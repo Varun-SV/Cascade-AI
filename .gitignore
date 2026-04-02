@@ -1,0 +1,13 @@
+node_modules/
+dist/
+web/dist/
+web/node_modules/
+*.log
+.env
+.env.local
+.cascade/keystore.enc
+.cascade/sessions/
+coverage/
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
