@@ -1,0 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap');
+
+:root {
+  --cascade-violet: #7c6af7;
+  --cascade-bg: #0f0f1a;
+  --cascade-surface: #1a1a2e;
+  --cascade-border: #2d2b55;
+  --cascade-text: #e2e8f0;
+  --cascade-muted: #6b7280;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--cascade-bg);
+  color: var(--cascade-text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--cascade-bg); }
+::-webkit-scrollbar-thumb { background: var(--cascade-border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--cascade-violet); }
+
+.react-flow__background { background: var(--cascade-bg); }
+.react-flow__node { font-family: 'JetBrains Mono', monospace; }

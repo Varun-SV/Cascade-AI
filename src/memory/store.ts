@@ -1,0 +1,320 @@
+// ─────────────────────────────────────────────
+//  Cascade AI — SQLite Memory Store
+// ─────────────────────────────────────────────
+
+import Database from 'better-sqlite3';
+import path from 'node:path';
+import fs from 'node:fs';
+import type { AuditEntry, Identity, ScheduledTask, Session, StoredMessage } from '../types.js';
+
+export class MemoryStore {
+  private db: Database.Database;
+
+  constructor(dbPath: string) {
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    this.db = new Database(dbPath);
+    this.db.pragma('journal_mode = WAL');
+    this.db.pragma('foreign_keys = ON');
+    this.migrate();
+  }
+
+  // ── Sessions ──────────────────────────────────
+
+  createSession(session: Session): void {
+    this.db.prepare(`
+      INSERT INTO sessions (id, title, created_at, updated_at, identity_id, workspace_path, metadata)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(session.id, session.title, session.createdAt, session.updatedAt, session.identityId, session.workspacePath, JSON.stringify(session.metadata));
+  }
+
+  updateSession(id: string, updates: Partial<Session>): void {
+    const parts: string[] = [];
+    const values: unknown[] = [];
+    if (updates.title) { parts.push('title = ?'); values.push(updates.title); }
+    if (updates.updatedAt) { parts.push('updated_at = ?'); values.push(updates.updatedAt); }
+    if (updates.metadata) { parts.push('metadata = ?'); values.push(JSON.stringify(updates.metadata)); }
+    if (!parts.length) return;
+    values.push(id);
+    this.db.prepare(`UPDATE sessions SET ${parts.join(', ')} WHERE id = ?`).run(...values);
+  }
+
+  getSession(id: string): Session | null {
+    const row = this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as DbSession | undefined;
+    if (!row) return null;
+    const messages = this.getSessionMessages(id);
+    return this.deserializeSession(row, messages);
+  }
+
+  listSessions(identityId?: string, limit = 50): Session[] {
+    const rows = identityId
+      ? this.db.prepare('SELECT * FROM sessions WHERE identity_id = ? ORDER BY updated_at DESC LIMIT ?').all(identityId, limit) as DbSession[]
+      : this.db.prepare('SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ?').all(limit) as DbSession[];
+    return rows.map((r) => this.deserializeSession(r, []));
+  }
+
+  deleteSession(id: string): void {
+    this.db.prepare('DELETE FROM messages WHERE session_id = ?').run(id);
+    this.db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
+  }
+
+  // ── Messages ──────────────────────────────────
+
+  addMessage(message: StoredMessage): void {
+    this.db.prepare(`
+      INSERT INTO messages (id, session_id, role, content, timestamp, tokens, agent_messages)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      message.id,
+      message.sessionId,
+      message.role,
+      message.content,
+      message.timestamp,
+      message.tokens ? JSON.stringify(message.tokens) : null,
+      message.agentMessages ? JSON.stringify(message.agentMessages) : null,
+    );
+    this.db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(message.timestamp, message.sessionId);
+  }
+
+  getSessionMessages(sessionId: string): StoredMessage[] {
+    const rows = this.db.prepare('SELECT * FROM messages WHERE session_id = ? ORDER BY timestamp ASC').all(sessionId) as DbMessage[];
+    return rows.map(this.deserializeMessage);
+  }
+
+  searchMessages(query: string, limit = 20): StoredMessage[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM messages WHERE content LIKE ? ORDER BY timestamp DESC LIMIT ?
+    `).all(`%${query}%`, limit) as DbMessage[];
+    return rows.map(this.deserializeMessage);
+  }
+
+  // ── Identities ────────────────────────────────
+
+  createIdentity(identity: Identity): void {
+    this.db.prepare(`
+      INSERT INTO identities (id, name, description, avatar, created_at, default_model, system_prompt, is_default)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(identity.id, identity.name, identity.description ?? null, identity.avatar ?? null,
+      identity.createdAt, identity.defaultModel ?? null, identity.systemPrompt ?? null,
+      identity.isDefault ? 1 : 0);
+  }
+
+  updateIdentity(id: string, updates: Partial<Identity>): void {
+    const parts: string[] = [];
+    const values: unknown[] = [];
+    if (updates.name !== undefined) { parts.push('name = ?'); values.push(updates.name); }
+    if (updates.description !== undefined) { parts.push('description = ?'); values.push(updates.description); }
+    if (updates.systemPrompt !== undefined) { parts.push('system_prompt = ?'); values.push(updates.systemPrompt); }
+    if (updates.isDefault !== undefined) { parts.push('is_default = ?'); values.push(updates.isDefault ? 1 : 0); }
+    if (!parts.length) return;
+    values.push(id);
+    this.db.prepare(`UPDATE identities SET ${parts.join(', ')} WHERE id = ?`).run(...values);
+  }
+
+  getIdentity(id: string): Identity | null {
+    const row = this.db.prepare('SELECT * FROM identities WHERE id = ?').get(id) as DbIdentity | undefined;
+    return row ? this.deserializeIdentity(row) : null;
+  }
+
+  getDefaultIdentity(): Identity | null {
+    const row = this.db.prepare('SELECT * FROM identities WHERE is_default = 1 LIMIT 1').get() as DbIdentity | undefined;
+    if (!row) {
+      const first = this.db.prepare('SELECT * FROM identities LIMIT 1').get() as DbIdentity | undefined;
+      return first ? this.deserializeIdentity(first) : null;
+    }
+    return this.deserializeIdentity(row);
+  }
+
+  listIdentities(): Identity[] {
+    const rows = this.db.prepare('SELECT * FROM identities ORDER BY is_default DESC, name ASC').all() as DbIdentity[];
+    return rows.map(this.deserializeIdentity);
+  }
+
+  deleteIdentity(id: string): void {
+    this.db.prepare('DELETE FROM identities WHERE id = ?').run(id);
+  }
+
+  // ── Scheduled Tasks ───────────────────────────
+
+  saveScheduledTask(task: ScheduledTask): void {
+    this.db.prepare(`
+      INSERT OR REPLACE INTO scheduled_tasks (id, name, cron_expression, prompt, identity_id, workspace_path, created_at, last_run, next_run, enabled)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(task.id, task.name, task.cronExpression, task.prompt, task.identityId ?? null,
+      task.workspacePath ?? null, task.createdAt, task.lastRun ?? null, task.nextRun ?? null, task.enabled ? 1 : 0);
+  }
+
+  listScheduledTasks(): ScheduledTask[] {
+    const rows = this.db.prepare('SELECT * FROM scheduled_tasks ORDER BY name').all() as DbScheduledTask[];
+    return rows.map(this.deserializeScheduledTask);
+  }
+
+  deleteScheduledTask(id: string): void {
+    this.db.prepare('DELETE FROM scheduled_tasks WHERE id = ?').run(id);
+  }
+
+  // ── Audit Log ─────────────────────────────────
+
+  addAuditEntry(entry: AuditEntry): void {
+    this.db.prepare(`
+      INSERT INTO audit_log (id, session_id, timestamp, tier_id, action, details)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(entry.id, entry.sessionId, entry.timestamp, entry.tierId, entry.action, JSON.stringify(entry.details));
+  }
+
+  getAuditLog(sessionId: string, limit = 100): AuditEntry[] {
+    const rows = this.db.prepare('SELECT * FROM audit_log WHERE session_id = ? ORDER BY timestamp DESC LIMIT ?').all(sessionId, limit) as DbAudit[];
+    return rows.map((r) => ({
+      id: r.id,
+      sessionId: r.session_id,
+      timestamp: r.timestamp,
+      tierId: r.tier_id,
+      action: r.action as AuditEntry['action'],
+      details: JSON.parse(r.details) as Record<string, unknown>,
+    }));
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
+  // ── Migration ─────────────────────────────────
+
+  private migrate(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        identity_id TEXT NOT NULL,
+        workspace_path TEXT NOT NULL,
+        metadata TEXT NOT NULL DEFAULT '{}'
+      );
+
+      CREATE TABLE IF NOT EXISTS messages (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        tokens TEXT,
+        agent_messages TEXT,
+        FOREIGN KEY (session_id) REFERENCES sessions(id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+      CREATE INDEX IF NOT EXISTS idx_messages_content ON messages(content);
+
+      CREATE TABLE IF NOT EXISTS identities (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        avatar TEXT,
+        created_at TEXT NOT NULL,
+        default_model TEXT,
+        system_prompt TEXT,
+        is_default INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS scheduled_tasks (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        cron_expression TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        identity_id TEXT,
+        workspace_path TEXT,
+        created_at TEXT NOT NULL,
+        last_run TEXT,
+        next_run TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1
+      );
+
+      CREATE TABLE IF NOT EXISTS audit_log (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        tier_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        details TEXT NOT NULL DEFAULT '{}'
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_audit_session ON audit_log(session_id);
+    `);
+  }
+
+  // ── Deserializers ─────────────────────────────
+
+  private deserializeSession(row: DbSession, messages: StoredMessage[]): Session {
+    return {
+      id: row.id,
+      title: row.title,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      identityId: row.identity_id,
+      workspacePath: row.workspace_path,
+      messages,
+      metadata: JSON.parse(row.metadata) as Session['metadata'],
+    };
+  }
+
+  private deserializeMessage(row: DbMessage): StoredMessage {
+    return {
+      id: row.id,
+      sessionId: row.session_id,
+      role: row.role as StoredMessage['role'],
+      content: row.content,
+      timestamp: row.timestamp,
+      tokens: row.tokens ? JSON.parse(row.tokens) : undefined,
+      agentMessages: row.agent_messages ? JSON.parse(row.agent_messages) : undefined,
+    };
+  }
+
+  private deserializeIdentity(row: DbIdentity): Identity {
+    return {
+      id: row.id,
+      name: row.name,
+      description: row.description ?? undefined,
+      avatar: row.avatar ?? undefined,
+      createdAt: row.created_at,
+      defaultModel: row.default_model ?? undefined,
+      systemPrompt: row.system_prompt ?? undefined,
+      isDefault: row.is_default === 1,
+    };
+  }
+
+  private deserializeScheduledTask(row: DbScheduledTask): ScheduledTask {
+    return {
+      id: row.id,
+      name: row.name,
+      cronExpression: row.cron_expression,
+      prompt: row.prompt,
+      identityId: row.identity_id ?? undefined,
+      workspacePath: row.workspace_path ?? undefined,
+      createdAt: row.created_at,
+      lastRun: row.last_run ?? undefined,
+      nextRun: row.next_run ?? undefined,
+      enabled: row.enabled === 1,
+    };
+  }
+}
+
+// ── DB Row Types ──────────────────────────────
+
+interface DbSession {
+  id: string; title: string; created_at: string; updated_at: string;
+  identity_id: string; workspace_path: string; metadata: string;
+}
+interface DbMessage {
+  id: string; session_id: string; role: string; content: string;
+  timestamp: string; tokens: string | null; agent_messages: string | null;
+}
+interface DbIdentity {
+  id: string; name: string; description: string | null; avatar: string | null;
+  created_at: string; default_model: string | null; system_prompt: string | null; is_default: number;
+}
+interface DbScheduledTask {
+  id: string; name: string; cron_expression: string; prompt: string;
+  identity_id: string | null; workspace_path: string | null;
+  created_at: string; last_run: string | null; next_run: string | null; enabled: number;
+}
+interface DbAudit { id: string; session_id: string; timestamp: string; tier_id: string; action: string; details: string; }
