@@ -164,7 +164,7 @@ export class T3Worker extends BaseTier {
       }
     }
 
-    const lastMsg = this.context.getMessages().findLast((m) => m.role === 'assistant');
+    const lastMsg = this.context.getMessages().slice().reverse().find((m) => m.role === 'assistant');
     return {
       output: typeof lastMsg?.content === 'string' ? lastMsg.content : '',
       toolCalls: allToolCalls,

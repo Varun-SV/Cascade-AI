@@ -35,7 +35,7 @@ export abstract class BaseTier extends EventEmitter {
   }
 
   protected sendStatusUpdate(update: StatusUpdate): void {
-    const message = this.buildMessage('STATUS_UPDATE', this.parentId ?? 'T1', update);
+    const message = this.buildMessage('STATUS_UPDATE', this.parentId ?? 'T1', update as unknown as Record<string, unknown>);
     this.emit('message', message);
   }
 
@@ -51,7 +51,7 @@ export abstract class BaseTier extends EventEmitter {
       type,
       taskId: this.taskId,
       timestamp: new Date().toISOString(),
-      payload: payload as CascadeMessage['payload'],
+      payload: payload as unknown as CascadeMessage['payload'],
     };
   }
 

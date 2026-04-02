@@ -33,7 +33,7 @@ export class McpClient {
 
     const client = new Client(
       { name: 'cascade-ai', version: '0.1.0' },
-      { capabilities: { tools: {} } },
+      { capabilities: {} },
     );
 
     await client.connect(transport);

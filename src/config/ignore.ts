@@ -4,7 +4,10 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import ignore, { type Ignore } from 'ignore';
+import * as _ignoreModule from 'ignore';
+import type { Ignore } from 'ignore';
+// ignore is a CJS package — access .default under NodeNext ESM interop
+const ignore = (_ignoreModule as unknown as { default: () => Ignore }).default ?? (_ignoreModule as unknown as () => Ignore);
 
 export class CascadeIgnore {
   private ig: Ignore;

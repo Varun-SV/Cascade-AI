@@ -93,13 +93,14 @@ export class DashboardServer {
     });
 
     this.app.get('/api/sessions/:id', auth, (req, res) => {
-      const session = this.store.getSession(req.params['id']!);
+      const id = req.params.id as string;
+      const session = this.store.getSession(id);
       if (!session) { res.status(404).json({ error: 'Not found' }); return; }
       res.json(session);
     });
 
     this.app.delete('/api/sessions/:id', auth, (req, res) => {
-      this.store.deleteSession(req.params['id']!);
+      this.store.deleteSession(req.params.id as string);
       res.json({ ok: true });
     });
 
@@ -110,7 +111,7 @@ export class DashboardServer {
 
     // ── Audit log ───────────────────────────────
     this.app.get('/api/audit/:sessionId', auth, (req, res) => {
-      const log = this.store.getAuditLog(req.params['sessionId']!);
+      const log = this.store.getAuditLog(req.params.sessionId as string);
       res.json(log);
     });
 
