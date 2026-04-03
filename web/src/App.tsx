@@ -119,9 +119,6 @@ export default function App() {
       if (!r.ok) return;
       const snapshot = await r.json() as RuntimeSnapshot;
       setRuntime(snapshot);
-      if (!selectedNodeId && snapshot.nodes[0]?.tierId) {
-        setSelectedNodeId(snapshot.nodes[0].tierId);
-      }
     } catch { /* noop */ }
   }
 
@@ -137,7 +134,7 @@ export default function App() {
             stats={stats}
             runtime={runtime}
             selectedNodeId={selectedNodeId}
-            onSelectNode={setSelectedNodeId}
+            onSelectNode={(nodeId) => setSelectedNodeId(nodeId)}
             streamLog={streamLog}
             runtimeScope={runtimeScope}
             onRuntimeScopeChange={setRuntimeScope}
@@ -289,11 +286,24 @@ function Dashboard({ stats, runtime, selectedNodeId, onSelectNode, streamLog, ru
     .filter((node) => node.parentId)
     .map((node) => ({ from: node.parentId!, to: node.tierId }));
 
-  const selectedNode = runtime.nodes.find((node) => node.tierId === selectedNodeId) ?? runtime.nodes[0] ?? null;
+  const selectedNode = runtime.nodes.find((node) => node.tierId === selectedNodeId) ?? null;
   const selectedLogs = useMemo(
     () => runtime.logs.filter((log) => log.tierId === selectedNode?.tierId).slice(0, 30),
     [runtime.logs, selectedNode],
   );
+
+  const uniqueSessions = useMemo(
+    () => runtime.sessions.filter((session, index, all) => all.findIndex((s) => s.sessionId === session.sessionId) === index),
+    [runtime.sessions],
+  );
+
+  const sessionGraphs = uniqueSessions.map((session) => {
+    const sessionNodes = runtime.nodes.filter((node) => node.sessionId === session.sessionId);
+    const sessionEdges = sessionNodes
+      .filter((node) => node.parentId)
+      .map((node) => ({ from: node.parentId!, to: node.tierId }));
+    return { session, sessionNodes, sessionEdges };
+  });
 
   return (
     <div className="space-y-6">
@@ -335,9 +345,53 @@ function Dashboard({ stats, runtime, selectedNodeId, onSelectNode, streamLog, ru
 
       <div className="grid grid-cols-[minmax(0,2fr)_minmax(320px,1fr)] gap-4">
         <div>
-          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Live Agent Graph</h2>
-          {nodes.length > 0 ? (
-            <AgentGraph nodes={nodes} edges={edges} selectedNodeId={selectedNode?.tierId} onSelectNode={onSelectNode} />
+          <div className="flex items-center justify-between mb-3 gap-3">
+            <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Live Agent Graph</h2>
+            <div className="flex items-center gap-2 text-xs">
+              <button
+                onClick={() => onSelectNode('')}
+                className="px-2 py-1 rounded border border-cascade-border text-gray-400 hover:text-white"
+              >
+                View All
+              </button>
+            </div>
+          </div>
+          {sessionGraphs.length > 0 ? (
+            <div className="space-y-4">
+              {sessionGraphs.map(({ session, sessionNodes, sessionEdges }) => (
+                <div key={session.sessionId} className="rounded-xl border border-cascade-border bg-cascade-surface p-3">
+                  <div className="flex items-center justify-between mb-2 gap-3">
+                    <button
+                      onClick={() => onSelectNode(sessionNodes.find((node) => node.status === 'ACTIVE')?.tierId ?? sessionNodes[0]?.tierId ?? '')}
+                      className="text-left hover:underline"
+                    >
+                      <div className="text-white font-medium">{session.title}</div>
+                      <div className="text-xs text-gray-500">{session.sessionId}</div>
+                    </button>
+                    <div className="text-xs text-gray-500">
+                      {session.status} · {sessionNodes.length} nodes
+                    </div>
+                  </div>
+                  {selectedNodeId && selectedNode?.sessionId !== session.sessionId ? (
+                    <p className="text-xs text-gray-500">Click the session title to focus this graph.</p>
+                  ) : (
+                    <AgentGraph
+                      nodes={sessionNodes.map((node) => ({
+                        id: node.tierId,
+                        role: node.role,
+                        label: node.label,
+                        status: node.status,
+                        action: node.currentAction,
+                      }))}
+                      edges={sessionEdges}
+                      selectedNodeId={selectedNode?.sessionId === session.sessionId ? selectedNode.tierId : undefined}
+                      onSelectNode={onSelectNode}
+                      showControls={false}
+                    />
+                  )}
+                </div>
+              ))}
+            </div>
           ) : (
             <div className="h-48 rounded-xl border border-cascade-border bg-cascade-surface flex items-center justify-center">
               <p className="text-gray-600 text-sm">No active agents — start a task in the CLI</p>

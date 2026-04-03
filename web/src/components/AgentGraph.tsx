@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import ReactFlow, {
   addEdge,
   Background,
@@ -17,6 +17,7 @@ interface AgentNode {
   label: string;
   status: 'IDLE' | 'ACTIVE' | 'COMPLETED' | 'FAILED' | 'ESCALATED';
   action?: string;
+  progressPct?: number;
 }
 
 interface AgentGraphProps {
@@ -24,6 +25,7 @@ interface AgentGraphProps {
   edges: Array<{ from: string; to: string }>;
   selectedNodeId?: string;
   onSelectNode?: (nodeId: string) => void;
+  showControls?: boolean;
 }
 
 const STATUS_COLOR: Record<string, string> = {
@@ -87,17 +89,35 @@ function nodeStyle(node: AgentNode, selectedNodeId?: string) {
 }
 
 function NodeLabel({ node }: { node: AgentNode }) {
+  const progressText = typeof node.progressPct === 'number' ? `${Math.max(0, Math.min(100, node.progressPct))}%` : null;
+  const actionText = node.action ?? (node.status === 'ACTIVE' ? 'Executing...' : 'Idle');
+
   return (
     <div>
       <div style={{ fontSize: 10, color: STATUS_COLOR[node.status], fontWeight: 700 }}>{node.role}</div>
       <div style={{ fontSize: 12, fontWeight: 600 }}>{node.label}</div>
-      {node.action && <div style={{ fontSize: 10, color: '#9ca3af', marginTop: 2 }}>{node.action.slice(0, 60)}</div>}
+      <div style={{ fontSize: 10, color: '#9ca3af', marginTop: 2, whiteSpace: 'pre-wrap' }}>{actionText.slice(0, 80)}</div>
+      {progressText && <div style={{ fontSize: 10, color: '#cbd5e1', marginTop: 2 }}>{progressText}</div>}
       <div style={{ fontSize: 10, color: STATUS_COLOR[node.status], marginTop: 2 }}>{node.status}</div>
     </div>
   );
 }
 
-export function AgentGraph({ nodes: agentNodes, edges: agentEdges, selectedNodeId, onSelectNode }: AgentGraphProps) {
+function NodeDetail({ node }: { node: AgentNode }) {
+  return (
+    <div style={{ position: 'absolute', right: 12, top: 12, zIndex: 20, background: 'rgba(15, 15, 26, 0.96)', color: '#e2e8f0', border: '1px solid #2d2b55', borderRadius: 10, padding: 12, width: 220, boxShadow: '0 12px 32px rgba(0,0,0,0.35)' }}>
+      <div style={{ fontSize: 10, color: STATUS_COLOR[node.status], fontWeight: 700 }}>{node.role}</div>
+      <div style={{ fontSize: 13, fontWeight: 700, marginTop: 2 }}>{node.label}</div>
+      <div style={{ fontSize: 11, color: '#cbd5e1', marginTop: 6, whiteSpace: 'pre-wrap' }}>{node.action ?? (node.status === 'ACTIVE' ? 'Executing node...' : 'No current action')}</div>
+      {typeof node.progressPct === 'number' && <div style={{ fontSize: 11, color: '#a5b4fc', marginTop: 8 }}>Progress: {Math.max(0, Math.min(100, node.progressPct))}%</div>}
+      <div style={{ fontSize: 11, color: STATUS_COLOR[node.status], marginTop: 8 }}>{node.status}</div>
+    </div>
+  );
+}
+
+export function AgentGraph({ nodes: agentNodes, edges: agentEdges, selectedNodeId, onSelectNode, showControls = true }: AgentGraphProps) {
+  const [hoveredNode, setHoveredNode] = useState<AgentNode | null>(null);
+  const activeNode = useMemo(() => hoveredNode ?? agentNodes.find((n) => n.id === selectedNodeId) ?? null, [hoveredNode, agentNodes, selectedNodeId]);
   const [nodes, setNodes, onNodesChange] = useNodesState(buildFlowNodes(agentNodes, selectedNodeId));
   const [edges, setEdges, onEdgesChange] = useEdgesState(
     agentEdges.map((e, i) => ({
@@ -134,10 +154,13 @@ export function AgentGraph({ nodes: agentNodes, edges: agentEdges, selectedNodeI
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
         onNodeClick={(_event, node) => onSelectNode?.(node.id)}
+        onNodeMouseEnter={(_event, node) => setHoveredNode(agentNodes.find((n) => n.id === node.id) ?? null)}
+        onNodeMouseLeave={() => setHoveredNode(null)}
         fitView
       >
         <Background color="#2d2b55" gap={24} />
-        <Controls style={{ background: '#1a1a2e', border: '1px solid #2d2b55' }} />
+        {activeNode && <NodeDetail node={activeNode} />}
+        {showControls && <Controls style={{ background: '#1a1a2e', border: '1px solid #2d2b55' }} />}
       </ReactFlow>
     </div>
   );

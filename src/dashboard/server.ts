@@ -106,7 +106,18 @@ export class DashboardServer {
     });
 
     this.app.delete('/api/sessions/:id', auth, (req, res) => {
-      this.store.deleteSession(req.params.id as string);
+      const sessionId = req.params.id as string;
+      this.store.deleteSession(sessionId);
+      this.store.deleteRuntimeSession(sessionId);
+
+      const globalDbPath = path.join(process.env['HOME'] ?? process.cwd(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
+      const globalStore = new MemoryStore(globalDbPath);
+      try {
+        globalStore.deleteRuntimeSession(sessionId);
+      } finally {
+        globalStore.close();
+      }
+
       res.json({ ok: true });
     });
 

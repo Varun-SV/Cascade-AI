@@ -67,6 +67,12 @@ export class MemoryStore {
     this.db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
   }
 
+  deleteRuntimeSession(sessionId: string): void {
+    this.db.prepare('DELETE FROM runtime_node_logs WHERE session_id = ?').run(sessionId);
+    this.db.prepare('DELETE FROM runtime_nodes WHERE session_id = ?').run(sessionId);
+    this.db.prepare('DELETE FROM runtime_sessions WHERE session_id = ?').run(sessionId);
+  }
+
   // ── Runtime Sessions / Nodes ─────────────────
 
   upsertRuntimeSession(session: RuntimeSession): void {
@@ -104,6 +110,7 @@ export class MemoryStore {
       startedAt: row.started_at,
       updatedAt: row.updated_at,
       latestPrompt: row.latest_prompt ?? undefined,
+      isGlobal: row.is_global === 1,
     }));
   }
 
@@ -156,6 +163,8 @@ export class MemoryStore {
       currentAction: row.current_action ?? undefined,
       progressPct: row.progress_pct ?? undefined,
       updatedAt: row.updated_at,
+      workspacePath: row.workspace_path ?? undefined,
+      isGlobal: row.is_global === 1,
     }));
   }
 
