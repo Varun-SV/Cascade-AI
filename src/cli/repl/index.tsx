@@ -365,6 +365,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt }: ReplPr
         );
         if (!match) return `Unknown identity: ${target}`;
         setCurrentIdentityId(match.id);
+        storeRef.current?.updateSession(sessionIdRef.current, {
+          identityId: match.id,
+          updatedAt: new Date().toISOString(),
+        });
         return `Active identity set to ${match.name}`;
       },
     });

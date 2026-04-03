@@ -41,6 +41,7 @@ export class MemoryStore {
     const values: unknown[] = [];
     if (updates.title) { parts.push('title = ?'); values.push(updates.title); }
     if (updates.updatedAt) { parts.push('updated_at = ?'); values.push(updates.updatedAt); }
+    if (updates.identityId) { parts.push('identity_id = ?'); values.push(updates.identityId); }
     if (updates.metadata) { parts.push('metadata = ?'); values.push(JSON.stringify(updates.metadata)); }
     if (!parts.length) return;
     values.push(id);

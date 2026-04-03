@@ -1,16 +1,62 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap');
-
-:root {
+:root,
+:root[data-theme='cascade'] {
   --cascade-violet: #7c6af7;
   --cascade-bg: #0f0f1a;
   --cascade-surface: #1a1a2e;
   --cascade-border: #2d2b55;
   --cascade-text: #e2e8f0;
   --cascade-muted: #6b7280;
+}
+
+:root[data-theme='dark'] {
+  --cascade-violet: #60a5fa;
+  --cascade-bg: #111827;
+  --cascade-surface: #1f2937;
+  --cascade-border: #374151;
+  --cascade-text: #f9fafb;
+  --cascade-muted: #9ca3af;
+}
+
+:root[data-theme='light'] {
+  --cascade-violet: #2563eb;
+  --cascade-bg: #f8fafc;
+  --cascade-surface: #ffffff;
+  --cascade-border: #cbd5e1;
+  --cascade-text: #111827;
+  --cascade-muted: #6b7280;
+}
+
+:root[data-theme='dracula'] {
+  --cascade-violet: #bd93f9;
+  --cascade-bg: #282a36;
+  --cascade-surface: #343746;
+  --cascade-border: #44475a;
+  --cascade-text: #f8f8f2;
+  --cascade-muted: #a1a1aa;
+}
+
+:root[data-theme='nord'] {
+  --cascade-violet: #88c0d0;
+  --cascade-bg: #2e3440;
+  --cascade-surface: #3b4252;
+  --cascade-border: #4c566a;
+  --cascade-text: #eceff4;
+  --cascade-muted: #d8dee9;
+}
+
+:root[data-theme='solarized'] {
+  --cascade-violet: #268bd2;
+  --cascade-bg: #002b36;
+  --cascade-surface: #073642;
+  --cascade-border: #586e75;
+  --cascade-text: #93a1a1;
+  --cascade-muted: #839496;
 }
 
 * { box-sizing: border-box; }

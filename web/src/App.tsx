@@ -53,6 +53,7 @@ interface RuntimeSnapshot {
 
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem('cascade_token') ?? '');
+  const [theme, setTheme] = useState(() => localStorage.getItem('cascade_theme') ?? 'cascade');
   const [page, setPage] = useState<'dashboard' | 'sessions' | 'settings'>('dashboard');
   const [sessions, setSessions] = useState<Session[]>([]);
   const [runtime, setRuntime] = useState<RuntimeSnapshot>({ sessions: [], nodes: [], logs: [] });
@@ -86,6 +87,11 @@ export default function App() {
     return () => clearInterval(timer);
   }, [token]);
 
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('cascade_theme', theme);
+  }, [theme]);
+
   async function fetchSessions() {
     try {
       const r = await fetch('/api/sessions', { headers: { Authorization: `Bearer ${token}` } });
@@ -116,7 +122,7 @@ export default function App() {
 
   return (
     <div className="flex h-screen bg-cascade-bg overflow-hidden">
-      <Sidebar page={page} onNavigate={setPage} connected={connected} onLogout={() => { setToken(''); localStorage.removeItem('cascade_token'); }} />
+      <Sidebar page={page} onNavigate={setPage} connected={connected} theme={theme} onThemeChange={setTheme} onLogout={() => { setToken(''); localStorage.removeItem('cascade_token'); }} />
 
       <main className="flex-1 overflow-auto p-6">
         {page === 'dashboard' && (
@@ -190,10 +196,12 @@ function LoginPage({ onLogin }: { onLogin: (token: string) => void }) {
   );
 }
 
-function Sidebar({ page, onNavigate, connected, onLogout }: {
+function Sidebar({ page, onNavigate, connected, theme, onThemeChange, onLogout }: {
   page: string;
   onNavigate: (p: 'dashboard' | 'sessions' | 'settings') => void;
   connected: boolean;
+  theme: string;
+  onThemeChange: (theme: string) => void;
   onLogout: () => void;
 }) {
   const items = [
@@ -227,6 +235,19 @@ function Sidebar({ page, onNavigate, connected, onLogout }: {
           </button>
         ))}
       </nav>
+
+      <div className="px-3 pb-3">
+        <label className="text-xs text-gray-500 block mb-2">Theme</label>
+        <select
+          value={theme}
+          onChange={(e) => onThemeChange(e.target.value)}
+          className="w-full px-3 py-2 rounded-lg bg-cascade-bg border border-cascade-border text-sm text-white outline-none"
+        >
+          {['cascade', 'dark', 'light', 'dracula', 'nord', 'solarized'].map((option) => (
+            <option key={option} value={option}>{option}</option>
+          ))}
+        </select>
+      </div>
 
       <div className="p-2 border-t border-cascade-border">
         <button onClick={onLogout}
