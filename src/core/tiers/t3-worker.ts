@@ -166,7 +166,7 @@ export class T3Worker extends BaseTier {
         },
       );
 
-      await this.context.addMessage({ role: 'assistant', content: result.content });
+      await this.context.addMessage({ role: 'assistant', content: result.content, toolCalls: result.toolCalls });
 
       if (!result.toolCalls?.length) {
         if (requiresArtifact) {
@@ -280,8 +280,8 @@ ${assignment.expectedOutput}`;
 
         if (!/\.pdf$/i.test(artifactPath)) {
           const content = await fs.readFile(absolutePath, 'utf-8');
-          if (content.trim().length < 20) {
-            issues.push(`Artifact content looks too short: ${artifactPath}`);
+          if (!content.trim()) {
+            issues.push(`Artifact content is empty: ${artifactPath}`);
           }
         } else if (stat.size < 100) {
           issues.push(`PDF artifact looks too small to be valid: ${artifactPath}`);

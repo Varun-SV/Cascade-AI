@@ -69,6 +69,7 @@ export interface ConversationMessage {
   role: 'user' | 'assistant' | 'system' | 'tool';
   content: string | MessageContent[];
   toolCallId?: string;
+  toolCalls?: ToolCall[];
   name?: string;
 }
 
@@ -268,6 +269,40 @@ export interface SessionMetadata {
   checkpoint?: SessionCheckpoint;
 }
 
+export interface RuntimeSession {
+  sessionId: string;
+  title: string;
+  workspacePath: string;
+  status: 'ACTIVE' | 'COMPLETED' | 'FAILED';
+  startedAt: string;
+  updatedAt: string;
+  latestPrompt?: string;
+}
+
+export interface RuntimeNode {
+  tierId: string;
+  sessionId: string;
+  parentId?: string;
+  role: TierRole;
+  label: string;
+  status: TierStatus;
+  currentAction?: string;
+  progressPct?: number;
+  updatedAt: string;
+}
+
+export interface RuntimeNodeLog {
+  id: string;
+  sessionId: string;
+  tierId: string;
+  role: TierRole;
+  label: string;
+  status: TierStatus;
+  currentAction?: string;
+  progressPct?: number;
+  timestamp: string;
+}
+
 export interface SessionCheckpoint {
   taskId: string;
   timestamp: string;
@@ -463,6 +498,7 @@ export interface CascadeRunOptions {
   workspacePath?: string;
   identityId?: string;
   sessionId?: string;
+  conversationHistory?: ConversationMessage[];
   streamCallback?: (chunk: StreamChunk) => void;
   approvalCallback?: (request: ApprovalRequest) => Promise<boolean>;
 }

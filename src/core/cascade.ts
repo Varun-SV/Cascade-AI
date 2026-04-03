@@ -37,10 +37,19 @@ export class Cascade extends EventEmitter {
     this.initialized = true;
   }
 
+  private looksLikeSimpleArtifactTask(prompt: string): boolean {
+    return /create .*\.(txt|md|json|csv)\b/i.test(prompt)
+      && !/(research|compare|thorough|pdf|report|analy[sz]e|architecture|multi-agent)/i.test(prompt);
+  }
+
   private async determineComplexity(
     prompt: string,
     conversationHistory: ConversationMessage[] = [],
   ): Promise<TaskComplexity> {
+    if (this.looksLikeSimpleArtifactTask(prompt)) {
+      return 'Simple';
+    }
+
     const sysPrompt = `You are a routing classifier for a hierarchical AI system. Determine task complexity using BOTH the latest user message and the recent conversation context.
 
 Classification:
@@ -51,7 +60,8 @@ Classification:
 Important rules:
 - Treat short follow-ups like "proceed", "continue", "do it", "yes" as referring to the recent context.
 - If the earlier context is complex, keep the inherited complexity unless the user clearly narrows scope.
-- If the task asks for a saved file, report, PDF, implementation, or verification, it is at least Moderate and often Complex.
+- If the task asks for a simple single-file artifact like hello.txt, it is usually Moderate.
+- If the task asks for a saved report, PDF, implementation, or deeper verification workflow, it is at least Moderate and often Complex.
 
 Respond with exactly one word: Simple, Moderate, or Complex.`;
 
@@ -108,13 +118,17 @@ ${prompt}`
       });
       tier.on('log', (e: any) => this.emit('log', e));
       tier.on('tier:status', (e: any) => this.emit('tier:status', e));
-      tier.on('tool:approval-request', async (request: ApprovalRequest) => {
+      tier.on('tool:approval-request', async (request: ApprovalRequest & { __cascadeResponder?: (approved: boolean) => void }) => {
         this.emit('tool:approval-request', request);
         let approved = false;
         if (options.approvalCallback) {
           approved = await options.approvalCallback(request);
         }
-        tier.emit(`tool:approval-response:${request.id}`, { approved } as ApprovalResponse);
+        if (typeof request.__cascadeResponder === 'function') {
+          request.__cascadeResponder(approved);
+        } else {
+          tier.emit(`tool:approval-response:${request.id}`, { approved } as ApprovalResponse);
+        }
       });
     };
 

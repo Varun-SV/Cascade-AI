@@ -169,7 +169,10 @@ Return ONLY the JSON array.`;
       worker.on('stream:token', (e) => this.emit('stream:token', e));
       worker.on('log', (e) => this.emit('log', e));
       worker.on('tier:status', (e) => this.emit('tier:status', e));
-      worker.on('tool:approval-request', (e) => this.emit('tool:approval-request', e));
+      worker.on('tool:approval-request', (e) => this.emit('tool:approval-request', {
+        ...e,
+        __cascadeResponder: (approved: boolean) => worker.emit(`tool:approval-response:${e.id}`, { approved }),
+      }));
 
       // Route peer sync
       worker.on('message', (msg) => {
@@ -206,7 +209,10 @@ Return ONLY the JSON array.`;
     this.log(`Retrying T3 for subtask: ${assignment.subtaskTitle}`);
     const worker = new T3Worker(this.router, this.toolRegistry, this.id);
     worker.on('stream:token', (e) => this.emit('stream:token', e));
-    worker.on('tool:approval-request', (e) => this.emit('tool:approval-request', e));
+    worker.on('tool:approval-request', (e) => this.emit('tool:approval-request', {
+      ...e,
+      __cascadeResponder: (approved: boolean) => worker.emit(`tool:approval-response:${e.id}`, { approved }),
+    }));
     return worker.execute({ ...assignment, description: `[RETRY] ${assignment.description}` }, taskId);
   }
 

@@ -50,7 +50,7 @@ export class OpenAIProvider extends BaseProvider {
     let outputTokens = 0;
     let finishReason: GenerateResult['finishReason'] = 'stop';
 
-    const stream = await this.client.chat.completions.create({
+    const params: OpenAI.Chat.ChatCompletionCreateParams = {
       model: this.model.id,
       messages,
       max_tokens: options.maxTokens ?? this.model.maxOutputTokens,
@@ -58,7 +58,28 @@ export class OpenAIProvider extends BaseProvider {
       tools: tools?.length ? tools : undefined,
       stream: true,
       stream_options: { include_usage: true },
-    });
+    };
+
+    let stream: any;
+    try {
+      stream = await this.client.chat.completions.create(params);
+    } catch (err: any) {
+      // Retry with max_completion_tokens instead if the model demands it (e.g., o1/o3 or custom proxy models)
+      if (err.message && err.message.includes('max_completion_tokens')) {
+        const fallbackParams = { ...params } as Record<string, unknown>;
+        delete fallbackParams.max_tokens;
+        fallbackParams.max_completion_tokens = options.maxTokens ?? this.model.maxOutputTokens;
+        
+        // o1 models also often strictly require temperature to be 1
+        if (this.model.id.includes('o1') || this.model.id.includes('o3')) {
+          fallbackParams.temperature = 1;
+        }
+        
+        stream = await this.client.chat.completions.create(fallbackParams as any);
+      } else {
+        throw err;
+      }
+    }
 
     const toolCallsMap: Record<number, { id: string; name: string; args: string }> = {};
 
@@ -137,8 +158,31 @@ export class OpenAIProvider extends BaseProvider {
         result.push({ role: 'system', content: typeof m.content === 'string' ? m.content : '' });
         continue;
       }
+      if (m.role === 'tool') {
+        result.push({
+          role: 'tool',
+          content: typeof m.content === 'string' ? m.content : '',
+          tool_call_id: m.toolCallId ?? '',
+        });
+        continue;
+      }
       if (typeof m.content === 'string') {
-        result.push({ role: m.role as 'user' | 'assistant', content: m.content });
+        if (m.role === 'assistant' && m.toolCalls?.length) {
+          result.push({
+            role: 'assistant',
+            content: m.content || '',
+            tool_calls: m.toolCalls.map((toolCall) => ({
+              id: toolCall.id,
+              type: 'function',
+              function: {
+                name: toolCall.name,
+                arguments: JSON.stringify(toolCall.input),
+              },
+            })),
+          } as any);
+        } else {
+          result.push({ role: m.role as 'user' | 'assistant', content: m.content });
+        }
         continue;
       }
 
@@ -155,7 +199,7 @@ export class OpenAIProvider extends BaseProvider {
         return { type: 'text' as const, text: '' };
       });
 
-      result.push({ role: m.role as 'user' | 'assistant', content: parts });
+      result.push({ role: m.role as 'user' | 'assistant', content: parts } as any);
     }
 
     return result;
