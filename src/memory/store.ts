@@ -71,14 +71,15 @@ export class MemoryStore {
 
   upsertRuntimeSession(session: RuntimeSession): void {
     this.db.prepare(`
-      INSERT INTO runtime_sessions (session_id, title, workspace_path, status, started_at, updated_at, latest_prompt)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO runtime_sessions (session_id, title, workspace_path, status, started_at, updated_at, latest_prompt, is_global)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(session_id) DO UPDATE SET
         title = excluded.title,
         workspace_path = excluded.workspace_path,
         status = excluded.status,
         updated_at = excluded.updated_at,
-        latest_prompt = excluded.latest_prompt
+        latest_prompt = excluded.latest_prompt,
+        is_global = excluded.is_global
     `).run(
       session.sessionId,
       session.title,
@@ -87,6 +88,7 @@ export class MemoryStore {
       session.startedAt,
       session.updatedAt,
       session.latestPrompt ?? null,
+      session.isGlobal ? 1 : 0,
     );
   }
 
@@ -107,8 +109,8 @@ export class MemoryStore {
 
   upsertRuntimeNode(node: RuntimeNode): void {
     this.db.prepare(`
-      INSERT INTO runtime_nodes (tier_id, session_id, parent_id, role, label, status, current_action, progress_pct, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO runtime_nodes (tier_id, session_id, parent_id, role, label, status, current_action, progress_pct, updated_at, workspace_path, is_global)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(tier_id) DO UPDATE SET
         session_id = excluded.session_id,
         parent_id = excluded.parent_id,
@@ -117,7 +119,9 @@ export class MemoryStore {
         status = excluded.status,
         current_action = excluded.current_action,
         progress_pct = excluded.progress_pct,
-        updated_at = excluded.updated_at
+        updated_at = excluded.updated_at,
+        workspace_path = excluded.workspace_path,
+        is_global = excluded.is_global
     `).run(
       node.tierId,
       node.sessionId,
@@ -128,6 +132,8 @@ export class MemoryStore {
       node.currentAction ?? null,
       node.progressPct ?? null,
       node.updatedAt,
+      node.workspacePath ?? null,
+      node.isGlobal ? 1 : 0,
     );
   }
 
@@ -155,8 +161,8 @@ export class MemoryStore {
 
   addRuntimeNodeLog(log: RuntimeNodeLog): void {
     this.db.prepare(`
-      INSERT INTO runtime_node_logs (id, session_id, tier_id, role, label, status, current_action, progress_pct, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO runtime_node_logs (id, session_id, tier_id, role, label, status, current_action, progress_pct, timestamp, workspace_path, is_global)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       log.id,
       log.sessionId,
@@ -167,6 +173,8 @@ export class MemoryStore {
       log.currentAction ?? null,
       log.progressPct ?? null,
       log.timestamp,
+      log.workspacePath ?? null,
+      log.isGlobal ? 1 : 0,
     );
 
     this.db.prepare(`
@@ -211,6 +219,8 @@ export class MemoryStore {
       currentAction: row.current_action ?? undefined,
       progressPct: row.progress_pct ?? undefined,
       timestamp: row.timestamp,
+      workspacePath: row.workspace_path ?? undefined,
+      isGlobal: row.is_global === 1,
     }));
   }
 
@@ -404,7 +414,8 @@ export class MemoryStore {
         status TEXT NOT NULL,
         started_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        latest_prompt TEXT
+        latest_prompt TEXT,
+        is_global INTEGER NOT NULL DEFAULT 0
       );
 
       CREATE TABLE IF NOT EXISTS runtime_nodes (
@@ -416,7 +427,9 @@ export class MemoryStore {
         status TEXT NOT NULL,
         current_action TEXT,
         progress_pct INTEGER,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        workspace_path TEXT,
+        is_global INTEGER NOT NULL DEFAULT 0
       );
 
       CREATE INDEX IF NOT EXISTS idx_runtime_nodes_session ON runtime_nodes(session_id);
@@ -431,7 +444,9 @@ export class MemoryStore {
         status TEXT NOT NULL,
         current_action TEXT,
         progress_pct INTEGER,
-        timestamp TEXT NOT NULL
+        timestamp TEXT NOT NULL,
+        workspace_path TEXT,
+        is_global INTEGER NOT NULL DEFAULT 0
       );
 
       CREATE INDEX IF NOT EXISTS idx_runtime_logs_session ON runtime_node_logs(session_id);
@@ -518,14 +533,15 @@ interface DbScheduledTask {
 interface DbAudit { id: string; session_id: string; timestamp: string; tier_id: string; action: string; details: string; }
 interface DbRuntimeSession {
   session_id: string; title: string; workspace_path: string; status: string;
-  started_at: string; updated_at: string; latest_prompt: string | null;
+  started_at: string; updated_at: string; latest_prompt: string | null; is_global: number;
 }
 interface DbRuntimeNode {
   tier_id: string; session_id: string; parent_id: string | null; role: string;
   label: string; status: string; current_action: string | null; progress_pct: number | null;
-  updated_at: string;
+  updated_at: string; workspace_path: string | null; is_global: number;
 }
 interface DbRuntimeNodeLog {
   id: string; session_id: string; tier_id: string; role: string; label: string;
   status: string; current_action: string | null; progress_pct: number | null; timestamp: string;
+  workspace_path: string | null; is_global: number;
 }

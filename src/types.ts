@@ -277,6 +277,7 @@ export interface RuntimeSession {
   startedAt: string;
   updatedAt: string;
   latestPrompt?: string;
+  isGlobal?: boolean;
 }
 
 export interface RuntimeNode {
@@ -289,6 +290,8 @@ export interface RuntimeNode {
   currentAction?: string;
   progressPct?: number;
   updatedAt: string;
+  workspacePath?: string;
+  isGlobal?: boolean;
 }
 
 export interface RuntimeNodeLog {
@@ -301,6 +304,8 @@ export interface RuntimeNodeLog {
   currentAction?: string;
   progressPct?: number;
   timestamp: string;
+  workspacePath?: string;
+  isGlobal?: boolean;
 }
 
 export interface SessionCheckpoint {
@@ -368,6 +373,7 @@ export interface DashboardConfig {
   auth: boolean;
   teamMode: 'single' | 'multi';
   secret?: string;    // JWT secret
+  globalRuntime?: boolean;
 }
 
 export interface TelemetryConfig {

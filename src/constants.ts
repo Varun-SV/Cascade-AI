@@ -16,6 +16,7 @@ export const CASCADE_DB_FILE = '.cascade/memory.db';
 export const GLOBAL_CONFIG_DIR = '.cascade-ai';
 export const GLOBAL_DB_FILE = 'memory.db';
 export const GLOBAL_KEYSTORE_FILE = 'keystore.enc';
+export const GLOBAL_RUNTIME_DB_FILE = 'runtime.db';
 
 export const DEFAULT_DASHBOARD_PORT = 4891;
 export const DEFAULT_API_PORT = 4892;

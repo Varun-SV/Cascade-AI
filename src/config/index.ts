@@ -16,7 +16,6 @@ import {
   CASCADE_CONFIG_FILE,
   CASCADE_DB_FILE,
   GLOBAL_CONFIG_DIR,
-  GLOBAL_DB_FILE,
   GLOBAL_KEYSTORE_FILE,
 } from '../constants.js';
 
@@ -35,28 +34,13 @@ export class ConfigManager {
   }
 
   async load(): Promise<void> {
-    // Load project config (or defaults)
     this.config = await this.loadConfig();
-
-    // Load .cascadeignore
     this.ignore = new CascadeIgnore();
     await this.ignore.load(this.workspacePath);
-
-    // Load CASCADE.md
     this.cascadeMd = await loadCascadeMd(this.workspacePath);
-
-    // Load keystore
-    const keystorePath = path.join(this.globalDir, GLOBAL_KEYSTORE_FILE);
-    this.keystore = new Keystore(keystorePath);
-
-    // Load memory store
-    const dbPath = path.join(this.workspacePath, CASCADE_DB_FILE);
-    this.store = new MemoryStore(dbPath);
-
-    // Inject provider API keys from keystore (if unlocked via env)
+    this.keystore = new Keystore(path.join(this.globalDir, GLOBAL_KEYSTORE_FILE));
+    this.store = new MemoryStore(path.join(this.workspacePath, CASCADE_DB_FILE));
     await this.injectEnvKeys();
-
-    // Ensure default identity exists
     await this.ensureDefaultIdentity();
   }
 
@@ -95,8 +79,6 @@ export class ConfigManager {
     await this.save();
   }
 
-  // ── Provider keys (reads from env or keystore) ──
-
   getApiKey(provider: string): string | undefined {
     const envMap: Record<string, string> = {
       anthropic: 'ANTHROPIC_API_KEY',
@@ -106,11 +88,13 @@ export class ConfigManager {
     };
     const envKey = envMap[provider];
     if (envKey && process.env[envKey]) return process.env[envKey];
-    if (this.keystore.isUnlocked()) return this.keystore.get(`provider:${provider}`);
-    return undefined;
+    if (this.keystore.isUnlocked()) {
+      const key = this.keystore.get(`provider:${provider}`);
+      if (key) return key;
+    }
+    const configProvider = this.config.providers.find(p => p.type === provider);
+    return configProvider?.apiKey;
   }
-
-  // ── Private ──────────────────────────────────
 
   private async loadConfig(): Promise<CascadeConfig> {
     const configPath = path.join(this.workspacePath, CASCADE_CONFIG_FILE);
@@ -135,14 +119,10 @@ export class ConfigManager {
       const key = process.env[env];
       if (!key) continue;
       const existing = this.config.providers.find((p) => p.type === type);
-      if (!existing) {
-        this.config.providers.push({ type, apiKey: key });
-      } else if (!existing.apiKey) {
-        existing.apiKey = key;
-      }
+      if (!existing) this.config.providers.push({ type, apiKey: key });
+      else if (!existing.apiKey) existing.apiKey = key;
     }
 
-    // Ollama: add if not configured but reachable
     if (!this.config.providers.find((p) => p.type === 'ollama')) {
       this.config.providers.push({ type: 'ollama' });
     }
@@ -151,7 +131,6 @@ export class ConfigManager {
   private async ensureDefaultIdentity(): Promise<void> {
     const existing = this.store.getDefaultIdentity();
     if (existing) return;
-
     const identity: Identity = {
       id: randomUUID(),
       name: 'Default',

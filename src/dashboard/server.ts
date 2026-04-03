@@ -8,7 +8,8 @@ import path from 'node:path';
 import fs from 'node:fs';
 import express, { type Request, type Response } from 'express';
 import type { CascadeConfig } from '../types.js';
-import type { MemoryStore } from '../memory/store.js';
+import { MemoryStore } from '../memory/store.js';
+import { GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE } from '../constants.js';
 import { DashboardSocket } from './websocket.js';
 import { authMiddleware, createToken } from './auth.js';
 import { DEFAULT_DASHBOARD_PORT } from '../constants.js';
@@ -35,8 +36,13 @@ export class DashboardServer {
   }
 
   async start(): Promise<void> {
-    await new Promise<void>((resolve) => {
-      this.httpServer.listen(this.port, resolve);
+    await new Promise<void>((resolve, reject) => {
+      const onError = (err: Error) => reject(err);
+      this.httpServer.once('error', onError);
+      this.httpServer.listen(this.port, () => {
+        this.httpServer.off('error', onError);
+        resolve();
+      });
     });
   }
 
@@ -134,7 +140,22 @@ export class DashboardServer {
     });
 
     // ── Runtime ──────────────────────────────────
-    this.app.get('/api/runtime', auth, (_req, res) => {
+    this.app.get('/api/runtime', auth, (req, res) => {
+      const scope = (req.query['scope'] as string | undefined) ?? 'workspace';
+      if (scope === 'global') {
+        const globalDbPath = path.join(process.env['HOME'] ?? process.cwd(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
+        const globalStore = new MemoryStore(globalDbPath);
+        try {
+          res.json({
+            sessions: globalStore.listRuntimeSessions(200),
+            nodes: globalStore.listRuntimeNodes(undefined, 1000),
+            logs: globalStore.listRuntimeNodeLogs(undefined, undefined, 500),
+          });
+        } finally {
+          globalStore.close();
+        }
+        return;
+      }
       res.json({
         sessions: this.store.listRuntimeSessions(200),
         nodes: this.store.listRuntimeNodes(undefined, 1000),

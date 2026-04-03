@@ -19,6 +19,7 @@ interface RuntimeSession {
   startedAt: string;
   updatedAt: string;
   latestPrompt?: string;
+  isGlobal?: boolean;
 }
 
 interface RuntimeNode {
@@ -31,6 +32,8 @@ interface RuntimeNode {
   currentAction?: string;
   progressPct?: number;
   updatedAt: string;
+  workspacePath?: string;
+  isGlobal?: boolean;
 }
 
 interface RuntimeNodeLog {
@@ -43,6 +46,8 @@ interface RuntimeNodeLog {
   currentAction?: string;
   progressPct?: number;
   timestamp: string;
+  workspacePath?: string;
+  isGlobal?: boolean;
 }
 
 interface RuntimeSnapshot {
@@ -60,6 +65,8 @@ export default function App() {
   const [streamLog, setStreamLog] = useState<string>('');
   const [stats, setStats] = useState<{ totalSessions: number; totalMessages: number; totalCostUsd: number } | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string>('');
+  const globalRuntimeCount = runtime.sessions.filter((session) => session.isGlobal).length;
+  const [runtimeScope, setRuntimeScope] = useState<'workspace' | 'global'>('workspace');
 
   const { connected, events } = useWebSocket({ url: '/', token });
 
@@ -85,7 +92,7 @@ export default function App() {
     }, 2000);
 
     return () => clearInterval(timer);
-  }, [token]);
+  }, [token, runtimeScope]);
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -108,7 +115,7 @@ export default function App() {
 
   async function fetchRuntime() {
     try {
-      const r = await fetch('/api/runtime', { headers: { Authorization: `Bearer ${token}` } });
+      const r = await fetch(`/api/runtime?scope=${runtimeScope}`, { headers: { Authorization: `Bearer ${token}` } });
       if (!r.ok) return;
       const snapshot = await r.json() as RuntimeSnapshot;
       setRuntime(snapshot);
@@ -132,6 +139,8 @@ export default function App() {
             selectedNodeId={selectedNodeId}
             onSelectNode={setSelectedNodeId}
             streamLog={streamLog}
+            runtimeScope={runtimeScope}
+            onRuntimeScopeChange={setRuntimeScope}
           />
         )}
         {page === 'sessions' && (
@@ -259,12 +268,14 @@ function Sidebar({ page, onNavigate, connected, theme, onThemeChange, onLogout }
   );
 }
 
-function Dashboard({ stats, runtime, selectedNodeId, onSelectNode, streamLog }: {
+function Dashboard({ stats, runtime, selectedNodeId, onSelectNode, streamLog, runtimeScope, onRuntimeScopeChange }: {
   stats: { totalSessions: number; totalMessages: number; totalCostUsd: number } | null;
   runtime: RuntimeSnapshot;
   selectedNodeId: string;
   onSelectNode: (nodeId: string) => void;
   streamLog: string;
+  runtimeScope: 'workspace' | 'global';
+  onRuntimeScopeChange: (scope: 'workspace' | 'global') => void;
 }) {
   const nodes = runtime.nodes.map((node) => ({
     id: node.tierId,
@@ -286,7 +297,26 @@ function Dashboard({ stats, runtime, selectedNodeId, onSelectNode, streamLog }: 
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold text-white">Dashboard</h1>
+      <div className="flex items-center justify-between gap-4 flex-wrap">
+        <h1 className="text-2xl font-bold text-white">Dashboard</h1>
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs text-gray-500 uppercase tracking-wider">Runtime</span>
+          <span className="rounded-full border border-cascade-border bg-cascade-bg px-3 py-1 text-xs text-gray-300">
+            {runtimeScope === 'global' ? `Global · ${runtime.sessions.length} runs` : `Workspace · ${runtime.sessions.length} runs`}
+          </span>
+          <button
+            onClick={() => onRuntimeScopeChange('workspace')}
+            className={`px-3 py-1 rounded-md text-xs border ${runtimeScope === 'workspace' ? 'border-cascade-500 text-cascade-400' : 'border-cascade-border text-gray-500'}`}>
+            Workspace
+          </button>
+          <button
+            onClick={() => onRuntimeScopeChange('global')}
+            className={`px-3 py-1 rounded-md text-xs border ${runtimeScope === 'global' ? 'border-cascade-500 text-cascade-400' : 'border-cascade-border text-gray-500'}`}>
+            Global
+          </button>
+        </div>
+      </div>
+
 
       {stats && (
         <div className="grid grid-cols-3 gap-4">
@@ -347,7 +377,9 @@ function Dashboard({ stats, runtime, selectedNodeId, onSelectNode, streamLog }: 
 
       {runtime.sessions.length > 0 && (
         <div>
-          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Workspace Runs</h2>
+          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">
+            {runtimeScope === 'global' ? 'Global Runs' : 'Workspace Runs'}
+          </h2>
           <div className="grid gap-3">
             {runtime.sessions.slice(0, 8).map((session) => (
               <div key={session.sessionId} className="rounded-xl border border-cascade-border bg-cascade-surface p-4">

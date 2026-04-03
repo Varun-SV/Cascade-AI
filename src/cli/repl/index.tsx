@@ -15,7 +15,7 @@ import type {
   RuntimeNode,
   Theme,
 } from '../../types.js';
-import { CASCADE_DB_FILE } from '../../constants.js';
+import { CASCADE_DB_FILE, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE } from '../../constants.js';
 import { Cascade } from '../../core/cascade.js';
 import { MemoryStore } from '../../memory/store.js';
 import { getTheme } from '../themes/index.js';
@@ -175,7 +175,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt }: ReplPr
   const persistRuntimeSession = useCallback((status: 'ACTIVE' | 'COMPLETED' | 'FAILED', latestPrompt?: string) => {
     const store = storeRef.current;
     if (!store) return;
-    store.upsertRuntimeSession({
+    const runtimeSession = {
       sessionId: sessionIdRef.current,
       title: sessionTitle,
       workspacePath,
@@ -183,7 +183,14 @@ export function Repl({ config, workspacePath, themeName, initialPrompt }: ReplPr
       startedAt: startedAtRef.current,
       updatedAt: new Date().toISOString(),
       latestPrompt,
-    });
+      isGlobal: false,
+    };
+    store.upsertRuntimeSession(runtimeSession);
+
+    const globalDbPath = path.join(process.env['HOME'] ?? process.cwd(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
+    const globalStore = new MemoryStore(globalDbPath);
+    globalStore.upsertRuntimeSession({ ...runtimeSession, isGlobal: true });
+    globalStore.close();
   }, [sessionTitle, workspacePath]);
 
   const rebuildTree = useCallback(() => {
@@ -233,6 +240,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt }: ReplPr
         currentAction: node.currentAction,
         progressPct: node.progressPct,
         updatedAt: new Date().toISOString(),
+        workspacePath,
+        isGlobal: false,
       };
       store.upsertRuntimeNode(runtimeNode);
       store.addRuntimeNodeLog({
@@ -245,7 +254,27 @@ export function Repl({ config, workspacePath, themeName, initialPrompt }: ReplPr
         currentAction: node.currentAction,
         progressPct: node.progressPct,
         timestamp: new Date().toISOString(),
+        workspacePath,
+        isGlobal: false,
       });
+
+      const globalDbPath = path.join(process.env['HOME'] ?? process.cwd(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
+      const globalStore = new MemoryStore(globalDbPath);
+      globalStore.upsertRuntimeNode({ ...runtimeNode, isGlobal: true });
+      globalStore.addRuntimeNodeLog({
+        id: randomUUID(),
+        sessionId: sessionIdRef.current,
+        tierId: node.id,
+        role: node.role,
+        label: node.label,
+        status: node.status,
+        currentAction: node.currentAction,
+        progressPct: node.progressPct,
+        timestamp: new Date().toISOString(),
+        workspacePath,
+        isGlobal: true,
+      });
+      globalStore.close();
     }
 
     const history = nodeLogsRef.current.get(node.id) ?? [];

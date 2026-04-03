@@ -5,6 +5,7 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import { OLLAMA_BASE_URL, LM_STUDIO_BASE_URL, PROVIDER_DISPLAY_NAMES } from '../../constants.js';
+import { ConfigManager } from '../../config/index.js';
 
 interface CheckResult {
   label: string;
@@ -26,20 +27,23 @@ export async function doctorCommand(): Promise<void> {
     detail: (major ?? 0) < 18 ? 'Requires Node.js ≥ 18' : undefined,
   });
 
-  // API keys from env
-  const providers: Array<{ env: string; name: string }> = [
-    { env: 'ANTHROPIC_API_KEY', name: 'Anthropic' },
-    { env: 'OPENAI_API_KEY', name: 'OpenAI' },
-    { env: 'GOOGLE_API_KEY', name: 'Google Gemini' },
-    { env: 'AZURE_OPENAI_KEY', name: 'Azure OpenAI' },
+  const cm = new ConfigManager(process.cwd());
+  await cm.load();
+
+  // API keys from config/env/keystore
+  const providers: Array<{ type: string; name: string }> = [
+    { type: 'anthropic', name: 'Anthropic' },
+    { type: 'openai', name: 'OpenAI' },
+    { type: 'gemini', name: 'Google Gemini' },
+    { type: 'azure', name: 'Azure OpenAI' },
   ];
 
-  for (const { env, name } of providers) {
-    const key = process.env[env];
+  for (const { type, name } of providers) {
+    const key = cm.getApiKey(type);
     checks.push({
       label: `${name} API key`,
       ok: Boolean(key),
-      detail: key ? `Set (${env})` : `Missing — set ${env}`,
+      detail: key ? 'Set' : 'Missing',
     });
   }
 

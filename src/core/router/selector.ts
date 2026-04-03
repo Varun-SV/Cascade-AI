@@ -30,7 +30,10 @@ export class ModelSelector {
     requireVision = false,
   ): ModelInfo | null {
     if (overrideModelId) {
-      const model = this.availableModels.get(overrideModelId);
+      let model = this.availableModels.get(overrideModelId);
+      if (!model) {
+        model = this.resolveDynamicModel(overrideModelId);
+      }
       if (model && this.availableProviders.has(model.provider)) return model;
     }
 
@@ -89,5 +92,48 @@ export class ModelSelector {
 
   markProviderUnavailable(provider: ProviderType): void {
     this.availableProviders.delete(provider);
+  }
+
+  private resolveDynamicModel(overrideModelId: string): ModelInfo | undefined {
+    let providerStr: ProviderType | null = null;
+    let actualId = overrideModelId;
+
+    if (overrideModelId.includes(':')) {
+      const parts = overrideModelId.split(':');
+      const prefix = parts[0]!.toLowerCase();
+      const validProviders = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama'];
+      if (validProviders.includes(prefix)) {
+        providerStr = prefix as ProviderType;
+        actualId = parts.slice(1).join(':');
+      }
+    }
+
+    if (!providerStr) {
+      const lower = actualId.toLowerCase();
+      if (lower.includes('claude')) providerStr = 'anthropic';
+      else if (lower.startsWith('gpt') || lower.startsWith('o1') || lower.startsWith('o3')) providerStr = 'openai';
+      else if (lower.includes('gemini')) providerStr = 'gemini';
+      else if (this.availableProviders.has('ollama')) providerStr = 'ollama';
+      else if (this.availableProviders.has('openai-compatible')) providerStr = 'openai-compatible';
+      else if (this.availableProviders.size === 1) providerStr = Array.from(this.availableProviders)[0]!;
+    }
+
+    if (providerStr && this.availableProviders.has(providerStr)) {
+      const dynamicModel: ModelInfo = {
+        id: actualId,
+        name: actualId,
+        provider: providerStr,
+        contextWindow: 128_000,
+        isVisionCapable: false,
+        inputCostPer1kTokens: 0,
+        outputCostPer1kTokens: 0,
+        maxOutputTokens: 8_000,
+        supportsStreaming: true,
+        isLocal: providerStr === 'ollama',
+      };
+      this.addDynamicModel(dynamicModel);
+      return dynamicModel;
+    }
+    return undefined;
   }
 }
