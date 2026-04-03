@@ -133,8 +133,22 @@ export class DashboardServer {
       });
     });
 
+    // ── Runtime ──────────────────────────────────
+    this.app.get('/api/runtime', auth, (_req, res) => {
+      res.json({
+        sessions: this.store.listRuntimeSessions(200),
+        nodes: this.store.listRuntimeNodes(undefined, 1000),
+        logs: this.store.listRuntimeNodeLogs(undefined, undefined, 500),
+      });
+    });
+
     // ── Serve React app ─────────────────────────
-    const webDistPath = path.resolve(__dirname, '../../web/dist');
+    // When running from built CLI, __dirname is dist/.
+    // When running locally via ts-node, __dirname is src/dashboard.
+    const prodPath = path.resolve(__dirname, '../web/dist');
+    const devPath = path.resolve(__dirname, '../../web/dist');
+    const webDistPath = fs.existsSync(prodPath) ? prodPath : devPath;
+
     if (fs.existsSync(webDistPath)) {
       this.app.use(express.static(webDistPath));
       this.app.get('*', (_req, res) => {

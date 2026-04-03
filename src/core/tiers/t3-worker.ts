@@ -2,6 +2,8 @@
 //  Cascade AI — T3 Worker
 // ─────────────────────────────────────────────
 
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import type {
   ApprovalRequest,
   ConversationMessage,
@@ -21,8 +23,10 @@ const T3_SYSTEM_PROMPT = `You are a T3 Worker agent in the Cascade AI system. Yo
 Rules:
 - Execute the subtask completely — do not stop partway through.
 - Use tools when needed. Ask for approval only when the tool registry requires it.
+- If the task asks for a file or artifact, you must actually create it in the workspace, verify that it exists, and inspect it before claiming success.
+- Intermediate files are allowed when useful. Clean them up after a successful final artifact verification. If the run fails, keep intermediates for debugging.
 - Self-test your output: check completeness, correctness, and constraint compliance.
-- If you find issues after one correction attempt, escalate honestly rather than fabricating output.
+- If you are not making meaningful progress, stop and escalate rather than looping or padding the response.
 - Return structured output that directly addresses the expected output specification.`;
 
 export class T3Worker extends BaseTier {
@@ -42,6 +46,7 @@ export class T3Worker extends BaseTier {
   async execute(assignment: T2ToT3Assignment, taskId: string): Promise<T3Result> {
     this.assignment = assignment;
     this.taskId = taskId;
+    this.setLabel(assignment.subtaskTitle);
     this.setStatus('ACTIVE');
 
     this.sendStatusUpdate({
@@ -73,6 +78,21 @@ export class T3Worker extends BaseTier {
       const result = await this.runAgentLoop(systemPrompt, tools);
       output = result.output;
       toolCalls = result.toolCalls;
+
+      this.sendStatusUpdate({ progressPct: 65, currentAction: 'Verifying required artifacts', status: 'IN_PROGRESS' });
+
+      const artifactCheck = await this.verifyArtifacts(assignment);
+      if (!artifactCheck.ok) {
+        correctionAttempts = 1;
+        issues.push(...artifactCheck.issues);
+        output = await this.correctOutput(output, artifactCheck.issues);
+        const retryArtifactCheck = await this.verifyArtifacts(assignment);
+        if (!retryArtifactCheck.ok) {
+          issues.push(...retryArtifactCheck.issues);
+          this.setStatus('FAILED');
+          return this.buildResult('ESCALATED', output, { checksRun, passed, failed }, issues, correctionAttempts);
+        }
+      }
 
       this.sendStatusUpdate({ progressPct: 70, currentAction: 'Self-testing output', status: 'IN_PROGRESS' });
 
@@ -124,7 +144,9 @@ export class T3Worker extends BaseTier {
   ): Promise<{ output: string; toolCalls: ToolCall[] }> {
     const allToolCalls: ToolCall[] = [];
     let iterations = 0;
+    let stalledArtifactIterations = 0;
     const MAX_ITERATIONS = 15;
+    const requiresArtifact = this.requiresArtifact();
 
     while (iterations < MAX_ITERATIONS) {
       iterations++;
@@ -136,23 +158,37 @@ export class T3Worker extends BaseTier {
         maxTokens: 4096,
       };
 
-      const chunks: string[] = [];
       const result = await this.router.generate(
         'T3',
         options,
         (chunk) => {
-          if (chunk.text) chunks.push(chunk.text);
           this.emit('stream:token', { tierId: this.id, text: chunk.text });
         },
       );
 
       await this.context.addMessage({ role: 'assistant', content: result.content });
 
-      if (result.finishReason === 'stop' || !result.toolCalls?.length) {
+      if (!result.toolCalls?.length) {
+        if (requiresArtifact) {
+          stalledArtifactIterations += 1;
+          if (stalledArtifactIterations >= 2) {
+            throw new Error('Artifact-producing task stalled without creating or verifying the required files');
+          }
+          await this.context.addMessage({
+            role: 'user',
+            content: 'You have not yet created and verified the required artifact. Use tools to create the file in the workspace, verify it exists, and inspect the result before concluding.',
+          });
+          continue;
+        }
         return { output: result.content, toolCalls: allToolCalls };
       }
 
-      // Execute tool calls
+      stalledArtifactIterations = 0;
+
+      if (result.finishReason === 'stop' && !requiresArtifact) {
+        return { output: result.content, toolCalls: allToolCalls };
+      }
+
       for (const tc of result.toolCalls) {
         allToolCalls.push(tc);
         const toolResult = await this.executeTool(tc);
@@ -207,6 +243,55 @@ export class T3Worker extends BaseTier {
     } catch (err) {
       return `Tool error: ${err instanceof Error ? err.message : String(err)}`;
     }
+  }
+
+  private requiresArtifact(): boolean {
+    const haystack = `${this.assignment?.description ?? ''}
+${this.assignment?.expectedOutput ?? ''}`;
+    return /\b[\w./-]+\.(pdf|md|html|txt|json|csv|py|js|ts|tsx|jsx|docx?)\b/i.test(haystack)
+      || /save (?:a|the)? file|create (?:a|the)? file|write (?:a|the)? file/i.test(haystack);
+  }
+
+  private extractArtifactPaths(assignment: T2ToT3Assignment): string[] {
+    const haystack = `${assignment.description}
+${assignment.expectedOutput}`;
+    const matches = haystack.match(/\b[\w./-]+\.(pdf|md|html|txt|json|csv|py|js|ts|tsx|jsx|docx?)\b/gi) ?? [];
+    return [...new Set(matches.map((m) => m.trim()))];
+  }
+
+  private async verifyArtifacts(assignment: T2ToT3Assignment): Promise<{ ok: boolean; issues: string[] }> {
+    const artifactPaths = this.extractArtifactPaths(assignment);
+    if (!artifactPaths.length) return { ok: true, issues: [] };
+
+    const issues: string[] = [];
+
+    for (const artifactPath of artifactPaths) {
+      const absolutePath = path.resolve(process.cwd(), artifactPath);
+      try {
+        const stat = await fs.stat(absolutePath);
+        if (!stat.isFile()) {
+          issues.push(`Expected artifact is not a file: ${artifactPath}`);
+          continue;
+        }
+        if (stat.size <= 0) {
+          issues.push(`Artifact is empty: ${artifactPath}`);
+          continue;
+        }
+
+        if (!/\.pdf$/i.test(artifactPath)) {
+          const content = await fs.readFile(absolutePath, 'utf-8');
+          if (content.trim().length < 20) {
+            issues.push(`Artifact content looks too short: ${artifactPath}`);
+          }
+        } else if (stat.size < 100) {
+          issues.push(`PDF artifact looks too small to be valid: ${artifactPath}`);
+        }
+      } catch {
+        issues.push(`Required artifact was not created: ${artifactPath}`);
+      }
+    }
+
+    return { ok: issues.length === 0, issues };
   }
 
   private async selfTest(

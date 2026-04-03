@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect } from 'react';
 import ReactFlow, {
   addEdge,
   Background,
@@ -22,14 +22,16 @@ interface AgentNode {
 interface AgentGraphProps {
   nodes: AgentNode[];
   edges: Array<{ from: string; to: string }>;
+  selectedNodeId?: string;
+  onSelectNode?: (nodeId: string) => void;
 }
 
 const STATUS_COLOR: Record<string, string> = {
-  ACTIVE:    '#7c6af7',
+  ACTIVE: '#7c6af7',
   COMPLETED: '#10b981',
-  FAILED:    '#ef4444',
+  FAILED: '#ef4444',
   ESCALATED: '#f59e0b',
-  IDLE:      '#374151',
+  IDLE: '#374151',
 };
 
 const ROLE_BG: Record<string, string> = {
@@ -38,32 +40,50 @@ const ROLE_BG: Record<string, string> = {
   T3: '#0f1f18',
 };
 
-function buildFlowNodes(agentNodes: AgentNode[]): Node[] {
+function buildFlowNodes(agentNodes: AgentNode[], selectedNodeId?: string): Node[] {
   const t1 = agentNodes.filter((n) => n.role === 'T1');
   const t2 = agentNodes.filter((n) => n.role === 'T2');
   const t3 = agentNodes.filter((n) => n.role === 'T3');
 
   const result: Node[] = [];
 
-  t1.forEach((n, i) => result.push({
-    id: n.id, type: 'default', position: { x: 300, y: 50 },
+  t1.forEach((n) => result.push({
+    id: n.id,
+    type: 'default',
+    position: { x: 300, y: 50 },
     data: { label: <NodeLabel node={n} /> },
-    style: { background: ROLE_BG['T1'], border: `1px solid ${STATUS_COLOR[n.status]}`, borderRadius: 8, color: '#e2e8f0', padding: 8, minWidth: 160 },
+    style: nodeStyle(n, selectedNodeId),
   }));
 
   t2.forEach((n, i) => result.push({
-    id: n.id, type: 'default', position: { x: 100 + i * 220, y: 200 },
+    id: n.id,
+    type: 'default',
+    position: { x: 100 + i * 220, y: 200 },
     data: { label: <NodeLabel node={n} /> },
-    style: { background: ROLE_BG['T2'], border: `1px solid ${STATUS_COLOR[n.status]}`, borderRadius: 8, color: '#e2e8f0', padding: 8, minWidth: 160 },
+    style: nodeStyle(n, selectedNodeId),
   }));
 
   t3.forEach((n, i) => result.push({
-    id: n.id, type: 'default', position: { x: 50 + i * 180, y: 380 },
+    id: n.id,
+    type: 'default',
+    position: { x: 50 + i * 180, y: 380 },
     data: { label: <NodeLabel node={n} /> },
-    style: { background: ROLE_BG['T3'], border: `1px solid ${STATUS_COLOR[n.status]}`, borderRadius: 8, color: '#e2e8f0', padding: 8, minWidth: 140 },
+    style: nodeStyle(n, selectedNodeId),
   }));
 
   return result;
+}
+
+function nodeStyle(node: AgentNode, selectedNodeId?: string) {
+  return {
+    background: ROLE_BG[node.role],
+    border: `2px solid ${selectedNodeId === node.id ? '#f8fafc' : STATUS_COLOR[node.status]}`,
+    borderRadius: 8,
+    color: '#e2e8f0',
+    padding: 8,
+    minWidth: 160,
+    boxShadow: selectedNodeId === node.id ? '0 0 0 2px rgba(124,106,247,0.45)' : 'none',
+  };
 }
 
 function NodeLabel({ node }: { node: AgentNode }) {
@@ -71,26 +91,39 @@ function NodeLabel({ node }: { node: AgentNode }) {
     <div>
       <div style={{ fontSize: 10, color: STATUS_COLOR[node.status], fontWeight: 700 }}>{node.role}</div>
       <div style={{ fontSize: 12, fontWeight: 600 }}>{node.label}</div>
-      {node.action && <div style={{ fontSize: 10, color: '#9ca3af', marginTop: 2 }}>{node.action.slice(0, 40)}</div>}
+      {node.action && <div style={{ fontSize: 10, color: '#9ca3af', marginTop: 2 }}>{node.action.slice(0, 60)}</div>}
       <div style={{ fontSize: 10, color: STATUS_COLOR[node.status], marginTop: 2 }}>{node.status}</div>
     </div>
   );
 }
 
-export function AgentGraph({ nodes: agentNodes, edges: agentEdges }: AgentGraphProps) {
-  const [nodes, setNodes, onNodesChange] = useNodesState(buildFlowNodes(agentNodes));
+export function AgentGraph({ nodes: agentNodes, edges: agentEdges, selectedNodeId, onSelectNode }: AgentGraphProps) {
+  const [nodes, setNodes, onNodesChange] = useNodesState(buildFlowNodes(agentNodes, selectedNodeId));
   const [edges, setEdges, onEdgesChange] = useEdgesState(
     agentEdges.map((e, i) => ({
-      id: `e-${i}`, source: e.from, target: e.to,
-      style: { stroke: '#2d2b55' }, animated: true,
+      id: `e-${i}`,
+      source: e.from,
+      target: e.to,
+      style: { stroke: '#2d2b55' },
+      animated: true,
     })),
   );
 
   useEffect(() => {
-    setNodes(buildFlowNodes(agentNodes));
-  }, [agentNodes]);
+    setNodes(buildFlowNodes(agentNodes, selectedNodeId));
+  }, [agentNodes, selectedNodeId, setNodes]);
 
-  const onConnect = useCallback((c: Connection) => setEdges((eds) => addEdge(c, eds)), []);
+  useEffect(() => {
+    setEdges(agentEdges.map((e, i) => ({
+      id: `e-${i}`,
+      source: e.from,
+      target: e.to,
+      style: { stroke: '#2d2b55' },
+      animated: true,
+    })));
+  }, [agentEdges, setEdges]);
+
+  const onConnect = useCallback((c: Connection) => setEdges((eds) => addEdge(c, eds)), [setEdges]);
 
   return (
     <div style={{ height: 480, background: '#0f0f1a', borderRadius: 8, border: '1px solid #2d2b55' }}>
@@ -100,6 +133,7 @@ export function AgentGraph({ nodes: agentNodes, edges: agentEdges }: AgentGraphP
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
+        onNodeClick={(_event, node) => onSelectNode?.(node.id)}
         fitView
       >
         <Background color="#2d2b55" gap={24} />

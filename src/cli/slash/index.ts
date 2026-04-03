@@ -24,6 +24,9 @@ export interface SlashCommandContext {
   onModelInfo: () => string;
   onCostInfo: () => string;
   onCompact: () => Promise<void>;
+  onStatus: () => string;
+  onSessions: (args: string[]) => Promise<string> | string;
+  onIdentity: (args: string[]) => Promise<string> | string;
 }
 
 export interface SlashCommandResult {
@@ -149,6 +152,24 @@ export class SlashCommandRegistry {
       handler: (_args, ctx) => {
         return { output: ctx.onCostInfo(), handled: true };
       },
+    });
+
+    this.register({
+      command: '/status',
+      description: 'Show active agent tree status',
+      handler: (_args, ctx) => ({ output: ctx.onStatus(), handled: true }),
+    });
+
+    this.register({
+      command: '/sessions',
+      description: 'List and resume past sessions',
+      handler: async (args, ctx) => ({ output: await ctx.onSessions(args), handled: true }),
+    });
+
+    this.register({
+      command: '/identity',
+      description: 'Switch active identity',
+      handler: async (args, ctx) => ({ output: await ctx.onIdentity(args), handled: true }),
     });
 
     this.register({

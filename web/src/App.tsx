@@ -1,9 +1,7 @@
-import React, { useEffect, useState } from 'react';
-import { Activity, Settings, MessageSquare, List, BarChart2, LogIn } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Activity, Settings, MessageSquare, LogIn } from 'lucide-react';
 import { useWebSocket } from './hooks/useWebSocket.ts';
 import { AgentGraph } from './components/AgentGraph.tsx';
-
-// ── Types ─────────────────────────────────────
 
 interface Session {
   id: string;
@@ -13,55 +11,59 @@ interface Session {
   metadata: { totalTokens: number; totalCostUsd: number; taskCount: number };
 }
 
-interface TierEvent {
-  tierId: string;
-  role: string;
-  status: string;
-  action?: string;
+interface RuntimeSession {
+  sessionId: string;
+  title: string;
+  workspacePath: string;
+  status: 'ACTIVE' | 'COMPLETED' | 'FAILED';
+  startedAt: string;
+  updatedAt: string;
+  latestPrompt?: string;
 }
 
-interface AgentNode {
-  id: string;
+interface RuntimeNode {
+  tierId: string;
+  sessionId: string;
+  parentId?: string;
   role: 'T1' | 'T2' | 'T3';
   label: string;
   status: 'IDLE' | 'ACTIVE' | 'COMPLETED' | 'FAILED' | 'ESCALATED';
-  action?: string;
+  currentAction?: string;
+  progressPct?: number;
+  updatedAt: string;
 }
 
-// ── Main App ──────────────────────────────────
+interface RuntimeNodeLog {
+  id: string;
+  sessionId: string;
+  tierId: string;
+  role: 'T1' | 'T2' | 'T3';
+  label: string;
+  status: 'IDLE' | 'ACTIVE' | 'COMPLETED' | 'FAILED' | 'ESCALATED';
+  currentAction?: string;
+  progressPct?: number;
+  timestamp: string;
+}
+
+interface RuntimeSnapshot {
+  sessions: RuntimeSession[];
+  nodes: RuntimeNode[];
+  logs: RuntimeNodeLog[];
+}
 
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem('cascade_token') ?? '');
-  const [page, setPage] = useState<'dashboard' | 'sessions' | 'settings' | 'login'>('dashboard');
+  const [page, setPage] = useState<'dashboard' | 'sessions' | 'settings'>('dashboard');
   const [sessions, setSessions] = useState<Session[]>([]);
-  const [agentNodes, setAgentNodes] = useState<AgentNode[]>([]);
+  const [runtime, setRuntime] = useState<RuntimeSnapshot>({ sessions: [], nodes: [], logs: [] });
   const [streamLog, setStreamLog] = useState<string>('');
   const [stats, setStats] = useState<{ totalSessions: number; totalMessages: number; totalCostUsd: number } | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string>('');
 
   const { connected, events } = useWebSocket({ url: '/', token });
 
-  // Process WebSocket events
   useEffect(() => {
     for (const ev of events) {
-      if (ev.type === 'tier:status') {
-        const d = ev.data as TierEvent;
-        setAgentNodes((prev) => {
-          const existing = prev.find((n) => n.id === d.tierId);
-          const role = d.role as AgentNode['role'];
-          if (existing) {
-            return prev.map((n) => n.id === d.tierId
-              ? { ...n, status: d.status as AgentNode['status'], action: d.action }
-              : n);
-          }
-          return [...prev, {
-            id: d.tierId,
-            role,
-            label: d.tierId,
-            status: d.status as AgentNode['status'],
-            action: d.action,
-          }];
-        });
-      }
       if (ev.type === 'stream:token') {
         const d = ev.data as { text: string };
         setStreamLog((prev) => (prev + d.text).slice(-5000));
@@ -69,41 +71,65 @@ export default function App() {
     }
   }, [events]);
 
-  // Load data
   useEffect(() => {
     if (!token) return;
     fetchSessions();
     fetchStats();
+    fetchRuntime();
+
+    const timer = setInterval(() => {
+      fetchRuntime();
+      fetchSessions();
+      fetchStats();
+    }, 2000);
+
+    return () => clearInterval(timer);
   }, [token]);
 
   async function fetchSessions() {
     try {
       const r = await fetch('/api/sessions', { headers: { Authorization: `Bearer ${token}` } });
       if (r.ok) setSessions(await r.json() as Session[]);
-    } catch { /* network error */ }
+    } catch { /* noop */ }
   }
 
   async function fetchStats() {
     try {
       const r = await fetch('/api/stats', { headers: { Authorization: `Bearer ${token}` } });
       if (r.ok) setStats(await r.json() as typeof stats);
-    } catch { /* network error */ }
+    } catch { /* noop */ }
+  }
+
+  async function fetchRuntime() {
+    try {
+      const r = await fetch('/api/runtime', { headers: { Authorization: `Bearer ${token}` } });
+      if (!r.ok) return;
+      const snapshot = await r.json() as RuntimeSnapshot;
+      setRuntime(snapshot);
+      if (!selectedNodeId && snapshot.nodes[0]?.tierId) {
+        setSelectedNodeId(snapshot.nodes[0].tierId);
+      }
+    } catch { /* noop */ }
   }
 
   if (!token) return <LoginPage onLogin={setToken} />;
 
   return (
     <div className="flex h-screen bg-cascade-bg overflow-hidden">
-      {/* Sidebar */}
       <Sidebar page={page} onNavigate={setPage} connected={connected} onLogout={() => { setToken(''); localStorage.removeItem('cascade_token'); }} />
 
-      {/* Main */}
       <main className="flex-1 overflow-auto p-6">
         {page === 'dashboard' && (
-          <Dashboard stats={stats} agentNodes={agentNodes} streamLog={streamLog} />
+          <Dashboard
+            stats={stats}
+            runtime={runtime}
+            selectedNodeId={selectedNodeId}
+            onSelectNode={setSelectedNodeId}
+            streamLog={streamLog}
+          />
         )}
         {page === 'sessions' && (
-          <SessionsPage sessions={sessions} token={token} />
+          <SessionsPage sessions={sessions} token={token} onRefresh={fetchSessions} />
         )}
         {page === 'settings' && (
           <SettingsPage token={token} />
@@ -112,8 +138,6 @@ export default function App() {
     </div>
   );
 }
-
-// ── Login ─────────────────────────────────────
 
 function LoginPage({ onLogin }: { onLogin: (token: string) => void }) {
   const [password, setPassword] = useState('');
@@ -166,8 +190,6 @@ function LoginPage({ onLogin }: { onLogin: (token: string) => void }) {
   );
 }
 
-// ── Sidebar ───────────────────────────────────
-
 function Sidebar({ page, onNavigate, connected, onLogout }: {
   page: string;
   onNavigate: (p: 'dashboard' | 'sessions' | 'settings') => void;
@@ -216,18 +238,35 @@ function Sidebar({ page, onNavigate, connected, onLogout }: {
   );
 }
 
-// ── Dashboard Page ────────────────────────────
-
-function Dashboard({ stats, agentNodes, streamLog }: {
+function Dashboard({ stats, runtime, selectedNodeId, onSelectNode, streamLog }: {
   stats: { totalSessions: number; totalMessages: number; totalCostUsd: number } | null;
-  agentNodes: AgentNode[];
+  runtime: RuntimeSnapshot;
+  selectedNodeId: string;
+  onSelectNode: (nodeId: string) => void;
   streamLog: string;
 }) {
+  const nodes = runtime.nodes.map((node) => ({
+    id: node.tierId,
+    role: node.role,
+    label: node.label,
+    status: node.status,
+    action: node.currentAction,
+  }));
+
+  const edges = runtime.nodes
+    .filter((node) => node.parentId)
+    .map((node) => ({ from: node.parentId!, to: node.tierId }));
+
+  const selectedNode = runtime.nodes.find((node) => node.tierId === selectedNodeId) ?? runtime.nodes[0] ?? null;
+  const selectedLogs = useMemo(
+    () => runtime.logs.filter((log) => log.tierId === selectedNode?.tierId).slice(0, 30),
+    [runtime.logs, selectedNode],
+  );
+
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold text-white">Dashboard</h1>
 
-      {/* Stats */}
       {stats && (
         <div className="grid grid-cols-3 gap-4">
           {[
@@ -243,19 +282,71 @@ function Dashboard({ stats, agentNodes, streamLog }: {
         </div>
       )}
 
-      {/* Agent Graph */}
-      <div>
-        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Live Agent Graph</h2>
-        {agentNodes.length > 0 ? (
-          <AgentGraph nodes={agentNodes} edges={[]} />
-        ) : (
-          <div className="h-48 rounded-xl border border-cascade-border bg-cascade-surface flex items-center justify-center">
-            <p className="text-gray-600 text-sm">No active agents — start a task in the CLI</p>
-          </div>
-        )}
+      <div className="grid grid-cols-[minmax(0,2fr)_minmax(320px,1fr)] gap-4">
+        <div>
+          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Live Agent Graph</h2>
+          {nodes.length > 0 ? (
+            <AgentGraph nodes={nodes} edges={edges} selectedNodeId={selectedNode?.tierId} onSelectNode={onSelectNode} />
+          ) : (
+            <div className="h-48 rounded-xl border border-cascade-border bg-cascade-surface flex items-center justify-center">
+              <p className="text-gray-600 text-sm">No active agents — start a task in the CLI</p>
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-xl border border-cascade-border bg-cascade-surface p-4 max-h-[480px] overflow-hidden flex flex-col">
+          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Node Activity</h2>
+          {selectedNode ? (
+            <>
+              <div className="mb-3">
+                <div className="text-xs text-cascade-400 font-semibold">{selectedNode.role}</div>
+                <div className="text-white font-semibold mt-1">{selectedNode.label}</div>
+                <div className="text-xs text-gray-500 mt-1">{selectedNode.status} · session {selectedNode.sessionId}</div>
+                {selectedNode.currentAction && (
+                  <div className="text-sm text-gray-300 mt-2">{selectedNode.currentAction}</div>
+                )}
+              </div>
+              <div className="overflow-auto space-y-2 pr-1">
+                {selectedLogs.length > 0 ? selectedLogs.map((log) => (
+                  <div key={log.id} className="rounded-lg border border-cascade-border bg-cascade-bg/60 p-2">
+                    <div className="text-xs text-gray-500">{new Date(log.timestamp).toLocaleString()}</div>
+                    <div className="text-sm text-white mt-1">{log.status}</div>
+                    {log.currentAction && <div className="text-xs text-gray-400 mt-1">{log.currentAction}</div>}
+                  </div>
+                )) : (
+                  <p className="text-sm text-gray-500">No activity logged for this node yet.</p>
+                )}
+              </div>
+            </>
+          ) : (
+            <p className="text-sm text-gray-500">Select a node to inspect activity.</p>
+          )}
+        </div>
       </div>
 
-      {/* Stream log */}
+      {runtime.sessions.length > 0 && (
+        <div>
+          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Workspace Runs</h2>
+          <div className="grid gap-3">
+            {runtime.sessions.slice(0, 8).map((session) => (
+              <div key={session.sessionId} className="rounded-xl border border-cascade-border bg-cascade-surface p-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="text-white font-medium">{session.title}</div>
+                    <div className="text-xs text-gray-500 mt-1">{session.sessionId}</div>
+                    {session.latestPrompt && <div className="text-sm text-gray-300 mt-2 line-clamp-2">{session.latestPrompt}</div>}
+                  </div>
+                  <div className="text-right text-xs text-gray-500">
+                    <div>{session.status}</div>
+                    <div className="mt-1">{new Date(session.updatedAt).toLocaleString()}</div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {streamLog && (
         <div>
           <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Live Stream</h2>
@@ -268,14 +359,13 @@ function Dashboard({ stats, agentNodes, streamLog }: {
   );
 }
 
-// ── Sessions Page ─────────────────────────────
-
-function SessionsPage({ sessions, token }: { sessions: Session[]; token: string }) {
+function SessionsPage({ sessions, token, onRefresh }: { sessions: Session[]; token: string; onRefresh: () => void }) {
   const [selected, setSelected] = useState<Session | null>(null);
 
   async function deleteSession(id: string) {
     await fetch(`/api/sessions/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
     setSelected(null);
+    onRefresh();
   }
 
   return (
@@ -315,8 +405,6 @@ function SessionsPage({ sessions, token }: { sessions: Session[]; token: string 
     </div>
   );
 }
-
-// ── Settings Page ─────────────────────────────
 
 function SettingsPage({ token }: { token: string }) {
   const [config, setConfig] = useState<Record<string, unknown> | null>(null);

@@ -17,12 +17,14 @@ export abstract class BaseTier extends EventEmitter {
   protected status: TierStatus = 'IDLE';
   protected parentId?: string;
   protected taskId: string = '';
+  protected label: string;
 
   constructor(role: TierRole, id?: string, parentId?: string) {
     super();
     this.role = role;
     this.id = id ?? `${role}_${randomUUID().slice(0, 8)}`;
     this.parentId = parentId;
+    this.label = this.id;
   }
 
   getStatus(): TierStatus {
@@ -31,12 +33,37 @@ export abstract class BaseTier extends EventEmitter {
 
   protected setStatus(status: TierStatus): void {
     this.status = status;
-    this.emit('status', { tierId: this.id, status, timestamp: new Date().toISOString() });
+    const timestamp = new Date().toISOString();
+    const event = {
+      tierId: this.id,
+      role: this.role,
+      parentId: this.parentId,
+      label: this.label,
+      status,
+      timestamp,
+    };
+    this.emit('status', event);
+    this.emit('tier:status', event);
+  }
+
+  protected setLabel(label: string): void {
+    this.label = label;
   }
 
   protected sendStatusUpdate(update: StatusUpdate): void {
+    const timestamp = new Date().toISOString();
     const message = this.buildMessage('STATUS_UPDATE', this.parentId ?? 'T1', update as unknown as Record<string, unknown>);
     this.emit('message', message);
+    this.emit('tier:status', {
+      tierId: this.id,
+      role: this.role,
+      parentId: this.parentId,
+      label: this.label,
+      status: this.status,
+      currentAction: update.currentAction,
+      progressPct: update.progressPct,
+      timestamp,
+    });
   }
 
   protected buildMessage(

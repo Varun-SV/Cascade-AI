@@ -36,6 +36,7 @@ export class T2Manager extends BaseTier {
   async execute(assignment: T1ToT2Assignment, taskId: string): Promise<T2Result> {
     this.assignment = assignment;
     this.taskId = taskId;
+    this.setLabel(assignment.sectionTitle);
     this.setStatus('ACTIVE');
 
     this.sendStatusUpdate({
@@ -167,7 +168,7 @@ Return ONLY the JSON array.`;
       // Bubble up events
       worker.on('stream:token', (e) => this.emit('stream:token', e));
       worker.on('log', (e) => this.emit('log', e));
-      worker.on('status', (e) => this.emit('tier:status', e));
+      worker.on('tier:status', (e) => this.emit('tier:status', e));
       worker.on('tool:approval-request', (e) => this.emit('tool:approval-request', e));
 
       // Route peer sync

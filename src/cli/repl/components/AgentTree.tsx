@@ -25,9 +25,16 @@ interface AgentTreeProps {
 export function AgentTree({ root, theme }: AgentTreeProps): React.ReactElement | null {
   if (!root) return null;
 
+  const activeT2 = countNodes(root, (node) => node.role === 'T2' && node.status === 'ACTIVE');
+  const activeT3 = countNodes(root, (node) => node.role === 'T3' && node.status === 'ACTIVE');
+
   return (
     <Box flexDirection="column" marginY={1}>
-      <Text bold color={theme.colors.muted}>Agent Execution Tree</Text>
+      <Text bold color={theme.colors.muted}>
+        Agent Execution Tree
+        <Text color={theme.colors.t2Color}> · T2 active: {activeT2}</Text>
+        <Text color={theme.colors.t3Color}> · T3 active: {activeT3}</Text>
+      </Text>
       <TierNodeView node={root} theme={theme} depth={0} isLast />
     </Box>
   );
@@ -93,4 +100,9 @@ function getStatusIcon(status: TierNode['status'], theme: Theme): React.ReactEle
     default:
       return <Text color={theme.colors.muted}>○</Text>;
   }
+}
+
+function countNodes(node: TierNode, predicate: (node: TierNode) => boolean): number {
+  const self = predicate(node) ? 1 : 0;
+  return self + (node.children?.reduce((acc, child) => acc + countNodes(child, predicate), 0) ?? 0);
 }

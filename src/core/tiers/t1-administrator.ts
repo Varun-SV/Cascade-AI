@@ -25,6 +25,7 @@ Your responsibilities:
 2. Decompose the task into logical sections (one per T2 Manager)
 3. For each section, define 2-5 subtasks for T3 Workers
 4. Return a structured plan as JSON
+5. When the user asks for a file/artifact, ensure the plan includes creation, verification, and final delivery of that artifact
 
 Rules:
 - Simple → 1 T2
@@ -32,7 +33,8 @@ Rules:
 - Complex → 3-5 T2s
 - Highly Complex → 5+ T2s
 - Each section must be non-overlapping and self-contained
-- Return ONLY valid JSON — no other text`;
+- Return ONLY valid JSON — no other text
+- If the user asks for a PDF/report/file, at least one section or subtask must explicitly create and verify it`;
 
 interface TaskPlan {
   complexity: TaskComplexity;
@@ -65,6 +67,7 @@ export class T1Administrator extends BaseTier {
     complexity: TaskComplexity;
   }> {
     this.taskId = randomUUID();
+    this.setLabel('Administrator');
     this.setStatus('ACTIVE');
 
     this.sendStatusUpdate({
@@ -137,6 +140,8 @@ export class T1Administrator extends BaseTier {
     const decompositionPrompt = `Analyze this task and create an execution plan.${contextSection}
 
 Task: ${prompt}
+
+If the task asks for a file, report, or PDF, include explicit subtasks for creation and verification, and allow temporary intermediate files only if the final deliverable is cleaned up and verified.
 
 Return JSON:
 {

@@ -5,7 +5,16 @@
 import Database from 'better-sqlite3';
 import path from 'node:path';
 import fs from 'node:fs';
-import type { AuditEntry, Identity, ScheduledTask, Session, StoredMessage } from '../types.js';
+import type {
+  AuditEntry,
+  Identity,
+  RuntimeNode,
+  RuntimeNodeLog,
+  RuntimeSession,
+  ScheduledTask,
+  Session,
+  StoredMessage,
+} from '../types.js';
 
 export class MemoryStore {
   private db: Database.Database;
@@ -55,6 +64,153 @@ export class MemoryStore {
   deleteSession(id: string): void {
     this.db.prepare('DELETE FROM messages WHERE session_id = ?').run(id);
     this.db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
+  }
+
+  // ── Runtime Sessions / Nodes ─────────────────
+
+  upsertRuntimeSession(session: RuntimeSession): void {
+    this.db.prepare(`
+      INSERT INTO runtime_sessions (session_id, title, workspace_path, status, started_at, updated_at, latest_prompt)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET
+        title = excluded.title,
+        workspace_path = excluded.workspace_path,
+        status = excluded.status,
+        updated_at = excluded.updated_at,
+        latest_prompt = excluded.latest_prompt
+    `).run(
+      session.sessionId,
+      session.title,
+      session.workspacePath,
+      session.status,
+      session.startedAt,
+      session.updatedAt,
+      session.latestPrompt ?? null,
+    );
+  }
+
+  listRuntimeSessions(limit = 100): RuntimeSession[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM runtime_sessions ORDER BY updated_at DESC LIMIT ?
+    `).all(limit) as DbRuntimeSession[];
+    return rows.map((row) => ({
+      sessionId: row.session_id,
+      title: row.title,
+      workspacePath: row.workspace_path,
+      status: row.status as RuntimeSession['status'],
+      startedAt: row.started_at,
+      updatedAt: row.updated_at,
+      latestPrompt: row.latest_prompt ?? undefined,
+    }));
+  }
+
+  upsertRuntimeNode(node: RuntimeNode): void {
+    this.db.prepare(`
+      INSERT INTO runtime_nodes (tier_id, session_id, parent_id, role, label, status, current_action, progress_pct, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(tier_id) DO UPDATE SET
+        session_id = excluded.session_id,
+        parent_id = excluded.parent_id,
+        role = excluded.role,
+        label = excluded.label,
+        status = excluded.status,
+        current_action = excluded.current_action,
+        progress_pct = excluded.progress_pct,
+        updated_at = excluded.updated_at
+    `).run(
+      node.tierId,
+      node.sessionId,
+      node.parentId ?? null,
+      node.role,
+      node.label,
+      node.status,
+      node.currentAction ?? null,
+      node.progressPct ?? null,
+      node.updatedAt,
+    );
+  }
+
+  listRuntimeNodes(sessionId?: string, limit = 500): RuntimeNode[] {
+    const rows = sessionId
+      ? this.db.prepare(`
+          SELECT * FROM runtime_nodes WHERE session_id = ? ORDER BY updated_at DESC LIMIT ?
+        `).all(sessionId, limit) as DbRuntimeNode[]
+      : this.db.prepare(`
+          SELECT * FROM runtime_nodes ORDER BY updated_at DESC LIMIT ?
+        `).all(limit) as DbRuntimeNode[];
+
+    return rows.map((row) => ({
+      tierId: row.tier_id,
+      sessionId: row.session_id,
+      parentId: row.parent_id ?? undefined,
+      role: row.role as RuntimeNode['role'],
+      label: row.label,
+      status: row.status as RuntimeNode['status'],
+      currentAction: row.current_action ?? undefined,
+      progressPct: row.progress_pct ?? undefined,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  addRuntimeNodeLog(log: RuntimeNodeLog): void {
+    this.db.prepare(`
+      INSERT INTO runtime_node_logs (id, session_id, tier_id, role, label, status, current_action, progress_pct, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      log.id,
+      log.sessionId,
+      log.tierId,
+      log.role,
+      log.label,
+      log.status,
+      log.currentAction ?? null,
+      log.progressPct ?? null,
+      log.timestamp,
+    );
+
+    this.db.prepare(`
+      DELETE FROM runtime_node_logs
+      WHERE id NOT IN (
+        SELECT id FROM runtime_node_logs
+        ORDER BY timestamp DESC
+        LIMIT 2000
+      )
+    `).run();
+  }
+
+  listRuntimeNodeLogs(sessionId?: string, tierId?: string, limit = 200): RuntimeNodeLog[] {
+    let rows: DbRuntimeNodeLog[];
+
+    if (sessionId && tierId) {
+      rows = this.db.prepare(`
+        SELECT * FROM runtime_node_logs
+        WHERE session_id = ? AND tier_id = ?
+        ORDER BY timestamp DESC LIMIT ?
+      `).all(sessionId, tierId, limit) as DbRuntimeNodeLog[];
+    } else if (sessionId) {
+      rows = this.db.prepare(`
+        SELECT * FROM runtime_node_logs
+        WHERE session_id = ?
+        ORDER BY timestamp DESC LIMIT ?
+      `).all(sessionId, limit) as DbRuntimeNodeLog[];
+    } else {
+      rows = this.db.prepare(`
+        SELECT * FROM runtime_node_logs
+        ORDER BY timestamp DESC LIMIT ?
+      `).all(limit) as DbRuntimeNodeLog[];
+    }
+
+    return rows.map((row) => ({
+      id: row.id,
+      sessionId: row.session_id,
+      tierId: row.tier_id,
+      role: row.role as RuntimeNodeLog['role'],
+      label: row.label,
+      status: row.status as RuntimeNodeLog['status'],
+      currentAction: row.current_action ?? undefined,
+      progressPct: row.progress_pct ?? undefined,
+      timestamp: row.timestamp,
+    }));
   }
 
   // ── Messages ──────────────────────────────────
@@ -239,6 +395,47 @@ export class MemoryStore {
       );
 
       CREATE INDEX IF NOT EXISTS idx_audit_session ON audit_log(session_id);
+
+      CREATE TABLE IF NOT EXISTS runtime_sessions (
+        session_id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        workspace_path TEXT NOT NULL,
+        status TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        latest_prompt TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS runtime_nodes (
+        tier_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        parent_id TEXT,
+        role TEXT NOT NULL,
+        label TEXT NOT NULL,
+        status TEXT NOT NULL,
+        current_action TEXT,
+        progress_pct INTEGER,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_runtime_nodes_session ON runtime_nodes(session_id);
+      CREATE INDEX IF NOT EXISTS idx_runtime_nodes_updated ON runtime_nodes(updated_at);
+
+      CREATE TABLE IF NOT EXISTS runtime_node_logs (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        tier_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        label TEXT NOT NULL,
+        status TEXT NOT NULL,
+        current_action TEXT,
+        progress_pct INTEGER,
+        timestamp TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_runtime_logs_session ON runtime_node_logs(session_id);
+      CREATE INDEX IF NOT EXISTS idx_runtime_logs_tier ON runtime_node_logs(tier_id);
+      CREATE INDEX IF NOT EXISTS idx_runtime_logs_timestamp ON runtime_node_logs(timestamp);
     `);
   }
 
@@ -318,3 +515,16 @@ interface DbScheduledTask {
   created_at: string; last_run: string | null; next_run: string | null; enabled: number;
 }
 interface DbAudit { id: string; session_id: string; timestamp: string; tier_id: string; action: string; details: string; }
+interface DbRuntimeSession {
+  session_id: string; title: string; workspace_path: string; status: string;
+  started_at: string; updated_at: string; latest_prompt: string | null;
+}
+interface DbRuntimeNode {
+  tier_id: string; session_id: string; parent_id: string | null; role: string;
+  label: string; status: string; current_action: string | null; progress_pct: number | null;
+  updated_at: string;
+}
+interface DbRuntimeNodeLog {
+  id: string; session_id: string; tier_id: string; role: string; label: string;
+  status: string; current_action: string | null; progress_pct: number | null; timestamp: string;
+}
