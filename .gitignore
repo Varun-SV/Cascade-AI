@@ -12,3 +12,7 @@ coverage/
 .DS_Store
 Thumbs.db
 package-lock.json
+.cascade/
+.claude
+CASCADE.md
+.cascadeignore
