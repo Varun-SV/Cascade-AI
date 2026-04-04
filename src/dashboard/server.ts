@@ -82,13 +82,14 @@ export class DashboardServer {
     if (scope === 'global') {
       const globalStore = this.getGlobalStore();
       try {
+        // Broadcast only session list (summary) to everyone
         this.socket.broadcast('runtime:update', {
           scope,
           source: 'dashboard/server',
           fetchedAt: new Date().toISOString(),
           sessions: globalStore.listRuntimeSessions(100),
-          nodes: globalStore.listRuntimeNodes(undefined, 500),
-          logs: globalStore.listRuntimeNodeLogs(undefined, undefined, 100),
+          nodes: [], // No nodes in summary
+          logs: [],  // No logs in summary
         });
       } catch (err) {
         console.error('Failed to broadcast global runtime:', err);
@@ -96,14 +97,38 @@ export class DashboardServer {
       return;
     }
 
+    // Workspace scope
+    const sessions = this.store.listRuntimeSessions(100);
     this.socket.broadcast('runtime:update', {
       scope,
       source: 'dashboard/server',
       fetchedAt: new Date().toISOString(),
-      sessions: this.store.listRuntimeSessions(100),
-      nodes: this.store.listRuntimeNodes(undefined, 500),
-      logs: this.store.listRuntimeNodeLogs(undefined, undefined, 100),
+      sessions,
+      nodes: [],
+      logs: [],
     });
+
+    // Broadcast details to active session rooms
+    for (const session of sessions) {
+      if (session.status === 'ACTIVE') {
+        this.broadcastSessionDetails(session.sessionId);
+      }
+    }
+  }
+
+  private broadcastSessionDetails(sessionId: string): void {
+    try {
+      const nodes = this.store.listRuntimeNodes(sessionId, 500);
+      const logs = this.store.listRuntimeNodeLogs(sessionId, undefined, 100);
+      this.socket.broadcastToRoom(`session:${sessionId}`, 'session:details', {
+        sessionId,
+        nodes,
+        logs,
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.error(`Failed to broadcast details for session ${sessionId}:`, err);
+    }
   }
 
   watchRuntimeChanges(): void {
@@ -113,7 +138,8 @@ export class DashboardServer {
 
     for (const watchPath of watchPaths) {
       if (!fs.existsSync(watchPath)) continue;
-      fs.watchFile(watchPath, { interval: 2000 }, () => {
+      // Increase interval to 3s and use throttled broadcast
+      fs.watchFile(watchPath, { interval: 3000 }, () => {
         this.throttledBroadcast(watchPath === globalDbPath ? 'global' : 'workspace');
       });
     }

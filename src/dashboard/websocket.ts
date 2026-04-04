@@ -16,24 +16,26 @@ export class DashboardSocket {
     this.setupHandlers();
   }
 
-  broadcast(event: string, data: unknown): void {
-    this.io.emit(event, data);
-  }
-
   broadcastToRoom(room: string, event: string, data: unknown): void {
     this.io.to(room).emit(event, data);
+  }
+
+  broadcast(event: string, data: unknown): void {
+    this.io.emit(event, data);
   }
 
   emitCascadeEvent(ev: CascadeEvent): void {
     this.io.emit('cascade:event', ev);
   }
 
-  emitTierStatus(tierId: string, role: string, status: string, action?: string): void {
-    this.io.emit('tier:status', { tierId, role, status, action, timestamp: new Date().toISOString() });
+  emitTierStatus(tierId: string, role: string, status: string, sessionId: string, action?: string): void {
+    const payload = { tierId, role, status, action, timestamp: new Date().toISOString(), sessionId };
+    this.io.emit('tier:status', payload);
+    this.io.to(`session:${sessionId}`).emit('tier:status', payload);
   }
 
-  emitStreamToken(tierId: string, text: string): void {
-    this.io.emit('stream:token', { tierId, text });
+  emitStreamToken(tierId: string, text: string, sessionId: string): void {
+    this.io.to(`session:${sessionId}`).emit('stream:token', { tierId, text, sessionId });
   }
 
   emitApprovalRequest(request: unknown): void {

@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
+import { useAppDispatch } from '../store';
+import { setConnected, updateRTKSnapshot, updateSessionDetails, appendLog } from '../store/slices/runtimeSlice';
 
+// Interfaces remain the same for now to maintain compatibility
 export interface RuntimeSession {
   sessionId: string;
   title: string;
@@ -40,13 +43,6 @@ export interface RuntimeNodeLog {
   isGlobal?: boolean;
 }
 
-interface UseWebSocketOptions {
-  url?: string;
-  token?: string;
-  onRuntimeUpdate?: (snapshot: RuntimeSnapshot) => void;
-  onRuntimeRefresh?: (scope?: 'workspace' | 'global') => void;
-}
-
 export interface RuntimeSnapshot {
   scope?: string;
   source?: string;
@@ -56,89 +52,92 @@ export interface RuntimeSnapshot {
   logs: RuntimeNodeLog[];
 }
 
-export function useWebSocket({ url = '/', token, onRuntimeUpdate, onRuntimeRefresh }: UseWebSocketOptions = {}) {
+interface UseWebSocketOptions {
+  url?: string;
+  token?: string;
+  activeSessionId?: string | null;
+  onRuntimeRefresh?: (scope?: 'workspace' | 'global') => void;
+}
+
+export function useWebSocket({ url = '/', token, activeSessionId, onRuntimeRefresh }: UseWebSocketOptions = {}) {
   const socketRef = useRef<Socket | null>(null);
-  const [connected, setConnected] = useState(false);
+  const dispatch = useAppDispatch();
   const [events, setEvents] = useState<Array<{ type: string; data: unknown; ts: number }>>([]);
   const refreshTimerRef = useRef<number | null>(null);
   const connectedRef = useRef(false);
-  const requestedInitialRefreshRef = useRef(false);
+  const lastJoinedSessionRef = useRef<string | null>(null);
 
   useEffect(() => {
     const socket = io(url, {
       auth: token ? { token } : {},
       transports: ['websocket', 'polling'],
       reconnection: true,
-      reconnectionAttempts: 10,
       reconnectionDelay: 500,
-      timeout: 10000,
     });
 
     socketRef.current = socket;
 
-    const requestRuntime = () => {
-      if (!requestedInitialRefreshRef.current) {
-        requestedInitialRefreshRef.current = true;
-        socket.emit('runtime:refresh', { scope: 'workspace' });
-      }
-    };
-
     socket.on('connect', () => {
       connectedRef.current = true;
-      setConnected(true);
-      requestRuntime();
-    });
-    socket.on('disconnect', () => {
-      connectedRef.current = false;
-      setConnected(false);
+      dispatch(setConnected(true));
+      socket.emit('runtime:refresh', { scope: 'workspace' });
+      
+      // Re-join session room if we had one
+      if (activeSessionId) {
+        socket.emit('join:session', { sessionId: activeSessionId });
+        lastJoinedSessionRef.current = activeSessionId;
+      }
     });
 
-    const eventTypes = [
-      'cascade:event', 'tier:status', 'stream:token',
-      'tool:approval-request', 'plan',
-    ];
-    for (const ev of eventTypes) {
-      socket.on(ev, (data: unknown) => {
-        setEvents((prev) => [...prev.slice(-200), { type: ev, data, ts: Date.now() }]);
-      });
-    }
+    socket.on('disconnect', () => {
+      connectedRef.current = false;
+      dispatch(setConnected(false));
+    });
 
     socket.on('runtime:update', (data: unknown) => {
       const snapshot = data as RuntimeSnapshot;
-      setEvents((prev) => [...prev.slice(-200), { type: 'runtime:update', data: snapshot, ts: Date.now() }]);
-      onRuntimeUpdate?.(snapshot);
+      dispatch(updateRTKSnapshot(snapshot));
+    });
+
+    socket.on('session:details', (data: unknown) => {
+      const details = data as { sessionId: string; nodes: RuntimeNode[]; logs: RuntimeNodeLog[] };
+      dispatch(updateSessionDetails(details));
+    });
+
+    socket.on('log:new', (data: unknown) => {
+      const log = data as RuntimeNodeLog;
+      dispatch(appendLog(log));
     });
 
     socket.on('runtime:refresh', (data: unknown) => {
       const payload = data as { scope?: 'workspace' | 'global' } | undefined;
-      setEvents((prev) => [...prev.slice(-200), { type: 'runtime:refresh', data: payload, ts: Date.now() }]);
       onRuntimeRefresh?.(payload?.scope);
     });
 
-    if (refreshTimerRef.current) {
-      window.clearInterval(refreshTimerRef.current);
+    const genericEvents = ['tier:status', 'stream:token', 'tool:approval-request', 'plan'];
+    for (const ev of genericEvents) {
+      socket.on(ev, (data: unknown) => {
+        setEvents((prev) => [...prev.slice(-100), { type: ev, data, ts: Date.now() }]);
+      });
     }
-    refreshTimerRef.current = window.setInterval(() => {
-      if (connectedRef.current) {
-        socket.emit('runtime:refresh', { scope: 'workspace' });
-      }
-    }, 15000);
 
     return () => {
-      if (refreshTimerRef.current) {
-        window.clearInterval(refreshTimerRef.current);
-        refreshTimerRef.current = null;
-      }
-      requestedInitialRefreshRef.current = false;
       socket.disconnect();
     };
-  }, [url, token, onRuntimeUpdate, onRuntimeRefresh]);
+  }, [url, token, dispatch, onRuntimeRefresh]);
 
-  const emit = (event: string, data: unknown) => {
-    socketRef.current?.emit(event, data);
-  };
+  // Handle room switching
+  useEffect(() => {
+    if (socketRef.current && connectedRef.current && activeSessionId !== lastJoinedSessionRef.current) {
+      if (lastJoinedSessionRef.current) {
+        socketRef.current.emit('leave:session', { sessionId: lastJoinedSessionRef.current });
+      }
+      if (activeSessionId) {
+        socketRef.current.emit('join:session', { sessionId: activeSessionId });
+      }
+      lastJoinedSessionRef.current = activeSessionId || null;
+    }
+  }, [activeSessionId]);
 
-  const clearEvents = () => setEvents([]);
-
-  return { connected, events, emit, clearEvents, socket: socketRef.current };
+  return { events, socket: socketRef.current };
 }

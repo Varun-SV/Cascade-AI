@@ -1,16 +1,21 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { useWebSocket } from './hooks/useWebSocket.ts';
+import { useAppSelector, useAppDispatch } from './store';
+import { 
+  setActiveSession, 
+  setScope, 
+  updateRTKSnapshot, 
+  selectSessions, 
+  selectActiveSession, 
+  selectActiveNodes, 
+  selectActiveLogs 
+} from './store/slices/runtimeSlice';
+import { useWebSocket, type RuntimeSnapshot } from './hooks/useWebSocket.ts';
 import { LoginView } from './components/auth/LoginView.tsx';
 import { DashboardLayout } from './components/layout/DashboardLayout.tsx';
 import { Sidebar } from './components/layout/Sidebar.tsx';
 import { AgentGraph } from './components/dashboard/AgentGraph.tsx';
 import { Inspector } from './components/dashboard/Inspector.tsx';
-import { mergeRuntimeSnapshots, formatNodeLabel, type RuntimeSnapshot } from './utils/runtime.ts';
-
-interface ScopedRuntimeSnapshot {
-  workspace: RuntimeSnapshot;
-  global: RuntimeSnapshot;
-}
+import { formatNodeLabel } from './utils/runtime.ts';
 
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem('cascade_token') ?? '');
@@ -39,20 +44,16 @@ export default function App() {
 }
 
 function Dashboard({ token, onLogout }: { token: string; onLogout: () => void }) {
+  const dispatch = useAppDispatch();
   const [activeTab, setActiveTab] = useState('topology');
-  const [runtime, setRuntime] = useState<ScopedRuntimeSnapshot>({
-    workspace: { sessions: [], nodes: [], logs: [] },
-    global: { sessions: [], nodes: [], logs: [] },
-  });
-  const [runtimeScope, setRuntimeScope] = useState<'workspace' | 'global'>('workspace');
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [streamLog, setStreamLog] = useState<string>('');
 
-  const activeRuntime = runtime[runtimeScope];
-  const activeSession = useMemo(() => 
-    activeRuntime.sessions.find((s) => s.status === 'ACTIVE') ?? activeRuntime.sessions[0], 
-    [activeRuntime.sessions]
-  );
+  const sessions = useAppSelector(selectSessions);
+  const activeSession = useAppSelector(selectActiveSession);
+  const activeNodes = useAppSelector(selectActiveNodes);
+  const activeLogs = useAppSelector(selectActiveLogs);
+  const runtimeScope = useAppSelector(state => state.runtime.scope);
 
   const refreshRuntime = useMemo(() => async (scope: 'workspace' | 'global' = 'workspace') => {
     try {
@@ -62,20 +63,17 @@ function Dashboard({ token, onLogout }: { token: string; onLogout: () => void })
       });
       if (res.ok) {
         const snapshot = await res.json() as RuntimeSnapshot;
-        setRuntime((prev) => ({ ...prev, [scope]: mergeRuntimeSnapshots(prev[scope], snapshot) }));
+        dispatch(updateRTKSnapshot(snapshot));
       }
     } catch (err) {
       console.error('Failed to refresh runtime:', err);
     }
-  }, [token]);
+  }, [token, dispatch]);
 
   const { events } = useWebSocket({
     url: '/',
     token,
-    onRuntimeUpdate: (snapshot) => {
-      const scope = (snapshot.scope as 'workspace' | 'global' | undefined) ?? 'workspace';
-      setRuntime((prev) => ({ ...prev, [scope]: mergeRuntimeSnapshots(prev[scope], snapshot) }));
-    },
+    activeSessionId: activeSession?.sessionId,
     onRuntimeRefresh: (scope) => {
       refreshRuntime(scope || runtimeScope);
     },
@@ -94,17 +92,13 @@ function Dashboard({ token, onLogout }: { token: string; onLogout: () => void })
     refreshRuntime(runtimeScope);
   }, [refreshRuntime, runtimeScope]);
 
-  const sessionNodes = useMemo(() => 
-    activeSession ? activeRuntime.nodes.filter(n => n.sessionId === activeSession.sessionId) : []
-  , [activeSession, activeRuntime.nodes]);
-
   const sessionEdges = useMemo(() => 
-    sessionNodes.filter(n => n.parentId).map(n => ({ from: n.parentId!, to: n.tierId }))
-  , [sessionNodes]);
+    activeNodes.filter(n => n.parentId).map(n => ({ from: n.parentId!, to: n.tierId }))
+  , [activeNodes]);
 
   const selectedNode = useMemo(() => 
-    activeRuntime.nodes.find(n => n.tierId === selectedNodeId)
-  , [activeRuntime.nodes, selectedNodeId]);
+    activeNodes.find(n => n.tierId === selectedNodeId)
+  , [activeNodes, selectedNodeId]);
 
   return (
     <DashboardLayout 
@@ -119,7 +113,7 @@ function Dashboard({ token, onLogout }: { token: string; onLogout: () => void })
       {activeTab === 'topology' && (
         <div className="w-full h-full relative">
           <AgentGraph 
-            nodes={sessionNodes.map(n => ({
+            nodes={activeNodes.map(n => ({
               id: n.tierId,
               role: n.role,
               label: formatNodeLabel(n.label, n.role),
@@ -139,7 +133,7 @@ function Dashboard({ token, onLogout }: { token: string; onLogout: () => void })
                   label: formatNodeLabel(selectedNode.label, selectedNode.role),
                   status: selectedNode.status.toLowerCase(),
                   description: selectedNode.currentAction,
-                  logs: [streamLog.split('\n').pop() || ''] // Simplified logs for now
+                  logs: [streamLog.split('\n').pop() || ''] 
                 }
               } : null}
               onClose={() => setSelectedNodeId(null)}
@@ -159,7 +153,7 @@ function Dashboard({ token, onLogout }: { token: string; onLogout: () => void })
       {activeTab === 'logs' && (
         <div className="p-8 h-full overflow-y-auto">
           <div className="space-y-4">
-            {activeRuntime.logs.map((log) => (
+            {activeLogs.map((log) => (
               <div key={log.id} className="p-4 bg-white/5 border border-white/5 rounded-2xl flex items-center justify-between">
                 <div className="flex items-center gap-4">
                   <span className="text-blue-400 font-mono text-xs">[{new Date(log.timestamp).toLocaleTimeString()}]</span>
