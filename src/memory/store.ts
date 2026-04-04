@@ -579,6 +579,8 @@ export class MemoryStore {
       CREATE INDEX IF NOT EXISTS idx_runtime_logs_session ON runtime_node_logs(session_id);
       CREATE INDEX IF NOT EXISTS idx_runtime_logs_tier ON runtime_node_logs(tier_id);
       CREATE INDEX IF NOT EXISTS idx_runtime_logs_timestamp ON runtime_node_logs(timestamp);
+      CREATE INDEX IF NOT EXISTS idx_runtime_nodes_session_updated ON runtime_nodes(session_id, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_runtime_logs_session_timestamp ON runtime_node_logs(session_id, timestamp);
 
       CREATE TABLE IF NOT EXISTS file_snapshots (
         id TEXT PRIMARY KEY,

@@ -23,6 +23,8 @@ export class DashboardServer {
   private socket: DashboardSocket;
   private config: CascadeConfig;
   private store: MemoryStore;
+  private globalStore: MemoryStore | null = null;
+  private broadcastTimer: NodeJS.Timeout | null = null;
   private port: number;
 
   constructor(config: CascadeConfig, store: MemoryStore) {
@@ -60,25 +62,36 @@ export class DashboardServer {
 
   // ── Setup ─────────────────────────────────────
 
+  private getGlobalStore(): MemoryStore {
+    if (!this.globalStore) {
+      const globalDbPath = path.join(process.env['HOME'] ?? process.cwd(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
+      this.globalStore = new MemoryStore(globalDbPath);
+    }
+    return this.globalStore;
+  }
+
+  private throttledBroadcast(scope: 'workspace' | 'global'): void {
+    if (this.broadcastTimer) return;
+    this.broadcastTimer = setTimeout(() => {
+      this.broadcastRuntime(scope);
+      this.broadcastTimer = null;
+    }, 500);
+  }
+
   private broadcastRuntime(scope: 'workspace' | 'global'): void {
     if (scope === 'global') {
-      const globalDbPath = path.join(process.env['HOME'] ?? process.cwd(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
-      if (!fs.existsSync(globalDbPath)) {
-        this.socket.broadcast('runtime:update', { scope, source: 'dashboard/server', fetchedAt: new Date().toISOString(), sessions: [], nodes: [], logs: [] });
-        return;
-      }
-      const globalStore = new MemoryStore(globalDbPath);
+      const globalStore = this.getGlobalStore();
       try {
         this.socket.broadcast('runtime:update', {
           scope,
           source: 'dashboard/server',
           fetchedAt: new Date().toISOString(),
-          sessions: globalStore.listRuntimeSessions(200),
-          nodes: globalStore.listRuntimeNodes(undefined, 1000),
-          logs: globalStore.listRuntimeNodeLogs(undefined, undefined, 500),
+          sessions: globalStore.listRuntimeSessions(100),
+          nodes: globalStore.listRuntimeNodes(undefined, 500),
+          logs: globalStore.listRuntimeNodeLogs(undefined, undefined, 100),
         });
-      } finally {
-        globalStore.close();
+      } catch (err) {
+        console.error('Failed to broadcast global runtime:', err);
       }
       return;
     }
@@ -87,9 +100,9 @@ export class DashboardServer {
       scope,
       source: 'dashboard/server',
       fetchedAt: new Date().toISOString(),
-      sessions: this.store.listRuntimeSessions(200),
-      nodes: this.store.listRuntimeNodes(undefined, 1000),
-      logs: this.store.listRuntimeNodeLogs(undefined, undefined, 500),
+      sessions: this.store.listRuntimeSessions(100),
+      nodes: this.store.listRuntimeNodes(undefined, 500),
+      logs: this.store.listRuntimeNodeLogs(undefined, undefined, 100),
     });
   }
 
@@ -100,8 +113,8 @@ export class DashboardServer {
 
     for (const watchPath of watchPaths) {
       if (!fs.existsSync(watchPath)) continue;
-      fs.watchFile(watchPath, { interval: 1000 }, () => {
-        this.broadcastRuntime(watchPath === globalDbPath ? 'global' : 'workspace');
+      fs.watchFile(watchPath, { interval: 2000 }, () => {
+        this.throttledBroadcast(watchPath === globalDbPath ? 'global' : 'workspace');
       });
     }
   }

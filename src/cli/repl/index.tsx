@@ -296,12 +296,13 @@ export function Repl({ config, workspacePath, themeName, initialPrompt }: ReplPr
       },
       onRollback: async () => {
         const store = storeRef.current;
-        if (!store) return;
+        if (!store) return 'No database connection.';
         const snapshots = store.getLatestFileSnapshots(sessionIdRef.current);
-        if (!snapshots.length) return;
+        if (!snapshots.length) return 'No file snapshots found for this session.';
         for (const { filePath, content } of snapshots) {
           try { await fs.writeFile(filePath, content, 'utf-8'); } catch (err) { console.error(`Restore failed: ${filePath}`, err); }
         }
+        return `Restored ${snapshots.length} files to their initial session state.`;
       },
       onBranch: async () => {
         const store = storeRef.current;
@@ -343,7 +344,11 @@ export function Repl({ config, workspacePath, themeName, initialPrompt }: ReplPr
         return `Restored session ${snapshot.session.title} with ${snapshot.messages.length} messages.`;
       },
       onCostInfo: () => { dispatch({ type: 'TOGGLE_COST' }); return ''; },
-      onCompact: async () => { /* compaction */ },
+      onCompact: async () => { 
+        const prompt = 'Please summarize our conversation so far to keep the context compact and efficient.';
+        await handleSubmit(prompt);
+        return 'Triggered context compaction. The agent will now summarize the history...';
+      },
       onStatus: () => formatRuntimeStatus([...treeNodesRef.current.values()], nodeLogsRef.current),
       onTree: () => { dispatch({ type: 'TOGGLE_DETAILS' }); return ''; },
       onSessions: async () => {
@@ -507,10 +512,14 @@ export function Repl({ config, workspacePath, themeName, initialPrompt }: ReplPr
 
     const onData = (data: Buffer) => {
       const str = data.toString();
-      // Match SGR mouse wheel sequences: ESC [ < 64 (Up) / 65 (Down) ; X ; Y M
-      const match = str.match(/\x1b\[<(\d+);\d+;\d+M/);
-      if (match) {
+      // Lock input for ANY escape sequence to prevent leakage into the prompt
+      if (str.includes('\x1b')) {
         lockInputTemporarily();
+      }
+
+      // Match SGR mouse wheel or click sequences: ESC [ < button ; X ; Y [Mm]
+      const match = str.match(/\x1b\[<(\d+);\d+;\d+[Mm]/);
+      if (match) {
         const code = parseInt(match[1]!, 10);
         if (code === 64) { // Wheel Up
           setIsAutoScrolling(false);
@@ -597,8 +606,9 @@ export function Repl({ config, workspacePath, themeName, initialPrompt }: ReplPr
           value={input} 
           onChange={(val) => {
             if (isInputLockedRef.current) return;
-            // Strip ALL control characters and complex ANSI/SGR escape sequences
-            const sanitized = val.replace(/[\x00-\x1F\x7F]|(?:\x1b\[<.*?[Mm])|(?:\x1b\[.*?[\x40-\x7E])|(?:\x1b[PX^_].*?\x1b\\)|(?:\x1b[\]\[].*?[\x07\x1b])|(?:\x1b[()#;?].*?[0-9A-ORZcf-nqry=><])/g, '');
+            // Strip complex ANSI/SGR escape sequences FIRST, then general control characters
+            // This prevents partial consumption of the escape byte (0x1b) leaving the rest of the sequence as text.
+            const sanitized = val.replace(/(?:\x1b\[<.*?[Mm])|(?:\x1b\[.*?[\x40-\x7E])|(?:\x1bO[\x40-\x7E])|(?:\x1b[PX^_].*?\x1b\\)|(?:\x1b[\]\[].*?[\x07\x1b])|(?:\x1b[()#;?].*?[0-9A-ORZcf-nqry=><])|[\x00-\x1F\x7F]/g, '');
             setInput(sanitized);
           }} 
           onSubmit={handleSubmit} 
@@ -645,18 +655,38 @@ function formatConfigSummary(config: CascadeConfig): string { return `Theme: ${c
 function stringifySlashOutput(val: unknown): string { return typeof val === 'string' ? val : JSON.stringify(val); }
 async function searchSessionsAndMessages(query: string, workspacePath: string): Promise<string> {
   if (!query) return 'Usage: /search <query>';
-  const store = new MemoryStore(path.join(workspacePath, CASCADE_DB_FILE));
+  const dbPath = path.join(workspacePath, CASCADE_DB_FILE);
+  
+  // Check if DB exists
+  try {
+    await fs.access(dbPath);
+  } catch {
+    return 'No database found. Start a conversation first.';
+  }
+
+  const store = new MemoryStore(dbPath);
   try {
     const sessions = store.listSessions(undefined, 20).filter((s) => s.title.toLowerCase().includes(query.toLowerCase()));
-    const messages = store.searchMessages(query, 10);
+    const messages = store.searchMessages(query, 20);
+    
+    if (sessions.length === 0 && messages.length === 0) {
+      return `No results found for "${query}".`;
+    }
+
     const lines = [
-      `Sessions matching "${query}": ${sessions.length}`,
-      ...sessions.slice(0, 5).map((s) => `- ${s.title} (${s.id})`),
+      `🔍 Search results for "${query}":`,
       '',
-      `Messages matching "${query}": ${messages.length}`,
-      ...messages.slice(0, 5).map((m) => `- [${m.role}] ${m.content.slice(0, 120)}`),
+      `📂 Sessions (${sessions.length}):`,
+      ...sessions.slice(0, 5).map((s) => `  - ${s.title} (ID: ${s.id.slice(0, 8)}...)`),
+      sessions.length > 5 ? `  ... and ${sessions.length - 5} more` : '',
+      '',
+      `💬 Messages (${messages.length}):`,
+      ...messages.slice(0, 8).map((m) => `  - [${m.role.toUpperCase()}] ${m.content.slice(0, 100)}${m.content.length > 100 ? '...' : ''}`),
+      messages.length > 8 ? `  ... and ${messages.length - 8} more` : '',
     ];
-    return lines.join('\n');
+    return lines.filter(Boolean).join('\n');
+  } catch (err: any) {
+    return `Search failed: ${err.message}`;
   } finally { store.close(); }
 }
 

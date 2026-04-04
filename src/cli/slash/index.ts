@@ -19,14 +19,14 @@ export interface SlashCommandContext {
   onExit: () => void;
   onThemeChange: (theme: string) => void;
   onExport: (format: 'markdown' | 'json') => Promise<void>;
-  onRollback: () => Promise<void>;
+  onRollback: () => Promise<string | void>;
   onBranch: () => Promise<void>;
   onModelInfo: () => string | Promise<string>;
   onModelsInfo: () => string | Promise<string>;
   onProvidersInfo: () => string | Promise<string>;
   onConfigInfo: () => string | Promise<string>;
   onCostInfo: () => string | Promise<string>;
-  onCompact: () => Promise<void>;
+  onCompact: () => Promise<string | void>;
   onStatus: () => string | Promise<string>;
   onSessions: (args: string[]) => Promise<string> | string;
   onIdentity: (args: string[]) => Promise<string> | string;
@@ -139,8 +139,8 @@ export class SlashCommandRegistry {
       command: '/rollback',
       description: 'Undo all file changes in this session',
       handler: async (_args, ctx) => {
-        await ctx.onRollback();
-        return { output: 'File changes rolled back.', handled: true };
+        const out = await ctx.onRollback();
+        return { output: out || 'File changes rolled back.', handled: true };
       },
     });
 
@@ -243,8 +243,8 @@ export class SlashCommandRegistry {
       command: '/compact',
       description: 'Compact/summarize context now',
       handler: async (_args, ctx) => {
-        await ctx.onCompact();
-        return { output: 'Context compacted.', handled: true };
+        const out = await ctx.onCompact();
+        return { output: out || 'Context compacted.', handled: true };
       },
     });
   }
