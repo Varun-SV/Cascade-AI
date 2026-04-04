@@ -2,7 +2,7 @@
 //  Cascade AI — Slash Command Registry
 // ─────────────────────────────────────────────
 
-import { SLASH_COMMANDS, THEME_NAMES } from '../../constants.js';
+import { THEME_NAMES } from '../../constants.js';
 
 export interface SlashCommand {
   command: string;
@@ -21,16 +21,25 @@ export interface SlashCommandContext {
   onExport: (format: 'markdown' | 'json') => Promise<void>;
   onRollback: () => Promise<void>;
   onBranch: () => Promise<void>;
-  onModelInfo: () => string;
-  onCostInfo: () => string;
+  onModelInfo: () => string | Promise<string>;
+  onModelsInfo: () => string | Promise<string>;
+  onProvidersInfo: () => string | Promise<string>;
+  onConfigInfo: () => string | Promise<string>;
+  onCostInfo: () => string | Promise<string>;
   onCompact: () => Promise<void>;
-  onStatus: () => string;
+  onStatus: () => string | Promise<string>;
   onSessions: (args: string[]) => Promise<string> | string;
   onIdentity: (args: string[]) => Promise<string> | string;
+  onRetry: () => Promise<string> | string;
+  onSearch: (args: string[]) => Promise<string> | string;
+  onDiagnose: () => Promise<string> | string;
+  onLogs: (args: string[]) => Promise<string> | string;
+  onTree: () => string;
+  onResume: (args: string[]) => Promise<string> | string;
 }
 
 export interface SlashCommandResult {
-  output?: string;
+  output?: string | Promise<string>;
   handled: boolean;
 }
 
@@ -49,7 +58,11 @@ export class SlashCommandRegistry {
     const [command, ...args] = input.trim().split(/\s+/);
     const cmd = this.commands.get(command ?? '');
     if (!cmd) return { handled: false };
-    return cmd.handler(args, ctx);
+    const result = await cmd.handler(args, ctx);
+    if (result.output instanceof Promise) {
+      result.output = await result.output;
+    }
+    return result as { output?: string; handled: boolean };
   }
 
   isSlashCommand(input: string): boolean {
@@ -69,7 +82,9 @@ export class SlashCommandRegistry {
       command: '/help',
       description: 'Show available commands',
       handler: (_args, ctx) => {
-        const lines = SLASH_COMMANDS.map((c) => `  ${c.command.padEnd(14)} ${c.description}`);
+        const lines = this.getAll()
+          .filter((c) => c.command !== '/help')
+          .map((c) => `  ${c.command.padEnd(14)} ${c.description}`);
         ctx.onOutput(['', 'Cascade AI — Slash Commands', '─'.repeat(40), ...lines, ''].join('\n'));
         return { handled: true };
       },
@@ -141,9 +156,61 @@ export class SlashCommandRegistry {
     this.register({
       command: '/model',
       description: 'Show active models per tier',
-      handler: (_args, ctx) => {
-        return { output: ctx.onModelInfo(), handled: true };
-      },
+      handler: (_args, ctx) => ({ output: ctx.onModelInfo(), handled: true }),
+    });
+
+    this.register({
+      command: '/models',
+      description: 'List available models by provider',
+      handler: (_args, ctx) => ({ output: ctx.onModelsInfo(), handled: true }),
+    });
+
+    this.register({
+      command: '/providers',
+      description: 'Show configured providers',
+      handler: (_args, ctx) => ({ output: ctx.onProvidersInfo(), handled: true }),
+    });
+
+    this.register({
+      command: '/config',
+      description: 'Show active configuration summary',
+      handler: (_args, ctx) => ({ output: ctx.onConfigInfo(), handled: true }),
+    });
+
+    this.register({
+      command: '/retry',
+      description: 'Retry the last user prompt',
+      handler: async (_args, ctx) => ({ output: await ctx.onRetry(), handled: true }),
+    });
+
+    this.register({
+      command: '/search',
+      description: 'Search past sessions/messages',
+      handler: async (args, ctx) => ({ output: await ctx.onSearch(args), handled: true }),
+    });
+
+    this.register({
+      command: '/diagnose',
+      description: 'Run provider/model/config health checks',
+      handler: async (_args, ctx) => ({ output: await ctx.onDiagnose(), handled: true }),
+    });
+
+    this.register({
+      command: '/logs',
+      description: 'Show recent runtime logs',
+      handler: async (args, ctx) => ({ output: await ctx.onLogs(args), handled: true }),
+    });
+
+    this.register({
+      command: '/tree',
+      description: 'Show current agent tree as text',
+      handler: (_args, ctx) => ({ output: ctx.onTree(), handled: true }),
+    });
+
+    this.register({
+      command: '/resume',
+      description: 'Resume a session by ID',
+      handler: async (args, ctx) => ({ output: await ctx.onResume(args), handled: true }),
     });
 
     this.register({

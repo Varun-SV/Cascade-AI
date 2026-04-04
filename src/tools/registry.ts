@@ -6,19 +6,23 @@ import type { ToolDefinition, ToolExecuteOptions, ToolsConfig } from '../types.j
 import { DEFAULT_APPROVAL_REQUIRED } from '../constants.js';
 import type { BaseTool } from './base.js';
 import { ShellTool } from './shell.js';
-import { FileReadTool, FileWriteTool, FileEditTool, FileDeleteTool } from './file.js';
+import { FileReadTool, FileWriteTool, FileEditTool, FileDeleteTool, FileListTool } from './file.js';
 import { GitTool } from './git.js';
 import { GitHubTool } from './github.js';
 import { BrowserTool } from './browser.js';
 import { ImageAnalyzeTool } from './image.js';
+import { PDFCreateTool } from './pdf.js';
+import { CodeInterpreterTool } from './interpreter.js';
 
 export class ToolRegistry {
   private tools: Map<string, BaseTool> = new Map();
   private config: ToolsConfig;
   private ignoredPaths: Set<string> = new Set();
+  private workspaceRoot: string;
 
-  constructor(config: ToolsConfig) {
+  constructor(config: ToolsConfig, workspaceRoot: string = process.cwd()) {
     this.config = config;
+    this.workspaceRoot = workspaceRoot;
     this.registerDefaults();
   }
 
@@ -68,20 +72,29 @@ export class ToolRegistry {
   }
 
   private registerDefaults(): void {
-    this.register(new ShellTool(
-      this.config.shellAllowlist,
-      this.config.shellBlocklist,
-    ));
-    this.register(new FileReadTool());
-    this.register(new FileWriteTool());
-    this.register(new FileEditTool());
-    this.register(new FileDeleteTool());
-    this.register(new GitTool());
-    this.register(new GitHubTool());
-    this.register(new ImageAnalyzeTool());
+    const tools: BaseTool[] = [
+      new ShellTool(this.config.shellAllowlist, this.config.shellBlocklist),
+      new FileReadTool(),
+      new FileWriteTool(),
+      new FileEditTool(),
+      new FileDeleteTool(),
+      new FileListTool(),
+      new GitTool(),
+      new GitHubTool(),
+      new ImageAnalyzeTool(),
+      new PDFCreateTool(),
+      new CodeInterpreterTool(),
+    ];
+
+    for (const tool of tools) {
+      tool.setWorkspaceRoot(this.workspaceRoot);
+      this.register(tool);
+    }
 
     if (this.config.browserEnabled) {
-      this.register(new BrowserTool());
+      const browser = new BrowserTool();
+      browser.setWorkspaceRoot(this.workspaceRoot);
+      this.register(browser);
     }
   }
 

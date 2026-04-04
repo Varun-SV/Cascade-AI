@@ -131,7 +131,28 @@ export class OpenAIProvider extends BaseProvider {
   }
 
   async listModels(): Promise<ModelInfo[]> {
-    return Object.values(MODELS).filter((m) => m.provider === 'openai');
+    try {
+      const response = await this.client.models.list();
+      return response.data.map((m) => {
+        const known = Object.values(MODELS).find((km) => km.id === m.id && km.provider === 'openai');
+        if (known) return known;
+
+        return {
+          id: m.id,
+          name: m.id,
+          provider: 'openai' as const,
+          contextWindow: 128_000,
+          isVisionCapable: m.id.includes('vision') || m.id.includes('gpt-4o'),
+          inputCostPer1kTokens: 0,
+          outputCostPer1kTokens: 0,
+          maxOutputTokens: 4_000,
+          supportsStreaming: true,
+          isLocal: false,
+        };
+      });
+    } catch {
+      return Object.values(MODELS).filter((m) => m.provider === 'openai');
+    }
   }
 
   async isAvailable(): Promise<boolean> {

@@ -38,7 +38,7 @@ const baseConfig: CascadeConfig = {
 
 describe('Cascade routing complexity', () => {
   it('passes recent conversation context into complexity routing', async () => {
-    const cascade = new Cascade(baseConfig);
+    const cascade = new Cascade(baseConfig, process.cwd());
     const generate = vi.fn().mockResolvedValue({
       content: 'Complex',
       usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimatedCostUsd: 0 },

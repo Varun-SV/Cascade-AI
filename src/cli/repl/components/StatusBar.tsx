@@ -28,7 +28,7 @@ export function StatusBar({
   const { stdout } = useStdout();
   const width = stdout?.columns ?? 80;
 
-  const left = ` cascade ${isStreaming ? '⟳' : '◈'} ${model.slice(0, 24)}`;
+  const left = ` cascade ${isStreaming ? '⟳' : '◈'} ${truncateModel(model)}`;
   const mid = workspacePath.split('/').pop() ?? workspacePath;
   const right = `${formatTokens(tokens)} · $${costUsd.toFixed(4)} `;
   const padding = Math.max(0, width - left.length - mid.length - right.length);
@@ -37,6 +37,10 @@ export function StatusBar({
   return (
     <Box
       borderStyle="single"
+      borderTop={true}
+      borderBottom={false}
+      borderLeft={false}
+      borderRight={false}
       borderColor={theme.colors.border}
       paddingX={1}
       width={width}
@@ -46,6 +50,12 @@ export function StatusBar({
       <Text color={theme.colors.muted}>{right}</Text>
     </Box>
   );
+}
+
+function truncateModel(name: string, max = 24): string {
+  if (!name) return '';
+  if (name.length <= max) return name;
+  return `${name.slice(0, max - 1)}…`;
 }
 
 function formatTokens(n: number): string {

@@ -92,6 +92,13 @@ export interface ToolDefinition {
   inputSchema: Record<string, unknown>;
 }
 
+export interface Message {
+  id: string;
+  role: 'user' | 'assistant' | 'error' | 'system';
+  content: string;
+  timestamp: string;
+}
+
 export interface ToolCall {
   id: string;
   name: string;
@@ -108,6 +115,7 @@ export interface ToolExecuteOptions {
   tierId: string;
   sessionId: string;
   requireApproval: boolean;
+  saveSnapshot?: (filePath: string, content: string) => Promise<void>;
 }
 
 // ── Tier System ───────────────────────────────

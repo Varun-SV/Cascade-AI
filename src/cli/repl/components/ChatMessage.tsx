@@ -9,7 +9,7 @@ import type { Theme } from '../../../types.js';
 
 interface ChatMessageProps {
   role: 'user' | 'assistant' | 'system' | 'error';
-  content: string;
+  content: string | unknown;
   theme: Theme;
   timestamp?: string;
   isStreaming?: boolean;
@@ -26,7 +26,7 @@ export function ChatMessage({ role, content, theme, timestamp, isStreaming }: Ch
         {isStreaming && <Text color={theme.colors.accent}> ⟳</Text>}
       </Box>
       <Box marginLeft={2} flexDirection="column">
-        {renderContent(content, theme)}
+        {renderContent(normalizeContent(content), theme)}
       </Box>
     </Box>
   );
@@ -43,6 +43,22 @@ function getRoleStyle(role: ChatMessageProps['role'], theme: Theme) {
     case 'error':
       return { label: 'Error', color: theme.colors.error, prefix: '✗' };
   }
+}
+
+function normalizeContent(content: string | unknown): string {
+  if (typeof content === 'string') return content;
+  if (content == null) return '';
+  if (Array.isArray(content)) {
+    return content.map((part) => {
+      if (typeof part === 'string') return part;
+      if (part && typeof part === 'object' && 'text' in part) {
+        const text = (part as { text?: unknown }).text;
+        return typeof text === 'string' ? text : '';
+      }
+      return typeof part === 'object' ? JSON.stringify(part) : String(part);
+    }).join(' ');
+  }
+  return typeof content === 'object' ? JSON.stringify(content) : String(content);
 }
 
 function renderContent(content: string, theme: Theme): React.ReactElement[] {

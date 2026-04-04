@@ -2,14 +2,7 @@
 //  Cascade AI — Google Gemini Provider
 // ─────────────────────────────────────────────
 
-import {
-  GoogleGenerativeAI,
-  HarmBlockThreshold,
-  HarmCategory,
-  type Content,
-  type FunctionDeclaration,
-  type Part,
-} from '@google/generative-ai';
+import { GoogleGenAI, HarmBlockThreshold, HarmCategory, type Content, type FunctionDeclaration, type Part } from '@google/genai';
 import type {
   ConversationMessage,
   GenerateOptions,
@@ -23,11 +16,11 @@ import { MODELS } from '../constants.js';
 import { BaseProvider } from './base.js';
 
 export class GeminiProvider extends BaseProvider {
-  private client: GoogleGenerativeAI;
+  private client: GoogleGenAI;
 
   constructor(config: ProviderConfig, model: ModelInfo) {
     super(config, model);
-    this.client = new GoogleGenerativeAI(config.apiKey ?? '');
+    this.client = new GoogleGenAI({ apiKey: config.apiKey ?? '' });
   }
 
   async generate(options: GenerateOptions): Promise<GenerateResult> {
@@ -39,89 +32,94 @@ export class GeminiProvider extends BaseProvider {
     options: GenerateOptions,
     onChunk: (chunk: StreamChunk) => void,
   ): Promise<GenerateResult> {
-    const genModel = this.client.getGenerativeModel({
+    const contents = this.buildContents(options.messages, options.images);
+    const stream = await this.client.models.generateContentStream({
       model: this.model.id,
-      systemInstruction: options.systemPrompt,
-      safetySettings: [
-        { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-        { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
-      ],
-      tools: options.tools?.length
-        ? [{ functionDeclarations: options.tools.map(this.convertTool) }]
-        : undefined,
+      contents,
+      config: {
+        systemInstruction: options.systemPrompt,
+        safetySettings: [
+          { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+          { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+        ],
+        tools: options.tools?.length
+          ? [{ functionDeclarations: options.tools.map(this.convertTool) }]
+          : undefined,
+      },
     });
 
-    const history = this.buildHistory(options.messages.slice(0, -1));
-    const chat = genModel.startChat({ history });
-
-    const lastMsg = options.messages[options.messages.length - 1];
-    const parts = this.convertMessageContent(lastMsg!, options.images);
-
     let fullContent = '';
-    let inputTokens = 0;
-    let outputTokens = 0;
-
-    const result = await chat.sendMessageStream(parts);
-
-    for await (const chunk of result.stream) {
-      const text = chunk.text();
+    for await (const chunk of stream) {
+      // The current version of @google/genai might yield objects with .text directly instead of a method
+      const text = typeof chunk.text === 'function' ? chunk.text() : chunk.text;
       if (text) {
         fullContent += text;
         onChunk({ text, finishReason: null });
       }
     }
 
-    const finalResponse = await result.response;
-    const usage = finalResponse.usageMetadata;
-    if (usage) {
-      inputTokens = usage.promptTokenCount ?? 0;
-      outputTokens = usage.candidatesTokenCount ?? 0;
-    }
-
-    const toolCalls = finalResponse.functionCalls()?.map((fc) => ({
-      id: `${fc.name}-${Date.now()}`,
-      name: fc.name,
-      input: fc.args as Record<string, unknown>,
-    }));
-
     onChunk({ text: '', finishReason: 'stop' });
-
     return {
       content: fullContent,
-      usage: this.makeUsage(inputTokens, outputTokens),
-      toolCalls: toolCalls?.length ? toolCalls : undefined,
-      finishReason: toolCalls?.length ? 'tool_use' : 'stop',
+      usage: this.makeUsage(0, 0),
+      finishReason: 'stop',
     };
   }
 
   async countTokens(text: string): Promise<number> {
-    const genModel = this.client.getGenerativeModel({ model: this.model.id });
-    const result = await genModel.countTokens(text);
-    return result.totalTokens;
+    try {
+      const result = await this.client.models.countTokens({ model: this.model.id, contents: [{ role: 'user', parts: [{ text }] }] });
+      return result.totalTokens ?? 0;
+    } catch {
+      return Math.ceil(text.length / 4);
+    }
   }
 
   async listModels(): Promise<ModelInfo[]> {
-    return Object.values(MODELS).filter((m) => m.provider === 'gemini');
+    try {
+      const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${this.config.apiKey}`);
+      const data = await resp.json() as { models: Array<{ name: string; displayName: string; inputTokenLimit: number; outputTokenLimit: number }> };
+      
+      return data.models.map((m) => {
+        const id = m.name.replace('models/', '');
+        const known = Object.values(MODELS).find((km) => km.id === id && km.provider === 'gemini');
+        if (known) return known;
+
+        return {
+          id,
+          name: m.displayName || id,
+          provider: 'gemini' as const,
+          contextWindow: m.inputTokenLimit || 128_000,
+          isVisionCapable: id.includes('vision') || id.includes('pro') || id.includes('flash'),
+          inputCostPer1kTokens: 0,
+          outputCostPer1kTokens: 0,
+          maxOutputTokens: m.outputTokenLimit || 8_000,
+          supportsStreaming: true,
+          isLocal: false,
+        };
+      });
+    } catch {
+      return Object.values(MODELS).filter((m) => m.provider === 'gemini');
+    }
   }
 
   async isAvailable(): Promise<boolean> {
     try {
-      const genModel = this.client.getGenerativeModel({ model: this.model.id });
-      await genModel.countTokens('ping');
+      await this.client.models.countTokens({ model: this.model.id, contents: [{ role: 'user', parts: [{ text: 'ping' }] }] });
       return true;
     } catch {
       return false;
     }
   }
 
-  private buildHistory(messages: ConversationMessage[]): Content[] {
+  private buildContents(messages: ConversationMessage[], extraImages?: ImageAttachment[]): Content[] {
     return messages
       .filter((m) => m.role === 'user' || m.role === 'assistant')
       .map((m) => ({
         role: m.role === 'assistant' ? 'model' : 'user',
         parts: typeof m.content === 'string'
           ? [{ text: m.content }]
-          : this.convertMessageContent(m),
+          : this.convertMessageContent(m, extraImages),
       }));
   }
 

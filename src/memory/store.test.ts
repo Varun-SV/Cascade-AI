@@ -54,4 +54,46 @@ describe('MemoryStore runtime persistence', () => {
 
     store.close();
   });
+
+  it('handles file snapshots and session branching', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-rollback-'));
+    tempDirs.push(dir);
+    const store = new MemoryStore(path.join(dir, 'memory.db'));
+
+    const sessionId = 'session-orig';
+    store.createSession({
+      id: sessionId,
+      title: 'Original Session',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      identityId: 'default',
+      workspacePath: dir,
+      messages: [],
+      metadata: { totalTokens: 0, totalCostUsd: 0, modelsUsed: [], toolsUsed: [], taskCount: 0 },
+    });
+
+    // Test snapshots
+    store.addFileSnapshot(sessionId, 'file1.txt', 'v1 content');
+    store.addFileSnapshot(sessionId, 'file1.txt', 'v2 content (ignored for rollback)');
+    store.addFileSnapshot(sessionId, 'file2.txt', 'v1 content of file2');
+
+    const snapshots = store.getLatestFileSnapshots(sessionId);
+    expect(snapshots).toHaveLength(2);
+    expect(snapshots.find(s => s.filePath === 'file1.txt')?.content).toBe('v1 content');
+    expect(snapshots.find(s => s.filePath === 'file2.txt')?.content).toBe('v1 content of file2');
+
+    // Test branching
+    const branchId = 'session-branch';
+    store.branchSession(sessionId, branchId);
+    
+    const branched = store.getSession(branchId);
+    expect(branched).not.toBeNull();
+    expect(branched?.title).toContain('Branch');
+    
+    const branchSnaps = store.getLatestFileSnapshots(branchId);
+    expect(branchSnaps).toHaveLength(2);
+    expect(branchSnaps.find(s => s.filePath === 'file1.txt')?.content).toBe('v1 content');
+
+    store.close();
+  });
 });

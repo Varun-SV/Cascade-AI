@@ -91,9 +91,21 @@ export const MODELS: Record<string, ModelInfo> = {
     isLocal: false,
   },
   // Google
-  'gemini-1.5-pro': {
-    id: 'gemini-1.5-pro',
-    name: 'Gemini 1.5 Pro',
+  'gemini-3-flash-preview': {
+    id: 'gemini-3-flash-preview',
+    name: 'Gemini 3 Flash Preview',
+    provider: 'gemini',
+    contextWindow: 1_000_000,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.0001,
+    outputCostPer1kTokens: 0.0004,
+    maxOutputTokens: 8_000,
+    supportsStreaming: true,
+    isLocal: false,
+  },
+  'gemini-3.1-pro-preview': {
+    id: 'gemini-3.1-pro-preview',
+    name: 'Gemini 3.1 Pro Preview',
     provider: 'gemini',
     contextWindow: 1_000_000,
     isVisionCapable: true,
@@ -103,14 +115,14 @@ export const MODELS: Record<string, ModelInfo> = {
     supportsStreaming: true,
     isLocal: false,
   },
-  'gemini-2.0-flash': {
-    id: 'gemini-2.0-flash',
-    name: 'Gemini 2.0 Flash',
+  'gemini-3.1-flash-lite-preview': {
+    id: 'gemini-3.1-flash-lite-preview',
+    name: 'Gemini 3.1 Flash-Lite Preview',
     provider: 'gemini',
     contextWindow: 1_000_000,
     isVisionCapable: true,
-    inputCostPer1kTokens: 0.0001,
-    outputCostPer1kTokens: 0.0004,
+    inputCostPer1kTokens: 0.00005,
+    outputCostPer1kTokens: 0.0002,
     maxOutputTokens: 8_000,
     supportsStreaming: true,
     isLocal: false,
@@ -223,22 +235,7 @@ export const LM_STUDIO_BASE_URL = 'http://localhost:1234';
 export const AZURE_BASE_URL_TEMPLATE = 'https://{resource}.openai.azure.com';
 
 // ── Slash Commands ────────────────────────────
-
-export const SLASH_COMMANDS = [
-  { command: '/help',     description: 'Show available commands' },
-  { command: '/clear',    description: 'Clear the conversation' },
-  { command: '/exit',     description: 'Exit Cascade' },
-  { command: '/export',   description: 'Export session (markdown|json)' },
-  { command: '/rollback', description: 'Undo all file changes in this session' },
-  { command: '/branch',   description: 'Fork current session into parallel branches' },
-  { command: '/theme',    description: 'Switch color theme' },
-  { command: '/model',    description: 'Show or change active models' },
-  { command: '/cost',     description: 'Show session cost and token usage' },
-  { command: '/identity', description: 'Switch active identity' },
-  { command: '/sessions', description: 'List and resume past sessions' },
-  { command: '/status',   description: 'Show active agent tree status' },
-  { command: '/compact',  description: 'Compact/summarize context now' },
-];
+// Command definitions live in src/cli/slash/index.ts.
 
 // ── Tool Names ────────────────────────────────
 
@@ -252,6 +249,8 @@ export const TOOL_NAMES = {
   GITHUB: 'github',
   BROWSER: 'browser',
   IMAGE_ANALYZE: 'image_analyze',
+  PDF_CREATE: 'pdf_create',
+  RUN_CODE: 'run_code',
 } as const;
 
 // Defaults that require approval
@@ -261,6 +260,8 @@ export const DEFAULT_APPROVAL_REQUIRED = [
   TOOL_NAMES.FILE_WRITE,
   TOOL_NAMES.BROWSER,
   TOOL_NAMES.GITHUB,
+  'pdf_create',
+  'run_code',
 ];
 
 // ── Provider Names ────────────────────────────

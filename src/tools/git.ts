@@ -2,7 +2,7 @@
 //  Cascade AI — Git Tool
 // ─────────────────────────────────────────────
 
-import simpleGit, { type SimpleGit } from 'simple-git';
+import { simpleGit, type SimpleGit } from 'simple-git';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
 
@@ -32,7 +32,7 @@ export class GitTool extends BaseTool {
   async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
     const operation = input['operation'] as string;
     const args = (input['args'] as string[] | undefined) ?? [];
-    const cwd = (input['cwd'] as string | undefined) ?? process.cwd();
+    const cwd = (input['cwd'] as string | undefined) ?? this.workspaceRoot;
 
     const git: SimpleGit = simpleGit(cwd);
 

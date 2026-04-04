@@ -8,6 +8,11 @@ export abstract class BaseTool {
   abstract readonly name: string;
   abstract readonly description: string;
   abstract readonly inputSchema: Record<string, unknown>;
+  protected workspaceRoot: string = process.cwd();
+
+  setWorkspaceRoot(root: string): void {
+    this.workspaceRoot = root;
+  }
 
   abstract execute(
     input: Record<string, unknown>,

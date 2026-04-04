@@ -37,7 +37,7 @@ export class ShellTool extends BaseTool {
 
   async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const command = input['command'] as string;
-    const cwd = (input['cwd'] as string | undefined) ?? process.cwd();
+    const cwd = (input['cwd'] as string | undefined) ?? this.workspaceRoot;
     const timeout = (input['timeout'] as number | undefined) ?? 30_000;
 
     this.validateCommand(command);

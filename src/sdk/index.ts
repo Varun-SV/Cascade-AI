@@ -31,7 +31,7 @@ export async function runCascade(
     ? CascadeConfigSchema.parse({ ...cm.getConfig(), ...options.config })
     : cm.getConfig();
 
-  const cascade = new Cascade(config);
+  const cascade = new Cascade(config, workspacePath);
   await cascade.init();
 
   return cascade.run({
@@ -44,9 +44,9 @@ export async function runCascade(
 /**
  * Create a Cascade instance with custom config (no file system required).
  */
-export function createCascade(config: Partial<CascadeConfig>): Cascade {
+export function createCascade(config: Partial<CascadeConfig>, workspacePath: string = process.cwd()): Cascade {
   const parsed = CascadeConfigSchema.parse(config);
-  return new Cascade(parsed);
+  return new Cascade(parsed, workspacePath);
 }
 
 /**

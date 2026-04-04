@@ -24,10 +24,11 @@ export class FileReadTool extends BaseTool {
 
   async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
     const filePath = input['path'] as string;
+    const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(this.workspaceRoot, filePath);
     const offset = (input['offset'] as number | undefined) ?? 1;
     const limit = input['limit'] as number | undefined;
 
-    const content = await fs.readFile(filePath, 'utf-8');
+    const content = await fs.readFile(absPath, 'utf-8');
     const lines = content.split('\n');
     const start = Math.max(0, offset - 1);
     const end = limit ? start + limit : lines.length;
@@ -54,12 +55,22 @@ export class FileWriteTool extends BaseTool {
 
   isDangerous(): boolean { return true; }
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const filePath = input['path'] as string;
+    const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(this.workspaceRoot, filePath);
     const content = input['content'] as string;
 
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
-    await fs.writeFile(filePath, content, 'utf-8');
+    if (options.saveSnapshot) {
+      try {
+        const oldContent = await fs.readFile(absPath, 'utf-8');
+        await options.saveSnapshot(absPath, oldContent);
+      } catch {
+        // File doesn't exist, nothing to snapshot for rollback (delete on rollback)
+      }
+    }
+
+    await fs.mkdir(path.dirname(absPath), { recursive: true });
+    await fs.writeFile(absPath, content, 'utf-8');
     return `Written ${content.length} characters to ${filePath}`;
   }
 }
@@ -82,13 +93,18 @@ export class FileEditTool extends BaseTool {
 
   isDangerous(): boolean { return true; }
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const filePath = input['path'] as string;
+    const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(this.workspaceRoot, filePath);
     const oldString = input['old_string'] as string;
     const newString = input['new_string'] as string;
     const replaceAll = (input['replace_all'] as boolean | undefined) ?? false;
 
-    const content = await fs.readFile(filePath, 'utf-8');
+    const content = await fs.readFile(absPath, 'utf-8');
+
+    if (options.saveSnapshot) {
+      await options.saveSnapshot(absPath, content);
+    }
 
     if (!content.includes(oldString)) {
       throw new Error(`old_string not found in ${filePath}. Make sure to match exactly.`);
@@ -98,7 +114,7 @@ export class FileEditTool extends BaseTool {
       ? content.split(oldString).join(newString)
       : content.replace(oldString, newString);
 
-    await fs.writeFile(filePath, updated, 'utf-8');
+    await fs.writeFile(absPath, updated, 'utf-8');
     const count = replaceAll ? (content.split(oldString).length - 1) : 1;
     return `Replaced ${count} occurrence(s) in ${filePath}`;
   }
@@ -119,9 +135,42 @@ export class FileDeleteTool extends BaseTool {
 
   isDangerous(): boolean { return true; }
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const filePath = input['path'] as string;
-    await fs.rm(filePath, { recursive: false });
+    const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(this.workspaceRoot, filePath);
+    
+    if (options.saveSnapshot) {
+      try {
+        const oldContent = await fs.readFile(absPath, 'utf-8');
+        await options.saveSnapshot(absPath, oldContent);
+      } catch {
+        // Already gone or dir
+      }
+    }
+
+    await fs.rm(absPath, { recursive: false });
     return `Deleted ${filePath}`;
+  }
+}
+
+// ── File List ─────────────────────────────────
+
+export class FileListTool extends BaseTool {
+  readonly name = 'file_list';
+  readonly description = 'List files and directories in a given path. Returns a list of filenames.';
+  readonly inputSchema = {
+    type: 'object',
+    properties: {
+      path: { type: 'string', description: 'Path to list (relative to workspace root)' },
+    },
+    required: ['path'],
+  };
+
+  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
+    const inputPath = (input['path'] as string) || '.';
+    const absPath = path.isAbsolute(inputPath) ? inputPath : path.resolve(this.workspaceRoot, inputPath);
+
+    const entries = await fs.readdir(absPath, { withFileTypes: true });
+    return entries.map(e => `${e.isDirectory() ? '[DIR] ' : '      '}${e.name}`).join('\n') || '(empty directory)';
   }
 }

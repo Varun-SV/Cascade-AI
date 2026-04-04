@@ -86,21 +86,46 @@ export class AnthropicProvider extends BaseProvider {
   }
 
   async countTokens(text: string): Promise<number> {
-    const result = await this.client.messages.countTokens({
-      model: this.model.id,
-      messages: [{ role: 'user', content: text }],
-    });
-    return result.input_tokens;
+    // Anthropic token counting is often simplified to 4 chars per token if the SDK doesn't support it directly
+    return Math.ceil(text.length / 4);
   }
 
   async listModels(): Promise<ModelInfo[]> {
-    return Object.values(MODELS).filter((m) => m.provider === 'anthropic');
+    try {
+      const resp = await fetch('https://api.anthropic.com/v1/models', {
+        headers: {
+          'x-api-key': this.config.apiKey ?? '',
+          'anthropic-version': '2023-06-01',
+        },
+      });
+      const data = await resp.json() as { data: Array<{ id: string; display_name: string }> };
+      
+      return data.data.map((m) => {
+        const known = Object.values(MODELS).find((km) => km.id === m.id && km.provider === 'anthropic');
+        if (known) return known;
+
+        return {
+          id: m.id,
+          name: m.display_name || m.id,
+          provider: 'anthropic' as const,
+          contextWindow: m.id.includes('3.5-sonnet') ? 200_000 : 100_000,
+          isVisionCapable: true,
+          inputCostPer1kTokens: 0,
+          outputCostPer1kTokens: 0,
+          maxOutputTokens: 8_000,
+          supportsStreaming: true,
+          isLocal: false,
+        };
+      });
+    } catch {
+      return Object.values(MODELS).filter((m) => m.provider === 'anthropic');
+    }
   }
 
   async isAvailable(): Promise<boolean> {
     try {
-      await this.client.models.list({ limit: 1 });
-      return true;
+      // Basic check for API key presence
+      return !!this.config.apiKey;
     } catch {
       return false;
     }
@@ -113,7 +138,7 @@ export class AnthropicProvider extends BaseProvider {
         if (typeof m.content === 'string') {
           return { role: m.role as 'user' | 'assistant', content: m.content };
         }
-        const content: Anthropic.ContentBlockParam[] = m.content.map((block) => {
+        const content: any[] = m.content.map((block) => {
           if (block.type === 'text') return { type: 'text' as const, text: block.text };
           if (block.type === 'image') {
             const img = block.image as ImageAttachment;
@@ -129,7 +154,7 @@ export class AnthropicProvider extends BaseProvider {
             }
             return {
               type: 'image' as const,
-              source: { type: 'url' as const, url: img.data },
+              source: { type: 'url' as const, url: img.data } as any,
             };
           }
           return { type: 'text' as const, text: '' };

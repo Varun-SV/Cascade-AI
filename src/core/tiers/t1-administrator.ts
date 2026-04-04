@@ -16,6 +16,7 @@ import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import { BaseTier } from './base.js';
 import { T2Manager } from './t2-manager.js';
+import { MemoryStore } from '../../memory/store.js';
 import { COMPLEXITY_T2_COUNT } from '../../constants.js';
 
 const T1_SYSTEM_PROMPT = `You are T1, the Administrator in the Cascade AI orchestration system.
@@ -32,9 +33,10 @@ Rules:
 - Moderate → 2-3 T2s
 - Complex → 3-5 T2s
 - Highly Complex → 5+ T2s
-- Each section must be non-overlapping and self-contained
 - Return ONLY valid JSON — no other text
-- If the user asks for a PDF/report/file, at least one section or subtask must explicitly create and verify it`;
+- If the user asks for a PDF, explicitly use the "pdf_create" tool in the plan.
+- If the user asks for a file type or complex task not covered by standard tools (e.g. Excel, Zip, Data processing), use "run_code" with Python or Node.js.
+- Ensure every plan includes explicit creation and verification steps for requested artifacts.`;
 
 interface TaskPlan {
   complexity: TaskComplexity;
@@ -48,12 +50,17 @@ export class T1Administrator extends BaseTier {
   private config: CascadeConfig;
   private t2Managers: Map<string, T2Manager> = new Map();
   private escalations: EscalationPayload[] = [];
+  private store?: MemoryStore;
 
   constructor(router: CascadeRouter, toolRegistry: ToolRegistry, config: CascadeConfig) {
     super('T1', 'T1');
     this.router = router;
     this.toolRegistry = toolRegistry;
     this.config = config;
+  }
+
+  setStore(store: MemoryStore): void {
+    this.store = store;
   }
 
   async execute(
@@ -218,6 +225,9 @@ Return JSON:
   private async dispatchT2Managers(sections: T1ToT2Assignment[]): Promise<T2Result[]> {
     const managers: T2Manager[] = sections.map((section) => {
       const manager = new T2Manager(this.router, this.toolRegistry, this.id);
+      if (this.store) {
+        manager.setStore(this.store);
+      }
       this.t2Managers.set(section.sectionId, manager);
 
       // Bubble up events

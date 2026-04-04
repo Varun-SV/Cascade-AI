@@ -5,9 +5,12 @@
 import Database from 'better-sqlite3';
 import path from 'node:path';
 import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import type {
   AuditEntry,
   Identity,
+  ModelInfo,
+  ProviderType,
   RuntimeNode,
   RuntimeNodeLog,
   RuntimeSession,
@@ -71,6 +74,36 @@ export class MemoryStore {
     this.db.prepare('DELETE FROM runtime_node_logs WHERE session_id = ?').run(sessionId);
     this.db.prepare('DELETE FROM runtime_nodes WHERE session_id = ?').run(sessionId);
     this.db.prepare('DELETE FROM runtime_sessions WHERE session_id = ?').run(sessionId);
+  }
+
+  branchSession(originalId: string, newId: string): void {
+    const session = this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(originalId) as DbSession | undefined;
+    if (!session) throw new Error(`Original session ${originalId} not found`);
+
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO sessions (id, title, created_at, updated_at, identity_id, workspace_path, metadata)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(newId, `${session.title} (Branch)`, now, now, session.identity_id, session.workspace_path, session.metadata);
+
+    const messages = this.db.prepare('SELECT * FROM messages WHERE session_id = ? ORDER BY timestamp ASC').all(originalId) as DbMessage[];
+    const stmt = this.db.prepare(`
+      INSERT INTO messages (id, session_id, role, content, timestamp, tokens, agent_messages)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    for (const msg of messages) {
+      stmt.run(randomUUID(), newId, msg.role, msg.content, msg.timestamp, msg.tokens, msg.agent_messages);
+    }
+
+    const snapshots = this.db.prepare('SELECT * FROM file_snapshots WHERE session_id = ?').all(originalId) as DbFileSnapshot[];
+    const snapStmt = this.db.prepare(`
+      INSERT INTO file_snapshots (id, session_id, file_path, content, timestamp)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    for (const snap of snapshots) {
+      snapStmt.run(randomUUID(), newId, snap.file_path, snap.content, snap.timestamp);
+    }
   }
 
   // ── Runtime Sessions / Nodes ─────────────────
@@ -243,7 +276,7 @@ export class MemoryStore {
       message.id,
       message.sessionId,
       message.role,
-      message.content,
+      typeof message.content === 'string' ? message.content : JSON.stringify(message.content),
       message.timestamp,
       message.tokens ? JSON.stringify(message.tokens) : null,
       message.agentMessages ? JSON.stringify(message.agentMessages) : null,
@@ -347,6 +380,68 @@ export class MemoryStore {
       action: r.action as AuditEntry['action'],
       details: JSON.parse(r.details) as Record<string, unknown>,
     }));
+  }
+
+  // ── File Snapshots ────────────────────────────
+
+  addFileSnapshot(sessionId: string, filePath: string, content: string): void {
+    this.db.prepare(`
+      INSERT INTO file_snapshots (id, session_id, file_path, content, timestamp)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(randomUUID(), sessionId, filePath, content, new Date().toISOString());
+  }
+
+  getLatestFileSnapshots(sessionId: string): Array<{ filePath: string; content: string }> {
+    // We want the FIRST snapshot of each file in this session, which represents the "before" state
+    const rows = this.db.prepare(`
+      SELECT file_path, content FROM file_snapshots
+      WHERE session_id = ?
+      GROUP BY file_path
+      HAVING timestamp = MIN(timestamp)
+    `).all(sessionId) as Array<{ file_path: string; content: string }>;
+
+    return rows.map((r) => ({ filePath: r.file_path, content: r.content }));
+  }
+
+  // ── Model Cache ───────────────────────────────
+
+  upsertCachedModel(model: ModelInfo): void {
+    this.db.prepare(`
+      INSERT INTO model_cache (id, provider, model_id, name, metadata, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        metadata = excluded.metadata,
+        updated_at = excluded.updated_at
+    `).run(
+      `${model.provider}:${model.id}`,
+      model.provider,
+      model.id,
+      model.name,
+      JSON.stringify(model),
+      new Date().toISOString(),
+    );
+  }
+
+  getCachedModels(provider?: ProviderType): ModelInfo[] {
+    const rows = provider
+      ? this.db.prepare('SELECT metadata FROM model_cache WHERE provider = ?').all(provider) as { metadata: string }[]
+      : this.db.prepare('SELECT metadata FROM model_cache').all() as { metadata: string }[];
+    return rows.map(r => JSON.parse(r.metadata));
+  }
+
+  clearModelCache(provider?: ProviderType): void {
+    if (provider) {
+      this.db.prepare('DELETE FROM model_cache WHERE provider = ?').run(provider);
+    } else {
+      this.db.prepare('DELETE FROM model_cache').run();
+    }
+  }
+
+  getCacheAge(): number {
+    const row = this.db.prepare('SELECT MIN(updated_at) as oldest FROM model_cache').get() as { oldest: string | null };
+    if (!row.oldest) return Infinity;
+    return Date.now() - new Date(row.oldest).getTime();
   }
 
   close(): void {
@@ -458,9 +553,43 @@ export class MemoryStore {
         is_global INTEGER NOT NULL DEFAULT 0
       );
 
+      CREATE TABLE IF NOT EXISTS runtime_node_logs (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        tier_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        label TEXT NOT NULL,
+        status TEXT NOT NULL,
+        current_action TEXT,
+        progress_pct INTEGER,
+        timestamp TEXT NOT NULL,
+        workspace_path TEXT,
+        is_global INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS model_cache (
+        id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        metadata TEXT NOT NULL DEFAULT '{}',
+        updated_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_runtime_logs_session ON runtime_node_logs(session_id);
       CREATE INDEX IF NOT EXISTS idx_runtime_logs_tier ON runtime_node_logs(tier_id);
       CREATE INDEX IF NOT EXISTS idx_runtime_logs_timestamp ON runtime_node_logs(timestamp);
+
+      CREATE TABLE IF NOT EXISTS file_snapshots (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        content TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions(id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_file_snapshots_session ON file_snapshots(session_id);
     `);
   }
 
@@ -540,6 +669,7 @@ interface DbScheduledTask {
   created_at: string; last_run: string | null; next_run: string | null; enabled: number;
 }
 interface DbAudit { id: string; session_id: string; timestamp: string; tier_id: string; action: string; details: string; }
+interface DbFileSnapshot { id: string; session_id: string; file_path: string; content: string; timestamp: string; }
 interface DbRuntimeSession {
   session_id: string; title: string; workspace_path: string; status: string;
   started_at: string; updated_at: string; latest_prompt: string | null; is_global: number;

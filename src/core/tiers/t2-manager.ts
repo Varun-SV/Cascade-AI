@@ -15,6 +15,7 @@ import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import { BaseTier } from './base.js';
 import { T3Worker } from './t3-worker.js';
+import { MemoryStore } from '../../memory/store.js';
 
 const T2_SYSTEM_PROMPT = `You are a T2 Manager agent in the Cascade AI system.
 Your role is to analyze a section of a task and decompose it into 2-5 discrete subtasks for T3 Workers.
@@ -26,11 +27,16 @@ export class T2Manager extends BaseTier {
   private assignment?: T1ToT2Assignment;
   private t3Workers: Map<string, T3Worker> = new Map();
   private escalations: EscalationPayload[] = [];
+  private store?: MemoryStore;
 
   constructor(router: CascadeRouter, toolRegistry: ToolRegistry, parentId: string) {
     super('T2', undefined, parentId);
     this.router = router;
     this.toolRegistry = toolRegistry;
+  }
+
+  setStore(store: MemoryStore): void {
+    this.store = store;
   }
 
   async execute(assignment: T1ToT2Assignment, taskId: string): Promise<T2Result> {
@@ -163,6 +169,9 @@ Return ONLY the JSON array.`;
     // Create T3 workers
     const workers: T3Worker[] = assignments.map((a) => {
       const worker = new T3Worker(this.router, this.toolRegistry, this.id);
+      if (this.store) {
+        worker.setStore(this.store, taskId);
+      }
       this.t3Workers.set(a.subtaskId, worker);
 
       // Bubble up events
@@ -208,6 +217,9 @@ Return ONLY the JSON array.`;
   private async retryT3(assignment: T2ToT3Assignment, taskId: string): Promise<T3Result> {
     this.log(`Retrying T3 for subtask: ${assignment.subtaskTitle}`);
     const worker = new T3Worker(this.router, this.toolRegistry, this.id);
+    if (this.store) {
+      worker.setStore(this.store, taskId);
+    }
     worker.on('stream:token', (e) => this.emit('stream:token', e));
     worker.on('tool:approval-request', (e) => this.emit('tool:approval-request', {
       ...e,

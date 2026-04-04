@@ -24,6 +24,16 @@ export class ModelSelector {
     this.availableModels.set(model.id, model);
   }
 
+  getAvailableModelsForProvider(provider: ProviderType): ModelInfo[] {
+    const models = new Map<string, ModelInfo>();
+    for (const model of this.availableModels.values()) {
+      if (model.provider === provider && this.availableProviders.has(provider)) {
+        models.set(model.id, model);
+      }
+    }
+    return [...models.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
   selectForTier(
     tier: TierRole,
     overrideModelId?: string,

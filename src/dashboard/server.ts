@@ -9,7 +9,8 @@ import fs from 'node:fs';
 import express, { type Request, type Response } from 'express';
 import type { CascadeConfig } from '../types.js';
 import { MemoryStore } from '../memory/store.js';
-import { GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE } from '../constants.js';
+import type { RuntimeNode, RuntimeNodeLog, RuntimeSession } from '../types.js';
+import { CASCADE_DB_FILE, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE } from '../constants.js';
 import { DashboardSocket } from './websocket.js';
 import { authMiddleware, createToken } from './auth.js';
 import { DEFAULT_DASHBOARD_PORT } from '../constants.js';
@@ -59,6 +60,56 @@ export class DashboardServer {
 
   // ── Setup ─────────────────────────────────────
 
+  private broadcastRuntime(scope: 'workspace' | 'global'): void {
+    if (scope === 'global') {
+      const globalDbPath = path.join(process.env['HOME'] ?? process.cwd(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
+      if (!fs.existsSync(globalDbPath)) {
+        this.socket.broadcast('runtime:update', { scope, source: 'dashboard/server', fetchedAt: new Date().toISOString(), sessions: [], nodes: [], logs: [] });
+        return;
+      }
+      const globalStore = new MemoryStore(globalDbPath);
+      try {
+        this.socket.broadcast('runtime:update', {
+          scope,
+          source: 'dashboard/server',
+          fetchedAt: new Date().toISOString(),
+          sessions: globalStore.listRuntimeSessions(200),
+          nodes: globalStore.listRuntimeNodes(undefined, 1000),
+          logs: globalStore.listRuntimeNodeLogs(undefined, undefined, 500),
+        });
+      } finally {
+        globalStore.close();
+      }
+      return;
+    }
+
+    this.socket.broadcast('runtime:update', {
+      scope,
+      source: 'dashboard/server',
+      fetchedAt: new Date().toISOString(),
+      sessions: this.store.listRuntimeSessions(200),
+      nodes: this.store.listRuntimeNodes(undefined, 1000),
+      logs: this.store.listRuntimeNodeLogs(undefined, undefined, 500),
+    });
+  }
+
+  watchRuntimeChanges(): void {
+    const workspaceDbPath = path.join(process.cwd(), CASCADE_DB_FILE);
+    const globalDbPath = path.join(process.env['HOME'] ?? process.cwd(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
+    const watchPaths = [workspaceDbPath, globalDbPath].filter((p, index, arr) => arr.indexOf(p) === index);
+
+    for (const watchPath of watchPaths) {
+      if (!fs.existsSync(watchPath)) continue;
+      fs.watchFile(watchPath, { interval: 1000 }, () => {
+        this.broadcastRuntime(watchPath === globalDbPath ? 'global' : 'workspace');
+      });
+    }
+  }
+
+  public refreshRuntime(scope: 'workspace' | 'global' = 'workspace'): void {
+    this.broadcastRuntime(scope);
+  }
+
   private setupMiddleware(): void {
     this.app.use(express.json({ limit: '10mb' }));
     this.app.use(express.urlencoded({ extended: true }));
@@ -92,6 +143,31 @@ export class DashboardServer {
       }
     });
 
+    // ── Commands ────────────────────────────────────
+    this.app.post('/api/force-halt', auth, (req: Request, res: Response) => {
+      const { sessionId, nodeId } = req.body as { sessionId?: string; nodeId?: string };
+      const payload = { sessionId, nodeId, requestedAt: new Date().toISOString() };
+      this.socket.broadcast('session:halt', payload);
+      if (sessionId) this.socket.broadcastToRoom(`session:${sessionId}`, 'session:halt', payload);
+      res.json({ success: true, ...payload });
+    });
+
+    this.app.post('/api/approve', auth, (req: Request, res: Response) => {
+      const { nodeId, sessionId } = req.body as { nodeId?: string; sessionId?: string };
+      const payload = { sessionId, nodeId, requestedAt: new Date().toISOString() };
+      this.socket.broadcast('session:approve', payload);
+      if (sessionId) this.socket.broadcastToRoom(`session:${sessionId}`, 'session:approve', payload);
+      res.json({ success: true, ...payload });
+    });
+
+    this.app.post('/api/inject', auth, (req: Request, res: Response) => {
+      const { message, sessionId, nodeId } = req.body as { message?: string; sessionId?: string; nodeId?: string };
+      const payload = { sessionId, nodeId, message, requestedAt: new Date().toISOString() };
+      this.socket.broadcast('session:message-injected', payload);
+      if (sessionId) this.socket.broadcastToRoom(`session:${sessionId}`, 'session:message-injected', payload);
+      res.json({ success: true, ...payload });
+    });
+    
     // ── Sessions ────────────────────────────────
     this.app.get('/api/sessions', auth, (_req, res) => {
       const sessions = this.store.listSessions();
@@ -118,6 +194,9 @@ export class DashboardServer {
         globalStore.close();
       }
 
+      this.socket.broadcast('session:deleted', { sessionId });
+      this.socket.broadcast('runtime:refresh', { scope: 'workspace' });
+      this.socket.broadcast('runtime:refresh', { scope: 'global' });
       res.json({ ok: true });
     });
 

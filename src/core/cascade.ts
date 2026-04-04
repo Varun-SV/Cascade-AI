@@ -17,18 +17,27 @@ import { T1Administrator } from './tiers/t1-administrator.js';
 import { T2Manager } from './tiers/t2-manager.js';
 import { T3Worker } from './tiers/t3-worker.js';
 import { ToolRegistry } from '../tools/registry.js';
+import { AuditLogger } from '../audit/log.js';
+import { MemoryStore } from '../memory/store.js';
 
 export class Cascade extends EventEmitter {
   private router: CascadeRouter;
   private toolRegistry: ToolRegistry;
   private config: CascadeConfig;
   private initialized = false;
+  private store?: MemoryStore;
+  private audit?: AuditLogger;
 
-  constructor(config: CascadeConfig) {
+  constructor(config: CascadeConfig, workspacePath: string, store?: MemoryStore) {
     super();
     this.config = config;
+    this.store = store;
     this.router = new CascadeRouter();
-    this.toolRegistry = new ToolRegistry(config.tools);
+    this.toolRegistry = new ToolRegistry(config.tools, workspacePath);
+  }
+
+  setStore(store: MemoryStore): void {
+    this.store = store;
   }
 
   async init(): Promise<void> {
@@ -134,6 +143,9 @@ ${prompt}`
 
     if (complexity === 'Simple') {
       const t3 = new T3Worker(this.router, this.toolRegistry, 'root');
+      if (this.store) {
+        t3.setStore(this.store, taskId);
+      }
       bindTierEvents(t3);
       const assignment = {
         subtaskId: taskId,
@@ -146,8 +158,12 @@ ${prompt}`
       };
       const t3Result = await t3.execute(assignment, taskId);
       finalOutput = typeof t3Result.output === 'string' ? t3Result.output : JSON.stringify(t3Result.output);
+      this.emit('tier:status', { tierId: 't3-root', status: 'COMPLETED', role: 'T3' });
     } else if (complexity === 'Moderate') {
       const t2 = new T2Manager(this.router, this.toolRegistry, 'root');
+      if (this.store) {
+        t2.setStore(this.store);
+      }
       bindTierEvents(t2);
       const assignment = {
         sectionId: taskId,
@@ -158,6 +174,7 @@ ${prompt}`
         t3Subtasks: []
       };
       const t2Result = await t2.execute(assignment, taskId);
+      this.emit('tier:status', { tierId: 't2-root', status: 'COMPLETED', role: 'T2' });
       t2Results = [t2Result];
       const completed = t2Result.t3Results.filter((r: T3Result) => r.status === 'COMPLETED');
       if (completed.length > 0) {
@@ -167,6 +184,9 @@ ${prompt}`
       }
     } else {
       const t1 = new T1Administrator(this.router, this.toolRegistry, this.config);
+      if (this.store) {
+        t1.setStore(this.store);
+      }
       bindTierEvents(t1);
       t1.on('plan', (e: any) => this.emit('plan', e));
       

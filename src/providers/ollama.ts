@@ -37,7 +37,7 @@ export class OllamaProvider extends BaseProvider {
   ): Promise<GenerateResult> {
     const messages = this.convertMessages(options.messages, options.systemPrompt);
 
-    const response = await axios.post<string>(
+    const response = await axios.post<any>(
       `${this.baseUrl}/api/chat`,
       {
         model: this.model.id,
@@ -96,19 +96,25 @@ export class OllamaProvider extends BaseProvider {
   async listModels(): Promise<ModelInfo[]> {
     try {
       const response = await axios.get<{ models: OllamaModelEntry[] }>(`${this.baseUrl}/api/tags`);
-      return response.data.models.map((m) => ({
-        id: m.name,
-        name: m.name,
-        provider: 'ollama' as const,
-        contextWindow: 128_000,
-        isVisionCapable: m.name.includes('llava') || m.name.includes('vision'),
-        inputCostPer1kTokens: 0,
-        outputCostPer1kTokens: 0,
-        maxOutputTokens: 4_000,
-        supportsStreaming: true,
-        isLocal: true,
-        minSizeB: this.parseSizeB(m.details?.parameter_size),
-      }));
+      const supportedKeywords = ['llama3', 'llama2', 'gemma', 'mistral', 'mixtral', 'qwen', 'phi3', 'codellama', 'deepseek', 'llava', 'starcoder', 'stable-code', 'nomic-embed'];
+      return response.data.models
+        .filter((m) => {
+          const name = m.name.toLowerCase();
+          return supportedKeywords.some((k) => name.includes(k));
+        })
+        .map((m) => ({
+          id: m.name,
+          name: m.name,
+          provider: 'ollama' as const,
+          contextWindow: 128_000,
+          isVisionCapable: m.name.includes('llava') || m.name.includes('vision'),
+          inputCostPer1kTokens: 0,
+          outputCostPer1kTokens: 0,
+          maxOutputTokens: 4_000,
+          supportsStreaming: true,
+          isLocal: true,
+          minSizeB: this.parseSizeB(m.details?.parameter_size),
+        }));
     } catch {
       return [];
     }

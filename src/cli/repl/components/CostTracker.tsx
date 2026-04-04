@@ -22,7 +22,7 @@ export function CostTracker({
   callsByTier,
 }: CostTrackerProps): React.ReactElement {
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={theme.colors.border} paddingX={2} paddingY={1}>
+    <Box flexDirection="column" borderStyle="round" borderColor={theme.colors.border} paddingX={2}>
       <Text color={theme.colors.primary} bold>Session Usage</Text>
 
       <Box marginTop={1}>

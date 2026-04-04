@@ -41,9 +41,9 @@ export function ApprovalPrompt({ request, theme, onDecision }: ApprovalPromptPro
       <Text color={borderColor} bold>{icon} Approval Required</Text>
       <Text color={theme.colors.muted}>Agent: {request.tierId}</Text>
       <Text color={theme.colors.foreground} bold>Tool: {request.toolName}</Text>
-      <Box marginTop={1}>
+      <Box marginTop={1} height={4}>
         <Text color={theme.colors.muted}>Input: </Text>
-        <Text>{JSON.stringify(request.input, null, 2).slice(0, 200)}</Text>
+        <Text>{JSON.stringify(request.input, null, 2).slice(0, 200).split('\n').slice(0, 4).join('\n')}</Text>
       </Box>
       <Box marginTop={1}>
         {!decided ? (

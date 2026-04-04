@@ -48,6 +48,20 @@ export class DashboardSocket {
 
   private setupHandlers(): void {
     this.io.on('connection', (socket) => {
+      socket.emit('runtime:refresh', { scope: 'workspace' });
+      socket.emit('runtime:refresh', { scope: 'global' });
+      socket.on('runtime:refresh', (scope?: 'workspace' | 'global') => {
+        this.io.emit('runtime:refresh', { scope: scope ?? 'workspace' });
+      });
+      socket.on('session:halt', (payload: { sessionId?: string }) => {
+        this.io.emit('session:halt', payload);
+      });
+      socket.on('session:approve', (payload: { nodeId?: string }) => {
+        this.io.emit('session:approve', payload);
+      });
+      socket.on('session:message-injected', (payload: { message?: string }) => {
+        this.io.emit('session:message-injected', payload);
+      });
       socket.on('join:session', (sessionId: string) => {
         socket.join(`session:${sessionId}`);
       });
@@ -64,3 +78,34 @@ export class DashboardSocket {
     this.io.close();
   }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

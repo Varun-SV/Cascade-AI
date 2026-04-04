@@ -19,11 +19,15 @@ export async function dashboardCommand(
 
   const store = new MemoryStore(path.join(workspacePath, CASCADE_DB_FILE));
   const server = new DashboardServer(config, store);
+  server.watchRuntimeChanges();
+  (globalThis as typeof globalThis & { cascadeDashboardServer?: DashboardServer }).cascadeDashboardServer = server;
 
   try {
     await server.start();
 
     spin.succeed(chalk.green(`Dashboard running at http://localhost:${port}`));
+    server.refreshRuntime('workspace');
+    server.refreshRuntime('global');
     console.log(chalk.gray(`  Press Ctrl+C to stop\n`));
 
     process.on('SIGINT', async () => {
@@ -38,5 +42,7 @@ export async function dashboardCommand(
     store.close();
     spin.fail(chalk.red(`Dashboard failed: ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
+  } finally {
+    delete (globalThis as typeof globalThis & { cascadeDashboardServer?: DashboardServer }).cascadeDashboardServer;
   }
 }

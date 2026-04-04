@@ -20,6 +20,7 @@ export interface TierNode {
 interface AgentTreeProps {
   root: TierNode | null;
   theme: Theme;
+  onToggleCollapse?: (nodeId: string) => void;
 }
 
 export function AgentTree({ root, theme }: AgentTreeProps): React.ReactElement | null {
@@ -29,7 +30,7 @@ export function AgentTree({ root, theme }: AgentTreeProps): React.ReactElement |
   const activeT3 = countNodes(root, (node) => node.role === 'T3' && node.status === 'ACTIVE');
 
   return (
-    <Box flexDirection="column" marginY={1}>
+    <Box flexDirection="column" marginY={0}>
       <Text bold color={theme.colors.muted}>
         Agent Execution Tree
         <Text color={theme.colors.t2Color}> · T2 active: {activeT2}</Text>
@@ -47,7 +48,18 @@ interface TierNodeViewProps {
   isLast: boolean;
 }
 
-function TierNodeView({ node, theme, depth, isLast }: TierNodeViewProps): React.ReactElement {
+function TierNodeView({ node, theme, depth, isLast }: TierNodeViewProps): React.ReactElement | null {
+  // Smart Collapsing Logic: 
+  // If the node is not active and none of its children are active/failed, 
+  // we might want to hide it if we are in a "focused" view.
+  // For this refactor, we'll ensure we always show ACTIVE branches.
+  const hasActiveDescendant = (n: TierNode): boolean => 
+    n.status === 'ACTIVE' || (n.children?.some(hasActiveDescendant) ?? false);
+  
+  const shouldShow = node.status === 'ACTIVE' || node.status === 'FAILED' || hasActiveDescendant(node) || depth === 0;
+
+  if (!shouldShow) return null;
+
   const tierColor = node.role === 'T1'
     ? theme.colors.t1Color
     : node.role === 'T2'
@@ -64,7 +76,7 @@ function TierNodeView({ node, theme, depth, isLast }: TierNodeViewProps): React.
         <Text color={theme.colors.muted}>{indent}{connector}</Text>
         <Text color={tierColor} bold>[{node.role}]</Text>
         <Text> </Text>
-        <Text color={theme.colors.foreground}>{node.label}</Text>
+        <Text color={theme.colors.foreground}>{formatNodeLabel(node)}</Text>
         <Text> </Text>
         {statusIcon}
         {node.currentAction && node.status === 'ACTIVE' && (
@@ -100,6 +112,11 @@ function getStatusIcon(status: TierNode['status'], theme: Theme): React.ReactEle
     default:
       return <Text color={theme.colors.muted}>○</Text>;
   }
+}
+
+function formatNodeLabel(node: TierNode): string {
+  const duplicatePrefix = new RegExp(`^\\[${node.role}\\]\\s+`, 'i');
+  return node.label.replace(duplicatePrefix, '');
 }
 
 function countNodes(node: TierNode, predicate: (node: TierNode) => boolean): number {

@@ -17,6 +17,8 @@ import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import { BaseTier } from './base.js';
 import { ContextManager } from '../context/manager.js';
+import { AuditLogger } from '../../audit/log.js';
+import { MemoryStore } from '../../memory/store.js';
 
 const T3_SYSTEM_PROMPT = `You are a T3 Worker agent in the Cascade AI system. Your job is to execute a specific subtask completely and accurately.
 
@@ -24,8 +26,8 @@ Rules:
 - Execute the subtask completely — do not stop partway through.
 - Use tools when needed. Ask for approval only when the tool registry requires it.
 - If the task asks for a file or artifact, you must actually create it in the workspace, verify that it exists, and inspect it before claiming success.
-- Intermediate files are allowed when useful. Clean them up after a successful final artifact verification. If the run fails, keep intermediates for debugging.
-- Self-test your output: check completeness, correctness, and constraint compliance.
+- Use the "pdf_create" tool for PDF requests.
+- Use the "run_code" tool for any file types (Excel, Zip, csv, etc.) or complex processing not covered by other tools. Always cleanup after code execution.
 - If you are not making meaningful progress, stop and escalate rather than looping or padding the response.
 - Return structured output that directly addresses the expected output specification.`;
 
@@ -35,12 +37,19 @@ export class T3Worker extends BaseTier {
   private context: ContextManager;
   private assignment?: T2ToT3Assignment;
   private peerSyncBuffer: Map<string, unknown> = new Map();
+  private store?: MemoryStore;
+  private audit?: AuditLogger;
 
   constructor(router: CascadeRouter, toolRegistry: ToolRegistry, parentId: string) {
     super('T3', undefined, parentId);
     this.router = router;
     this.toolRegistry = toolRegistry;
     this.context = new ContextManager();
+  }
+
+  setStore(store: MemoryStore, sessionId: string): void {
+    this.store = store;
+    this.audit = new AuditLogger(store, sessionId);
   }
 
   async execute(assignment: T2ToT3Assignment, taskId: string): Promise<T3Result> {
@@ -237,7 +246,16 @@ export class T3Worker extends BaseTier {
         tierId: this.id,
         sessionId: this.taskId,
         requireApproval: false,
+        saveSnapshot: async (path, content) => {
+          this.store?.addFileSnapshot(this.taskId, path, content);
+        },
       });
+      if (this.audit) {
+        this.audit.toolCall(this.id, tc.name, tc.input);
+        if (this.isFileOperation(tc.name)) {
+          this.audit.fileChange(this.id, (tc.input['path'] as string | undefined) ?? 'unknown', tc.name);
+        }
+      }
       this.emit('tool:result', { tierId: this.id, toolName: tc.name, result });
       return typeof result === 'string' ? result : JSON.stringify(result);
     } catch (err) {
@@ -396,5 +414,9 @@ Begin execution now.`;
       peerSyncsUsed: [...this.peerSyncBuffer.keys()],
       correctionAttempts,
     };
+  }
+
+  private isFileOperation(toolName: string): boolean {
+    return ['file_write', 'file_edit', 'file_delete'].includes(toolName);
   }
 }

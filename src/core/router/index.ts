@@ -57,13 +57,31 @@ export class CascadeRouter {
       await this.discoverOllamaModels(ollamaCfg);
     }
 
-    // Pre-select models for each tier
+    // Apply explicit tier overrides first.
     for (const tier of ['T1', 'T2', 'T3'] as TierRole[]) {
       const override =
         tier === 'T1' ? config.models.t1
         : tier === 'T2' ? config.models.t2
         : config.models.t3;
+      if (!override) continue;
+
       const model = this.selector.selectForTier(tier, override);
+      if (!model) {
+        throw new Error(`Configured model "${override}" for ${tier} could not be loaded. Check provider availability and exact model name.`);
+      }
+
+      if (model.id !== override) {
+        throw new Error(`Configured model "${override}" for ${tier} resolved to "${model.id}". Use the exact provider model ID or prefix the provider (e.g. gemini:${override}).`);
+      }
+
+      this.tierModels.set(tier, model);
+      this.ensureProvider(model, config.providers);
+    }
+
+    // Fill any tiers without explicit overrides using priority defaults.
+    for (const tier of ['T1', 'T2', 'T3'] as TierRole[]) {
+      if (this.tierModels.has(tier)) continue;
+      const model = this.selector.selectForTier(tier);
       if (model) {
         this.tierModels.set(tier, model);
         this.ensureProvider(model, config.providers);
@@ -86,13 +104,27 @@ export class CascadeRouter {
     const provider = this.getProvider(model);
     if (!provider) throw new Error(`No provider for model ${model.id}`);
 
+    const useStream = Boolean(onChunk) && model.supportsStreaming && typeof provider.generateStream === 'function';
+
     try {
       let result: GenerateResult;
-      if (onChunk) {
-        result = await provider.generateStream(options, onChunk);
+      if (useStream && onChunk) {
+        try {
+          result = await provider.generateStream(options, (chunk) => {
+            const text = typeof chunk?.text === 'string' ? chunk.text : '';
+            if (text) onChunk({ ...chunk, text });
+          });
+        } catch {
+          result = await provider.generate(options);
+        }
       } else {
         result = await provider.generate(options);
       }
+
+      if (!result || typeof result.content !== 'string' || !result.usage) {
+        throw new Error(`Provider ${model.provider}:${model.id} returned an invalid generation result.`);
+      }
+
       this.recordStats(tier, model, result.usage);
       return result;
     } catch (err) {
@@ -180,6 +212,8 @@ export class CascadeRouter {
       case 'azure': return new AzureOpenAIProvider(cfg, model);
       case 'ollama': return new OllamaProvider(cfg, model);
       case 'openai-compatible': return new OpenAICompatibleProvider(cfg, model);
+      default:
+        throw new Error(`Unsupported provider type: ${String(cfg.type)}`);
     }
   }
 

@@ -9,6 +9,9 @@ describe('SlashCommandRegistry', () => {
     expect(commands).toContain('/status');
     expect(commands).toContain('/sessions');
     expect(commands).toContain('/identity');
+    expect(commands).toContain('/rollback');
+    expect(commands).toContain('/branch');
+    expect(commands).toContain('/compact');
   });
 
   it('offers completions for slash prefixes', () => {
