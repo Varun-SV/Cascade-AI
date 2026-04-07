@@ -1,5 +1,18 @@
-import { createSlice, createSelector, type PayloadAction } from '@reduxjs/toolkit';
+import { createSlice, createSelector, createAsyncThunk, type PayloadAction } from '@reduxjs/toolkit';
 import type { RuntimeSession, RuntimeNode, RuntimeNodeLog, RuntimeSnapshot } from '../../hooks/useWebSocket';
+
+export const fetchHistory = createAsyncThunk(
+  'runtime/fetchHistory',
+  async ({ sessionId, before, limit = 100 }: { sessionId: string; before?: string; limit?: number }, { getState }) => {
+    const token = localStorage.getItem('cascade_token');
+    const response = await fetch(`/api/runtime/logs/${sessionId}?limit=${limit}${before ? `&before=${before}` : ''}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!response.ok) throw new Error('Failed to fetch history');
+    const logs = await response.json() as RuntimeNodeLog[];
+    return { sessionId, logs };
+  }
+);
 
 interface RuntimeState {
   sessions: Record<string, RuntimeSession>;
@@ -70,6 +83,17 @@ export const runtimeSlice = createSlice({
         state.logs[log.sessionId] = [...history, log].slice(-1000);
       }
     }
+  },
+  extraReducers: (builder) => {
+    builder.addCase(fetchHistory.fulfilled, (state, action) => {
+      const { sessionId, logs } = action.payload;
+      const existing = state.logs[sessionId] || [];
+      const logMap = new Map(existing.map(l => [l.id, l]));
+      logs.forEach(l => logMap.set(l.id, l));
+      state.logs[sessionId] = Array.from(logMap.values())
+        .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+        .slice(-2000); // Allow more for history
+    });
   }
 });
 

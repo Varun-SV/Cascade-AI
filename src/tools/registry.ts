@@ -13,12 +13,45 @@ import { BrowserTool } from './browser.js';
 import { ImageAnalyzeTool } from './image.js';
 import { PDFCreateTool } from './pdf.js';
 import { CodeInterpreterTool } from './interpreter.js';
+import { PeerCommunicationTool } from './peer.js';
+
+// ── Plugin System (Roadmap Stub) ──────────────────────────────────────────
+//
+// Future plugin support. Plugins bundle one or more tools together with
+// optional lifecycle hooks. Use `registry.registerPlugin(plugin)` to register.
+// This is a stub — full implementation tracked in ROADMAP.md.
+
+/**
+ * A ToolPlugin bundles one or more custom tools that extend Cascade's capabilities.
+ * Plugins are loaded via `registerPlugin()` and behave like built-in tools.
+ *
+ * @example
+ * const myPlugin: ToolPlugin = {
+ *   name: 'my-custom-tools',
+ *   version: '1.0.0',
+ *   tools: [new MyCustomTool()],
+ *   onRegister: (registry) => console.log('Plugin registered'),
+ * };
+ * registry.registerPlugin(myPlugin);
+ */
+export interface ToolPlugin {
+  /** Unique plugin identifier */
+  name: string;
+  /** Semantic version string */
+  version: string;
+  /** One or more tools this plugin provides */
+  tools: BaseTool[];
+  /** Called once when the plugin is registered */
+  onRegister?: (registry: ToolRegistry) => void;
+}
 
 export class ToolRegistry {
   private tools: Map<string, BaseTool> = new Map();
   private config: ToolsConfig;
   private ignoredPaths: Set<string> = new Set();
   private workspaceRoot: string;
+  /** Loaded plugins, keyed by plugin name */
+  private plugins: Map<string, ToolPlugin> = new Map();
 
   constructor(config: ToolsConfig, workspaceRoot: string = process.cwd()) {
     this.config = config;
@@ -28,6 +61,29 @@ export class ToolRegistry {
 
   register(tool: BaseTool): void {
     this.tools.set(tool.name, tool);
+  }
+
+  /**
+   * Register a ToolPlugin, loading all its tools into the registry.
+   * Each tool is configured with the current workspace root.
+   * Duplicate plugin names are silently ignored.
+   *
+   * @example
+   * registry.registerPlugin(myPlugin);
+   */
+  registerPlugin(plugin: ToolPlugin): void {
+    if (this.plugins.has(plugin.name)) return;
+    this.plugins.set(plugin.name, plugin);
+    for (const tool of plugin.tools) {
+      tool.setWorkspaceRoot(this.workspaceRoot);
+      this.register(tool);
+    }
+    plugin.onRegister?.(this);
+  }
+
+  /** Returns the names of all registered plugins */
+  getRegisteredPlugins(): string[] {
+    return Array.from(this.plugins.keys());
   }
 
   setIgnoredPaths(paths: string[]): void {
@@ -84,6 +140,7 @@ export class ToolRegistry {
       new ImageAnalyzeTool(),
       new PDFCreateTool(),
       new CodeInterpreterTool(),
+      new PeerCommunicationTool(),
     ];
 
     for (const tool of tools) {

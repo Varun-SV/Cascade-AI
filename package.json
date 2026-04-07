@@ -67,6 +67,7 @@
     "react-dom": "^18.3.0",
     "simple-git": "^3.27.0",
     "socket.io": "^4.8.0",
+    "socket.io-msgpack-parser": "^3.0.2",
     "undici": "^6.21.0",
     "update-notifier": "^7.3.0",
     "uuid": "^10.0.0",

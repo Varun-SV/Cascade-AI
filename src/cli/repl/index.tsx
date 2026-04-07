@@ -64,6 +64,7 @@ interface ReplState {
   messages: Message[];
   agentTree: TierNode | null;
   isStreaming: boolean;
+  isExecuting: boolean;
   streamBuffer: string;
   totalTokens: number;
   totalCostUsd: number;
@@ -82,6 +83,7 @@ type ReplAction =
   | { type: 'SET_TREE'; tree: TierNode | null }
   | { type: 'UPDATE_COST'; tokens: number; costUsd: number; byProvider: Record<string,number>; byTier: Record<string,number> }
   | { type: 'SET_APPROVAL'; request: ApprovalRequest | null }
+  | { type: 'SET_EXECUTING'; isExecuting: boolean }
   | { type: 'CLEAR' }
   | { type: 'TOGGLE_COST' }
   | { type: 'TOGGLE_DETAILS' }
@@ -108,6 +110,8 @@ function replReducer(state: ReplState, action: ReplAction): ReplState {
       return { ...state, totalTokens: action.tokens, totalCostUsd: action.costUsd, callsByProvider: action.byProvider, callsByTier: action.byTier };
     case 'SET_APPROVAL':
       return { ...state, approvalRequest: action.request };
+    case 'SET_EXECUTING':
+      return { ...state, isExecuting: action.isExecuting };
     case 'CLEAR':
       return { ...state, messages: [], agentTree: null, streamBuffer: '', totalTokens: 0, totalCostUsd: 0 };
     case 'TOGGLE_COST':
@@ -156,13 +160,13 @@ export function Repl({ config, workspacePath, themeName, initialPrompt }: ReplPr
   const [slashIndex, setSlashIndex] = useState(0);
   const [identities, setIdentities] = useState<Array<{ id: string; name: string; isDefault: boolean }>>([]);
   const [currentIdentityId, setCurrentIdentityId] = useState<string | undefined>(config.defaultIdentityId);
-  const [state, dispatch] = useReducer(replReducer, { messages: [], agentTree: null, isStreaming: false, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, approvalRequest: null, showCost: false, showDetails: false, error: null });
+  const [state, dispatch] = useReducer(replReducer, { messages: [], agentTree: null, isStreaming: false, isExecuting: false, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, approvalRequest: null, showCost: false, showDetails: false, error: null });
   const [isShowingModels, setIsShowingModels] = useState(false);
   const [cachedModels, setCachedModels] = useState<Map<ProviderType, ModelInfo[]>>(new Map());
   const cascadeRef = useRef<Cascade | null>(null);
   const storeRef = useRef<MemoryStore | null>(null);
   const slashRef = useRef(new SlashCommandRegistry());
-  const approvalResolverRef = useRef<((approved: boolean) => void) | null>(null);
+  const approvalResolverRef = useRef<((decision: { approved: boolean; always: boolean }) => void) | null>(null);
   const sessionIdRef = useRef(randomUUID());
   const startedAtRef = useRef(new Date().toISOString());
   const treeNodesRef = useRef<Map<string, FlatTreeNode>>(new Map());
@@ -171,6 +175,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt }: ReplPr
   const [timelineIndex, setTimelineIndex] = useState(0);
   const [scrollOffset, setScrollOffset] = useState(0);
   const [isAutoScrolling, setIsAutoScrolling] = useState(true);
+  const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
+  const [quitAttempted, setQuitAttempted] = useState(false);
   const isInputLockedRef = useRef(false);
   const lockTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -387,6 +393,16 @@ export function Repl({ config, workspacePath, themeName, initialPrompt }: ReplPr
     }
     const trimmed = userInput.trim();
     if (!trimmed) return;
+    if (state.isExecuting) {
+      if (slashRef.current.isSlashCommand(trimmed)) {
+        setInput('');
+        await handleSlashCommand(trimmed);
+        return;
+      }
+      setQueuedMessages(prev => [...prev, trimmed]);
+      setInput('');
+      return;
+    }
     setInputHistory((prev) => [trimmed, ...prev.filter((item) => item !== trimmed)].slice(0, 100));
     setHistoryIndex(null);
     if (slashRef.current.isSlashCommand(trimmed)) { await handleSlashCommand(trimmed); return; }
@@ -395,6 +411,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt }: ReplPr
     persistMessage('user', trimmed, timestamp);
     lastUserPrompt.current = trimmed;
     setInput('');
+    dispatch({ type: 'SET_EXECUTING', isExecuting: true });
     const cascade = cascadeRef.current;
     if (!cascade) return;
     treeNodesRef.current.clear(); rebuildTree();
@@ -404,30 +421,62 @@ export function Repl({ config, workspacePath, themeName, initialPrompt }: ReplPr
     let currentStreamBuffer = '';
     let streamThrottleTimeout: any = null;
     const flushStream = () => { if (currentStreamBuffer) { dispatch({ type: 'APPEND_STREAM', text: currentStreamBuffer }); currentStreamBuffer = ''; } streamThrottleTimeout = null; };
-    const onStream = ({ text }: any) => { currentStreamBuffer += (text ?? ''); if (!streamThrottleTimeout) streamThrottleTimeout = setTimeout(flushStream, 50); };
+    const onStream = ({ text, tierId }: any) => { 
+      if (tierId !== 'T1') return; // Hide intermediate thoughts from main chat
+      currentStreamBuffer += (text ?? ''); 
+      if (!streamThrottleTimeout) streamThrottleTimeout = setTimeout(flushStream, 50); 
+    };
     cascade.on('tier:root', onRoot);
     cascade.on('stream:token', onStream);
-    cascade.on('tier:status', (ev: any) => recordNodeEvent(ev));
+    cascade.on('tier:status', (ev: any) => {
+      recordNodeEvent(ev);
+      const stats = cascade.getRouter().getStats();
+      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier });
+    });
     try {
-      const result = await cascade.run({ prompt: trimmed, workspacePath, conversationHistory: toConversationHistory(state.messages), approvalCallback: async (req) => { dispatch({ type: 'SET_APPROVAL', request: req }); return new Promise<boolean>((resolve) => { approvalResolverRef.current = resolve; }); } });
+      const result = await cascade.run({ prompt: trimmed, workspacePath, conversationHistory: toConversationHistory(state.messages), approvalCallback: async (req) => { dispatch({ type: 'SET_APPROVAL', request: req }); return new Promise<{ approved: boolean; always: boolean }>((resolve) => { approvalResolverRef.current = resolve; }); } });
       flushStream();
+      const stats = cascade.getRouter().getStats();
+      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier });
       dispatch({ type: 'COMMIT_STREAM', finalText: result.output, timestamp: new Date().toISOString() });
       persistMessage('assistant', result.output, new Date().toISOString());
-    } catch (err: any) { dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'error', content: err.message, timestamp: new Date().toISOString() } }); }
-    finally { cascade.removeAllListeners(); }
-  }, [handleSlashCommand, persistMessage, state.messages, workspacePath, rebuildTree, recordNodeEvent, slashCompletions, slashIndex]);
+    } catch (err: any) { 
+      dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'error', content: err.message, timestamp: new Date().toISOString() } }); 
+    }
+    finally { 
+      cascade.removeAllListeners(); 
+      const finalStats = cascade.getRouter().getStats();
+      const currentSession = storeRef.current?.getSession(sessionIdRef.current);
+      if (currentSession) {
+        storeRef.current?.updateSession(sessionIdRef.current, {
+          metadata: {
+            ...currentSession.metadata,
+            totalTokens: finalStats.totalTokens,
+            totalCostUsd: finalStats.totalCostUsd,
+          }
+        });
+      }
+      dispatch({ type: 'SET_EXECUTING', isExecuting: false });
+    }
+  }, [handleSlashCommand, persistMessage, state.messages, workspacePath, rebuildTree, recordNodeEvent, slashCompletions, slashIndex, state.isExecuting]);
 
   useInput((_input, key) => {
     if (key.ctrl && _input === 'c') {
-      if (input.trim() !== '') {
-        setInput('');
-        setHistoryIndex(null);
+      if (quitAttempted) {
+        exit();
         return;
       }
-      exit();
+      setQuitAttempted(true);
+      return;
     }
     if (key.escape) {
+      if (quitAttempted) { setQuitAttempted(false); return; }
       if (isShowingModels) { setIsShowingModels(false); return; }
+      if (queuedMessages.length > 0) {
+        setInput(queuedMessages[0]!);
+        setQueuedMessages(p => p.slice(1));
+        return;
+      }
       setInput('');
       setHistoryIndex(null);
       return;
@@ -593,27 +642,36 @@ export function Repl({ config, workspacePath, themeName, initialPrompt }: ReplPr
         />
       )}
       {state.showCost && <CostTracker theme={theme} totalTokens={state.totalTokens} totalCostUsd={state.totalCostUsd} callsByProvider={state.callsByProvider} callsByTier={state.callsByTier} />}
-      {state.approvalRequest && <ApprovalPrompt request={state.approvalRequest} theme={theme} onDecision={(approved) => { dispatch({ type: 'SET_APPROVAL', request: null }); approvalResolverRef.current?.(approved); }} />}
+      {state.approvalRequest && <ApprovalPrompt request={state.approvalRequest} theme={theme} onDecision={(decision) => { dispatch({ type: 'SET_APPROVAL', request: null }); approvalResolverRef.current?.(decision); }} />}
       {slashCompletions.length > 0 && (
         <Box flexDirection="column" borderStyle="round" borderColor={theme.colors.border} paddingX={1}>
           <Text color={theme.colors.muted}>Slash commands</Text>
           {slashCompletions.slice(0, 10).map((c, i) => <Text key={c} color={i === slashIndex ? theme.colors.accent : theme.colors.foreground}>{i === slashIndex ? '› ' : '  '}{c}</Text>)}
         </Box>
       )}
-      <Box borderStyle="round" borderColor={state.isStreaming ? theme.colors.accent : theme.colors.border} paddingX={2}>
-        <Text color={theme.colors.primary} bold>▸ </Text>
-        <TextInput 
-          value={input} 
-          onChange={(val) => {
-            if (isInputLockedRef.current) return;
-            // Strip complex ANSI/SGR escape sequences FIRST, then general control characters
-            // This prevents partial consumption of the escape byte (0x1b) leaving the rest of the sequence as text.
-            const sanitized = val.replace(/(?:\x1b\[<.*?[Mm])|(?:\x1b\[.*?[\x40-\x7E])|(?:\x1bO[\x40-\x7E])|(?:\x1b[PX^_].*?\x1b\\)|(?:\x1b[\]\[].*?[\x07\x1b])|(?:\x1b[()#;?].*?[0-9A-ORZcf-nqry=><])|[\x00-\x1F\x7F]/g, '');
-            setInput(sanitized);
-          }} 
-          onSubmit={handleSubmit} 
-          placeholder="Ask Cascade anything… (/help for commands)" 
-        />
+      <Box borderStyle="round" borderColor={quitAttempted ? 'red' : (state.isStreaming ? theme.colors.accent : theme.colors.border)} paddingX={2} flexDirection="column">
+        {quitAttempted && (
+          <Box marginBottom={0}>
+            <Text color="red" bold> Press Ctrl+C again to quit or ESC to return to TUI </Text>
+          </Box>
+        )}
+        <Box flexDirection="row">
+          <Text color={theme.colors.primary} bold>▸ {queuedMessages.length > 0 ? <Text color={theme.colors.accent}>[QUEUED] </Text> : ''}</Text>
+          <TextInput 
+            focus={!state.approvalRequest}
+            value={input} 
+            onChange={(val) => {
+              if (isInputLockedRef.current) return;
+              // Strip complex ANSI/SGR escape sequences and dangerous control characters.
+              // ⚠ Do NOT include \x7F here — that is the Delete/Backspace key code.
+              //   Ink's TextInput handles \x7F natively; stripping it here prevents deletion from working.
+              const sanitized = val.replace(/(?:\x1b\[<.*?[Mm])|(?:\x1b\[.*?[\x40-\x7E])|(?:\x1bO[\x40-\x7E])|(?:\x1b[PX^_].*?\x1b\\)|(?:\x1b[\]\[].*?[\x07\x1b])|(?:\x1b[()#;?].*?[0-9A-ORZcf-nqry=><])|[\x00-\x1F]/g, '');
+              setInput(sanitized);
+            }} 
+            onSubmit={handleSubmit} 
+            placeholder={state.isStreaming ? "Wait for response or type next prompt to queue…" : "Ask Cascade anything… (/help for commands)"} 
+          />
+        </Box>
       </Box>
       <StatusBar theme={theme} model={cascadeRef.current?.getRouter().getModelForTier('T1')?.name ?? 'Initializing...'} tokens={state.totalTokens} costUsd={state.totalCostUsd} sessionId={sessionIdRef.current} workspacePath={`${path.basename(workspacePath)} · ${currentIdentity}`} isStreaming={state.isStreaming} />
     </Box>

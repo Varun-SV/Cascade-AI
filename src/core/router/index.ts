@@ -23,6 +23,7 @@ import type { BaseProvider } from '../../providers/base.js';
 import { ModelSelector } from './selector.js';
 import { FailoverManager } from './failover.js';
 import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
+import { calculateCost } from '../../utils/cost.js';
 
 export interface RouterStats {
   totalTokens: number;
@@ -120,6 +121,19 @@ export class CascadeRouter {
       } else {
         result = await provider.generate(options);
       }
+      const correctedCost = calculateCost(
+        result.usage.inputTokens,
+        result.usage.outputTokens,
+        model,
+      );
+
+      result = {
+        ...result,
+        usage: {
+          ...result.usage,
+          estimatedCostUsd: correctedCost,
+        },
+      };
 
       if (!result || typeof result.content !== 'string' || !result.usage) {
         throw new Error(`Provider ${model.provider}:${model.id} returned an invalid generation result.`);

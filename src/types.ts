@@ -116,6 +116,8 @@ export interface ToolExecuteOptions {
   sessionId: string;
   requireApproval: boolean;
   saveSnapshot?: (filePath: string, content: string) => Promise<void>;
+  sendPeerSync?: (to: string, type: string, content: string | Record<string, unknown>) => void;
+  getPeerMessages?: () => Array<{ fromId: string; content: unknown; timestamp: string }>;
 }
 
 // ── Tier System ───────────────────────────────
@@ -176,6 +178,8 @@ export interface T1ToT2Assignment {
   expectedOutput: string;
   constraints: string[];
   t3Subtasks: T3SubtaskSpec[];
+  executionMode?: 'parallel' | 'sequential';
+  peerT2Ids?: string[];
 }
 
 export interface T3SubtaskSpec {
@@ -185,6 +189,8 @@ export interface T3SubtaskSpec {
   expectedOutput: string;
   constraints: string[];
   peerT3Ids: string[];
+  dependsOn?: string[];
+  executionMode?: 'parallel' | 'sequential';
 }
 
 export interface T2ToT3Assignment {
@@ -195,6 +201,8 @@ export interface T2ToT3Assignment {
   constraints: string[];
   peerT3Ids: string[];
   parentT2: string;
+  dependsOn?: string[];
+  executionMode?: 'parallel' | 'sequential';
 }
 
 export interface StatusUpdate {
@@ -226,7 +234,7 @@ export interface T3ResultPayload {
   correctionAttempts: number;
 }
 
-export interface T3Result extends T3ResultPayload {}
+export interface T3Result extends T3ResultPayload { }
 
 export interface EscalationPayload {
   raisedBy: string;
@@ -242,6 +250,16 @@ export interface PeerSyncPayload {
   recipientT3Id: string;
   syncType: 'SHARE_OUTPUT' | 'RESOLVE_CONFLICT' | 'DIVIDE_WORK' | 'CHECK_ASSUMPTION';
   content: string | Record<string, unknown>;
+  subtaskId?: string;
+}
+
+export interface PeerMessage {
+  fromId: string;
+  toId: string;             // '*' = broadcast to all peers
+  type: 'OUTPUT_READY' | 'REQUEST_OUTPUT' | 'SYNC_DATA' | 'BARRIER';
+  subtaskId: string;
+  payload: unknown;
+  timestamp: string;
 }
 
 // ── Session & Memory ──────────────────────────
@@ -467,6 +485,53 @@ export interface ApprovalRequest {
 export interface ApprovalResponse {
   id: string;
   approved: boolean;
+  always?: boolean;
+}
+
+// ── Hierarchical Permission Escalation ────────
+
+/**
+ * A permission request raised by a T3 worker that must be evaluated
+ * by T2, then T1, and finally the user if neither tier can decide.
+ */
+export interface PermissionRequest {
+  /** Unique request ID */
+  id: string;
+  /** T3 worker that requires the permission */
+  requestedBy: string;
+  /** T2 manager that owns this T3 worker */
+  parentT2Id: string;
+  /** Tool being requested */
+  toolName: string;
+  /** Tool input arguments */
+  input: Record<string, unknown>;
+  /** Whether the tool is flagged as dangerous */
+  isDangerous: boolean;
+  /** What the T3 subtask is trying to accomplish */
+  subtaskContext: string;
+  /** What the parent T2 section's goal is */
+  sectionContext: string;
+  /** What T1's overall task goal is (injected when escalated to T1) */
+  taskContext?: string;
+}
+
+/**
+ * A decision made at any tier (T2, T1, or USER) about a PermissionRequest.
+ */
+export interface PermissionDecision {
+  /** ID of the PermissionRequest this responds to */
+  requestId: string;
+  /** Whether the tool call is approved */
+  approved: boolean;
+  /**
+   * If true, cache this decision for the session so the same tool
+   * is not asked about again (section-wide scope for T2, task-wide for T1).
+   */
+  always?: boolean;
+  /** Which tier made the decision */
+  decidedBy: 'T2' | 'T1' | 'USER';
+  /** Optional explanation from the evaluating tier */
+  reasoning?: string;
 }
 
 // ── Audit ─────────────────────────────────────
@@ -514,7 +579,7 @@ export interface CascadeRunOptions {
   sessionId?: string;
   conversationHistory?: ConversationMessage[];
   streamCallback?: (chunk: StreamChunk) => void;
-  approvalCallback?: (request: ApprovalRequest) => Promise<boolean>;
+  approvalCallback?: (request: ApprovalRequest) => Promise<boolean | { approved: boolean; always: boolean }>;
 }
 
 export interface CascadeRunResult {

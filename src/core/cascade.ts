@@ -8,6 +8,7 @@ import type {
   CascadeRunResult,
   ConversationMessage,
   ImageAttachment,
+  PermissionRequest,
   StreamChunk,
   TaskComplexity,
   T3Result
@@ -19,6 +20,8 @@ import { T3Worker } from './tiers/t3-worker.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { AuditLogger } from '../audit/log.js';
 import { MemoryStore } from '../memory/store.js';
+import { PermissionEscalator } from './permissions/escalator.js';
+import { validateConfig } from '../config/validate.js';
 
 export class Cascade extends EventEmitter {
   private router: CascadeRouter;
@@ -30,10 +33,11 @@ export class Cascade extends EventEmitter {
 
   constructor(config: CascadeConfig, workspacePath: string, store?: MemoryStore) {
     super();
-    this.config = config;
+    // Validate config eagerly so users get a clear error at startup, not at run time
+    this.config = validateConfig(config) as CascadeConfig;
     this.store = store;
     this.router = new CascadeRouter();
-    this.toolRegistry = new ToolRegistry(config.tools, workspacePath);
+    this.toolRegistry = new ToolRegistry(this.config.tools, workspacePath);
   }
 
   setStore(store: MemoryStore): void {
@@ -111,6 +115,46 @@ ${prompt}`
     const startMs = Date.now();
     const taskId = randomUUID();
 
+    // Create a fresh permission escalator for this task run
+    const escalator = new PermissionEscalator();
+
+    // Wire escalator's user-required event → approvalCallback or direct event
+    escalator.on('permission:user-required', async (req: PermissionRequest) => {
+      this.emit('permission:user-required', req);
+
+      // Build enriched context for the approval callback / REPL
+      const enrichedRequest: ApprovalRequest & { escalationContext?: unknown } = {
+        id: req.id,
+        tierId: req.requestedBy,
+        toolName: req.toolName,
+        input: req.input,
+        description: `T3 Worker "${req.subtaskContext}" wants to run "${req.toolName}". T2 and T1 could not determine if this is safe.`,
+        isDangerous: req.isDangerous,
+        escalationContext: {
+          requestedBy: req.requestedBy,
+          parentT2Id: req.parentT2Id,
+          subtaskContext: req.subtaskContext,
+          sectionContext: req.sectionContext,
+          taskContext: req.taskContext,
+        },
+      };
+
+      let approved = false;
+      let always = false;
+
+      if (options.approvalCallback) {
+        const result = await options.approvalCallback(enrichedRequest);
+        if (typeof result === 'boolean') {
+          approved = result;
+        } else {
+          approved = result.approved;
+          always = result.always;
+        }
+      }
+
+      escalator.resolveUserDecision(req.id, approved, always);
+    });
+
     // 1. Determine complexity
     const complexity = await this.determineComplexity(options.prompt, options.conversationHistory);
 
@@ -127,16 +171,22 @@ ${prompt}`
       });
       tier.on('log', (e: any) => this.emit('log', e));
       tier.on('tier:status', (e: any) => this.emit('tier:status', e));
-      tier.on('tool:approval-request', async (request: ApprovalRequest & { __cascadeResponder?: (approved: boolean) => void }) => {
+      // Legacy approval events (for tiers not yet wired to escalator)
+      tier.on('tool:approval-request', async (request: ApprovalRequest & { __cascadeResponder?: (decision: { approved: boolean; always?: boolean }) => void }) => {
         this.emit('tool:approval-request', request);
-        let approved = false;
+        let decision: { approved: boolean; always?: boolean } = { approved: false };
         if (options.approvalCallback) {
-          approved = await options.approvalCallback(request);
+          const result = await options.approvalCallback(request);
+          if (typeof result === 'boolean') {
+            decision = { approved: result };
+          } else {
+            decision = result;
+          }
         }
         if (typeof request.__cascadeResponder === 'function') {
-          request.__cascadeResponder(approved);
+          request.__cascadeResponder(decision);
         } else {
-          tier.emit(`tool:approval-response:${request.id}`, { approved } as ApprovalResponse);
+          tier.emit(`tool:approval-response:${request.id}`, { id: request.id, ...decision } as ApprovalResponse);
         }
       });
     };
@@ -146,6 +196,7 @@ ${prompt}`
       if (this.store) {
         t3.setStore(this.store, taskId);
       }
+      t3.setPermissionEscalator(escalator);
       bindTierEvents(t3);
       const assignment = {
         subtaskId: taskId,
@@ -164,6 +215,7 @@ ${prompt}`
       if (this.store) {
         t2.setStore(this.store);
       }
+      t2.setPermissionEscalator(escalator);
       bindTierEvents(t2);
       const assignment = {
         sectionId: taskId,
@@ -187,6 +239,7 @@ ${prompt}`
       if (this.store) {
         t1.setStore(this.store);
       }
+      t1.setPermissionEscalator(escalator);
       bindTierEvents(t1);
       t1.on('plan', (e: any) => this.emit('plan', e));
       
@@ -194,6 +247,9 @@ ${prompt}`
       finalOutput = result.output;
       t2Results = result.t2Results;
     }
+
+    // Clean up any pending escalations on task completion
+    escalator.cancelAllPending();
 
     const stats = this.router.getStats();
 

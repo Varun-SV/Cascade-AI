@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { Server as SocketServer } from 'socket.io';
+import parser from 'socket.io-msgpack-parser';
 import type { Server as HttpServer } from 'node:http';
 import type { CascadeEvent } from '../types.js';
 
@@ -12,6 +13,7 @@ export class DashboardSocket {
   constructor(httpServer: HttpServer, corsOrigin: string | string[] = '*') {
     this.io = new SocketServer(httpServer, {
       cors: { origin: corsOrigin, methods: ['GET', 'POST'] },
+      parser,
     });
     this.setupHandlers();
   }

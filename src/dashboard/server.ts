@@ -250,12 +250,24 @@ export class DashboardServer {
       res.json(log);
     });
 
-    // ── Config ──────────────────────────────────
     this.app.get('/api/config', auth, (_req, res) => {
       // Strip sensitive fields before sending
       const safe = { ...this.config };
       safe.providers = safe.providers.map((p) => ({ ...p, apiKey: p.apiKey ? '***' : undefined }));
       res.json(safe);
+    });
+
+    // ── Log History ─────────────────────────────
+    this.app.get('/api/runtime/logs/:sessionId', auth, (req: Request, res: Response) => {
+      const sessionId = req.params['sessionId'] as string;
+      const before = req.query['before'] as string | undefined;
+      const limitStr = req.query['limit'] as string | undefined;
+      const logs = this.store.listRuntimeNodeLogs(
+        sessionId,
+        before,
+        parseInt(limitStr || '100', 10),
+      );
+      res.json(logs);
     });
 
     // ── Stats ───────────────────────────────────

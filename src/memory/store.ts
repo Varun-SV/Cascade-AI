@@ -444,6 +444,59 @@ export class MemoryStore {
     return Date.now() - new Date(row.oldest).getTime();
   }
 
+  // ── Tool Result Cache (in-memory, TTL-based) ──────────────────────────
+  // Avoids redundant calls for read-only tools within a short window.
+  // Not persisted to DB — cleared on process restart.
+
+  private toolResultCache: Map<string, { result: string; expiresAt: number }> = new Map();
+
+  private static CACHEABLE_TOOLS = new Set([
+    'file_read', 'file_list', 'git_status', 'git_log', 'git_diff',
+  ]);
+
+  private static TOOL_TTL_MS: Record<string, number> = {
+    file_read:  60_000,
+    file_list:  30_000,
+    git_status: 15_000,
+    git_log:    60_000,
+    git_diff:   30_000,
+  };
+
+  /**
+   * Returns a cached tool result, or null if not cached / expired.
+   */
+  getToolResult(toolName: string, input: Record<string, unknown>): string | null {
+    if (!MemoryStore.CACHEABLE_TOOLS.has(toolName)) return null;
+    const key = `${toolName}:${JSON.stringify(input)}`;
+    const entry = this.toolResultCache.get(key);
+    if (!entry || Date.now() > entry.expiresAt) {
+      this.toolResultCache.delete(key);
+      return null;
+    }
+    return entry.result;
+  }
+
+  /**
+   * Stores a tool result in the in-memory cache.
+   * Only caches read-only/safe tools (see CACHEABLE_TOOLS).
+   */
+  setToolResult(toolName: string, input: Record<string, unknown>, result: string): void {
+    if (!MemoryStore.CACHEABLE_TOOLS.has(toolName)) return;
+    const ttl = MemoryStore.TOOL_TTL_MS[toolName] ?? 30_000;
+    this.toolResultCache.set(`${toolName}:${JSON.stringify(input)}`, {
+      result,
+      expiresAt: Date.now() + ttl,
+    });
+  }
+
+  /** Invalidate tool cache for a specific tool name, or all tools if omitted. */
+  invalidateToolCache(toolName?: string): void {
+    if (!toolName) { this.toolResultCache.clear(); return; }
+    for (const key of this.toolResultCache.keys()) {
+      if (key.startsWith(`${toolName}:`)) this.toolResultCache.delete(key);
+    }
+  }
+
   close(): void {
     this.db.close();
   }

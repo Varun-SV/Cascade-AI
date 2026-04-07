@@ -5,9 +5,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type {
-  ApprovalRequest,
   ConversationMessage,
   GenerateOptions,
+  PermissionRequest,
   T2ToT3Assignment,
   T3Result,
   ToolCall,
@@ -19,6 +19,8 @@ import { BaseTier } from './base.js';
 import { ContextManager } from '../context/manager.js';
 import { AuditLogger } from '../../audit/log.js';
 import { MemoryStore } from '../../memory/store.js';
+import type { PeerBus } from '../peer/bus.js';
+import type { PermissionEscalator } from '../permissions/escalator.js';
 
 const T3_SYSTEM_PROMPT = `You are a T3 Worker agent in the Cascade AI system. Your job is to execute a specific subtask completely and accurately.
 
@@ -29,6 +31,7 @@ Rules:
 - Use the "pdf_create" tool for PDF requests.
 - Use the "run_code" tool for any file types (Excel, Zip, csv, etc.) or complex processing not covered by other tools. Always cleanup after code execution.
 - If you are not making meaningful progress, stop and escalate rather than looping or padding the response.
+- Use the "peer_message" tool to communicate with other T3 workers if your tasks have dependencies or shared state. You can send updates or wait for signals.
 - Return structured output that directly addresses the expected output specification.`;
 
 export class T3Worker extends BaseTier {
@@ -36,9 +39,29 @@ export class T3Worker extends BaseTier {
   private toolRegistry: ToolRegistry;
   private context: ContextManager;
   private assignment?: T2ToT3Assignment;
-  private peerSyncBuffer: Map<string, unknown> = new Map();
+  private peerSyncBuffer: Array<{ fromId: string; content: unknown; timestamp: string }> = [];
   private store?: MemoryStore;
   private audit?: AuditLogger;
+  private tools: ToolDefinition[] = [];
+  /** @deprecated — kept only as fallback when no escalator is attached */
+  private sessionApprovals: Map<string, boolean> = new Map();
+  private peerBus?: PeerBus;
+  private permissionEscalator?: PermissionEscalator;
+
+  setPeerBus(bus: PeerBus): void {
+    this.peerBus = bus;
+    this.peerBus.register(this.id);
+
+    // Listen for targeted messages from peers
+    this.peerBus.on(`message:${this.id}`, (msg) => {
+      this.log(`Peer message from ${msg.fromId}: ${msg.type}`);
+      this.receivePeerSync(msg.fromId, msg.payload);
+    });
+  }
+
+  setPermissionEscalator(escalator: PermissionEscalator): void {
+    this.permissionEscalator = escalator;
+  }
 
   constructor(router: CascadeRouter, toolRegistry: ToolRegistry, parentId: string) {
     super('T3', undefined, parentId);
@@ -58,15 +81,58 @@ export class T3Worker extends BaseTier {
     this.setLabel(assignment.subtaskTitle);
     this.setStatus('ACTIVE');
 
+    this.tools = this.toolRegistry.getToolDefinitions();
+
+    // ── Step 0: Wait for dependencies ──────────
+    if (assignment.dependsOn?.length && this.peerBus) {
+      this.sendStatusUpdate({
+        progressPct: 0,
+        currentAction: `Waiting for dependencies: ${assignment.dependsOn.join(', ')}`,
+        status: 'IN_PROGRESS',
+      });
+
+      const depOutputs: string[] = [];
+      for (const depId of assignment.dependsOn) {
+        try {
+          const dep = await this.peerBus.waitFor(depId);
+          if (dep.status === 'FAILED' || dep.status === 'ESCALATED') {
+            return this.buildResult(
+              'ESCALATED',
+              `Dependency ${depId} failed — cannot proceed`,
+              { checksRun: [], passed: [], failed: [] },
+              [`Blocked by failed dependency: ${depId}`],
+              0,
+            );
+          }
+          depOutputs.push(`[From ${dep.fromId} - ${dep.subtaskId}]:\n${dep.output}`);
+        } catch (err) {
+          return this.buildResult(
+            'ESCALATED',
+            `Dependency timeout: ${depId}`,
+            { checksRun: [], passed: [], failed: [] },
+            [err instanceof Error ? err.message : String(err)],
+            0,
+          );
+        }
+      }
+
+      // Inject dependency outputs into context
+      if (depOutputs.length) {
+        await this.context.addMessage({
+          role: 'user',
+          content: `Context from completed dependencies:\n\n${depOutputs.join('\n\n')}\n\nNow execute your subtask using this context where relevant.`,
+        });
+      }
+    }
+
     this.sendStatusUpdate({
-      progressPct: 0,
+      progressPct: 5,
       currentAction: `Starting subtask: ${assignment.subtaskTitle}`,
       status: 'IN_PROGRESS',
     });
 
     this.log(`T3 executing subtask: ${assignment.subtaskTitle}`);
 
-    const tools = this.toolRegistry.getToolDefinitions();
     const systemPrompt = this.buildSystemPrompt(assignment);
 
     await this.context.addMessage({
@@ -83,8 +149,7 @@ export class T3Worker extends BaseTier {
     const issues: string[] = [];
 
     try {
-      // Execute
-      const result = await this.runAgentLoop(systemPrompt, tools);
+      const result = await this.runAgentLoop(systemPrompt, this.tools);
       output = result.output;
       toolCalls = result.toolCalls;
 
@@ -99,31 +164,30 @@ export class T3Worker extends BaseTier {
         if (!retryArtifactCheck.ok) {
           issues.push(...retryArtifactCheck.issues);
           this.setStatus('FAILED');
+          // ── Publish failure to peers ──
+          this.peerBus?.publish(this.id, assignment.subtaskId, output, 'ESCALATED');
           return this.buildResult('ESCALATED', output, { checksRun, passed, failed }, issues, correctionAttempts);
         }
       }
 
       this.sendStatusUpdate({ progressPct: 70, currentAction: 'Self-testing output', status: 'IN_PROGRESS' });
 
-      // Self-test
       const testResult = await this.selfTest(assignment, output);
       checksRun.push(...testResult.checksRun);
       passed.push(...testResult.passed);
       failed.push(...testResult.failed);
 
-      // If failed, one correction attempt
       if (testResult.failed.length > 0) {
         correctionAttempts = 1;
         issues.push(`Initial check failed: ${testResult.failed.join(', ')}`);
-
         const corrected = await this.correctOutput(output, testResult.failed);
         output = corrected;
-
         const retest = await this.selfTest(assignment, output);
         passed.push(...retest.passed);
         if (retest.failed.length > 0) {
           failed.push(...retest.failed);
           this.setStatus('FAILED');
+          this.peerBus?.publish(this.id, assignment.subtaskId, output, 'ESCALATED');
           return this.buildResult('ESCALATED', output, { checksRun, passed, failed }, issues, correctionAttempts);
         }
       }
@@ -131,17 +195,43 @@ export class T3Worker extends BaseTier {
       this.setStatus('COMPLETED');
       this.sendStatusUpdate({ progressPct: 100, currentAction: 'Subtask complete', status: 'IN_PROGRESS' });
 
+      // ── Publish success to peers ─────────────
+      this.peerBus?.publish(this.id, assignment.subtaskId, output, 'COMPLETED');
+
       return this.buildResult('COMPLETED', output, { checksRun, passed, failed }, issues, correctionAttempts);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       issues.push(`Execution error: ${errMsg}`);
       this.setStatus('FAILED');
+      this.peerBus?.publish(this.id, assignment.subtaskId, errMsg, 'FAILED');
       return this.buildResult('ESCALATED', output || errMsg, { checksRun, passed, failed }, issues, correctionAttempts);
     }
   }
 
+  sendToPeer(toId: string, content: unknown): void {
+    this.peerBus?.send(this.id, toId, 'SYNC_DATA', this.assignment?.subtaskId ?? '', content);
+  }
+
+  async requestFromPeer(peerId: string, subtaskId: string): Promise<string> {
+    if (!this.peerBus) throw new Error('No PeerBus attached');
+    const output = await this.peerBus.waitFor(subtaskId);
+    return output.output;
+  }
+
+  async syncWithPeers(barrierName: string): Promise<void> {
+    if (!this.peerBus) return;
+    const total = this.peerBus.getMembers().length;
+    await this.peerBus.barrier(this.id, barrierName, total);
+  }
+
   receivePeerSync(fromId: string, content: unknown): void {
-    this.peerSyncBuffer.set(fromId, content);
+    const existing = this.peerSyncBuffer.find(p => p.fromId === fromId);
+    if (existing) {
+      existing.content = content;
+      existing.timestamp = new Date().toISOString();
+    } else {
+      this.peerSyncBuffer.push({ fromId, content, timestamp: new Date().toISOString() });
+    }
     this.emit('peer-sync-received', { fromId, content });
   }
 
@@ -220,24 +310,40 @@ export class T3Worker extends BaseTier {
     const needsApproval = this.toolRegistry.requiresApproval(tc.name);
 
     if (needsApproval) {
-      const request: ApprovalRequest = {
-        id: `${this.id}-${tc.id}`,
-        tierId: this.id,
-        toolName: tc.name,
-        input: tc.input,
-        description: `T3 (${this.assignment?.subtaskTitle}) wants to run: ${tc.name}`,
-        isDangerous: this.toolRegistry.isDangerous(tc.name),
-      };
-
-      const approved = await new Promise<boolean>((resolve) => {
-        this.emit('tool:approval-request', request);
-        this.once(`tool:approval-response:${request.id}`, (resp: { approved: boolean }) => {
-          resolve(resp.approved);
-        });
-      });
-
-      if (!approved) {
-        return `Tool ${tc.name} was denied by user.`;
+      // ── Hierarchical permission escalation: T3 → T2 → T1 → User ──
+      if (this.permissionEscalator) {
+        const req: PermissionRequest = {
+          id: `${this.id}-${tc.id}`,
+          requestedBy: this.id,
+          parentT2Id: this.parentId ?? 'root',
+          toolName: tc.name,
+          input: tc.input,
+          isDangerous: this.toolRegistry.isDangerous(tc.name),
+          subtaskContext: this.assignment?.subtaskTitle ?? 'Unknown subtask',
+          sectionContext: this.assignment?.subtaskTitle ?? 'Unknown section',
+        };
+        const decision = await this.permissionEscalator.requestPermission(req);
+        if (!decision.approved) return `Tool ${tc.name} was denied (decided by ${decision.decidedBy}).`;
+      } else {
+        // ── Fallback: legacy direct approval event (used when escalator not wired) ──
+        if (this.sessionApprovals.has(tc.name)) {
+          const wasApproved = this.sessionApprovals.get(tc.name)!;
+          if (!wasApproved) return `Tool ${tc.name} was denied by user.`;
+        } else {
+          const legacyDecision = await new Promise<{ approved: boolean; always?: boolean }>((resolve) => {
+            this.emit('tool:approval-request', {
+              id: `${this.id}-${tc.id}`,
+              tierId: this.id,
+              toolName: tc.name,
+              input: tc.input,
+              description: `T3 (${this.assignment?.subtaskTitle}) wants to run "${tc.name}"`,
+              isDangerous: this.toolRegistry.isDangerous(tc.name),
+            });
+            this.once(`tool:approval-response:${this.id}-${tc.id}`, resolve);
+          });
+          if (legacyDecision.always) this.sessionApprovals.set(tc.name, legacyDecision.approved);
+          if (!legacyDecision.approved) return `Tool ${tc.name} was denied by user.`;
+        }
       }
     }
 
@@ -249,6 +355,15 @@ export class T3Worker extends BaseTier {
         saveSnapshot: async (path, content) => {
           this.store?.addFileSnapshot(this.taskId, path, content);
         },
+        sendPeerSync: (to, type, content) => {
+          this.emit('message', this.buildMessage('PEER_SYNC', this.parentId ?? 'T2', {
+            senderT3Id: this.id,
+            recipientT3Id: to,
+            syncType: type as any,
+            content,
+          }));
+        },
+        getPeerMessages: () => [...this.peerSyncBuffer],
       });
       if (this.audit) {
         this.audit.toolCall(this.id, tc.name, tc.input);
@@ -365,8 +480,12 @@ Correct the issues and provide an improved version that addresses all failures.`
     await this.context.addMessage({ role: 'user', content: correctionPrompt });
 
     const result = await this.router.generate(
-      'T3',
-      { messages: this.context.getMessages(), maxTokens: 4096 },
+    'T3',
+      { 
+        messages: this.context.getMessages(),
+        tools: this.tools.length ? this.tools : undefined, // ✅  was missing
+        maxTokens: 4096 
+      },
       (chunk) => this.emit('stream:token', { tierId: this.id, text: chunk.text }),
     );
     await this.context.addMessage({ role: 'assistant', content: result.content });
@@ -411,7 +530,7 @@ Begin execution now.`;
       output,
       testResults,
       issues,
-      peerSyncsUsed: [...this.peerSyncBuffer.keys()],
+      peerSyncsUsed: this.peerSyncBuffer.map(m => m.fromId),
       correctionAttempts,
     };
   }

@@ -104,7 +104,7 @@ async function startRepl(options: {
       themeName: options.theme ?? config.theme ?? DEFAULT_THEME,
       initialPrompt: options.prompt,
     }),
-    { exitOnCtrlC: true },
+    { exitOnCtrlC: false },
   );
 
   await waitUntilExit();

@@ -1,171 +1,210 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { useAppSelector, useAppDispatch } from './store';
-import { 
-  setActiveSession, 
-  setScope, 
-  updateRTKSnapshot, 
-  selectSessions, 
-  selectActiveSession, 
-  selectActiveNodes, 
-  selectActiveLogs 
+import {
+  setActiveSession,
+  updateRTKSnapshot,
+  selectActiveNodes,
+  selectActiveSession,
 } from './store/slices/runtimeSlice';
-import { useWebSocket, type RuntimeSnapshot } from './hooks/useWebSocket.ts';
-import { LoginView } from './components/auth/LoginView.tsx';
-import { DashboardLayout } from './components/layout/DashboardLayout.tsx';
-import { Sidebar } from './components/layout/Sidebar.tsx';
-import { AgentGraph } from './components/dashboard/AgentGraph.tsx';
-import { Inspector } from './components/dashboard/Inspector.tsx';
-import { formatNodeLabel } from './utils/runtime.ts';
+import { useWebSocket, type RuntimeSnapshot } from './hooks/useWebSocket';
+import { LoginView } from './components/auth/LoginView';
+import { NavRail } from './components/layout/NavRail';
+import { TopBar } from './components/layout/TopBar';
+import { AgentGraph } from './components/dashboard/AgentGraph';
+import { InspectorPanel } from './components/dashboard/InspectorPanel';
+import { EscalationCard } from './components/dashboard/EscalationCard';
+import { SessionList } from './components/dashboard/SessionList';
+import { LogViewer } from './components/dashboard/LogViewer';
+
+// Inline type matching src/types.ts PermissionRequest
+interface PermissionRequest {
+  id: string;
+  requestedBy: string;
+  parentT2Id: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  isDangerous: boolean;
+  subtaskContext: string;
+  sectionContext: string;
+  taskContext?: string;
+}
+
+type NavTab = 'topology' | 'sessions' | 'logs' | 'settings';
+
+// ── Root ───────────────────────────────────────
 
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem('cascade_token') ?? '');
-  const [vibe, setVibe] = useState<'hacker' | 'linear'>(() => (localStorage.getItem('cascade_vibe') as any) ?? 'linear');
 
-  useEffect(() => {
-    localStorage.setItem('cascade_vibe', vibe);
-  }, [vibe]);
-  
-  if (!token) {
+  const handleLogin = useCallback((t: string) => {
+    setToken(t);
+    localStorage.setItem('cascade_token', t);
+  }, []);
+
+  const handleLogout = useCallback(() => {
+    setToken('');
+    localStorage.removeItem('cascade_token');
+  }, []);
+
+  if (!token && token !== '') {
+    // Still loading (checking no-auth)
     return (
-      <LoginView 
-        onLogin={(t) => { setToken(t); localStorage.setItem('cascade_token', t); }} 
-        vibe={vibe}
-        setVibe={setVibe}
-      />
+      <div className="flex items-center justify-center w-full h-full">
+        <div className="w-8 h-8 rounded-full border-2 border-[var(--accent)] border-t-transparent animate-spin" />
+      </div>
     );
   }
 
-  return (
-    <Dashboard 
-      token={token} 
-      onLogout={() => { setToken(''); localStorage.removeItem('cascade_token'); }} 
-    />
-  );
+  return <Dashboard token={token} onLogout={handleLogout} onNeedAuth={() => setToken('')} />;
 }
 
-function Dashboard({ token, onLogout }: { token: string; onLogout: () => void }) {
+// ── Dashboard ──────────────────────────────────
+
+function Dashboard({
+  token,
+  onLogout,
+  onNeedAuth,
+}: {
+  token: string;
+  onLogout: () => void;
+  onNeedAuth: () => void;
+}) {
   const dispatch = useAppDispatch();
-  const [activeTab, setActiveTab] = useState('topology');
+  const [activeTab, setActiveTab] = useState<NavTab>('topology');
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [streamLog, setStreamLog] = useState<string>('');
+  const [streamLog, setStreamLog] = useState('');
+  const [pendingEscalation, setPendingEscalation] = useState<PermissionRequest | null>(null);
+  const [costUsd, setCostUsd] = useState(0);
+  const [totalTokens, setTotalTokens] = useState(0);
 
-  const sessions = useAppSelector(selectSessions);
-  const activeSession = useAppSelector(selectActiveSession);
   const activeNodes = useAppSelector(selectActiveNodes);
-  const activeLogs = useAppSelector(selectActiveLogs);
-  const runtimeScope = useAppSelector(state => state.runtime.scope);
+  const activeSession = useAppSelector(selectActiveSession);
 
-  const refreshRuntime = useMemo(() => async (scope: 'workspace' | 'global' = 'workspace') => {
+  // ── Refresh runtime snapshot ─────────────────
+  const refreshRuntime = useCallback(async (scope: 'workspace' | 'global' = 'workspace') => {
     try {
-      const res = await fetch(`/api/runtime?scope=${scope}`, { 
-        headers: { Authorization: `Bearer ${token}` }, 
-        cache: 'no-store' 
+      const res = await fetch(`/api/runtime?scope=${scope}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: 'no-store',
       });
+      if (res.status === 401) { onNeedAuth(); return; }
       if (res.ok) {
         const snapshot = await res.json() as RuntimeSnapshot;
         dispatch(updateRTKSnapshot(snapshot));
       }
-    } catch (err) {
-      console.error('Failed to refresh runtime:', err);
-    }
-  }, [token, dispatch]);
+    } catch { /* network error, retry on next WS ping */ }
+  }, [token, dispatch, onNeedAuth]);
 
-  const { events } = useWebSocket({
+  // ── WebSocket ────────────────────────────────
+  const { events, socket } = useWebSocket({
     url: '/',
     token,
     activeSessionId: activeSession?.sessionId,
-    onRuntimeRefresh: (scope) => {
-      refreshRuntime(scope || runtimeScope);
-    },
+    onRuntimeRefresh: (scope) => refreshRuntime(scope || 'workspace'),
+    onStreamToken: (d) => setStreamLog((prev) => (prev + d.text).slice(-8000)),
   });
 
+  // Listen for cost updates and permission escalations via WS events
   useEffect(() => {
-    for (const ev of events) {
-      if (ev.type === 'stream:token') {
-        const d = ev.data as { text: string };
-        setStreamLog((prev) => (prev + d.text).slice(-10000));
-      }
+    const costEvent = [...events].reverse().find((e: { type: string; data: unknown; ts: number }) => e.type === 'cost:update');
+    if (costEvent) {
+      const d = costEvent.data as { totalCostUsd?: number; totalTokens?: number };
+      if (d.totalCostUsd) setCostUsd(d.totalCostUsd);
+      if (d.totalTokens) setTotalTokens(d.totalTokens);
+    }
+
+    const escEvent = [...events].reverse().find((e: { type: string; data: unknown; ts: number }) => e.type === 'permission:user-required');
+    if (escEvent && !pendingEscalation) {
+      setPendingEscalation(escEvent.data as PermissionRequest);
     }
   }, [events]);
 
-  useEffect(() => {
-    refreshRuntime(runtimeScope);
-  }, [refreshRuntime, runtimeScope]);
+  useEffect(() => { refreshRuntime(); }, [refreshRuntime]);
 
-  const sessionEdges = useMemo(() => 
-    activeNodes.filter(n => n.parentId).map(n => ({ from: n.parentId!, to: n.tierId }))
-  , [activeNodes]);
+  // ── Derived data ─────────────────────────────
+  const graphNodes = useMemo(() => activeNodes.map((n) => ({
+    id: n.tierId,
+    role: n.role,
+    label: n.label,
+    status: n.status,
+    action: n.currentAction,
+    progressPct: n.progressPct,
+  })), [activeNodes]);
 
-  const selectedNode = useMemo(() => 
-    activeNodes.find(n => n.tierId === selectedNodeId)
-  , [activeNodes, selectedNodeId]);
+  const graphEdges = useMemo(() =>
+    activeNodes.filter((n) => n.parentId).map((n) => ({ from: n.parentId!, to: n.tierId })),
+  [activeNodes]);
+
+  const selectedNode = useMemo(() =>
+    activeNodes.find((n) => n.tierId === selectedNodeId) ?? null,
+  [activeNodes, selectedNodeId]);
+
+  const isConnected = useAppSelector((s) => s.runtime.connected);
+
+  // ── Escalation decision handler ──────────────
+  const handleEscalationDecide = useCallback((approved: boolean, always: boolean) => {
+    if (!pendingEscalation || !socket) return;
+    socket.emit('permission:decision', {
+      requestId: pendingEscalation.id,
+      approved,
+      always,
+      decidedBy: 'USER',
+    });
+    setPendingEscalation(null);
+  }, [pendingEscalation, socket]);
+
+  const showInspector = selectedNodeId !== null;
 
   return (
-    <DashboardLayout 
-      sidebar={
-        <Sidebar 
-          activeTab={activeTab} 
-          setActiveTab={setActiveTab} 
-          onLogout={onLogout} 
-        />
-      }
-    >
-      {activeTab === 'topology' && (
-        <div className="w-full h-full relative">
-          <AgentGraph 
-            nodes={activeNodes.map(n => ({
-              id: n.tierId,
-              role: n.role,
-              label: formatNodeLabel(n.label, n.role),
-              status: n.status,
-              action: n.currentAction
-            }))}
-            edges={sessionEdges}
-            selectedNodeId={selectedNodeId || undefined}
-            onSelectNode={setSelectedNodeId}
-          />
-          
-          {selectedNodeId && (
-            <Inspector 
-              selectedNode={selectedNode ? {
-                id: selectedNode.tierId,
-                data: {
-                  label: formatNodeLabel(selectedNode.label, selectedNode.role),
-                  status: selectedNode.status.toLowerCase(),
-                  description: selectedNode.currentAction,
-                  logs: [streamLog.split('\n').pop() || ''] 
-                }
-              } : null}
+    <div className="flex h-full w-full overflow-hidden bg-[var(--bg-base)]">
+      {/* Navigation Rail */}
+      <NavRail activeTab={activeTab} onTabChange={setActiveTab} onLogout={onLogout} />
+
+      {/* Main area */}
+      <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+        {/* Top Bar */}
+        <TopBar isConnected={isConnected} totalCostUsd={costUsd} totalTokens={totalTokens} />
+
+        {/* Content */}
+        <div className="flex flex-1 min-h-0 overflow-hidden">
+
+          {/* Primary content panel */}
+          <main className="flex-1 min-w-0 overflow-hidden relative dot-grid">
+            {activeTab === 'topology' && (
+              <AgentGraph
+                nodes={graphNodes}
+                edges={graphEdges}
+                selectedNodeId={selectedNodeId ?? undefined}
+                onSelectNode={setSelectedNodeId}
+              />
+            )}
+            {activeTab === 'sessions' && <SessionList />}
+            {activeTab === 'logs' && <LogViewer />}
+            {activeTab === 'settings' && (
+              <div className="flex items-center justify-center h-full animate-fade-in">
+                <p className="text-[var(--text-muted)] text-sm">Settings panel — coming soon</p>
+              </div>
+            )}
+          </main>
+
+          {/* Inspector panel (topology tab only) */}
+          {activeTab === 'topology' && (showInspector || !graphNodes.length) && (
+            <InspectorPanel
+              node={selectedNode}
+              streamLog={streamLog}
               onClose={() => setSelectedNodeId(null)}
             />
           )}
         </div>
-      )}
+      </div>
 
-      {activeTab === 'chat' && (
-        <div className="p-8 h-full flex flex-col">
-          <div className="flex-1 bg-black/40 backdrop-blur-sm border border-white/5 rounded-3xl p-6 font-mono text-sm overflow-y-auto custom-scrollbar">
-            {streamLog || 'Awaiting telemetry stream...'}
-          </div>
-        </div>
+      {/* Permission Escalation Card (modal overlay) */}
+      {pendingEscalation && (
+        <EscalationCard
+          request={pendingEscalation}
+          onDecide={handleEscalationDecide}
+        />
       )}
-
-      {activeTab === 'logs' && (
-        <div className="p-8 h-full overflow-y-auto">
-          <div className="space-y-4">
-            {activeLogs.map((log) => (
-              <div key={log.id} className="p-4 bg-white/5 border border-white/5 rounded-2xl flex items-center justify-between">
-                <div className="flex items-center gap-4">
-                  <span className="text-blue-400 font-mono text-xs">[{new Date(log.timestamp).toLocaleTimeString()}]</span>
-                  <span className="text-white font-bold">{log.label}</span>
-                  <span className="text-slate-500 text-xs italic">{log.status}</span>
-                </div>
-                <div className="text-xs text-slate-400">{log.currentAction}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </DashboardLayout>
+    </div>
   );
 }

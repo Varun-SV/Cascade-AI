@@ -9,7 +9,7 @@ import type { ApprovalRequest, Theme } from '../../../types.js';
 interface ApprovalPromptProps {
   request: ApprovalRequest;
   theme: Theme;
-  onDecision: (approved: boolean) => void;
+  onDecision: (decision: { approved: boolean; always: boolean }) => void;
 }
 
 export function ApprovalPrompt({ request, theme, onDecision }: ApprovalPromptProps): React.ReactElement {
@@ -17,12 +17,15 @@ export function ApprovalPrompt({ request, theme, onDecision }: ApprovalPromptPro
 
   useInput((input, key) => {
     if (decided) return;
-    if (input === 'y' || input === 'Y') {
+    if (input === 'a' || input === 'A') {
       setDecided(true);
-      onDecision(true);
+      onDecision({ approved: true, always: true });
+    } else if (input === 'y' || input === 'Y') {
+      setDecided(true);
+      onDecision({ approved: true, always: false });
     } else if (input === 'n' || input === 'N' || key.escape) {
       setDecided(true);
-      onDecision(false);
+      onDecision({ approved: false, always: false });
     }
   });
 
@@ -48,6 +51,8 @@ export function ApprovalPrompt({ request, theme, onDecision }: ApprovalPromptPro
       <Box marginTop={1}>
         {!decided ? (
           <Text>
+            <Text color={theme.colors.success} bold>[a]</Text>
+            <Text color={theme.colors.muted}> Allow Always  </Text>
             <Text color={theme.colors.success} bold>[y]</Text>
             <Text color={theme.colors.muted}> Allow  </Text>
             <Text color={theme.colors.error} bold>[n]</Text>

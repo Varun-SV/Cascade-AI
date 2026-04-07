@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
+import parser from 'socket.io-msgpack-parser';
 import { useAppDispatch } from '../store';
 import { setConnected, updateRTKSnapshot, updateSessionDetails, appendLog } from '../store/slices/runtimeSlice';
 
@@ -57,9 +58,10 @@ interface UseWebSocketOptions {
   token?: string;
   activeSessionId?: string | null;
   onRuntimeRefresh?: (scope?: 'workspace' | 'global') => void;
+  onStreamToken?: (data: { text: string }) => void;
 }
 
-export function useWebSocket({ url = '/', token, activeSessionId, onRuntimeRefresh }: UseWebSocketOptions = {}) {
+export function useWebSocket({ url = '/', token, activeSessionId, onRuntimeRefresh, onStreamToken }: UseWebSocketOptions = {}) {
   const socketRef = useRef<Socket | null>(null);
   const dispatch = useAppDispatch();
   const [events, setEvents] = useState<Array<{ type: string; data: unknown; ts: number }>>([]);
@@ -73,6 +75,7 @@ export function useWebSocket({ url = '/', token, activeSessionId, onRuntimeRefre
       transports: ['websocket', 'polling'],
       reconnection: true,
       reconnectionDelay: 500,
+      parser,
     });
 
     socketRef.current = socket;
@@ -113,8 +116,12 @@ export function useWebSocket({ url = '/', token, activeSessionId, onRuntimeRefre
       const payload = data as { scope?: 'workspace' | 'global' } | undefined;
       onRuntimeRefresh?.(payload?.scope);
     });
+    
+    socket.on('stream:token', (data: unknown) => {
+      onStreamToken?.(data as { text: string });
+    });
 
-    const genericEvents = ['tier:status', 'stream:token', 'tool:approval-request', 'plan'];
+    const genericEvents = ['tier:status', 'tool:approval-request', 'plan'];
     for (const ev of genericEvents) {
       socket.on(ev, (data: unknown) => {
         setEvents((prev) => [...prev.slice(-100), { type: ev, data, ts: Date.now() }]);
@@ -124,7 +131,7 @@ export function useWebSocket({ url = '/', token, activeSessionId, onRuntimeRefre
     return () => {
       socket.disconnect();
     };
-  }, [url, token, dispatch, onRuntimeRefresh]);
+  }, [url, token, dispatch, onRuntimeRefresh, onStreamToken]);
 
   // Handle room switching
   useEffect(() => {

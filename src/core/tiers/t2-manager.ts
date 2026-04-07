@@ -6,6 +6,8 @@ import { randomUUID } from 'node:crypto';
 import type {
   ConversationMessage,
   EscalationPayload,
+  PermissionRequest,
+  PermissionDecision,
   T1ToT2Assignment,
   T2Result,
   T2ToT3Assignment,
@@ -16,9 +18,13 @@ import type { ToolRegistry } from '../../tools/registry.js';
 import { BaseTier } from './base.js';
 import { T3Worker } from './t3-worker.js';
 import { MemoryStore } from '../../memory/store.js';
+import { PeerBus } from '../peer/bus.js';
+import type { PermissionEscalator } from '../permissions/escalator.js';
 
 const T2_SYSTEM_PROMPT = `You are a T2 Manager agent in the Cascade AI system.
 Your role is to analyze a section of a task and decompose it into 2-5 discrete subtasks for T3 Workers.
+If subtasks have dependencies, you can specify "executionMode": "sequential" for the section.
+Provide "peerT3Ids" to subtasks so they can coordinate using the peer_message tool.
 Return ONLY valid JSON matching the T3 subtask array schema — no other text.`;
 
 export class T2Manager extends BaseTier {
@@ -27,7 +33,24 @@ export class T2Manager extends BaseTier {
   private assignment?: T1ToT2Assignment;
   private t3Workers: Map<string, T3Worker> = new Map();
   private escalations: EscalationPayload[] = [];
+  private peerSyncBuffer: Array<{ fromId: string; content: unknown; timestamp: string }> = [];
   private store?: MemoryStore;
+  private t3PeerBus: PeerBus = new PeerBus();   // ← T3↔T3 bus (local to this T2)
+  private t2PeerBus?: PeerBus;
+  private permissionEscalator?: PermissionEscalator;
+
+  setPeerBus(bus: PeerBus): void {
+    this.t2PeerBus = bus;
+    this.t2PeerBus.register(this.id);
+
+    // Listen for messages from sibling T2s
+    this.t2PeerBus.on(`message:${this.id}`, (msg) => {
+      this.log(`T2 peer message from ${msg.fromId}`);
+      this.receivePeerSync(msg.fromId, msg.payload);
+    });
+  }
+
+
 
   constructor(router: CascadeRouter, toolRegistry: ToolRegistry, parentId: string) {
     super('T2', undefined, parentId);
@@ -37,6 +60,24 @@ export class T2Manager extends BaseTier {
 
   setStore(store: MemoryStore): void {
     this.store = store;
+  }
+
+  /**
+   * Inject the shared PermissionEscalator for this task run.
+   * The escalator will also be given this T2's evaluator function.
+   */
+  setPermissionEscalator(escalator: PermissionEscalator): void {
+    this.permissionEscalator = escalator;
+    escalator.setT2Evaluator((req) => this.evaluatePermissionAtT2(req));
+  }
+
+  receivePeerSync(fromId: string, content: unknown): void {
+    this.peerSyncBuffer.push({
+      fromId,
+      content,
+      timestamp: new Date().toISOString(),
+    });
+    this.emit('peer-sync-received', { fromId, content });
   }
 
   async execute(assignment: T1ToT2Assignment, taskId: string): Promise<T2Result> {
@@ -54,7 +95,6 @@ export class T2Manager extends BaseTier {
     this.log(`T2 managing section: ${assignment.sectionTitle}`);
 
     try {
-      // If T1 pre-planned subtasks, use them; otherwise decompose ourselves
       const subtasks = assignment.t3Subtasks.length > 0
         ? assignment.t3Subtasks
         : await this.decomposeSection(assignment);
@@ -65,7 +105,6 @@ export class T2Manager extends BaseTier {
         status: 'IN_PROGRESS',
       });
 
-      // Spawn T3 workers
       const t3Results = await this.executeSubtasks(subtasks, taskId);
 
       this.sendStatusUpdate({
@@ -84,7 +123,8 @@ export class T2Manager extends BaseTier {
 
       this.sendStatusUpdate({ progressPct: 100, currentAction: 'Section complete', status: 'IN_PROGRESS' });
 
-      return {
+      // ── Build result first, then publish to peers ──
+      const result: T2Result = {
         sectionId: assignment.sectionId,
         sectionTitle: assignment.sectionTitle,
         status: overallStatus,
@@ -92,10 +132,16 @@ export class T2Manager extends BaseTier {
         sectionSummary: summary,
         issues,
       };
+
+      this.publishSectionOutput(result); // ← now result exists to publish
+
+      return result;
+
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       this.setStatus('FAILED');
-      return {
+
+      const failedResult: T2Result = {
         sectionId: assignment.sectionId,
         sectionTitle: assignment.sectionTitle,
         status: 'FAILED',
@@ -103,6 +149,10 @@ export class T2Manager extends BaseTier {
         sectionSummary: '',
         issues: [`T2 execution error: ${errMsg}`],
       };
+
+      this.publishSectionOutput(failedResult); // ← publish failures too so dependents don't hang
+
+      return failedResult;
     }
   }
 
@@ -122,7 +172,10 @@ Return a JSON array of subtask objects, each with:
 - description: string
 - expectedOutput: string
 - constraints: string[]
+- expectedOutput: string
+- constraints: string[]
 - peerT3Ids: string[] (empty for now)
+- executionMode: "parallel|sequential" (default is parallel)
 
 Return ONLY the JSON array.`;
 
@@ -147,6 +200,7 @@ Return ONLY the JSON array.`;
         constraints: assignment.constraints,
         peerT3Ids: [],
         parentT2: this.id,
+        executionMode: 'parallel',
       }];
     }
   }
@@ -160,18 +214,28 @@ Return ONLY the JSON array.`;
       parentT2: this.id,
     }));
 
-    // Wire peer sync IDs
-    const idMap = new Map(assignments.map((a) => [a.subtaskId, a]));
+    // Wire peer IDs
     for (const a of assignments) {
-      a.peerT3Ids = assignments.filter((x) => x.subtaskId !== a.subtaskId).map((x) => x.subtaskId);
+      a.peerT3Ids = assignments
+        .filter((x) => x.subtaskId !== a.subtaskId)
+        .map((x) => x.subtaskId);
     }
 
     // Create T3 workers
+    const workerMap = new Map<string, T3Worker>();
     const workers: T3Worker[] = assignments.map((a) => {
       const worker = new T3Worker(this.router, this.toolRegistry, this.id);
-      if (this.store) {
-        worker.setStore(this.store, taskId);
+      if (this.store) worker.setStore(this.store, taskId);
+
+      // ← Inject the shared T3 peer bus
+      worker.setPeerBus(this.t3PeerBus);
+
+      // ← Inject the permission escalator so T3 uses T2→T1→User flow
+      if (this.permissionEscalator) {
+        worker.setPermissionEscalator(this.permissionEscalator);
       }
+
+      workerMap.set(a.subtaskId, worker);
       this.t3Workers.set(a.subtaskId, worker);
 
       // Bubble up events
@@ -180,52 +244,214 @@ Return ONLY the JSON array.`;
       worker.on('tier:status', (e) => this.emit('tier:status', e));
       worker.on('tool:approval-request', (e) => this.emit('tool:approval-request', {
         ...e,
-        __cascadeResponder: (approved: boolean) => worker.emit(`tool:approval-response:${e.id}`, { approved }),
+        __cascadeResponder: (approved: boolean) =>
+          worker.emit(`tool:approval-response:${e.id}`, { approved }),
       }));
-
-      // Route peer sync
-      worker.on('message', (msg) => {
-        if (msg.type === 'PEER_SYNC') {
-          const target = this.t3Workers.get(msg.payload.recipientT3Id as string);
-          if (target) target.receivePeerSync(msg.from, msg.payload.content);
-        }
-      });
 
       return worker;
     });
 
-    // Execute all T3s in parallel
-    const results = await Promise.allSettled(
-      workers.map((w, i) => w.execute(assignments[i]!, taskId)),
-    );
+    // ── Dependency-aware execution ────────────
+    return this.runWithDependencies(assignments, workerMap, taskId);
+  }
 
-    const t3Results: T3Result[] = [];
-    for (let i = 0; i < results.length; i++) {
-      const r = results[i]!;
-      if (r.status === 'fulfilled') {
-        t3Results.push(r.value);
-      } else {
-        // T3 crashed — try once more
-        const retryResult = await this.retryT3(assignments[i]!, taskId);
-        t3Results.push(retryResult);
+  /**
+   * Runs T3 workers respecting dependsOn declarations.
+   *
+   * Uses Kahn's algorithm for topological ordering:
+   *  1. Build an in-degree map from the dependency graph.
+   *  2. Detect cycles — if any exist, break them by removing the offending edge
+   *     and logging a warning (so the run degrades gracefully instead of deadlocking).
+   *  3. Execute workers in waves: start all zero-in-degree tasks in parallel,
+   *     then reduce in-degrees of their dependents and repeat.
+   */
+  private async runWithDependencies(
+    assignments: T2ToT3Assignment[],
+    workerMap: Map<string, T3Worker>,
+    taskId: string,
+  ): Promise<T3Result[]> {
+    // ── Build graph ────────────────────────────
+    // adjacency: subtaskId → set of subtaskIds that depend on it
+    const adj = new Map<string, Set<string>>();
+    // inDegree: how many unresolved dependencies each task has
+    const inDegree = new Map<string, number>();
+    // resolved outputs
+    const resultMap = new Map<string, T3Result>();
+
+    const allIds = new Set(assignments.map((a) => a.subtaskId));
+
+    for (const a of assignments) {
+      if (!adj.has(a.subtaskId)) adj.set(a.subtaskId, new Set());
+      inDegree.set(a.subtaskId, 0);
+    }
+
+    for (const a of assignments) {
+      const deps = (a.dependsOn ?? []).filter((d) => allIds.has(d));
+      for (const dep of deps) {
+        adj.get(dep)!.add(a.subtaskId);
+        inDegree.set(a.subtaskId, (inDegree.get(a.subtaskId) ?? 0) + 1);
       }
     }
 
-    return t3Results;
+    // ── Cycle detection & breaking (Kahn's) ───
+    //
+    // After a full topological pass, any task still with inDegree > 0
+    // is part of a cycle. We break cycles by forcibly zeroing their inDegree
+    // and logging a warning so they can still execute (without that dependency).
+
+    const sanitizedAssignments = this.breakCycles(assignments, adj, inDegree);
+
+    // ── Wave-based execution ───────────────────
+    //
+    // Each iteration: collect all tasks with inDegree = 0, run them in parallel,
+    // then decrement in-degrees of their dependents.
+
+    let remaining = new Set(sanitizedAssignments.map((a) => a.subtaskId));
+    let wave = 0;
+
+    while (remaining.size > 0) {
+      // Collect all runnable tasks this wave
+      const runnableIds = [...remaining].filter((id) => (inDegree.get(id) ?? 0) === 0);
+
+      if (runnableIds.length === 0) {
+        // Safety net: should not happen after cycle breaking, but if it does,
+        // force-unblock the lowest-in-degree remaining task to prevent stalling.
+        const fallbackId = [...remaining].sort(
+          (a, b) => (inDegree.get(a) ?? 0) - (inDegree.get(b) ?? 0),
+        )[0]!;
+        this.log(`⚠ Dependency stall detected — force-starting: ${fallbackId}`);
+        inDegree.set(fallbackId, 0);
+        runnableIds.push(fallbackId);
+      }
+
+      wave++;
+      this.log(`Wave ${wave}: running ${runnableIds.length} subtask(s) in parallel`);
+      this.sendStatusUpdate({
+        progressPct: 20 + Math.min(wave * 10, 60),
+        currentAction: `T3 wave ${wave}: ${runnableIds.map((id) =>
+          sanitizedAssignments.find((a) => a.subtaskId === id)?.subtaskTitle ?? id
+        ).join(', ')}`,
+        status: 'IN_PROGRESS',
+      });
+
+      // Execute this wave in parallel
+      const waveResults = await Promise.allSettled(
+        runnableIds.map(async (id) => {
+          const assignment = sanitizedAssignments.find((a) => a.subtaskId === id)!;
+          const worker = workerMap.get(id)!;
+          const result = await worker.execute(assignment, taskId);
+          resultMap.set(id, result);
+          return result;
+        }),
+      );
+
+      // Reduce in-degrees for dependents of completed tasks
+      for (let i = 0; i < runnableIds.length; i++) {
+        const id = runnableIds[i]!;
+        remaining.delete(id);
+
+        const r = waveResults[i]!;
+        if (r.status === 'rejected') {
+          // Retry once on crash
+          const assignment = sanitizedAssignments.find((a) => a.subtaskId === id)!;
+          const retried = await this.retryT3(assignment, taskId);
+          resultMap.set(id, retried);
+        }
+
+        for (const dependent of adj.get(id) ?? []) {
+          inDegree.set(dependent, Math.max(0, (inDegree.get(dependent) ?? 0) - 1));
+        }
+      }
+    }
+
+    return [...resultMap.values()];
   }
+
+  /**
+   * Detects cyclic dependencies using Kahn's algorithm and breaks them
+   * by removing back-edges. Returns a sanitized copy of assignments.
+   *
+   * A cycle like t1→t2→t3→t1 is broken at the last edge (t3→t1),
+   * meaning t3 will start without waiting for t1, preventing deadlock.
+   */
+  private breakCycles(
+    assignments: T2ToT3Assignment[],
+    adj: Map<string, Set<string>>,
+    inDegree: Map<string, number>,
+  ): T2ToT3Assignment[] {
+    // Clone inDegree for simulation
+    const degree = new Map(inDegree);
+    const queue: string[] = [];
+    const visited = new Set<string>();
+
+    for (const [id, d] of degree) {
+      if (d === 0) queue.push(id);
+    }
+
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      visited.add(id);
+      for (const dep of adj.get(id) ?? []) {
+        const newDeg = (degree.get(dep) ?? 1) - 1;
+        degree.set(dep, newDeg);
+        if (newDeg === 0) queue.push(dep);
+      }
+    }
+
+    // Any node not visited is in a cycle
+    const cycleNodes = [...inDegree.keys()].filter((id) => !visited.has(id));
+
+    if (cycleNodes.length === 0) return assignments; // No cycles
+
+    this.log(
+      `⚠ Circular dependency detected among subtasks: [${cycleNodes.join(', ')}]. ` +
+      `Breaking cycles — affected tasks will run without their cyclic dependencies.`,
+    );
+
+    // Sanitize: remove dependsOn references that involve cycle nodes
+    return assignments.map((a) => {
+      if (!cycleNodes.includes(a.subtaskId)) return a;
+      const safeDeps = (a.dependsOn ?? []).filter((d) => !cycleNodes.includes(d));
+      if (safeDeps.length !== (a.dependsOn ?? []).length) {
+        this.log(
+          `  → Breaking cycle: removed ${(a.dependsOn ?? []).filter((d) => cycleNodes.includes(d)).join(', ')} ` +
+          `from "${a.subtaskTitle}" dependsOn`,
+        );
+        // Also decrement inDegree for the removed deps
+        for (const removed of (a.dependsOn ?? []).filter((d) => cycleNodes.includes(d))) {
+          inDegree.set(a.subtaskId, Math.max(0, (inDegree.get(a.subtaskId) ?? 1) - 1));
+          adj.get(removed)?.delete(a.subtaskId);
+        }
+      }
+      return { ...a, dependsOn: safeDeps };
+    });
+  }
+
 
   private async retryT3(assignment: T2ToT3Assignment, taskId: string): Promise<T3Result> {
     this.log(`Retrying T3 for subtask: ${assignment.subtaskTitle}`);
     const worker = new T3Worker(this.router, this.toolRegistry, this.id);
-    if (this.store) {
-      worker.setStore(this.store, taskId);
-    }
+    if (this.store) worker.setStore(this.store, taskId);
+    worker.setPeerBus(this.t3PeerBus); // ← wire bus on retry too
     worker.on('stream:token', (e) => this.emit('stream:token', e));
     worker.on('tool:approval-request', (e) => this.emit('tool:approval-request', {
       ...e,
-      __cascadeResponder: (approved: boolean) => worker.emit(`tool:approval-response:${e.id}`, { approved }),
+      __cascadeResponder: (approved: boolean) =>
+        worker.emit(`tool:approval-response:${e.id}`, { approved }),
     }));
-    return worker.execute({ ...assignment, description: `[RETRY] ${assignment.description}` }, taskId);
+    return worker.execute(
+      { ...assignment, description: `[RETRY] ${assignment.description}` },
+      taskId,
+    );
+  }
+
+  private publishSectionOutput(result: T2Result): void {
+    this.t2PeerBus?.publish(
+      this.id,
+      result.sectionId,
+      result.sectionSummary,
+      result.status === 'COMPLETED' ? 'COMPLETED' : 'FAILED',
+    );
   }
 
   private async aggregateResults(
@@ -248,5 +474,56 @@ Return ONLY the JSON array.`;
     if (results.some((r) => r.status === 'COMPLETED')) return 'PARTIAL';
     if (results.some((r) => r.status === 'ESCALATED')) return 'ESCALATED';
     return 'FAILED';
+  }
+
+  /**
+   * T2-level permission evaluator.
+   * - Safe / non-dangerous tools: auto-approve via rules (no LLM call).
+   * - Dangerous tools: ask T2's LLM whether the action fits the section goal.
+   * - Returns null if the LLM is uncertain (triggers T1 evaluation).
+   */
+  private async evaluatePermissionAtT2(req: PermissionRequest): Promise<PermissionDecision | null> {
+    // Non-dangerous path: already handled by SAFE_TOOLS set in escalator.
+    // This method only receives calls for tools that cleared the safe-list.
+    if (!req.isDangerous) {
+      return {
+        requestId: req.id,
+        approved: true,
+        always: true,
+        decidedBy: 'T2',
+        reasoning: 'Non-dangerous tool auto-approved by T2 section policy',
+      };
+    }
+
+    // Dangerous path: LLM inference (max 200 tokens)
+    const prompt = `You are a T2 Manager for this section: "${this.assignment?.sectionTitle ?? req.sectionContext}".
+Section goal: ${this.assignment?.description ?? req.sectionContext}
+
+A T3 Worker wants to execute:
+Tool: ${req.toolName}
+Target: ${JSON.stringify(req.input)}
+Reason: ${req.subtaskContext}
+
+Is this consistent with the section goal and safe to allow?
+Reply with exactly one word: YES, NO, or UNSURE.`;
+
+    try {
+      const result = await this.router.generate('T2', {
+        messages: [{ role: 'user', content: prompt }],
+        maxTokens: 10,
+        temperature: 0,
+      });
+      const answer = result.content.trim().toUpperCase();
+      if (answer.includes('YES')) {
+        return { requestId: req.id, approved: true, always: true, decidedBy: 'T2', reasoning: 'T2 LLM evaluated: consistent with section goal' };
+      }
+      if (answer.includes('NO')) {
+        return { requestId: req.id, approved: false, always: true, decidedBy: 'T2', reasoning: 'T2 LLM evaluated: inconsistent with section goal' };
+      }
+      // UNSURE → return null to escalate to T1
+      return null;
+    } catch {
+      return null; // On error, escalate rather than block
+    }
   }
 }
