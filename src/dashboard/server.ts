@@ -239,6 +239,27 @@ export class DashboardServer {
       res.json({ ok: true });
     });
 
+    this.app.delete('/api/sessions', auth, (_req, res) => {
+      this.store.deleteAllSessions();
+      this.socket.broadcast('runtime:refresh', { scope: 'workspace' });
+      this.socket.broadcast('runtime:refresh', { scope: 'global' });
+      res.json({ ok: true });
+    });
+
+    this.app.delete('/api/runtime', auth, (_req, res) => {
+      this.store.deleteAllRuntimeNodes();
+      const globalDbPath = path.join(process.env['HOME'] ?? process.cwd(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
+      const globalStore = new MemoryStore(globalDbPath);
+      try {
+        globalStore.deleteAllRuntimeNodes();
+      } finally {
+        globalStore.close();
+      }
+      this.socket.broadcast('runtime:refresh', { scope: 'workspace' });
+      this.socket.broadcast('runtime:refresh', { scope: 'global' });
+      res.json({ ok: true });
+    });
+
     // ── Identities ──────────────────────────────
     this.app.get('/api/identities', auth, (_req, res) => {
       res.json(this.store.listIdentities());

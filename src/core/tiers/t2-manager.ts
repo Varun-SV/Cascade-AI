@@ -214,11 +214,13 @@ Return ONLY the JSON array.`;
       parentT2: this.id,
     }));
 
-    // Wire peer IDs
+    // Wire peer IDs and sanitize dependencies
+    const allKeys = new Set(assignments.map((a) => a.subtaskId));
     for (const a of assignments) {
       a.peerT3Ids = assignments
         .filter((x) => x.subtaskId !== a.subtaskId)
         .map((x) => x.subtaskId);
+      a.dependsOn = (a.dependsOn ?? []).filter((d) => allKeys.has(d));
     }
 
     // Create T3 workers
@@ -278,15 +280,13 @@ Return ONLY the JSON array.`;
     // resolved outputs
     const resultMap = new Map<string, T3Result>();
 
-    const allIds = new Set(assignments.map((a) => a.subtaskId));
-
     for (const a of assignments) {
       if (!adj.has(a.subtaskId)) adj.set(a.subtaskId, new Set());
       inDegree.set(a.subtaskId, 0);
     }
 
     for (const a of assignments) {
-      const deps = (a.dependsOn ?? []).filter((d) => allIds.has(d));
+      const deps = (a.dependsOn ?? []);
       for (const dep of deps) {
         adj.get(dep)!.add(a.subtaskId);
         inDegree.set(a.subtaskId, (inDegree.get(a.subtaskId) ?? 0) + 1);

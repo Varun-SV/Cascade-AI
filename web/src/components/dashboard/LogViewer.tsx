@@ -1,33 +1,35 @@
-import React, { memo, useRef, useEffect, useState, useCallback } from 'react';
+import React, { memo, useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useAppSelector } from '../../store';
 import { selectActiveLogs } from '../../store/slices/runtimeSlice';
 import type { RuntimeNodeLog } from '../../hooks/useWebSocket';
 
-// ── Filters ────────────────────────────────────
+// ── Filter types ───────────────────────────────
 
 type RoleFilter = 'ALL' | 'T1' | 'T2' | 'T3';
 type StatusFilter = 'ALL' | 'ACTIVE' | 'COMPLETED' | 'FAILED' | 'ESCALATED';
+
+// ── FilterPill ─────────────────────────────────
 
 function FilterPill({
   label,
   active,
   onClick,
-  colorClass = '',
 }: {
   label: string;
   active: boolean;
   onClick: () => void;
-  colorClass?: string;
 }) {
   return (
     <button
-      className={`px-2.5 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wider
-                  transition-all duration-150 border
-                  ${active
-                    ? `bg-[var(--accent)] text-white border-[var(--accent)]`
-                    : `bg-transparent text-[var(--text-muted)] border-[var(--border-subtle)] hover:border-[var(--border-strong)]`
-                  } ${colorClass}`}
+      className={`
+        px-2.5 py-1 rounded-[3px] text-[9px] font-mono font-bold
+        uppercase tracking-wider transition-all duration-100 border
+        ${active
+          ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
+          : 'bg-transparent text-[var(--text-muted)] border-[var(--border-subtle)] hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]'
+        }
+      `}
       onClick={onClick}
     >
       {label}
@@ -35,25 +37,45 @@ function FilterPill({
   );
 }
 
-// ── Log Row ─────────────────────────────────────
+// ── LogRow ─────────────────────────────────────
 
-const LogRow = memo(function LogRow({ log, style }: { log: RuntimeNodeLog; style: React.CSSProperties }) {
+const ROW_HEIGHT = 38;
+
+const LogRow = memo(function LogRow({
+  log,
+  style,
+}: {
+  log: RuntimeNodeLog;
+  style: React.CSSProperties;
+}) {
   return (
     <div
       style={style}
-      className="flex items-center gap-3 px-5 border-b border-[var(--border-subtle)]
-                 hover:bg-[var(--bg-elevated)] transition-colors"
+      className="
+        flex items-center gap-3 px-5
+        border-b border-[var(--border-subtle)]
+        hover:bg-[var(--bg-elevated)] transition-colors
+      "
     >
-      <span className="text-[10px] font-mono text-[var(--text-faint)] flex-shrink-0 w-[72px]">
+      {/* Time */}
+      <span className="text-[9px] font-mono text-[var(--text-faint)] flex-shrink-0 w-[64px] tabular-nums">
         {new Date(log.timestamp).toLocaleTimeString('en-US', { hour12: false })}
       </span>
-      <span className={`badge flex-shrink-0 badge-${log.role}`}>{log.role}</span>
-      <span className={`badge flex-shrink-0 badge-${log.status}`}>{log.status}</span>
-      <span className="text-[11px] font-medium text-[var(--text-primary)] truncate flex-shrink-0 max-w-[120px]">
+
+      {/* Tier badge */}
+      <span className={`badge badge-${log.role} flex-shrink-0`}>{log.role}</span>
+
+      {/* Status badge */}
+      <span className={`badge badge-${log.status} flex-shrink-0`}>{log.status}</span>
+
+      {/* Agent name */}
+      <span className="text-[10px] font-medium text-[var(--text-primary)] truncate flex-shrink-0 max-w-[120px]">
         {log.label}
       </span>
+
+      {/* Action */}
       {log.currentAction && (
-        <span className="text-[10px] text-[var(--text-muted)] truncate flex-1 min-w-0">
+        <span className="text-[9px] text-[var(--text-muted)] font-mono truncate flex-1 min-w-0">
           {log.currentAction}
         </span>
       )}
@@ -61,69 +83,83 @@ const LogRow = memo(function LogRow({ log, style }: { log: RuntimeNodeLog; style
   );
 });
 
-// ── Main Component ─────────────────────────────
+// ── Main ───────────────────────────────────────
 
 export const LogViewer = memo(function LogViewer() {
   const logs = useAppSelector(selectActiveLogs);
+
   const [roleFilter, setRoleFilter] = useState<RoleFilter>('ALL');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('ALL');
   const [autoScroll, setAutoScroll] = useState(true);
+
   const parentRef = useRef<HTMLDivElement>(null);
 
-  const filteredLogs = logs.filter((log) => {
-    if (roleFilter !== 'ALL' && log.role !== roleFilter) return false;
-    if (statusFilter !== 'ALL' && log.status !== statusFilter) return false;
-    return true;
-  });
+  // Memoised filter — previously recomputed on every render
+  const filteredLogs = useMemo(
+    () => logs.filter((log) => {
+      if (roleFilter !== 'ALL' && log.role !== roleFilter) return false;
+      if (statusFilter !== 'ALL' && log.status !== statusFilter) return false;
+      return true;
+    }),
+    [logs, roleFilter, statusFilter],
+  );
 
   const virtualizer = useVirtualizer({
     count: filteredLogs.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 40,
-    overscan: 10,
+    estimateSize: () => ROW_HEIGHT,
+    overscan: 12,
   });
 
-  // Auto-scroll to bottom
-  useEffect(() => {
-    if (autoScroll && filteredLogs.length > 0) {
+  // Auto-scroll to bottom.
+  // `virtualizer` is excluded from deps intentionally: the virtualizer object
+  // reference changes on every render (TanStack creates a new object) and
+  // including it caused an infinite scroll loop. scrollToIndex is stable.
+  const scrollToBottom = useCallback(() => {
+    if (filteredLogs.length > 0) {
       virtualizer.scrollToIndex(filteredLogs.length - 1, { behavior: 'smooth' });
     }
-  }, [filteredLogs.length, autoScroll, virtualizer]);
+  }, [filteredLogs.length, virtualizer]);
+
+  useEffect(() => {
+    if (autoScroll) scrollToBottom();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredLogs.length, autoScroll]);
 
   const handleScroll = useCallback(() => {
     const el = parentRef.current;
     if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop <= el.clientHeight + 50;
-    setAutoScroll(atBottom);
+    setAutoScroll(el.scrollHeight - el.scrollTop <= el.clientHeight + 60);
   }, []);
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
+    <div className="flex flex-col h-full overflow-hidden bg-[var(--bg-base)]">
       {/* Filter bar */}
-      <div className="flex items-center gap-2 px-5 py-3 border-b border-[var(--border-subtle)] flex-shrink-0 flex-wrap">
-        <span className="text-[10px] uppercase tracking-wider text-[var(--text-faint)] mr-1">Role</span>
+      <div className="
+        flex items-center gap-2 px-5 py-2.5
+        border-b border-[var(--border-subtle)] flex-shrink-0 flex-wrap
+        bg-[var(--bg-surface)]
+      ">
+        <span className="section-label mr-1">Role</span>
         {(['ALL', 'T1', 'T2', 'T3'] as RoleFilter[]).map((r) => (
           <FilterPill key={r} label={r} active={roleFilter === r} onClick={() => setRoleFilter(r)} />
         ))}
 
-        <div className="w-px h-4 bg-[var(--border-subtle)] mx-1" />
+        <div className="divider-v h-4 mx-1" />
 
-        <span className="text-[10px] uppercase tracking-wider text-[var(--text-faint)] mr-1">Status</span>
+        <span className="section-label mr-1">Status</span>
         {(['ALL', 'ACTIVE', 'COMPLETED', 'FAILED', 'ESCALATED'] as StatusFilter[]).map((s) => (
           <FilterPill key={s} label={s} active={statusFilter === s} onClick={() => setStatusFilter(s)} />
         ))}
 
-        <div className="ml-auto flex items-center gap-2">
-          <span className="text-[10px] text-[var(--text-faint)]">
-            {filteredLogs.length} entries
+        <div className="ml-auto flex items-center gap-3">
+          <span className="text-[9px] font-mono text-[var(--text-faint)] tabular-nums">
+            {filteredLogs.length.toLocaleString()} entries
           </span>
           {!autoScroll && (
             <button
-              className="btn btn-ghost py-0.5 px-2 text-[10px]"
-              onClick={() => {
-                setAutoScroll(true);
-                virtualizer.scrollToIndex(filteredLogs.length - 1);
-              }}
+              className="btn btn-ghost py-0.5 px-2"
+              onClick={() => { setAutoScroll(true); scrollToBottom(); }}
             >
               ↓ Jump to latest
             </button>
@@ -132,34 +168,35 @@ export const LogViewer = memo(function LogViewer() {
       </div>
 
       {/* Column headers */}
-      <div className="flex items-center gap-3 px-5 py-2 border-b border-[var(--border-subtle)]
-                      bg-[var(--bg-surface)] flex-shrink-0">
-        <span className="text-[9px] uppercase tracking-widest text-[var(--text-faint)] w-[72px]">Time</span>
-        <span className="text-[9px] uppercase tracking-widest text-[var(--text-faint)] w-[32px]">Role</span>
-        <span className="text-[9px] uppercase tracking-widest text-[var(--text-faint)] w-[72px]">Status</span>
-        <span className="text-[9px] uppercase tracking-widest text-[var(--text-faint)] w-[120px]">Agent</span>
-        <span className="text-[9px] uppercase tracking-widest text-[var(--text-faint)]">Action</span>
+      <div className="
+        flex items-center gap-3 px-5 py-1.5
+        border-b border-[var(--border-subtle)]
+        bg-[var(--bg-surface)] flex-shrink-0
+      ">
+        <span className="section-label w-[64px]">Time</span>
+        <span className="section-label w-[28px]">Tier</span>
+        <span className="section-label w-[72px]">Status</span>
+        <span className="section-label w-[120px]">Agent</span>
+        <span className="section-label">Action</span>
       </div>
 
-      {/* Virtual log rows */}
+      {/* Virtual rows */}
       {filteredLogs.length === 0 ? (
-        <div className="flex items-center justify-center flex-1 text-[var(--text-faint)] text-[12px]">
-          {logs.length === 0 ? 'No log entries' : 'No entries match the current filter'}
+        <div className="flex items-center justify-center flex-1 text-[var(--text-faint)] text-[11px] font-mono">
+          {logs.length === 0 ? '// no log entries' : '// no entries match filter'}
         </div>
       ) : (
         <div
           ref={parentRef}
           onScroll={handleScroll}
           className="flex-1 overflow-y-auto"
-          aria-label="Activity log"
           role="log"
+          aria-label="Activity log"
           aria-live="polite"
         >
-          <div
-            style={{ height: `${virtualizer.getTotalSize()}px`, position: 'relative' }}
-          >
-            {virtualizer.getVirtualItems().map((virtualRow) => {
-              const log = filteredLogs[virtualRow.index]!;
+          <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
+            {virtualizer.getVirtualItems().map((vRow) => {
+              const log = filteredLogs[vRow.index]!;
               return (
                 <LogRow
                   key={log.id}
@@ -169,8 +206,8 @@ export const LogViewer = memo(function LogViewer() {
                     top: 0,
                     left: 0,
                     right: 0,
-                    transform: `translateY(${virtualRow.start}px)`,
-                    height: `${virtualRow.size}px`,
+                    transform: `translateY(${vRow.start}px)`,
+                    height: `${vRow.size}px`,
                   }}
                 />
               );

@@ -70,10 +70,22 @@ export class MemoryStore {
     this.db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
   }
 
+  deleteAllSessions(): void {
+    this.db.prepare('DELETE FROM file_snapshots').run();
+    this.db.prepare('DELETE FROM messages').run();
+    this.db.prepare('DELETE FROM sessions').run();
+  }
+
   deleteRuntimeSession(sessionId: string): void {
     this.db.prepare('DELETE FROM runtime_node_logs WHERE session_id = ?').run(sessionId);
     this.db.prepare('DELETE FROM runtime_nodes WHERE session_id = ?').run(sessionId);
     this.db.prepare('DELETE FROM runtime_sessions WHERE session_id = ?').run(sessionId);
+  }
+
+  deleteAllRuntimeNodes(): void {
+    this.db.prepare('DELETE FROM runtime_node_logs').run();
+    this.db.prepare('DELETE FROM runtime_nodes').run();
+    this.db.prepare('DELETE FROM runtime_sessions').run();
   }
 
   branchSession(originalId: string, newId: string): void {

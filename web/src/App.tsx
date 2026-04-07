@@ -1,40 +1,54 @@
-import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { useAppSelector, useAppDispatch } from './store';
 import {
-  setActiveSession,
   updateRTKSnapshot,
   selectActiveNodes,
   selectActiveSession,
+  selectIsConnected,
 } from './store/slices/runtimeSlice';
-import { useWebSocket, type RuntimeSnapshot } from './hooks/useWebSocket';
+import {
+  useWebSocket,
+  type RuntimeSnapshot,
+  type PermissionRequest,
+} from './hooks/useWebSocket';
 import { LoginView } from './components/auth/LoginView';
-import { NavRail } from './components/layout/NavRail';
+import { NavRail, type NavTab } from './components/layout/NavRail';
 import { TopBar } from './components/layout/TopBar';
 import { AgentGraph } from './components/dashboard/AgentGraph';
 import { InspectorPanel } from './components/dashboard/InspectorPanel';
 import { EscalationCard } from './components/dashboard/EscalationCard';
 import { SessionList } from './components/dashboard/SessionList';
 import { LogViewer } from './components/dashboard/LogViewer';
-
-// Inline type matching src/types.ts PermissionRequest
-interface PermissionRequest {
-  id: string;
-  requestedBy: string;
-  parentT2Id: string;
-  toolName: string;
-  input: Record<string, unknown>;
-  isDangerous: boolean;
-  subtaskContext: string;
-  sectionContext: string;
-  taskContext?: string;
-}
-
-type NavTab = 'topology' | 'sessions' | 'logs' | 'settings';
+import { SettingsView } from './components/dashboard/SettingsView';
 
 // ── Root ───────────────────────────────────────
 
 export default function App() {
-  const [token, setToken] = useState(() => localStorage.getItem('cascade_token') ?? '');
+  // null  → checking no-auth (show spinner)
+  // ''    → authenticated without token (no-auth mode)
+  // str   → authenticated with real token
+  const [token, setToken] = useState<string | null>(() => localStorage.getItem('cascade_token'));
+  const [checking, setChecking] = useState(token === null);
+
+  // Probe the server for no-auth access only when we have no stored token
+  useEffect(() => {
+    if (token !== null) return;
+    (async () => {
+      try {
+        const res = await fetch('/api/runtime?scope=workspace', {
+          headers: { Authorization: 'Bearer ' },
+        });
+        if (res.ok) {
+          setToken('');
+          localStorage.setItem('cascade_token', '');
+        }
+      } catch {
+        // needs auth or server not reachable yet
+      } finally {
+        setChecking(false);
+      }
+    })();
+  }, [token]);
 
   const handleLogin = useCallback((t: string) => {
     setToken(t);
@@ -42,20 +56,35 @@ export default function App() {
   }, []);
 
   const handleLogout = useCallback(() => {
-    setToken('');
+    setToken(null);
     localStorage.removeItem('cascade_token');
   }, []);
 
-  if (!token && token !== '') {
-    // Still loading (checking no-auth)
+  if (checking) {
     return (
-      <div className="flex items-center justify-center w-full h-full">
-        <div className="w-8 h-8 rounded-full border-2 border-[var(--accent)] border-t-transparent animate-spin" />
+      <div className="flex items-center justify-center w-full h-full bg-[var(--bg-base)]">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-8 h-8 rounded-full border-2 border-[var(--accent)] border-t-transparent animate-spin" />
+          <p className="section-label">Connecting…</p>
+        </div>
       </div>
     );
   }
 
-  return <Dashboard token={token} onLogout={handleLogout} onNeedAuth={() => setToken('')} />;
+  if (token === null) {
+    return <LoginView onLogin={handleLogin} />;
+  }
+
+  return (
+    <Dashboard
+      token={token}
+      onLogout={handleLogout}
+      onNeedAuth={() => {
+        setToken(null);
+        localStorage.removeItem('cascade_token');
+      }}
+    />
+  );
 }
 
 // ── Dashboard ──────────────────────────────────
@@ -77,8 +106,13 @@ function Dashboard({
   const [costUsd, setCostUsd] = useState(0);
   const [totalTokens, setTotalTokens] = useState(0);
 
-  const activeNodes = useAppSelector(selectActiveNodes);
+  const activeNodes   = useAppSelector(selectActiveNodes);
   const activeSession = useAppSelector(selectActiveSession);
+  const isConnected   = useAppSelector(selectIsConnected);
+
+  // Guard: never overwrite an unresolved escalation
+  const pendingRef = useRef(pendingEscalation);
+  pendingRef.current = pendingEscalation;
 
   // ── Refresh runtime snapshot ─────────────────
   const refreshRuntime = useCallback(async (scope: 'workspace' | 'global' = 'workspace') => {
@@ -89,39 +123,31 @@ function Dashboard({
       });
       if (res.status === 401) { onNeedAuth(); return; }
       if (res.ok) {
-        const snapshot = await res.json() as RuntimeSnapshot;
+        const snapshot = (await res.json()) as RuntimeSnapshot;
         dispatch(updateRTKSnapshot(snapshot));
       }
-    } catch { /* network error, retry on next WS ping */ }
+    } catch { /* retry on next WS ping */ }
   }, [token, dispatch, onNeedAuth]);
 
   // ── WebSocket ────────────────────────────────
-  const { events, socket } = useWebSocket({
+  const { socket } = useWebSocket({
     url: '/',
     token,
     activeSessionId: activeSession?.sessionId,
-    onRuntimeRefresh: (scope) => refreshRuntime(scope || 'workspace'),
+    onRuntimeRefresh: (scope) => refreshRuntime(scope ?? 'workspace'),
     onStreamToken: (d) => setStreamLog((prev) => (prev + d.text).slice(-8000)),
+    onCostUpdate: (d) => {
+      if (typeof d.totalCostUsd === 'number') setCostUsd(d.totalCostUsd);
+      if (typeof d.totalTokens  === 'number') setTotalTokens(d.totalTokens);
+    },
+    onEscalation: (req) => {
+      if (!pendingRef.current) setPendingEscalation(req);
+    },
   });
-
-  // Listen for cost updates and permission escalations via WS events
-  useEffect(() => {
-    const costEvent = [...events].reverse().find((e: { type: string; data: unknown; ts: number }) => e.type === 'cost:update');
-    if (costEvent) {
-      const d = costEvent.data as { totalCostUsd?: number; totalTokens?: number };
-      if (d.totalCostUsd) setCostUsd(d.totalCostUsd);
-      if (d.totalTokens) setTotalTokens(d.totalTokens);
-    }
-
-    const escEvent = [...events].reverse().find((e: { type: string; data: unknown; ts: number }) => e.type === 'permission:user-required');
-    if (escEvent && !pendingEscalation) {
-      setPendingEscalation(escEvent.data as PermissionRequest);
-    }
-  }, [events]);
 
   useEffect(() => { refreshRuntime(); }, [refreshRuntime]);
 
-  // ── Derived data ─────────────────────────────
+  // ── Derived graph data ────────────────────────
   const graphNodes = useMemo(() => activeNodes.map((n) => ({
     id: n.tierId,
     role: n.role,
@@ -132,16 +158,16 @@ function Dashboard({
   })), [activeNodes]);
 
   const graphEdges = useMemo(() =>
-    activeNodes.filter((n) => n.parentId).map((n) => ({ from: n.parentId!, to: n.tierId })),
+    activeNodes
+      .filter((n) => n.parentId)
+      .map((n) => ({ from: n.parentId!, to: n.tierId })),
   [activeNodes]);
 
   const selectedNode = useMemo(() =>
     activeNodes.find((n) => n.tierId === selectedNodeId) ?? null,
   [activeNodes, selectedNodeId]);
 
-  const isConnected = useAppSelector((s) => s.runtime.connected);
-
-  // ── Escalation decision handler ──────────────
+  // ── Escalation handler ────────────────────────
   const handleEscalationDecide = useCallback((approved: boolean, always: boolean) => {
     if (!pendingEscalation || !socket) return;
     socket.emit('permission:decision', {
@@ -157,18 +183,12 @@ function Dashboard({
 
   return (
     <div className="flex h-full w-full overflow-hidden bg-[var(--bg-base)]">
-      {/* Navigation Rail */}
       <NavRail activeTab={activeTab} onTabChange={setActiveTab} onLogout={onLogout} />
 
-      {/* Main area */}
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-        {/* Top Bar */}
         <TopBar isConnected={isConnected} totalCostUsd={costUsd} totalTokens={totalTokens} />
 
-        {/* Content */}
         <div className="flex flex-1 min-h-0 overflow-hidden">
-
-          {/* Primary content panel */}
           <main className="flex-1 min-w-0 overflow-hidden relative dot-grid">
             {activeTab === 'topology' && (
               <AgentGraph
@@ -179,16 +199,11 @@ function Dashboard({
               />
             )}
             {activeTab === 'sessions' && <SessionList />}
-            {activeTab === 'logs' && <LogViewer />}
-            {activeTab === 'settings' && (
-              <div className="flex items-center justify-center h-full animate-fade-in">
-                <p className="text-[var(--text-muted)] text-sm">Settings panel — coming soon</p>
-              </div>
-            )}
+            {activeTab === 'logs'     && <LogViewer />}
+            {activeTab === 'settings' && <SettingsView token={token} />}
           </main>
 
-          {/* Inspector panel (topology tab only) */}
-          {activeTab === 'topology' && (showInspector || !graphNodes.length) && (
+          {activeTab === 'topology' && showInspector && (
             <InspectorPanel
               node={selectedNode}
               streamLog={streamLog}
@@ -198,12 +213,8 @@ function Dashboard({
         </div>
       </div>
 
-      {/* Permission Escalation Card (modal overlay) */}
       {pendingEscalation && (
-        <EscalationCard
-          request={pendingEscalation}
-          onDecide={handleEscalationDecide}
-        />
+        <EscalationCard request={pendingEscalation} onDecide={handleEscalationDecide} />
       )}
     </div>
   );

@@ -6,6 +6,14 @@ export const store = configureStore({
   reducer: {
     runtime: runtimeReducer,
   },
+  // Serialisability check: Sets (used in logIds) are not serialisable by default.
+  // We disable the check for that path only so we keep the O(1) dup detection.
+  middleware: (getDefaultMiddleware) =>
+    getDefaultMiddleware({
+      serializableCheck: {
+        ignoredPaths: ['runtime.logIds'],
+      },
+    }),
 });
 
 export type RootState = ReturnType<typeof store.getState>;

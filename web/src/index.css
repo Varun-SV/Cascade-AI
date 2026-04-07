@@ -1,50 +1,89 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* ── Design Tokens ────────────────────────────── */
+/* ═══════════════════════════════════════════════
+   DESIGN TOKENS — Cascade Tactical Dashboard
+   Aesthetic: mission-control meets terminal-noir
+   ═══════════════════════════════════════════════ */
 :root {
-  --bg-base:       #050810;
-  --bg-surface:    #0d1117;
-  --bg-elevated:   #161b22;
-  --bg-overlay:    #1c2333;
-  --border-subtle: rgba(255, 255, 255, 0.06);
-  --border-strong: rgba(255, 255, 255, 0.12);
+  /* Backgrounds */
+  --bg-base: #06080f;
+  --bg-surface: #0b0e18;
+  --bg-elevated: #111422;
+  --bg-overlay: #191d2e;
+  --bg-toast: #1e2235;
 
-  --t1-color:      #f59e0b;  /* Amber — T1 Administrator */
-  --t2-color:      #a855f7;  /* Purple — T2 Manager */
-  --t3-color:      #06b6d4;  /* Cyan — T3 Worker */
+  /* Borders */
+  --border-subtle: rgba(255, 255, 255, 0.055);
+  --border-strong: rgba(255, 255, 255, 0.11);
+  --border-accent: rgba(124, 106, 247, 0.3);
 
-  --accent:        #7c6af7;
-  --accent-glow:   rgba(124, 106, 247, 0.35);
+  /* Tier identity colors */
+  --t1-color: #f5a623;
+  /* Amber  — T1 Administrator */
+  --t2-color: #b87fff;
+  /* Violet — T2 Manager       */
+  --t3-color: #00d4e8;
+  /* Cyan   — T3 Worker        */
 
-  --success:       #22c55e;
-  --warning:       #f59e0b;
-  --error:         #ef4444;
-  --info:          #3b82f6;
+  /* Tier glow */
+  --t1-glow: rgba(245, 166, 35, 0.22);
+  --t2-glow: rgba(184, 127, 255, 0.22);
+  --t3-glow: rgba(0, 212, 232, 0.22);
 
-  --text-primary:  #e2e8f0;
-  --text-muted:    #64748b;
-  --text-faint:    #374151;
+  /* Accent */
+  --accent: #7c6af7;
+  --accent-dim: rgba(124, 106, 247, 0.18);
+  --accent-glow: rgba(124, 106, 247, 0.32);
 
-  --radius-sm:     6px;
-  --radius-md:     10px;
-  --radius-lg:     16px;
-  --radius-xl:     24px;
+  /* Semantic */
+  --success: #22d47a;
+  --warning: #f5a623;
+  --error: #ff4d6a;
+  --info: #3b82f6;
 
-  --shadow-glow-violet: 0 0 20px rgba(124, 106, 247, 0.3);
-  --shadow-glow-cyan:   0 0 20px rgba(6, 182, 212, 0.3);
-  --shadow-glow-green:  0 0 15px rgba(34, 197, 94, 0.25);
-  --shadow-glow-red:    0 0 15px rgba(239, 68, 68, 0.25);
-  --shadow-glow-amber:  0 0 15px rgba(245, 158, 11, 0.25);
+  /* Text */
+  --text-primary: #dce4f0;
+  --text-secondary: #8b96aa;
+  --text-muted: #556070;
+  --text-faint: #2e3848;
+
+  /* Radii */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-xl: 22px;
+
+  /* ── Shadow CSS Variables (usable with shadow-[var(...)]) ── */
+  --shadow-glow-violet: 0 0 24px rgba(124, 106, 247, 0.35);
+  --shadow-glow-cyan: 0 0 20px rgba(0, 212, 232, 0.3);
+  --shadow-glow-green: 0 0 18px rgba(34, 212, 122, 0.28);
+  --shadow-glow-red: 0 0 18px rgba(255, 77, 106, 0.28);
+  --shadow-glow-amber: 0 0 18px rgba(245, 166, 35, 0.28);
+  --shadow-glow-t2: 0 0 20px rgba(184, 127, 255, 0.28);
+
+  /* These are the ones used via Tailwind arbitrary syntax */
+  --shadow-panel: 0 0 0 1px var(--border-subtle), 0 8px 32px rgba(0, 0, 0, 0.5);
+  --shadow-dialog: 0 0 0 1px var(--border-strong), 0 28px 72px rgba(0, 0, 0, 0.75);
+  --shadow-card: 0 2px 12px rgba(0, 0, 0, 0.4);
 }
 
 /* ── Reset ────────────────────────────────────── */
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
 
-html, body, #root {
+html,
+body,
+#root {
   height: 100%;
   width: 100%;
   overflow: hidden;
@@ -53,7 +92,7 @@ html, body, #root {
 body {
   background: var(--bg-base);
   color: var(--text-primary);
-  font-family: 'Inter', system-ui, sans-serif;
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
   font-size: 13px;
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
@@ -61,26 +100,42 @@ body {
 }
 
 /* ── Custom Scrollbar ─────────────────────────── */
-::-webkit-scrollbar { width: 5px; height: 5px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 99px; }
-::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
 
-/* ── Typography ───────────────────────────────── */
-.font-mono { font-family: 'JetBrains Mono', monospace; }
-.text-muted { color: var(--text-muted); }
-.text-faint { color: var(--text-faint); }
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 99px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(124, 106, 247, 0.45);
+}
+
+/* ── Monospace ────────────────────────────────── */
+.font-mono,
+code,
+kbd,
+pre {
+  font-family: 'IBM Plex Mono', 'JetBrains Mono', monospace;
+}
 
 /* ── Glassmorphism ────────────────────────────── */
 .glass {
-  background: rgba(255, 255, 255, 0.03);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  background: rgba(255, 255, 255, 0.025);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--border-subtle);
 }
 
 .glass-elevated {
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(255, 255, 255, 0.045);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   border: 1px solid var(--border-strong);
@@ -88,185 +143,526 @@ body {
 
 /* ── Dot Grid Background ──────────────────────── */
 .dot-grid {
-  background-image: radial-gradient(circle, rgba(255,255,255,0.04) 1px, transparent 1px);
-  background-size: 28px 28px;
+  background-image: radial-gradient(circle,
+      rgba(255, 255, 255, 0.032) 1px,
+      transparent 1px);
+  background-size: 24px 24px;
 }
 
-/* ── Animations ───────────────────────────────── */
+/* ── Scan-line overlay (decorative) ───────────── */
+.scanlines::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(to bottom,
+      transparent 0px,
+      transparent 2px,
+      rgba(0, 0, 0, 0.06) 2px,
+      rgba(0, 0, 0, 0.06) 4px);
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* ═══════════════════════════════════════════════
+   ANIMATIONS
+   ═══════════════════════════════════════════════ */
+
 @keyframes fade-in-up {
-  from { opacity: 0; transform: translateY(12px); }
-  to   { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 @keyframes fade-in {
-  from { opacity: 0; }
-  to   { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
 }
 
 @keyframes slide-in-right {
-  from { opacity: 0; transform: translateX(20px); }
-  to   { opacity: 1; transform: translateX(0); }
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 @keyframes pulse-glow {
-  0%, 100% { opacity: 0.6; }
-  50%       { opacity: 1; }
-}
 
-@keyframes shimmer {
-  from { background-position: -200% 0; }
-  to   { background-position: 200% 0; }
+  0%,
+  100% {
+    opacity: 0.5;
+    transform: scale(0.85);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
 }
 
 @keyframes orbit {
-  from { transform: rotate(0deg) translateX(24px) rotate(0deg); }
-  to   { transform: rotate(360deg) translateX(24px) rotate(-360deg); }
+  from {
+    transform: rotate(0deg) translateX(22px) rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg) translateX(22px) rotate(-360deg);
+  }
 }
 
-.animate-fade-in-up   { animation: fade-in-up 0.4s ease both; }
-.animate-fade-in      { animation: fade-in 0.3s ease both; }
-.animate-slide-in     { animation: slide-in-right 0.3s cubic-bezier(.22,.68,0,1.2) both; }
-.animate-pulse-glow   { animation: pulse-glow 2s ease-in-out infinite; }
+@keyframes blink {
 
-/* ── Status Colors ────────────────────────────── */
-.status-active    { color: var(--t3-color); }
-.status-completed { color: var(--success); }
-.status-failed    { color: var(--error); }
-.status-escalated { color: var(--warning); }
-.status-idle      { color: var(--text-faint); }
+  0%,
+  100% {
+    opacity: 1;
+  }
 
-/* ── Agent Node Borders (ReactFlow) ───────────── */
-.agent-node-T1       { border-color: var(--t1-color); }
-.agent-node-T2       { border-color: var(--t2-color); }
-.agent-node-T3       { border-color: var(--t3-color); }
-.agent-node-ACTIVE   { box-shadow: var(--shadow-glow-cyan); }
-.agent-node-COMPLETED{ box-shadow: var(--shadow-glow-green); }
-.agent-node-FAILED   { box-shadow: var(--shadow-glow-red); }
-.agent-node-ESCALATED{ box-shadow: var(--shadow-glow-amber); }
+  50% {
+    opacity: 0;
+  }
+}
 
-/* ── ReactFlow Overrides ──────────────────────── */
-.react-flow__background { background: var(--bg-base) !important; }
-.react-flow__node       { font-family: 'Inter', sans-serif !important; }
-.react-flow__controls   { background: var(--bg-elevated) !important; border: 1px solid var(--border-subtle) !important; border-radius: var(--radius-md) !important; box-shadow: none !important; }
-.react-flow__controls-button { background: transparent !important; border: none !important; color: var(--text-muted) !important; fill: var(--text-muted) !important; }
-.react-flow__controls-button:hover { background: var(--bg-overlay) !important; fill: var(--text-primary) !important; }
-.react-flow__edge-path { stroke: rgba(124, 106, 247, 0.4) !important; }
+@keyframes spin-slow {
+  from {
+    transform: rotate(0deg);
+  }
 
-/* ── Badge ────────────────────────────────────── */
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes status-pulse {
+
+  0%,
+  100% {
+    box-shadow: 0 0 4px currentColor;
+  }
+
+  50% {
+    box-shadow: 0 0 12px currentColor;
+  }
+}
+
+@keyframes row-in {
+  from {
+    opacity: 0;
+    transform: translateX(-4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-fade-in-up {
+  animation: fade-in-up 0.35s cubic-bezier(.22, .68, 0, 1.1) both;
+}
+
+.animate-fade-in {
+  animation: fade-in 0.25s ease both;
+}
+
+.animate-slide-in {
+  animation: slide-in-right 0.28s cubic-bezier(.22, .68, 0, 1.1) both;
+}
+
+.animate-slide-up {
+  animation: slide-up 0.25s ease both;
+}
+
+.animate-blink {
+  animation: blink 1.1s step-start infinite;
+}
+
+.animate-spin-slow {
+  animation: spin-slow 2s linear infinite;
+}
+
+/* ═══════════════════════════════════════════════
+   BADGE SYSTEM
+   ═══════════════════════════════════════════════ */
 .badge {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border-radius: 99px;
-  font-size: 10px;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: 3px;
+  font-size: 9px;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
+  font-family: 'IBM Plex Mono', monospace;
+  border: 1px solid transparent;
+  white-space: nowrap;
 }
-.badge-T1 { background: rgba(245,158,11,0.12); color: var(--t1-color); border: 1px solid rgba(245,158,11,0.25); }
-.badge-T2 { background: rgba(168,85,247,0.12); color: var(--t2-color); border: 1px solid rgba(168,85,247,0.25); }
-.badge-T3 { background: rgba(6,182,212,0.12);  color: var(--t3-color); border: 1px solid rgba(6,182,212,0.25); }
-.badge-ACTIVE    { background: rgba(6,182,212,0.12);  color: var(--t3-color); }
-.badge-COMPLETED { background: rgba(34,197,94,0.12);  color: var(--success); }
-.badge-FAILED    { background: rgba(239,68,68,0.12);  color: var(--error); }
-.badge-ESCALATED { background: rgba(245,158,11,0.12); color: var(--warning); }
-.badge-IDLE      { background: rgba(100,116,139,0.12); color: var(--text-muted); }
 
-/* ── Button ───────────────────────────────────── */
+/* Tier badges */
+.badge-T1 {
+  background: rgba(245, 166, 35, 0.1);
+  color: var(--t1-color);
+  border-color: rgba(245, 166, 35, 0.22);
+}
+
+.badge-T2 {
+  background: rgba(184, 127, 255, 0.1);
+  color: var(--t2-color);
+  border-color: rgba(184, 127, 255, 0.22);
+}
+
+.badge-T3 {
+  background: rgba(0, 212, 232, 0.08);
+  color: var(--t3-color);
+  border-color: rgba(0, 212, 232, 0.2);
+}
+
+/* Status badges */
+.badge-ACTIVE {
+  background: rgba(0, 212, 232, 0.08);
+  color: var(--t3-color);
+  border-color: rgba(0, 212, 232, 0.2);
+}
+
+.badge-COMPLETED {
+  background: rgba(34, 212, 122, 0.08);
+  color: var(--success);
+  border-color: rgba(34, 212, 122, 0.2);
+}
+
+.badge-FAILED {
+  background: rgba(255, 77, 106, 0.08);
+  color: var(--error);
+  border-color: rgba(255, 77, 106, 0.2);
+}
+
+.badge-ESCALATED {
+  background: rgba(245, 166, 35, 0.1);
+  color: var(--warning);
+  border-color: rgba(245, 166, 35, 0.22);
+}
+
+.badge-IDLE {
+  background: rgba(85, 96, 112, 0.1);
+  color: var(--text-muted);
+  border-color: var(--border-subtle);
+}
+
+/* ═══════════════════════════════════════════════
+   BUTTON SYSTEM
+   ═══════════════════════════════════════════════ */
 .btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   padding: 6px 14px;
-  border-radius: var(--radius-md);
-  font-size: 12px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all 0.12s ease;
   border: 1px solid transparent;
   white-space: nowrap;
+  letter-spacing: 0.02em;
+  font-family: 'IBM Plex Mono', monospace;
 }
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .btn-primary {
   background: var(--accent);
-  color: white;
-  border-color: rgba(124,106,247,0.5);
+  color: #fff;
+  border-color: rgba(124, 106, 247, 0.6);
 }
-.btn-primary:hover { background: #8b7cf8; box-shadow: var(--shadow-glow-violet); }
+
+.btn-primary:hover:not(:disabled) {
+  background: #9080f9;
+  box-shadow: var(--shadow-glow-violet);
+}
+
 .btn-ghost {
   background: transparent;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   border-color: var(--border-subtle);
 }
-.btn-ghost:hover { background: var(--bg-elevated); color: var(--text-primary); }
-.btn-danger {
-  background: rgba(239,68,68,0.12);
-  color: var(--error);
-  border-color: rgba(239,68,68,0.25);
-}
-.btn-danger:hover { background: rgba(239,68,68,0.2); }
-.btn-success {
-  background: rgba(34,197,94,0.12);
-  color: var(--success);
-  border-color: rgba(34,197,94,0.25);
-}
-.btn-success:hover { background: rgba(34,197,94,0.2); }
 
-/* ── Nav Rail ─────────────────────────────────── */
+.btn-ghost:hover:not(:disabled) {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+.btn-danger {
+  background: rgba(255, 77, 106, 0.1);
+  color: var(--error);
+  border-color: rgba(255, 77, 106, 0.25);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: rgba(255, 77, 106, 0.18);
+}
+
+.btn-success {
+  background: rgba(34, 212, 122, 0.1);
+  color: var(--success);
+  border-color: rgba(34, 212, 122, 0.25);
+}
+
+.btn-success:hover:not(:disabled) {
+  background: rgba(34, 212, 122, 0.18);
+}
+
+/* ═══════════════════════════════════════════════
+   NAV RAIL
+   ═══════════════════════════════════════════════ */
 .nav-rail-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  height: 44px;
-  border-radius: var(--radius-md);
+  width: 42px;
+  height: 42px;
+  border-radius: var(--radius-sm);
   color: var(--text-faint);
   cursor: pointer;
-  transition: all 0.15s ease;
-  position: relative;
+  transition: all 0.12s ease;
   border: 1px solid transparent;
+  position: relative;
 }
-.nav-rail-btn:hover { background: var(--bg-elevated); color: var(--text-muted); }
+
+.nav-rail-btn:hover {
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+}
+
 .nav-rail-btn.active {
-  background: rgba(124,106,247,0.12);
+  background: var(--accent-dim);
   color: var(--accent);
-  border-color: rgba(124,106,247,0.2);
+  border-color: var(--border-accent);
+}
+
+/* Left accent bar on active */
+.nav-rail-btn.active::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: 20%;
+  height: 60%;
+  width: 2px;
+  background: var(--accent);
+  border-radius: 0 2px 2px 0;
   box-shadow: var(--shadow-glow-violet);
 }
 
-/* ── Input ────────────────────────────────────── */
+/* ═══════════════════════════════════════════════
+   INPUT
+   ═══════════════════════════════════════════════ */
 .input {
   background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   color: var(--text-primary);
-  font-family: inherit;
-  font-size: 13px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px;
   padding: 8px 12px;
   outline: none;
-  transition: border-color 0.15s ease;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
   width: 100%;
 }
-.input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,106,247,0.15); }
-.input::placeholder { color: var(--text-faint); }
 
-/* ── Elevation shadows ────────────────────────── */
-.shadow-panel { box-shadow: 0 0 0 1px var(--border-subtle), 0 8px 32px rgba(0,0,0,0.4); }
-.shadow-dialog { box-shadow: 0 0 0 1px var(--border-strong), 0 24px 64px rgba(0,0,0,0.7); }
+.input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(124, 106, 247, 0.12);
+}
 
-/* ── Progress Bar ─────────────────────────────── */
+.input::placeholder {
+  color: var(--text-faint);
+}
+
+/* ═══════════════════════════════════════════════
+   PROGRESS BAR
+   ═══════════════════════════════════════════════ */
 .progress-track {
-  height: 3px;
+  height: 2px;
   background: var(--bg-overlay);
   border-radius: 99px;
   overflow: hidden;
 }
+
 .progress-fill {
   height: 100%;
   border-radius: 99px;
-  background: linear-gradient(90deg, var(--accent), var(--t3-color));
-  transition: width 0.4s ease;
+  background: linear-gradient(90deg, var(--accent) 0%, var(--t3-color) 100%);
+  transition: width 0.5s cubic-bezier(.4, 0, .2, 1);
+  box-shadow: 0 0 8px var(--accent-glow);
 }
 
-/* ── Divider ──────────────────────────────────── */
-.divider { height: 1px; background: var(--border-subtle); }
+/* ═══════════════════════════════════════════════
+   DIVIDER
+   ═══════════════════════════════════════════════ */
+.divider {
+  height: 1px;
+  background: var(--border-subtle);
+}
+
+.divider-v {
+  width: 1px;
+  background: var(--border-subtle);
+}
+
+/* ═══════════════════════════════════════════════
+   ELEVATION CLASSES (utility shadows)
+   ═══════════════════════════════════════════════ */
+.shadow-panel {
+  box-shadow: var(--shadow-panel);
+}
+
+.shadow-dialog {
+  box-shadow: var(--shadow-dialog);
+}
+
+.shadow-card {
+  box-shadow: var(--shadow-card);
+}
+
+/* ═══════════════════════════════════════════════
+   AGENT NODE (ReactFlow custom nodes)
+   ═══════════════════════════════════════════════ */
+.agent-node-ACTIVE {
+  box-shadow: 0 0 16px var(--t3-glow);
+}
+
+.agent-node-COMPLETED {
+  box-shadow: 0 0 14px rgba(34, 212, 122, 0.2);
+}
+
+.agent-node-FAILED {
+  box-shadow: 0 0 14px rgba(255, 77, 106, 0.2);
+}
+
+.agent-node-ESCALATED {
+  box-shadow: 0 0 14px var(--t1-glow);
+}
+
+/* ═══════════════════════════════════════════════
+   REACTFLOW OVERRIDES
+   ═══════════════════════════════════════════════ */
+.react-flow__background {
+  background: var(--bg-base) !important;
+}
+
+.react-flow__node {
+  font-family: 'IBM Plex Sans', sans-serif !important;
+}
+
+.react-flow__controls {
+  background: var(--bg-elevated) !important;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: var(--radius-sm) !important;
+  box-shadow: none !important;
+  gap: 0 !important;
+}
+
+.react-flow__controls-button {
+  background: transparent !important;
+  border: none !important;
+  border-bottom: 1px solid var(--border-subtle) !important;
+  color: var(--text-muted) !important;
+  fill: var(--text-muted) !important;
+  width: 28px !important;
+  height: 28px !important;
+}
+
+.react-flow__controls-button:last-child {
+  border-bottom: none !important;
+}
+
+.react-flow__controls-button:hover {
+  background: var(--bg-overlay) !important;
+  fill: var(--text-primary) !important;
+}
+
+.react-flow__edge-path {
+  stroke: rgba(124, 106, 247, 0.3) !important;
+}
+
+.react-flow__edge.animated .react-flow__edge-path {
+  stroke-dasharray: 6 3;
+}
+
+/* ═══════════════════════════════════════════════
+   TERMINAL CURSOR (for stream output)
+   ═══════════════════════════════════════════════ */
+.terminal-cursor::after {
+  content: '█';
+  color: var(--t3-color);
+  animation: blink 1.1s step-start infinite;
+  font-size: 0.85em;
+  margin-left: 1px;
+}
+
+/* ═══════════════════════════════════════════════
+   SECTION LABEL (reusable micro-heading)
+   ═══════════════════════════════════════════════ */
+.section-label {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* ═══════════════════════════════════════════════
+   METRIC CHIP (used in TopBar)
+   ═══════════════════════════════════════════════ */
+.metric-chip {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.metric-chip .label {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.metric-chip .value {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}

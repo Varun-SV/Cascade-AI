@@ -14,6 +14,7 @@ import { initCommand } from './commands/init.js';
 import { doctorCommand } from './commands/doctor.js';
 import { updateCommand } from './commands/update.js';
 import { dashboardCommand } from './commands/dashboard.js';
+import { makeIdentityCommand } from './commands/identity.js';
 
 dotenv.config();
 
@@ -26,10 +27,13 @@ program
   .option('-p, --prompt <text>', 'Run a single prompt non-interactively')
   .option('-t, --theme <name>', 'Color theme', DEFAULT_THEME)
   .option('-w, --workspace <path>', 'Workspace path', process.cwd())
+  .option('-i, --identity <name>', 'Identity name or ID')
   .option('--no-color', 'Disable colors')
   .action(async (options) => {
     await startRepl(options);
   });
+
+program.addCommand(makeIdentityCommand());
 
 program
   .command('init [path]')
@@ -68,8 +72,9 @@ program
   .command('run <prompt>')
   .description('Run a single prompt and exit')
   .option('-t, --theme <name>', 'Color theme', DEFAULT_THEME)
+  .option('-i, --identity <name>', 'Identity name or ID')
   .action(async (prompt: string, opts) => {
-    await startRepl({ prompt, theme: opts.theme, workspace: process.cwd() });
+    await startRepl({ prompt, theme: opts.theme, workspace: process.cwd(), identity: opts.identity });
   });
 
 // ── Start REPL ────────────────────────────────
@@ -78,6 +83,7 @@ async function startRepl(options: {
   prompt?: string;
   theme?: string;
   workspace?: string;
+  identity?: string;
 }): Promise<void> {
   const workspacePath = options.workspace ?? process.cwd();
 
@@ -103,6 +109,7 @@ async function startRepl(options: {
       workspacePath,
       themeName: options.theme ?? config.theme ?? DEFAULT_THEME,
       initialPrompt: options.prompt,
+      identityName: options.identity,
     }),
     { exitOnCtrlC: false },
   );

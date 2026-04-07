@@ -130,6 +130,7 @@ interface ReplProps {
   workspacePath: string;
   themeName: string;
   initialPrompt?: string;
+  identityName?: string;
 }
 
 async function refreshModelCache(store: MemoryStore, providers: CascadeConfig['providers']) {
@@ -150,7 +151,7 @@ async function refreshModelCache(store: MemoryStore, providers: CascadeConfig['p
   }
 }
 
-export function Repl({ config, workspacePath, themeName, initialPrompt }: ReplProps): React.ReactElement {
+export function Repl({ config, workspacePath, themeName, initialPrompt, identityName }: ReplProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [theme, setTheme] = useState<Theme>(() => getTheme(themeName));
@@ -246,7 +247,13 @@ export function Repl({ config, workspacePath, themeName, initialPrompt }: ReplPr
     storeRef.current = store;
     const identityRows = store.listIdentities().map(i => ({ id: i.id, name: i.name, isDefault: i.isDefault }));
     setIdentities(identityRows);
-    setCurrentIdentityId(config.defaultIdentityId ?? identityRows.find(i => i.isDefault)?.id ?? identityRows[0]?.id);
+    let initialIdentityId = config.defaultIdentityId ?? identityRows.find(i => i.isDefault)?.id ?? identityRows[0]?.id;
+    if (identityName) {
+      const match = identityRows.find(i => i.id === identityName || i.name.toLowerCase() === identityName.toLowerCase());
+      if (match) initialIdentityId = match.id;
+      else console.warn(`Identity '${identityName}' not found. Using default.`);
+    }
+    setCurrentIdentityId(initialIdentityId);
     const loadCache = async () => {
       const models = store.getCachedModels();
       const map = new Map<ProviderType, ModelInfo[]>();

@@ -2,9 +2,15 @@ import { useEffect, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
 import parser from 'socket.io-msgpack-parser';
 import { useAppDispatch } from '../store';
-import { setConnected, updateRTKSnapshot, updateSessionDetails, appendLog } from '../store/slices/runtimeSlice';
+import {
+  setConnected,
+  updateRTKSnapshot,
+  updateSessionDetails,
+  appendLog,
+} from '../store/slices/runtimeSlice';
 
-// Interfaces remain the same for now to maintain compatibility
+// ── Public types ───────────────────────────────
+
 export interface RuntimeSession {
   sessionId: string;
   title: string;
@@ -53,24 +59,85 @@ export interface RuntimeSnapshot {
   logs: RuntimeNodeLog[];
 }
 
+export interface CostUpdate {
+  totalCostUsd?: number;
+  totalTokens?: number;
+}
+
+export interface PermissionRequest {
+  id: string;
+  requestedBy: string;
+  parentT2Id: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  isDangerous: boolean;
+  subtaskContext: string;
+  sectionContext: string;
+  taskContext?: string;
+}
+
+// ── Hook options ───────────────────────────────
+
 interface UseWebSocketOptions {
   url?: string;
   token?: string;
   activeSessionId?: string | null;
+  /** Called when the server requests a runtime refresh */
   onRuntimeRefresh?: (scope?: 'workspace' | 'global') => void;
+  /** Called on every streamed LLM token */
   onStreamToken?: (data: { text: string }) => void;
+  /** Called on cost:update events */
+  onCostUpdate?: (data: CostUpdate) => void;
+  /** Called when the server requires a human permission decision */
+  onEscalation?: (request: PermissionRequest) => void;
 }
 
-export function useWebSocket({ url = '/', token, activeSessionId, onRuntimeRefresh, onStreamToken }: UseWebSocketOptions = {}) {
-  const socketRef = useRef<Socket | null>(null);
-  const dispatch = useAppDispatch();
-  const [events, setEvents] = useState<Array<{ type: string; data: unknown; ts: number }>>([]);
-  const refreshTimerRef = useRef<number | null>(null);
-  const connectedRef = useRef(false);
-  const lastJoinedSessionRef = useRef<string | null>(null);
+// ── Hook ───────────────────────────────────────
 
+/**
+ * Manages the Socket.IO connection.
+ *
+ * Returns a *reactive* socket reference — `socket` is `null` before the
+ * connection is established and non-null once connected.  This allows
+ * consumers to safely add `socket.on` listeners in a `useEffect([socket])`
+ * without the previous stale-ref problem (ref.current is always null on the
+ * first render because the socket is created inside an effect).
+ *
+ * All application-level event callbacks (cost, escalation, stream) are
+ * registered here so consumers don't need to manage socket.on/off themselves.
+ */
+export function useWebSocket({
+  url = '/',
+  token,
+  activeSessionId,
+  onRuntimeRefresh,
+  onStreamToken,
+  onCostUpdate,
+  onEscalation,
+}: UseWebSocketOptions = {}) {
+  // Reactive: causes re-render when the socket connects or disconnects
+  const [socket, setSocket] = useState<Socket | null>(null);
+  const dispatch = useAppDispatch();
+
+  // Stable refs for callbacks — updating them never triggers reconnection
+  const cbRefresh = useRef(onRuntimeRefresh);
+  const cbStream = useRef(onStreamToken);
+  const cbCost = useRef(onCostUpdate);
+  const cbEscalation = useRef(onEscalation);
+  cbRefresh.current = onRuntimeRefresh;
+  cbStream.current = onStreamToken;
+  cbCost.current = onCostUpdate;
+  cbEscalation.current = onEscalation;
+
+  // Ref for activeSessionId so the connect handler always sees the latest value
+  const activeSessionIdRef = useRef(activeSessionId);
+  activeSessionIdRef.current = activeSessionId;
+
+  const lastJoinedRef = useRef<string | null>(null);
+
+  // ── Create / destroy socket ──────────────────
   useEffect(() => {
-    const socket = io(url, {
+    const s = io(url, {
       auth: token ? { token } : {},
       transports: ['websocket', 'polling'],
       reconnection: true,
@@ -78,73 +145,79 @@ export function useWebSocket({ url = '/', token, activeSessionId, onRuntimeRefre
       parser,
     });
 
-    socketRef.current = socket;
-
-    socket.on('connect', () => {
-      connectedRef.current = true;
+    s.on('connect', () => {
       dispatch(setConnected(true));
-      socket.emit('runtime:refresh', { scope: 'workspace' });
-      
-      // Re-join session room if we had one
-      if (activeSessionId) {
-        socket.emit('join:session', { sessionId: activeSessionId });
-        lastJoinedSessionRef.current = activeSessionId;
+      s.emit('runtime:refresh', { scope: 'workspace' });
+
+      // Rejoin last session room (uses ref so it's always fresh)
+      const sid = activeSessionIdRef.current;
+      if (sid) {
+        s.emit('join:session', { sessionId: sid });
+        lastJoinedRef.current = sid;
       }
+
+      setSocket(s);
     });
 
-    socket.on('disconnect', () => {
-      connectedRef.current = false;
+    s.on('disconnect', () => {
       dispatch(setConnected(false));
+      setSocket(null);
     });
 
-    socket.on('runtime:update', (data: unknown) => {
-      const snapshot = data as RuntimeSnapshot;
-      dispatch(updateRTKSnapshot(snapshot));
+    // Redux-dispatched events
+    s.on('runtime:update', (d: unknown) => {
+      dispatch(updateRTKSnapshot(d as RuntimeSnapshot));
     });
 
-    socket.on('session:details', (data: unknown) => {
-      const details = data as { sessionId: string; nodes: RuntimeNode[]; logs: RuntimeNodeLog[] };
-      dispatch(updateSessionDetails(details));
+    s.on('session:details', (d: unknown) => {
+      const payload = d as { sessionId: string; nodes: RuntimeNode[]; logs: RuntimeNodeLog[] };
+      dispatch(updateSessionDetails(payload));
     });
 
-    socket.on('log:new', (data: unknown) => {
-      const log = data as RuntimeNodeLog;
-      dispatch(appendLog(log));
+    s.on('log:new', (d: unknown) => {
+      dispatch(appendLog(d as RuntimeNodeLog));
     });
 
-    socket.on('runtime:refresh', (data: unknown) => {
-      const payload = data as { scope?: 'workspace' | 'global' } | undefined;
-      onRuntimeRefresh?.(payload?.scope);
-    });
-    
-    socket.on('stream:token', (data: unknown) => {
-      onStreamToken?.(data as { text: string });
+    // Callback-dispatched events (caller decides what state to set)
+    s.on('runtime:refresh', (d: unknown) => {
+      const p = d as { scope?: 'workspace' | 'global' } | undefined;
+      cbRefresh.current?.(p?.scope);
     });
 
-    const genericEvents = ['tier:status', 'tool:approval-request', 'plan'];
-    for (const ev of genericEvents) {
-      socket.on(ev, (data: unknown) => {
-        setEvents((prev) => [...prev.slice(-100), { type: ev, data, ts: Date.now() }]);
-      });
-    }
+    s.on('stream:token', (d: unknown) => {
+      cbStream.current?.(d as { text: string });
+    });
+
+    s.on('cost:update', (d: unknown) => {
+      cbCost.current?.(d as CostUpdate);
+    });
+
+    s.on('permission:user-required', (d: unknown) => {
+      cbEscalation.current?.(d as PermissionRequest);
+    });
 
     return () => {
-      socket.disconnect();
+      s.disconnect();
+      setSocket(null);
+      lastJoinedRef.current = null;
     };
-  }, [url, token, dispatch, onRuntimeRefresh, onStreamToken]);
+    // url and token changes require a new socket connection
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [url, token, dispatch]);
 
-  // Handle room switching
+  // ── Room switching ───────────────────────────
   useEffect(() => {
-    if (socketRef.current && connectedRef.current && activeSessionId !== lastJoinedSessionRef.current) {
-      if (lastJoinedSessionRef.current) {
-        socketRef.current.emit('leave:session', { sessionId: lastJoinedSessionRef.current });
-      }
-      if (activeSessionId) {
-        socketRef.current.emit('join:session', { sessionId: activeSessionId });
-      }
-      lastJoinedSessionRef.current = activeSessionId || null;
-    }
-  }, [activeSessionId]);
+    if (!socket) return;
+    if (activeSessionId === lastJoinedRef.current) return;
 
-  return { events, socket: socketRef.current };
+    if (lastJoinedRef.current) {
+      socket.emit('leave:session', { sessionId: lastJoinedRef.current });
+    }
+    if (activeSessionId) {
+      socket.emit('join:session', { sessionId: activeSessionId });
+    }
+    lastJoinedRef.current = activeSessionId ?? null;
+  }, [socket, activeSessionId]);
+
+  return { socket };
 }

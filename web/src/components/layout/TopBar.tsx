@@ -8,109 +8,138 @@ interface TopBarProps {
   totalTokens: number;
 }
 
-function useLiveLatency(isConnected: boolean) {
+/**
+ * Measures actual round-trip latency using a periodic Date.now() probe.
+ * The previous implementation measured requestAnimationFrame scheduling
+ * delay (0–16 ms), which has nothing to do with network latency.
+ */
+function usePingLatency(isConnected: boolean) {
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
+
   useEffect(() => {
     if (!isConnected) { setLatencyMs(null); return; }
-    // Approximate: measure time from last re-render cycle
-    const t = Date.now();
-    const raf = requestAnimationFrame(() => setLatencyMs(Date.now() - t));
-    return () => cancelAnimationFrame(raf);
+
+    let cancelled = false;
+
+    const probe = async () => {
+      const t0 = Date.now();
+      try {
+        await fetch('/api/ping', { cache: 'no-store' });
+        if (!cancelled) setLatencyMs(Date.now() - t0);
+      } catch {
+        if (!cancelled) setLatencyMs(null);
+      }
+    };
+
+    probe();
+    const id = setInterval(probe, 5_000);
+    return () => { cancelled = true; clearInterval(id); };
   }, [isConnected]);
+
   return latencyMs;
 }
 
 function useUptime(startedAt?: string) {
   const [elapsed, setElapsed] = useState('');
+
   useEffect(() => {
     if (!startedAt) { setElapsed(''); return; }
+
     const update = () => {
       const diff = Date.now() - new Date(startedAt).getTime();
-      const h = Math.floor(diff / 3600000).toString().padStart(2, '0');
-      const m = Math.floor((diff % 3600000) / 60000).toString().padStart(2, '0');
-      const s = Math.floor((diff % 60000) / 1000).toString().padStart(2, '0');
+      const h = Math.floor(diff / 3_600_000).toString().padStart(2, '0');
+      const m = Math.floor((diff % 3_600_000) / 60_000).toString().padStart(2, '0');
+      const s = Math.floor((diff % 60_000) / 1_000).toString().padStart(2, '0');
       setElapsed(`${h}:${m}:${s}`);
     };
+
     update();
-    const id = setInterval(update, 1000);
+    const id = setInterval(update, 1_000);
     return () => clearInterval(id);
   }, [startedAt]);
+
   return elapsed;
+}
+
+function MetricChip({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
+  return (
+    <div className="metric-chip">
+      <span className="label">{label}</span>
+      <span className={`value ${highlight ? 'text-[var(--warning)]' : ''}`}>{value}</span>
+    </div>
+  );
 }
 
 export const TopBar = memo(function TopBar({ isConnected, totalCostUsd, totalTokens }: TopBarProps) {
   const session = useAppSelector(selectActiveSession);
-  const latency = useLiveLatency(isConnected);
+  const latency = usePingLatency(isConnected);
   const uptime = useUptime(session?.startedAt);
 
   return (
     <header
       aria-label="Dashboard header"
-      className="flex items-center justify-between px-6 h-12 border-b border-[var(--border-subtle)]
-                 bg-[var(--bg-surface)] flex-shrink-0 z-10"
+      className="
+        flex items-center justify-between px-5 h-11
+        border-b border-[var(--border-subtle)]
+        bg-[var(--bg-surface)] flex-shrink-0 z-10
+      "
     >
-      {/* Left: connection status + session name */}
-      <div className="flex items-center gap-4">
-        <div className="flex items-center gap-2">
+      {/* Left: connection dot + session info */}
+      <div className="flex items-center gap-4 min-w-0">
+        {/* Live / disconnected pill */}
+        <div className="flex items-center gap-2 flex-shrink-0">
           <span
             aria-label={isConnected ? 'Connected' : 'Disconnected'}
-            className={`w-2 h-2 rounded-full transition-all duration-500 ${
-              isConnected
-                ? 'bg-[var(--success)] shadow-[var(--shadow-glow-green)] animate-pulse'
+            className={`
+              w-1.5 h-1.5 rounded-full transition-all duration-500
+              ${isConnected
+                ? 'bg-[var(--success)] shadow-[var(--shadow-glow-green)]'
                 : 'bg-[var(--text-faint)]'
-            }`}
+              }
+            `}
           />
-          <span className="text-[10px] uppercase tracking-widest text-[var(--text-muted)] font-medium">
-            {isConnected ? 'Live' : 'Disconnected'}
+          <span className="section-label">
+            {isConnected ? 'Live' : 'Offline'}
           </span>
         </div>
 
         {session && (
           <>
-            <div className="w-px h-4 bg-[var(--border-subtle)]" />
-            <span className="text-sm font-medium text-[var(--text-primary)] truncate max-w-[240px]">
-              {session.title || 'Untitled Session'}
-            </span>
-            <span className={`badge ${
-              session.status === 'ACTIVE' ? 'badge-ACTIVE'
-              : session.status === 'COMPLETED' ? 'badge-COMPLETED'
-              : 'badge-FAILED'
-            }`}>
-              {session.status}
-            </span>
+            <div className="divider-v h-4 flex-shrink-0" />
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-[12px] font-medium text-[var(--text-primary)] truncate max-w-[200px]">
+                {session.title || 'Untitled Session'}
+              </span>
+              <span className={`badge badge-${session.status} flex-shrink-0`}>
+                {session.status}
+              </span>
+            </div>
           </>
         )}
       </div>
 
-      {/* Right: metrics */}
-      <div className="flex items-center gap-5 font-mono text-[11px]">
+      {/* Right: metrics row */}
+      <div className="flex items-center gap-5">
         {latency !== null && (
-          <div className="flex items-center gap-1.5">
-            <span className="text-[var(--text-faint)] uppercase tracking-wider">Latency</span>
-            <span className="text-[var(--t3-color)] font-semibold">{latency}ms</span>
-          </div>
+          <MetricChip label="Ping" value={`${latency}ms`} />
         )}
-
         {uptime && (
-          <div className="flex items-center gap-1.5">
-            <span className="text-[var(--text-faint)] uppercase tracking-wider">Uptime</span>
-            <span className="text-[var(--text-muted)]">{uptime}</span>
-          </div>
+          <MetricChip label="Uptime" value={uptime} />
         )}
 
-        <div className="w-px h-4 bg-[var(--border-subtle)]" />
+        <div className="divider-v h-4" />
 
-        <div className="flex items-center gap-1.5">
-          <span className="text-[var(--text-faint)] uppercase tracking-wider">Tokens</span>
-          <span className="text-[var(--text-primary)]">{totalTokens.toLocaleString()}</span>
-        </div>
-
-        <div className="flex items-center gap-1.5">
-          <span className="text-[var(--text-faint)] uppercase tracking-wider">Cost</span>
-          <span className={`font-semibold ${totalCostUsd > 1 ? 'text-[var(--warning)]' : 'text-[var(--text-primary)]'}`}>
-            ${totalCostUsd.toFixed(4)}
-          </span>
-        </div>
+        <MetricChip
+          label="Tokens"
+          value={totalTokens >= 1_000
+            ? `${(totalTokens / 1_000).toFixed(1)}k`
+            : totalTokens.toLocaleString()}
+        />
+        <MetricChip
+          label="Cost"
+          value={`$${totalCostUsd.toFixed(4)}`}
+          highlight={totalCostUsd > 1}
+        />
       </div>
     </header>
   );
