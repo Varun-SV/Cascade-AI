@@ -201,7 +201,7 @@ Leave dependsOn empty for subtasks that can run immediately in parallel.`;
     const messages: ConversationMessage[] = [{ role: 'user', content: decompositionPrompt }];
     const result = await this.router.generate('T1', {
       messages,
-      systemPrompt: T1_SYSTEM_PROMPT,
+      systemPrompt: this.systemPromptOverride + T1_SYSTEM_PROMPT,
       maxTokens: 4000,
     });
 
@@ -404,7 +404,11 @@ Instructions:
 - Do NOT expose JSON or tier internals`;
 
     const messages: ConversationMessage[] = [{ role: 'user', content: compilePrompt }];
-    const result = await this.router.generate('T1', { messages, maxTokens: 8000 }, (chunk) => {
+    const result = await this.router.generate('T1', {
+      messages,
+      systemPrompt: this.systemPromptOverride + 'You are a final output compiler. Summarize and format the task results clearly.',
+      maxTokens: 8000
+    }, (chunk) => {
       this.emit('stream:token', { tierId: this.id, text: chunk.text });
     });
 
@@ -432,6 +436,7 @@ Reply with exactly one word: YES, NO, or UNSURE.
     try {
       const result = await this.router.generate('T1', {
         messages: [{ role: 'user', content: prompt }],
+        systemPrompt: (this as any).systemPromptOverride + 'You are a T1 Administrator evaluating permissions.',
         maxTokens: 10,
         temperature: 0,
       });

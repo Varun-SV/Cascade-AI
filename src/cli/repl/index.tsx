@@ -189,8 +189,12 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
 
   const sessionTitle = state.messages.find(m => m.role === 'user')?.content.slice(0, 72) ?? 'Cascade Session';
   const lastUserPrompt = useRef<string | null>(null);
-  const isTypingCommand = input.startsWith('/') && !input.includes(' ');
-  const slashCompletions = isTypingCommand ? slashRef.current.getCompletions(input).slice(0, 24) : [];
+  const isTypingCommand = input.startsWith('/');
+  const slashCompletions = isTypingCommand ? (
+    input.startsWith('/identity ') 
+      ? identities.map(i => `/identity ${i.name}`).filter(c => c.startsWith(input))
+      : slashRef.current.getCompletions(input)
+  ).slice(0, 24) : [];
 
   const persistMessage = useCallback((role: 'user' | 'assistant' | 'system', content: string, timestamp: string) => {
     storeRef.current?.addMessage({ id: randomUUID(), sessionId: sessionIdRef.current, role, content, timestamp });
@@ -372,8 +376,17 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         return sessions.map((s, idx) => `${idx + 1}. ${s.title}\n   id: ${s.id}\n   updated: ${new Date(s.updatedAt).toLocaleString()}\n   tokens: ${s.metadata.totalTokens} · cost: $${s.metadata.totalCostUsd.toFixed(4)}`).join('\n\n');
       },
       onIdentity: async (args) => {
+        if (args.length === 0) {
+          if (identities.length === 0) return 'No identities found.';
+          const list = identities.map(id => {
+            const isActive = id.id === currentIdentityId;
+            const isDef = id.isDefault ? ' [Default]' : '';
+            return `  ${isActive ? '●' : '○'} ${id.name} (${id.id.slice(0, 8)}...)${isDef}`;
+          }).join('\n');
+          return `Available identities:\n\n${list}\n\nUse /identity <name|id> to switch.`;
+        }
         const target = args.join(' ').trim();
-        const match = identities.find((identity) => identity.id === target || identity.name.toLowerCase() === target.toLowerCase());
+        const match = identities.find((identity) => identity.id === target || identity.name.toLowerCase() === target.toLowerCase() || identity.id.startsWith(target));
         if (!match) return `Unknown identity: ${target}`;
         setCurrentIdentityId(match.id);
         storeRef.current?.updateSession(sessionIdRef.current, { identityId: match.id, updatedAt: new Date().toISOString() });
@@ -441,7 +454,18 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier });
     });
     try {
-      const result = await cascade.run({ prompt: trimmed, workspacePath, conversationHistory: toConversationHistory(state.messages), approvalCallback: async (req) => { dispatch({ type: 'SET_APPROVAL', request: req }); return new Promise<{ approved: boolean; always: boolean }>((resolve) => { approvalResolverRef.current = resolve; }); } });
+      const result = await cascade.run({
+        prompt: trimmed,
+        workspacePath,
+        identityId: currentIdentityId,
+        conversationHistory: toConversationHistory(state.messages),
+        approvalCallback: async (req) => {
+          dispatch({ type: 'SET_APPROVAL', request: req });
+          return new Promise<{ approved: boolean; always: boolean }>((resolve) => {
+            approvalResolverRef.current = resolve;
+          });
+        }
+      });
       flushStream();
       const stats = cascade.getRouter().getStats();
       dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier });

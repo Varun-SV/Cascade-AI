@@ -363,6 +363,8 @@ export interface CascadeConfig {
   dashboard: DashboardConfig;
   telemetry: TelemetryConfig;
   memory: MemoryConfig;
+  tierLimits: TierLimits;
+  budget: BudgetConfig;
   theme: string;
   workspace: WorkspaceConfig;
 }
@@ -411,6 +413,18 @@ export interface MemoryConfig {
   maxSessionMessages: number;
   autoSummarizeAt: number;   // token threshold
   retentionDays: number;
+}
+
+export interface TierLimits {
+  t1MaxTokens?: number;
+  t2MaxTokens?: number;
+  t3MaxTokens?: number;
+}
+
+export interface BudgetConfig {
+  dailyBudgetUsd?: number;
+  sessionBudgetUsd?: number;
+  warnAtPct: number; // 0-100, default 80
 }
 
 export interface WorkspaceConfig {

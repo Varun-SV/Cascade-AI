@@ -10,10 +10,12 @@ import express, { type Request, type Response } from 'express';
 import type { CascadeConfig } from '../types.js';
 import { MemoryStore } from '../memory/store.js';
 import type { RuntimeNode, RuntimeNodeLog, RuntimeSession } from '../types.js';
-import { CASCADE_DB_FILE, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE } from '../constants.js';
+import { CASCADE_DB_FILE, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE, CASCADE_CONFIG_FILE } from '../constants.js';
 import { DashboardSocket } from './websocket.js';
 import { authMiddleware, createToken } from './auth.js';
 import { DEFAULT_DASHBOARD_PORT } from '../constants.js';
+import { randomUUID } from 'node:crypto';
+import type { Identity, TierLimits, BudgetConfig } from '../types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -26,10 +28,12 @@ export class DashboardServer {
   private globalStore: MemoryStore | null = null;
   private broadcastTimer: NodeJS.Timeout | null = null;
   private port: number;
+  private workspacePath: string;
 
-  constructor(config: CascadeConfig, store: MemoryStore) {
+  constructor(config: CascadeConfig, store: MemoryStore, workspacePath = process.cwd()) {
     this.config = config;
     this.store = store;
+    this.workspacePath = workspacePath;
     this.port = config.dashboard.port ?? DEFAULT_DASHBOARD_PORT;
     this.app = express();
     this.httpServer = createServer(this.app);
@@ -265,6 +269,43 @@ export class DashboardServer {
       res.json(this.store.listIdentities());
     });
 
+    this.app.post('/api/identities', auth, (req: Request, res: Response) => {
+      const body = req.body as Partial<Identity> & { setDefault?: boolean };
+      if (!body.name) { res.status(400).json({ error: 'name is required' }); return; }
+      if (body.setDefault) {
+        const existing = this.store.getDefaultIdentity();
+        if (existing) this.store.updateIdentity(existing.id, { isDefault: false });
+      }
+      const id = randomUUID();
+      const identity: Identity = {
+        id,
+        name: body.name,
+        description: body.description,
+        systemPrompt: body.systemPrompt,
+        isDefault: body.setDefault ?? false,
+        createdAt: new Date().toISOString(),
+      };
+      this.store.createIdentity(identity);
+      res.json(identity);
+    });
+
+    this.app.put('/api/identities/:id', auth, (req: Request, res: Response) => {
+      const identityId = req.params.id as string;
+      const body = req.body as Partial<Identity> & { setDefault?: boolean };
+      if (body.setDefault) {
+        const existing = this.store.getDefaultIdentity();
+        if (existing && existing.id !== identityId) this.store.updateIdentity(existing.id, { isDefault: false });
+        body.isDefault = true;
+      }
+      this.store.updateIdentity(identityId, body);
+      res.json({ ok: true });
+    });
+
+    this.app.delete('/api/identities/:id', auth, (req: Request, res: Response) => {
+      this.store.deleteIdentity(req.params.id as string);
+      res.json({ ok: true });
+    });
+
     // ── Audit log ───────────────────────────────
     this.app.get('/api/audit/:sessionId', auth, (req, res) => {
       const log = this.store.getAuditLog(req.params.sessionId as string);
@@ -276,6 +317,22 @@ export class DashboardServer {
       const safe = { ...this.config };
       safe.providers = safe.providers.map((p) => ({ ...p, apiKey: p.apiKey ? '***' : undefined }));
       res.json(safe);
+    });
+
+    this.app.put('/api/config', auth, async (req: Request, res: Response) => {
+      const body = req.body as { tierLimits?: TierLimits; budget?: BudgetConfig };
+      if (body.tierLimits) this.config.tierLimits = { ...this.config.tierLimits, ...body.tierLimits };
+      if (body.budget)     this.config.budget     = { ...this.config.budget,     ...body.budget };
+      // Persist to .cascade/config.json
+      try {
+        const configPath = path.join(this.workspacePath, CASCADE_CONFIG_FILE);
+        const existing = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf-8')) : {};
+        const updated = { ...existing, tierLimits: this.config.tierLimits, budget: this.config.budget };
+        fs.writeFileSync(configPath, JSON.stringify(updated, null, 2), 'utf-8');
+        res.json({ ok: true });
+      } catch (err) {
+        res.status(500).json({ error: `Failed to save config: ${String(err)}` });
+      }
     });
 
     // ── Log History ─────────────────────────────

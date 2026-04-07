@@ -465,7 +465,11 @@ Return ONLY the JSON array.`;
     const prompt = `Summarize these T3 worker outputs for section "${assignment.sectionTitle}" in 2-3 sentences:\n\n${outputs}`;
 
     const messages: ConversationMessage[] = [{ role: 'user', content: prompt }];
-    const result = await this.router.generate('T2', { messages, maxTokens: 300 });
+    const result = await this.router.generate('T2', {
+      messages,
+      systemPrompt: this.systemPromptOverride + 'You are a T2 Manager. Summarize the work of your T3 workers succinctly.',
+      maxTokens: 300
+    });
     return result.content;
   }
 
@@ -510,6 +514,7 @@ Reply with exactly one word: YES, NO, or UNSURE.`;
     try {
       const result = await this.router.generate('T2', {
         messages: [{ role: 'user', content: prompt }],
+        systemPrompt: this.systemPromptOverride + 'You are a T2 Manager evaluating permissions.',
         maxTokens: 10,
         temperature: 0,
       });

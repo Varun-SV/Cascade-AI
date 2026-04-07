@@ -18,7 +18,7 @@ export async function dashboardCommand(
   const spin = ora({ text: `Starting dashboard on port ${port}…`, color: 'magenta' }).start();
 
   const store = new MemoryStore(path.join(workspacePath, CASCADE_DB_FILE));
-  const server = new DashboardServer(config, store);
+  const server = new DashboardServer(config, store, workspacePath);
   server.watchRuntimeChanges();
   (globalThis as typeof globalThis & { cascadeDashboardServer?: DashboardServer }).cascadeDashboardServer = server;
 

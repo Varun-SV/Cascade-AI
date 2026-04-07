@@ -45,6 +45,12 @@ export class CascadeRouter {
 
   private tierModels: Map<TierRole, ModelInfo> = new Map();
   private config!: CascadeConfig;
+  private sessionCostUsd = 0;
+
+  /** Thrown when the configured budget is exceeded. */
+  static BudgetExceededError = class extends Error {
+    constructor(msg: string) { super(msg); this.name = 'BudgetExceededError'; }
+  };
 
   async init(config: CascadeConfig): Promise<void> {
     this.config = config;
@@ -96,6 +102,13 @@ export class CascadeRouter {
     onChunk?: (chunk: StreamChunk) => void,
     requireVision = false,
   ): Promise<GenerateResult> {
+    // ── Apply per-tier token limit ──────────────
+    const limits = this.config?.tierLimits;
+    const tierKey = tier.toLowerCase() as 't1' | 't2' | 't3';
+    const tierMaxTokens = limits?.[`${tierKey}MaxTokens` as keyof typeof limits] as number | undefined;
+    if (tierMaxTokens && (!options.maxTokens || options.maxTokens > tierMaxTokens)) {
+      options = { ...options, maxTokens: tierMaxTokens };
+    }
     const model = requireVision
       ? this.selector.selectVisionModel()
       : this.tierModels.get(tier);
@@ -238,8 +251,17 @@ export class CascadeRouter {
   private recordStats(tier: TierRole, model: ModelInfo, usage: TokenUsage): void {
     this.stats.totalTokens += usage.totalTokens;
     this.stats.totalCostUsd += usage.estimatedCostUsd;
+    this.sessionCostUsd += usage.estimatedCostUsd;
     this.stats.callsByProvider[model.provider] = (this.stats.callsByProvider[model.provider] ?? 0) + 1;
     this.stats.callsByTier[tier] = (this.stats.callsByTier[tier] ?? 0) + 1;
+
+    // ── Budget enforcement ─────────────────────
+    const budget = this.config?.budget;
+    if (budget?.sessionBudgetUsd && this.sessionCostUsd >= budget.sessionBudgetUsd) {
+      throw new CascadeRouter.BudgetExceededError(
+        `Session budget of $${budget.sessionBudgetUsd.toFixed(4)} exceeded (spent $${this.sessionCostUsd.toFixed(4)}).`,
+      );
+    }
   }
 
   private isRateLimitError(msg: string): boolean {

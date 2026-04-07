@@ -58,6 +58,18 @@ export const MemoryConfigSchema = z.object({
   retentionDays: z.number().default(90),
 });
 
+export const TierLimitsSchema = z.object({
+  t1MaxTokens: z.number().optional(),
+  t2MaxTokens: z.number().optional(),
+  t3MaxTokens: z.number().optional(),
+});
+
+export const BudgetConfigSchema = z.object({
+  dailyBudgetUsd:   z.number().optional(),
+  sessionBudgetUsd: z.number().optional(),
+  warnAtPct:        z.number().default(80),
+});
+
 export const WorkspaceConfigSchema = z.object({
   cascadeMdPath: z.string().default('CASCADE.md'),
   configPath: z.string().default('.cascade/config.json'),
@@ -75,6 +87,8 @@ export const CascadeConfigSchema = z.object({
   dashboard: DashboardConfigSchema.default({}),
   telemetry: TelemetryConfigSchema.default({}),
   memory: MemoryConfigSchema.default({}),
+  tierLimits: TierLimitsSchema.default({}),
+  budget: BudgetConfigSchema.default({}),
   theme: z.string().default('cascade'),
   workspace: WorkspaceConfigSchema.default({}),
 });

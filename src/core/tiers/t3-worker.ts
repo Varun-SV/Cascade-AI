@@ -252,7 +252,7 @@ export class T3Worker extends BaseTier {
 
       const options: GenerateOptions = {
         messages: this.context.getMessages(),
-        systemPrompt,
+        systemPrompt: (this as any).systemPromptOverride + systemPrompt,
         tools: tools.length ? tools : undefined,
         maxTokens: 4096,
       };

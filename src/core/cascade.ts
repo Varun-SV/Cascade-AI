@@ -163,6 +163,19 @@ ${prompt}`
     let finalOutput = '';
     let t2Results: any[] = [];
 
+    // ── Fetch Identity System Prompt ────────────
+    let identityPrompt = '';
+    if (this.store) {
+      const identityId = options.identityId || this.config.defaultIdentityId;
+      if (identityId) {
+        const identities = this.store.listIdentities();
+        const identity = identities.find(i => i.id === identityId);
+        if (identity?.systemPrompt) {
+          identityPrompt = identity.systemPrompt + '\n\n';
+        }
+      }
+    }
+
     // Helper to bind standard events to any tier
     const bindTierEvents = (tier: any) => {
       tier.on('stream:token', (e: any) => {
@@ -193,6 +206,9 @@ ${prompt}`
 
     if (complexity === 'Simple') {
       const t3 = new T3Worker(this.router, this.toolRegistry, 'root');
+      if (identityPrompt) {
+        t3.setSystemPromptOverride(identityPrompt);
+      }
       if (this.store) {
         t3.setStore(this.store, taskId);
       }
@@ -212,6 +228,9 @@ ${prompt}`
       this.emit('tier:status', { tierId: 't3-root', status: 'COMPLETED', role: 'T3' });
     } else if (complexity === 'Moderate') {
       const t2 = new T2Manager(this.router, this.toolRegistry, 'root');
+      if (identityPrompt) {
+        t2.setSystemPromptOverride(identityPrompt);
+      }
       if (this.store) {
         t2.setStore(this.store);
       }
@@ -236,6 +255,9 @@ ${prompt}`
       }
     } else {
       const t1 = new T1Administrator(this.router, this.toolRegistry, this.config);
+      if (identityPrompt) {
+        t1.setSystemPromptOverride(identityPrompt);
+      }
       if (this.store) {
         t1.setStore(this.store);
       }
