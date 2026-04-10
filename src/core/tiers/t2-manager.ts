@@ -172,9 +172,8 @@ Return a JSON array of subtask objects, each with:
 - description: string
 - expectedOutput: string
 - constraints: string[]
-- expectedOutput: string
-- constraints: string[]
 - peerT3Ids: string[] (empty for now)
+- dependsOn: string[] (array of subtaskIds this task depends on to start)
 - executionMode: "parallel|sequential" (default is parallel)
 
 Return ONLY the JSON array.`;
@@ -246,8 +245,8 @@ Return ONLY the JSON array.`;
       worker.on('tier:status', (e) => this.emit('tier:status', e));
       worker.on('tool:approval-request', (e) => this.emit('tool:approval-request', {
         ...e,
-        __cascadeResponder: (approved: boolean) =>
-          worker.emit(`tool:approval-response:${e.id}`, { approved }),
+        __cascadeResponder: (decision: { approved: boolean; always?: boolean }) =>
+          worker.emit(`tool:approval-response:${e.id}`, decision),
       }));
 
       return worker;
@@ -436,8 +435,8 @@ Return ONLY the JSON array.`;
     worker.on('stream:token', (e) => this.emit('stream:token', e));
     worker.on('tool:approval-request', (e) => this.emit('tool:approval-request', {
       ...e,
-      __cascadeResponder: (approved: boolean) =>
-        worker.emit(`tool:approval-response:${e.id}`, { approved }),
+      __cascadeResponder: (decision: { approved: boolean; always?: boolean }) =>
+        worker.emit(`tool:approval-response:${e.id}`, decision),
     }));
     return worker.execute(
       { ...assignment, description: `[RETRY] ${assignment.description}` },

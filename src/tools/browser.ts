@@ -70,7 +70,7 @@ export class BrowserTool extends BaseTool {
         return JSON.stringify(result);
       }
       case 'extract_text': {
-        const text = await page.evaluate(() => document.body.innerText);
+        const text = await page.locator('body').innerText();
         return text.slice(0, 10_000);
       }
       case 'wait': {

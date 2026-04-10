@@ -5,16 +5,7 @@
  * making them easy to unit-test in isolation.
  */
 
-import type { RuntimeSession, RuntimeNode, RuntimeNodeLog } from '../hooks/useWebSocket';
-
-export interface RuntimeSnapshot {
-  scope?: string;
-  source?: string;
-  fetchedAt?: string;
-  sessions: RuntimeSession[];
-  nodes: RuntimeNode[];
-  logs: RuntimeNodeLog[];
-}
+import type { RuntimeSnapshotPayload as RuntimeSnapshot } from '../types/protocol';
 
 /**
  * Deep-merge two runtime snapshots, deduplicating by natural key.

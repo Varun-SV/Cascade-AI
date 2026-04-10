@@ -116,7 +116,11 @@ export interface ToolExecuteOptions {
   sessionId: string;
   requireApproval: boolean;
   saveSnapshot?: (filePath: string, content: string) => Promise<void>;
-  sendPeerSync?: (to: string, type: string, content: string | Record<string, unknown>) => void;
+  sendPeerSync?: (
+    to: string,
+    syncType: PeerSyncType,
+    content: string | Record<string, unknown>,
+  ) => void;
   getPeerMessages?: () => Array<{ fromId: string; content: unknown; timestamp: string }>;
 }
 
@@ -248,16 +252,24 @@ export interface EscalationPayload {
 export interface PeerSyncPayload {
   senderT3Id: string;
   recipientT3Id: string;
-  syncType: 'SHARE_OUTPUT' | 'RESOLVE_CONFLICT' | 'DIVIDE_WORK' | 'CHECK_ASSUMPTION';
+  syncType: PeerSyncType;
   content: string | Record<string, unknown>;
   subtaskId?: string;
 }
 
+export type PeerSyncType =
+  | 'SHARE_OUTPUT'
+  | 'RESOLVE_CONFLICT'
+  | 'DIVIDE_WORK'
+  | 'CHECK_ASSUMPTION'
+  | 'SIGNAL_READY';
+
 export interface PeerMessage {
   fromId: string;
   toId: string;             // '*' = broadcast to all peers
-  type: 'OUTPUT_READY' | 'REQUEST_OUTPUT' | 'SYNC_DATA' | 'BARRIER';
+  type: 'SYNC_DATA' | 'BARRIER';
   subtaskId: string;
+  syncType?: PeerSyncType;
   payload: unknown;
   timestamp: string;
 }
@@ -333,6 +345,27 @@ export interface RuntimeNodeLog {
   workspacePath?: string;
   isGlobal?: boolean;
 }
+
+export type RuntimeScope = 'workspace' | 'global';
+
+export interface RuntimeSnapshotPayload {
+  scope?: RuntimeScope;
+  source?: string;
+  fetchedAt?: string;
+  sessions: RuntimeSession[];
+  nodes: RuntimeNode[];
+  logs: RuntimeNodeLog[];
+}
+
+export interface RuntimeRefreshPayload {
+  scope: RuntimeScope;
+}
+
+export interface SessionSubscriptionPayload {
+  sessionId: string;
+}
+
+export interface PermissionDecisionPayload extends PermissionDecision {}
 
 export interface SessionCheckpoint {
   taskId: string;

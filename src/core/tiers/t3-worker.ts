@@ -209,7 +209,7 @@ export class T3Worker extends BaseTier {
   }
 
   sendToPeer(toId: string, content: unknown): void {
-    this.peerBus?.send(this.id, toId, 'SYNC_DATA', this.assignment?.subtaskId ?? '', content);
+    this.peerBus?.send(this.id, toId, 'SHARE_OUTPUT', this.assignment?.subtaskId ?? '', content);
   }
 
   async requestFromPeer(peerId: string, subtaskId: string): Promise<string> {
@@ -252,7 +252,7 @@ export class T3Worker extends BaseTier {
 
       const options: GenerateOptions = {
         messages: this.context.getMessages(),
-        systemPrompt: (this as any).systemPromptOverride + systemPrompt,
+        systemPrompt: this.systemPromptOverride + systemPrompt,
         tools: tools.length ? tools : undefined,
         maxTokens: 4096,
       };
@@ -355,13 +355,8 @@ export class T3Worker extends BaseTier {
         saveSnapshot: async (path, content) => {
           this.store?.addFileSnapshot(this.taskId, path, content);
         },
-        sendPeerSync: (to, type, content) => {
-          this.emit('message', this.buildMessage('PEER_SYNC', this.parentId ?? 'T2', {
-            senderT3Id: this.id,
-            recipientT3Id: to,
-            syncType: type as any,
-            content,
-          }));
+        sendPeerSync: (to, syncType, content) => {
+          this.peerBus?.send(this.id, to, syncType, this.assignment?.subtaskId ?? '', content);
         },
         getPeerMessages: () => [...this.peerSyncBuffer],
       });
@@ -381,14 +376,14 @@ export class T3Worker extends BaseTier {
   private requiresArtifact(): boolean {
     const haystack = `${this.assignment?.description ?? ''}
 ${this.assignment?.expectedOutput ?? ''}`;
-    return /\b[\w./-]+\.(pdf|md|html|txt|json|csv|py|js|ts|tsx|jsx|docx?)\b/i.test(haystack)
+    return /\b[\w./-]+\.(pdf|md|html|txt|json|csv|py|js|ts|tsx|jsx|docx?|png|jpg|jpeg|svg|gif)\b/i.test(haystack)
       || /save (?:a|the)? file|create (?:a|the)? file|write (?:a|the)? file/i.test(haystack);
   }
 
   private extractArtifactPaths(assignment: T2ToT3Assignment): string[] {
     const haystack = `${assignment.description}
 ${assignment.expectedOutput}`;
-    const matches = haystack.match(/\b[\w./-]+\.(pdf|md|html|txt|json|csv|py|js|ts|tsx|jsx|docx?)\b/gi) ?? [];
+    const matches = haystack.match(/\b[\w./-]+\.(pdf|md|html|txt|json|csv|py|js|ts|tsx|jsx|docx?|png|jpg|jpeg|svg|gif)\b/gi) ?? [];
     return [...new Set(matches.map((m) => m.trim()))];
   }
 
@@ -479,17 +474,11 @@ Correct the issues and provide an improved version that addresses all failures.`
 
     await this.context.addMessage({ role: 'user', content: correctionPrompt });
 
-    const result = await this.router.generate(
-    'T3',
-      { 
-        messages: this.context.getMessages(),
-        tools: this.tools.length ? this.tools : undefined, // ✅  was missing
-        maxTokens: 4096 
-      },
-      (chunk) => this.emit('stream:token', { tierId: this.id, text: chunk.text }),
+    const result = await this.runAgentLoop(
+      "You are in a correction phase. Fix the identified issues using your tools.",
+      this.tools
     );
-    await this.context.addMessage({ role: 'assistant', content: result.content });
-    return result.content;
+    return result.output;
   }
 
   private buildSystemPrompt(assignment: T2ToT3Assignment): string {

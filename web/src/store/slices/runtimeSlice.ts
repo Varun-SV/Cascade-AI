@@ -5,11 +5,12 @@ import {
   type PayloadAction,
 } from '@reduxjs/toolkit';
 import type {
-  RuntimeSession,
   RuntimeNode,
   RuntimeNodeLog,
-  RuntimeSnapshot,
-} from '../../hooks/useWebSocket';
+  RuntimeScope,
+  RuntimeSession,
+  RuntimeSnapshotPayload,
+} from '../../types/protocol';
 
 // ── Async thunk ────────────────────────────────
 
@@ -34,7 +35,7 @@ interface RuntimeState {
   logIds: Record<string, Set<string>>;
   logs: Record<string, RuntimeNodeLog[]>;
   activeSessionId: string | null;
-  scope: 'workspace' | 'global';
+  scope: RuntimeScope;
   connected: boolean;
 }
 
@@ -99,7 +100,7 @@ export const runtimeSlice = createSlice({
       state.connected = action.payload;
     },
 
-    setScope(state, action: PayloadAction<'workspace' | 'global'>) {
+    setScope(state, action: PayloadAction<RuntimeScope>) {
       state.scope = action.payload;
     },
 
@@ -112,7 +113,7 @@ export const runtimeSlice = createSlice({
      * Previously this ignored `nodes` — now it processes them too so the
      * topology graph is populated after the first HTTP fetch.
      */
-    updateRTKSnapshot(state, action: PayloadAction<RuntimeSnapshot>) {
+    updateRTKSnapshot(state, action: PayloadAction<RuntimeSnapshotPayload>) {
       const { sessions, nodes, logs, scope } = action.payload;
 
       // Scope — validated cast (avoids `as any`)

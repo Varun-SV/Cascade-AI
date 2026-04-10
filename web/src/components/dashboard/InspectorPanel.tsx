@@ -1,6 +1,6 @@
 import React, { memo, useEffect, useRef } from 'react';
 import { X, Cpu, Activity, Clock, ChevronRight } from 'lucide-react';
-import type { RuntimeNode } from '../../hooks/useWebSocket';
+import type { RuntimeNode } from '../../types/protocol';
 
 interface InspectorPanelProps {
   node: RuntimeNode | null;

@@ -17,7 +17,7 @@
     "cascade": "bin/cascade.js"
   },
   "scripts": {
-    "build:web": "cd web && npm install && npm run build",
+    "build:web": "npm --prefix web run build",
     "build:cli": "tsup",
     "build": "npm run build:web && npm run build:cli",
     "dev": "tsup --watch",

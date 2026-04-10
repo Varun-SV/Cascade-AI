@@ -3,7 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { BaseTool } from './base.js';
-import type { ToolExecuteOptions } from '../types.js';
+import type { PeerSyncType, ToolExecuteOptions } from '../types.js';
 
 export class PeerCommunicationTool extends BaseTool {
   readonly name = 'peer_message';
@@ -38,7 +38,7 @@ export class PeerCommunicationTool extends BaseTool {
 
     if (action === 'send') {
       const toId = input.toId as string;
-      const messageType = (input.messageType as string) || 'SHARE_OUTPUT';
+      const messageType = ((input.messageType as PeerSyncType | undefined) ?? 'SHARE_OUTPUT');
       const content = input.content as string;
 
       if (!toId) return 'Error: toId is required when action is "send"';

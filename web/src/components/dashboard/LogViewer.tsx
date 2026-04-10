@@ -2,7 +2,7 @@ import React, { memo, useRef, useEffect, useState, useCallback, useMemo } from '
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useAppSelector } from '../../store';
 import { selectActiveLogs } from '../../store/slices/runtimeSlice';
-import type { RuntimeNodeLog } from '../../hooks/useWebSocket';
+import type { RuntimeNodeLog } from '../../types/protocol';
 
 // ── Filter types ───────────────────────────────
 

@@ -65,7 +65,7 @@ export class GeminiProvider extends BaseProvider {
 
     for await (const chunk of stream) {
       // ── Text content ──────────────────────────
-      const text = typeof chunk.text === 'function' ? chunk.text() : chunk.text;
+      const text = chunk.text ?? '';
       if (text) {
         fullContent += text;
         onChunk({ text, finishReason: null });

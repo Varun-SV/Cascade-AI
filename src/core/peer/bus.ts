@@ -3,7 +3,7 @@
 // ─────────────────────────────────────────────
 
 import EventEmitter from 'node:events';
-import type { PeerMessage } from '../../types.js';
+import type { PeerMessage, PeerSyncType } from '../../types.js';
 
 interface PeerOutput {
   subtaskId: string;
@@ -86,6 +86,7 @@ export class PeerBus extends EventEmitter {
       toId: '*',
       type: 'SYNC_DATA',
       subtaskId: '',
+      syncType: 'SHARE_OUTPUT',
       payload,
       timestamp: new Date().toISOString(),
     };
@@ -95,12 +96,19 @@ export class PeerBus extends EventEmitter {
   /**
    * Send a targeted message to a specific peer
    */
-  send(fromId: string, toId: string, type: PeerMessage['type'], subtaskId: string, payload: unknown): void {
+  send(
+    fromId: string,
+    toId: string,
+    syncType: PeerSyncType,
+    subtaskId: string,
+    payload: unknown,
+  ): void {
     const msg: PeerMessage = {
       fromId,
       toId,
-      type,
+      type: 'SYNC_DATA',
       subtaskId,
+      syncType,
       payload,
       timestamp: new Date().toISOString(),
     };

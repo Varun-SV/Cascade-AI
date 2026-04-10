@@ -8,9 +8,8 @@ import {
 } from './store/slices/runtimeSlice';
 import {
   useWebSocket,
-  type RuntimeSnapshot,
-  type PermissionRequest,
 } from './hooks/useWebSocket';
+import type { PermissionDecisionPayload, PermissionRequest, RuntimeSnapshotPayload } from './types/protocol';
 import { LoginView } from './components/auth/LoginView';
 import { NavRail, type NavTab } from './components/layout/NavRail';
 import { TopBar } from './components/layout/TopBar';
@@ -123,7 +122,7 @@ function Dashboard({
       });
       if (res.status === 401) { onNeedAuth(); return; }
       if (res.ok) {
-        const snapshot = (await res.json()) as RuntimeSnapshot;
+        const snapshot = (await res.json()) as RuntimeSnapshotPayload;
         dispatch(updateRTKSnapshot(snapshot));
       }
     } catch { /* retry on next WS ping */ }
@@ -169,13 +168,13 @@ function Dashboard({
 
   // ── Escalation handler ────────────────────────
   const handleEscalationDecide = useCallback((approved: boolean, always: boolean) => {
-    if (!pendingEscalation || !socket) return;
+      if (!pendingEscalation || !socket) return;
     socket.emit('permission:decision', {
       requestId: pendingEscalation.id,
       approved,
       always,
       decidedBy: 'USER',
-    });
+    } satisfies PermissionDecisionPayload);
     setPendingEscalation(null);
   }, [pendingEscalation, socket]);
 

@@ -2,6 +2,16 @@ import { useEffect, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
 import parser from 'socket.io-msgpack-parser';
 import { useAppDispatch } from '../store';
+import type {
+  PermissionRequest,
+  RuntimeNode,
+  RuntimeNodeLog,
+  RuntimeRefreshPayload,
+  RuntimeScope,
+  RuntimeSession,
+  RuntimeSnapshotPayload,
+  SessionSubscriptionPayload,
+} from '../types/protocol';
 import {
   setConnected,
   updateRTKSnapshot,
@@ -9,71 +19,9 @@ import {
   appendLog,
 } from '../store/slices/runtimeSlice';
 
-// ── Public types ───────────────────────────────
-
-export interface RuntimeSession {
-  sessionId: string;
-  title: string;
-  workspacePath: string;
-  status: 'ACTIVE' | 'COMPLETED' | 'FAILED';
-  startedAt: string;
-  updatedAt: string;
-  latestPrompt?: string;
-  isGlobal?: boolean;
-}
-
-export interface RuntimeNode {
-  tierId: string;
-  sessionId: string;
-  parentId?: string;
-  role: 'T1' | 'T2' | 'T3';
-  label: string;
-  status: 'IDLE' | 'ACTIVE' | 'COMPLETED' | 'FAILED' | 'ESCALATED';
-  currentAction?: string;
-  progressPct?: number;
-  updatedAt: string;
-  workspacePath?: string;
-  isGlobal?: boolean;
-}
-
-export interface RuntimeNodeLog {
-  id: string;
-  sessionId: string;
-  tierId: string;
-  role: 'T1' | 'T2' | 'T3';
-  label: string;
-  status: 'IDLE' | 'ACTIVE' | 'COMPLETED' | 'FAILED' | 'ESCALATED';
-  currentAction?: string;
-  progressPct?: number;
-  timestamp: string;
-  workspacePath?: string;
-  isGlobal?: boolean;
-}
-
-export interface RuntimeSnapshot {
-  scope?: string;
-  source?: string;
-  fetchedAt?: string;
-  sessions: RuntimeSession[];
-  nodes: RuntimeNode[];
-  logs: RuntimeNodeLog[];
-}
-
 export interface CostUpdate {
   totalCostUsd?: number;
   totalTokens?: number;
-}
-
-export interface PermissionRequest {
-  id: string;
-  requestedBy: string;
-  parentT2Id: string;
-  toolName: string;
-  input: Record<string, unknown>;
-  isDangerous: boolean;
-  subtaskContext: string;
-  sectionContext: string;
-  taskContext?: string;
 }
 
 // ── Hook options ───────────────────────────────
@@ -83,7 +31,7 @@ interface UseWebSocketOptions {
   token?: string;
   activeSessionId?: string | null;
   /** Called when the server requests a runtime refresh */
-  onRuntimeRefresh?: (scope?: 'workspace' | 'global') => void;
+  onRuntimeRefresh?: (scope?: RuntimeScope) => void;
   /** Called on every streamed LLM token */
   onStreamToken?: (data: { text: string }) => void;
   /** Called on cost:update events */
@@ -147,12 +95,12 @@ export function useWebSocket({
 
     s.on('connect', () => {
       dispatch(setConnected(true));
-      s.emit('runtime:refresh', { scope: 'workspace' });
+      s.emit('runtime:refresh', { scope: 'workspace' } satisfies RuntimeRefreshPayload);
 
       // Rejoin last session room (uses ref so it's always fresh)
       const sid = activeSessionIdRef.current;
       if (sid) {
-        s.emit('join:session', { sessionId: sid });
+        s.emit('join:session', { sessionId: sid } satisfies SessionSubscriptionPayload);
         lastJoinedRef.current = sid;
       }
 
@@ -166,7 +114,7 @@ export function useWebSocket({
 
     // Redux-dispatched events
     s.on('runtime:update', (d: unknown) => {
-      dispatch(updateRTKSnapshot(d as RuntimeSnapshot));
+      dispatch(updateRTKSnapshot(d as RuntimeSnapshotPayload));
     });
 
     s.on('session:details', (d: unknown) => {
@@ -180,7 +128,7 @@ export function useWebSocket({
 
     // Callback-dispatched events (caller decides what state to set)
     s.on('runtime:refresh', (d: unknown) => {
-      const p = d as { scope?: 'workspace' | 'global' } | undefined;
+      const p = d as RuntimeRefreshPayload | undefined;
       cbRefresh.current?.(p?.scope);
     });
 
@@ -211,10 +159,10 @@ export function useWebSocket({
     if (activeSessionId === lastJoinedRef.current) return;
 
     if (lastJoinedRef.current) {
-      socket.emit('leave:session', { sessionId: lastJoinedRef.current });
+      socket.emit('leave:session', { sessionId: lastJoinedRef.current } satisfies SessionSubscriptionPayload);
     }
     if (activeSessionId) {
-      socket.emit('join:session', { sessionId: activeSessionId });
+      socket.emit('join:session', { sessionId: activeSessionId } satisfies SessionSubscriptionPayload);
     }
     lastJoinedRef.current = activeSessionId ?? null;
   }, [socket, activeSessionId]);

@@ -4,7 +4,8 @@
 
 import axios from 'axios';
 import chalk from 'chalk';
-import { OLLAMA_BASE_URL, LM_STUDIO_BASE_URL, PROVIDER_DISPLAY_NAMES } from '../../constants.js';
+import path from 'node:path';
+import { CASCADE_CONFIG_FILE, LM_STUDIO_BASE_URL, OLLAMA_BASE_URL } from '../../constants.js';
 import { ConfigManager } from '../../config/index.js';
 
 interface CheckResult {
@@ -29,6 +30,13 @@ export async function doctorCommand(): Promise<void> {
 
   const cm = new ConfigManager(process.cwd());
   await cm.load();
+  const config = cm.getConfig();
+
+  checks.push({
+    label: 'Cascade config',
+    ok: true,
+    detail: `Loaded ${path.join(process.cwd(), CASCADE_CONFIG_FILE)}`,
+  });
 
   // API keys from config/env/keystore
   const providers: Array<{ type: string; name: string }> = [
@@ -62,6 +70,33 @@ export async function doctorCommand(): Promise<void> {
     playwrightOk = true;
   } catch { /* not installed */ }
   checks.push({ label: 'Playwright (browser automation)', ok: playwrightOk, detail: playwrightOk ? 'Installed' : 'Optional — npm install playwright' });
+
+  const hasOpenAICompatible = config.providers.some((provider) => provider.type === 'openai-compatible');
+  if (hasOpenAICompatible) {
+    checks.push({
+      label: 'OpenAI-compatible endpoint',
+      ok: config.providers.some((provider) => provider.type === 'openai-compatible' && Boolean(provider.baseUrl)),
+      detail: 'Configured in .cascade/config.json',
+    });
+  }
+
+  const dashboardPasswordConfigured = Boolean(process.env['CASCADE_DASHBOARD_PASSWORD']);
+  checks.push({
+    label: 'Dashboard auth',
+    ok: !config.dashboard.auth || dashboardPasswordConfigured,
+    detail: config.dashboard.auth
+      ? (dashboardPasswordConfigured ? 'Password configured' : 'Missing CASCADE_DASHBOARD_PASSWORD')
+      : 'Disabled',
+  });
+
+  const dashboardSecretConfigured = Boolean(config.dashboard.secret || process.env['CASCADE_DASHBOARD_SECRET']);
+  checks.push({
+    label: 'Dashboard JWT secret',
+    ok: !config.dashboard.auth || dashboardSecretConfigured,
+    detail: config.dashboard.auth
+      ? (dashboardSecretConfigured ? 'Configured' : 'Using ephemeral secret at runtime')
+      : 'Not required',
+  });
 
   // Print results
   for (const c of checks) {

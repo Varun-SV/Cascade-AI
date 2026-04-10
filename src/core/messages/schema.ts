@@ -73,7 +73,7 @@ export const EscalationSchema = z.object({
 export const PeerSyncSchema = z.object({
   senderT3Id: z.string(),
   recipientT3Id: z.string(),
-  syncType: z.enum(['SHARE_OUTPUT', 'RESOLVE_CONFLICT', 'DIVIDE_WORK', 'CHECK_ASSUMPTION']),
+  syncType: z.enum(['SHARE_OUTPUT', 'RESOLVE_CONFLICT', 'DIVIDE_WORK', 'CHECK_ASSUMPTION', 'SIGNAL_READY']),
   content: z.union([z.string(), z.record(z.unknown())]),
 });
 

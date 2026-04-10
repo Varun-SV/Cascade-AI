@@ -4,9 +4,6 @@
 
 import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
-
-// Hard clear terminal once on load
-process.stdout.write('\x1bc');
 import TextInput from 'ink-text-input';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
@@ -32,6 +29,7 @@ import { GeminiProvider } from '../../providers/gemini.js';
 import { AnthropicProvider } from '../../providers/anthropic.js';
 import { OllamaProvider } from '../../providers/ollama.js';
 import { OpenAICompatibleProvider } from '../../providers/openai-compatible.js';
+import type { BaseProvider } from '../../providers/base.js';
 import { getTheme } from '../themes/index.js';
 import { SlashCommandRegistry } from '../slash/index.js';
 import { AgentTree, type TierNode } from './components/AgentTree.js';
@@ -58,6 +56,20 @@ function WelcomeSplash({ theme }: { theme: Theme }) {
 
 interface FlatTreeNode extends TierNode {
   parentId?: string;
+}
+
+interface RootTierEvent {
+  role: 'T1' | 'T2' | 'T3';
+}
+
+interface TierStatusEvent {
+  tierId: string;
+  role: 'T1' | 'T2' | 'T3';
+  parentId?: string;
+  label?: string;
+  status: RuntimeNode['status'];
+  currentAction?: string;
+  progressPct?: number;
 }
 
 interface ReplState {
@@ -137,7 +149,7 @@ async function refreshModelCache(store: MemoryStore, providers: CascadeConfig['p
   for (const provider of providers) {
     try {
       const dummyModel: ModelInfo = { id: 'dummy', name: 'dummy', provider: provider.type, contextWindow: 0, isVisionCapable: false, inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, maxOutputTokens: 0, supportsStreaming: false, isLocal: false };
-      let instance: any;
+      let instance: BaseProvider | undefined;
       if (provider.type === 'openai') instance = new OpenAIProvider(provider, dummyModel);
       else if (provider.type === 'gemini') instance = new GeminiProvider(provider, dummyModel);
       else if (provider.type === 'anthropic') instance = new AnthropicProvider(provider, dummyModel);
@@ -189,6 +201,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
 
   const sessionTitle = state.messages.find(m => m.role === 'user')?.content.slice(0, 72) ?? 'Cascade Session';
   const lastUserPrompt = useRef<string | null>(null);
+  const rootTierIdRef = useRef<'T1' | 't2-root' | 't3-root'>('T1');
   const isTypingCommand = input.startsWith('/');
   const slashCompletions = isTypingCommand ? (
     input.startsWith('/identity ') 
@@ -200,18 +213,17 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     storeRef.current?.addMessage({ id: randomUUID(), sessionId: sessionIdRef.current, role, content, timestamp });
   }, []);
 
+  const globalStoreRef = useRef<MemoryStore | null>(null);
+
   const persistRuntimeSession = useCallback((status: 'ACTIVE' | 'COMPLETED' | 'FAILED', latestPrompt?: string) => {
     const runtimeSession = { sessionId: sessionIdRef.current, title: sessionTitle, workspacePath, status, startedAt: startedAtRef.current, updatedAt: new Date().toISOString(), latestPrompt, isGlobal: false };
     storeRef.current?.upsertRuntimeSession(runtimeSession);
-    const globalDbPath = path.join(process.env['HOME'] ?? process.cwd(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
-    const globalStore = new MemoryStore(globalDbPath);
-    globalStore.upsertRuntimeSession({ ...runtimeSession, isGlobal: true });
-    globalStore.close();
+    globalStoreRef.current?.upsertRuntimeSession({ ...runtimeSession, isGlobal: true });
   }, [sessionTitle, workspacePath]);
 
   const rebuildTree = useCallback(() => { dispatch({ type: 'SET_TREE', tree: buildTreeFromFlatNodes([...treeNodesRef.current.values()]) }); }, []);
 
-  const recordNodeEvent = useCallback((event: any) => {
+  const recordNodeEvent = useCallback((event: TierStatusEvent) => {
     const existing = treeNodesRef.current.get(event.tierId);
     const node: FlatTreeNode = { id: event.tierId, role: event.role ?? existing?.role ?? 'T3', label: event.label ?? existing?.label ?? event.tierId, status: event.status ?? existing?.status ?? 'IDLE', currentAction: event.currentAction ?? existing?.currentAction, progressPct: event.progressPct ?? existing?.progressPct, parentId: event.parentId ?? existing?.parentId, children: [] };
     treeNodesRef.current.set(event.tierId, node);
@@ -219,10 +231,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     if (store) {
       const runtimeNode: RuntimeNode = { tierId: node.id, sessionId: sessionIdRef.current, parentId: node.parentId, role: node.role, label: node.label, status: node.status, currentAction: node.currentAction, progressPct: node.progressPct, updatedAt: new Date().toISOString(), workspacePath, isGlobal: false };
       store.upsertRuntimeNode(runtimeNode);
-      const globalDbPath = path.join(process.env['HOME'] ?? process.cwd(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
-      const globalStore = new MemoryStore(globalDbPath);
-      globalStore.upsertRuntimeNode({ ...runtimeNode, isGlobal: true });
-      globalStore.close();
+      globalStoreRef.current?.upsertRuntimeNode({ ...runtimeNode, isGlobal: true });
     }
     const history = nodeLogsRef.current.get(node.id) ?? [];
     nodeLogsRef.current.set(node.id, [...history.slice(-24), [node.status, node.currentAction].filter(Boolean).join(' — ')]);
@@ -234,14 +243,16 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     const originalWarn = console.warn;
     const originalLog = console.log;
     
-    console.warn = (...args: any[]) => {
+    process.stdout.write('\x1bc');
+
+    console.warn = (...args: unknown[]) => {
       const msg = args.join(' ');
       if (msg.includes('non-text parts') || msg.includes('functionCall')) return;
       originalWarn(...args);
     };
 
     // Also silence some direct logs if they leak
-    console.log = (...args: any[]) => {
+    console.log = (...args: unknown[]) => {
       const msg = args.join(' ');
       if (msg.includes('non-text parts')) return;
       originalLog(...args);
@@ -249,6 +260,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
 
     const store = new MemoryStore(path.join(workspacePath, CASCADE_DB_FILE));
     storeRef.current = store;
+    globalStoreRef.current = new MemoryStore(path.join(process.env['HOME'] ?? process.cwd(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE));
     const identityRows = store.listIdentities().map(i => ({ id: i.id, name: i.name, isDefault: i.isDefault }));
     setIdentities(identityRows);
     let initialIdentityId = config.defaultIdentityId ?? identityRows.find(i => i.isDefault)?.id ?? identityRows[0]?.id;
@@ -273,6 +285,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     validateConfiguredModels(config).then(setStartupWarning);
     return () => { 
       persistRuntimeSession('COMPLETED'); 
+      globalStoreRef.current?.close();
       store.close(); 
       console.warn = originalWarn;
       console.log = originalLog;
@@ -435,20 +448,22 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     const cascade = cascadeRef.current;
     if (!cascade) return;
     treeNodesRef.current.clear(); rebuildTree();
-    const onRoot = ({ role }: any) => {
-      recordNodeEvent({ tierId: role === 'T1' ? 'T1' : `${role.toLowerCase()}-root`, role, label: 'Initializing', status: 'ACTIVE' });
+    const onRoot = ({ role }: RootTierEvent) => {
+      const tierId = role === 'T1' ? 'T1' : `${role.toLowerCase()}-root` as 't2-root' | 't3-root';
+      rootTierIdRef.current = tierId;
+      recordNodeEvent({ tierId, role, label: 'Initializing', status: 'ACTIVE' });
     };
     let currentStreamBuffer = '';
-    let streamThrottleTimeout: any = null;
+    let streamThrottleTimeout: NodeJS.Timeout | null = null;
     const flushStream = () => { if (currentStreamBuffer) { dispatch({ type: 'APPEND_STREAM', text: currentStreamBuffer }); currentStreamBuffer = ''; } streamThrottleTimeout = null; };
-    const onStream = ({ text, tierId }: any) => { 
-      if (tierId !== 'T1') return; // Hide intermediate thoughts from main chat
+    const onStream = ({ text, tierId }: { text: string; tierId: string }) => { 
+      if (tierId !== rootTierIdRef.current) return; // Hide non-root streams from main chat
       currentStreamBuffer += (text ?? ''); 
       if (!streamThrottleTimeout) streamThrottleTimeout = setTimeout(flushStream, 50); 
     };
     cascade.on('tier:root', onRoot);
     cascade.on('stream:token', onStream);
-    cascade.on('tier:status', (ev: any) => {
+    cascade.on('tier:status', (ev: TierStatusEvent) => {
       recordNodeEvent(ev);
       const stats = cascade.getRouter().getStats();
       dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier });
@@ -471,8 +486,9 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier });
       dispatch({ type: 'COMMIT_STREAM', finalText: result.output, timestamp: new Date().toISOString() });
       persistMessage('assistant', result.output, new Date().toISOString());
-    } catch (err: any) { 
-      dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'error', content: err.message, timestamp: new Date().toISOString() } }); 
+    } catch (err: unknown) { 
+      const message = err instanceof Error ? err.message : String(err);
+      dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'error', content: message, timestamp: new Date().toISOString() } }); 
     }
     finally { 
       cascade.removeAllListeners(); 
@@ -710,7 +726,9 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
 }
 
 function toConversationHistory(messages: Message[]): ConversationMessage[] {
-  return messages.filter(m => m.role !== 'error').map(m => ({ role: m.role as any, content: m.content }));
+  return messages
+    .filter((m): m is Message & { role: 'user' | 'assistant' | 'system' } => m.role !== 'error')
+    .map((m) => ({ role: m.role, content: m.content }));
 }
 
 function buildTreeFromFlatNodes(nodes: FlatTreeNode[]): TierNode | null {
@@ -774,8 +792,8 @@ async function searchSessionsAndMessages(query: string, workspacePath: string): 
       messages.length > 8 ? `  ... and ${messages.length - 8} more` : '',
     ];
     return lines.filter(Boolean).join('\n');
-  } catch (err: any) {
-    return `Search failed: ${err.message}`;
+  } catch (err: unknown) {
+    return `Search failed: ${err instanceof Error ? err.message : String(err)}`;
   } finally { store.close(); }
 }
 

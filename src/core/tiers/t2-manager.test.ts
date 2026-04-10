@@ -1,92 +1,121 @@
-// ─────────────────────────────────────────────
-//  Cascade AI — T2 Manager Permission Tests
-// ─────────────────────────────────────────────
+import { describe, expect, it, vi } from 'vitest';
+import type { GenerateResult, T1ToT2Assignment, ToolDefinition } from '../../types.js';
+import type { CascadeRouter } from '../router/index.js';
+import type { ToolRegistry } from '../../tools/registry.js';
+import { T2Manager } from './t2-manager.js';
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { PermissionRequest } from '../../types.js';
-
-// We test the T2 evaluator logic in isolation by extracting its behavior.
-// The actual evaluatePermissionAtT2 is private; we test it via the escalator integration.
-
-function makeT2Request(overrides: Partial<PermissionRequest> = {}): PermissionRequest {
+function makeResult(content: string, finishReason: GenerateResult['finishReason'] = 'stop'): GenerateResult {
   return {
-    id: 'req-t2-001',
-    requestedBy: 't3-alpha',
-    parentT2Id: 't2-section-1',
-    toolName: 'file_read',
-    input: { path: '/workspace/data.txt' },
-    isDangerous: false,
-    subtaskContext: 'Read config file',
-    sectionContext: 'Analyze project structure',
-    ...overrides,
+    content,
+    finishReason,
+    usage: {
+      inputTokens: 1,
+      outputTokens: 1,
+      totalTokens: 2,
+      estimatedCostUsd: 0,
+    },
   };
 }
 
-// ── Safe tool rule set ──────────────────────
+function makeAssignment(): T1ToT2Assignment {
+  return {
+    sectionId: 'section-1',
+    sectionTitle: 'Build release notes',
+    description: 'Generate release notes from the completed work',
+    expectedOutput: 'A final release-notes summary',
+    constraints: [],
+    executionMode: 'parallel',
+    t3Subtasks: [
+      {
+        subtaskId: 'draft',
+        subtaskTitle: 'Draft notes',
+        description: 'Draft the initial notes',
+        expectedOutput: 'Drafted notes',
+        constraints: [],
+        peerT3Ids: [],
+        dependsOn: [],
+      },
+      {
+        subtaskId: 'finalize',
+        subtaskTitle: 'Finalize notes',
+        description: 'Finalize after the draft is complete',
+        expectedOutput: 'Finalized notes',
+        constraints: [],
+        peerT3Ids: [],
+        dependsOn: ['draft'],
+      },
+    ],
+  };
+}
 
-describe('T2 permission rules — safe tools', () => {
-  const SAFE_TOOLS = ['file_read', 'file_list', 'git_status', 'git_log', 'git_diff', 'image_analyze', 'peer_message'];
+function makeToolRegistry(): ToolRegistry {
+  const definitions: ToolDefinition[] = [];
+  return {
+    getToolDefinitions: () => definitions,
+    requiresApproval: () => false,
+    isDangerous: () => false,
+    execute: vi.fn(),
+  } as unknown as ToolRegistry;
+}
 
-  for (const toolName of SAFE_TOOLS) {
-    it(`auto-approves ${toolName} (non-dangerous, no LLM call)`, () => {
-      // Safe tools are rule-approved before reaching T2's LLM.
-      // This tests that the SAFE_TOOLS constant covers all expected read-only tools.
-      const req = makeT2Request({ toolName, isDangerous: false });
-      expect(req.isDangerous).toBe(false);
-      expect(SAFE_TOOLS).toContain(req.toolName);
-    });
-  }
-});
+describe('T2Manager', () => {
+  it('executes dependent subtasks in dependency order and aggregates the result', async () => {
+    const executionOrder: string[] = [];
 
-// ── Dangerous tool LLM evaluation ─────────
+    const router = {
+      generate: vi.fn(async (tier, options) => {
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
 
-describe('T2 LLM evaluation', () => {
-  it('returns approved=true for YES answer', async () => {
-    // Simulate T2's evaluatePermissionAtT2 logic directly
-    const mockRouter = { generate: vi.fn().mockResolvedValue({ content: 'YES' }) };
-    const answer = (await mockRouter.generate()).content.trim().toUpperCase();
-    expect(answer.includes('YES')).toBe(true);
+        if (content.startsWith('Execute the following subtask completely:')) {
+          const title = /\*\*(.+?)\*\*/.exec(content)?.[1] ?? 'unknown';
+          executionOrder.push(title);
+          return makeResult(`${title} complete`);
+        }
+
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+
+        if (tier === 'T2') {
+          return makeResult('Merged release notes');
+        }
+
+        return makeResult('ok');
+      }),
+    } as unknown as CascadeRouter;
+
+    const manager = new T2Manager(router, makeToolRegistry(), 't1-root');
+    const result = await manager.execute(makeAssignment(), 'task-1');
+
+    expect(result.status).toBe('COMPLETED');
+    expect(result.sectionSummary).toBe('Merged release notes');
+    expect(executionOrder).toEqual(['Draft notes', 'Finalize notes']);
   });
 
-  it('returns approved=false for NO answer', async () => {
-    const mockRouter = { generate: vi.fn().mockResolvedValue({ content: 'NO' }) };
-    const answer = (await mockRouter.generate()).content.trim().toUpperCase();
-    expect(answer.includes('NO')).toBe(true);
-  });
+  it('breaks cyclic dependencies instead of deadlocking the section', async () => {
+    const router = {
+      generate: vi.fn(async (_tier, options) => {
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        if (content.startsWith('Summarize these T3 worker outputs')) {
+          return makeResult('Cyclic section merged');
+        }
+        return makeResult('completed');
+      }),
+    } as unknown as CascadeRouter;
 
-  it('returns null (escalate) for UNSURE answer', async () => {
-    const mockRouter = { generate: vi.fn().mockResolvedValue({ content: 'UNSURE' }) };
-    const answer = (await mockRouter.generate()).content.trim().toUpperCase();
-    expect(answer.includes('YES') || answer.includes('NO')).toBe(false);
-  });
+    const assignment = makeAssignment();
+    assignment.t3Subtasks[0]!.dependsOn = ['finalize'];
 
-  it('returns null (escalate) on LLM timeout', async () => {
-    const mockRouter = { generate: vi.fn().mockRejectedValue(new Error('Timeout')) };
-    let result: unknown = null;
-    try {
-      const r = await mockRouter.generate();
-      result = r.content;
-    } catch {
-      result = null; // error → escalate
-    }
-    expect(result).toBeNull();
-  });
-});
+    const manager = new T2Manager(router, makeToolRegistry(), 't1-root');
+    const result = await manager.execute(assignment, 'task-2');
 
-// ── Section-wide caching ────────────────────
-
-describe('Section-wide cache key', () => {
-  it('uses t2Id + toolName as cache key', () => {
-    const req = makeT2Request({ toolName: 'shell_run', isDangerous: true });
-    const key = `${req.parentT2Id}:${req.toolName}`;
-    expect(key).toBe('t2-section-1:shell_run');
-  });
-
-  it('different t2Ids produce different cache keys', () => {
-    const req1 = makeT2Request({ parentT2Id: 't2-section-1', toolName: 'file_write' });
-    const req2 = makeT2Request({ parentT2Id: 't2-section-2', toolName: 'file_write' });
-    const key1 = `${req1.parentT2Id}:${req1.toolName}`;
-    const key2 = `${req2.parentT2Id}:${req2.toolName}`;
-    expect(key1).not.toBe(key2);
+    expect(result.status).toBe('COMPLETED');
+    expect(result.t3Results).toHaveLength(2);
+    expect(result.t3Results.every((t3) => t3.status === 'COMPLETED')).toBe(true);
   });
 });

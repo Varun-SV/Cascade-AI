@@ -7,11 +7,11 @@ import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { CascadeConfig, Identity } from '../types.js';
-import { CascadeConfigSchema } from './schema.js';
 import { Keystore } from './keystore.js';
 import { CascadeIgnore } from './ignore.js';
 import { loadCascadeMd, type CascadeMdContent } from './cascade-md.js';
 import { MemoryStore } from '../memory/store.js';
+import { validateConfig } from './validate.js';
 import {
   CASCADE_CONFIG_FILE,
   CASCADE_DB_FILE,
@@ -75,7 +75,7 @@ export class ConfigManager {
   }
 
   async updateConfig(updates: Partial<CascadeConfig>): Promise<void> {
-    this.config = { ...this.config, ...updates };
+    this.config = validateConfig({ ...this.config, ...updates });
     await this.save();
   }
 
@@ -100,10 +100,12 @@ export class ConfigManager {
     const configPath = path.join(this.workspacePath, CASCADE_CONFIG_FILE);
     try {
       const raw = await fs.readFile(configPath, 'utf-8');
-      const parsed = JSON.parse(raw) as unknown;
-      return CascadeConfigSchema.parse(parsed);
-    } catch {
-      return CascadeConfigSchema.parse({});
+      return validateConfig(JSON.parse(raw) as unknown);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return validateConfig({});
+      }
+      throw err;
     }
   }
 

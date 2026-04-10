@@ -5,8 +5,6 @@
 import jwt from 'jsonwebtoken';
 import type { Request, Response, NextFunction } from 'express';
 
-const DEFAULT_SECRET = 'cascade-dashboard-secret-change-me';
-
 export interface DashboardUser {
   id: string;
   username: string;
@@ -26,10 +24,10 @@ export function verifyToken(token: string, secret: string): DashboardUser | null
   }
 }
 
-export function authMiddleware(secret = DEFAULT_SECRET, required = true) {
+export function authMiddleware(secret: string, required = true) {
   return (req: Request, res: Response, next: NextFunction): void => {
     const header = req.headers.authorization;
-    const token = header?.startsWith('Bearer ') ? header.slice(7) : req.cookies?.cascade_token;
+    const token = header?.startsWith('Bearer ') ? header.slice(7) : undefined;
 
     if (!token) {
       if (!required) { (req as Request & { user?: DashboardUser }).user = undefined; next(); return; }

@@ -177,13 +177,27 @@ ${prompt}`
     }
 
     // Helper to bind standard events to any tier
-    const bindTierEvents = (tier: any) => {
-      tier.on('stream:token', (e: any) => {
+    type TierEventSource = EventEmitter & {
+      on(event: 'stream:token', listener: (event: { text: string }) => void): TierEventSource;
+      on(event: 'log', listener: (event: unknown) => void): TierEventSource;
+      on(event: 'tier:status', listener: (event: unknown) => void): TierEventSource;
+      on(
+        event: 'tool:approval-request',
+        listener: (
+          request: ApprovalRequest & {
+            __cascadeResponder?: (decision: { approved: boolean; always?: boolean }) => void;
+          },
+        ) => void,
+      ): TierEventSource;
+    };
+
+    const bindTierEvents = (tier: TierEventSource) => {
+      tier.on('stream:token', (e) => {
         this.emit('stream:token', e);
         options.streamCallback?.({ text: e.text, finishReason: null });
       });
-      tier.on('log', (e: any) => this.emit('log', e));
-      tier.on('tier:status', (e: any) => this.emit('tier:status', e));
+      tier.on('log', (e) => this.emit('log', e));
+      tier.on('tier:status', (e) => this.emit('tier:status', e));
       // Legacy approval events (for tiers not yet wired to escalator)
       tier.on('tool:approval-request', async (request: ApprovalRequest & { __cascadeResponder?: (decision: { approved: boolean; always?: boolean }) => void }) => {
         this.emit('tool:approval-request', request);
@@ -263,7 +277,7 @@ ${prompt}`
       }
       t1.setPermissionEscalator(escalator);
       bindTierEvents(t1);
-      t1.on('plan', (e: any) => this.emit('plan', e));
+      t1.on('plan', (e) => this.emit('plan', e));
       
       const result = await t1.execute(options.prompt, options.images);
       finalOutput = result.output;
@@ -298,4 +312,3 @@ ${prompt}`
     return this.toolRegistry;
   }
 }
-

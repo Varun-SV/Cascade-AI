@@ -5,16 +5,39 @@
 import { Server as SocketServer } from 'socket.io';
 import parser from 'socket.io-msgpack-parser';
 import type { Server as HttpServer } from 'node:http';
-import type { CascadeEvent } from '../types.js';
+import type {
+  CascadeEvent,
+  PermissionDecisionPayload,
+  PermissionRequest,
+  RuntimeRefreshPayload,
+  SessionSubscriptionPayload,
+} from '../types.js';
+import { verifyToken } from './auth.js';
+import {
+  normalizePermissionDecisionPayload,
+  normalizeRuntimeRefreshPayload,
+  normalizeSessionSubscriptionPayload,
+} from './socket-protocol.js';
+
+interface DashboardSocketOptions {
+  authRequired: boolean;
+  secret: string;
+  corsOrigin?: string | string[];
+}
 
 export class DashboardSocket {
   private io: SocketServer;
+  private authRequired: boolean;
+  private secret: string;
 
-  constructor(httpServer: HttpServer, corsOrigin: string | string[] = '*') {
+  constructor(httpServer: HttpServer, options: DashboardSocketOptions) {
+    const corsOrigin = options.corsOrigin ?? '*';
     this.io = new SocketServer(httpServer, {
       cors: { origin: corsOrigin, methods: ['GET', 'POST'] },
       parser,
     });
+    this.authRequired = options.authRequired;
+    this.secret = options.secret;
     this.setupHandlers();
   }
 
@@ -40,22 +63,37 @@ export class DashboardSocket {
     this.io.to(`session:${sessionId}`).emit('stream:token', { tierId, text, sessionId });
   }
 
-  emitApprovalRequest(request: unknown): void {
-    this.io.emit('tool:approval-request', request);
+  emitApprovalRequest(request: PermissionRequest): void {
+    this.io.emit('permission:user-required', request);
   }
 
-  onApprovalResponse(callback: (data: { id: string; approved: boolean }) => void): void {
+  onApprovalResponse(callback: (data: PermissionDecisionPayload) => void): void {
     this.io.on('connection', (socket) => {
-      socket.on('tool:approval-response', callback);
+      socket.on('permission:decision', (payload: PermissionDecisionPayload) => {
+        callback(normalizePermissionDecisionPayload(payload));
+      });
     });
   }
 
   private setupHandlers(): void {
     this.io.on('connection', (socket) => {
-      socket.emit('runtime:refresh', { scope: 'workspace' });
-      socket.emit('runtime:refresh', { scope: 'global' });
-      socket.on('runtime:refresh', (scope?: 'workspace' | 'global') => {
-        this.io.emit('runtime:refresh', { scope: scope ?? 'workspace' });
+      const token = typeof socket.handshake.auth?.token === 'string'
+        ? socket.handshake.auth.token
+        : undefined;
+      const user = token ? verifyToken(token, this.secret) : null;
+
+      if (this.authRequired && !user) {
+        socket.emit('auth:error', { error: 'Unauthorized socket connection' });
+        socket.disconnect(true);
+        return;
+      }
+
+      socket.data.user = user ?? undefined;
+
+      socket.emit('runtime:refresh', { scope: 'workspace' } satisfies RuntimeRefreshPayload);
+      socket.emit('runtime:refresh', { scope: 'global' } satisfies RuntimeRefreshPayload);
+      socket.on('runtime:refresh', (payload?: RuntimeRefreshPayload) => {
+        this.io.emit('runtime:refresh', normalizeRuntimeRefreshPayload(payload));
       });
       socket.on('session:halt', (payload: { sessionId?: string }) => {
         this.io.emit('session:halt', payload);
@@ -66,10 +104,12 @@ export class DashboardSocket {
       socket.on('session:message-injected', (payload: { message?: string }) => {
         this.io.emit('session:message-injected', payload);
       });
-      socket.on('join:session', (sessionId: string) => {
+      socket.on('join:session', (payload: SessionSubscriptionPayload) => {
+        const { sessionId } = normalizeSessionSubscriptionPayload(payload);
         socket.join(`session:${sessionId}`);
       });
-      socket.on('leave:session', (sessionId: string) => {
+      socket.on('leave:session', (payload: SessionSubscriptionPayload) => {
+        const { sessionId } = normalizeSessionSubscriptionPayload(payload);
         socket.leave(`session:${sessionId}`);
       });
       socket.on('join:tenant', (tenantId: string) => {
@@ -82,7 +122,6 @@ export class DashboardSocket {
     this.io.close();
   }
 }
-
 
 
 

@@ -1,6 +1,6 @@
 import React, { memo, useEffect, useCallback } from 'react';
 import { ShieldAlert, ArrowRight } from 'lucide-react';
-import type { PermissionRequest } from '../../hooks/useWebSocket';
+import type { PermissionRequest } from '../../types/protocol';
 
 interface EscalationCardProps {
   request: PermissionRequest;

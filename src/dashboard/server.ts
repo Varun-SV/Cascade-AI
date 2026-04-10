@@ -24,6 +24,7 @@ export class DashboardServer {
   private httpServer: ReturnType<typeof createServer>;
   private socket: DashboardSocket;
   private config: CascadeConfig;
+  private dashboardSecret: string;
   private store: MemoryStore;
   private globalStore: MemoryStore | null = null;
   private broadcastTimer: NodeJS.Timeout | null = null;
@@ -35,9 +36,20 @@ export class DashboardServer {
     this.store = store;
     this.workspacePath = workspacePath;
     this.port = config.dashboard.port ?? DEFAULT_DASHBOARD_PORT;
+    const configuredSecret = config.dashboard.secret ?? process.env['CASCADE_DASHBOARD_SECRET'];
+    if (config.dashboard.auth && !configuredSecret) {
+      console.warn('Dashboard auth is enabled but no secret was configured; using an ephemeral process secret.');
+    }
+    this.dashboardSecret = configuredSecret ?? randomUUID();
     this.app = express();
     this.httpServer = createServer(this.app);
-    this.socket = new DashboardSocket(this.httpServer);
+    this.socket = new DashboardSocket(this.httpServer, {
+      authRequired: config.dashboard.auth,
+      secret: this.dashboardSecret,
+      corsOrigin: config.dashboard.auth
+        ? [`http://localhost:${this.port}`, `http://127.0.0.1:${this.port}`]
+        : '*',
+    });
     this.setupMiddleware();
     this.setupRoutes();
   }
@@ -136,7 +148,7 @@ export class DashboardServer {
   }
 
   watchRuntimeChanges(): void {
-    const workspaceDbPath = path.join(process.cwd(), CASCADE_DB_FILE);
+    const workspaceDbPath = path.join(this.workspacePath, CASCADE_DB_FILE);
     const globalDbPath = path.join(process.env['HOME'] ?? process.cwd(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
     const watchPaths = [workspaceDbPath, globalDbPath].filter((p, index, arr) => arr.indexOf(p) === index);
 
@@ -159,7 +171,9 @@ export class DashboardServer {
 
     // CORS for dev
     this.app.use((_req, res, next) => {
-      res.header('Access-Control-Allow-Origin', '*');
+      if (!this.config.dashboard.auth) {
+        res.header('Access-Control-Allow-Origin', '*');
+      }
       res.header('Access-Control-Allow-Headers', 'Authorization, Content-Type');
       res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
       next();
@@ -167,18 +181,21 @@ export class DashboardServer {
   }
 
   private setupRoutes(): void {
-    const secret = this.config.dashboard.secret ?? 'cascade-secret';
     const authRequired = this.config.dashboard.auth;
-    const auth = authMiddleware(secret, authRequired);
+    const auth = authMiddleware(this.dashboardSecret, authRequired);
 
     // ── Auth ────────────────────────────────────
     this.app.post('/api/auth/login', (req: Request, res: Response) => {
       const { username, password } = req.body as { username: string; password: string };
-      // Simple password check — in production, use a proper user store
-      if (password === (process.env['CASCADE_DASHBOARD_PASSWORD'] ?? 'cascade')) {
+      const configuredPassword = process.env['CASCADE_DASHBOARD_PASSWORD'];
+      if (authRequired && !configuredPassword) {
+        res.status(503).json({ error: 'Dashboard password is not configured. Set CASCADE_DASHBOARD_PASSWORD or disable dashboard auth.' });
+        return;
+      }
+      if (!authRequired || password === configuredPassword) {
         const token = createToken(
           { id: username, username, role: 'admin' },
-          secret,
+          this.dashboardSecret,
         );
         res.json({ token });
       } else {
@@ -366,6 +383,7 @@ export class DashboardServer {
         const globalStore = new MemoryStore(globalDbPath);
         try {
           res.json({
+            scope,
             sessions: globalStore.listRuntimeSessions(200),
             nodes: globalStore.listRuntimeNodes(undefined, 1000),
             logs: globalStore.listRuntimeNodeLogs(undefined, undefined, 500),
@@ -376,6 +394,7 @@ export class DashboardServer {
         return;
       }
       res.json({
+        scope: 'workspace',
         sessions: this.store.listRuntimeSessions(200),
         nodes: this.store.listRuntimeNodes(undefined, 1000),
         logs: this.store.listRuntimeNodeLogs(undefined, undefined, 500),
