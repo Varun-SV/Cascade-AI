@@ -9,7 +9,7 @@ import {
 import {
   useWebSocket,
 } from './hooks/useWebSocket';
-import type { PermissionDecisionPayload, PermissionRequest, RuntimeSnapshotPayload } from './types/protocol';
+import type { PermissionDecisionPayload, PermissionRequest, RuntimeNode, RuntimeSnapshotPayload } from './types/protocol';
 import { LoginView } from './components/auth/LoginView';
 import { NavRail, type NavTab } from './components/layout/NavRail';
 import { TopBar } from './components/layout/TopBar';
@@ -147,7 +147,7 @@ function Dashboard({
   useEffect(() => { refreshRuntime(); }, [refreshRuntime]);
 
   // ── Derived graph data ────────────────────────
-  const graphNodes = useMemo(() => activeNodes.map((n) => ({
+  const graphNodes = useMemo(() => activeNodes.map((n: RuntimeNode) => ({
     id: n.tierId,
     role: n.role,
     label: n.label,
@@ -158,13 +158,14 @@ function Dashboard({
 
   const graphEdges = useMemo(() =>
     activeNodes
-      .filter((n) => n.parentId)
-      .map((n) => ({ from: n.parentId!, to: n.tierId })),
+      .filter((n: RuntimeNode) => n.parentId)
+      .map((n: RuntimeNode) => ({ from: n.parentId!, to: n.tierId })),
   [activeNodes]);
 
   const selectedNode = useMemo(() =>
-    activeNodes.find((n) => n.tierId === selectedNodeId) ?? null,
+    activeNodes.find((n: RuntimeNode) => n.tierId === selectedNodeId) ?? null,
   [activeNodes, selectedNodeId]);
+
 
   // ── Escalation handler ────────────────────────
   const handleEscalationDecide = useCallback((approved: boolean, always: boolean) => {

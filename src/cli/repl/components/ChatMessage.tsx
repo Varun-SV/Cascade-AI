@@ -35,13 +35,13 @@ export function ChatMessage({ role, content, theme, timestamp, isStreaming }: Ch
 function getRoleStyle(role: ChatMessageProps['role'], theme: Theme) {
   switch (role) {
     case 'user':
-      return { label: 'You', color: theme.colors.primary, prefix: '▸' };
+      return { label: 'USER', color: theme.colors.primary, prefix: '▸' };
     case 'assistant':
-      return { label: 'Cascade', color: theme.colors.secondary, prefix: '◈' };
+      return { label: 'CASCADE', color: theme.colors.accent, prefix: '◈' };
     case 'system':
-      return { label: 'System', color: theme.colors.muted, prefix: '◦' };
+      return { label: 'SYSTEM', color: theme.colors.muted, prefix: '◦' };
     case 'error':
-      return { label: 'Error', color: theme.colors.error, prefix: '✗' };
+      return { label: 'ERROR', color: theme.colors.error, prefix: '✗' };
   }
 }
 

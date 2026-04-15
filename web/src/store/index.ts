@@ -8,7 +8,7 @@ export const store = configureStore({
   },
   // Serialisability check: Sets (used in logIds) are not serialisable by default.
   // We disable the check for that path only so we keep the O(1) dup detection.
-  middleware: (getDefaultMiddleware) =>
+  middleware: (getDefaultMiddleware: any) =>
     getDefaultMiddleware({
       serializableCheck: {
         ignoredPaths: ['runtime.logIds'],

@@ -6,6 +6,7 @@ import {
   selectActiveSession,
 } from '../../store/slices/runtimeSlice';
 import { Clock, Folder, Activity } from 'lucide-react';
+import type { RuntimeSession } from '../../types/protocol';
 
 // ── Helpers ────────────────────────────────────
 
@@ -59,7 +60,7 @@ export const SessionList = memo(function SessionList() {
 
       {/* List */}
       <div className="flex-1 overflow-y-auto">
-        {sessions.map((session, idx) => {
+        {sessions.map((session: RuntimeSession, idx: number) => {
           const isActive = session.sessionId === activeSession?.sessionId;
 
           return (

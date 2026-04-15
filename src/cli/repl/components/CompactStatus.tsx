@@ -23,20 +23,25 @@ export function CompactStatus({ theme, activeT2Count, activeT3Count, currentActi
       <Box flexGrow={1}>
         {isStreaming || activeCount > 0 ? (
           <>
-            <Text color={theme.colors.accent}><Spinner type="dots" /> </Text>
-            <Text color={theme.colors.secondary} bold>
-              {activeCount > 0 ? `${activeCount} agents active` : 'Cascade is thinking'}
+            <Text color={theme.colors.accent} bold><Spinner type="hamburger" /> </Text>
+            <Text color={theme.colors.accent} bold>
+              {activeCount > 0 ? `WORKING: ${activeCount} AGENTS` : 'ORCHESTRATING'}
             </Text>
             {currentAction && (
-              <Text color={theme.colors.muted}> — {currentAction.length > 60 ? currentAction.slice(0, 57) + '...' : currentAction}</Text>
+              <Text color={theme.colors.muted}> ┃ {currentAction.length > 80 ? currentAction.slice(0, 77) + '...' : currentAction}</Text>
             )}
           </>
         ) : (
-          <Text color={theme.colors.muted}>System Idle — Press / for commands</Text>
+          <Box>
+            <Text color={theme.colors.muted}>● SYSTEM IDLE </Text>
+            <Text color={theme.colors.muted}>┃ Press </Text>
+            <Text color={theme.colors.accent} bold>/</Text>
+            <Text color={theme.colors.muted}> for command palette</Text>
+          </Box>
         )}
       </Box>
       <Box>
-        <Text color={theme.colors.muted}>details: <Text color={theme.colors.accent} bold>/tree</Text></Text>
+        <Text color={theme.colors.muted}>[<Text color={theme.colors.accent} bold>tree</Text>]</Text>
       </Box>
     </Box>
   );

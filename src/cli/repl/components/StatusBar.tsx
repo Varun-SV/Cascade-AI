@@ -26,13 +26,16 @@ export function StatusBar({
   isStreaming,
 }: StatusBarProps): React.ReactElement {
   const { stdout } = useStdout();
-  const width = stdout?.columns ?? 80;
+  const width = (stdout?.columns ?? 80) - 2;
 
-  const left = ` cascade ${isStreaming ? '⟳' : '◈'} ${truncateModel(model)}`;
-  const mid = workspacePath.split('/').pop() ?? workspacePath;
-  const right = `${formatTokens(tokens)} · $${costUsd.toFixed(4)} `;
-  const padding = Math.max(0, width - left.length - mid.length - right.length);
-  const midPad = ' '.repeat(Math.floor(padding / 2));
+  const left = ` ◈ ${truncateModel(model)} `;
+  const mid = ` [${sessionId.slice(0, 8)}] ${workspacePath.split(/[/\\]/).pop() ?? workspacePath} `;
+  const right = ` ${formatTokens(tokens)} · $${costUsd.toFixed(4)} · LOAD: ${isStreaming ? '⚡' : '○'} `;
+  
+  const totalUsed = left.length + mid.length + right.length;
+  const paddingSize = Math.max(0, width - totalUsed);
+  const leftPad = ' '.repeat(Math.floor(paddingSize / 2));
+  const rightPad = ' '.repeat(Math.ceil(paddingSize / 2));
 
   return (
     <Box
@@ -42,11 +45,11 @@ export function StatusBar({
       borderLeft={false}
       borderRight={false}
       borderColor={theme.colors.border}
-      paddingX={1}
-      width={width}
+      paddingX={0}
+      width={width + 2}
     >
-      <Text color={theme.colors.primary} bold>{left}</Text>
-      <Text color={theme.colors.muted}>{midPad}{mid}{midPad}</Text>
+      <Text backgroundColor={theme.colors.primary} color={theme.colors.background} bold>{left}</Text>
+      <Text color={theme.colors.muted}>{leftPad}{mid}{rightPad}</Text>
       <Text color={theme.colors.muted}>{right}</Text>
     </Box>
   );
