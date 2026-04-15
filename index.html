@@ -1,0 +1,1319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cascade AI — Multi-Tier Agent Orchestration</title>
+  <meta name="description" content="Open-source CLI tool that runs prompts through a hierarchical three-tier agent system. T1 plans, T2 manages, T3 executes." />
+  <meta property="og:title" content="Cascade AI" />
+  <meta property="og:description" content="Multi-tier AI orchestration. T1 → T2 → T3." />
+  <meta property="og:type" content="website" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@300;400;500;700&display=swap" rel="stylesheet" />
+
+  <style>
+    /* ════════════════════════════════════════
+       TOKENS
+    ════════════════════════════════════════ */
+    :root {
+      --bg:        #060a0e;
+      --bg-2:      #0b1017;
+      --bg-3:      #111820;
+      --border:    rgba(255,255,255,0.06);
+      --border-2:  rgba(255,255,255,0.11);
+
+      --lime:      #aaff00;
+      --lime-dim:  rgba(170,255,0,0.12);
+      --lime-glow: rgba(170,255,0,0.25);
+
+      --amber:     #f5a623;
+      --violet:    #a78bff;
+      --cyan:      #00d4e8;
+
+      --text-1:    #dce4f0;
+      --text-2:    #7a8899;
+      --text-3:    #3a4555;
+
+      --font-display: 'Syne', sans-serif;
+      --font-mono:    'IBM Plex Mono', monospace;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text-1);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }
+
+    ::selection { background: var(--lime-dim); color: var(--lime); }
+
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 99px; }
+
+    /* ════════════════════════════════════════
+       NOISE GRAIN OVERLAY
+    ════════════════════════════════════════ */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+      background-size: 128px;
+      pointer-events: none;
+      z-index: 9999;
+      opacity: 0.4;
+    }
+
+    /* ════════════════════════════════════════
+       LAYOUT
+    ════════════════════════════════════════ */
+    .container {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 0 32px;
+    }
+
+    /* ════════════════════════════════════════
+       NAV
+    ════════════════════════════════════════ */
+    nav {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 100;
+      border-bottom: 1px solid var(--border);
+      background: rgba(6,10,14,0.85);
+      backdrop-filter: blur(20px);
+    }
+
+    nav .inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 52px;
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 0 32px;
+    }
+
+    .nav-brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      text-decoration: none;
+    }
+
+    .nav-logo {
+      width: 28px;
+      height: 28px;
+      background: var(--lime);
+      border-radius: 5px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--font-display);
+      font-weight: 800;
+      font-size: 14px;
+      color: var(--bg);
+      box-shadow: 0 0 20px var(--lime-glow);
+      flex-shrink: 0;
+    }
+
+    .nav-name {
+      font-family: var(--font-display);
+      font-weight: 700;
+      font-size: 15px;
+      color: var(--text-1);
+      letter-spacing: -0.01em;
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .nav-link {
+      color: var(--text-2);
+      text-decoration: none;
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 6px 12px;
+      border-radius: 4px;
+      transition: color 0.12s, background 0.12s;
+    }
+
+    .nav-link:hover { color: var(--text-1); background: rgba(255,255,255,0.04); }
+
+    .nav-cta {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      background: var(--lime);
+      color: var(--bg);
+      font-family: var(--font-mono);
+      font-weight: 700;
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      text-decoration: none;
+      padding: 7px 16px;
+      border-radius: 5px;
+      transition: opacity 0.12s, box-shadow 0.12s;
+      box-shadow: 0 0 18px var(--lime-glow);
+    }
+
+    .nav-cta:hover { opacity: 0.88; box-shadow: 0 0 28px var(--lime-glow); }
+
+    /* ════════════════════════════════════════
+       HERO
+    ════════════════════════════════════════ */
+    .hero {
+      padding: 160px 0 100px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* radial glow background */
+    .hero::after {
+      content: '';
+      position: absolute;
+      top: -10%;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 600px;
+      height: 400px;
+      background: radial-gradient(ellipse, rgba(170,255,0,0.06) 0%, transparent 70%);
+      pointer-events: none;
+    }
+
+    .hero-eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 10px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--lime);
+      border: 1px solid rgba(170,255,0,0.22);
+      background: rgba(170,255,0,0.06);
+      padding: 5px 12px;
+      border-radius: 3px;
+      margin-bottom: 28px;
+    }
+
+    .hero-eyebrow-dot {
+      width: 5px;
+      height: 5px;
+      background: var(--lime);
+      border-radius: 50%;
+      box-shadow: 0 0 8px var(--lime);
+      animation: blink 2s step-start infinite;
+    }
+
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
+
+    h1 {
+      font-family: var(--font-display);
+      font-weight: 800;
+      font-size: clamp(44px, 7vw, 80px);
+      line-height: 1.0;
+      letter-spacing: -0.03em;
+      color: var(--text-1);
+      max-width: 780px;
+      margin-bottom: 24px;
+    }
+
+    h1 .accent { color: var(--lime); }
+    h1 .dim { color: var(--text-3); }
+
+    .hero-sub {
+      font-size: 15px;
+      color: var(--text-2);
+      max-width: 480px;
+      line-height: 1.7;
+      margin-bottom: 44px;
+    }
+
+    .hero-actions {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+
+    .btn-primary {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--lime);
+      color: var(--bg);
+      font-family: var(--font-mono);
+      font-weight: 700;
+      font-size: 12px;
+      letter-spacing: 0.05em;
+      text-decoration: none;
+      padding: 12px 24px;
+      border-radius: 6px;
+      transition: all 0.14s;
+      box-shadow: 0 0 24px var(--lime-glow);
+    }
+
+    .btn-primary:hover { opacity: 0.88; transform: translateY(-1px); box-shadow: 0 0 36px var(--lime-glow); }
+
+    .btn-ghost {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text-2);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-decoration: none;
+      padding: 12px 20px;
+      border: 1px solid var(--border-2);
+      border-radius: 6px;
+      transition: all 0.14s;
+    }
+
+    .btn-ghost:hover { color: var(--text-1); border-color: rgba(255,255,255,0.22); background: rgba(255,255,255,0.03); }
+
+    /* ════════════════════════════════════════
+       TERMINAL INSTALL BLOCK
+    ════════════════════════════════════════ */
+    .install-block {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--bg-3);
+      border: 1px solid var(--border-2);
+      border-radius: 8px;
+      padding: 14px 20px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      color: var(--text-2);
+      margin-top: 48px;
+      cursor: pointer;
+      transition: border-color 0.14s;
+      position: relative;
+    }
+
+    .install-block:hover { border-color: rgba(170,255,0,0.3); }
+
+    .install-block .prompt { color: var(--lime); user-select: none; }
+    .install-block .cmd { color: var(--text-1); }
+    .install-block .copy-hint {
+      margin-left: 8px;
+      font-size: 10px;
+      color: var(--text-3);
+      border-left: 1px solid var(--border);
+      padding-left: 12px;
+    }
+
+    .install-block .copied {
+      position: absolute;
+      right: 14px;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 10px;
+      color: var(--lime);
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+
+    .install-block.did-copy .copied { opacity: 1; }
+
+    /* ════════════════════════════════════════
+       ARCHITECTURE CARD (animated)
+    ════════════════════════════════════════ */
+    .arch-section {
+      padding: 100px 0;
+      position: relative;
+    }
+
+    .section-label {
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--lime);
+      margin-bottom: 16px;
+    }
+
+    h2 {
+      font-family: var(--font-display);
+      font-weight: 800;
+      font-size: clamp(28px, 4vw, 48px);
+      letter-spacing: -0.02em;
+      color: var(--text-1);
+      margin-bottom: 16px;
+      line-height: 1.1;
+    }
+
+    .section-desc {
+      color: var(--text-2);
+      font-size: 14px;
+      max-width: 480px;
+      margin-bottom: 56px;
+      line-height: 1.7;
+    }
+
+    .arch-card {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 48px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .arch-card::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(ellipse at 50% 0%, rgba(170,255,0,0.04) 0%, transparent 60%);
+      pointer-events: none;
+    }
+
+    /* Tier rows */
+    .tier-row {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 0;
+    }
+
+    .tier-line {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0;
+      position: relative;
+    }
+
+    .tier-connector {
+      width: 1px;
+      height: 40px;
+      background: linear-gradient(to bottom, var(--border-2), transparent);
+      margin: 0 auto;
+    }
+
+    /* T1 node */
+    .tier-node {
+      border-radius: 10px;
+      padding: 20px 24px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      border: 1px solid transparent;
+      position: relative;
+      transition: border-color 0.3s, box-shadow 0.3s;
+      flex: 1;
+    }
+
+    .tier-node.t1 {
+      background: rgba(245,166,35,0.06);
+      border-color: rgba(245,166,35,0.18);
+      animation: pulse-t1 3s ease-in-out infinite;
+    }
+
+    .tier-node.t2 {
+      background: rgba(167,139,255,0.06);
+      border-color: rgba(167,139,255,0.18);
+      animation: pulse-t2 3.5s ease-in-out infinite 0.5s;
+    }
+
+    .tier-node.t3 {
+      background: rgba(0,212,232,0.05);
+      border-color: rgba(0,212,232,0.16);
+      animation: pulse-t3 4s ease-in-out infinite 1s;
+    }
+
+    @keyframes pulse-t1 {
+      0%,100%{ box-shadow: 0 0 0 rgba(245,166,35,0); }
+      50%    { box-shadow: 0 0 24px rgba(245,166,35,0.12); }
+    }
+    @keyframes pulse-t2 {
+      0%,100%{ box-shadow: 0 0 0 rgba(167,139,255,0); }
+      50%    { box-shadow: 0 0 24px rgba(167,139,255,0.12); }
+    }
+    @keyframes pulse-t3 {
+      0%,100%{ box-shadow: 0 0 0 rgba(0,212,232,0); }
+      50%    { box-shadow: 0 0 24px rgba(0,212,232,0.12); }
+    }
+
+    .tier-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      font-family: var(--font-display);
+      font-weight: 800;
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+
+    .tier-badge.t1 { background: rgba(245,166,35,0.15); color: var(--amber); }
+    .tier-badge.t2 { background: rgba(167,139,255,0.15); color: var(--violet); }
+    .tier-badge.t3 { background: rgba(0,212,232,0.12); color: var(--cyan); }
+
+    .tier-info h3 {
+      font-family: var(--font-display);
+      font-weight: 700;
+      font-size: 14px;
+      color: var(--text-1);
+      margin-bottom: 2px;
+    }
+
+    .tier-info p {
+      font-size: 11px;
+      color: var(--text-2);
+      line-height: 1.5;
+    }
+
+    .tier-status {
+      margin-left: auto;
+      font-size: 9px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      padding: 4px 9px;
+      border-radius: 3px;
+    }
+
+    .tier-status.active {
+      background: rgba(170,255,0,0.08);
+      color: var(--lime);
+      border: 1px solid rgba(170,255,0,0.18);
+    }
+
+    /* T2s in parallel */
+    .tier-parallel {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 12px;
+      flex: 1;
+    }
+
+    /* T3s in a wider grid */
+    .tier-parallel-t3 {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 8px;
+      flex: 1;
+    }
+
+    .tier-mini {
+      border-radius: 8px;
+      padding: 12px 14px;
+      border: 1px solid transparent;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .tier-mini.t2 { background: rgba(167,139,255,0.05); border-color: rgba(167,139,255,0.14); }
+    .tier-mini.t3 { background: rgba(0,212,232,0.04); border-color: rgba(0,212,232,0.12); }
+
+    .tier-mini .mini-badge {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    .tier-mini.t2 .mini-badge { color: var(--violet); }
+    .tier-mini.t3 .mini-badge { color: var(--cyan); }
+
+    .tier-mini .mini-label { font-size: 10px; color: var(--text-2); }
+
+    /* animated activity indicator */
+    .activity {
+      display: flex;
+      gap: 3px;
+      align-items: center;
+    }
+    .activity-dot {
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+    }
+    .t3 .activity-dot { background: var(--cyan); }
+    .t2 .activity-dot { background: var(--violet); }
+
+    .activity-dot:nth-child(1) { animation: bounce 1.4s ease-in-out infinite; }
+    .activity-dot:nth-child(2) { animation: bounce 1.4s ease-in-out 0.15s infinite; }
+    .activity-dot:nth-child(3) { animation: bounce 1.4s ease-in-out 0.3s infinite; }
+
+    @keyframes bounce { 0%,80%,100%{transform:scale(0.7);opacity:0.4} 40%{transform:scale(1.1);opacity:1} }
+
+    /* arrows between tiers */
+    .arch-arrow {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 10px 0;
+      gap: 8px;
+    }
+
+    .arch-arrow-line {
+      flex: 1;
+      height: 1px;
+      background: linear-gradient(to right, transparent, var(--border-2), transparent);
+    }
+
+    .arch-arrow-label {
+      font-size: 9px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      padding: 0 12px;
+    }
+
+    /* ════════════════════════════════════════
+       FEATURES GRID
+    ════════════════════════════════════════ */
+    .features-section { padding: 80px 0; }
+
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      margin-top: 56px;
+    }
+
+    .feature-cell {
+      background: var(--bg-2);
+      padding: 32px 28px;
+      transition: background 0.14s;
+    }
+
+    .feature-cell:hover { background: var(--bg-3); }
+
+    .feature-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      margin-bottom: 16px;
+    }
+
+    .feature-icon.lime { background: rgba(170,255,0,0.1); }
+    .feature-icon.amber { background: rgba(245,166,35,0.1); }
+    .feature-icon.violet { background: rgba(167,139,255,0.1); }
+    .feature-icon.cyan { background: rgba(0,212,232,0.08); }
+    .feature-icon.red { background: rgba(255,77,100,0.08); }
+    .feature-icon.green { background: rgba(34,212,122,0.08); }
+
+    .feature-cell h3 {
+      font-family: var(--font-display);
+      font-weight: 700;
+      font-size: 15px;
+      color: var(--text-1);
+      margin-bottom: 8px;
+    }
+
+    .feature-cell p { font-size: 12px; color: var(--text-2); line-height: 1.65; }
+
+    /* ════════════════════════════════════════
+       PROVIDERS STRIP
+    ════════════════════════════════════════ */
+    .providers-section {
+      padding: 64px 0;
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .providers-label {
+      text-align: center;
+      font-size: 10px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 32px;
+    }
+
+    .providers-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .provider-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--bg-3);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 9px 16px;
+      font-size: 12px;
+      color: var(--text-2);
+      transition: border-color 0.14s, color 0.14s;
+    }
+
+    .provider-pill:hover { border-color: var(--border-2); color: var(--text-1); }
+
+    .provider-pill .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    /* ════════════════════════════════════════
+       CODE BLOCK
+    ════════════════════════════════════════ */
+    .code-section {
+      padding: 100px 0;
+    }
+
+    .code-split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 64px;
+      align-items: center;
+    }
+
+    .code-window {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    .code-titlebar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255,255,255,0.02);
+    }
+
+    .code-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .code-dot.red   { background: #ff5f57; }
+    .code-dot.amber { background: #ffbd2e; }
+    .code-dot.green { background: #28c840; }
+
+    .code-filename {
+      margin-left: 6px;
+      font-size: 10px;
+      color: var(--text-3);
+      letter-spacing: 0.04em;
+    }
+
+    pre {
+      padding: 24px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.8;
+      overflow-x: auto;
+      color: var(--text-2);
+    }
+
+    .kw  { color: var(--violet); }
+    .fn  { color: var(--cyan); }
+    .str { color: var(--lime); }
+    .cm  { color: var(--text-3); }
+    .num { color: var(--amber); }
+
+    .code-right h2 { margin-bottom: 16px; }
+    .code-right p { color: var(--text-2); font-size: 13px; line-height: 1.7; margin-bottom: 20px; }
+
+    .code-bullet {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .code-bullet-dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--lime);
+      flex-shrink: 0;
+      margin-top: 7px;
+    }
+    .code-bullet p { margin: 0; }
+
+    /* ════════════════════════════════════════
+       COMPLEXITY TABLE
+    ════════════════════════════════════════ */
+    .complexity-section { padding: 80px 0; }
+
+    .complexity-table {
+      width: 100%;
+      border-collapse: collapse;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      margin-top: 48px;
+    }
+
+    .complexity-table th {
+      background: var(--bg-3);
+      padding: 12px 20px;
+      text-align: left;
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .complexity-table td {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--text-2);
+    }
+
+    .complexity-table tr:last-child td { border-bottom: none; }
+    .complexity-table tr:hover td { background: rgba(255,255,255,0.015); }
+
+    .complexity-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 8px;
+      border-radius: 3px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .complexity-badge.simple  { background: rgba(34,212,122,0.1); color: #22d47a; }
+    .complexity-badge.mod     { background: rgba(167,139,255,0.1); color: var(--violet); }
+    .complexity-badge.complex { background: rgba(245,166,35,0.1); color: var(--amber); }
+    .complexity-badge.high    { background: rgba(255,77,100,0.1); color: #ff4d64; }
+
+    .tier-chips { display: flex; align-items: center; gap: 6px; }
+    .tier-chip {
+      padding: 2px 8px;
+      border-radius: 3px;
+      font-size: 10px;
+      font-weight: 700;
+      font-family: var(--font-mono);
+    }
+    .tier-chip.t1 { background: rgba(245,166,35,0.1); color: var(--amber); }
+    .tier-chip.t2 { background: rgba(167,139,255,0.1); color: var(--violet); }
+    .tier-chip.t3 { background: rgba(0,212,232,0.08); color: var(--cyan); }
+
+    /* ════════════════════════════════════════
+       CTA BAND
+    ════════════════════════════════════════ */
+    .cta-section {
+      padding: 100px 0;
+      text-align: center;
+      position: relative;
+    }
+
+    .cta-section::before {
+      content: '';
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%,-50%);
+      width: 700px;
+      height: 350px;
+      background: radial-gradient(ellipse, rgba(170,255,0,0.05) 0%, transparent 70%);
+      pointer-events: none;
+    }
+
+    .cta-section h2 { margin-bottom: 16px; }
+    .cta-section p { color: var(--text-2); font-size: 14px; margin-bottom: 36px; }
+    .cta-actions { display: flex; align-items: center; justify-content: center; gap: 14px; flex-wrap: wrap; }
+
+    /* ════════════════════════════════════════
+       FOOTER
+    ════════════════════════════════════════ */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 40px 0;
+    }
+
+    .footer-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .footer-left { display: flex; align-items: center; gap: 10px; }
+    .footer-logo { width: 22px; height: 22px; background: var(--lime); border-radius: 4px; display:flex; align-items:center; justify-content:center; font-family:var(--font-display); font-weight:800; font-size:11px; color:var(--bg); }
+
+    .footer-copy { font-size: 11px; color: var(--text-3); }
+
+    .footer-links { display: flex; align-items: center; gap: 20px; }
+    .footer-link {
+      font-size: 11px;
+      color: var(--text-3);
+      text-decoration: none;
+      transition: color 0.12s;
+    }
+    .footer-link:hover { color: var(--text-2); }
+
+    /* ════════════════════════════════════════
+       ANIMATIONS (staggered reveal)
+    ════════════════════════════════════════ */
+    .reveal {
+      opacity: 0;
+      transform: translateY(22px);
+      transition: opacity 0.6s ease, transform 0.6s cubic-bezier(.22,.68,0,1.1);
+    }
+    .reveal.visible { opacity: 1; transform: none; }
+
+    /* ════════════════════════════════════════
+       RESPONSIVE
+    ════════════════════════════════════════ */
+    @media (max-width: 768px) {
+      .container { padding: 0 20px; }
+      .nav-links { display: none; }
+      h1 { font-size: 36px; }
+      .features-grid { grid-template-columns: 1fr; }
+      .code-split { grid-template-columns: 1fr; }
+      .tier-parallel { grid-template-columns: 1fr 1fr; }
+      .tier-parallel-t3 { grid-template-columns: repeat(3, 1fr); }
+      .arch-card { padding: 24px; }
+      .footer-inner { flex-direction: column; gap: 20px; }
+      .complexity-table { font-size: 11px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ── NAV ─────────────────────────────── -->
+  <nav>
+    <div class="inner">
+      <a href="#" class="nav-brand">
+        <div class="nav-logo">C</div>
+        <span class="nav-name">Cascade AI</span>
+      </a>
+      <div class="nav-links">
+        <a href="#architecture" class="nav-link">Architecture</a>
+        <a href="#features" class="nav-link">Features</a>
+        <a href="#usage" class="nav-link">Usage</a>
+        <a href="https://github.com/Varun-SV/Cascade-AI" target="_blank" class="nav-link">GitHub</a>
+      </div>
+      <a href="https://github.com/Varun-SV/Cascade-AI" target="_blank" class="nav-cta">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        View on GitHub
+      </a>
+    </div>
+  </nav>
+
+  <!-- ── HERO ─────────────────────────────── -->
+  <section class="hero">
+    <div class="container">
+      <div class="hero-eyebrow">
+        <span class="hero-eyebrow-dot"></span>
+        Open-source · MIT License · v0.1.0
+      </div>
+
+      <h1 class="reveal">
+        Agents that<br/>
+        <span class="accent">think in tiers</span><span class="dim">.</span>
+      </h1>
+
+      <p class="hero-sub reveal">
+        Cascade is a CLI orchestration system that decomposes any task into a three-tier hierarchy — Administrator → Manager → Worker — routing work across the best available models automatically.
+      </p>
+
+      <div class="hero-actions reveal">
+        <a href="https://github.com/Varun-SV/Cascade-AI" target="_blank" class="btn-primary">
+          Get Started
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M7 17L17 7M17 7H7M17 7v10"/></svg>
+        </a>
+        <a href="#architecture" class="btn-ghost">
+          See how it works
+        </a>
+      </div>
+
+      <div class="install-block reveal" onclick="copyInstall(this)">
+        <span class="prompt">$</span>
+        <span class="cmd">npm install -g cascade-ai</span>
+        <span class="copy-hint">click to copy</span>
+        <span class="copied">✓ copied</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── ARCHITECTURE ─────────────────────── -->
+  <section class="arch-section" id="architecture">
+    <div class="container">
+      <div class="section-label reveal">How it works</div>
+      <h2 class="reveal">Three tiers. One coherent output.</h2>
+      <p class="section-desc reveal">
+        Every prompt flows through a hierarchy. T1 plans, spawns T2 managers in parallel, each of which orchestrates T3 workers — all streaming back into a single final answer.
+      </p>
+
+      <div class="arch-card reveal">
+
+        <!-- T1 Row -->
+        <div class="tier-row">
+          <div class="tier-node t1" style="max-width:100%">
+            <div class="tier-badge t1">T1</div>
+            <div class="tier-info">
+              <h3>Administrator</h3>
+              <p>Analyzes complexity · Selects models · Decomposes into sections · Compiles final output</p>
+            </div>
+            <div class="tier-status active">active</div>
+          </div>
+        </div>
+
+        <!-- Arrow down -->
+        <div class="arch-arrow">
+          <div class="arch-arrow-line"></div>
+          <span class="arch-arrow-label">dispatches in parallel</span>
+          <div class="arch-arrow-line"></div>
+        </div>
+
+        <!-- T2 Row -->
+        <div class="tier-parallel">
+          <div class="tier-mini t2">
+            <div class="mini-badge t2">T2 — Section 1</div>
+            <div class="mini-label">Auth module refactor</div>
+            <div class="activity"><div class="activity-dot"></div><div class="activity-dot"></div><div class="activity-dot"></div></div>
+          </div>
+          <div class="tier-mini t2">
+            <div class="mini-badge t2">T2 — Section 2</div>
+            <div class="mini-label">Test generation</div>
+            <div class="activity"><div class="activity-dot"></div><div class="activity-dot"></div><div class="activity-dot"></div></div>
+          </div>
+          <div class="tier-mini t2">
+            <div class="mini-badge t2">T2 — Section 3</div>
+            <div class="mini-label">Open pull request</div>
+            <div class="activity"><div class="activity-dot"></div><div class="activity-dot"></div><div class="activity-dot"></div></div>
+          </div>
+        </div>
+
+        <!-- Arrow down -->
+        <div class="arch-arrow">
+          <div class="arch-arrow-line"></div>
+          <span class="arch-arrow-label">spawn workers</span>
+          <div class="arch-arrow-line"></div>
+        </div>
+
+        <!-- T3 Row -->
+        <div class="tier-parallel-t3">
+          <div class="tier-mini t3">
+            <div class="mini-badge t3">T3</div>
+            <div class="mini-label">Read files</div>
+            <div class="activity"><div class="activity-dot"></div><div class="activity-dot"></div><div class="activity-dot"></div></div>
+          </div>
+          <div class="tier-mini t3">
+            <div class="mini-badge t3">T3</div>
+            <div class="mini-label">Write JWT logic</div>
+            <div class="activity"><div class="activity-dot"></div><div class="activity-dot"></div><div class="activity-dot"></div></div>
+          </div>
+          <div class="tier-mini t3">
+            <div class="mini-badge t3">T3</div>
+            <div class="mini-label">Run tests</div>
+            <div class="activity"><div class="activity-dot"></div><div class="activity-dot"></div><div class="activity-dot"></div></div>
+          </div>
+          <div class="tier-mini t3">
+            <div class="mini-badge t3">T3</div>
+            <div class="mini-label">Write test file</div>
+            <div class="activity"><div class="activity-dot"></div><div class="activity-dot"></div><div class="activity-dot"></div></div>
+          </div>
+          <div class="tier-mini t3">
+            <div class="mini-badge t3">T3</div>
+            <div class="mini-label">git commit &amp; push</div>
+            <div class="activity"><div class="activity-dot"></div><div class="activity-dot"></div><div class="activity-dot"></div></div>
+          </div>
+        </div>
+
+      </div><!-- /arch-card -->
+    </div>
+  </section>
+
+  <!-- ── COMPLEXITY TABLE ──────────────────── -->
+  <section class="complexity-section">
+    <div class="container">
+      <div class="section-label reveal">Auto-routing</div>
+      <h2 class="reveal">Complexity determines the tier count.</h2>
+      <p class="section-desc reveal">Cascade classifies your prompt before dispatching — simple questions go direct to a T3 worker, complex implementations spin up a full hierarchy.</p>
+
+      <table class="complexity-table reveal">
+        <thead>
+          <tr>
+            <th>Classification</th>
+            <th>Example</th>
+            <th>Route</th>
+            <th>T2 Managers</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="complexity-badge simple">Simple</span></td>
+            <td>"What is a closure?"</td>
+            <td>
+              <div class="tier-chips">
+                <span class="tier-chip t3">T3</span>
+              </div>
+            </td>
+            <td>—</td>
+          </tr>
+          <tr>
+            <td><span class="complexity-badge mod">Moderate</span></td>
+            <td>"Add pagination to the users API"</td>
+            <td>
+              <div class="tier-chips">
+                <span class="tier-chip t2">T2</span>
+                <span class="tier-chip t3">T3 ×2</span>
+              </div>
+            </td>
+            <td>1</td>
+          </tr>
+          <tr>
+            <td><span class="complexity-badge complex">Complex</span></td>
+            <td>"Refactor auth module to JWT, add tests, open PR"</td>
+            <td>
+              <div class="tier-chips">
+                <span class="tier-chip t1">T1</span>
+                <span class="tier-chip t2">T2 ×3</span>
+                <span class="tier-chip t3">T3 ×n</span>
+              </div>
+            </td>
+            <td>3–5</td>
+          </tr>
+          <tr>
+            <td><span class="complexity-badge high">Highly Complex</span></td>
+            <td>"Research, benchmark, and document the full auth ecosystem"</td>
+            <td>
+              <div class="tier-chips">
+                <span class="tier-chip t1">T1</span>
+                <span class="tier-chip t2">T2 ×5+</span>
+                <span class="tier-chip t3">T3 ×n</span>
+              </div>
+            </td>
+            <td>5+</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── PROVIDERS ─────────────────────────── -->
+  <section class="providers-section">
+    <div class="container">
+      <p class="providers-label">Works with every major model provider</p>
+      <div class="providers-row">
+        <div class="provider-pill"><span class="dot" style="background:#f4c74a"></span> Anthropic Claude</div>
+        <div class="provider-pill"><span class="dot" style="background:#19c37d"></span> OpenAI GPT</div>
+        <div class="provider-pill"><span class="dot" style="background:#4285f4"></span> Google Gemini</div>
+        <div class="provider-pill"><span class="dot" style="background:#0078d4"></span> Azure OpenAI</div>
+        <div class="provider-pill"><span class="dot" style="background:#e8632a"></span> Ollama (local)</div>
+        <div class="provider-pill"><span class="dot" style="background:#7a7a7a"></span> OpenAI-Compatible</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── FEATURES GRID ─────────────────────── -->
+  <section class="features-section" id="features">
+    <div class="container">
+      <div class="section-label reveal">Everything included</div>
+      <h2 class="reveal">Production-grade from day one.</h2>
+      <p class="section-desc reveal">No plugin store to browse. The tools your agents need are already wired in.</p>
+
+      <div class="features-grid reveal">
+        <div class="feature-cell">
+          <div class="feature-icon lime">⚡</div>
+          <h3>Live Agent Tree</h3>
+          <p>Watch the T1→T2→T3 hierarchy execute in real time directly in the terminal via ink rendering.</p>
+        </div>
+        <div class="feature-cell">
+          <div class="feature-icon violet">🔒</div>
+          <h3>Permission Escalation</h3>
+          <p>Dangerous tool calls escalate through T2 → T1 → user before executing. Never a silent file delete.</p>
+        </div>
+        <div class="feature-cell">
+          <div class="feature-icon amber">🔄</div>
+          <h3>Provider Failover</h3>
+          <p>Rate-limit hit? Cascade auto-switches providers with exponential backoff. Zero config required.</p>
+        </div>
+        <div class="feature-cell">
+          <div class="feature-icon cyan">🛠️</div>
+          <h3>Full Tool Suite</h3>
+          <p>Shell, file CRUD, git, GitHub/GitLab PRs, Playwright browser automation, PDF creation, code interpreter.</p>
+        </div>
+        <div class="feature-cell">
+          <div class="feature-icon red">🌐</div>
+          <h3>Web Dashboard</h3>
+          <p>React + ReactFlow live topology graph, session browser, cost tracker, JWT auth, WebSocket updates.</p>
+        </div>
+        <div class="feature-cell">
+          <div class="feature-icon green">🔌</div>
+          <h3>MCP Support</h3>
+          <p>Connect any Model Context Protocol server. Its tools become available to every T3 worker automatically.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── CODE SPLIT ─────────────────────────── -->
+  <section class="code-section" id="usage">
+    <div class="container">
+      <div class="code-split">
+        <div class="code-window reveal">
+          <div class="code-titlebar">
+            <div class="code-dot red"></div>
+            <div class="code-dot amber"></div>
+            <div class="code-dot green"></div>
+            <span class="code-filename">cascade.config.json</span>
+          </div>
+          <pre><code><span class="cm">// .cascade/config.json</span>
+{
+  <span class="str">"version"</span>: <span class="str">"1.0"</span>,
+  <span class="str">"providers"</span>: [
+    { <span class="str">"type"</span>: <span class="str">"anthropic"</span>,
+      <span class="str">"apiKey"</span>: <span class="str">"sk-ant-..."</span> },
+    { <span class="str">"type"</span>: <span class="str">"ollama"</span> }
+  ],
+  <span class="str">"models"</span>: {
+    <span class="str">"t1"</span>: <span class="str">"claude-opus-4"</span>,
+    <span class="str">"t2"</span>: <span class="str">"claude-sonnet-4"</span>,
+    <span class="str">"t3"</span>: <span class="str">"llama3.2:3b"</span>
+  },
+  <span class="str">"tools"</span>: {
+    <span class="str">"shellBlocklist"</span>: [<span class="str">"rm -rf"</span>],
+    <span class="str">"requireApprovalFor"</span>: [<span class="str">"shell"</span>]
+  }
+}</code></pre>
+        </div>
+
+        <div class="code-right reveal">
+          <div class="section-label">SDK usage</div>
+          <h2>Embed in any<br/>Node.js project.</h2>
+          <p>Cascade exposes a first-class TypeScript SDK. Bring your own approval flow, stream tokens to any UI, or wire it into a CI pipeline.</p>
+
+          <div class="code-bullet">
+            <div class="code-bullet-dot"></div>
+            <p>Full TypeScript types for every option and result</p>
+          </div>
+          <div class="code-bullet">
+            <div class="code-bullet-dot"></div>
+            <p>Token-by-token streaming via callback</p>
+          </div>
+          <div class="code-bullet">
+            <div class="code-bullet-dot"></div>
+            <p>Custom approval callbacks for tool gating</p>
+          </div>
+          <div class="code-bullet">
+            <div class="code-bullet-dot"></div>
+            <p><code>runCascade</code>, <code>createCascade</code>, <code>streamCascade</code> — three entry points</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- SDK snippet below -->
+      <div class="code-window reveal" style="margin-top:32px">
+        <div class="code-titlebar">
+          <div class="code-dot red"></div>
+          <div class="code-dot amber"></div>
+          <div class="code-dot green"></div>
+          <span class="code-filename">example.ts</span>
+        </div>
+        <pre><code><span class="kw">import</span> { <span class="fn">streamCascade</span> } <span class="kw">from</span> <span class="str">'cascade-ai'</span>;
+
+<span class="kw">await</span> <span class="fn">streamCascade</span>(
+  <span class="str">'Refactor auth module to use JWT, add tests, open a PR'</span>,
+  (token) => process.stdout.<span class="fn">write</span>(token),
+  {
+    workspacePath: <span class="str">'/my/project'</span>,
+    approvalCallback: <span class="kw">async</span> (req) => {
+      console.<span class="fn">log</span>(<span class="str">`Allow </span>${req.toolName}<span class="str">?`</span>);
+      <span class="kw">return</span> { approved: <span class="kw">true</span>, always: <span class="kw">false</span> };
+    },
+  }
+);</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── CTA ───────────────────────────────── -->
+  <section class="cta-section">
+    <div class="container">
+      <div class="section-label reveal">Get started</div>
+      <h2 class="reveal">One command away.</h2>
+      <p class="reveal">Open-source, MIT licensed. No telemetry by default. Runs local models via Ollama — your code never leaves your machine if you don't want it to.</p>
+      <div class="cta-actions reveal">
+        <a href="https://github.com/Varun-SV/Cascade-AI" target="_blank" class="btn-primary">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          Star on GitHub
+        </a>
+        <a href="https://github.com/Varun-SV/Cascade-AI#readme" target="_blank" class="btn-ghost">
+          Read the docs →
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── FOOTER ─────────────────────────────── -->
+  <footer>
+    <div class="container">
+      <div class="footer-inner">
+        <div class="footer-left">
+          <div class="footer-logo">C</div>
+          <span class="footer-copy">Cascade AI · MIT License · Built by Varun SV</span>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/Varun-SV/Cascade-AI" target="_blank" class="footer-link">GitHub</a>
+          <a href="https://github.com/Varun-SV/Cascade-AI/blob/main/CONTRIBUTING.md" target="_blank" class="footer-link">Contributing</a>
+          <a href="https://github.com/Varun-SV/Cascade-AI/issues" target="_blank" class="footer-link">Issues</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    /* ── Copy install command ── */
+    function copyInstall(el) {
+      navigator.clipboard?.writeText('npm install -g cascade-ai').then(() => {
+        el.classList.add('did-copy');
+        setTimeout(() => el.classList.remove('did-copy'), 2000);
+      });
+    }
+
+    /* ── Staggered scroll reveal ── */
+    const reveals = document.querySelectorAll('.reveal');
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry, i) => {
+        if (entry.isIntersecting) {
+          const delay = Array.from(entry.target.parentElement?.querySelectorAll('.reveal') ?? [])
+            .indexOf(entry.target) * 60;
+          setTimeout(() => entry.target.classList.add('visible'), delay);
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.08 });
+
+    reveals.forEach(el => observer.observe(el));
+
+    /* ── Trigger hero reveals immediately ── */
+    document.querySelectorAll('.hero .reveal').forEach((el, i) => {
+      setTimeout(() => el.classList.add('visible'), 80 + i * 110);
+    });
+  </script>
+</body>
+</html>
