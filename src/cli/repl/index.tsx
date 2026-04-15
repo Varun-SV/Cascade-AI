@@ -86,6 +86,7 @@ interface ReplState {
   showCost: boolean;
   showDetails: boolean;
   error: string | null;
+  activeTool: string | null;
 }
 
 type ReplAction =
@@ -96,10 +97,12 @@ type ReplAction =
   | { type: 'UPDATE_COST'; tokens: number; costUsd: number; byProvider: Record<string,number>; byTier: Record<string,number> }
   | { type: 'SET_APPROVAL'; request: ApprovalRequest | null }
   | { type: 'SET_EXECUTING'; isExecuting: boolean }
+  | { type: 'SET_STREAMING'; isStreaming: boolean }
   | { type: 'CLEAR' }
   | { type: 'TOGGLE_COST' }
   | { type: 'TOGGLE_DETAILS' }
-  | { type: 'SET_ERROR'; error: string | null };
+  | { type: 'SET_ERROR'; error: string | null }
+  | { type: 'SET_ACTIVE_TOOL'; toolName: string | null };
 
 function replReducer(state: ReplState, action: ReplAction): ReplState {
   switch (action.type) {
@@ -114,7 +117,7 @@ function replReducer(state: ReplState, action: ReplAction): ReplState {
         content: action.finalText,
         timestamp: action.timestamp ?? new Date().toISOString(),
       };
-      return { ...state, messages: [...state.messages, msg], isStreaming: false, streamBuffer: '' };
+      return { ...state, messages: [...state.messages, msg], isStreaming: false, streamBuffer: '', activeTool: null };
     }
     case 'SET_TREE':
       return { ...state, agentTree: action.tree };
@@ -124,14 +127,18 @@ function replReducer(state: ReplState, action: ReplAction): ReplState {
       return { ...state, approvalRequest: action.request };
     case 'SET_EXECUTING':
       return { ...state, isExecuting: action.isExecuting };
+    case 'SET_STREAMING':
+      return { ...state, isStreaming: action.isStreaming };
     case 'CLEAR':
-      return { ...state, messages: [], agentTree: null, streamBuffer: '', totalTokens: 0, totalCostUsd: 0 };
+      return { ...state, messages: [], agentTree: null, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, activeTool: null };
     case 'TOGGLE_COST':
       return { ...state, showCost: !state.showCost };
     case 'TOGGLE_DETAILS':
       return { ...state, showDetails: !state.showDetails };
     case 'SET_ERROR':
       return { ...state, error: action.error };
+    case 'SET_ACTIVE_TOOL':
+      return { ...state, activeTool: action.toolName };
     default:
       return state;
   }
@@ -173,7 +180,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const [slashIndex, setSlashIndex] = useState(0);
   const [identities, setIdentities] = useState<Array<{ id: string; name: string; isDefault: boolean }>>([]);
   const [currentIdentityId, setCurrentIdentityId] = useState<string | undefined>(config.defaultIdentityId);
-  const [state, dispatch] = useReducer(replReducer, { messages: [], agentTree: null, isStreaming: false, isExecuting: false, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, approvalRequest: null, showCost: false, showDetails: false, error: null });
+  const [state, dispatch] = useReducer(replReducer, { messages: [], agentTree: null, isStreaming: false, isExecuting: false, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, approvalRequest: null, showCost: false, showDetails: false, error: null, activeTool: null });
   const [isShowingModels, setIsShowingModels] = useState(false);
   const [cachedModels, setCachedModels] = useState<Map<ProviderType, ModelInfo[]>>(new Map());
   const cascadeRef = useRef<Cascade | null>(null);
@@ -201,6 +208,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
 
   const sessionTitle = state.messages.find(m => m.role === 'user')?.content.slice(0, 72) ?? 'Cascade Session';
   const lastUserPrompt = useRef<string | null>(null);
+  const lastSubmittedInputRef = useRef<string | null>(null);
+  const sessionTitleGeneratedRef = useRef(false);
   const rootTierIdRef = useRef<'T1' | 't2-root' | 't3-root'>('T1');
   const isTypingCommand = input.startsWith('/');
   const slashCompletions = isTypingCommand ? (
@@ -464,6 +473,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'user', content: trimmed, timestamp } });
     persistMessage('user', trimmed, timestamp);
     lastUserPrompt.current = trimmed;
+    lastSubmittedInputRef.current = trimmed;
     setInput('');
     dispatch({ type: 'SET_EXECUTING', isExecuting: true });
     dispatch({ type: 'SET_STREAMING', isStreaming: true });
@@ -489,6 +499,11 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       recordNodeEvent(ev);
       const stats = cascade.getRouter().getStats();
       dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier });
+      // Extract active tool from currentAction if present
+      if (ev.currentAction?.startsWith('Using tool:')) {
+        const toolName = ev.currentAction.replace('Using tool:', '').trim();
+        dispatch({ type: 'SET_ACTIVE_TOOL', toolName });
+      }
     });
     try {
       const result = await cascade.run({
@@ -508,6 +523,16 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier });
       dispatch({ type: 'COMMIT_STREAM', finalText: result.output, timestamp: new Date().toISOString() });
       persistMessage('assistant', result.output, new Date().toISOString());
+      // Generate AI session name on first exchange (async, fire-and-forget)
+      if (!sessionTitleGeneratedRef.current && storeRef.current) {
+        sessionTitleGeneratedRef.current = true;
+        generateSessionName(trimmed, cascadeRef.current).then(name => {
+          if (name && storeRef.current) {
+            storeRef.current.updateSession(sessionIdRef.current, { title: name, updatedAt: new Date().toISOString() });
+            persistRuntimeSession('ACTIVE');
+          }
+        }).catch(() => { /* non-critical */ });
+      }
     } catch (err: unknown) { 
       const message = err instanceof Error ? err.message : String(err);
       dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'error', content: message, timestamp: new Date().toISOString() } }); 
@@ -544,6 +569,12 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       if (queuedMessages.length > 0) {
         setInput(queuedMessages[0]!);
         setQueuedMessages(p => p.slice(1));
+        return;
+      }
+      // Restore last submitted message if input is empty and not currently executing
+      if (!input && lastSubmittedInputRef.current && !state.isExecuting) {
+        setInput(lastSubmittedInputRef.current);
+        setHistoryIndex(null);
         return;
       }
       setInput('');
@@ -621,8 +652,9 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
 
   useEffect(() => {
     allLinesRef.current = allLines.length;
+    chatWindowHeightRef.current = chatWindowHeight;
     isAutoScrollingRef.current = isAutoScrolling;
-  }, [allLines.length, isAutoScrolling]);
+  }, [allLines.length, isAutoScrolling, chatWindowHeight]);
 
   useEffect(() => {
     // Enable mouse reporting (1000: mouse move/press, 1006: SGR mode)
@@ -630,15 +662,15 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
 
     const onData = (data: Buffer) => {
       const str = data.toString();
-      // Lock input for ANY escape sequence to prevent leakage into the prompt
-      if (str.includes('\x1b')) {
-        lockInputTemporarily();
-      }
 
-      // Match SGR mouse wheel or click sequences: ESC [ < button ; X ; Y [Mm]
-      const match = str.match(/\x1b\[<(\d+);\d+;\d+[Mm]/);
-      if (match) {
-        const code = parseInt(match[1]!, 10);
+      // Match SGR mouse sequences: ESC [ < button ; X ; Y [Mm]
+      const mouseMatch = str.match(/\x1b\[<(\d+);\d+;\d+[Mm]/);
+      if (mouseMatch) {
+        // Lock input ONLY for mouse sequences to prevent them leaking into the prompt.
+        // ⚠ Do NOT lock for all \x1b sequences — that would block Delete (\x1b[3~),
+        //   arrow keys, Home, End, and other navigation escape sequences.
+        lockInputTemporarily();
+        const code = parseInt(mouseMatch[1]!, 10);
         if (code === 64) { // Wheel Up
           setIsAutoScrolling(false);
           setScrollOffset(p => Math.max(0, p - 3));
@@ -650,6 +682,19 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
             return next;
           });
         }
+        return; // Consumed by mouse handler
+      }
+
+      // Handle forward Delete key (\x1b[3~) — Ink's TextInput doesn't natively delete forward.
+      // We intercept it here and remove the character at the cursor position.
+      if (str === '\x1b[3~') {
+        setInput(prev => {
+          // Remove the character right after where the cursor would be.
+          // Since ink-text-input manages cursor internally, we can't know exact position,
+          // so we treat forward-delete the same as removing the last typed character for now.
+          // A full cursor-aware implementation would require patching ink-text-input.
+          return prev.slice(0, -1);
+        });
       }
     };
 
@@ -704,11 +749,12 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           <TimelinePanel nodes={[...treeNodesRef.current.values()]} theme={theme} currentIndex={timelineIndex} onChangeIndex={setTimelineIndex} />
         </>
       ) : (
-        <CompactStatus 
-          theme={theme} 
+        <CompactStatus
+          theme={theme}
           activeT2Count={countNodes(state.agentTree, n => n.role === 'T2' && n.status === 'ACTIVE')}
           activeT3Count={countNodes(state.agentTree, n => n.role === 'T3' && n.status === 'ACTIVE')}
           currentAction={state.agentTree ? findCurrentAction(state.agentTree) : undefined}
+          activeTool={state.activeTool}
           isStreaming={state.isStreaming}
         />
       )}
@@ -912,6 +958,22 @@ function formatRuntimeStatus(nodes: FlatTreeNode[], nodeLogs: Map<string, string
     for (const entry of recent) lines.push(`  · ${entry}`);
   }
   return lines.join('\n');
+}
+
+async function generateSessionName(firstMessage: string, cascade: Cascade | null): Promise<string | null> {
+  if (!cascade) return null;
+  try {
+    const router = cascade.getRouter();
+    const prompt = `Generate a concise 3-5 word session title for this AI conversation. Return ONLY the title, no punctuation, no quotes.\n\nFirst message: "${firstMessage.slice(0, 200)}"`;
+    const result = await router.generate('T3', {
+      messages: [{ role: 'user', content: prompt }],
+      maxTokens: 20,
+    });
+    const name = result.content.trim().replace(/^["']|["']$/g, '').slice(0, 60);
+    return name || null;
+  } catch {
+    return null;
+  }
 }
 
 function countNodes(node: TierNode | null, predicate: (node: TierNode) => boolean): number {

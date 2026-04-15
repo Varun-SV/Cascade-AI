@@ -18,11 +18,25 @@ interface PeerOutput {
  * Each T2Manager creates one PeerBus and shares it with its T3Workers.
  * T1 creates one PeerBus and shares it with its T2Managers.
  */
+interface BroadcastMessage {
+  fromId: string;
+  payload: unknown;
+  timestamp: string;
+}
+
+interface FileLock {
+  holderId: string;
+  lockedAt: string;
+  waiters: Array<() => void>;
+}
+
 export class PeerBus extends EventEmitter {
   private outputs: Map<string, PeerOutput> = new Map();
   private waiters: Map<string, Array<(output: PeerOutput) => void>> = new Map();
   private members: Set<string> = new Set();
   private barriers: Map<string, { total: number; arrived: Set<string> }> = new Map();
+  private broadcastLog: BroadcastMessage[] = [];
+  private fileLocks: Map<string, FileLock> = new Map();
 
   register(peerId: string): void {
     this.members.add(peerId);
@@ -78,7 +92,8 @@ export class PeerBus extends EventEmitter {
   }
 
   /**
-   * Broadcast a message to all registered peers except sender
+   * Broadcast a message to all registered peers except sender.
+   * Also logs to broadcastLog so collect() can retrieve recent broadcasts.
    */
   broadcast(fromId: string, payload: unknown): void {
     const msg: PeerMessage = {
@@ -90,7 +105,113 @@ export class PeerBus extends EventEmitter {
       payload,
       timestamp: new Date().toISOString(),
     };
+    this.broadcastLog.push({ fromId, payload, timestamp: msg.timestamp });
     this.emit('broadcast', msg);
+  }
+
+  /**
+   * Collect all broadcast messages received within a time window.
+   * Useful for T2 announcement gathering — call immediately after triggering broadcasts.
+   */
+  collect(timeoutMs: number): Promise<BroadcastMessage[]> {
+    const collected: BroadcastMessage[] = [...this.broadcastLog];
+    return new Promise(resolve => {
+      const timer = setTimeout(() => {
+        off();
+        resolve(collected);
+      }, timeoutMs);
+
+      const handler = (msg: PeerMessage) => {
+        collected.push({ fromId: msg.fromId, payload: msg.payload, timestamp: msg.timestamp });
+      };
+      this.on('broadcast', handler);
+
+      const off = () => {
+        clearTimeout(timer);
+        this.off('broadcast', handler);
+      };
+
+      // Also resolve early if all members have broadcast
+      const checkComplete = () => {
+        const broadcasters = new Set(collected.map(m => m.fromId));
+        if (broadcasters.size >= this.members.size) {
+          off();
+          resolve(collected);
+        }
+      };
+      this.on('broadcast', checkComplete);
+    });
+  }
+
+  /**
+   * Acquire an exclusive file lock — prevents concurrent T3 writes to the same file.
+   * If the file is already locked, waits until the lock is released.
+   */
+  async lockFile(tierId: string, filePath: string, timeoutMs = 30_000): Promise<void> {
+    const existing = this.fileLocks.get(filePath);
+    if (!existing) {
+      this.fileLocks.set(filePath, { holderId: tierId, lockedAt: new Date().toISOString(), waiters: [] });
+      return;
+    }
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`File lock timeout for ${filePath} (held by ${existing.holderId})`));
+      }, timeoutMs);
+
+      existing.waiters.push(() => {
+        clearTimeout(timer);
+        // Re-acquire for this tier
+        this.fileLocks.set(filePath, { holderId: tierId, lockedAt: new Date().toISOString(), waiters: [] });
+        resolve();
+      });
+    });
+  }
+
+  /**
+   * Release a file lock — unblocks the next waiter if any.
+   */
+  releaseFile(tierId: string, filePath: string): void {
+    const lock = this.fileLocks.get(filePath);
+    if (!lock || lock.holderId !== tierId) return;
+
+    const nextWaiter = lock.waiters.shift();
+    if (nextWaiter) {
+      nextWaiter();
+    } else {
+      this.fileLocks.delete(filePath);
+    }
+    this.emit(`file:released:${filePath}`, { tierId, filePath });
+  }
+
+  /**
+   * Wait until a file lock is released (non-acquiring — just observes).
+   * Used by T3s that want to read after another T3 finishes writing.
+   */
+  waitForFileRelease(filePath: string, timeoutMs = 30_000): Promise<void> {
+    if (!this.fileLocks.has(filePath)) return Promise.resolve();
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`Timeout waiting for file release: ${filePath}`)), timeoutMs);
+      this.once(`file:released:${filePath}`, () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+
+  /**
+   * Check if a file is currently locked (non-blocking).
+   */
+  isFileLocked(filePath: string): boolean {
+    return this.fileLocks.has(filePath);
+  }
+
+  /**
+   * Clear broadcast log — call between phases to avoid stale announcements.
+   */
+  clearBroadcastLog(): void {
+    this.broadcastLog = [];
   }
 
   /**

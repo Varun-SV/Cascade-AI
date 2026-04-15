@@ -169,6 +169,23 @@ export const runtimeSlice = createSlice({
       state.logIds = {};
       state.logs = {};
     },
+
+    removeSessionsBulk(state: RuntimeState, action: PayloadAction<string[]>) {
+      for (const id of action.payload) {
+        delete state.sessions[id];
+        // Clean up nodes and logs for removed sessions
+        for (const key of Object.keys(state.nodes)) {
+          if (state.nodes[key]?.sessionId === id) delete state.nodes[key];
+        }
+        delete state.logs[id];
+        delete state.logIds[id];
+      }
+      // If active session was deleted, select the next available one
+      if (state.activeSessionId && action.payload.includes(state.activeSessionId)) {
+        const remaining = Object.values(state.sessions);
+        state.activeSessionId = remaining[0]?.sessionId ?? null;
+      }
+    },
   },
 
   extraReducers(builder) {
@@ -190,6 +207,7 @@ export const {
   updateSessionDetails,
   appendLog,
   clearFrontendGraphs,
+  removeSessionsBulk,
 } = runtimeSlice.actions;
 
 // ── Selectors ──────────────────────────────────

@@ -448,6 +448,7 @@ export interface DashboardConfig {
 export interface TelemetryConfig {
   enabled: boolean;
   posthogApiKey?: string;
+  distinctId?: string;
 }
 
 export interface MemoryConfig {

@@ -58,6 +58,7 @@ export const DashboardConfigSchema = z.object({
 export const TelemetryConfigSchema = z.object({
   enabled: z.boolean().default(false),
   posthogApiKey: z.string().optional(),
+  distinctId: z.string().optional(),
 });
 
 export const MemoryConfigSchema = z.object({
@@ -99,6 +100,19 @@ export const CascadeConfigSchema = z.object({
   budget: BudgetConfigSchema.default({}),
   theme: z.string().default('cascade'),
   workspace: WorkspaceConfigSchema.default({}),
+  /**
+   * Cascade Auto: when true, the TaskAnalyzer selects the optimal model for each
+   * tier based on task type and complexity, overriding the static priority lists.
+   * Heuristic-first with AI inference fallback (adds ~0–500ms per task).
+   */
+  cascadeAuto: z.boolean().default(false),
+  /**
+   * Runtime Tool Creation: when true, T3 workers can generate and register new tools
+   * at runtime via the ToolCreator when no existing tool can handle a required operation.
+   * Generated tools are session-scoped and sandboxed in node:vm.
+   * HTTP calls from generated tools require approval.
+   */
+  enableToolCreation: z.boolean().default(false),
 });
 
 export type CascadeConfigInput = z.input<typeof CascadeConfigSchema>;

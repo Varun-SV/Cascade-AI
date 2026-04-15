@@ -11,6 +11,7 @@ import type {
   PermissionRequest,
   StreamChunk,
   TaskComplexity,
+  TierRole,
   T3Result
 } from '../types.js';
 import { CascadeRouter } from './router/index.js';
@@ -23,6 +24,9 @@ import { AuditLogger } from '../audit/log.js';
 import { MemoryStore } from '../memory/store.js';
 import { PermissionEscalator } from './permissions/escalator.js';
 import { validateConfig } from '../config/validate.js';
+import { Telemetry, noopTelemetry } from '../telemetry/index.js';
+import { TaskAnalyzer } from './router/task-analyzer.js';
+import { ToolCreator } from '../tools/tool-creator.js';
 
 export class Cascade extends EventEmitter {
   private router: CascadeRouter;
@@ -32,6 +36,9 @@ export class Cascade extends EventEmitter {
   private initialized = false;
   private store?: MemoryStore;
   private audit?: AuditLogger;
+  private telemetry: Pick<Telemetry, 'capture' | 'shutdown'>;
+  private taskAnalyzer?: TaskAnalyzer;
+  private toolCreator?: ToolCreator;
 
   constructor(config: CascadeConfig, workspacePath: string, store?: MemoryStore) {
     super();
@@ -41,6 +48,19 @@ export class Cascade extends EventEmitter {
     this.router = new CascadeRouter();
     this.mcpClient = new McpClient();
     this.toolRegistry = new ToolRegistry(this.config.tools, workspacePath);
+    this.telemetry = config.telemetry?.enabled
+      ? new Telemetry(config.telemetry, config.telemetry.distinctId ?? 'anonymous')
+      : noopTelemetry;
+  }
+
+  private initOptionalFeatures(): void {
+    const cfg = this.config as unknown as Record<string, unknown>;
+    if (cfg['cascadeAuto'] === true) {
+      this.taskAnalyzer = new TaskAnalyzer(this.router);
+    }
+    if (cfg['enableToolCreation'] === true) {
+      this.toolCreator = new ToolCreator(this.router, this.toolRegistry);
+    }
   }
 
   setStore(store: MemoryStore): void {
@@ -63,6 +83,7 @@ export class Cascade extends EventEmitter {
       }
     }
 
+    this.initOptionalFeatures();
     this.initialized = true;
   }
 
@@ -174,7 +195,28 @@ ${prompt}`
     // 1. Determine complexity
     const complexity = await this.determineComplexity(options.prompt, options.conversationHistory);
 
+    this.telemetry.capture('cascade:session_start', {
+      complexity,
+      providerCount: this.config.providers.length,
+      cascadeAutoEnabled: (this.config as unknown as Record<string, unknown>)['cascadeAuto'] === true,
+      toolCreationEnabled: (this.config as unknown as Record<string, unknown>)['enableToolCreation'] === true,
+    });
+
     this.emit('tier:root', { role: complexity === 'Simple' ? 'T3' : complexity === 'Moderate' ? 'T2' : 'T1' });
+
+    // Cascade Auto: select optimal models for each tier based on task analysis
+    if (this.taskAnalyzer) {
+      const tiers: TierRole[] = complexity === 'Simple' ? ['T3'] : complexity === 'Moderate' ? ['T2', 'T3'] : ['T1', 'T2', 'T3'];
+      await Promise.all(tiers.map(async (tier) => {
+        try {
+          const model = await this.taskAnalyzer!.selectModel(options.prompt, tier, this.router.getSelector());
+          if (model) this.router.overrideTierModel(tier, model);
+        } catch { /* non-critical — fall back to priority list */ }
+      }));
+    }
+
+    // Register ToolCreator with the T3 instances (done below, passed via closure)
+    const toolCreator = this.toolCreator;
 
     let finalOutput = '';
     let t2Results: any[] = [];
@@ -244,6 +286,7 @@ ${prompt}`
         t3.setStore(this.store, taskId);
       }
       t3.setPermissionEscalator(escalator);
+      if (toolCreator) t3.setToolCreator(toolCreator);
       bindTierEvents(t3);
       const assignment = {
         subtaskId: taskId,
@@ -267,6 +310,7 @@ ${prompt}`
         t2.setStore(this.store);
       }
       t2.setPermissionEscalator(escalator);
+      if (toolCreator) t2.setToolCreator(toolCreator);
       bindTierEvents(t2);
       const assignment = {
         sectionId: taskId,
@@ -295,6 +339,7 @@ ${prompt}`
         t1.setStore(this.store);
       }
       t1.setPermissionEscalator(escalator);
+      if (toolCreator) t1.setToolCreator(toolCreator);
       bindTierEvents(t1);
       t1.on('plan', (e) => this.emit('plan', e));
       
@@ -307,6 +352,17 @@ ${prompt}`
     escalator.cancelAllPending();
 
     const stats = this.router.getStats();
+    const durationMs = Date.now() - startMs;
+
+    this.telemetry.capture('cascade:task_complete', {
+      complexity,
+      tier: complexity === 'Simple' ? 'simple' : complexity === 'Moderate' ? 'T2' : 'T1',
+      durationMs,
+      tokenCount: stats.totalTokens,
+      costUsd: stats.totalCostUsd,
+      t2Count: t2Results.length,
+      t3Count: t2Results.reduce((sum: number, r: { t3Results?: unknown[] }) => sum + (r.t3Results?.length ?? 0), 0),
+    });
 
     return {
       output: finalOutput,
@@ -319,7 +375,7 @@ ${prompt}`
         estimatedCostUsd: stats.totalCostUsd,
       },
       t2Results,
-      durationMs: Date.now() - startMs,
+      durationMs,
     };
   }
 

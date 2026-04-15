@@ -121,6 +121,10 @@ export class ToolRegistry {
     return this.tools.get(name);
   }
 
+  hasTool(name: string): boolean {
+    return this.tools.has(name);
+  }
+
   requiresApproval(toolName: string): boolean {
     const defaults = DEFAULT_APPROVAL_REQUIRED as string[];
     const configured = this.config.requireApprovalFor;
