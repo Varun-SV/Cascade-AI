@@ -373,6 +373,24 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         hydrateResumeState(snapshot, { dispatch, treeNodesRef, nodeLogsRef, sessionIdRef, startedAtRef, setInputHistory, setHistoryIndex, setCurrentIdentityId, storeRef });
         return `Restored session ${snapshot.session.title} with ${snapshot.messages.length} messages.`;
       },
+      onMcpList: async () => {
+        const cascade = cascadeRef.current;
+        if (!cascade) return 'Cascade not initialized.';
+        const toolRegistry = cascade.getToolRegistry();
+        const tools = toolRegistry.getToolDefinitions().filter(t => t.name.startsWith('mcp::'));
+        if (tools.length === 0) return 'No MCP tools connected.';
+        
+        const servers = new Set<string>();
+        tools.forEach(t => servers.add(t.name.split('::')[1]!));
+        
+        const lines = [`Connected MCP Servers (${servers.size}):`];
+        for (const server of servers) {
+          const serverTools = tools.filter(t => t.name.startsWith(`mcp::${server}::`));
+          lines.push(`\n● ${server} (${serverTools.length} tools)`);
+          serverTools.forEach(t => lines.push(`  - ${t.name.split('::')[2]} — ${t.description.replace(`[MCP:${server}] `, '')}`));
+        }
+        return lines.join('\n');
+      },
       onCostInfo: () => { dispatch({ type: 'TOGGLE_COST' }); return ''; },
       onCompact: async () => { 
         const prompt = 'Please summarize our conversation so far to keep the context compact and efficient.';
@@ -380,7 +398,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         return 'Triggered context compaction. The agent will now summarize the history...';
       },
       onStatus: () => formatRuntimeStatus([...treeNodesRef.current.values()], nodeLogsRef.current),
-      onTree: () => { dispatch({ type: 'TOGGLE_DETAILS' }); return ''; },
+      onTree: () => { 
+        dispatch({ type: 'TOGGLE_DETAILS' }); 
+        return 'Toggled agent tree visualization.'; 
+      },
       onSessions: async () => {
         const store = storeRef.current;
         if (!store) return 'No session store loaded.';

@@ -20,11 +20,19 @@ export const ModelOverridesSchema = z.object({
   vision: z.string().optional(),
 });
 
+export const McpServerConfigSchema = z.object({
+  name: z.string(),
+  command: z.string(),
+  args: z.array(z.string()).optional(),
+  env: z.record(z.string()).optional(),
+});
+
 export const ToolsConfigSchema = z.object({
   shellAllowlist: z.array(z.string()).default([]),
   shellBlocklist: z.array(z.string()).default(['rm -rf', 'sudo rm', 'format', 'mkfs']),
   requireApprovalFor: z.array(z.string()).default([]),
   browserEnabled: z.boolean().default(false),
+  mcpServers: z.array(McpServerConfigSchema).optional(),
 });
 
 export const HookDefinitionSchema = z.object({

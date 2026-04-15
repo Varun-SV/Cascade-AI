@@ -36,6 +36,7 @@ export interface SlashCommandContext {
   onLogs: (args: string[]) => Promise<string> | string;
   onTree: () => string;
   onResume: (args: string[]) => Promise<string> | string;
+  onMcpList: () => string | Promise<string>;
 }
 
 export interface SlashCommandResult {
@@ -211,6 +212,12 @@ export class SlashCommandRegistry {
       command: '/resume',
       description: 'Resume a session by ID',
       handler: async (args, ctx) => ({ output: await ctx.onResume(args), handled: true }),
+    });
+
+    this.register({
+      command: '/mcp',
+      description: 'List and manage MCP servers',
+      handler: async (_args, ctx) => ({ output: await ctx.onMcpList(), handled: true }),
     });
 
     this.register({

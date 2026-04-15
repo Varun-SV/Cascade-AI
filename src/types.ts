@@ -86,11 +86,19 @@ export interface ImageAttachment {
 
 // ── Tools ─────────────────────────────────────
 
+export interface McpServerConfig {
+  name: string;
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
 export interface ToolDefinition {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
 }
+// ... (omitted lines for brevity, but I will provide full replacement in a moment)
 
 export interface Message {
   id: string;
@@ -414,6 +422,7 @@ export interface ToolsConfig {
   shellBlocklist: string[];
   requireApprovalFor: string[];
   browserEnabled: boolean;
+  mcpServers?: McpServerConfig[];
 }
 
 export interface HooksConfig {
