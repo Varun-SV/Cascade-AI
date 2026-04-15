@@ -181,7 +181,7 @@ Return ONLY the JSON array.`;
     const messages: ConversationMessage[] = [{ role: 'user', content: prompt }];
     const result = await this.router.generate('T2', {
       messages,
-      systemPrompt: T2_SYSTEM_PROMPT,
+      systemPrompt: this.systemPromptOverride + T2_SYSTEM_PROMPT + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
       maxTokens: 2000,
     });
 
@@ -466,7 +466,7 @@ Return ONLY the JSON array.`;
     const messages: ConversationMessage[] = [{ role: 'user', content: prompt }];
     const result = await this.router.generate('T2', {
       messages,
-      systemPrompt: this.systemPromptOverride + 'You are a T2 Manager. Summarize the work of your T3 workers succinctly.',
+      systemPrompt: this.systemPromptOverride + 'You are a T2 Manager. Summarize the work of your T3 workers succinctly.' + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
       maxTokens: 300
     });
     return result.content;
@@ -513,7 +513,7 @@ Reply with exactly one word: YES, NO, or UNSURE.`;
     try {
       const result = await this.router.generate('T2', {
         messages: [{ role: 'user', content: prompt }],
-        systemPrompt: this.systemPromptOverride + 'You are a T2 Manager evaluating permissions.',
+        systemPrompt: this.systemPromptOverride + 'You are a T2 Manager evaluating permissions.' + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
         maxTokens: 10,
         temperature: 0,
       });
