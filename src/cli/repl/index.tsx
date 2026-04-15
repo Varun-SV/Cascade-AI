@@ -466,6 +466,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     lastUserPrompt.current = trimmed;
     setInput('');
     dispatch({ type: 'SET_EXECUTING', isExecuting: true });
+    dispatch({ type: 'SET_STREAMING', isStreaming: true });
     const cascade = cascadeRef.current;
     if (!cascade) return;
     treeNodesRef.current.clear(); rebuildTree();
