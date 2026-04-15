@@ -24,6 +24,7 @@ import { ModelSelector } from './selector.js';
 import { FailoverManager } from './failover.js';
 import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
 import { calculateCost } from '../../utils/cost.js';
+import { withTimeout } from '../../utils/retry.js';
 
 export interface RouterStats {
   totalTokens: number;

@@ -19,6 +19,7 @@ export abstract class BaseTier extends EventEmitter {
   protected taskId: string = '';
   protected label: string;
   protected systemPromptOverride: string = '';
+  protected hierarchyContext: string = '';
 
   constructor(role: TierRole, id?: string, parentId?: string) {
     super();
@@ -53,6 +54,10 @@ export abstract class BaseTier extends EventEmitter {
 
   setSystemPromptOverride(prompt: string): void {
     this.systemPromptOverride = prompt;
+  }
+
+  setHierarchyContext(context: string): void {
+    this.hierarchyContext = context;
   }
 
   protected sendStatusUpdate(update: StatusUpdate): void {

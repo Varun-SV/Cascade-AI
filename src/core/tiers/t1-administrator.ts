@@ -259,6 +259,7 @@ Leave dependsOn empty for subtasks that can run immediately in parallel.`;
 
     const managers: T2Manager[] = sections.map((section) => {
       const manager = new T2Manager(this.router, this.toolRegistry, this.id);
+      manager.setHierarchyContext(`You are a T2 Manager for the section "${section.sectionTitle}". You are part of a COMPLEX task overseen by T1 Administrator.`);
       if (this.store) {
         manager.setStore(this.store);
       }

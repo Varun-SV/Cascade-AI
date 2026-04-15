@@ -236,6 +236,7 @@ ${prompt}`
 
     if (complexity === 'Simple') {
       const t3 = new T3Worker(this.router, this.toolRegistry, 'root');
+      t3.setHierarchyContext('You are the DIRECT worker for this task. There is no T1 Administrator or T2 Manager involved in this run.');
       if (identityPrompt) {
         t3.setSystemPromptOverride(identityPrompt);
       }
@@ -258,6 +259,7 @@ ${prompt}`
       this.emit('tier:status', { tierId: 't3-root', status: 'COMPLETED', role: 'T3' });
     } else if (complexity === 'Moderate') {
       const t2 = new T2Manager(this.router, this.toolRegistry, 'root');
+      t2.setHierarchyContext('You are the ROOT Manager for this task. There is no T1 Administrator involved in this run. You are responsible for decomposing the task and managing T3 workers directly.');
       if (identityPrompt) {
         t2.setSystemPromptOverride(identityPrompt);
       }
@@ -285,6 +287,7 @@ ${prompt}`
       }
     } else {
       const t1 = new T1Administrator(this.router, this.toolRegistry, this.config);
+      t1.setHierarchyContext('You are the top-level Administrator. You are responsible for the overall plan and supervising multiple T2 Managers.');
       if (identityPrompt) {
         t1.setSystemPromptOverride(identityPrompt);
       }

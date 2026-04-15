@@ -252,7 +252,7 @@ export class T3Worker extends BaseTier {
 
       const options: GenerateOptions = {
         messages: this.context.getMessages(),
-        systemPrompt: this.systemPromptOverride + systemPrompt,
+        systemPrompt: this.systemPromptOverride + systemPrompt + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
         tools: tools.length ? tools : undefined,
         maxTokens: 4096,
       };
@@ -438,7 +438,11 @@ ${output}
 Reply with JSON: { "completeness": "pass"|"fail", "correctness": "pass"|"fail", "compliance": "pass"|"fail", "notes": "string" }`;
 
     const testMessages: ConversationMessage[] = [{ role: 'user', content: prompt }];
-    const testResult = await this.router.generate('T3', { messages: testMessages, maxTokens: 500 });
+    const testResult = await this.router.generate('T3', { 
+      messages: testMessages, 
+      maxTokens: 500,
+      systemPrompt: this.systemPromptOverride + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
+    });
 
     try {
       const jsonMatch = /\{[\s\S]*\}/.exec(testResult.content);
@@ -475,7 +479,7 @@ Correct the issues and provide an improved version that addresses all failures.`
     await this.context.addMessage({ role: 'user', content: correctionPrompt });
 
     const result = await this.runAgentLoop(
-      "You are in a correction phase. Fix the identified issues using your tools.",
+      "You are in a correction phase. Fix the identified issues using your tools." + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
       this.tools
     );
     return result.output;

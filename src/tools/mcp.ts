@@ -10,6 +10,10 @@ import { McpClient } from '../mcp/client.js';
  * A wrapper for a single tool exposed by an MCP server.
  */
 export class McpToolWrapper extends BaseTool {
+  public readonly name: string;
+  public readonly description: string;
+  public readonly inputSchema: Record<string, unknown>;
+
   private mcpClient: McpClient;
   private serverName: string;
   private toolName: string;

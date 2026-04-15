@@ -71,6 +71,28 @@ export async function withRetry<T>(
   throw lastErr;
 }
 
+/**
+ * Wraps a promise with a timeout.
+ */
+export async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  errorMessage = 'Operation timed out',
+): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(errorMessage)), timeoutMs);
+  });
+
+  try {
+    const result = await Promise.race([promise, timeoutPromise]);
+    return result;
+  } finally {
+    // @ts-ignore
+    if (timer) clearTimeout(timer);
+  }
+}
+
 // ── Helpers ────────────────────────────────────
 
 function defaultIsRetryable(err: Error): boolean {
