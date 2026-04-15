@@ -380,7 +380,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         return 'Triggered context compaction. The agent will now summarize the history...';
       },
       onStatus: () => formatRuntimeStatus([...treeNodesRef.current.values()], nodeLogsRef.current),
-      onTree: () => { dispatch({ type: 'TOGGLE_DETAILS' }); return ''; },
+      onTree: () => { 
+        dispatch({ type: 'TOGGLE_DETAILS' }); 
+        return 'Toggled agent tree visualization.'; 
+      },
       onSessions: async () => {
         const store = storeRef.current;
         if (!store) return 'No session store loaded.';

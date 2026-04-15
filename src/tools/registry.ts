@@ -14,6 +14,8 @@ import { ImageAnalyzeTool } from './image.js';
 import { PDFCreateTool } from './pdf.js';
 import { CodeInterpreterTool } from './interpreter.js';
 import { PeerCommunicationTool } from './peer.js';
+import { McpClient } from '../mcp/client.js';
+import { McpToolWrapper } from './mcp.js';
 
 // ── Plugin System (Roadmap Stub) ──────────────────────────────────────────
 //
@@ -84,6 +86,27 @@ export class ToolRegistry {
   /** Returns the names of all registered plugins */
   getRegisteredPlugins(): string[] {
     return Array.from(this.plugins.keys());
+  }
+
+  /** Registers all tools from an MCP client */
+  registerMcpTools(mcpClient: McpClient): void {
+    const definitions = mcpClient.getToolDefinitions();
+    for (const def of definitions) {
+      // definitions from McpClient.getToolDefinitions() are already prefixed
+      // but we need to create wrappers for them
+      const [,, serverName, toolName] = def.name.split('::');
+      if (!serverName || !toolName) continue;
+      
+      const wrapper = new McpToolWrapper(
+        mcpClient,
+        serverName,
+        toolName,
+        def.description.replace(`[MCP:${serverName}] `, ''),
+        def.inputSchema
+      );
+      wrapper.setWorkspaceRoot(this.workspaceRoot);
+      this.register(wrapper);
+    }
   }
 
   setIgnoredPaths(paths: string[]): void {

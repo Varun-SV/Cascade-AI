@@ -18,6 +18,7 @@ import { T1Administrator } from './tiers/t1-administrator.js';
 import { T2Manager } from './tiers/t2-manager.js';
 import { T3Worker } from './tiers/t3-worker.js';
 import { ToolRegistry } from '../tools/registry.js';
+import { McpClient } from '../mcp/client.js';
 import { AuditLogger } from '../audit/log.js';
 import { MemoryStore } from '../memory/store.js';
 import { PermissionEscalator } from './permissions/escalator.js';
@@ -26,6 +27,7 @@ import { validateConfig } from '../config/validate.js';
 export class Cascade extends EventEmitter {
   private router: CascadeRouter;
   private toolRegistry: ToolRegistry;
+  private mcpClient: McpClient;
   private config: CascadeConfig;
   private initialized = false;
   private store?: MemoryStore;
@@ -37,6 +39,7 @@ export class Cascade extends EventEmitter {
     this.config = validateConfig(config) as CascadeConfig;
     this.store = store;
     this.router = new CascadeRouter();
+    this.mcpClient = new McpClient();
     this.toolRegistry = new ToolRegistry(this.config.tools, workspacePath);
   }
 
@@ -47,6 +50,19 @@ export class Cascade extends EventEmitter {
   async init(): Promise<void> {
     if (this.initialized) return;
     await this.router.init(this.config);
+
+    // Initialize MCP servers
+    if (this.config.tools.mcpServers?.length) {
+      for (const server of this.config.tools.mcpServers) {
+        try {
+          await this.mcpClient.connect(server);
+          this.toolRegistry.registerMcpTools(this.mcpClient);
+        } catch (err) {
+          console.error(`Failed to connect to MCP server "${server.name}":`, err);
+        }
+      }
+    }
+
     this.initialized = true;
   }
 
