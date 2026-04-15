@@ -17,6 +17,9 @@ export class McpToolWrapper extends BaseTool {
   private mcpClient: McpClient;
   private serverName: string;
   private toolName: string;
+  public readonly name: string;
+  public readonly description: string;
+  public readonly inputSchema: Record<string, unknown>;
 
   constructor(
     mcpClient: McpClient,

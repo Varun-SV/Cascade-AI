@@ -96,7 +96,7 @@ export const LogViewer = memo(function LogViewer() {
 
   // Memoised filter — previously recomputed on every render
   const filteredLogs = useMemo(
-    () => logs.filter((log) => {
+    () => logs.filter((log: RuntimeNodeLog) => {
       if (roleFilter !== 'ALL' && log.role !== roleFilter) return false;
       if (statusFilter !== 'ALL' && log.status !== statusFilter) return false;
       return true;
@@ -195,7 +195,7 @@ export const LogViewer = memo(function LogViewer() {
           aria-live="polite"
         >
           <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
-            {virtualizer.getVirtualItems().map((vRow) => {
+            {virtualizer.getVirtualItems().map((vRow: any) => {
               const log = filteredLogs[vRow.index]!;
               return (
                 <LogRow
