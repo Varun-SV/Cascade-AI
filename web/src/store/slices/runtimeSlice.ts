@@ -96,15 +96,15 @@ export const runtimeSlice = createSlice({
   name: 'runtime',
   initialState,
   reducers: {
-    setConnected(state, action: PayloadAction<boolean>) {
+    setConnected(state: RuntimeState, action: PayloadAction<boolean>) {
       state.connected = action.payload;
     },
 
-    setScope(state, action: PayloadAction<RuntimeScope>) {
+    setScope(state: RuntimeState, action: PayloadAction<RuntimeScope>) {
       state.scope = action.payload;
     },
 
-    setActiveSession(state, action: PayloadAction<string | null>) {
+    setActiveSession(state: RuntimeState, action: PayloadAction<string | null>) {
       state.activeSessionId = action.payload;
     },
 
@@ -113,7 +113,7 @@ export const runtimeSlice = createSlice({
      * Previously this ignored `nodes` — now it processes them too so the
      * topology graph is populated after the first HTTP fetch.
      */
-    updateRTKSnapshot(state, action: PayloadAction<RuntimeSnapshotPayload>) {
+    updateRTKSnapshot(state: RuntimeState, action: PayloadAction<RuntimeSnapshotPayload>) {
       const { sessions, nodes, logs, scope } = action.payload;
 
       // Scope — validated cast (avoids `as any`)
@@ -129,7 +129,7 @@ export const runtimeSlice = createSlice({
       // Auto-select active session
       if (!state.activeSessionId && sessions.length > 0) {
         state.activeSessionId =
-          sessions.find((s) => s.status === 'ACTIVE')?.sessionId ?? sessions[0]!.sessionId;
+          sessions.find((s: RuntimeSession) => s.status === 'ACTIVE')?.sessionId ?? sessions[0]!.sessionId;
       }
 
       // Nodes — previously missing, causing topology to stay empty after REST fetch
@@ -146,7 +146,7 @@ export const runtimeSlice = createSlice({
     },
 
     updateSessionDetails(
-      state,
+      state: RuntimeState,
       action: PayloadAction<{ sessionId: string; nodes: RuntimeNode[]; logs: RuntimeNodeLog[] }>,
     ) {
       const { sessionId, nodes, logs } = action.payload;
@@ -155,16 +155,16 @@ export const runtimeSlice = createSlice({
 
       // Sort per-session logs by timestamp (cheap — only at socket push time)
       state.logs[sessionId]?.sort(
-        (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+        (a: RuntimeNodeLog, b: RuntimeNodeLog) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
       );
     },
 
-    appendLog(state, action: PayloadAction<RuntimeNodeLog>) {
+    appendLog(state: RuntimeState, action: PayloadAction<RuntimeNodeLog>) {
       const log = action.payload;
       mergeLogs(state, log.sessionId, [log]);
     },
 
-    clearFrontendGraphs(state) {
+    clearFrontendGraphs(state: RuntimeState) {
       state.nodes = {};
       state.logIds = {};
       state.logs = {};
@@ -172,11 +172,11 @@ export const runtimeSlice = createSlice({
   },
 
   extraReducers(builder) {
-    builder.addCase(fetchHistory.fulfilled, (state, action) => {
+    builder.addCase(fetchHistory.fulfilled, (state: RuntimeState, action) => {
       const { sessionId, logs } = action.payload;
       mergeLogs(state, sessionId, logs, 2000);
       state.logs[sessionId]?.sort(
-        (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+        (a: RuntimeNodeLog, b: RuntimeNodeLog) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
       );
     });
   },
@@ -196,25 +196,25 @@ export const {
 
 const selectRuntime = (state: { runtime: RuntimeState }) => state.runtime;
 
-export const selectSessions = createSelector(selectRuntime, (r) =>
+export const selectSessions = createSelector(selectRuntime, (r: RuntimeState) =>
   Object.values(r.sessions).sort(
-    (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+    (a: RuntimeSession, b: RuntimeSession) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
   ),
 );
 
-export const selectActiveSession = createSelector(selectRuntime, (r) =>
+export const selectActiveSession = createSelector(selectRuntime, (r: RuntimeState) =>
   r.activeSessionId ? (r.sessions[r.activeSessionId] ?? null) : null,
 );
 
-export const selectActiveNodes = createSelector(selectRuntime, (r) => {
+export const selectActiveNodes = createSelector(selectRuntime, (r: RuntimeState) => {
   if (!r.activeSessionId) return [];
-  return Object.values(r.nodes).filter((n) => n.sessionId === r.activeSessionId);
+  return Object.values(r.nodes).filter((n: RuntimeNode) => n.sessionId === r.activeSessionId);
 });
 
-export const selectActiveLogs = createSelector(selectRuntime, (r) =>
+export const selectActiveLogs = createSelector(selectRuntime, (r: RuntimeState) =>
   r.activeSessionId ? (r.logs[r.activeSessionId] ?? []) : [],
 );
 
-export const selectIsConnected = createSelector(selectRuntime, (r) => r.connected);
+export const selectIsConnected = createSelector(selectRuntime, (r: RuntimeState) => r.connected);
 
 export default runtimeSlice.reducer;
