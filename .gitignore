@@ -16,3 +16,4 @@ package-lock.json
 .claude
 CASCADE.md
 .cascadeignore
+.claude/
