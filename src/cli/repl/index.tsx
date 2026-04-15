@@ -668,10 +668,12 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   return (
     <Box flexDirection="column" width={width}>
       <Box flexDirection="column" borderStyle="round" borderColor={theme.colors.border} paddingX={1} height={chatWindowHeight + 2}>
-        <Box flexDirection="row" justifyContent="space-between">
-          <Text color={theme.colors.primary} bold>◈ CASCADE · {modelName}</Text>
+        <Box flexDirection="row" justifyContent="space-between" paddingX={1}>
+          <Text backgroundColor={theme.colors.primary} color={theme.colors.background} bold> CASCADE AI </Text>
+          <Text color={theme.colors.primary} bold>◈ {modelName}</Text>
           <Text color={theme.colors.muted}>{currentIdentity}</Text>
         </Box>
+        <Box borderStyle="single" borderTop={true} borderBottom={false} borderLeft={false} borderRight={false} borderColor={theme.colors.muted} marginTop={0} />
         <Box flexDirection="column" flexGrow={1} overflow="hidden">
           {showScrollAlert && (
             <Box justifyContent="center" height={1}>

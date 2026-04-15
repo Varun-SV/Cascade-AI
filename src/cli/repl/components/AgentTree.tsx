@@ -30,13 +30,19 @@ export function AgentTree({ root, theme }: AgentTreeProps): React.ReactElement |
   const activeT3 = countNodes(root, (node) => node.role === 'T3' && node.status === 'ACTIVE');
 
   return (
-    <Box flexDirection="column" marginY={0}>
-      <Text bold color={theme.colors.muted}>
-        Agent Execution Tree
-        <Text color={theme.colors.t2Color}> · T2 active: {activeT2}</Text>
-        <Text color={theme.colors.t3Color}> · T3 active: {activeT3}</Text>
-      </Text>
-      <TierNodeView node={root} theme={theme} depth={0} isLast />
+    <Box flexDirection="column" marginY={0} paddingX={1} borderStyle="round" borderColor={theme.colors.muted}>
+      <Box justifyContent="space-between">
+        <Text bold color={theme.colors.primary}>
+          AGENT EXECUTION ARCHITECTURE
+        </Text>
+        <Box>
+          <Text color={theme.colors.t2Color}>T2:{activeT2} </Text>
+          <Text color={theme.colors.t3Color}>T3:{activeT3} </Text>
+        </Box>
+      </Box>
+      <Box marginTop={0} flexDirection="column">
+        <TierNodeView node={root} theme={theme} depth={0} isLast />
+      </Box>
     </Box>
   );
 }
@@ -102,13 +108,13 @@ function TierNodeView({ node, theme, depth, isLast }: TierNodeViewProps): React.
 function getStatusIcon(status: TierNode['status'], theme: Theme): React.ReactElement {
   switch (status) {
     case 'ACTIVE':
-      return <><Spinner type="dots" /><Text> </Text></>;
+      return <><Spinner type="dots" /> </>;
     case 'COMPLETED':
-      return <Text color={theme.colors.success}>✓</Text>;
+      return <Text color={theme.colors.success}>✔</Text>;
     case 'FAILED':
-      return <Text color={theme.colors.error}>✗</Text>;
+      return <Text color={theme.colors.error}>✘</Text>;
     case 'ESCALATED':
-      return <Text color={theme.colors.warning}>⚠</Text>;
+      return <Text color={theme.colors.warning}>▲</Text>;
     default:
       return <Text color={theme.colors.muted}>○</Text>;
   }
