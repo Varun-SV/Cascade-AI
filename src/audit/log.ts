@@ -41,7 +41,7 @@ export class AuditLogger {
 
   error(tierId: string, err: Error | unknown, context: Record<string, unknown> = {}): void {
     const e = err instanceof Error ? err : new Error(String(err));
-    this.logAt('error', tierId, 'error' as AuditEntry['action'], {
+    this.logAt('error', tierId, 'error', {
       message: e.message,
       name: e.name,
       stack: e.stack?.slice(0, 500),

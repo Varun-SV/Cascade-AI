@@ -91,9 +91,9 @@ export const MODELS: Record<string, ModelInfo> = {
     isLocal: false,
   },
   // Google
-  'gemini-3-flash-preview': {
-    id: 'gemini-3-flash-preview',
-    name: 'Gemini 3 Flash Preview',
+  'gemini-2.0-flash': {
+    id: 'gemini-2.0-flash',
+    name: 'Gemini 2.0 Flash',
     provider: 'gemini',
     contextWindow: 1_000_000,
     isVisionCapable: true,
@@ -103,9 +103,9 @@ export const MODELS: Record<string, ModelInfo> = {
     supportsStreaming: true,
     isLocal: false,
   },
-  'gemini-3.1-pro-preview': {
-    id: 'gemini-3.1-pro-preview',
-    name: 'Gemini 3.1 Pro Preview',
+  'gemini-1.5-pro': {
+    id: 'gemini-1.5-pro',
+    name: 'Gemini 1.5 Pro',
     provider: 'gemini',
     contextWindow: 1_000_000,
     isVisionCapable: true,
@@ -115,9 +115,9 @@ export const MODELS: Record<string, ModelInfo> = {
     supportsStreaming: true,
     isLocal: false,
   },
-  'gemini-3.1-flash-lite-preview': {
-    id: 'gemini-3.1-flash-lite-preview',
-    name: 'Gemini 3.1 Flash-Lite Preview',
+  'gemini-2.0-flash-lite': {
+    id: 'gemini-2.0-flash-lite',
+    name: 'Gemini 2.0 Flash-Lite',
     provider: 'gemini',
     contextWindow: 1_000_000,
     isVisionCapable: true,
@@ -245,12 +245,14 @@ export const TOOL_NAMES = {
   FILE_WRITE: 'file_write',
   FILE_EDIT: 'file_edit',
   FILE_DELETE: 'file_delete',
+  FILE_LIST: 'file_list',
   GIT: 'git',
   GITHUB: 'github',
   BROWSER: 'browser',
   IMAGE_ANALYZE: 'image_analyze',
   PDF_CREATE: 'pdf_create',
   RUN_CODE: 'run_code',
+  PEER_MESSAGE: 'peer_message',
 } as const;
 
 // Defaults that require approval
