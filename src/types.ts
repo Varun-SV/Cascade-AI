@@ -219,7 +219,7 @@ export interface T2Result {
   sectionId: string;
   sectionTitle: string;
   status: 'COMPLETED' | 'PARTIAL' | 'FAILED' | 'ESCALATED';
-  t3Results: T3ResultPayload[];
+  t3Results: T3Result[];
   sectionSummary: string;
   issues: string[];
 }
@@ -434,7 +434,6 @@ export interface DashboardConfig {
   auth: boolean;
   teamMode: 'single' | 'multi';
   secret?: string;    // JWT secret
-  globalRuntime?: boolean;
 }
 
 export interface TelemetryConfig {
@@ -588,7 +587,7 @@ export interface AuditEntry {
   sessionId: string;
   timestamp: string;
   tierId: string;
-  action: 'tool_call' | 'file_change' | 'agent_decision' | 'approval' | 'escalation';
+  action: 'tool_call' | 'file_change' | 'agent_decision' | 'approval' | 'escalation' | 'error';
   details: Record<string, unknown>;
 }
 

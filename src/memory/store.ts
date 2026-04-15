@@ -463,15 +463,12 @@ export class MemoryStore {
   private toolResultCache: Map<string, { result: string; expiresAt: number }> = new Map();
 
   private static CACHEABLE_TOOLS = new Set([
-    'file_read', 'file_list', 'git_status', 'git_log', 'git_diff',
+    'file_read', 'file_list',
   ]);
 
   private static TOOL_TTL_MS: Record<string, number> = {
     file_read:  60_000,
     file_list:  30_000,
-    git_status: 15_000,
-    git_log:    60_000,
-    git_diff:   30_000,
   };
 
   /**
@@ -603,20 +600,6 @@ export class MemoryStore {
 
       CREATE INDEX IF NOT EXISTS idx_runtime_nodes_session ON runtime_nodes(session_id);
       CREATE INDEX IF NOT EXISTS idx_runtime_nodes_updated ON runtime_nodes(updated_at);
-
-      CREATE TABLE IF NOT EXISTS runtime_node_logs (
-        id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        tier_id TEXT NOT NULL,
-        role TEXT NOT NULL,
-        label TEXT NOT NULL,
-        status TEXT NOT NULL,
-        current_action TEXT,
-        progress_pct INTEGER,
-        timestamp TEXT NOT NULL,
-        workspace_path TEXT,
-        is_global INTEGER NOT NULL DEFAULT 0
-      );
 
       CREATE TABLE IF NOT EXISTS runtime_node_logs (
         id TEXT PRIMARY KEY,
