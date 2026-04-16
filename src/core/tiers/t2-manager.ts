@@ -399,7 +399,7 @@ Return ONLY the JSON array.`;
 
         const r = waveResults[i]!;
         if (r.status === 'rejected') {
-          // Retry once on crash
+          this.log(`T3 worker ${id} failed: ${r.reason instanceof Error ? r.reason.message : String(r.reason)} — retrying once`);
           const assignment = sanitizedAssignments.find((a) => a.subtaskId === id)!;
           const retried = await this.retryT3(assignment, taskId);
           resultMap.set(id, retried);

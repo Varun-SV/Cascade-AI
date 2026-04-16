@@ -71,15 +71,24 @@ export class PeerBus extends EventEmitter {
     if (existing) return Promise.resolve(existing);
 
     return new Promise((resolve, reject) => {
+      const resolver = (output: PeerOutput) => {
+        clearTimeout(timer);
+        resolve(output);
+      };
+
       const timer = setTimeout(() => {
+        // Remove this specific resolver so publish() cannot call it after rejection
+        const waiting = this.waiters.get(subtaskId);
+        if (waiting) {
+          const idx = waiting.indexOf(resolver);
+          if (idx !== -1) waiting.splice(idx, 1);
+          if (waiting.length === 0) this.waiters.delete(subtaskId);
+        }
         reject(new Error(`Peer timeout waiting for subtask: ${subtaskId}`));
       }, timeoutMs);
 
       const resolvers = this.waiters.get(subtaskId) ?? [];
-      resolvers.push((output) => {
-        clearTimeout(timer);
-        resolve(output);
-      });
+      resolvers.push(resolver);
       this.waiters.set(subtaskId, resolvers);
     });
   }

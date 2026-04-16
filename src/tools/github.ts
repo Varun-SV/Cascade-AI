@@ -111,6 +111,20 @@ export class GitHubTool extends BaseTool {
         }, { headers });
         return `Created MR !${response.data.iid}: ${response.data.web_url}`;
       }
+      case 'list_prs': {
+        const response = await axios.get<Array<{ iid: number; title: string; state: string; source_branch: string; target_branch: string }>>(`${base}/merge_requests`, { headers });
+        return response.data.map((p) => `!${p.iid} [${p.state}] ${p.title} (${p.source_branch} → ${p.target_branch})`).join('\n');
+      }
+      case 'comment_issue': {
+        const num = input['issue_number'] as number;
+        await axios.post(`${base}/issues/${num}/notes`, { body: input['body'] }, { headers });
+        return `Comment added to #${num}`;
+      }
+      case 'get_pr': {
+        const num = input['issue_number'] as number;
+        const response = await axios.get<{ title: string; state: string; description: string; web_url: string }>(`${base}/merge_requests/${num}`, { headers });
+        return `MR !${num}: ${response.data.title}\nState: ${response.data.state}\n${response.data.web_url}\n\n${response.data.description}`;
+      }
       default:
         throw new Error(`GitLab operation not supported: ${operation}`);
     }
