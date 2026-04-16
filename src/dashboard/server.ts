@@ -474,7 +474,7 @@ export class DashboardServer {
         t3: this.config.models?.t3 ?? 'auto',
         providers: this.config.providers.map((p) => ({
           type: p.type,
-          label: (p as Record<string, unknown>)['label'] as string ?? p.type,
+          label: p.label ?? p.type,
         })),
       });
     });
