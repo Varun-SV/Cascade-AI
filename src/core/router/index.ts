@@ -31,6 +31,13 @@ export interface RouterStats {
   totalCostUsd: number;
   callsByProvider: Record<string, number>;
   callsByTier: Record<string, number>;
+  /** Accumulated cost (USD) broken down per tier — useful for budget attribution. */
+  costByTier: Record<string, number>;
+  /** Accumulated token usage broken down per tier (input + output). */
+  tokensByTier: Record<string, number>;
+  /** Input and output token counts per tier for granular cost analysis. */
+  inputTokensByTier: Record<string, number>;
+  outputTokensByTier: Record<string, number>;
 }
 
 export class CascadeRouter {
@@ -42,6 +49,10 @@ export class CascadeRouter {
     totalCostUsd: 0,
     callsByProvider: {},
     callsByTier: {},
+    costByTier: {},
+    tokensByTier: {},
+    inputTokensByTier: {},
+    outputTokensByTier: {},
   };
 
   private tierModels: Map<TierRole, ModelInfo> = new Map();
@@ -189,7 +200,63 @@ export class CascadeRouter {
   }
 
   getStats(): RouterStats {
-    return { ...this.stats };
+    // Deep-copy the nested Record maps so callers cannot mutate internal state.
+    return {
+      totalTokens: this.stats.totalTokens,
+      totalCostUsd: this.stats.totalCostUsd,
+      callsByProvider: { ...this.stats.callsByProvider },
+      callsByTier: { ...this.stats.callsByTier },
+      costByTier: { ...this.stats.costByTier },
+      tokensByTier: { ...this.stats.tokensByTier },
+      inputTokensByTier: { ...this.stats.inputTokensByTier },
+      outputTokensByTier: { ...this.stats.outputTokensByTier },
+    };
+  }
+
+  /**
+   * Returns a human-readable cost summary broken down by tier.
+   * Example: { T1: "$0.0120 (2 calls, 1500 tokens)", T2: "$0.0043 (6 calls, 4200 tokens)", ... }
+   */
+  getTierCostSummary(): Record<string, string> {
+    const summary: Record<string, string> = {};
+    for (const tier of Object.keys(this.stats.callsByTier)) {
+      const cost = (this.stats.costByTier[tier] ?? 0).toFixed(6);
+      const calls = this.stats.callsByTier[tier] ?? 0;
+      const tokens = this.stats.tokensByTier[tier] ?? 0;
+      summary[tier] = `$${cost} (${calls} call${calls !== 1 ? 's' : ''}, ${tokens.toLocaleString()} tokens)`;
+    }
+    return summary;
+  }
+
+  /**
+   * Returns the percentage of total cost attributed to each tier.
+   * Useful for identifying which tier is the dominant cost driver.
+   */
+  getTierCostPercentages(): Record<string, number> {
+    const total = this.stats.totalCostUsd;
+    if (total === 0) return {};
+    const pcts: Record<string, number> = {};
+    for (const [tier, cost] of Object.entries(this.stats.costByTier)) {
+      pcts[tier] = Math.round((cost / total) * 1000) / 10; // e.g. 42.5
+    }
+    return pcts;
+  }
+
+  /**
+   * Resets all stats — useful between independent task runs in long-lived sessions.
+   */
+  resetStats(): void {
+    this.stats = {
+      totalTokens: 0,
+      totalCostUsd: 0,
+      callsByProvider: {},
+      callsByTier: {},
+      costByTier: {},
+      tokensByTier: {},
+      inputTokensByTier: {},
+      outputTokensByTier: {},
+    };
+    this.sessionCostUsd = 0;
   }
 
   getFailures(): Record<string, string> {
@@ -285,6 +352,12 @@ export class CascadeRouter {
     this.sessionCostUsd += usage.estimatedCostUsd;
     this.stats.callsByProvider[model.provider] = (this.stats.callsByProvider[model.provider] ?? 0) + 1;
     this.stats.callsByTier[tier] = (this.stats.callsByTier[tier] ?? 0) + 1;
+
+    // ── Per-tier cost & token breakdown ──────────
+    this.stats.costByTier[tier] = (this.stats.costByTier[tier] ?? 0) + usage.estimatedCostUsd;
+    this.stats.tokensByTier[tier] = (this.stats.tokensByTier[tier] ?? 0) + usage.totalTokens;
+    this.stats.inputTokensByTier[tier] = (this.stats.inputTokensByTier[tier] ?? 0) + usage.inputTokens;
+    this.stats.outputTokensByTier[tier] = (this.stats.outputTokensByTier[tier] ?? 0) + usage.outputTokens;
 
     // ── Budget enforcement ─────────────────────
     const budget = this.config?.budget;

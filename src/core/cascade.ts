@@ -376,6 +376,9 @@ ${prompt}`
       },
       t2Results,
       durationMs,
+      costByTier: stats.costByTier,
+      tokensByTier: stats.tokensByTier,
+      costPercentByTier: this.router.getTierCostPercentages(),
     };
   }
 

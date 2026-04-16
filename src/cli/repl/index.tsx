@@ -82,6 +82,8 @@ interface ReplState {
   totalCostUsd: number;
   callsByProvider: Record<string, number>;
   callsByTier: Record<string, number>;
+  costByTier: Record<string, number>;
+  tokensByTier: Record<string, number>;
   approvalRequest: ApprovalRequest | null;
   showCost: boolean;
   showDetails: boolean;
@@ -94,7 +96,7 @@ type ReplAction =
   | { type: 'APPEND_STREAM'; text: string }
   | { type: 'COMMIT_STREAM'; finalText: string; timestamp?: string }
   | { type: 'SET_TREE'; tree: TierNode | null }
-  | { type: 'UPDATE_COST'; tokens: number; costUsd: number; byProvider: Record<string,number>; byTier: Record<string,number> }
+  | { type: 'UPDATE_COST'; tokens: number; costUsd: number; byProvider: Record<string,number>; byTier: Record<string,number>; costByTier: Record<string,number>; tokensByTier: Record<string,number> }
   | { type: 'SET_APPROVAL'; request: ApprovalRequest | null }
   | { type: 'SET_EXECUTING'; isExecuting: boolean }
   | { type: 'SET_STREAMING'; isStreaming: boolean }
@@ -122,7 +124,7 @@ function replReducer(state: ReplState, action: ReplAction): ReplState {
     case 'SET_TREE':
       return { ...state, agentTree: action.tree };
     case 'UPDATE_COST':
-      return { ...state, totalTokens: action.tokens, totalCostUsd: action.costUsd, callsByProvider: action.byProvider, callsByTier: action.byTier };
+      return { ...state, totalTokens: action.tokens, totalCostUsd: action.costUsd, callsByProvider: action.byProvider, callsByTier: action.byTier, costByTier: action.costByTier, tokensByTier: action.tokensByTier };
     case 'SET_APPROVAL':
       return { ...state, approvalRequest: action.request };
     case 'SET_EXECUTING':
@@ -180,7 +182,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const [slashIndex, setSlashIndex] = useState(0);
   const [identities, setIdentities] = useState<Array<{ id: string; name: string; isDefault: boolean }>>([]);
   const [currentIdentityId, setCurrentIdentityId] = useState<string | undefined>(config.defaultIdentityId);
-  const [state, dispatch] = useReducer(replReducer, { messages: [], agentTree: null, isStreaming: false, isExecuting: false, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, approvalRequest: null, showCost: false, showDetails: false, error: null, activeTool: null });
+  const [state, dispatch] = useReducer(replReducer, { messages: [], agentTree: null, isStreaming: false, isExecuting: false, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, approvalRequest: null, showCost: false, showDetails: false, error: null, activeTool: null });
   const [isShowingModels, setIsShowingModels] = useState(false);
   const [cachedModels, setCachedModels] = useState<Map<ProviderType, ModelInfo[]>>(new Map());
   const cascadeRef = useRef<Cascade | null>(null);
@@ -498,7 +500,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     cascade.on('tier:status', (ev: TierStatusEvent) => {
       recordNodeEvent(ev);
       const stats = cascade.getRouter().getStats();
-      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier });
+      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier });
       // Extract active tool from currentAction if present
       if (ev.currentAction?.startsWith('Using tool:')) {
         const toolName = ev.currentAction.replace('Using tool:', '').trim();
@@ -520,7 +522,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       });
       flushStream();
       const stats = cascade.getRouter().getStats();
-      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier });
+      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier });
       dispatch({ type: 'COMMIT_STREAM', finalText: result.output, timestamp: new Date().toISOString() });
       persistMessage('assistant', result.output, new Date().toISOString());
       // Generate AI session name on first exchange (async, fire-and-forget)
@@ -758,7 +760,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           isStreaming={state.isStreaming}
         />
       )}
-      {state.showCost && <CostTracker theme={theme} totalTokens={state.totalTokens} totalCostUsd={state.totalCostUsd} callsByProvider={state.callsByProvider} callsByTier={state.callsByTier} />}
+      {state.showCost && <CostTracker theme={theme} totalTokens={state.totalTokens} totalCostUsd={state.totalCostUsd} callsByProvider={state.callsByProvider} callsByTier={state.callsByTier} costByTier={state.costByTier} tokensByTier={state.tokensByTier} />}
       {state.approvalRequest && <ApprovalPrompt request={state.approvalRequest} theme={theme} onDecision={(decision) => { dispatch({ type: 'SET_APPROVAL', request: null }); approvalResolverRef.current?.(decision); }} />}
       {slashCompletions.length > 0 && (
         <Box flexDirection="column" borderStyle="round" borderColor={theme.colors.border} paddingX={1}>
