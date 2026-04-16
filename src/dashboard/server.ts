@@ -16,6 +16,7 @@ import { authMiddleware, createToken } from './auth.js';
 import { DEFAULT_DASHBOARD_PORT } from '../constants.js';
 import { randomUUID } from 'node:crypto';
 import type { Identity, TierLimits, BudgetConfig } from '../types.js';
+import { Cascade } from '../core/cascade.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -418,6 +419,63 @@ export class DashboardServer {
         sessions: this.store.listRuntimeSessions(200),
         nodes: this.store.listRuntimeNodes(undefined, 1000),
         logs: this.store.listRuntimeNodeLogs(undefined, undefined, 500),
+      });
+    });
+
+    // ── Remote Run ──────────────────────────────
+    this.app.post('/api/run', auth, (req: Request, res: Response) => {
+      const body = req.body as { prompt?: string; identityId?: string };
+      if (!body.prompt || typeof body.prompt !== 'string') {
+        res.status(400).json({ error: 'prompt is required' });
+        return;
+      }
+
+      const sessionId = randomUUID();
+      res.json({ sessionId, status: 'ACTIVE' });
+
+      void (async () => {
+        const cascade = new Cascade(this.config, this.workspacePath, this.store);
+
+        cascade.on('stream:token', (e: { text: string }) => {
+          this.socket.broadcast('stream:token', { sessionId, token: e.text });
+          this.socket.broadcastToRoom(`session:${sessionId}`, 'stream:token', { sessionId, token: e.text });
+        });
+        cascade.on('tier:status', (e: unknown) => {
+          this.socket.broadcast('tier:status', { sessionId, ...(e as object) });
+          this.socket.broadcastToRoom(`session:${sessionId}`, 'tier:status', { sessionId, ...(e as object) });
+        });
+        cascade.on('permission:user-required', (e: unknown) => {
+          this.socket.broadcastToRoom(`session:${sessionId}`, 'permission:user-required', { sessionId, ...(e as object) });
+        });
+
+        try {
+          const result = await cascade.run({ prompt: body.prompt!, identityId: body.identityId });
+          this.socket.broadcast('cost:update', {
+            sessionId,
+            tokens: result.usage.totalTokens,
+            costUsd: result.usage.estimatedCostUsd,
+          });
+          this.socket.broadcastToRoom(`session:${sessionId}`, 'session:complete', { sessionId, result });
+          this.throttledBroadcast('workspace');
+        } catch (err) {
+          this.socket.broadcastToRoom(`session:${sessionId}`, 'session:error', {
+            sessionId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      })();
+    });
+
+    // ── Models ───────────────────────────────────
+    this.app.get('/api/models', auth, (_req: Request, res: Response) => {
+      res.json({
+        t1: this.config.models?.t1 ?? 'auto',
+        t2: this.config.models?.t2 ?? 'auto',
+        t3: this.config.models?.t3 ?? 'auto',
+        providers: this.config.providers.map((p) => ({
+          type: p.type,
+          label: (p as Record<string, unknown>)['label'] as string ?? p.type,
+        })),
       });
     });
 
