@@ -196,6 +196,22 @@ export class CascadeRouter {
     return this.failover.getFailureReport();
   }
 
+  /**
+   * Returns the resolved ModelInfo for a given tier, or null if no model
+   * is available (e.g. the required provider is not configured).
+   */
+  getTierModel(tier: TierRole): ModelInfo | null {
+    return this.tierModels.get(tier) ?? null;
+  }
+
+  /**
+   * Returns all models available for the given provider type.
+   * Useful for listing configured/usable models per provider.
+   */
+  getModelsForProvider(provider: ProviderType): ModelInfo[] {
+    return this.selector.getAvailableModelsForProvider(provider);
+  }
+
   // ── Private ──────────────────────────────────
 
   private async detectAvailableProviders(

@@ -125,13 +125,20 @@ function defaultIsRetryable(err: Error): boolean {
     msg.includes('econnreset') ||
     msg.includes('econnrefused') ||
     msg.includes('etimedout') ||
+    msg.includes('enotfound') ||       // DNS resolution failure (transient)
+    msg.includes('econnaborted') ||    // Connection aborted mid-stream
     msg.includes('socket hang up') ||
+    msg.includes('socket timeout') ||
     msg.includes('network error') ||
+    msg.includes('failed to fetch') || // fetch() in browser/node environments
     msg.includes('rate limit') ||
     msg.includes('too many requests') ||  // 429
-    msg.includes('529') ||   // Anthropic overload
+    msg.includes('overloaded') ||         // Anthropic 529 body text
+    msg.includes('529') ||                // Anthropic overload status code
     msg.includes('503') ||
-    msg.includes('502')
+    msg.includes('502') ||
+    msg.includes('504') ||               // Gateway timeout
+    msg.includes('internal server error') // 500 — may be transient
   );
 }
 
