@@ -17,3 +17,6 @@ package-lock.json
 CASCADE.md
 .cascadeignore
 .claude/
+
+# Release / CI helper scripts (local use only)
+scripts/
