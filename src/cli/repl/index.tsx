@@ -35,20 +35,42 @@ import { SlashCommandRegistry } from '../slash/index.js';
 import { AgentTree, type TierNode } from './components/AgentTree.js';
 import { TimelinePanel } from './components/TimelinePanel.js';
 import { StatusBar } from './components/StatusBar.js';
+import { HintBar } from './components/HintBar.js';
 import { ApprovalPrompt } from './components/ApprovalPrompt.js';
 import { ModelsDisplay } from './components/ModelsDisplay.js';
 import { CostTracker } from './components/CostTracker.js';
 import { CompactStatus } from './components/CompactStatus.js';
 import { formatToLines } from './utils/line-buffer.js';
 
-function WelcomeSplash({ theme }: { theme: Theme }) {
+interface WelcomeBannerProps {
+  theme: Theme;
+  config: CascadeConfig;
+  workspacePath: string;
+  sessionId: string;
+}
+
+function WelcomeBanner({ theme, config, workspacePath, sessionId }: WelcomeBannerProps) {
+  const t1 = config.models?.t1 ?? 'auto';
+  const t2 = config.models?.t2 ?? 'auto';
+  const t3 = config.models?.t3 ?? 'auto';
+  const folder = workspacePath.split(/[/\\]/).pop() ?? workspacePath;
+
   return (
-    <Box flexDirection="column" alignItems="center" justifyContent="center" flexGrow={1} paddingY={2}>
+    <Box flexDirection="column" paddingY={1} paddingLeft={2}>
       <Text color={theme.colors.primary} bold>◈ CASCADE AI</Text>
-      <Text color={theme.colors.muted}>The Multi-Tier Autonomous Agent System</Text>
-      <Box marginTop={1} flexDirection="column" alignItems="center">
-        <Text>Type <Text color={theme.colors.accent} bold>/help</Text> to see available commands</Text>
-        <Text>Use <Text color={theme.colors.accent} bold>PageUp/PageDown</Text> to scroll history</Text>
+      <Text color={theme.colors.muted}>
+        {'T1: '}<Text color={theme.colors.foreground}>{t1}</Text>
+        {'  T2: '}<Text color={theme.colors.foreground}>{t2}</Text>
+        {'  T3: '}<Text color={theme.colors.foreground}>{t3}</Text>
+      </Text>
+      <Text color={theme.colors.muted}>
+        {'workspace: '}<Text color={theme.colors.foreground}>{folder}</Text>
+        {'  ·  session: '}<Text color={theme.colors.foreground}>{sessionId.slice(0, 8)}</Text>
+      </Text>
+      <Box marginTop={1}>
+        <Text color={theme.colors.muted}>
+          {'Type '}<Text color={theme.colors.accent} bold>/help</Text>{' for commands  ·  Esc to cancel  ·  Ctrl+C to exit'}
+        </Text>
       </Box>
     </Box>
   );
@@ -761,13 +783,22 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
 
   return (
     <Box flexDirection="column" width={width}>
+      {/* ── Status bar — top, always visible ── */}
+      <StatusBar
+        theme={theme}
+        tierModels={{
+          t1: config.models?.t1,
+          t2: config.models?.t2,
+          t3: config.models?.t3,
+        }}
+        tokens={state.totalTokens}
+        costUsd={state.totalCostUsd}
+        workspacePath={workspacePath}
+        isExecuting={state.isExecuting}
+        activeTier={state.agentTree?.status === 'ACTIVE' ? 'T1' : undefined}
+      />
+
       <Box flexDirection="column" borderStyle="round" borderColor={theme.colors.border} paddingX={1} height={chatWindowHeight + 2}>
-        <Box flexDirection="row" justifyContent="space-between" paddingX={1}>
-          <Text backgroundColor={theme.colors.primary} color={theme.colors.background} bold> CASCADE AI </Text>
-          <Text color={theme.colors.primary} bold>◈ {modelName}</Text>
-          <Text color={theme.colors.muted}>{currentIdentity}</Text>
-        </Box>
-        <Box borderStyle="single" borderTop={true} borderBottom={false} borderLeft={false} borderRight={false} borderColor={theme.colors.muted} marginTop={0} />
         <Box flexDirection="column" flexGrow={1} overflow="hidden">
           {showScrollAlert && (
             <Box justifyContent="center" height={1}>
@@ -784,27 +815,18 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
 
       <Box flexDirection="column" paddingX={1}>
         {state.messages.length === 0 && !state.isStreaming && (
-          <WelcomeSplash theme={theme} />
+          <WelcomeBanner theme={theme} config={config} workspacePath={workspacePath} sessionId={sessionIdRef.current} />
         )}
         {isShowingModels && (
           <ModelsDisplay providers={config.providers.map(p => p.type)} modelsByProvider={cachedModels} onClose={() => setIsShowingModels(false)} />
         )}
       </Box>
 
-      {state.showDetails ? (
-        <>
-          {state.agentTree && <AgentTree root={state.agentTree} theme={theme} />}
-          <TimelinePanel nodes={[...treeNodesRef.current.values()]} theme={theme} currentIndex={timelineIndex} onChangeIndex={setTimelineIndex} />
-        </>
-      ) : (
-        <CompactStatus
-          theme={theme}
-          activeT2Count={countNodes(state.agentTree, n => n.role === 'T2' && n.status === 'ACTIVE')}
-          activeT3Count={countNodes(state.agentTree, n => n.role === 'T3' && n.status === 'ACTIVE')}
-          currentAction={state.agentTree ? findCurrentAction(state.agentTree) : undefined}
-          activeTool={state.activeTool}
-          isStreaming={state.isStreaming}
-        />
+      {/* ── Compact agent tree — auto-hides when idle ── */}
+      <AgentTree root={state.agentTree} theme={theme} />
+
+      {state.showDetails && (
+        <TimelinePanel nodes={[...treeNodesRef.current.values()]} theme={theme} currentIndex={timelineIndex} onChangeIndex={setTimelineIndex} />
       )}
       {state.showCost && <CostTracker theme={theme} totalTokens={state.totalTokens} totalCostUsd={state.totalCostUsd} callsByProvider={state.callsByProvider} callsByTier={state.callsByTier} costByTier={state.costByTier} tokensByTier={state.tokensByTier} />}
       {state.approvalRequest && <ApprovalPrompt request={state.approvalRequest} theme={theme} onDecision={(decision) => { dispatch({ type: 'SET_APPROVAL', request: null }); approvalResolverRef.current?.(decision); }} />}
@@ -845,6 +867,9 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           )}
         </Box>
       )}
+      {/* ── Hint bar — keyboard shortcuts, hidden during execution ── */}
+      <HintBar theme={theme} isExecuting={state.isExecuting} />
+
       <Box borderStyle="round" borderColor={quitAttempted ? 'red' : (state.isStreaming ? theme.colors.accent : theme.colors.border)} paddingX={2} flexDirection="column">
         {quitAttempted && (
           <Box marginBottom={0}>
@@ -853,9 +878,9 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         )}
         <Box flexDirection="row">
           <Text color={theme.colors.primary} bold>▸ {queuedMessages.length > 0 ? <Text color={theme.colors.accent}>[QUEUED] </Text> : ''}</Text>
-          <TextInput 
+          <TextInput
             focus={!state.approvalRequest}
-            value={input} 
+            value={input}
             onChange={(val) => {
               if (isInputLockedRef.current) return;
               // Strip complex ANSI/SGR escape sequences and dangerous control characters.
@@ -863,13 +888,12 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
               //   Ink's TextInput handles \x7F natively; stripping it here prevents deletion from working.
               const sanitized = val.replace(/(?:\x1b\[<.*?[Mm])|(?:\x1b\[.*?[\x40-\x7E])|(?:\x1bO[\x40-\x7E])|(?:\x1b[PX^_].*?\x1b\\)|(?:\x1b[\]\[].*?[\x07\x1b])|(?:\x1b[()#;?].*?[0-9A-ORZcf-nqry=><])|[\x00-\x1F]/g, '');
               setInput(sanitized);
-            }} 
-            onSubmit={handleSubmit} 
-            placeholder={state.isStreaming ? "Wait for response or type next prompt to queue…" : "Ask Cascade anything… (/help for commands)"} 
+            }}
+            onSubmit={handleSubmit}
+            placeholder={state.isStreaming ? "Wait for response or type next prompt to queue…" : "Ask Cascade anything… (/help for commands)"}
           />
         </Box>
       </Box>
-      <StatusBar theme={theme} model={cascadeRef.current?.getRouter().getModelForTier('T1')?.name ?? 'Initializing...'} tokens={state.totalTokens} costUsd={state.totalCostUsd} sessionId={sessionIdRef.current} workspacePath={`${path.basename(workspacePath)} · ${currentIdentity}`} isStreaming={state.isStreaming} />
     </Box>
   );
 }

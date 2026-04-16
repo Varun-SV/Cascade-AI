@@ -17,6 +17,7 @@ import { dashboardCommand } from './commands/dashboard.js';
 import { makeIdentityCommand } from './commands/identity.js';
 import { modelsCommand } from './commands/models.js';
 import { exportCommand } from './commands/export.js';
+import { runSetupWizard } from './setup/index.js';
 
 dotenv.config();
 
@@ -124,7 +125,22 @@ async function startRepl(options: {
     process.exit(1);
   }
 
-  const config = cm.getConfig();
+  let config = cm.getConfig();
+
+  // First-run detection: no providers configured → launch setup wizard
+  const needsSetup =
+    !config.providers?.length ||
+    config.providers.every((p: { type: string; apiKey?: string }) => p.type !== 'ollama' && !p.apiKey);
+
+  if (needsSetup) {
+    console.log(chalk.magenta('  ◈ No providers configured — launching setup wizard…'));
+    console.log();
+    config = await runSetupWizard(workspacePath);
+    await cm.updateConfig(config);
+    // Reload to pick up persisted defaults
+    await cm.load();
+    config = cm.getConfig();
+  }
 
   // Render ink REPL
   const { waitUntilExit } = render(
