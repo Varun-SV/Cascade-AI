@@ -4,7 +4,7 @@
 
 import type { ModelInfo, ProviderType, ThemeName } from './types.js';
 
-export const CASCADE_VERSION = '0.1.0';
+export const CASCADE_VERSION = '0.1.2';
 export const CASCADE_CONFIG_DIR = '.cascade';
 export const CASCADE_MD_FILE = 'CASCADE.md';
 export const CASCADE_IGNORE_FILE = '.cascadeignore';
@@ -65,6 +65,18 @@ export const MODELS: Record<string, ModelInfo> = {
     supportsStreaming: true,
     isLocal: false,
   },
+  'claude-haiku-4-5': {
+    id: 'claude-haiku-4-5-20251001',
+    name: 'Claude Haiku 4.5',
+    provider: 'anthropic',
+    contextWindow: 200_000,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.0008,
+    outputCostPer1kTokens: 0.004,
+    maxOutputTokens: 8_000,
+    supportsStreaming: true,
+    isLocal: false,
+  },
   // OpenAI
   'gpt-4o': {
     id: 'gpt-4o',
@@ -87,6 +99,42 @@ export const MODELS: Record<string, ModelInfo> = {
     inputCostPer1kTokens: 0.00015,
     outputCostPer1kTokens: 0.0006,
     maxOutputTokens: 16_000,
+    supportsStreaming: true,
+    isLocal: false,
+  },
+  'gpt-4.1': {
+    id: 'gpt-4.1',
+    name: 'GPT-4.1',
+    provider: 'openai',
+    contextWindow: 1_047_576,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.002,
+    outputCostPer1kTokens: 0.008,
+    maxOutputTokens: 32_768,
+    supportsStreaming: true,
+    isLocal: false,
+  },
+  'gpt-4.1-mini': {
+    id: 'gpt-4.1-mini',
+    name: 'GPT-4.1 Mini',
+    provider: 'openai',
+    contextWindow: 1_047_576,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.0004,
+    outputCostPer1kTokens: 0.0016,
+    maxOutputTokens: 32_768,
+    supportsStreaming: true,
+    isLocal: false,
+  },
+  'gpt-4.1-nano': {
+    id: 'gpt-4.1-nano',
+    name: 'GPT-4.1 Nano',
+    provider: 'openai',
+    contextWindow: 1_047_576,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.0001,
+    outputCostPer1kTokens: 0.0004,
+    maxOutputTokens: 32_768,
     supportsStreaming: true,
     isLocal: false,
   },
@@ -124,6 +172,30 @@ export const MODELS: Record<string, ModelInfo> = {
     inputCostPer1kTokens: 0.00005,
     outputCostPer1kTokens: 0.0002,
     maxOutputTokens: 8_000,
+    supportsStreaming: true,
+    isLocal: false,
+  },
+  'gemini-2.5-pro': {
+    id: 'gemini-2.5-pro-preview-05-06',
+    name: 'Gemini 2.5 Pro',
+    provider: 'gemini',
+    contextWindow: 1_000_000,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.00125,
+    outputCostPer1kTokens: 0.01,
+    maxOutputTokens: 65_536,
+    supportsStreaming: true,
+    isLocal: false,
+  },
+  'gemini-2.5-flash': {
+    id: 'gemini-2.5-flash-preview-04-17',
+    name: 'Gemini 2.5 Flash',
+    provider: 'gemini',
+    contextWindow: 1_000_000,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.00015,
+    outputCostPer1kTokens: 0.0006,
+    maxOutputTokens: 65_536,
     supportsStreaming: true,
     isLocal: false,
   },
@@ -187,13 +259,18 @@ export const MODELS: Record<string, ModelInfo> = {
 export const T1_MODEL_PRIORITY: string[] = [
   'claude-opus-4',
   'claude-sonnet-4',
+  'gemini-2.5-pro',
+  'gpt-4.1',
   'gpt-4o',
   'gemini-1.5-pro',
 ];
 
 export const T2_MODEL_PRIORITY: string[] = [
   'claude-sonnet-4',
+  'claude-haiku-4-5',
   'claude-haiku-3-5',
+  'gemini-2.5-flash',
+  'gpt-4.1-mini',
   'gpt-4o-mini',
   'gemini-2.0-flash',
   'llama3:70b',
@@ -202,8 +279,11 @@ export const T2_MODEL_PRIORITY: string[] = [
 export const T3_MODEL_PRIORITY: string[] = [
   'llama3.2:3b',
   'mistral:7b',
+  'claude-haiku-4-5',
   'claude-haiku-3-5',
+  'gpt-4.1-nano',
   'gpt-4o-mini',
+  'gemini-2.5-flash',
   'gemini-2.0-flash',
 ];
 

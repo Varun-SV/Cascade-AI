@@ -44,7 +44,18 @@ Rules:
 - Return ONLY valid JSON — no other text
 - If the user asks for a PDF, explicitly use the "pdf_create" tool
 - If the user asks for Excel/Zip/complex processing, use "run_code" with Python or Node.js
-- Ensure every plan includes explicit creation and verification steps for requested artifacts`;
+- Ensure every plan includes explicit creation and verification steps for requested artifacts
+
+EXECUTION MODE GUIDANCE:
+- Use "parallel" for sections that are independent (e.g. writing different files, researching different topics).
+- Use "sequential" ONLY when a later section strictly depends on the output of an earlier one (e.g. write code → then test it).
+- Prefer parallel execution: it is significantly faster and reduces total wall-clock time.
+- Within a sequential section, mark T3 subtasks with "dependsOn" only when they truly block each other.
+
+QUALITY RULES:
+- Each section must have a clear, testable "expectedOutput" so T2 knows when it is done.
+- Do NOT create trivial sections that only move files or print summaries — fold those into adjacent sections.
+- If the plan would naturally produce fewer than 2 independent sections, prefer Moderate routing (single T2).`;
 
 interface TaskPlan {
   complexity: TaskComplexity;

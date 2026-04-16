@@ -15,6 +15,8 @@ import { doctorCommand } from './commands/doctor.js';
 import { updateCommand } from './commands/update.js';
 import { dashboardCommand } from './commands/dashboard.js';
 import { makeIdentityCommand } from './commands/identity.js';
+import { modelsCommand } from './commands/models.js';
+import { exportCommand } from './commands/export.js';
 
 dotenv.config();
 
@@ -75,6 +77,28 @@ program
   .option('-i, --identity <name>', 'Identity name or ID')
   .action(async (prompt: string, opts) => {
     await startRepl({ prompt, theme: opts.theme, workspace: process.cwd(), identity: opts.identity });
+  });
+
+program
+  .command('models')
+  .description('List available AI models for each tier')
+  .option('-v, --verbose', 'Show all models per provider with pricing')
+  .action(async (opts) => {
+    await modelsCommand({ verbose: opts.verbose });
+  });
+
+program
+  .command('export')
+  .description('Export a session conversation to Markdown or JSON')
+  .option('-s, --session <id>', 'Session ID to export (default: most recent)')
+  .option('-f, --format <format>', 'Output format: markdown | json', 'markdown')
+  .option('-o, --output <path>', 'Output file path')
+  .action(async (opts) => {
+    await exportCommand({
+      sessionId: opts.session,
+      format: opts.format as 'markdown' | 'json',
+      output: opts.output,
+    });
   });
 
 // ── Start REPL ────────────────────────────────
