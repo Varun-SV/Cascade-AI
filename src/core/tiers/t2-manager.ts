@@ -20,6 +20,7 @@ import { T3Worker } from './t3-worker.js';
 import { MemoryStore } from '../../memory/store.js';
 import { PeerBus } from '../peer/bus.js';
 import type { PermissionEscalator } from '../permissions/escalator.js';
+import type { ToolCreator } from '../../tools/tool-creator.js';
 
 const T2_SYSTEM_PROMPT = `You are a T2 Manager agent in the Cascade AI system.
 Your role is to analyze a section of a task and decompose it into 2-5 discrete subtasks for T3 Workers.
@@ -38,6 +39,7 @@ export class T2Manager extends BaseTier {
   private t3PeerBus: PeerBus = new PeerBus();   // ← T3↔T3 bus (local to this T2)
   private t2PeerBus?: PeerBus;
   private permissionEscalator?: PermissionEscalator;
+  private toolCreator?: ToolCreator;
 
   setPeerBus(bus: PeerBus): void {
     this.t2PeerBus = bus;
@@ -69,6 +71,47 @@ export class T2Manager extends BaseTier {
   setPermissionEscalator(escalator: PermissionEscalator): void {
     this.permissionEscalator = escalator;
     escalator.setT2Evaluator((req) => this.evaluatePermissionAtT2(req));
+  }
+
+  setToolCreator(creator: ToolCreator): void {
+    this.toolCreator = creator;
+  }
+
+  /**
+   * Phase 1 of T2 peer discussion: broadcast this section's plan so sibling T2s
+   * and T1 can detect overlaps and coordinate execution order.
+   * Called BEFORE execute() begins the agent loop.
+   */
+  announcePlan(assignment: T1ToT2Assignment): void {
+    if (!this.t2PeerBus) return;
+    const payload = {
+      type: 'T2_PLAN_ANNOUNCEMENT',
+      sectionId: assignment.sectionId,
+      sectionTitle: assignment.sectionTitle,
+      description: assignment.description,
+      subtaskTitles: assignment.t3Subtasks?.map(s => s.subtaskTitle) ?? [],
+      keywords: this.extractKeywords(assignment),
+    };
+    this.t2PeerBus.broadcast(this.id, payload);
+    this.log(`[T2] Announced plan for section: ${assignment.sectionTitle}`);
+  }
+
+  /**
+   * Phase 2: After this section completes, share the output with sibling T2s
+   * so they can reference it in their final compilation if relevant.
+   */
+  shareCompletedOutput(sectionId: string, output: string): void {
+    if (!this.t2PeerBus) return;
+    const payload = { type: 'T2_SECTION_OUTPUT', sectionId, output };
+    this.t2PeerBus.broadcast(this.id, payload);
+  }
+
+  private extractKeywords(assignment: T1ToT2Assignment): string[] {
+    const text = `${assignment.sectionTitle} ${assignment.description}`.toLowerCase();
+    // Extract file-like tokens and key nouns for overlap detection
+    const fileTokens = text.match(/[\w./-]+\.(ts|js|tsx|jsx|py|md|json|yaml|txt|html|css|sh)\b/gi) ?? [];
+    const wordTokens = text.match(/\b(?:auth|database|api|server|client|config|deploy|test|ui|model|schema|route|endpoint|migration|component)\b/gi) ?? [];
+    return [...new Set([...fileTokens, ...wordTokens].map(t => t.toLowerCase()))];
   }
 
   receivePeerSync(fromId: string, content: unknown): void {
@@ -234,6 +277,11 @@ Return ONLY the JSON array.`;
       // ← Inject the permission escalator so T3 uses T2→T1→User flow
       if (this.permissionEscalator) {
         worker.setPermissionEscalator(this.permissionEscalator);
+      }
+
+      // ← Inject optional ToolCreator for runtime tool generation
+      if (this.toolCreator) {
+        worker.setToolCreator(this.toolCreator);
       }
 
       workerMap.set(a.subtaskId, worker);

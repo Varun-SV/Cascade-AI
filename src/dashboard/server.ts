@@ -260,11 +260,31 @@ export class DashboardServer {
       res.json({ ok: true });
     });
 
-    this.app.delete('/api/sessions', auth, (_req, res) => {
-      this.store.deleteAllSessions();
+    this.app.delete('/api/sessions', auth, (req: Request, res: Response) => {
+      const body = req.body as { ids?: string[] } | undefined;
+      const globalDbPath = path.join(process.env['HOME'] ?? process.cwd(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
+
+      if (body?.ids && Array.isArray(body.ids) && body.ids.length > 0) {
+        // Bulk delete specific sessions by IDs
+        const globalStore = new MemoryStore(globalDbPath);
+        try {
+          for (const id of body.ids) {
+            this.store.deleteSession(id);
+            this.store.deleteRuntimeSession(id);
+            globalStore.deleteRuntimeSession(id);
+            this.socket.broadcast('session:deleted', { sessionId: id });
+          }
+        } finally {
+          globalStore.close();
+        }
+        res.json({ ok: true, deleted: body.ids.length });
+      } else {
+        // Delete all sessions (original behavior)
+        this.store.deleteAllSessions();
+        res.json({ ok: true });
+      }
       this.socket.broadcast('runtime:refresh', { scope: 'workspace' });
       this.socket.broadcast('runtime:refresh', { scope: 'global' });
-      res.json({ ok: true });
     });
 
     this.app.delete('/api/runtime', auth, (_req, res) => {

@@ -21,6 +21,7 @@ import { AuditLogger } from '../../audit/log.js';
 import { MemoryStore } from '../../memory/store.js';
 import type { PeerBus } from '../peer/bus.js';
 import type { PermissionEscalator } from '../permissions/escalator.js';
+import type { ToolCreator } from '../../tools/tool-creator.js';
 
 const T3_SYSTEM_PROMPT = `You are a T3 Worker agent in the Cascade AI system. Your job is to execute a specific subtask completely and accurately.
 
@@ -47,6 +48,7 @@ export class T3Worker extends BaseTier {
   private sessionApprovals: Map<string, boolean> = new Map();
   private peerBus?: PeerBus;
   private permissionEscalator?: PermissionEscalator;
+  private toolCreator?: ToolCreator;
 
   setPeerBus(bus: PeerBus): void {
     this.peerBus = bus;
@@ -61,6 +63,10 @@ export class T3Worker extends BaseTier {
 
   setPermissionEscalator(escalator: PermissionEscalator): void {
     this.permissionEscalator = escalator;
+  }
+
+  setToolCreator(creator: ToolCreator): void {
+    this.toolCreator = creator;
   }
 
   constructor(router: CascadeRouter, toolRegistry: ToolRegistry, parentId: string) {
@@ -132,6 +138,12 @@ export class T3Worker extends BaseTier {
     });
 
     this.log(`T3 executing subtask: ${assignment.subtaskTitle}`);
+
+    // ── Step 0.5: T3 File-Intent Coordination ──
+    // Announce files this subtask plans to write so siblings can avoid conflicts.
+    if (this.peerBus && this.peerBus.getMembers().length > 1) {
+      await this.coordinateFileIntents(assignment);
+    }
 
     const systemPrompt = this.buildSystemPrompt(assignment);
 
@@ -246,6 +258,8 @@ export class T3Worker extends BaseTier {
     let stalledArtifactIterations = 0;
     const MAX_ITERATIONS = 15;
     const requiresArtifact = this.requiresArtifact();
+    // `tools` is reassigned when a dynamic tool is created — must be a let
+    tools = [...tools];
 
     while (iterations < MAX_ITERATIONS) {
       iterations++;
@@ -271,6 +285,24 @@ export class T3Worker extends BaseTier {
         if (requiresArtifact) {
           stalledArtifactIterations += 1;
           if (stalledArtifactIterations >= 2) {
+            // Attempt to create a runtime tool if ToolCreator is available
+            if (this.toolCreator && stalledArtifactIterations === 2) {
+              const toolName = await this.toolCreator.createTool(
+                `Help complete: ${this.assignment?.subtaskTitle ?? 'unknown task'}`,
+                this.assignment?.description ?? '',
+              );
+              if (toolName) {
+                // Refresh tool definitions with newly created tool
+                tools = this.toolRegistry.getToolDefinitions();
+                this.sendStatusUpdate({
+                  progressPct: 50,
+                  currentAction: `Dynamic tool created: ${toolName}`,
+                  status: 'IN_PROGRESS',
+                });
+                this.emit('tool:created', { tierId: this.id, toolName });
+                continue;
+              }
+            }
             throw new Error('Artifact-producing task stalled without creating or verifying the required files');
           }
           await this.context.addMessage({
@@ -347,6 +379,13 @@ export class T3Worker extends BaseTier {
       }
     }
 
+    // Emit tool:use before execution so the TUI can display the active tool
+    this.sendStatusUpdate({
+      progressPct: 50,
+      currentAction: `Using tool: ${tc.name}`,
+      status: 'IN_PROGRESS',
+    });
+
     try {
       const result = await this.toolRegistry.execute(tc.name, tc.input, {
         tierId: this.id,
@@ -371,6 +410,58 @@ export class T3Worker extends BaseTier {
     } catch (err) {
       return `Tool error: ${err instanceof Error ? err.message : String(err)}`;
     }
+  }
+
+  /**
+   * Announce which files this T3 plans to edit, then acquire locks on them
+   * before competing siblings can claim them. T3s working on different files
+   * proceed in full parallel; T3s on the same file serialize automatically.
+   */
+  private async coordinateFileIntents(assignment: T2ToT3Assignment): Promise<void> {
+    if (!this.peerBus) return;
+    const plannedFiles = this.extractArtifactPaths(assignment);
+    if (!plannedFiles.length) return;
+
+    // Broadcast intent so siblings are aware
+    this.peerBus.broadcast(this.id, {
+      type: 'FILE_INTENT',
+      subtaskId: assignment.subtaskId,
+      files: plannedFiles,
+    });
+
+    // Give siblings 500ms to announce their intents
+    await new Promise(r => setTimeout(r, 500));
+
+    // Acquire locks on all planned files (in deterministic order to avoid deadlock)
+    const sortedFiles = [...plannedFiles].sort();
+    for (const filePath of sortedFiles) {
+      if (this.peerBus.isFileLocked(filePath)) {
+        this.log(`[T3] Waiting for file lock: ${filePath}`);
+        this.sendStatusUpdate({
+          progressPct: 5,
+          currentAction: `Waiting for peer to finish editing: ${filePath}`,
+          status: 'IN_PROGRESS',
+        });
+        await this.peerBus.waitForFileRelease(filePath);
+      }
+      await this.peerBus.lockFile(this.id, filePath);
+    }
+
+    // Register cleanup: release all locks when this worker finishes
+    const origPublish = this.peerBus.publish.bind(this.peerBus);
+    const bus = this.peerBus;
+    const workerId = this.id;
+    const cleanup = () => {
+      for (const f of sortedFiles) bus.releaseFile(workerId, f);
+    };
+    this.once('completed', cleanup);
+    this.once('failed', cleanup);
+    this.peerBus.publish = (fromId, subtaskId, output, status) => {
+      if (fromId === this.id) cleanup();
+      // Restore original after first call for this worker
+      this.peerBus!.publish = origPublish;
+      origPublish(fromId, subtaskId, output, status);
+    };
   }
 
   private requiresArtifact(): boolean {

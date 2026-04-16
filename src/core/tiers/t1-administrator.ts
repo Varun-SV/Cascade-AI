@@ -22,6 +22,7 @@ import { MemoryStore } from '../../memory/store.js';
 import { COMPLEXITY_T2_COUNT } from '../../constants.js';
 import { PeerBus } from '../peer/bus.js';
 import type { PermissionEscalator } from '../permissions/escalator.js';
+import type { ToolCreator } from '../../tools/tool-creator.js';
 
 const T1_SYSTEM_PROMPT = `You are T1, the Administrator in the Cascade AI orchestration system.
 
@@ -60,6 +61,7 @@ export class T1Administrator extends BaseTier {
   private store?: MemoryStore;
   private t2PeerBus: PeerBus = new PeerBus();
   private permissionEscalator?: PermissionEscalator;
+  private toolCreator?: ToolCreator;
   /** Stored overall task goal — used when evaluating escalated permissions */
   private taskGoal = '';
 
@@ -81,6 +83,10 @@ export class T1Administrator extends BaseTier {
   setPermissionEscalator(escalator: PermissionEscalator): void {
     this.permissionEscalator = escalator;
     escalator.setT1Evaluator((req) => this.evaluatePermissionAtT1(req));
+  }
+
+  setToolCreator(creator: ToolCreator): void {
+    this.toolCreator = creator;
   }
 
   async execute(
@@ -270,6 +276,11 @@ Leave dependsOn empty for subtasks that can run immediately in parallel.`;
         manager.setPermissionEscalator(this.permissionEscalator);
       }
 
+      // ← Inject optional ToolCreator for runtime tool generation
+      if (this.toolCreator) {
+        manager.setToolCreator(this.toolCreator);
+      }
+
       this.t2Managers.set(section.sectionId, manager);
 
       // Bubble up events
@@ -290,6 +301,67 @@ Leave dependsOn empty for subtasks that can run immediately in parallel.`;
       return manager;
     });
 
+    // ── Phase 1: T2 Peer Discussion — Proactive Announcement ──────────────
+    // Each T2 broadcasts its section plan. T1 collects for 500ms and uses
+    // the results to detect overlapping work and inject sibling context.
+    this.t2PeerBus.clearBroadcastLog();
+    managers.forEach((m, i) => m.announcePlan(sections[i]!));
+    const announcements = await this.t2PeerBus.collect(500);
+
+    // Build sibling context map: section → keywords from all other sections
+    const siblingKeywords = new Map<string, string[]>();
+    for (const ann of announcements) {
+      const payload = ann.payload as { type: string; sectionId: string; sectionTitle: string; keywords: string[] };
+      if (payload?.type !== 'T2_PLAN_ANNOUNCEMENT') continue;
+      for (const other of announcements) {
+        const otherPayload = other.payload as typeof payload;
+        if (otherPayload?.type !== 'T2_PLAN_ANNOUNCEMENT' || otherPayload.sectionId === payload.sectionId) continue;
+        const existing = siblingKeywords.get(payload.sectionId) ?? [];
+        existing.push(...(otherPayload.keywords ?? []));
+        siblingKeywords.set(payload.sectionId, [...new Set(existing)]);
+      }
+    }
+
+    // Detect shared keywords → mark overlapping sections as sequential
+    const overlapSections = new Set<string>();
+    for (let i = 0; i < announcements.length; i++) {
+      for (let j = i + 1; j < announcements.length; j++) {
+        const a = announcements[i]!.payload as { keywords?: string[]; sectionId?: string };
+        const b = announcements[j]!.payload as { keywords?: string[]; sectionId?: string };
+        if (!a.keywords || !b.keywords || !a.sectionId || !b.sectionId) continue;
+        const shared = a.keywords.filter(k => b.keywords!.includes(k));
+        if (shared.length > 0) {
+          overlapSections.add(a.sectionId);
+          overlapSections.add(b.sectionId);
+          this.log(`T2 overlap detected between sections: ${a.sectionId} ↔ ${b.sectionId} (shared: ${shared.join(', ')})`);
+        }
+      }
+    }
+
+    // Inject sibling context into each T2 manager
+    managers.forEach((m, i) => {
+      const section = sections[i]!;
+      const myKeywords = siblingKeywords.get(section.sectionId) ?? [];
+      const otherTitles = sections.filter(s => s.sectionId !== section.sectionId).map(s => s.sectionTitle);
+      const context = [
+        `You are T2 Manager for section: "${section.sectionTitle}".`,
+        `Sibling sections being worked on in parallel: ${otherTitles.join(', ') || 'none'}.`,
+        myKeywords.length > 0 ? `Watch for overlap with: ${[...new Set(myKeywords)].slice(0, 10).join(', ')}.` : '',
+        overlapSections.has(section.sectionId) ? 'NOTE: Potential overlap detected with a sibling section — be careful not to duplicate work.' : '',
+      ].filter(Boolean).join(' ');
+      m.setHierarchyContext(context);
+    });
+
+    // If overlaps detected globally, switch to sequential execution for safety
+    if (overlapSections.size > 0 && !sections.some(s => s.executionMode === 'sequential')) {
+      this.log('Overlap detected — switching to sequential execution for conflicting sections');
+      for (const section of sections) {
+        if (overlapSections.has(section.sectionId)) {
+          section.executionMode = 'sequential';
+        }
+      }
+    }
+
     const pct = (i: number) => 10 + Math.floor((i / sections.length) * 85);
     const isSequential = sections.some(s => s.executionMode === 'sequential');
     const t2Results: T2Result[] = [];
@@ -306,6 +378,8 @@ Leave dependsOn empty for subtasks that can run immediately in parallel.`;
         try {
           const result = await m.execute(sections[i]!, this.taskId);
           t2Results.push(result);
+          // Phase 2: Reactive — share completed section output with siblings
+          m.shareCompletedOutput(sections[i]!.sectionId, result.sectionSummary);
           if (result.status === 'ESCALATED') {
             this.escalations.push({
               raisedBy: `T2_${sections[i]!.sectionId}`,
@@ -342,6 +416,8 @@ Leave dependsOn empty for subtasks that can run immediately in parallel.`;
         const r = results[i]!;
         if (r.status === 'fulfilled') {
           t2Results.push(r.value);
+          // Phase 2: Reactive — share completed section output with siblings
+          managers[i]!.shareCompletedOutput(sections[i]!.sectionId, r.value.sectionSummary);
           if (r.value.status === 'ESCALATED') {
             this.escalations.push({
               raisedBy: `T2_${sections[i]!.sectionId}`,

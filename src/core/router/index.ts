@@ -174,6 +174,20 @@ export class CascadeRouter {
     return this.tierModels.get(tier);
   }
 
+  /**
+   * Cascade Auto: temporarily override the model for a tier.
+   * Used by TaskAnalyzer to inject task-optimal models before execution.
+   * The override is valid for the current task only — restored by restoreTierModels().
+   */
+  overrideTierModel(tier: TierRole, model: ModelInfo): void {
+    this.tierModels.set(tier, model);
+    this.ensureProvider(model, this.config.providers);
+  }
+
+  getSelector(): import('./selector.js').ModelSelector {
+    return this.selector;
+  }
+
   getStats(): RouterStats {
     return { ...this.stats };
   }
