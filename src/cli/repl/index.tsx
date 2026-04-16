@@ -213,12 +213,28 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const lastSubmittedInputRef = useRef<string | null>(null);
   const sessionTitleGeneratedRef = useRef(false);
   const rootTierIdRef = useRef<'T1' | 't2-root' | 't3-root'>('T1');
+  const SLASH_PAGE_SIZE = 8;
   const isTypingCommand = input.startsWith('/');
+  // Full list of matching commands (names only — used for index cycling & Tab)
   const slashCompletions = isTypingCommand ? (
-    input.startsWith('/identity ') 
+    input.startsWith('/identity ')
       ? identities.map(i => `/identity ${i.name}`).filter(c => c.startsWith(input))
       : slashRef.current.getCompletions(input)
-  ).slice(0, 24) : [];
+  ) : [];
+  // Paired list with descriptions for the suggestion panel
+  const slashEntries = isTypingCommand ? (
+    input.startsWith('/identity ')
+      ? identities.map(i => `/identity ${i.name}`).filter(c => c.startsWith(input)).map(c => ({ command: c, description: '' }))
+      : slashRef.current.getCompletionEntries(input)
+  ) : [];
+  // Viewport: keep selected item visible, centred in the window
+  const slashViewStart = Math.max(
+    0,
+    Math.min(
+      slashIndex - Math.floor(SLASH_PAGE_SIZE / 2),
+      slashEntries.length - SLASH_PAGE_SIZE,
+    ),
+  );
 
   const persistMessage = useCallback((role: 'user' | 'assistant' | 'system', content: string, timestamp: string) => {
     storeRef.current?.addMessage({ id: randomUUID(), sessionId: sessionIdRef.current, role, content, timestamp });
@@ -659,7 +675,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const statusHeight = state.showDetails ? (state.agentTree ? 10 : 4) : 3;
   const costHeight = state.showCost ? 6 : 0;
   const approvalHeight = state.approvalRequest ? 12 : 0;
-  const slashHeight = slashCompletions.length > 0 ? Math.min(10, slashCompletions.length) + 2 : 0;
+  const slashVisibleCount = Math.min(SLASH_PAGE_SIZE, slashEntries.length);
+  const slashHeight = slashVisibleCount > 0 ? slashVisibleCount + 2 : 0; // +2 for border + header row
   const chromeHeight = statusHeight + costHeight + approvalHeight + slashHeight + 7; // Input(3) + Status(2) + Header(2) + Margin(2)
   const totalCap = Math.floor(height * 0.7);
 
@@ -791,10 +808,41 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       )}
       {state.showCost && <CostTracker theme={theme} totalTokens={state.totalTokens} totalCostUsd={state.totalCostUsd} callsByProvider={state.callsByProvider} callsByTier={state.callsByTier} costByTier={state.costByTier} tokensByTier={state.tokensByTier} />}
       {state.approvalRequest && <ApprovalPrompt request={state.approvalRequest} theme={theme} onDecision={(decision) => { dispatch({ type: 'SET_APPROVAL', request: null }); approvalResolverRef.current?.(decision); }} />}
-      {slashCompletions.length > 0 && (
+      {slashEntries.length > 0 && (
         <Box flexDirection="column" borderStyle="round" borderColor={theme.colors.border} paddingX={1}>
-          <Text color={theme.colors.muted}>Slash commands</Text>
-          {slashCompletions.slice(0, 10).map((c, i) => <Text key={c} color={i === slashIndex ? theme.colors.accent : theme.colors.foreground}>{i === slashIndex ? '› ' : '  '}{c}</Text>)}
+          <Box flexDirection="row" justifyContent="space-between">
+            <Text color={theme.colors.muted}>Commands  ↑↓ navigate · ↵ select · Tab complete</Text>
+            {slashEntries.length > SLASH_PAGE_SIZE && (
+              <Text color={theme.colors.muted} dimColor>
+                {slashIndex + 1}/{slashEntries.length}
+              </Text>
+            )}
+          </Box>
+          {slashViewStart > 0 && (
+            <Text color={theme.colors.muted} dimColor>  ↑ {slashViewStart} more above</Text>
+          )}
+          {slashEntries.slice(slashViewStart, slashViewStart + SLASH_PAGE_SIZE).map((entry, i) => {
+            const globalIdx = slashViewStart + i;
+            const isSelected = globalIdx === slashIndex;
+            return (
+              <Box key={entry.command} flexDirection="row">
+                <Text color={isSelected ? theme.colors.accent : theme.colors.foreground} bold={isSelected}>
+                  {isSelected ? '› ' : '  '}
+                </Text>
+                <Box width={16}>
+                  <Text color={isSelected ? theme.colors.accent : theme.colors.foreground} bold={isSelected}>
+                    {entry.command}
+                  </Text>
+                </Box>
+                {entry.description ? (
+                  <Text color={theme.colors.muted} dimColor> {entry.description}</Text>
+                ) : null}
+              </Box>
+            );
+          })}
+          {slashViewStart + SLASH_PAGE_SIZE < slashEntries.length && (
+            <Text color={theme.colors.muted} dimColor>  ↓ {slashEntries.length - slashViewStart - SLASH_PAGE_SIZE} more below</Text>
+          )}
         </Box>
       )}
       <Box borderStyle="round" borderColor={quitAttempted ? 'red' : (state.isStreaming ? theme.colors.accent : theme.colors.border)} paddingX={2} flexDirection="column">

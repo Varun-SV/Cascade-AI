@@ -75,6 +75,13 @@ export class SlashCommandRegistry {
     return Array.from(this.commands.keys()).filter((c) => c.startsWith(partial));
   }
 
+  /** Returns completions as {command, description} pairs — used by the REPL suggestion list. */
+  getCompletionEntries(partial: string): Array<{ command: string; description: string }> {
+    return Array.from(this.commands.values())
+      .filter((c) => c.command.startsWith(partial))
+      .map((c) => ({ command: c.command, description: c.description }));
+  }
+
   getAll(): SlashCommand[] {
     return Array.from(this.commands.values());
   }
