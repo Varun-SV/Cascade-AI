@@ -264,6 +264,36 @@ export class CascadeRouter {
   }
 
   /**
+   * Returns the current session budget cap (USD), or undefined if no cap is set.
+   */
+  getSessionBudget(): number | undefined {
+    return this.config?.budget?.sessionBudgetUsd;
+  }
+
+  /**
+   * Sets (or clears) a runtime session budget cap (USD).
+   * Pass null to remove the cap.
+   */
+  setSessionBudget(usd: number | null): void {
+    if (!this.config) return;
+    if (!this.config.budget) {
+      this.config = { ...this.config, budget: { sessionBudgetUsd: usd ?? undefined, warnAtPct: 80 } };
+    } else {
+      this.config = {
+        ...this.config,
+        budget: { ...this.config.budget, sessionBudgetUsd: usd ?? undefined },
+      };
+    }
+  }
+
+  /**
+   * Returns how much of the session budget has been used (USD).
+   */
+  getSessionSpend(): number {
+    return this.sessionCostUsd;
+  }
+
+  /**
    * Returns the resolved ModelInfo for a given tier, or null if no model
    * is available (e.g. the required provider is not configured).
    */

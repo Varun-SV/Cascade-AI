@@ -1169,8 +1169,8 @@
         </div>
         <div class="feature-cell">
           <div class="feature-icon amber">💰</div>
-          <h3>Per-Tier Cost Breakdown</h3>
-          <p>Every result exposes <code>costByTier</code>, <code>tokensByTier</code>, and percentage attribution — see exactly what T1, T2, and T3 each spend so you can tune model assignments for cost efficiency.</p>
+          <h3>Per-Tier Cost Breakdown &amp; Budget Control</h3>
+          <p>Every result exposes <code>costByTier</code>, <code>tokensByTier</code>, and percentage attribution. Set a live session budget with <code>/budget set 0.50</code> — Cascade stops new tasks the moment the cap is hit, with no config-file edits required.</p>
         </div>
       </div>
     </div>
@@ -1227,6 +1227,10 @@
           <div class="code-bullet">
             <div class="code-bullet-dot"></div>
             <p>Per-tier cost &amp; token breakdown — <code>costByTier</code>, <code>tokensByTier</code>, and percentage attribution in every result</p>
+          </div>
+          <div class="code-bullet">
+            <div class="code-bullet-dot"></div>
+            <p>Live budget management — <code>/budget set &lt;$amount&gt;</code> caps session spend at runtime; <code>/budget</code> shows a visual spend bar</p>
           </div>
           <div class="code-bullet">
             <div class="code-bullet-dot"></div>

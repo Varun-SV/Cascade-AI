@@ -403,7 +403,36 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         return lines.join('\n');
       },
       onCostInfo: () => { dispatch({ type: 'TOGGLE_COST' }); return ''; },
-      onCompact: async () => { 
+      onBudget: (args) => {
+        const router = cascadeRef.current?.getRouter();
+        if (!router) return 'Router not initialised yet.';
+
+        if (args[0] === 'set' && args[1]) {
+          const amount = parseFloat(args[1].replace(/^\$/, ''));
+          if (isNaN(amount) || amount <= 0) {
+            return 'Invalid amount. Usage: /budget set 1.00';
+          }
+          router.setSessionBudget(amount);
+          return `✔ Session budget set to $${amount.toFixed(2)}. Cascade will stop new tasks once this limit is reached.`;
+        }
+
+        if (args[0] === 'clear') {
+          router.setSessionBudget(null);
+          return '✔ Session budget cap removed.';
+        }
+
+        // Show current status
+        const cap = router.getSessionBudget();
+        const spent = router.getSessionSpend();
+        if (!cap) {
+          return `Session budget: none (no cap set)\nSpent so far:   $${spent.toFixed(6)}\n\nSet a cap with: /budget set <amount>  (e.g. /budget set 0.50)`;
+        }
+        const remaining = Math.max(0, cap - spent);
+        const pct = Math.min(100, Math.round((spent / cap) * 100));
+        const bar = '█'.repeat(Math.round(pct / 5)) + '░'.repeat(20 - Math.round(pct / 5));
+        return `Session budget:  $${cap.toFixed(2)}\nSpent:           $${spent.toFixed(6)} (${pct}%)\nRemaining:       $${remaining.toFixed(6)}\n[${bar}]`;
+      },
+      onCompact: async () => {
         const prompt = 'Please summarize our conversation so far to keep the context compact and efficient.';
         await handleSubmit(prompt);
         return 'Triggered context compaction. The agent will now summarize the history...';

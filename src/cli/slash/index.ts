@@ -26,6 +26,7 @@ export interface SlashCommandContext {
   onProvidersInfo: () => string | Promise<string>;
   onConfigInfo: () => string | Promise<string>;
   onCostInfo: () => string | Promise<string>;
+  onBudget: (args: string[]) => string | Promise<string>;
   onCompact: () => Promise<string | void>;
   onStatus: () => string | Promise<string>;
   onSessions: (args: string[]) => Promise<string> | string;
@@ -226,6 +227,13 @@ export class SlashCommandRegistry {
       handler: (_args, ctx) => {
         return { output: ctx.onCostInfo(), handled: true };
       },
+    });
+
+    this.register({
+      command: '/budget',
+      description: 'Manage session budget cap  /budget [set <$amount> | clear]',
+      args: ['set <amount>', 'clear'],
+      handler: (args, ctx) => ({ output: ctx.onBudget(args), handled: true }),
     });
 
     this.register({

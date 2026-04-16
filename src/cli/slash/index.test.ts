@@ -12,6 +12,7 @@ describe('SlashCommandRegistry', () => {
     expect(commands).toContain('/rollback');
     expect(commands).toContain('/branch');
     expect(commands).toContain('/compact');
+    expect(commands).toContain('/budget');
   });
 
   it('offers completions for slash prefixes', () => {
