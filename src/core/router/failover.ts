@@ -10,6 +10,8 @@ interface FailoverState {
   failedAt: number;
   reason: string;
   retryAfterMs: number;
+  /** Number of consecutive failures — drives backoff step selection */
+  failureCount: number;
 }
 
 export class FailoverManager {
@@ -25,7 +27,10 @@ export class FailoverManager {
 
   recordFailure(provider: ProviderType, reason: string): void {
     const existing = this.failures.get(provider);
-    const step = existing ? Math.min(this.BACKOFF_STEPS.length - 1, 1) : 0;
+    // Increment failure count and use it as the backoff step index so that
+    // repeated failures correctly escalate through the full backoff ladder.
+    const failureCount = (existing?.failureCount ?? 0) + 1;
+    const step = Math.min(failureCount - 1, this.BACKOFF_STEPS.length - 1);
     const retryAfterMs = this.BACKOFF_STEPS[step] ?? 30_000;
 
     this.failures.set(provider, {
@@ -33,6 +38,7 @@ export class FailoverManager {
       failedAt: Date.now(),
       reason,
       retryAfterMs,
+      failureCount,
     });
 
     this.selector.markProviderUnavailable(provider);
@@ -58,9 +64,14 @@ export class FailoverManager {
     const report: Record<string, string> = {};
     for (const [provider, state] of this.failures) {
       const remainingMs = state.retryAfterMs - (Date.now() - state.failedAt);
-      report[provider] = `Failed: ${state.reason}. Retry in ${Math.ceil(remainingMs / 1000)}s`;
+      report[provider] =
+        `Failed (${state.failureCount}x): ${state.reason}. Retry in ${Math.ceil(remainingMs / 1000)}s`;
     }
     return report;
+  }
+
+  getFailureCount(provider: ProviderType): number {
+    return this.failures.get(provider)?.failureCount ?? 0;
   }
 
   clearFailure(provider: ProviderType): void {

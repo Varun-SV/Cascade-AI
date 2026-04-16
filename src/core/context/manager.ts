@@ -83,6 +83,26 @@ export class ContextManager {
     this.tokenCount = 0;
   }
 
+  /**
+   * Returns a human-readable summary of the current context state.
+   * Useful for debugging and status-bar display.
+   */
+  getContextSummary(): {
+    messageCount: number;
+    tokenCount: number;
+    usagePercent: number;
+    isNearLimit: boolean;
+    isAtLimit: boolean;
+  } {
+    return {
+      messageCount: this.messages.length,
+      tokenCount: this.tokenCount,
+      usagePercent: this.getUsagePercent(),
+      isNearLimit: this.isNearLimit(),
+      isAtLimit: this.isAtLimit(),
+    };
+  }
+
   private async summarize(): Promise<void> {
     if (!this.onSummarizeNeeded) return;
 
@@ -105,9 +125,26 @@ export class ContextManager {
   }
 
   private estimateTokens(message: ConversationMessage): number {
-    const content = typeof message.content === 'string'
-      ? message.content
-      : message.content.map((b) => b.type === 'text' ? b.text : '[image]').join(' ');
-    return Math.ceil(content.length / 4);
+    let charCount = 0;
+
+    if (typeof message.content === 'string') {
+      charCount = message.content.length;
+    } else {
+      for (const block of message.content) {
+        if (block.type === 'text') {
+          charCount += block.text.length;
+        } else if (block.type === 'image') {
+          // Images consume significant tokens; use a conservative flat estimate
+          // (~85 tokens/image thumbnail tile as a lower-bound proxy)
+          charCount += 340; // ≈ 85 tokens × 4 chars/token equivalent
+        } else if (block.type === 'tool_result') {
+          charCount += block.content.length;
+        }
+      }
+    }
+
+    // Role + structural overhead (~4 tokens per message)
+    const overhead = 16;
+    return Math.ceil(charCount / 4) + overhead;
   }
 }
