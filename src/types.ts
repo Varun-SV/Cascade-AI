@@ -28,6 +28,7 @@ export interface ModelInfo {
 
 export interface ProviderConfig {
   type: ProviderType;
+  label?: string;                 // User-defined label
   apiKey?: string;
   baseUrl?: string;
   deploymentName?: string;        // Azure
