@@ -24,10 +24,21 @@ export class MemoryStore {
 
   constructor(dbPath: string) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-    this.db = new Database(dbPath);
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('foreign_keys = ON');
-    this.migrate();
+    try {
+      this.db = new Database(dbPath);
+      this.db.pragma('journal_mode = WAL');
+      this.db.pragma('foreign_keys = ON');
+      this.migrate();
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('Could not locate the bindings file')) {
+        throw new Error(
+          `Cascade AI failed to load its database (better-sqlite3). This is usually because native bindings for Node.js ${process.version} are missing.\n\n` +
+          `Please try running: npm install better-sqlite3 --force\n` +
+          `Original error: ${err.message}`
+        );
+      }
+      throw err;
+    }
   }
 
   // ── Sessions ──────────────────────────────────
