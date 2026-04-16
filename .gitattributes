@@ -1,0 +1,40 @@
+# ─────────────────────────────────────────────
+#  Cascade AI — Git Line-Ending Normalization
+# ─────────────────────────────────────────────
+
+# Auto-detect text files and normalize to LF on check-in
+* text=auto eol=lf
+
+# Force LF for all source files
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.js    text eol=lf
+*.jsx   text eol=lf
+*.mjs   text eol=lf
+*.cjs   text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sh    text eol=lf
+*.bash  text eol=lf
+*.zsh   text eol=lf
+*.fish  text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.toml  text eol=lf
+
+# Binary files — never convert
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.svg   binary
+*.eot   binary
+*.ttf   binary
+*.woff  binary
+*.woff2 binary
+*.db    binary
+*.sqlite binary
+*.enc   binary

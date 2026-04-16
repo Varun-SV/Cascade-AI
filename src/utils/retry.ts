@@ -25,12 +25,25 @@ export interface RetryOptions {
   maxAttempts?: number;
   /** Base delay in ms (doubled each retry). Default: 300 */
   baseDelayMs?: number;
+  /**
+   * Maximum delay cap in ms to prevent excessive waits. Default: 30_000 (30s).
+   * Useful when `baseDelayMs` is large and `maxAttempts` is high.
+   */
+  maxDelayMs?: number;
+  /**
+   * When true (default), adds ±25% random jitter to each delay to prevent
+   * thundering-herd issues when many callers retry simultaneously.
+   */
+  jitter?: boolean;
   /** Custom predicate: return true if the error warrants a retry. */
   isRetryable?: (err: Error) => boolean;
+  /** Optional callback fired before each retry with the attempt number and error. */
+  onRetry?: (attempt: number, err: Error, delayMs: number) => void;
 }
 
 /**
  * Executes `fn`, retrying on transient errors up to `maxAttempts` times.
+ * Uses exponential back-off with optional jitter to spread load across retrying clients.
  *
  * @example
  * const result = await withRetry(() => fetchRemoteData(), {
@@ -44,6 +57,8 @@ export async function withRetry<T>(
 ): Promise<T> {
   const maxAttempts = opts.maxAttempts ?? 3;
   const baseDelayMs = opts.baseDelayMs ?? 300;
+  const maxDelayMs = opts.maxDelayMs ?? 30_000;
+  const useJitter = opts.jitter !== false; // default: true
   const isRetryable = opts.isRetryable ?? defaultIsRetryable;
 
   let lastErr: Error = new Error('No attempts made');
@@ -63,7 +78,13 @@ export async function withRetry<T>(
         throw lastErr;
       }
 
-      const delay = baseDelayMs * 2 ** (attempt - 1);
+      const rawDelay = Math.min(baseDelayMs * 2 ** (attempt - 1), maxDelayMs);
+      // Add ±25% jitter to reduce thundering-herd on simultaneous retries
+      const delay = useJitter
+        ? rawDelay * (0.75 + Math.random() * 0.5)
+        : rawDelay;
+
+      opts.onRetry?.(attempt, lastErr, delay);
       await sleep(delay);
     }
   }
@@ -72,24 +93,27 @@ export async function withRetry<T>(
 }
 
 /**
- * Wraps a promise with a timeout.
+ * Wraps a promise with a timeout. Clears the internal timer whether the
+ * promise resolves, rejects, or times out to avoid lingering handles.
  */
 export async function withTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
   errorMessage = 'Operation timed out',
 ): Promise<T> {
-  let timer: NodeJS.Timeout;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
   const timeoutPromise = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(errorMessage)), timeoutMs);
+    timer = setTimeout(
+      () => reject(new Error(errorMessage)),
+      timeoutMs,
+    );
   });
 
   try {
-    const result = await Promise.race([promise, timeoutPromise]);
-    return result;
+    return await Promise.race([promise, timeoutPromise]);
   } finally {
-    // @ts-ignore
-    if (timer) clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -104,6 +128,7 @@ function defaultIsRetryable(err: Error): boolean {
     msg.includes('socket hang up') ||
     msg.includes('network error') ||
     msg.includes('rate limit') ||
+    msg.includes('too many requests') ||  // 429
     msg.includes('529') ||   // Anthropic overload
     msg.includes('503') ||
     msg.includes('502')
