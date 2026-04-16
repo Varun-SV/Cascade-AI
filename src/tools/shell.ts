@@ -78,11 +78,20 @@ export class ShellTool extends BaseTool {
       }
     }
 
-    // User allowlist (if set, command must match one entry)
+    // User allowlist (if set, command must match one entry and contain no shell metacharacters)
     if (this.allowlist.length > 0) {
       const allowed = this.allowlist.some((a) => command.startsWith(a));
       if (!allowed) {
         throw new Error(`Command not in allowlist. Allowed prefixes: ${this.allowlist.join(', ')}`);
+      }
+
+      // Chaining metacharacters defeat the allowlist — block them when allowlist is active.
+      const SHELL_METACHAR = /[;|`]|\$\(|&&|\|\|/;
+      if (SHELL_METACHAR.test(command)) {
+        throw new Error(
+          `Command blocked: shell metacharacters (;, |, &&, ||, \`, $(...)) are not permitted ` +
+          `when an allowlist is active because they allow chaining of arbitrary commands.`,
+        );
       }
     }
   }

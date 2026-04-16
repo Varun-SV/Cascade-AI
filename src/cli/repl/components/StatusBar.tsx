@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────
-//  Cascade AI — Status Bar
+//  Cascade AI — Status Bar (top, Claude Code style)
 // ─────────────────────────────────────────────
 
 import React from 'react';
@@ -8,57 +8,58 @@ import type { Theme } from '../../../types.js';
 
 interface StatusBarProps {
   theme: Theme;
-  model: string;
+  tierModels: { t1?: string; t2?: string; t3?: string };
   tokens: number;
   costUsd: number;
-  sessionId: string;
   workspacePath: string;
-  isStreaming: boolean;
+  isExecuting: boolean;
+  activeTier?: string;
 }
 
 export function StatusBar({
   theme,
-  model,
+  tierModels,
   tokens,
   costUsd,
-  sessionId,
   workspacePath,
-  isStreaming,
+  isExecuting,
+  activeTier,
 }: StatusBarProps): React.ReactElement {
   const { stdout } = useStdout();
   const width = (stdout?.columns ?? 80) - 2;
 
-  const left = ` ◈ ${truncateModel(model)} `;
-  const mid = ` [${sessionId.slice(0, 8)}] ${workspacePath.split(/[/\\]/).pop() ?? workspacePath} `;
-  const right = ` ${formatTokens(tokens)} · $${costUsd.toFixed(4)} · LOAD: ${isStreaming ? '⚡' : '○'} `;
-  
+  const t1Label = tierModels.t1 ? truncate(tierModels.t1, 18) : 'auto';
+  const folderName = workspacePath.split(/[/\\]/).pop() ?? workspacePath;
+  const tierIndicator = activeTier ? ` [${activeTier}]` : '';
+
+  const left = ` ◈ CASCADE${tierIndicator} `;
+  const mid = ` ${truncate(folderName, 24)}  T1:${t1Label} `;
+  const right = ` ${formatTokens(tokens)} · $${costUsd.toFixed(4)} ${isExecuting ? '⚡' : '·'} `;
+
   const totalUsed = left.length + mid.length + right.length;
-  const paddingSize = Math.max(0, width - totalUsed);
-  const leftPad = ' '.repeat(Math.floor(paddingSize / 2));
-  const rightPad = ' '.repeat(Math.ceil(paddingSize / 2));
+  const gap = Math.max(0, width - totalUsed);
+  const leftGap = ' '.repeat(Math.floor(gap / 2));
+  const rightGap = ' '.repeat(Math.ceil(gap / 2));
 
   return (
     <Box
       borderStyle="single"
-      borderTop={true}
-      borderBottom={false}
+      borderTop={false}
+      borderBottom={true}
       borderLeft={false}
       borderRight={false}
       borderColor={theme.colors.border}
-      paddingX={0}
       width={width + 2}
     >
       <Text backgroundColor={theme.colors.primary} color={theme.colors.background} bold>{left}</Text>
-      <Text color={theme.colors.muted}>{leftPad}{mid}{rightPad}</Text>
+      <Text color={theme.colors.muted}>{leftGap}{mid}{rightGap}</Text>
       <Text color={theme.colors.muted}>{right}</Text>
     </Box>
   );
 }
 
-function truncateModel(name: string, max = 24): string {
-  if (!name) return '';
-  if (name.length <= max) return name;
-  return `${name.slice(0, max - 1)}…`;
+function truncate(s: string, max: number): string {
+  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
 }
 
 function formatTokens(n: number): string {

@@ -100,22 +100,28 @@ export class FileEditTool extends BaseTool {
     const newString = input['new_string'] as string;
     const replaceAll = (input['replace_all'] as boolean | undefined) ?? false;
 
-    const content = await fs.readFile(absPath, 'utf-8');
+    const rawContent = await fs.readFile(absPath, 'utf-8');
 
     if (options.saveSnapshot) {
-      await options.saveSnapshot(absPath, content);
+      await options.saveSnapshot(absPath, rawContent);
     }
 
-    if (!content.includes(oldString)) {
-      throw new Error(`old_string not found in ${filePath}. Make sure to match exactly.`);
+    // Normalize CRLF → LF so edits work on Windows-formatted files transparently.
+    const content = rawContent.replace(/\r\n/g, '\n');
+    const normalizedOld = oldString.replace(/\r\n/g, '\n');
+
+    if (!content.includes(normalizedOld)) {
+      throw new Error(
+        `old_string not found in ${filePath}. Make sure to match exactly (line endings are normalized to LF).`,
+      );
     }
 
     const updated = replaceAll
-      ? content.split(oldString).join(newString)
-      : content.replace(oldString, newString);
+      ? content.split(normalizedOld).join(newString)
+      : content.replace(normalizedOld, newString);
 
     await fs.writeFile(absPath, updated, 'utf-8');
-    const count = replaceAll ? (content.split(oldString).length - 1) : 1;
+    const count = replaceAll ? (content.split(normalizedOld).length - 1) : 1;
     return `Replaced ${count} occurrence(s) in ${filePath}`;
   }
 }

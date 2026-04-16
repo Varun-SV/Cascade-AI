@@ -8,8 +8,9 @@ import ora from 'ora';
 import chalk from 'chalk';
 import { createDefaultCascadeMd } from '../../config/cascade-md.js';
 import { createDefaultIgnoreFile } from '../../config/ignore.js';
-import { CascadeConfigSchema } from '../../config/schema.js';
+import { ConfigManager } from '../../config/index.js';
 import { CASCADE_CONFIG_FILE } from '../../constants.js';
+import { runSetupWizard } from '../setup/index.js';
 
 export async function initCommand(workspacePath = process.cwd()): Promise<void> {
   const spin = ora({ text: 'Initializing Cascade project…', color: 'magenta' }).start();
@@ -17,16 +18,6 @@ export async function initCommand(workspacePath = process.cwd()): Promise<void> 
   try {
     const configDir = path.join(workspacePath, '.cascade');
     await fs.mkdir(configDir, { recursive: true });
-
-    // Write default config
-    const configPath = path.join(workspacePath, CASCADE_CONFIG_FILE);
-    if (!(await fileExists(configPath))) {
-      const defaultConfig = CascadeConfigSchema.parse({});
-      await fs.writeFile(configPath, JSON.stringify(defaultConfig, null, 2), 'utf-8');
-      spin.succeed(chalk.green('Created .cascade/config.json'));
-    } else {
-      spin.warn(chalk.yellow('.cascade/config.json already exists — skipping'));
-    }
 
     // Write CASCADE.md
     const mdPath = path.join(workspacePath, 'CASCADE.md');
@@ -44,15 +35,28 @@ export async function initCommand(workspacePath = process.cwd()): Promise<void> 
 
     spin.stop();
     console.log();
-    console.log(chalk.magenta('  ◈ Cascade initialized successfully!'));
+    console.log(chalk.magenta('  ◈ Cascade AI — Project initialized'));
     console.log();
-    console.log(chalk.gray('  Next steps:'));
-    console.log(chalk.gray('  1. Edit CASCADE.md with project-specific instructions'));
-    console.log(chalk.gray('  2. Add API keys: cascade config set anthropic_key <key>'));
-    console.log(chalk.gray('  3. Run: cascade'));
+
+    // Launch interactive setup wizard to configure providers and models
+    const configPath = path.join(workspacePath, CASCADE_CONFIG_FILE);
+    if (await fileExists(configPath)) {
+      console.log(chalk.yellow('  .cascade/config.json already exists — launching wizard to reconfigure.'));
+      console.log();
+    }
+
+    const config = await runSetupWizard(workspacePath);
+
+    // Persist config via ConfigManager so all schema defaults are applied
+    const cm = new ConfigManager(workspacePath);
+    await cm.load();
+    await cm.updateConfig(config);
+
+    console.log();
+    console.log(chalk.green('  ◈ Setup complete! Run `cascade` to start.'));
     console.log();
   } catch (err) {
-    spin.fail(chalk.red(`Init failed: ${err instanceof Error ? err.message : String(err)}`));
+    console.error(chalk.red(`Init failed: ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
   }
 }

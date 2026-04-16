@@ -512,12 +512,17 @@ Return ONLY the JSON array.`;
     const prompt = `Summarize these T3 worker outputs for section "${assignment.sectionTitle}" in 2-3 sentences:\n\n${outputs}`;
 
     const messages: ConversationMessage[] = [{ role: 'user', content: prompt }];
-    const result = await this.router.generate('T2', {
-      messages,
-      systemPrompt: this.systemPromptOverride + 'You are a T2 Manager. Summarize the work of your T3 workers succinctly.' + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
-      maxTokens: 300
-    });
-    return result.content;
+    try {
+      const result = await this.router.generate('T2', {
+        messages,
+        systemPrompt: this.systemPromptOverride + 'You are a T2 Manager. Summarize the work of your T3 workers succinctly.' + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
+        maxTokens: 300
+      });
+      return result.content;
+    } catch (err) {
+      this.log(`aggregateResults: LLM summarization failed — returning raw T3 outputs. Error: ${err instanceof Error ? err.message : String(err)}`);
+      return outputs;
+    }
   }
 
   private determineStatus(results: T3Result[]): T2Result['status'] {
