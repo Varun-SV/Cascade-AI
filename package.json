@@ -117,8 +117,12 @@
     "ollama"
   ],
   "license": "MIT",
+  "homepage": "https://github.com/Varun-SV/Cascade-AI#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/cascade-ai/cascade"
+    "url": "git+https://github.com/Varun-SV/Cascade-AI.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Varun-SV/Cascade-AI/issues"
   }
 }

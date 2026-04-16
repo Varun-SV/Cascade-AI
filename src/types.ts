@@ -645,4 +645,10 @@ export interface CascadeRunResult {
   usage: TokenUsage;
   t2Results: T2Result[];
   durationMs: number;
+  /** Per-tier cost breakdown (USD). Available when the router tracked stats. */
+  costByTier?: Record<string, number>;
+  /** Per-tier total token counts. Available when the router tracked stats. */
+  tokensByTier?: Record<string, number>;
+  /** Per-tier cost as a percentage of total spend (0–100). */
+  costPercentByTier?: Record<string, number>;
 }
