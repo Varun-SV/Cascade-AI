@@ -563,6 +563,9 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
 // ── Exported runner ───────────────────────────
 
 export async function runSetupWizard(workspacePath: string): Promise<CascadeConfig> {
+  // Prominent telemetry notice — shown on every first-run setup so users
+  // understand the default is OFF and they can revisit the decision later.
+  printTelemetryBanner();
   return new Promise((resolve) => {
     const { unmount } = render(
       React.createElement(SetupWizard, {
@@ -575,4 +578,22 @@ export async function runSetupWizard(workspacePath: string): Promise<CascadeConf
       { exitOnCtrlC: true },
     );
   });
+}
+
+function printTelemetryBanner(): void {
+  // Plain console output (outside Ink) so it survives re-mounts.
+  // eslint-disable-next-line no-console
+  console.log();
+  // eslint-disable-next-line no-console
+  console.log('  ┌──────────────────────────────────────────────────────────────┐');
+  // eslint-disable-next-line no-console
+  console.log('  │  Telemetry: OFF by default.                                  │');
+  // eslint-disable-next-line no-console
+  console.log('  │  Toggle anytime with:  cascade telemetry on | off | status   │');
+  // eslint-disable-next-line no-console
+  console.log('  │  Anonymous session metadata only — never prompts or output.  │');
+  // eslint-disable-next-line no-console
+  console.log('  └──────────────────────────────────────────────────────────────┘');
+  // eslint-disable-next-line no-console
+  console.log();
 }

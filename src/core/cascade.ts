@@ -47,7 +47,14 @@ export class Cascade extends EventEmitter {
     this.config = validateConfig(config) as CascadeConfig;
     this.store = store;
     this.router = new CascadeRouter();
-    this.mcpClient = new McpClient();
+    this.mcpClient = new McpClient({
+      trustedServers: this.config.tools.mcpTrusted,
+      approvalCallback: async (server) => {
+        // Surface as a generic permission event so REPL / dashboard / SDK
+        // consumers can all plug the same approval dialog in.
+        return await this.requestMcpApproval(server);
+      },
+    });
     this.toolRegistry = new ToolRegistry(this.config.tools, workspacePath);
     this.telemetry = config.telemetry?.enabled
       ? new Telemetry(config.telemetry, config.telemetry.distinctId ?? 'anonymous')
@@ -66,6 +73,45 @@ export class Cascade extends EventEmitter {
 
   setStore(store: MemoryStore): void {
     this.store = store;
+  }
+
+  /**
+   * Emit an `mcp:approval-required` event and wait up to 30 s for a listener
+   * to resolve it via `cascade.resolveMcpApproval(serverName, approved)`.
+   *
+   * If no listener is attached (e.g. a non-interactive SDK run), the default
+   * is to reject — safer than silently spawning an arbitrary subprocess.
+   */
+  private pendingMcpApprovals: Map<string, (approved: boolean) => void> = new Map();
+
+  private async requestMcpApproval(server: { name: string; command: string; args?: string[] }): Promise<boolean> {
+    // No listeners → reject. Callers can add a listener BEFORE init() runs
+    // when they need to approve servers programmatically.
+    if (this.listenerCount('mcp:approval-required') === 0) {
+      return false;
+    }
+    return await new Promise<boolean>((resolve) => {
+      this.pendingMcpApprovals.set(server.name, resolve);
+      const timeout = setTimeout(() => {
+        if (this.pendingMcpApprovals.delete(server.name)) resolve(false);
+      }, 30_000);
+      // If the caller resolves, also clear the timeout.
+      const wrap = (approved: boolean) => {
+        clearTimeout(timeout);
+        resolve(approved);
+      };
+      this.pendingMcpApprovals.set(server.name, wrap);
+      this.emit('mcp:approval-required', { server });
+    });
+  }
+
+  /** Resolve a pending MCP server approval from a REPL / dashboard listener. */
+  resolveMcpApproval(serverName: string, approved: boolean): void {
+    const resolver = this.pendingMcpApprovals.get(serverName);
+    if (resolver) {
+      this.pendingMcpApprovals.delete(serverName);
+      resolver(approved);
+    }
   }
 
   async init(): Promise<void> {
@@ -88,6 +134,17 @@ export class Cascade extends EventEmitter {
         remainingUsd: number;
       }) => {
         this.emit('budget:warning', payload);
+      });
+
+      // Budget hard-kill: cancel any pending user approvals and notify
+      // consumers so the REPL/dashboard can tear down gracefully instead
+      // of waiting for an approval that will never resolve.
+      this.router.on('budget:exceeded', (payload: { reason: string; spentUsd: number }) => {
+        this.emit('budget:exceeded', payload);
+        for (const [name, resolver] of this.pendingMcpApprovals) {
+          resolver(false);
+          this.pendingMcpApprovals.delete(name);
+        }
       });
 
       // Initialize MCP servers

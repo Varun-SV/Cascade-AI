@@ -6,6 +6,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
+import { resolveInWorkspace } from './utils/workspace-path.js';
 
 // ── File Read ─────────────────────────────────
 
@@ -15,7 +16,7 @@ export class FileReadTool extends BaseTool {
   readonly inputSchema = {
     type: 'object',
     properties: {
-      path: { type: 'string', description: 'Absolute or relative path to the file' },
+      path: { type: 'string', description: 'Path to the file (relative to workspace root)' },
       offset: { type: 'number', description: 'Line number to start reading from (1-indexed)' },
       limit: { type: 'number', description: 'Maximum number of lines to read' },
     },
@@ -24,7 +25,7 @@ export class FileReadTool extends BaseTool {
 
   async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
     const filePath = input['path'] as string;
-    const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(this.workspaceRoot, filePath);
+    const absPath = resolveInWorkspace(this.workspaceRoot, filePath);
     const offset = (input['offset'] as number | undefined) ?? 1;
     const limit = input['limit'] as number | undefined;
 
@@ -47,7 +48,7 @@ export class FileWriteTool extends BaseTool {
   readonly inputSchema = {
     type: 'object',
     properties: {
-      path: { type: 'string', description: 'Path to write to' },
+      path: { type: 'string', description: 'Path to write to (relative to workspace root)' },
       content: { type: 'string', description: 'Content to write' },
     },
     required: ['path', 'content'],
@@ -57,7 +58,7 @@ export class FileWriteTool extends BaseTool {
 
   async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const filePath = input['path'] as string;
-    const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(this.workspaceRoot, filePath);
+    const absPath = resolveInWorkspace(this.workspaceRoot, filePath);
     const content = input['content'] as string;
 
     if (options.saveSnapshot) {
@@ -83,7 +84,7 @@ export class FileEditTool extends BaseTool {
   readonly inputSchema = {
     type: 'object',
     properties: {
-      path: { type: 'string', description: 'Path to the file to edit' },
+      path: { type: 'string', description: 'Path to the file to edit (relative to workspace root)' },
       old_string: { type: 'string', description: 'The exact string to find and replace' },
       new_string: { type: 'string', description: 'The replacement string' },
       replace_all: { type: 'boolean', description: 'Replace all occurrences (default: false)' },
@@ -95,7 +96,7 @@ export class FileEditTool extends BaseTool {
 
   async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const filePath = input['path'] as string;
-    const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(this.workspaceRoot, filePath);
+    const absPath = resolveInWorkspace(this.workspaceRoot, filePath);
     const oldString = input['old_string'] as string;
     const newString = input['new_string'] as string;
     const replaceAll = (input['replace_all'] as boolean | undefined) ?? false;
@@ -134,7 +135,7 @@ export class FileDeleteTool extends BaseTool {
   readonly inputSchema = {
     type: 'object',
     properties: {
-      path: { type: 'string', description: 'Path to delete' },
+      path: { type: 'string', description: 'Path to delete (relative to workspace root)' },
     },
     required: ['path'],
   };
@@ -143,8 +144,8 @@ export class FileDeleteTool extends BaseTool {
 
   async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const filePath = input['path'] as string;
-    const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(this.workspaceRoot, filePath);
-    
+    const absPath = resolveInWorkspace(this.workspaceRoot, filePath);
+
     if (options.saveSnapshot) {
       try {
         const oldContent = await fs.readFile(absPath, 'utf-8');
@@ -174,7 +175,7 @@ export class FileListTool extends BaseTool {
 
   async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
     const inputPath = (input['path'] as string) || '.';
-    const absPath = path.isAbsolute(inputPath) ? inputPath : path.resolve(this.workspaceRoot, inputPath);
+    const absPath = resolveInWorkspace(this.workspaceRoot, inputPath);
 
     const entries = await fs.readdir(absPath, { withFileTypes: true });
     return entries.map(e => `${e.isDirectory() ? '[DIR] ' : '      '}${e.name}`).join('\n') || '(empty directory)';

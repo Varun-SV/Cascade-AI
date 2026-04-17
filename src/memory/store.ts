@@ -415,22 +415,23 @@ export class MemoryStore {
   }
 
   getLatestFileSnapshots(sessionId: string): Array<{ filePath: string; content: string }> {
-    // We want the FIRST snapshot of each file in this session, which
-    // represents the "before" state. The old query used
-    //   GROUP BY file_path HAVING timestamp = MIN(timestamp)
-    // which relies on undefined bare-column behaviour in SQLite — the
-    // `content` column could come from any row in the group, not the one
-    // with the minimum timestamp. Use a correlated subquery so the row
-    // returned always matches the earliest snapshot per file.
+    // Return the earliest snapshot per file — the "before" state used by
+    // /rollback. ISO timestamps have millisecond resolution, so two rapid
+    // calls can share a timestamp. The inner query picks a single winning
+    // row per (session, path) by (timestamp ASC, rowid ASC), then the outer
+    // query dedups to that row — avoiding the duplicate-row bug that
+    // returned every snapshot for files written in the same millisecond.
     const rows = this.db.prepare(`
       SELECT fs.file_path, fs.content
       FROM file_snapshots fs
       WHERE fs.session_id = ?
-        AND fs.timestamp = (
-          SELECT MIN(fs2.timestamp)
+        AND fs.rowid = (
+          SELECT fs2.rowid
           FROM file_snapshots fs2
           WHERE fs2.session_id = fs.session_id
             AND fs2.file_path = fs.file_path
+          ORDER BY fs2.timestamp ASC, fs2.rowid ASC
+          LIMIT 1
         )
     `).all(sessionId) as Array<{ file_path: string; content: string }>;
 

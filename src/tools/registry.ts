@@ -2,6 +2,15 @@
 //  Cascade AI — Tool Registry
 // ─────────────────────────────────────────────
 
+import path from 'node:path';
+import ignoreFactory, { type Ignore } from 'ignore';
+
+// `ignore` is published as CJS. Under `moduleResolution: NodeNext` the
+// default import surfaces the module namespace rather than the callable
+// factory, so normalise to whichever shape the runtime hands us.
+const ignore: (opts?: unknown) => Ignore =
+  (ignoreFactory as unknown as { default?: (opts?: unknown) => Ignore }).default ??
+  (ignoreFactory as unknown as (opts?: unknown) => Ignore);
 import type { ToolDefinition, ToolExecuteOptions, ToolsConfig } from '../types.js';
 import { DEFAULT_APPROVAL_REQUIRED } from '../constants.js';
 import type { BaseTool } from './base.js';
@@ -50,7 +59,7 @@ export interface ToolPlugin {
 export class ToolRegistry {
   private tools: Map<string, BaseTool> = new Map();
   private config: ToolsConfig;
-  private ignoredPaths: Set<string> = new Set();
+  private ignoreMatcher: Ignore = ignore();
   private workspaceRoot: string;
   /** Loaded plugins, keyed by plugin name */
   private plugins: Map<string, ToolPlugin> = new Map();
@@ -112,8 +121,11 @@ export class ToolRegistry {
     }
   }
 
-  setIgnoredPaths(paths: string[]): void {
-    this.ignoredPaths = new Set(paths);
+  setIgnoredPaths(patterns: string[]): void {
+    // `ignore` mirrors .gitignore semantics: supports negation, globs, dirs.
+    // Using the library eliminates the old substring bug where `node_modules`
+    // would also match `mynodemodules.js`.
+    this.ignoreMatcher = ignore().add(patterns);
   }
 
   getToolDefinitions(): ToolDefinition[] {
@@ -190,9 +202,14 @@ export class ToolRegistry {
   }
 
   private isIgnored(filePath: string): boolean {
-    for (const ignored of this.ignoredPaths) {
-      if (filePath.startsWith(ignored) || filePath.includes(ignored)) return true;
-    }
-    return false;
+    if (!filePath) return false;
+    const abs = path.resolve(this.workspaceRoot, filePath);
+    const rel = path.relative(this.workspaceRoot, abs);
+    // Any path outside the workspace is treated as ignored (defence in depth;
+    // the dedicated path-sandbox guards in each file tool also reject these).
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return true;
+    // `ignore` requires POSIX-style separators.
+    const posixRel = rel.split(path.sep).join('/');
+    return this.ignoreMatcher.ignores(posixRel);
   }
 }

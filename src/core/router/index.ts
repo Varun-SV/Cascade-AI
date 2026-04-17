@@ -23,6 +23,7 @@ import { OpenAIProvider } from '../../providers/openai.js';
 import type { BaseProvider } from '../../providers/base.js';
 import { ModelSelector } from './selector.js';
 import { FailoverManager } from './failover.js';
+import { TpmLimiter } from './tpm-limiter.js';
 import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
 import { calculateCost } from '../../utils/cost.js';
 import { withTimeout } from '../../utils/retry.js';
@@ -59,8 +60,15 @@ export class CascadeRouter extends EventEmitter {
   private tierModels: Map<TierRole, ModelInfo> = new Map();
   private config!: CascadeConfig;
   private sessionCostUsd = 0;
-  /** Guard to emit the budget warning only once per session. */
-  private budgetWarnFired = false;
+  /**
+   * Budget state machine — guards against two concurrent `generate()` calls
+   * each firing the warning or both slipping past the hard cap. All
+   * transitions happen inside `updateBudgetState()` which is called only
+   * from `recordStats`, single-threaded per V8 event loop turn.
+   */
+  private budgetState: 'ok' | 'warned' | 'exceeded' = 'ok';
+  private budgetExceededReason: string | undefined;
+  private tpmLimiter!: TpmLimiter;
 
   /** Thrown when the configured budget is exceeded. */
   static BudgetExceededError = class extends Error {
@@ -76,6 +84,9 @@ export class CascadeRouter extends EventEmitter {
     const availableProviders = await this.detectAvailableProviders(config.providers);
     this.selector = new ModelSelector(availableProviders);
     this.failover = new FailoverManager(this.selector);
+    this.tpmLimiter = new TpmLimiter((config as unknown as {
+      rateLimits?: { providerTpm?: Partial<Record<ProviderType, number>> };
+    }).rateLimits?.providerTpm ?? {});
 
     // Discover Ollama models and register them
     const ollamaCfg = config.providers.find((p) => p.type === 'ollama');
@@ -121,6 +132,15 @@ export class CascadeRouter extends EventEmitter {
     onChunk?: (chunk: StreamChunk) => void,
     requireVision = false,
   ): Promise<GenerateResult> {
+    // Hard stop: refuse every new LLM call once the budget kill-switch fired.
+    // This closes the race where two in-flight generate() calls both slipped
+    // past the pre-existing `>= cap` check and pushed spend over the limit.
+    if (this.budgetState === 'exceeded') {
+      throw new CascadeRouter.BudgetExceededError(
+        this.budgetExceededReason ?? 'Session budget exceeded.',
+      );
+    }
+
     // ── Apply per-tier token limit ──────────────
     const limits = this.config?.tierLimits;
     const tierKey = tier.toLowerCase() as 't1' | 't2' | 't3';
@@ -136,6 +156,15 @@ export class CascadeRouter extends EventEmitter {
 
     const provider = this.getProvider(model);
     if (!provider) throw new Error(`No provider for model ${model.id}`);
+
+    // Per-provider TPM guard: pause this call until the token bucket has
+    // enough budget to cover the estimated input+output tokens. Prevents
+    // sudden bursts of parallel T3 spawns from overshooting a provider's
+    // tokens-per-minute quota.
+    const estimatedTokens = (options.maxTokens ?? model.maxOutputTokens ?? 1024) + 512;
+    if (this.tpmLimiter) {
+      await this.tpmLimiter.acquire(model.provider, estimatedTokens);
+    }
 
     const useStream = Boolean(onChunk) && model.supportsStreaming && typeof provider.generateStream === 'function';
 
@@ -264,7 +293,8 @@ export class CascadeRouter extends EventEmitter {
       outputTokensByTier: {},
     };
     this.sessionCostUsd = 0;
-    this.budgetWarnFired = false;
+    this.budgetState = 'ok';
+    this.budgetExceededReason = undefined;
   }
 
   getFailures(): Record<string, string> {
@@ -397,34 +427,58 @@ export class CascadeRouter extends EventEmitter {
     this.stats.inputTokensByTier[tier] = (this.stats.inputTokensByTier[tier] ?? 0) + usage.inputTokens;
     this.stats.outputTokensByTier[tier] = (this.stats.outputTokensByTier[tier] ?? 0) + usage.outputTokens;
 
-    // ── Budget enforcement & warning ───────────
+    // ── Budget enforcement & warning (atomic state transitions) ─
+    this.updateBudgetState();
+  }
+
+  /**
+   * Single point of truth for budget state transitions. Called after each
+   * recordStats() so warning and hard-stop transitions are evaluated
+   * exactly once — previous logic allowed concurrent generate() calls to
+   * both fire the warning or both miss the hard stop.
+   */
+  private updateBudgetState(): void {
     const budget = this.config?.budget;
-    if (budget?.sessionBudgetUsd) {
-      const cap = budget.sessionBudgetUsd;
-      const spendPct = (this.sessionCostUsd / cap) * 100;
+    const cap = budget?.sessionBudgetUsd;
+    if (!cap) return;
+    const spendPct = (this.sessionCostUsd / cap) * 100;
+    const warnAt = budget.warnAtPct ?? 80;
 
-      // Fire a one-shot warning when spend first crosses the warnAtPct threshold
-      if (!this.budgetWarnFired) {
-        const warnAt = budget.warnAtPct ?? 80;
-        if (spendPct >= warnAt) {
-          this.budgetWarnFired = true;
-          this.emit('budget:warning', {
-            spentUsd: this.sessionCostUsd,
-            capUsd: cap,
-            spendPct: Math.round(spendPct * 10) / 10,
-            warnAtPct: warnAt,
-            remainingUsd: Math.max(0, cap - this.sessionCostUsd),
-          });
-        }
-      }
-
-      // Hard stop when budget is exceeded
-      if (this.sessionCostUsd >= cap) {
-        throw new CascadeRouter.BudgetExceededError(
-          `Session budget of $${cap.toFixed(4)} exceeded (spent $${this.sessionCostUsd.toFixed(4)}).`,
-        );
-      }
+    if (this.budgetState === 'ok' && spendPct >= warnAt) {
+      this.budgetState = 'warned';
+      this.emit('budget:warning', {
+        spentUsd: this.sessionCostUsd,
+        capUsd: cap,
+        spendPct: Math.round(spendPct * 10) / 10,
+        warnAtPct: warnAt,
+        remainingUsd: Math.max(0, cap - this.sessionCostUsd),
+      });
     }
+
+    if (this.budgetState !== 'exceeded' && this.sessionCostUsd >= cap) {
+      const reason = `Session budget of $${cap.toFixed(4)} exceeded (spent $${this.sessionCostUsd.toFixed(4)}).`;
+      this.halt(reason);
+      // Throw on the current call so the caller also unwinds.
+      throw new CascadeRouter.BudgetExceededError(reason);
+    }
+  }
+
+  /**
+   * Flip the router to "exceeded" state. Subsequent `generate()` calls will
+   * throw BudgetExceededError immediately, and a `budget:exceeded` event is
+   * broadcast once so listeners (REPL, dashboard, SDK) can cancel any
+   * pending approvals and unwind the run.
+   */
+  halt(reason: string): void {
+    if (this.budgetState === 'exceeded') return;
+    this.budgetState = 'exceeded';
+    this.budgetExceededReason = reason;
+    this.emit('budget:exceeded', { reason, spentUsd: this.sessionCostUsd });
+  }
+
+  /** Returns current budget state — useful for tests and dashboard. */
+  getBudgetState(): 'ok' | 'warned' | 'exceeded' {
+    return this.budgetState;
   }
 
   private isRateLimitError(msg: string): boolean {

@@ -2,11 +2,21 @@
 //  Cascade AI — Hooks System
 // ─────────────────────────────────────────────
 
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { HookDefinition, HooksConfig } from '../types.js';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+const SAFE_ENV_NAME = /^[A-Z][A-Z0-9_]*$/;
+
+function sanitizeEnvValue(v: unknown): string {
+  const raw = typeof v === 'string' ? v : JSON.stringify(v);
+  // Strip control chars and cap length so a malicious hook cannot inject NUL
+  // or ANSI escape sequences that change how a downstream script parses its
+  // environment.
+  return raw.replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 8192);
+}
 
 export class HooksRunner {
   private config: HooksConfig;
@@ -43,17 +53,34 @@ export class HooksRunner {
     const results: string[] = [];
     for (const hook of applicable) {
       try {
-        const envVars = Object.fromEntries(
-          Object.entries(env).map(([k, v]) => [
-            `CASCADE_${k.toUpperCase()}`,
-            typeof v === 'string' ? v : JSON.stringify(v),
-          ]),
-        );
-        const { stdout } = await execAsync(hook.command, {
+        const envVars: Record<string, string> = {};
+        for (const [k, v] of Object.entries(env)) {
+          const name = `CASCADE_${k.toUpperCase()}`;
+          // Reject environment variable names that contain shell-unsafe chars.
+          // This cannot happen with the built-in callers (fixed strings), but
+          // guards against future callers that forward user input.
+          if (!SAFE_ENV_NAME.test(name)) continue;
+          envVars[name] = sanitizeEnvValue(v);
+        }
+
+        // SECURITY: Previously this used `exec(hook.command, { env })`, which
+        // interpolates the command string verbatim. Because `env` carries
+        // tool input, any value containing `$(...)`, backticks, or `;` could
+        // be executed by the shell that ran the hook. We now hand the command
+        // to the platform shell as a literal argument via `execFile` — the
+        // shell still interprets the command body (so users can keep writing
+        // pipelines), but env values can never graft onto the command line.
+        const isWin = process.platform === 'win32';
+        const shell = isWin ? 'cmd.exe' : '/bin/sh';
+        const shellArgs = isWin ? ['/d', '/s', '/c', hook.command] : ['-c', hook.command];
+
+        const { stdout } = await execFileAsync(shell, shellArgs, {
           timeout: hook.timeout ?? 10_000,
           env: { ...process.env, ...envVars },
+          windowsHide: true,
         });
-        if (stdout.trim()) results.push(stdout.trim());
+        const text = typeof stdout === 'string' ? stdout : Buffer.from(stdout as ArrayBufferLike).toString('utf-8');
+        if (text.trim()) results.push(text.trim());
       } catch (err) {
         return {
           success: false,

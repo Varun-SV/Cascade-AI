@@ -7,14 +7,16 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
 import express, { type Request, type Response } from 'express';
+import rateLimit from 'express-rate-limit';
+import bcrypt from 'bcryptjs';
 import type { CascadeConfig } from '../types.js';
 import { MemoryStore } from '../memory/store.js';
 import type { RuntimeNode, RuntimeNodeLog, RuntimeSession } from '../types.js';
-import { CASCADE_DB_FILE, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE, CASCADE_CONFIG_FILE } from '../constants.js';
+import { CASCADE_DB_FILE, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE, CASCADE_CONFIG_FILE, CASCADE_DASHBOARD_SECRET_FILE } from '../constants.js';
 import { DashboardSocket } from './websocket.js';
 import { authMiddleware, createToken } from './auth.js';
 import { DEFAULT_DASHBOARD_PORT } from '../constants.js';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Identity, TierLimits, BudgetConfig } from '../types.js';
 import { Cascade } from '../core/cascade.js';
 
@@ -37,11 +39,7 @@ export class DashboardServer {
     this.store = store;
     this.workspacePath = workspacePath;
     this.port = config.dashboard.port ?? DEFAULT_DASHBOARD_PORT;
-    const configuredSecret = config.dashboard.secret ?? process.env['CASCADE_DASHBOARD_SECRET'];
-    if (config.dashboard.auth && !configuredSecret) {
-      console.warn('Dashboard auth is enabled but no secret was configured; using an ephemeral process secret.');
-    }
-    this.dashboardSecret = configuredSecret ?? randomUUID();
+    this.dashboardSecret = this.resolveDashboardSecret();
     this.app = express();
     this.httpServer = createServer(this.app);
     this.socket = new DashboardSocket(this.httpServer, {
@@ -86,6 +84,53 @@ export class DashboardServer {
 
   getSocket(): DashboardSocket {
     return this.socket;
+  }
+
+  /**
+   * Produce a stable dashboard JWT signing secret.
+   *
+   * Order of precedence: explicit config → env var → secret file on disk
+   * (auto-created with 0600 perms). Previously this generated a fresh UUID
+   * on every process start which invalidated all outstanding JWTs.
+   */
+  private resolveDashboardSecret(): string {
+    const fromConfig = this.config.dashboard.secret ?? process.env['CASCADE_DASHBOARD_SECRET'];
+    if (fromConfig) return fromConfig;
+
+    const secretPath = path.join(this.workspacePath, CASCADE_DASHBOARD_SECRET_FILE);
+    try {
+      if (fs.existsSync(secretPath)) {
+        const existing = fs.readFileSync(secretPath, 'utf-8').trim();
+        if (existing.length >= 16) return existing;
+      }
+      const generated = randomUUID();
+      fs.mkdirSync(path.dirname(secretPath), { recursive: true });
+      fs.writeFileSync(secretPath, generated, { encoding: 'utf-8', mode: 0o600 });
+      if (this.config.dashboard.auth) {
+        console.warn(
+          `Dashboard auth enabled with no secret configured; persisted a generated secret to ${secretPath}. ` +
+          `Set CASCADE_DASHBOARD_SECRET or config.dashboard.secret to override.`,
+        );
+      }
+      return generated;
+    } catch {
+      // Read-only FS fallback: use an ephemeral secret but warn loudly.
+      console.warn('Unable to persist dashboard secret; falling back to a process-ephemeral secret.');
+      return randomUUID();
+    }
+  }
+
+  /**
+   * Resolve the dashboard password as a bcrypt hash.
+   * Accepts either a pre-hashed `CASCADE_DASHBOARD_PASSWORD_HASH` or a plain
+   * `CASCADE_DASHBOARD_PASSWORD` which is hashed once at startup.
+   */
+  private resolvePasswordHash(): string | null {
+    const preHashed = process.env['CASCADE_DASHBOARD_PASSWORD_HASH'];
+    if (preHashed && preHashed.startsWith('$2')) return preHashed;
+    const plain = process.env['CASCADE_DASHBOARD_PASSWORD'];
+    if (!plain) return null;
+    return bcrypt.hashSync(plain, 10);
   }
 
   // ── Setup ─────────────────────────────────────
@@ -195,16 +240,48 @@ export class DashboardServer {
   private setupRoutes(): void {
     const authRequired = this.config.dashboard.auth;
     const auth = authMiddleware(this.dashboardSecret, authRequired);
+    const passwordHash = authRequired ? this.resolvePasswordHash() : null;
+
+    // Brute-force protection: 5 attempts / 15 min per IP. Applied only to
+    // the login route so a bad password cannot be rapidly guessed.
+    const loginLimiter = rateLimit({
+      windowMs: 15 * 60 * 1000,
+      limit: 5,
+      standardHeaders: 'draft-7',
+      legacyHeaders: false,
+      message: { error: 'Too many login attempts. Try again in 15 minutes.' },
+    });
 
     // ── Auth ────────────────────────────────────
-    this.app.post('/api/auth/login', (req: Request, res: Response) => {
-      const { username, password } = req.body as { username: string; password: string };
-      const configuredPassword = process.env['CASCADE_DASHBOARD_PASSWORD'];
-      if (authRequired && !configuredPassword) {
-        res.status(503).json({ error: 'Dashboard password is not configured. Set CASCADE_DASHBOARD_PASSWORD or disable dashboard auth.' });
+    this.app.post('/api/auth/login', loginLimiter, (req: Request, res: Response) => {
+      const { username, password } = (req.body ?? {}) as { username?: string; password?: string };
+      if (!authRequired) {
+        const token = createToken(
+          { id: username ?? 'anonymous', username: username ?? 'anonymous', role: 'admin' },
+          this.dashboardSecret,
+        );
+        res.json({ token });
         return;
       }
-      if (!authRequired || password === configuredPassword) {
+      if (!passwordHash) {
+        res.status(503).json({
+          error: 'Dashboard password is not configured. Set CASCADE_DASHBOARD_PASSWORD (or CASCADE_DASHBOARD_PASSWORD_HASH) or disable dashboard auth.',
+        });
+        return;
+      }
+      if (typeof password !== 'string' || typeof username !== 'string') {
+        res.status(400).json({ error: 'username and password are required' });
+        return;
+      }
+      // bcrypt.compareSync is constant-time; we additionally gate on a
+      // timingSafeEqual over the stringified result to preserve the same
+      // response timing for both branches.
+      const ok = bcrypt.compareSync(password, passwordHash);
+      const truthy = Buffer.from('1');
+      const falsy = Buffer.from('0');
+      const probe = ok ? truthy : falsy;
+      const authorized = timingSafeEqual(probe, truthy);
+      if (authorized) {
         const token = createToken(
           { id: username, username, role: 'admin' },
           this.dashboardSecret,

@@ -606,14 +606,68 @@ web/
 
 ## Contributing
 
+### Prerequisites
+
+| Tool | Required Version |
+|------|-----------------|
+| Node.js | ≥ 20.x |
+| npm | ≥ 10.x |
+
+### Setup
+
 ```bash
-git clone https://github.com/cascade-ai/cascade
-cd cascade
-npm install
-npm run build:web
-npm run dev          # watch mode
-npm test             # vitest
+git clone https://github.com/Varun-SV/Cascade-AI.git
+cd Cascade-AI
+npm install   # installs root + web via npm workspaces
 ```
+
+### Development commands
+
+```bash
+npm run dev          # watch mode for the CLI
+npm run build        # build CLI + web dashboard
+npm run dev:web      # hot-reload dashboard at web/
+npm test             # vitest
+npm run lint         # tsc --noEmit
+```
+
+### Architecture notes
+
+**Permission escalation.** When a T3 Worker needs to execute a dangerous tool the
+request travels `T3 → PermissionEscalator → T2 → T1 → User`. Read-only tools are
+auto-approved by rule; dangerous ones use a max-10-token LLM inference at each
+tier. Session-wide approvals are cached by `${t2Id}:${toolName}`.
+
+**Adding a tool.** Create `src/tools/my-tool.ts` extending `BaseTool`; implement
+`getDefinition()`, `execute()`, and optionally `isDangerous()`; register in
+`src/tools/registry.ts` → `registerDefaults()`; if approval is required, add the
+tool name to `DEFAULT_APPROVAL_REQUIRED` in `src/constants.ts`.
+
+**Adding a plugin.** Use the `ToolPlugin` interface from
+`src/tools/registry.ts` to bundle one or more tools.
+
+### Testing
+
+- Coverage target: 80% lines, 75% functions, 70% branches.
+- Co-locate `*.test.ts` alongside the source file they test.
+- Mock external I/O (`fs`, network) with `vi.mock()`; don't mock internal logic.
+
+### Code style
+
+- TypeScript strict mode is enforced.
+- Use `async/await`, not `.then()` chains.
+- Wrap external calls (shell, git, GitHub API) with `withRetry()` from
+  `src/utils/retry.ts`.
+- Raise tool failures as `CascadeToolError` so they carry a `.userMessage`.
+
+### Pull request checklist
+
+- [ ] Tests added / updated for changed code
+- [ ] `npm test` passes
+- [ ] `npm run build` succeeds
+- [ ] New public APIs have JSDoc
+- [ ] No hardcoded API keys or secrets
+- [ ] `.cascadeignore` patterns respected for file tools
 
 ---
 
