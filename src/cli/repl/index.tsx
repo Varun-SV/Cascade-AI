@@ -4,7 +4,8 @@
 
 import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
-import TextInput from 'ink-text-input';
+import { SafeTextInput } from '../components/SafeTextInput.js';
+import { sanitizeTerminalInput, containsMouseSequence } from '../utils/terminal-input.js';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -332,10 +333,13 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     cascadeRef.current = new Cascade(config, workspacePath);
     cascadeRef.current.init().catch(err => setStartupWarning(`Init failed: ${err.message}`));
     validateConfiguredModels(config).then(setStartupWarning);
-    return () => { 
-      persistRuntimeSession('COMPLETED'); 
+    return () => {
+      persistRuntimeSession('COMPLETED');
+      // Close any MCP servers / telemetry the Cascade orchestrator opened so
+      // we don't leak child processes when the REPL exits.
+      cascadeRef.current?.close().catch(() => { /* ignored on shutdown */ });
       globalStoreRef.current?.close();
-      store.close(); 
+      store.close();
       console.warn = originalWarn;
       console.log = originalLog;
     };
@@ -547,7 +551,14 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     dispatch({ type: 'SET_EXECUTING', isExecuting: true });
     dispatch({ type: 'SET_STREAMING', isStreaming: true });
     const cascade = cascadeRef.current;
-    if (!cascade) return;
+    if (!cascade) {
+      // Cascade failed to initialise — don't leave the UI stuck with
+      // isExecuting=true (input field disabled, spinner running forever).
+      dispatch({ type: 'SET_EXECUTING', isExecuting: false });
+      dispatch({ type: 'SET_STREAMING', isStreaming: false });
+      dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'error', content: 'Cascade not initialised. Check your configuration and restart.', timestamp: new Date().toISOString() } });
+      return;
+    }
     treeNodesRef.current.clear(); rebuildTree();
     const onRoot = ({ role }: RootTierEvent) => {
       const tierId = role === 'T1' ? 'T1' : `${role.toLowerCase()}-root` as 't2-root' | 't3-root';
@@ -739,45 +750,42 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   }, [allLines.length, isAutoScrolling, chatWindowHeight]);
 
   useEffect(() => {
-    // Enable mouse reporting (1000: mouse move/press, 1006: SGR mode)
+    // Enable mouse reporting (1000: mouse move/press, 1006: SGR mode).
+    // SafeTextInput honours `manageMouseReporting={false}` so it won't disable
+    // this on mount. Bracketed-paste mode is enabled by SafeTextInput itself.
     process.stdout.write('\x1b[?1000h\x1b[?1006h');
 
     const onData = (data: Buffer) => {
       const str = data.toString();
 
-      // Match SGR mouse sequences: ESC [ < button ; X ; Y [Mm]
-      const mouseMatch = str.match(/\x1b\[<(\d+);\d+;\d+[Mm]/);
-      if (mouseMatch) {
+      // SGR mouse sequence → handle scroll wheel, swallow the rest.
+      if (containsMouseSequence(str)) {
         // Lock input ONLY for mouse sequences to prevent them leaking into the prompt.
         // ⚠ Do NOT lock for all \x1b sequences — that would block Delete (\x1b[3~),
         //   arrow keys, Home, End, and other navigation escape sequences.
         lockInputTemporarily();
-        const code = parseInt(mouseMatch[1]!, 10);
-        if (code === 64) { // Wheel Up
-          setIsAutoScrolling(false);
-          setScrollOffset(p => Math.max(0, p - 3));
-        } else if (code === 65) { // Wheel Down
-          setScrollOffset(p => {
-            const next = p + 3;
-            const max = Math.max(0, allLinesRef.current - chatWindowHeightRef.current);
-            if (next >= max) { setIsAutoScrolling(true); return max; }
-            return next;
-          });
+        const mouseMatch = str.match(/\x1b\[<(\d+);\d+;\d+[Mm]/);
+        if (mouseMatch) {
+          const code = parseInt(mouseMatch[1]!, 10);
+          if (code === 64) { // Wheel Up
+            setIsAutoScrolling(false);
+            setScrollOffset(p => Math.max(0, p - 3));
+          } else if (code === 65) { // Wheel Down
+            setScrollOffset(p => {
+              const next = p + 3;
+              const max = Math.max(0, allLinesRef.current - chatWindowHeightRef.current);
+              if (next >= max) { setIsAutoScrolling(true); return max; }
+              return next;
+            });
+          }
         }
         return; // Consumed by mouse handler
       }
 
-      // Handle forward Delete key (\x1b[3~) — Ink's TextInput doesn't natively delete forward.
-      // We intercept it here and remove the character at the cursor position.
-      if (str === '\x1b[3~') {
-        setInput(prev => {
-          // Remove the character right after where the cursor would be.
-          // Since ink-text-input manages cursor internally, we can't know exact position,
-          // so we treat forward-delete the same as removing the last typed character for now.
-          // A full cursor-aware implementation would require patching ink-text-input.
-          return prev.slice(0, -1);
-        });
-      }
+      // Forward-delete (\x1b[3~) is handled by SafeTextInput's own raw-stdin
+      // listener — it correctly removes the character AT the cursor, not the
+      // last character of the buffer. We deliberately do NOT handle it here
+      // to avoid double-deletions.
     };
 
     process.stdin.on('data', onData);
@@ -785,7 +793,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       process.stdout.write('\x1b[?1000l\x1b[?1006l');
       process.stdin.removeListener('data', onData);
     };
-  }, []);
+  }, [lockInputTemporarily]);
 
   const visibleLines = allLines.slice(scrollOffset, scrollOffset + chatWindowHeight);
   const showScrollAlert = !isAutoScrolling;
@@ -890,16 +898,15 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         )}
         <Box flexDirection="row">
           <Text color={theme.colors.primary} bold>▸ {queuedMessages.length > 0 ? <Text color={theme.colors.accent}>[QUEUED] </Text> : ''}</Text>
-          <TextInput
+          <SafeTextInput
             focus={!state.approvalRequest}
             value={input}
+            manageMouseReporting={false}
             onChange={(val) => {
               if (isInputLockedRef.current) return;
-              // Strip complex ANSI/SGR escape sequences and dangerous control characters.
-              // ⚠ Do NOT include \x7F here — that is the Delete/Backspace key code.
-              //   Ink's TextInput handles \x7F natively; stripping it here prevents deletion from working.
-              const sanitized = val.replace(/(?:\x1b\[<.*?[Mm])|(?:\x1b\[.*?[\x40-\x7E])|(?:\x1bO[\x40-\x7E])|(?:\x1b[PX^_].*?\x1b\\)|(?:\x1b[\]\[].*?[\x07\x1b])|(?:\x1b[()#;?].*?[0-9A-ORZcf-nqry=><])|[\x00-\x1F]/g, '');
-              setInput(sanitized);
+              // Defense in depth — SafeTextInput already sanitizes, but a brief
+              // input-lock window can still pass through values we'd rather drop.
+              setInput(sanitizeTerminalInput(val));
             }}
             onSubmit={handleSubmit}
             placeholder={state.isStreaming ? "Wait for response or type next prompt to queue…" : "Ask Cascade anything… (/help for commands)"}
@@ -1084,4 +1091,9 @@ async function generateSessionName(firstMessage: string, cascade: Cascade | null
       messages: [{ role: 'user', content: prompt }],
       maxTokens: 20,
     });
-    const name = result.content.trim().replace(/^["']|["']$/g, '').slice(0,
+    const name = result.content.trim().replace(/^["']|["']$/g, '').slice(0, 60);
+    return name || null;
+  } catch {
+    return null;
+  }
+}

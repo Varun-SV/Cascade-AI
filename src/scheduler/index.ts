@@ -35,10 +35,24 @@ export class TaskScheduler {
       throw new Error(`Invalid cron expression: ${task.cronExpression}`);
     }
 
+    // If the same task id is rescheduled, stop the previous cron job first so
+    // it doesn't leak into the node-cron internals (node-cron keeps all
+    // scheduled jobs alive via a timer until explicitly stopped).
+    const existing = this.cronJobs.get(task.id);
+    if (existing) {
+      try { existing.stop(); } catch { /* ignore */ }
+    }
+
     const job = cron.schedule(task.cronExpression, async () => {
-      task.lastRun = new Date().toISOString();
-      this.store.saveScheduledTask(task);
-      await this.runner(task);
+      try {
+        task.lastRun = new Date().toISOString();
+        this.store.saveScheduledTask(task);
+        await this.runner(task);
+      } catch (err) {
+        // Do NOT let cron-thrown rejections bubble into Node's
+        // unhandledRejection handler — that crashes long-running daemons.
+        console.error(`[scheduler] Task "${task.id}" (${task.cronExpression}) failed:`, err);
+      }
     }, { timezone: 'UTC' });
 
     this.cronJobs.set(task.id, job);

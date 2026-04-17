@@ -127,14 +127,22 @@ export class GeminiProvider extends BaseProvider {
       const resp = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models?key=${this.config.apiKey}`,
       );
+      if (!resp.ok) {
+        // Invalid key / network error — fall back to the built-in model list
+        // instead of crashing downstream consumers with a shape mismatch.
+        return Object.values(MODELS).filter((m) => m.provider === 'gemini');
+      }
       const data = await resp.json() as {
-        models: Array<{
+        models?: Array<{
           name: string;
           displayName: string;
           inputTokenLimit: number;
           outputTokenLimit: number;
         }>;
       };
+      if (!Array.isArray(data?.models)) {
+        return Object.values(MODELS).filter((m) => m.provider === 'gemini');
+      }
 
       return data.models.map((m) => {
         const id = m.name.replace('models/', '');

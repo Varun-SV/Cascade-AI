@@ -51,11 +51,18 @@ export async function runCascade(
   const cascade = new Cascade(config, workspacePath);
   await cascade.init();
 
-  return cascade.run({
-    prompt,
-    workspacePath,
-    ...options,
-  });
+  try {
+    return await cascade.run({
+      prompt,
+      workspacePath,
+      ...options,
+    });
+  } finally {
+    // Fire-and-forget SDK invocations should not leak the MCP child
+    // processes Cascade may have spawned. `createCascade` (which returns
+    // the instance) still leaves cleanup to the caller.
+    try { await cascade.close(); } catch { /* non-critical */ }
+  }
 }
 
 /**

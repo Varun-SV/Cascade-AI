@@ -92,17 +92,20 @@ export class ToolRegistry {
   registerMcpTools(mcpClient: McpClient): void {
     const definitions = mcpClient.getToolDefinitions();
     for (const def of definitions) {
-      // definitions from McpClient.getToolDefinitions() are already prefixed
-      // but we need to create wrappers for them
-      const [,, serverName, toolName] = def.name.split('::');
+      // Definitions from McpClient.getToolDefinitions() are prefixed as
+      // `mcp::<serverName>::<toolName>` — three parts, not four. Previously
+      // this destructured [,, serverName, toolName] which silently dropped
+      // every MCP tool (toolName was always undefined and the `continue`
+      // below filtered them all out).
+      const [, serverName, toolName] = def.name.split('::');
       if (!serverName || !toolName) continue;
-      
+
       const wrapper = new McpToolWrapper(
         mcpClient,
         serverName,
         toolName,
         def.description.replace(`[MCP:${serverName}] `, ''),
-        def.inputSchema
+        def.inputSchema,
       );
       wrapper.setWorkspaceRoot(this.workspaceRoot);
       this.register(wrapper);

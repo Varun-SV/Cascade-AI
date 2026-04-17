@@ -34,6 +34,7 @@ export class Cascade extends EventEmitter {
   private mcpClient: McpClient;
   private config: CascadeConfig;
   private initialized = false;
+  private initPromise?: Promise<void>;
   private store?: MemoryStore;
   private audit?: AuditLogger;
   private telemetry: Pick<Telemetry, 'capture' | 'shutdown'>;
@@ -69,33 +70,49 @@ export class Cascade extends EventEmitter {
 
   async init(): Promise<void> {
     if (this.initialized) return;
-    await this.router.init(this.config);
+    // Concurrent callers (e.g. the REPL eagerly calls init() and the first
+    // run() also awaits init()) must share the SAME init promise. Otherwise
+    // the MCP client would open duplicate connections and budget:warning
+    // would be registered twice, causing double-emission.
+    if (this.initPromise) return this.initPromise;
 
-    // Bubble budget:warning events from the router up to Cascade consumers
-    this.router.on('budget:warning', (payload: {
-      spentUsd: number;
-      capUsd: number;
-      spendPct: number;
-      warnAtPct: number;
-      remainingUsd: number;
-    }) => {
-      this.emit('budget:warning', payload);
-    });
+    this.initPromise = (async () => {
+      await this.router.init(this.config);
 
-    // Initialize MCP servers
-    if (this.config.tools.mcpServers?.length) {
-      for (const server of this.config.tools.mcpServers) {
-        try {
-          await this.mcpClient.connect(server);
-          this.toolRegistry.registerMcpTools(this.mcpClient);
-        } catch (err) {
-          console.error(`Failed to connect to MCP server "${server.name}":`, err);
+      // Bubble budget:warning events from the router up to Cascade consumers
+      this.router.on('budget:warning', (payload: {
+        spentUsd: number;
+        capUsd: number;
+        spendPct: number;
+        warnAtPct: number;
+        remainingUsd: number;
+      }) => {
+        this.emit('budget:warning', payload);
+      });
+
+      // Initialize MCP servers
+      if (this.config.tools.mcpServers?.length) {
+        for (const server of this.config.tools.mcpServers) {
+          try {
+            await this.mcpClient.connect(server);
+            this.toolRegistry.registerMcpTools(this.mcpClient);
+          } catch (err) {
+            console.error(`Failed to connect to MCP server "${server.name}":`, err);
+          }
         }
       }
-    }
 
-    this.initOptionalFeatures();
-    this.initialized = true;
+      this.initOptionalFeatures();
+      this.initialized = true;
+    })();
+
+    try {
+      await this.initPromise;
+    } catch (err) {
+      // Allow a retry after a failed init.
+      this.initPromise = undefined;
+      throw err;
+    }
   }
 
   private looksLikeSimpleArtifactTask(prompt: string): boolean {
@@ -230,7 +247,9 @@ ${prompt}`
     const toolCreator = this.toolCreator;
 
     let finalOutput = '';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let t2Results: any[] = [];
+    let runError: unknown = null;
 
     // ── Fetch Identity System Prompt ────────────
     let identityPrompt = '';
@@ -287,6 +306,7 @@ ${prompt}`
       });
     };
 
+    try {
     if (complexity === 'Simple') {
       const t3 = new T3Worker(this.router, this.toolRegistry, 'root');
       t3.setHierarchyContext('You are the DIRECT worker for this task. There is no T1 Administrator or T2 Manager involved in this run.');
@@ -358,22 +378,36 @@ ${prompt}`
       finalOutput = result.output;
       t2Results = result.t2Results;
     }
+    } catch (err) {
+      runError = err;
+      throw err;
+    } finally {
+      // Always release pending permission escalations so they don't leak
+      // across runs — even on error paths. cancelAllPending is safe to call
+      // when there are no pending requests.
+      try { escalator.cancelAllPending(); } catch { /* non-critical */ }
 
-    // Clean up any pending escalations on task completion
-    escalator.cancelAllPending();
+      // Always emit telemetry for completion (or failure) so dashboards
+      // don't silently drop failed runs.
+      try {
+        const stats = this.router.getStats();
+        const durationMs = Date.now() - startMs;
+        this.telemetry.capture(runError ? 'cascade:task_failed' : 'cascade:task_complete', {
+          complexity,
+          tier: complexity === 'Simple' ? 'simple' : complexity === 'Moderate' ? 'T2' : 'T1',
+          durationMs,
+          tokenCount: stats.totalTokens,
+          costUsd: stats.totalCostUsd,
+          t2Count: t2Results.length,
+          t3Count: t2Results.reduce((sum: number, r: { t3Results?: unknown[] }) => sum + (r.t3Results?.length ?? 0), 0),
+          errored: runError ? true : false,
+          errorMessage: runError instanceof Error ? runError.message : undefined,
+        });
+      } catch { /* telemetry must never block task results */ }
+    }
 
     const stats = this.router.getStats();
     const durationMs = Date.now() - startMs;
-
-    this.telemetry.capture('cascade:task_complete', {
-      complexity,
-      tier: complexity === 'Simple' ? 'simple' : complexity === 'Moderate' ? 'T2' : 'T1',
-      durationMs,
-      tokenCount: stats.totalTokens,
-      costUsd: stats.totalCostUsd,
-      t2Count: t2Results.length,
-      t3Count: t2Results.reduce((sum: number, r: { t3Results?: unknown[] }) => sum + (r.t3Results?.length ?? 0), 0),
-    });
 
     return {
       output: finalOutput,
@@ -399,5 +433,18 @@ ${prompt}`
 
   getToolRegistry(): ToolRegistry {
     return this.toolRegistry;
+  }
+
+  /**
+   * Tear down MCP connections and flush any pending telemetry so long-lived
+   * hosts (REPL, SDK embedders) don't leak child processes. Safe to call
+   * multiple times.
+   */
+  async close(): Promise<void> {
+    try { await this.mcpClient.disconnectAll(); } catch { /* non-critical */ }
+    try {
+      const maybeShutdown = (this.telemetry as Pick<Telemetry, 'shutdown'>)?.shutdown;
+      if (typeof maybeShutdown === 'function') await maybeShutdown.call(this.telemetry);
+    } catch { /* non-critical */ }
   }
 }

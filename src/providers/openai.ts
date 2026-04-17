@@ -109,11 +109,21 @@ export class OpenAIProvider extends BaseProvider {
       }
     }
 
-    const toolCalls = Object.values(toolCallsMap).map((tc) => ({
-      id: tc.id,
-      name: tc.name,
-      input: JSON.parse(tc.args || '{}') as Record<string, unknown>,
-    }));
+    const toolCalls = Object.values(toolCallsMap).map((tc) => {
+      // OpenAI streams tool-call arguments as incremental fragments. If the
+      // stream is truncated (e.g. max_tokens hit mid-argument, connection
+      // dropped, or the model returned empty args) the concatenated string
+      // may not be valid JSON. Crashing here throws away the whole response
+      // — degrade gracefully by surfacing an empty input and letting the
+      // tier decide what to do.
+      let input: Record<string, unknown> = {};
+      try {
+        input = JSON.parse(tc.args || '{}') as Record<string, unknown>;
+      } catch {
+        input = { __rawArguments: tc.args, __parseError: true };
+      }
+      return { id: tc.id, name: tc.name, input };
+    });
 
     onChunk({ text: '', finishReason });
 
