@@ -23,8 +23,14 @@ export class Keystore {
 
   unlock(password: string): void {
     if (!fs.existsSync(this.storePath)) {
-      this.masterKey = this.deriveKey(password, crypto.randomBytes(SALT_LEN));
-      this.save({}, password);
+      // IMPORTANT: derive the master key and persist it against the SAME
+      // salt. The previous implementation generated two independent random
+      // salts (one for masterKey derivation, one written to disk) which
+      // silently corrupted the store — subsequent unlock attempts would
+      // derive a different key from the on-disk salt and fail to decrypt.
+      const salt = crypto.randomBytes(SALT_LEN);
+      this.masterKey = this.deriveKey(password, salt);
+      this.writeWithSalt({}, salt);
       return;
     }
     const { salt } = this.readRaw();
@@ -99,11 +105,15 @@ export class Keystore {
     fs.writeFileSync(this.storePath, out);
   }
 
-  private save(data: Record<string, string>, _password: string): void {
-    const salt = crypto.randomBytes(SALT_LEN);
-    const key = this.masterKey ?? this.deriveKey(_password, salt);
+  /**
+   * Writes a fresh keystore file using the caller-supplied salt. This is
+   * used on first-time unlock to ensure the salt persisted to disk is
+   * identical to the one that derived `masterKey`.
+   */
+  private writeWithSalt(data: Record<string, string>, salt: Buffer): void {
+    if (!this.masterKey) throw new Error('writeWithSalt called before masterKey was set');
     const iv = crypto.randomBytes(IV_LEN);
-    const cipher = crypto.createCipheriv(ALGORITHM, key, iv) as crypto.CipherGCM;
+    const cipher = crypto.createCipheriv(ALGORITHM, this.masterKey, iv) as crypto.CipherGCM;
     const plaintext = Buffer.from(JSON.stringify(data), 'utf-8');
     const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
     const tag = cipher.getAuthTag();

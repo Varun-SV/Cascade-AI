@@ -415,12 +415,23 @@ export class MemoryStore {
   }
 
   getLatestFileSnapshots(sessionId: string): Array<{ filePath: string; content: string }> {
-    // We want the FIRST snapshot of each file in this session, which represents the "before" state
+    // We want the FIRST snapshot of each file in this session, which
+    // represents the "before" state. The old query used
+    //   GROUP BY file_path HAVING timestamp = MIN(timestamp)
+    // which relies on undefined bare-column behaviour in SQLite — the
+    // `content` column could come from any row in the group, not the one
+    // with the minimum timestamp. Use a correlated subquery so the row
+    // returned always matches the earliest snapshot per file.
     const rows = this.db.prepare(`
-      SELECT file_path, content FROM file_snapshots
-      WHERE session_id = ?
-      GROUP BY file_path
-      HAVING timestamp = MIN(timestamp)
+      SELECT fs.file_path, fs.content
+      FROM file_snapshots fs
+      WHERE fs.session_id = ?
+        AND fs.timestamp = (
+          SELECT MIN(fs2.timestamp)
+          FROM file_snapshots fs2
+          WHERE fs2.session_id = fs.session_id
+            AND fs2.file_path = fs.file_path
+        )
     `).all(sessionId) as Array<{ file_path: string; content: string }>;
 
     return rows.map((r) => ({ filePath: r.file_path, content: r.content }));

@@ -9,7 +9,6 @@
 
 import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { Box, Text, useApp, useInput, render } from 'ink';
-import TextInput from 'ink-text-input';
 import SelectInput from 'ink-select-input';
 import Spinner from 'ink-spinner';
 import path from 'node:path';
@@ -18,6 +17,7 @@ import { randomUUID } from 'node:crypto';
 import { CascadeConfigSchema } from '../../config/schema.js';
 import { CASCADE_CONFIG_FILE, GLOBAL_CONFIG_DIR } from '../../constants.js';
 import type { CascadeConfig } from '../../types.js';
+import { SafeTextInput } from '../components/SafeTextInput.js';
 
 // ── Types ─────────────────────────────────────
 
@@ -464,14 +464,21 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
         <Text>{prompt}</Text>
         <Box marginTop={1}>
           <Text color="green">{'> '}</Text>
-          <TextInput
+          <SafeTextInput
             value={fieldBuffer}
             onChange={setFieldBuffer}
             onSubmit={handleFieldSubmit}
-            mask={isMasked ? '*' : undefined}
+            {...(isMasked ? { mask: '*' } : {})}
             placeholder={isOllama ? 'http://localhost:11434' : ''}
           />
         </Box>
+        {isMasked && (
+          <Box marginTop={1}>
+            <Text dimColor>
+              Tip: Ctrl+V pastes from clipboard. Most terminals also support right-click paste.
+            </Text>
+          </Box>
+        )}
         {state.error && <Text color="red">{state.error}</Text>}
       </Box>
     );

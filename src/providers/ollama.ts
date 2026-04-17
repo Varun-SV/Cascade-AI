@@ -76,7 +76,27 @@ export class OllamaProvider extends BaseProvider {
           } catch { /* ignore parse errors */ }
         }
       });
-      response.data.on('end', resolve);
+      response.data.on('end', () => {
+        // Flush any trailing JSON line that was not newline-terminated.
+        // Ollama usually ends each NDJSON line with "\n", but if the server
+        // disconnects on the last message the final response would otherwise
+        // be lost and the task would report `done: false`.
+        const tail = buffer.trim();
+        if (tail) {
+          try {
+            const parsed = JSON.parse(tail) as OllamaChatChunk;
+            if (parsed.message?.content) {
+              fullContent += parsed.message.content;
+              onChunk({ text: parsed.message.content, finishReason: null });
+            }
+            if (parsed.done) {
+              inputTokens = parsed.prompt_eval_count ?? inputTokens;
+              outputTokens = parsed.eval_count ?? outputTokens;
+            }
+          } catch { /* ignore malformed tail */ }
+        }
+        resolve();
+      });
       response.data.on('error', reject);
     });
 

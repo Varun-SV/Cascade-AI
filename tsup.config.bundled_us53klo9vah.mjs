@@ -1,0 +1,30 @@
+// tsup.config.ts
+import { defineConfig } from "tsup";
+var tsup_config_default = defineConfig({
+  entry: {
+    index: "src/index.ts",
+    cli: "src/cli/index.ts"
+  },
+  format: ["esm", "cjs"],
+  dts: true,
+  clean: true,
+  sourcemap: true,
+  splitting: false,
+  treeshake: true,
+  target: "node18",
+  external: [
+    "better-sqlite3",
+    "playwright",
+    "fsevents"
+  ],
+  esbuildOptions(options) {
+    options.jsx = "automatic";
+  },
+  banner: {
+    js: "// Cascade AI \u2014 Multi-tier AI Orchestration System"
+  }
+});
+export {
+  tsup_config_default as default
+};
+//# sourceMappingURL=data:application/json;base64,ewogICJ2ZXJzaW9uIjogMywKICAic291cmNlcyI6IFsidHN1cC5jb25maWcudHMiXSwKICAic291cmNlc0NvbnRlbnQiOiBbImNvbnN0IF9faW5qZWN0ZWRfZmlsZW5hbWVfXyA9IFwiL3Nlc3Npb25zL2Vjc3RhdGljLWVwaWMtbWNjYXJ0aHkvbW50L0Nhc2NhZGUtQUkvdHN1cC5jb25maWcudHNcIjtjb25zdCBfX2luamVjdGVkX2Rpcm5hbWVfXyA9IFwiL3Nlc3Npb25zL2Vjc3RhdGljLWVwaWMtbWNjYXJ0aHkvbW50L0Nhc2NhZGUtQUlcIjtjb25zdCBfX2luamVjdGVkX2ltcG9ydF9tZXRhX3VybF9fID0gXCJmaWxlOi8vL3Nlc3Npb25zL2Vjc3RhdGljLWVwaWMtbWNjYXJ0aHkvbW50L0Nhc2NhZGUtQUkvdHN1cC5jb25maWcudHNcIjtpbXBvcnQgeyBkZWZpbmVDb25maWcgfSBmcm9tICd0c3VwJztcclxuXHJcbmV4cG9ydCBkZWZhdWx0IGRlZmluZUNvbmZpZyh7XHJcbiAgZW50cnk6IHtcclxuICAgIGluZGV4OiAnc3JjL2luZGV4LnRzJyxcclxuICAgIGNsaTogJ3NyYy9jbGkvaW5kZXgudHMnLFxyXG4gIH0sXHJcbiAgZm9ybWF0OiBbJ2VzbScsICdjanMnXSxcclxuICBkdHM6IHRydWUsXHJcbiAgY2xlYW46IHRydWUsXHJcbiAgc291cmNlbWFwOiB0cnVlLFxyXG4gIHNwbGl0dGluZzogZmFsc2UsXHJcbiAgdHJlZXNoYWtlOiB0cnVlLFxyXG4gIHRhcmdldDogJ25vZGUxOCcsXHJcbiAgZXh0ZXJuYWw6IFtcclxuICAgICdiZXR0ZXItc3FsaXRlMycsXHJcbiAgICAncGxheXdyaWdodCcsXHJcbiAgICAnZnNldmVudHMnLFxyXG4gIF0sXHJcbiAgZXNidWlsZE9wdGlvbnMob3B0aW9ucykge1xyXG4gICAgb3B0aW9ucy5qc3ggPSAnYXV0b21hdGljJztcclxuICB9LFxyXG4gIGJhbm5lcjoge1xyXG4gICAganM6ICcvLyBDYXNjYWRlIEFJIFx1MjAxNCBNdWx0aS10aWVyIEFJIE9yY2hlc3RyYXRpb24gU3lzdGVtJyxcclxuICB9LFxyXG59KTtcclxuIl0sCiAgIm1hcHBpbmdzIjogIjtBQUEyUixTQUFTLG9CQUFvQjtBQUV4VCxJQUFPLHNCQUFRLGFBQWE7QUFBQSxFQUMxQixPQUFPO0FBQUEsSUFDTCxPQUFPO0FBQUEsSUFDUCxLQUFLO0FBQUEsRUFDUDtBQUFBLEVBQ0EsUUFBUSxDQUFDLE9BQU8sS0FBSztBQUFBLEVBQ3JCLEtBQUs7QUFBQSxFQUNMLE9BQU87QUFBQSxFQUNQLFdBQVc7QUFBQSxFQUNYLFdBQVc7QUFBQSxFQUNYLFdBQVc7QUFBQSxFQUNYLFFBQVE7QUFBQSxFQUNSLFVBQVU7QUFBQSxJQUNSO0FBQUEsSUFDQTtBQUFBLElBQ0E7QUFBQSxFQUNGO0FBQUEsRUFDQSxlQUFlLFNBQVM7QUFDdEIsWUFBUSxNQUFNO0FBQUEsRUFDaEI7QUFBQSxFQUNBLFFBQVE7QUFBQSxJQUNOLElBQUk7QUFBQSxFQUNOO0FBQ0YsQ0FBQzsiLAogICJuYW1lcyI6IFtdCn0K

@@ -98,8 +98,18 @@ export class AnthropicProvider extends BaseProvider {
           'anthropic-version': '2023-06-01',
         },
       });
-      const data = await resp.json() as { data: Array<{ id: string; display_name: string }> };
-      
+      // Anthropic returns JSON-encoded error objects ({ type: "error", ... })
+      // for 4xx/5xx responses. Calling `.data.map` on that crashes the caller
+      // and hides the real authentication / network error. Fall through to
+      // the hardcoded model list instead.
+      if (!resp.ok) {
+        return Object.values(MODELS).filter((m) => m.provider === 'anthropic');
+      }
+      const data = await resp.json() as { data?: Array<{ id: string; display_name: string }> };
+      if (!Array.isArray(data?.data)) {
+        return Object.values(MODELS).filter((m) => m.provider === 'anthropic');
+      }
+
       return data.data.map((m) => {
         const known = Object.values(MODELS).find((km) => km.id === m.id && km.provider === 'anthropic');
         if (known) return known;

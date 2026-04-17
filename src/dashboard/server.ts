@@ -67,7 +67,18 @@ export class DashboardServer {
   }
 
   async stop(): Promise<void> {
+    // Cancel any pending throttled broadcast so we don't fire a broadcast
+    // on an already-closed socket (which logs noisy errors and keeps the
+    // event loop alive).
+    if (this.broadcastTimer) {
+      clearTimeout(this.broadcastTimer);
+      this.broadcastTimer = null;
+    }
     this.socket.close();
+    // Release the lazily-opened global runtime DB handle so the caller can
+    // safely reopen the dashboard or delete the underlying file.
+    try { this.globalStore?.close(); } catch { /* ignore */ }
+    this.globalStore = null;
     await new Promise<void>((resolve, reject) => {
       this.httpServer.close((err) => (err ? reject(err) : resolve()));
     });
