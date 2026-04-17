@@ -17,6 +17,7 @@ import { dashboardCommand } from './commands/dashboard.js';
 import { makeIdentityCommand } from './commands/identity.js';
 import { modelsCommand } from './commands/models.js';
 import { exportCommand } from './commands/export.js';
+import { telemetryCommand } from './commands/telemetry.js';
 import { runSetupWizard } from './setup/index.js';
 
 dotenv.config();
@@ -86,6 +87,18 @@ program
   .option('-v, --verbose', 'Show all models per provider with pricing')
   .action(async (opts) => {
     await modelsCommand({ verbose: opts.verbose });
+  });
+
+program
+  .command('telemetry [action]')
+  .description('Toggle anonymous usage telemetry (on | off | status). Default: status')
+  .action(async (action?: string) => {
+    const normalized = (action ?? 'status').toLowerCase();
+    if (normalized !== 'on' && normalized !== 'off' && normalized !== 'status') {
+      console.error(chalk.red(`Unknown action: ${action}. Use: on | off | status`));
+      process.exit(1);
+    }
+    await telemetryCommand(normalized);
   });
 
 program

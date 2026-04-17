@@ -16,12 +16,15 @@
   "bin": {
     "cascade": "bin/cascade.js"
   },
+  "workspaces": [
+    "web"
+  ],
   "scripts": {
-    "build:web": "npm --prefix web run build",
+    "build:web": "npm run build -w web",
     "build:cli": "tsup",
     "build": "npm run build:web && npm run build:cli",
     "dev": "tsup --watch",
-    "dev:web": "cd web && npm run dev",
+    "dev:web": "npm run dev -w web",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
@@ -40,6 +43,7 @@
     "@google/genai": "^1.0.0",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "axios": "1.13.6",
+    "bcryptjs": "^2.4.3",
     "better-sqlite3": "^12.9.0",
     "chalk": "^5.3.0",
     "commander": "^12.1.0",
@@ -48,6 +52,7 @@
     "diff": "^7.0.0",
     "dotenv": "^16.4.0",
     "express": "^4.21.0",
+    "express-rate-limit": "^7.4.0",
     "glob": "^11.0.0",
     "highlight.js": "^11.10.0",
     "ignore": "^6.0.2",
@@ -76,6 +81,7 @@
     "zod": "^3.23.8"
   },
   "optionalDependencies": {
+    "keytar": "^7.9.0",
     "playwright": "^1.48.0"
   },
   "peerDependencies": {
@@ -87,6 +93,7 @@
     }
   },
   "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
     "@types/better-sqlite3": "^7.6.13",
     "@types/diff": "^5.2.3",
     "@types/express": "^5.0.0",

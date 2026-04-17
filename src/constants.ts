@@ -12,6 +12,7 @@ export const CASCADE_CONFIG_FILE = '.cascade/config.json';
 export const CASCADE_KEYSTORE_FILE = '.cascade/keystore.enc';
 export const CASCADE_AUDIT_FILE = '.cascade/audit.log';
 export const CASCADE_DB_FILE = '.cascade/memory.db';
+export const CASCADE_DASHBOARD_SECRET_FILE = '.cascade/dashboard-secret';
 
 export const GLOBAL_CONFIG_DIR = '.cascade-ai';
 export const GLOBAL_DB_FILE = 'memory.db';

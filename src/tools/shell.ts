@@ -78,11 +78,19 @@ export class ShellTool extends BaseTool {
       }
     }
 
-    // User allowlist (if set, command must match one entry and contain no shell metacharacters)
+    // User allowlist (if set, the FIRST token of the command must be an exact
+    // match for an entry, and the command must contain no shell metacharacters).
+    //
+    // Previously this used `command.startsWith(a)`, which let `npm-foo` through
+    // when `npm` was whitelisted. Token-level comparison closes that hole.
     if (this.allowlist.length > 0) {
-      const allowed = this.allowlist.some((a) => command.startsWith(a));
+      const firstToken = command.trimStart().split(/\s+/)[0] ?? '';
+      const allowed = this.allowlist.some((a) => firstToken === a);
       if (!allowed) {
-        throw new Error(`Command not in allowlist. Allowed prefixes: ${this.allowlist.join(', ')}`);
+        throw new Error(
+          `Command not in allowlist. First token "${firstToken}" must exactly ` +
+          `match one of: ${this.allowlist.join(', ')}`,
+        );
       }
 
       // Chaining metacharacters defeat the allowlist — block them when allowlist is active.

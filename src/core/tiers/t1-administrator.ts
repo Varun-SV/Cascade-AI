@@ -23,6 +23,7 @@ import { COMPLEXITY_T2_COUNT } from '../../constants.js';
 import { PeerBus } from '../peer/bus.js';
 import type { PermissionEscalator } from '../permissions/escalator.js';
 import type { ToolCreator } from '../../tools/tool-creator.js';
+import { parseFirstJsonObject } from '../../utils/json-extract.js';
 
 const T1_SYSTEM_PROMPT = `You are T1, the Administrator in the Cascade AI orchestration system.
 
@@ -223,11 +224,10 @@ Leave dependsOn empty for subtasks that can run immediately in parallel.`;
     });
 
     try {
-      const jsonMatch = /\{[\s\S]*\}/.exec(result.content);
-      if (!jsonMatch) throw new Error('No JSON in T1 response');
-      const plan = JSON.parse(jsonMatch[0]) as TaskPlan;
-      this.validatePlan(plan);
-      return plan;
+      const parsed = parseFirstJsonObject<TaskPlan>(result.content);
+      if (!parsed) throw new Error('No JSON in T1 response');
+      this.validatePlan(parsed);
+      return parsed;
     } catch {
       // Fallback: single section, single T3
       return {
@@ -267,12 +267,21 @@ Leave dependsOn empty for subtasks that can run immediately in parallel.`;
 
   private async dispatchT2Managers(sections: T1ToT2Assignment[]): Promise<T2Result[]> {
     // Wire peer sync IDs
-    const idMap = new Map(sections.map((s) => [s.sectionId, s]));
     for (const section of sections) {
       section.peerT2Ids = sections
         .filter((x) => x.sectionId !== section.sectionId)
         .map((x) => x.sectionId);
     }
+
+    // Track (emitter, event, handler) tuples so we can detach all listeners
+    // when dispatch finishes. Without this, bubble handlers and peer-sync
+    // routers leak for the lifetime of the process in long-lived REPLs.
+    const registered: Array<[T2Manager, string, (...args: unknown[]) => void]> = [];
+    const bind = <T>(m: T2Manager, event: string, fn: (arg: T) => void) => {
+      const handler = (arg: T) => fn(arg);
+      m.on(event, handler as (...args: unknown[]) => void);
+      registered.push([m, event, handler as (...args: unknown[]) => void]);
+    };
 
     const managers: T2Manager[] = sections.map((section) => {
       const manager = new T2Manager(this.router, this.toolRegistry, this.id);
@@ -282,35 +291,38 @@ Leave dependsOn empty for subtasks that can run immediately in parallel.`;
       }
       manager.setPeerBus(this.t2PeerBus);
 
-      // ← Inject the permission escalator into each T2 manager
       if (this.permissionEscalator) {
         manager.setPermissionEscalator(this.permissionEscalator);
       }
 
-      // ← Inject optional ToolCreator for runtime tool generation
       if (this.toolCreator) {
         manager.setToolCreator(this.toolCreator);
       }
 
       this.t2Managers.set(section.sectionId, manager);
 
-      // Bubble up events
-      manager.on('stream:token', (e) => this.emit('stream:token', e));
-      manager.on('log', (e) => this.emit('log', e));
-      manager.on('tier:status', (e) => this.emit('tier:status', e));
-      manager.on('tool:approval-request', (e) => this.emit('tool:approval-request', e));
+      bind(manager, 'stream:token', (e) => this.emit('stream:token', e));
+      bind(manager, 'log', (e) => this.emit('log', e));
+      bind(manager, 'tier:status', (e) => this.emit('tier:status', e));
+      bind(manager, 'tool:approval-request', (e) => this.emit('tool:approval-request', e));
 
-      // Route peer sync
-      manager.on('message', (msg) => {
+      bind(manager, 'message', (msg: { type: string; from: string; payload: Record<string, unknown> }) => {
         if (msg.type === 'PEER_SYNC') {
           const recipientId = msg.payload.recipientT3Id as string;
           const target = this.t2Managers.get(recipientId);
-          if (target) target.receivePeerSync(msg.from, msg.payload.content);
+          if (target) target.receivePeerSync(msg.from, msg.payload.content as string);
         }
       });
 
       return manager;
     });
+
+    const cleanup = () => {
+      for (const [m, event, handler] of registered) {
+        m.off(event, handler);
+      }
+      registered.length = 0;
+    };
 
     // ── Phase 1: T2 Peer Discussion — Proactive Announcement ──────────────
     // Each T2 broadcasts its section plan. T1 collects for 500ms and uses
@@ -377,6 +389,7 @@ Leave dependsOn empty for subtasks that can run immediately in parallel.`;
     const isSequential = sections.some(s => s.executionMode === 'sequential');
     const t2Results: T2Result[] = [];
 
+    try {
     if (isSequential) {
       this.log('Dispatching T2 managers sequentially');
       for (let i = 0; i < managers.length; i++) {
@@ -449,6 +462,9 @@ Leave dependsOn empty for subtasks that can run immediately in parallel.`;
           });
         }
       }
+    }
+    } finally {
+      cleanup();
     }
 
     return t2Results;

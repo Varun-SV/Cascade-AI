@@ -94,8 +94,32 @@ export async function doctorCommand(): Promise<void> {
     label: 'Dashboard JWT secret',
     ok: !config.dashboard.auth || dashboardSecretConfigured,
     detail: config.dashboard.auth
-      ? (dashboardSecretConfigured ? 'Configured' : 'Using ephemeral secret at runtime')
+      ? (dashboardSecretConfigured ? 'Configured' : 'Persisted at .cascade/dashboard-secret (0600)')
       : 'Not required',
+  });
+
+  // Keystore backend (keytar if available, encrypted file otherwise)
+  let keystoreBackend = 'file (AES-256-GCM)';
+  try {
+    await import('keytar');
+    keystoreBackend = 'keytar (OS keychain)';
+  } catch {
+    // keytar not installed or failed to load (Alpine, headless)
+  }
+  checks.push({
+    label: 'Keystore backend',
+    ok: true,
+    detail: keystoreBackend,
+  });
+
+  // Telemetry — opt-in only, displayed prominently so users can audit it.
+  const telemetryEnabled = Boolean(config.telemetry?.enabled);
+  checks.push({
+    label: 'Telemetry',
+    ok: true,
+    detail: telemetryEnabled
+      ? 'ON — toggle with `cascade telemetry off`'
+      : 'OFF (default) — toggle with `cascade telemetry on`',
   });
 
   // Print results

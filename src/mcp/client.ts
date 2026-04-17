@@ -20,11 +20,47 @@ export interface McpTool {
   inputSchema: Record<string, unknown>;
 }
 
+/**
+ * Gate called before each MCP server is spawned. Lets the caller (REPL or
+ * SDK) prompt the user for explicit approval of a subprocess binary.
+ * Return `true` to allow, `false` to reject.
+ */
+export type McpApprovalCallback = (server: McpServerConfig) => Promise<boolean> | boolean;
+
+export interface McpClientOptions {
+  /** Names of servers the user has already trusted (config.mcp.trusted). */
+  trustedServers?: string[];
+  /** Approval gate invoked when a server is NOT in the trusted list. */
+  approvalCallback?: McpApprovalCallback;
+}
+
 export class McpClient {
   private clients: Map<string, Client> = new Map();
   private tools: Map<string, McpTool> = new Map();
+  private trustedServers: Set<string>;
+  private approvalCallback: McpApprovalCallback | undefined;
+
+  constructor(options: McpClientOptions = {}) {
+    this.trustedServers = new Set(options.trustedServers ?? []);
+    this.approvalCallback = options.approvalCallback;
+  }
 
   async connect(server: McpServerConfig): Promise<void> {
+    // Spawning an arbitrary subprocess is the riskiest operation in the
+    // tool system — the MCP command could be anything, including curl or a
+    // shell. Require explicit trust before transport creation.
+    if (!this.trustedServers.has(server.name)) {
+      const approved = this.approvalCallback
+        ? await this.approvalCallback(server)
+        : false;
+      if (!approved) {
+        throw new Error(
+          `MCP server "${server.name}" is not trusted. Add it to config.mcp.trusted or approve interactively before connecting.`,
+        );
+      }
+      this.trustedServers.add(server.name);
+    }
+
     const transport = new StdioClientTransport({
       command: server.command,
       args: server.args ?? [],
@@ -39,9 +75,20 @@ export class McpClient {
     await client.connect(transport);
     this.clients.set(server.name, client);
 
-    // Discover tools from this server
+    // Discover tools from this server. If another server already registered
+    // a tool with the same bare name, emit a console warning but keep the
+    // new key distinct (we namespace internally as `<server>::<tool>`).
     const toolsResult = await client.listTools();
     for (const tool of toolsResult.tools) {
+      for (const existing of this.tools.values()) {
+        if (existing.name === tool.name && existing.serverName !== server.name) {
+          console.warn(
+            `[mcp] Tool "${tool.name}" is exposed by both "${existing.serverName}" and "${server.name}". ` +
+            `Cascade disambiguates internally via mcp::<server>::<tool>.`,
+          );
+          break;
+        }
+      }
       this.tools.set(`${server.name}::${tool.name}`, {
         serverName: server.name,
         name: tool.name,

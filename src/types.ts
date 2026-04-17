@@ -424,6 +424,12 @@ export interface ToolsConfig {
   requireApprovalFor: string[];
   browserEnabled: boolean;
   mcpServers?: McpServerConfig[];
+  /**
+   * Names of MCP servers (matching McpServerConfig.name) that the user has
+   * explicitly trusted. Servers not in this list require interactive
+   * approval before they are spawned.
+   */
+  mcpTrusted?: string[];
 }
 
 export interface HooksConfig {

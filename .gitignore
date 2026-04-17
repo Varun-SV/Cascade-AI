@@ -5,6 +5,11 @@ web/node_modules/
 *.log
 .env
 .env.local
+.cascade-credentials
+
+# Stray build / watcher artifacts
+tsup.config.bundled_*.mjs
+vitest.config.ts.timestamp-*.mjs
 .cascade/keystore.enc
 .cascade/sessions/
 coverage/

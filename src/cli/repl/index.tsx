@@ -597,6 +597,34 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         },
       });
     });
+    cascade.on('budget:exceeded', (payload: { reason: string }) => {
+      dispatch({
+        type: 'ADD_MESSAGE',
+        message: {
+          id: randomUUID(),
+          role: 'error',
+          content: `Budget exceeded: ${payload.reason}. New LLM calls rejected.`,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    });
+    // Re-use the approval dialog for MCP server spawn requests. These are the
+    // riskiest events we expose — an arbitrary subprocess.
+    cascade.on('mcp:approval-required', (payload: { server: { name: string; command: string; args?: string[] } }) => {
+      const server = payload.server;
+      dispatch({
+        type: 'SET_APPROVAL',
+        request: {
+          id: `mcp-${server.name}`,
+          tierId: 'MCP',
+          toolName: `mcp::${server.name}`,
+          input: { command: server.command, args: server.args ?? [] },
+          description: `Spawn MCP server "${server.name}" via command: ${server.command} ${server.args?.join(' ') ?? ''}`,
+          isDangerous: true,
+        },
+      });
+      approvalResolverRef.current = ({ approved }) => cascade.resolveMcpApproval(server.name, approved);
+    });
     try {
       const result = await cascade.run({
         prompt: trimmed,
