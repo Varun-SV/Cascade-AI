@@ -71,6 +71,17 @@ export class Cascade extends EventEmitter {
     if (this.initialized) return;
     await this.router.init(this.config);
 
+    // Bubble budget:warning events from the router up to Cascade consumers
+    this.router.on('budget:warning', (payload: {
+      spentUsd: number;
+      capUsd: number;
+      spendPct: number;
+      warnAtPct: number;
+      remainingUsd: number;
+    }) => {
+      this.emit('budget:warning', payload);
+    });
+
     // Initialize MCP servers
     if (this.config.tools.mcpServers?.length) {
       for (const server of this.config.tools.mcpServers) {

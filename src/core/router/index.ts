@@ -2,6 +2,7 @@
 //  Cascade AI — Model Router
 // ─────────────────────────────────────────────
 
+import EventEmitter from 'node:events';
 import type {
   CascadeConfig,
   GenerateOptions,
@@ -40,7 +41,7 @@ export interface RouterStats {
   outputTokensByTier: Record<string, number>;
 }
 
-export class CascadeRouter {
+export class CascadeRouter extends EventEmitter {
   private selector!: ModelSelector;
   private failover!: FailoverManager;
   private providers: Map<string, BaseProvider> = new Map();
@@ -58,11 +59,17 @@ export class CascadeRouter {
   private tierModels: Map<TierRole, ModelInfo> = new Map();
   private config!: CascadeConfig;
   private sessionCostUsd = 0;
+  /** Guard to emit the budget warning only once per session. */
+  private budgetWarnFired = false;
 
   /** Thrown when the configured budget is exceeded. */
   static BudgetExceededError = class extends Error {
     constructor(msg: string) { super(msg); this.name = 'BudgetExceededError'; }
   };
+
+  constructor() {
+    super();
+  }
 
   async init(config: CascadeConfig): Promise<void> {
     this.config = config;
@@ -257,6 +264,7 @@ export class CascadeRouter {
       outputTokensByTier: {},
     };
     this.sessionCostUsd = 0;
+    this.budgetWarnFired = false;
   }
 
   getFailures(): Record<string, string> {
@@ -389,12 +397,33 @@ export class CascadeRouter {
     this.stats.inputTokensByTier[tier] = (this.stats.inputTokensByTier[tier] ?? 0) + usage.inputTokens;
     this.stats.outputTokensByTier[tier] = (this.stats.outputTokensByTier[tier] ?? 0) + usage.outputTokens;
 
-    // ── Budget enforcement ─────────────────────
+    // ── Budget enforcement & warning ───────────
     const budget = this.config?.budget;
-    if (budget?.sessionBudgetUsd && this.sessionCostUsd >= budget.sessionBudgetUsd) {
-      throw new CascadeRouter.BudgetExceededError(
-        `Session budget of $${budget.sessionBudgetUsd.toFixed(4)} exceeded (spent $${this.sessionCostUsd.toFixed(4)}).`,
-      );
+    if (budget?.sessionBudgetUsd) {
+      const cap = budget.sessionBudgetUsd;
+      const spendPct = (this.sessionCostUsd / cap) * 100;
+
+      // Fire a one-shot warning when spend first crosses the warnAtPct threshold
+      if (!this.budgetWarnFired) {
+        const warnAt = budget.warnAtPct ?? 80;
+        if (spendPct >= warnAt) {
+          this.budgetWarnFired = true;
+          this.emit('budget:warning', {
+            spentUsd: this.sessionCostUsd,
+            capUsd: cap,
+            spendPct: Math.round(spendPct * 10) / 10,
+            warnAtPct: warnAt,
+            remainingUsd: Math.max(0, cap - this.sessionCostUsd),
+          });
+        }
+      }
+
+      // Hard stop when budget is exceeded
+      if (this.sessionCostUsd >= cap) {
+        throw new CascadeRouter.BudgetExceededError(
+          `Session budget of $${cap.toFixed(4)} exceeded (spent $${this.sessionCostUsd.toFixed(4)}).`,
+        );
+      }
     }
   }
 

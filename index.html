@@ -1170,7 +1170,7 @@
         <div class="feature-cell">
           <div class="feature-icon amber">💰</div>
           <h3>Per-Tier Cost Breakdown &amp; Budget Control</h3>
-          <p>Every result exposes <code>costByTier</code>, <code>tokensByTier</code>, and percentage attribution. Set a live session budget with <code>/budget set 0.50</code> — Cascade stops new tasks the moment the cap is hit, with no config-file edits required.</p>
+          <p>Every result exposes <code>costByTier</code>, <code>tokensByTier</code>, and percentage attribution. Set a live session budget with <code>/budget set 0.50</code> — Cascade warns you at 80% spend (configurable via <code>warnAtPct</code>) and stops new tasks the moment the cap is hit, with no config-file edits required.</p>
         </div>
         <div class="feature-cell">
           <div class="feature-icon lime">⌨️</div>
@@ -1240,7 +1240,7 @@
           </div>
           <div class="code-bullet">
             <div class="code-bullet-dot"></div>
-            <p>Live budget management — <code>/budget set &lt;$amount&gt;</code> caps session spend at runtime; <code>/budget</code> shows a visual spend bar</p>
+            <p>Live budget management — <code>/budget set &lt;$amount&gt;</code> caps session spend at runtime; <code>/budget</code> shows a visual spend bar; proactive warning fires at 80% (configurable <code>warnAtPct</code>) before the hard stop</p>
           </div>
           <div class="code-bullet">
             <div class="code-bullet-dot"></div>
