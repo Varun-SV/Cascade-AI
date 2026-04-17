@@ -574,6 +574,18 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         dispatch({ type: 'SET_ACTIVE_TOOL', toolName });
       }
     });
+    cascade.on('budget:warning', (payload: { spentUsd: number; capUsd: number; spendPct: number; remainingUsd: number }) => {
+      const bar = '█'.repeat(Math.round(payload.spendPct / 10)) + '░'.repeat(10 - Math.round(payload.spendPct / 10));
+      dispatch({
+        type: 'ADD_MESSAGE',
+        message: {
+          id: randomUUID(),
+          role: 'system',
+          content: `⚠ Budget warning: ${payload.spendPct}% used ($${payload.spentUsd.toFixed(4)} of $${payload.capUsd.toFixed(2)}) — $${payload.remainingUsd.toFixed(4)} remaining  [${bar}]`,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    });
     try {
       const result = await cascade.run({
         prompt: trimmed,
@@ -1072,24 +1084,4 @@ async function generateSessionName(firstMessage: string, cascade: Cascade | null
       messages: [{ role: 'user', content: prompt }],
       maxTokens: 20,
     });
-    const name = result.content.trim().replace(/^["']|["']$/g, '').slice(0, 60);
-    return name || null;
-  } catch {
-    return null;
-  }
-}
-
-function countNodes(node: TierNode | null, predicate: (node: TierNode) => boolean): number {
-  if (!node) return 0;
-  const self = predicate(node) ? 1 : 0;
-  return self + (node.children?.reduce((acc: number, child: TierNode) => acc + countNodes(child, predicate), 0) ?? 0);
-}
-
-function findCurrentAction(node: TierNode): string | undefined {
-  if (node.status === 'ACTIVE' && node.currentAction) return node.currentAction;
-  for (const child of node.children ?? []) {
-    const action = findCurrentAction(child);
-    if (action) return action;
-  }
-  return undefined;
-}
+    const name = result.content.trim().replace(/^["']|["']$/g, '').slice(0,
