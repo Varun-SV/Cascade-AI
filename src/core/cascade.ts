@@ -401,3 +401,7 @@ ${prompt}`
     return this.toolRegistry;
   }
 }
+egistry {
+    return this.toolRegistry;
+  }
+}
