@@ -180,13 +180,18 @@ interface ReplProps {
 async function refreshModelCache(store: MemoryStore, providers: CascadeConfig['providers']) {
   for (const provider of providers) {
     try {
-      const dummyModel: ModelInfo = { id: 'dummy', name: 'dummy', provider: provider.type, contextWindow: 0, isVisionCapable: false, inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, maxOutputTokens: 0, supportsStreaming: false, isLocal: false };
+      const dummyId = provider.type === 'azure' ? provider.deploymentName || 'azure-model' : 'dummy';
+      const dummyModel: ModelInfo = { id: dummyId, name: dummyId, provider: provider.type, contextWindow: 0, isVisionCapable: false, inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, maxOutputTokens: 0, supportsStreaming: false, isLocal: false };
       let instance: BaseProvider | undefined;
       if (provider.type === 'openai') instance = new OpenAIProvider(provider, dummyModel);
       else if (provider.type === 'gemini') instance = new GeminiProvider(provider, dummyModel);
       else if (provider.type === 'anthropic') instance = new AnthropicProvider(provider, dummyModel);
       else if (provider.type === 'ollama') instance = new OllamaProvider(provider, dummyModel);
       else if (provider.type === 'openai-compatible') instance = new OpenAICompatibleProvider(provider, dummyModel);
+      else if (provider.type === 'azure') {
+        const { AzureOpenAIProvider } = await import('../../providers/azure.js');
+        instance = new AzureOpenAIProvider(provider, dummyModel);
+      }
       if (instance) {
         const fetched = await instance.listModels();
         for (const m of fetched) store.upsertCachedModel(m);
