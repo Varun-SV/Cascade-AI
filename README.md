@@ -81,7 +81,7 @@ User prompt
 - **Token-by-token streaming** — live output as agents work
 - **Live agent tree** — real-time T1→T2→T3 execution graph in the terminal
 - **Approval prompts** — explicit y/n for destructive tool operations
-- **Provider failover** — auto-switches provider on rate limits (exponential backoff)
+- **Provider failover** — auto-switches provider on rate limits (exponential backoff); automatically re-enables recovered providers on success
 - **Context auto-summarization** — compresses history when the context window fills
 - **Conversation branching** — fork a session to try parallel approaches
 
@@ -586,7 +586,7 @@ web/
 |--------|---------|
 | ✓ | T1/T2/T3 hierarchical orchestration |
 | ✓ | 6 AI providers + Ollama |
-| ✓ | Provider failover |
+| ✓ | Provider failover with automatic recovery |
 | ✓ | Streaming REPL (ink) |
 | ✓ | Live agent tree visualization |
 | ✓ | AES-256 encrypted keystore |

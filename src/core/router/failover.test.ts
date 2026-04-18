@@ -9,6 +9,7 @@ import type { ModelSelector } from './selector.js';
 function makeSelector(): ModelSelector {
   return {
     markProviderUnavailable: vi.fn(),
+    markProviderAvailable: vi.fn(),
     getNextFallback: vi.fn().mockReturnValue(null),
   } as unknown as ModelSelector;
 }
@@ -121,13 +122,51 @@ describe('FailoverManager', () => {
     vi.useRealTimers();
   });
 
-  it('clearFailure resets the provider state', () => {
+  it('clearFailure resets the provider state and re-enables it in selector', () => {
     mgr.recordFailure('openai-compatible', 'error');
     expect(mgr.isProviderAvailable('openai-compatible')).toBe(false);
 
     mgr.clearFailure('openai-compatible');
     expect(mgr.isProviderAvailable('openai-compatible')).toBe(true);
     expect(mgr.getFailureCount('openai-compatible')).toBe(0);
+    expect(selector.markProviderAvailable).toHaveBeenCalledWith('openai-compatible');
+  });
+
+  it('isProviderAvailable re-enables provider in selector when timeout expires', () => {
+    vi.useFakeTimers();
+
+    mgr.recordFailure('anthropic', 'rate_limit');
+    expect(selector.markProviderUnavailable).toHaveBeenCalledWith('anthropic');
+
+    // Advance past the 30s backoff window
+    vi.advanceTimersByTime(30_001);
+    expect(mgr.isProviderAvailable('anthropic')).toBe(true);
+
+    // Selector should have been re-enabled
+    expect(selector.markProviderAvailable).toHaveBeenCalledWith('anthropic');
+    vi.useRealTimers();
+  });
+
+  it('recordSuccess clears failure state and re-enables provider immediately', () => {
+    vi.useFakeTimers();
+
+    mgr.recordFailure('openai', 'rate_limit');
+    expect(mgr.isProviderAvailable('openai')).toBe(false);
+    expect(mgr.getFailureCount('openai')).toBe(1);
+
+    // A successful call clears the backoff without waiting for the window
+    mgr.recordSuccess('openai');
+    expect(mgr.isProviderAvailable('openai')).toBe(true);
+    expect(mgr.getFailureCount('openai')).toBe(0);
+    expect(selector.markProviderAvailable).toHaveBeenCalledWith('openai');
+
+    vi.useRealTimers();
+  });
+
+  it('recordSuccess is a no-op for providers without active failures', () => {
+    // Should not throw or mutate selector when provider was never failed
+    expect(() => mgr.recordSuccess('gemini')).not.toThrow();
+    expect(selector.markProviderAvailable).not.toHaveBeenCalled();
   });
 
   it('getFailureReport includes failure count and retry countdown', () => {
