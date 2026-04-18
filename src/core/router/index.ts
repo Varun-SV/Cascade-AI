@@ -201,6 +201,10 @@ export class CascadeRouter extends EventEmitter {
       }
 
       this.recordStats(tier, model, result.usage);
+      // On success, signal the failover manager so that a provider which
+      // previously tripped a rate-limit can be immediately re-enabled rather
+      // than waiting the full backoff window to expire.
+      this.failover.recordSuccess(model.provider);
       return result;
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);

@@ -104,6 +104,16 @@ export class ModelSelector {
     this.availableProviders.delete(provider);
   }
 
+  /**
+   * Re-add a provider to the available set after it has recovered (e.g. after
+   * a failover timeout expires or a successful call confirms recovery). Only
+   * re-enables providers that were originally configured — callers should
+   * guard against enabling providers that were never configured.
+   */
+  markProviderAvailable(provider: ProviderType): void {
+    this.availableProviders.add(provider);
+  }
+
   private resolveDynamicModel(overrideModelId: string): ModelInfo | undefined {
     let providerStr: ProviderType | null = null;
     let actualId = overrideModelId;

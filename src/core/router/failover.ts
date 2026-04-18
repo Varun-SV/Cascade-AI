@@ -49,11 +49,26 @@ export class FailoverManager {
     if (!failure) return true;
 
     if (Date.now() - failure.failedAt >= failure.retryAfterMs) {
-      // Retry window passed — mark as potentially available again
+      // Retry window passed — re-enable provider in both the failure map and
+      // the selector so the model priority chain can route to it again.
       this.failures.delete(provider);
+      this.selector.markProviderAvailable(provider);
       return true;
     }
     return false;
+  }
+
+  /**
+   * Call after a successful generation to immediately re-enable a provider
+   * that had previously been marked unavailable. This allows fast recovery
+   * when a transient rate-limit clears before the backoff window expires,
+   * preventing unnecessary routing to more expensive fallback models.
+   */
+  recordSuccess(provider: ProviderType): void {
+    if (this.failures.has(provider)) {
+      this.failures.delete(provider);
+      this.selector.markProviderAvailable(provider);
+    }
   }
 
   getFallbackModel(currentModel: ModelInfo, tier: TierRole): ModelInfo | null {
@@ -76,5 +91,8 @@ export class FailoverManager {
 
   clearFailure(provider: ProviderType): void {
     this.failures.delete(provider);
+    // Sync the selector so that manually cleared providers can be routed to
+    // immediately without waiting for the backoff window to expire.
+    this.selector.markProviderAvailable(provider);
   }
 }
