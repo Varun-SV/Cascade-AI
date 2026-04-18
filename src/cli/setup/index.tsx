@@ -30,6 +30,7 @@ interface ProviderEntry {
   apiKey?: string;
   baseUrl?: string;
   deploymentName?: string;
+  apiVersion?: string;
 }
 
 interface FetchedModel {
@@ -139,10 +140,14 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
       return { ...state, currentEntryIdx: next };
     }
     case 'ADD_AZURE': {
+      const prevAzure = state.entries.find(e => e.type === 'azure');
       const newEntry: ProviderEntry = {
         id: randomUUID(),
         type: 'azure',
         label: `Azure deployment ${state.entries.filter(e => e.type === 'azure').length + 1}`,
+        baseUrl: prevAzure?.baseUrl,
+        apiKey: prevAzure?.apiKey,
+        apiVersion: prevAzure?.apiVersion,
       };
       return {
         ...state,
@@ -218,7 +223,7 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
 
   const [providerCursor, setProviderCursor] = useState(0);
   const [fieldBuffer, setFieldBuffer] = useState('');
-  const [fieldStage, setFieldStage] = useState<'apiKey' | 'baseUrl' | 'deploymentName' | 'label' | 'askMore'>('apiKey');
+  const [fieldStage, setFieldStage] = useState<'apiKey' | 'baseUrl' | 'deploymentName' | 'label' | 'apiVersion' | 'askMore'>('apiKey');
   const dispatchRef = useRef(dispatch);
   dispatchRef.current = dispatch;
 
@@ -266,8 +271,9 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
             dispatchRef.current({ type: 'SET_FETCH_LOG', line: `  ✔ ${entry.label} — ${fetched.length} models` });
           } else if (type === 'azure') {
             const { AzureOpenAIProvider } = await import('../../providers/azure.js');
-            const dummyModel = { id: 'dummy', name: 'dummy', provider: type as never, contextWindow: 0, isVisionCapable: false, inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, maxOutputTokens: 0, supportsStreaming: false, isLocal: false };
-            const p = new AzureOpenAIProvider({ type, apiKey, baseUrl, deploymentName }, dummyModel);
+            const actualModelId = deploymentName || `azure-${entry.id}`;
+            const dummyModel = { id: actualModelId, name: actualModelId, provider: type as never, contextWindow: 0, isVisionCapable: false, inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, maxOutputTokens: 0, supportsStreaming: false, isLocal: false };
+            const p = new AzureOpenAIProvider({ type, apiKey, baseUrl, deploymentName, apiVersion: entry.apiVersion }, dummyModel);
             const fetched = await p.listModels();
             fetched.forEach(m => models.push({ id: m.id, name: m.name, providerLabel: entry.label }));
             dispatchRef.current({ type: 'SET_FETCH_LOG', line: `  ✔ ${entry.label} — ${fetched.length} models` });
@@ -293,6 +299,7 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
           ...(e.apiKey ? { apiKey: e.apiKey } : {}),
           ...(e.baseUrl ? { baseUrl: e.baseUrl } : {}),
           ...(e.deploymentName ? { deploymentName: e.deploymentName } : {}),
+          ...(e.apiVersion ? { apiVersion: e.apiVersion } : {}),
         }));
 
         const models: Record<string, string> = {};
@@ -329,7 +336,8 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
       if (key.return) {
         if (state.selectedTypes.size === 0) return;
         dispatch({ type: 'CONFIRM_PROVIDERS' });
-        setFieldStage('apiKey');
+        const firstType = [...state.selectedTypes][0];
+        setFieldStage(firstType === 'azure' ? 'deploymentName' : firstType === 'openai-compatible' ? 'label' : firstType === 'ollama' ? 'baseUrl' : 'apiKey');
         setFieldBuffer('');
       }
     }
@@ -354,13 +362,21 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
       if (fieldStage === 'deploymentName') {
         dispatch({ type: 'SET_ENTRY_FIELD', field: 'deploymentName', value: val });
         setFieldBuffer('');
-        setFieldStage('baseUrl');
+        if (currentEntry.baseUrl && currentEntry.apiKey && currentEntry.apiVersion) {
+          setFieldStage('askMore');
+        } else {
+          setFieldStage('baseUrl');
+        }
       } else if (fieldStage === 'baseUrl') {
         dispatch({ type: 'SET_ENTRY_FIELD', field: 'baseUrl', value: val });
         setFieldBuffer('');
         setFieldStage('apiKey');
       } else if (fieldStage === 'apiKey') {
         dispatch({ type: 'SET_ENTRY_FIELD', field: 'apiKey', value: val });
+        setFieldBuffer('');
+        setFieldStage('apiVersion');
+      } else if (fieldStage === 'apiVersion') {
+        dispatch({ type: 'SET_ENTRY_FIELD', field: 'apiVersion', value: val || '2024-08-01-preview' });
         setFieldBuffer('');
         setFieldStage('askMore');
       }
@@ -381,14 +397,20 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
     } else if (currentEntry.type === 'ollama') {
       dispatch({ type: 'SET_ENTRY_FIELD', field: 'baseUrl', value: val || 'http://localhost:11434' });
       setFieldBuffer('');
+      const nextEntry = state.entries[state.currentEntryIdx + 1];
+      if (nextEntry) {
+        setFieldStage(nextEntry.type === 'azure' ? 'deploymentName' : nextEntry.type === 'openai-compatible' ? 'label' : nextEntry.type === 'ollama' ? 'baseUrl' : 'apiKey');
+      }
       dispatch({ type: 'NEXT_ENTRY' });
-      setFieldStage('apiKey');
     } else {
       // anthropic / openai / gemini — just need apiKey
       dispatch({ type: 'SET_ENTRY_FIELD', field: 'apiKey', value: val });
       setFieldBuffer('');
+      const nextEntry = state.entries[state.currentEntryIdx + 1];
+      if (nextEntry) {
+        setFieldStage(nextEntry.type === 'azure' ? 'deploymentName' : nextEntry.type === 'openai-compatible' ? 'label' : nextEntry.type === 'ollama' ? 'baseUrl' : 'apiKey');
+      }
       dispatch({ type: 'NEXT_ENTRY' });
-      setFieldStage('apiKey');
     }
   }, [currentEntry, fieldStage]);
 
@@ -453,8 +475,11 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
                   setFieldStage(isAzure ? 'deploymentName' : 'label');
                   setFieldBuffer('');
                 } else {
+                  const nextEntry = state.entries[state.currentEntryIdx + 1];
+                  if (nextEntry) {
+                    setFieldStage(nextEntry.type === 'azure' ? 'deploymentName' : nextEntry.type === 'openai-compatible' ? 'label' : nextEntry.type === 'ollama' ? 'baseUrl' : 'apiKey');
+                  }
                   dispatch({ type: 'NEXT_ENTRY' });
-                  setFieldStage('apiKey');
                   setFieldBuffer('');
                 }
               }}
