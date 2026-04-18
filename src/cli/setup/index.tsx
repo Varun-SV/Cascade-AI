@@ -63,6 +63,8 @@ interface WizardState {
 
 type WizardAction =
   | { type: 'TOGGLE_PROVIDER'; provider: ProviderType }
+  | { type: 'TOGGLE_ALL' }
+  | { type: 'INVERT_SELECTION' }
   | { type: 'CONFIRM_PROVIDERS' }
   | { type: 'SET_ENTRY_FIELD'; field: keyof ProviderEntry; value: string }
   | { type: 'NEXT_ENTRY' }
@@ -86,6 +88,8 @@ const PROVIDER_LABELS: Record<ProviderType, string> = {
   'openai-compatible': 'OpenAI-Compatible',
 };
 
+const providerOrder: ProviderType[] = ['anthropic', 'openai', 'gemini', 'azure', 'ollama', 'openai-compatible'];
+
 function buildInitialEntries(types: Set<ProviderType>): ProviderEntry[] {
   return [...types].map(type => ({
     id: randomUUID(),
@@ -102,6 +106,17 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
       const next = new Set(state.selectedTypes);
       if (next.has(action.provider)) next.delete(action.provider);
       else next.add(action.provider);
+      return { ...state, selectedTypes: next };
+    }
+    case 'TOGGLE_ALL': {
+      const allSelected = state.selectedTypes.size === providerOrder.length;
+      return { ...state, selectedTypes: allSelected ? new Set() : new Set(providerOrder) };
+    }
+    case 'INVERT_SELECTION': {
+      const next = new Set<ProviderType>();
+      providerOrder.forEach(p => {
+        if (!state.selectedTypes.has(p)) next.add(p);
+      });
       return { ...state, selectedTypes: next };
     }
     case 'CONFIRM_PROVIDERS': {
@@ -201,7 +216,6 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
     error: null,
   });
 
-  const providerOrder: ProviderType[] = ['anthropic', 'openai', 'gemini', 'azure', 'ollama', 'openai-compatible'];
   const [providerCursor, setProviderCursor] = useState(0);
   const [fieldBuffer, setFieldBuffer] = useState('');
   const [fieldStage, setFieldStage] = useState<'apiKey' | 'baseUrl' | 'deploymentName' | 'label' | 'askMore'>('apiKey');
@@ -310,6 +324,8 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
       if (key.upArrow) setProviderCursor(p => Math.max(0, p - 1));
       if (key.downArrow) setProviderCursor(p => Math.min(providerOrder.length - 1, p + 1));
       if (_input === ' ') dispatch({ type: 'TOGGLE_PROVIDER', provider: providerOrder[providerCursor]! });
+      if (_input === 'a') dispatch({ type: 'TOGGLE_ALL' });
+      if (_input === 'i') dispatch({ type: 'INVERT_SELECTION' });
       if (key.return) {
         if (state.selectedTypes.size === 0) return;
         dispatch({ type: 'CONFIRM_PROVIDERS' });
@@ -380,26 +396,28 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
   if (state.step === 'PROVIDER_SELECT') {
     return (
       <Box flexDirection="column" paddingX={2} paddingY={1}>
-        <Text bold color="green">◈ CASCADE AI — Setup</Text>
-        <Box marginTop={1} marginBottom={1}>
-          <Text dimColor>Which providers do you want to configure?</Text>
+        <Box marginBottom={1}>
+          <Text color="magenta" bold>? </Text>
+          <Text bold>Which providers do you want to configure?</Text>
         </Box>
-        <Text dimColor>Space to toggle · Enter to confirm</Text>
-        <Box marginTop={1} flexDirection="column">
+        <Box flexDirection="column">
           {providerOrder.map((p, i) => {
             const selected = state.selectedTypes.has(p);
             const focused = i === providerCursor;
             return (
               <Box key={p}>
-                <Text color={focused ? 'green' : 'white'}>{focused ? '❯ ' : '  '}</Text>
-                <Text color={selected ? 'green' : 'white'}>{selected ? '◉ ' : '○ '}</Text>
-                <Text color={focused ? 'white' : 'gray'}>{PROVIDER_LABELS[p]}</Text>
+                <Text color={focused ? 'magenta' : 'white'}>{focused ? '❯ ' : '  '}</Text>
+                <Text color={selected ? 'green' : 'white'}>{selected ? '◉ ' : '◯ '}</Text>
+                <Text color={focused ? 'magenta' : (selected ? 'white' : 'gray')}>{PROVIDER_LABELS[p]}</Text>
                 {p === 'azure' && <Text dimColor>  — multiple deployments supported</Text>}
                 {p === 'openai-compatible' && <Text dimColor>  — Groq, Together, custom</Text>}
                 {p === 'ollama' && <Text dimColor>  — no API key needed</Text>}
               </Box>
             );
           })}
+        </Box>
+        <Box marginTop={1}>
+          <Text dimColor>(Press &lt;space&gt; to select, &lt;a&gt; to toggle all, &lt;i&gt; to invert selection, and &lt;enter&gt; to proceed)</Text>
         </Box>
         {state.error && <Text color="red">{state.error}</Text>}
       </Box>
@@ -415,16 +433,18 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
       // After completing an Azure or compat entry, ask if they want another
       return (
         <Box flexDirection="column" paddingX={2} paddingY={1}>
-          <Text bold color="green">◈ CASCADE AI — Setup</Text>
-          <Box marginTop={1}>
-            <Text>{isAzure ? 'Add another Azure deployment? (y/n)' : 'Add another custom endpoint? (y/n)'}</Text>
+          <Box marginBottom={1}>
+            <Text color="magenta" bold>? </Text>
+            <Text bold>{isAzure ? 'Add another Azure deployment? (y/n)' : 'Add another custom endpoint? (y/n)'}</Text>
           </Box>
-          <Box marginTop={1}>
+          <Box>
             <SelectInput
               items={[
                 { label: 'Yes — add another', value: 'yes' },
                 { label: 'No — continue', value: 'no' },
               ]}
+              indicatorComponent={({ isSelected }) => <Text color="magenta">{isSelected ? '❯ ' : '  '}</Text>}
+              itemComponent={({ isSelected, label }) => <Text color={isSelected ? 'magenta' : 'white'}>{label}</Text>}
               onSelect={(item) => {
                 if (item.value === 'yes') {
                   if (isAzure) dispatch({ type: 'ADD_AZURE' });
@@ -444,26 +464,23 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
     }
 
     const prompt =
-      isAzure && fieldStage === 'deploymentName' ? `Azure deployment name (${currentEntry.label}):` :
-      isAzure && fieldStage === 'baseUrl' ? `Azure endpoint URL:` :
-      isCompat && fieldStage === 'label' ? `Name for this endpoint (e.g. Groq):` :
-      isCompat && fieldStage === 'baseUrl' ? `Base URL (e.g. https://api.groq.com/openai/v1):` :
-      isOllama ? `Ollama URL (Enter for http://localhost:11434):` :
-      `${currentEntry.label} API Key:`;
+      isAzure && fieldStage === 'deploymentName' ? `Azure deployment name (${currentEntry.label})` :
+      isAzure && fieldStage === 'baseUrl' ? `Azure endpoint URL` :
+      isCompat && fieldStage === 'label' ? `Name for this endpoint (e.g. Groq)` :
+      isCompat && fieldStage === 'baseUrl' ? `Base URL (e.g. https://api.groq.com/openai/v1)` :
+      isOllama ? `Ollama URL (Enter for http://localhost:11434)` :
+      `${currentEntry.label} API Key`;
 
     const isMasked = fieldStage === 'apiKey';
 
     return (
       <Box flexDirection="column" paddingX={2} paddingY={1}>
-        <Text bold color="green">◈ CASCADE AI — Setup</Text>
-        <Box marginTop={1} marginBottom={1}>
-          <Text dimColor>
-            Provider {state.currentEntryIdx + 1} of {state.entries.length}: {currentEntry.label}
-          </Text>
+        <Box marginBottom={1}>
+          <Text color="magenta" bold>? </Text>
+          <Text bold>{prompt}</Text>
         </Box>
-        <Text>{prompt}</Text>
-        <Box marginTop={1}>
-          <Text color="green">{'> '}</Text>
+        <Box>
+          <Text color="magenta">❯ </Text>
           <SafeTextInput
             value={fieldBuffer}
             onChange={setFieldBuffer}
@@ -487,13 +504,15 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
   if (state.step === 'FETCH_MODELS') {
     return (
       <Box flexDirection="column" paddingX={2} paddingY={1}>
-        <Text bold color="green">◈ CASCADE AI — Fetching Models</Text>
-        <Box marginTop={1} flexDirection="column">
+        <Box marginBottom={1}>
+          <Text color="magenta" bold>? </Text>
+          <Text bold>Connecting to providers and fetching models...</Text>
+        </Box>
+        <Box flexDirection="column">
           {state.fetchLog.map((line, i) => <Text key={i}>{line}</Text>)}
           {state.fetchedModels.length === 0 && (
             <Box>
               <Spinner type="dots" />
-              <Text> Connecting to providers...</Text>
             </Box>
           )}
         </Box>
@@ -513,31 +532,44 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
     const tierLabel = (tier: 'T1' | 'T2' | 'T3', hint: string) => {
       const isFocused = state.tierSelectFocus === tier;
       const current = tier === 'T1' ? state.tierT1 : tier === 'T2' ? state.tierT2 : state.tierT3;
+      
+      if (!isFocused) {
+        return (
+          <Box key={tier}>
+            <Text color="green" bold>✔ </Text>
+            <Text bold>{tier} {hint}: </Text>
+            <Text color="magenta">{current === 'auto' ? 'Auto — let Cascade choose best available' : state.fetchedModels.find(m => m.id === current)?.name || current}</Text>
+          </Box>
+        );
+      }
+      
       return (
         <Box flexDirection="column" marginBottom={1} key={tier}>
-          <Text bold color={isFocused ? 'green' : 'white'}>{tier} {hint}:</Text>
-          <Text dimColor>  currently: {current === 'auto' ? 'Auto' : current}</Text>
-          {isFocused && (
+          <Box>
+            <Text color="magenta" bold>? </Text>
+            <Text bold>{tier} {hint}: </Text>
+          </Box>
+          <Box>
             <SelectInput
               items={modelOptions}
               onSelect={(item) => dispatch({ type: 'SET_TIER', tier, value: item.value })}
+              indicatorComponent={({ isSelected }) => <Text color="magenta">{isSelected ? '❯ ' : '  '}</Text>}
+              itemComponent={({ isSelected, label }) => <Text color={isSelected ? 'magenta' : 'white'}>{label}</Text>}
             />
-          )}
+          </Box>
         </Box>
       );
     };
 
     return (
       <Box flexDirection="column" paddingX={2} paddingY={1}>
-        <Text bold color="green">◈ CASCADE AI — Tier Assignment</Text>
-        <Text dimColor>Tab to switch tier · Enter to confirm selection</Text>
-        <Box marginTop={1} flexDirection="column">
+        <Box flexDirection="column">
           {tierLabel('T1', '(Administrator — complex reasoning, runs once per task)')}
           {tierLabel('T2', '(Manager — runs per section)')}
           {tierLabel('T3', '(Worker — high volume, many parallel runs)')}
         </Box>
         <Box marginTop={1}>
-          <Text dimColor>Press Enter on the last tier to finish setup</Text>
+          <Text dimColor>(Tab/Arrow Down to skip tier, Enter to select or save)</Text>
         </Box>
         {state.error && <Text color="red">{state.error}</Text>}
       </Box>
@@ -547,7 +579,10 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
   if (state.step === 'SAVE') {
     return (
       <Box flexDirection="column" paddingX={2} paddingY={1}>
-        <Text bold color="green">◈ CASCADE AI — Saving Configuration</Text>
+        <Box>
+          <Text color="green" bold>✔ </Text>
+          <Text bold>Setup complete!</Text>
+        </Box>
         <Box marginTop={1}>
           <Spinner type="dots" />
           <Text> Writing .cascade/config.json...</Text>
