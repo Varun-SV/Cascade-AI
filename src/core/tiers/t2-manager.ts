@@ -202,13 +202,18 @@ export class T2Manager extends BaseTier {
   // ── Private ──────────────────────────────────
 
   private async decomposeSection(assignment: T1ToT2Assignment): Promise<T2ToT3Assignment['subtaskId'] extends string ? T2ToT3Assignment[] : never> {
+    const peerPlans = this.peerSyncBuffer
+      .filter(p => (p.content as any)?.type === 'T2_PLAN_ANNOUNCEMENT')
+      .map(p => `[Peer ${p.fromId} Plan]: ${(p.content as any).sectionTitle} - ${(p.content as any).subtaskTitles?.join(', ')}`)
+      .join('\n');
+
     const prompt = `Decompose this section into 2-5 concrete subtasks for T3 workers.
 
 Section: ${assignment.sectionTitle}
 Description: ${assignment.description}
 Expected output: ${assignment.expectedOutput}
 Constraints: ${assignment.constraints.join('; ')}
-
+${peerPlans ? `\nContext from sibling T2 plans (use this to align execution and avoid overlaps):\n${peerPlans}\n` : ''}
 Return a JSON array of subtask objects, each with:
 - subtaskId: string (unique)
 - subtaskTitle: string
@@ -509,7 +514,14 @@ Return ONLY the JSON array.`;
     if (!completed.length) return `Section ${assignment.sectionTitle} failed — no T3 workers completed.`;
 
     const outputs = completed.map((r, i) => `[T3-${i + 1}]: ${r.output}`).join('\n\n');
-    const prompt = `Summarize these T3 worker outputs for section "${assignment.sectionTitle}" in 2-3 sentences:\n\n${outputs}`;
+    
+    const peerOutputs = this.peerSyncBuffer
+      .filter(p => (p.content as any)?.type === 'T2_SECTION_OUTPUT')
+      .map(p => `[Peer ${p.fromId} Output]: ${(p.content as any).output}`)
+      .join('\n\n');
+
+    const prompt = `Summarize these T3 worker outputs for section "${assignment.sectionTitle}" in 2-3 sentences:\n\n${outputs}
+${peerOutputs ? `\n\nContext from sibling T2 completed sections (use this to ensure your summary aligns with the overall state):\n${peerOutputs}` : ''}`;
 
     const messages: ConversationMessage[] = [{ role: 'user', content: prompt }];
     try {

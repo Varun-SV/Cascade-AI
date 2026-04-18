@@ -237,14 +237,14 @@ export class T3Worker extends BaseTier {
   }
 
   receivePeerSync(fromId: string, content: unknown): void {
-    const existing = this.peerSyncBuffer.find(p => p.fromId === fromId);
-    if (existing) {
-      existing.content = content;
-      existing.timestamp = new Date().toISOString();
-    } else {
-      this.peerSyncBuffer.push({ fromId, content, timestamp: new Date().toISOString() });
-    }
+    this.peerSyncBuffer.push({ fromId, content, timestamp: new Date().toISOString() });
     this.emit('peer-sync-received', { fromId, content });
+    
+    // Notify the agent proactively so it doesn't have to guess when to poll
+    this.context.addMessage({
+      role: 'user',
+      content: `[SYSTEM_NOTIFICATION]: You received a new peer message from ${fromId}. Use the "peer_message" tool with action="receive" to read it.`
+    }).catch(() => {});
   }
 
   // ── Private ──────────────────────────────────
@@ -397,7 +397,11 @@ export class T3Worker extends BaseTier {
         sendPeerSync: (to, syncType, content) => {
           this.peerBus?.send(this.id, to, syncType, this.assignment?.subtaskId ?? '', content);
         },
-        getPeerMessages: () => [...this.peerSyncBuffer],
+        getPeerMessages: () => {
+          const msgs = [...this.peerSyncBuffer];
+          this.peerSyncBuffer = [];
+          return msgs;
+        },
       });
       if (this.audit) {
         this.audit.toolCall(this.id, tc.name, tc.input);
