@@ -179,6 +179,10 @@ export const ModelsDisplay: React.FC<Props> = ({
     : step === 'TIER'   ? `Step 2 / 3  ·  provider: ${picked.provider}`
     :                     `Step 3 / 3  ·  ${picked.provider} → ${picked.tier}`;
 
+  const PAGE_SIZE = 8;
+  const viewStart = Math.max(0, Math.min(cursor - Math.floor(PAGE_SIZE / 2), currentItems.length - PAGE_SIZE));
+  const visibleItems = currentItems.slice(viewStart, viewStart + PAGE_SIZE);
+
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
       <Box justifyContent="space-between">
@@ -193,10 +197,12 @@ export const ModelsDisplay: React.FC<Props> = ({
         <Text italic color="yellow">No items to show.</Text>
       ) : (
         <Box flexDirection="column">
-          {currentItems.map((item, i) => {
-            const focused = i === cursor;
+          {viewStart > 0 && <Text color="gray" dimColor>  ↑ {viewStart} more above</Text>}
+          {visibleItems.map((item, i) => {
+            const globalIdx = viewStart + i;
+            const focused = globalIdx === cursor;
             return (
-              <Box key={`${step}-${item.value}-${i}`} flexDirection="row">
+              <Box key={`${step}-${item.value}-${globalIdx}`} flexDirection="row">
                 <Text color={focused ? 'green' : 'gray'}>{focused ? '❯ ' : '  '}</Text>
                 <Box flexDirection="column">
                   <Text color={focused ? 'white' : 'gray'} bold={focused}>{item.label}</Text>
@@ -207,6 +213,7 @@ export const ModelsDisplay: React.FC<Props> = ({
               </Box>
             );
           })}
+          {viewStart + PAGE_SIZE < currentItems.length && <Text color="gray" dimColor>  ↓ {currentItems.length - viewStart - PAGE_SIZE} more below</Text>}
         </Box>
       )}
     </Box>
