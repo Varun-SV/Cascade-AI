@@ -163,6 +163,11 @@ cascade run "explain the auth module in this repo"
 
 Cascade loads config from `.cascade/config.json` in your project directory.
 
+> **Prefer the picker over hand-editing config.** Inside the REPL, run `/model`
+> to walk through a three-step interactive picker (provider → tier → model,
+> with an Auto option at every step). The picker writes `.cascade/config.json`
+> for you and hot-swaps the running router — no restart needed.
+
 ```jsonc
 // .cascade/config.json
 {
@@ -332,7 +337,9 @@ Type any of these inside the REPL:
 | `/clear`     | Clear conversation history                    |
 | `/exit`      | Exit Cascade                                  |
 | `/theme <name>` | Switch color theme                         |
-| `/model`     | Show active models per tier                   |
+| `/model`     | Interactive picker — choose provider → tier → model (or Auto) |
+| `/model-info`| Show active models per tier                   |
+| `/models`    | Browse available models grouped by provider   |
 | `/cost`      | Toggle session cost / token usage panel       |
 | `/export [markdown\|json]` | Export session to file             |
 | `/rollback`  | Undo all file changes made in this session    |

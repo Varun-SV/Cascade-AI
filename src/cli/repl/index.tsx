@@ -38,7 +38,7 @@ import { TimelinePanel } from './components/TimelinePanel.js';
 import { StatusBar } from './components/StatusBar.js';
 import { HintBar } from './components/HintBar.js';
 import { ApprovalPrompt } from './components/ApprovalPrompt.js';
-import { ModelsDisplay } from './components/ModelsDisplay.js';
+import { ModelsDisplay, type ModelPickerSelection } from './components/ModelsDisplay.js';
 import { CostTracker } from './components/CostTracker.js';
 import { CompactStatus } from './components/CompactStatus.js';
 import { formatToLines } from './utils/line-buffer.js';
@@ -263,6 +263,60 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     storeRef.current?.addMessage({ id: randomUUID(), sessionId: sessionIdRef.current, role, content, timestamp });
   }, []);
 
+  /**
+   * Apply a selection from the interactive model picker:
+   *   - update the in-memory CascadeConfig.models[tier]
+   *   - persist the updated config to .cascade/config.json
+   *   - hot-swap the running router via overrideTierModel (if a concrete
+   *     ModelInfo is available in the model cache)
+   *   - print a short confirmation in the chat stream
+   */
+  const applyModelPick = useCallback(async (sel: ModelPickerSelection) => {
+    const tierKey = sel.tier.toLowerCase() as 't1' | 't2' | 't3';
+    const tierLabel = sel.tier;
+
+    // Update in-memory config (mutating is OK here — this is a TUI session
+    // local copy; runCascade hasn't persisted it elsewhere).
+    if (sel.kind === 'auto') {
+      delete (config.models as Record<string, string | undefined>)[tierKey];
+    } else {
+      (config.models as Record<string, string | undefined>)[tierKey] = sel.modelId;
+    }
+
+    // Hot-swap the live router — best-effort.
+    try {
+      const router = cascadeRef.current?.getRouter();
+      if (router && sel.kind === 'pick') {
+        const candidate = (cachedModels.get(sel.provider) ?? []).find(m => m.id === sel.modelId);
+        if (candidate) router.overrideTierModel(tierLabel, candidate);
+      }
+    } catch {
+      /* hot-swap is best effort; persisted config will take effect next start */
+    }
+
+    // Persist .cascade/config.json
+    const configPath = path.join(workspacePath, '.cascade', 'config.json');
+    try {
+      await fs.mkdir(path.dirname(configPath), { recursive: true });
+      await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      dispatch({
+        type: 'ADD_MESSAGE',
+        message: { id: randomUUID(), role: 'error', content: `Failed to persist model selection: ${msg}`, timestamp: new Date().toISOString() },
+      });
+      return;
+    }
+
+    const summary = sel.kind === 'auto'
+      ? `${tierLabel} → Auto (Cascade will pick best available).`
+      : `${tierLabel} → ${sel.modelId}  (provider: ${sel.provider}).`;
+    dispatch({
+      type: 'ADD_MESSAGE',
+      message: { id: randomUUID(), role: 'system', content: `✔ Model updated — ${summary}`, timestamp: new Date().toISOString() },
+    });
+  }, [config, workspacePath, cachedModels]);
+
   const globalStoreRef = useRef<MemoryStore | null>(null);
 
   const persistRuntimeSession = useCallback((status: 'ACTIVE' | 'COMPLETED' | 'FAILED', latestPrompt?: string) => {
@@ -408,6 +462,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           return `${t}: ${m?.name ?? 'none'} (${m?.provider ?? '—'})${configured ? ` | configured: ${configured}` : ''}`;
         }).join('\n');
       },
+      onModelPicker: async () => { setIsShowingModels(true); return 'Opening model picker — choose provider → tier → model (ESC to exit).'; },
       onModelsInfo: async () => { setIsShowingModels(true); return 'Opening interactive models explorer... (ESC to exit)'; },
       onProvidersInfo: () => listConfiguredProviders(config),
       onConfigInfo: () => formatConfigSummary(config),
@@ -675,6 +730,18 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   }, [handleSlashCommand, persistMessage, state.messages, workspacePath, rebuildTree, recordNodeEvent, slashCompletions, slashIndex, state.isExecuting]);
 
   useInput((_input, key) => {
+    // When the interactive model picker is open it owns the keyboard.
+    // Let Ctrl+C still exit, but route every other key (incl. arrows, Enter,
+    // Tab, number keys, Esc) to the picker's own useInput so navigation
+    // isn't hijacked — this is the root-cause fix for the "only ↑ worked
+    // in the model selector" regression.
+    if (isShowingModels) {
+      if (key.ctrl && _input === 'c') {
+        if (quitAttempted) { exit(); return; }
+        setQuitAttempted(true);
+      }
+      return;
+    }
     if (key.ctrl && _input === 'c') {
       if (quitAttempted) {
         exit();
@@ -866,7 +933,12 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           <WelcomeBanner theme={theme} config={config} workspacePath={workspacePath} sessionId={sessionIdRef.current} />
         )}
         {isShowingModels && (
-          <ModelsDisplay providers={config.providers.map(p => p.type)} modelsByProvider={cachedModels} onClose={() => setIsShowingModels(false)} />
+          <ModelsDisplay
+            providers={config.providers.map(p => p.type)}
+            modelsByProvider={cachedModels}
+            onSelect={(sel) => { void applyModelPick(sel); }}
+            onClose={() => setIsShowingModels(false)}
+          />
         )}
       </Box>
 
@@ -927,7 +999,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         <Box flexDirection="row">
           <Text color={theme.colors.primary} bold>▸ {queuedMessages.length > 0 ? <Text color={theme.colors.accent}>[QUEUED] </Text> : ''}</Text>
           <SafeTextInput
-            focus={!state.approvalRequest}
+            focus={!state.approvalRequest && !isShowingModels}
             value={input}
             manageMouseReporting={false}
             onChange={(val) => {

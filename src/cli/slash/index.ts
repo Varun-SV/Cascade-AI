@@ -22,6 +22,8 @@ export interface SlashCommandContext {
   onRollback: () => Promise<string | void>;
   onBranch: () => Promise<void>;
   onModelInfo: () => string | Promise<string>;
+  /** Opens the interactive provider → tier → model picker (Claude-Code-style). */
+  onModelPicker: () => string | Promise<string>;
   onModelsInfo: () => string | Promise<string>;
   onProvidersInfo: () => string | Promise<string>;
   onConfigInfo: () => string | Promise<string>;
@@ -164,13 +166,19 @@ export class SlashCommandRegistry {
 
     this.register({
       command: '/model',
+      description: 'Pick a provider and model for a tier (interactive)',
+      handler: (_args, ctx) => ({ output: ctx.onModelPicker(), handled: true }),
+    });
+
+    this.register({
+      command: '/model-info',
       description: 'Show active models per tier',
       handler: (_args, ctx) => ({ output: ctx.onModelInfo(), handled: true }),
     });
 
     this.register({
       command: '/models',
-      description: 'List available models by provider',
+      description: 'Browse available models by provider',
       handler: (_args, ctx) => ({ output: ctx.onModelsInfo(), handled: true }),
     });
 
