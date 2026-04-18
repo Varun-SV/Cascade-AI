@@ -810,17 +810,35 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const width = stdout?.columns ?? 100;
   const height = stdout?.rows ?? 24;
   
-  // Calculate fixed element overhead accurately
-  const headerHeight = 2; // Header + Border top
-  const statusHeight = state.showDetails ? (state.agentTree ? 10 : 4) : 3;
+  // Calculate dynamic heights exactly to prevent screen flickering
+  const hasActiveOrFailed = (node: TierNode): boolean => {
+    if (node.status === 'ACTIVE' || node.status === 'FAILED') return true;
+    return node.children?.some(hasActiveOrFailed) ?? false;
+  };
+
+  let agentTreeHeight = 0;
+  if (state.agentTree && hasActiveOrFailed(state.agentTree)) {
+    agentTreeHeight = 1; // Header row
+    const childrenCount = state.agentTree.children?.length ?? 0;
+    agentTreeHeight += Math.min(childrenCount, 6); // Up to 6 T2 rows
+    if (childrenCount > 6) agentTreeHeight += 1; // "... more sections" row
+  }
+
+  let timelineHeight = 0;
+  if (state.showDetails && treeNodesRef.current.size > 0) {
+    timelineHeight = 1; // "Activity Log" header
+    timelineHeight += Math.min(3, treeNodesRef.current.size); // Up to 3 logs
+  }
+
+  const statusHeight = agentTreeHeight + timelineHeight;
   const costHeight = state.showCost ? 6 : 0;
   const approvalHeight = state.approvalRequest ? 12 : 0;
   const slashVisibleCount = Math.min(SLASH_PAGE_SIZE, slashEntries.length);
   const slashHeight = slashVisibleCount > 0 ? slashVisibleCount + 2 : 0; // +2 for border + header row
-  const chromeHeight = statusHeight + costHeight + approvalHeight + slashHeight + 7; // Input(3) + Status(2) + Header(2) + Margin(2)
+  const chromeHeight = statusHeight + costHeight + approvalHeight + slashHeight + 7; // Input(3) + Status(2) + Margins(2)
   const totalCap = Math.floor(height * 0.7);
 
-  const availableHeight = Math.max(4, totalCap - chromeHeight);
+  const availableHeight = Math.max(4, height - chromeHeight);
   const allLines = formatToLines(
     state.isStreaming 
       ? [...state.messages, { id: 'stream', role: 'assistant', content: state.streamBuffer, timestamp: new Date().toISOString() } as Message] 

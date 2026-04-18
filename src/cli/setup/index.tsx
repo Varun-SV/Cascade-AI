@@ -334,12 +334,13 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
       }
     }
     if (state.step === 'TIER_ASSIGN') {
-      if (key.tab || key.downArrow) {
+      // Remove enter and downArrow interception so SelectInput can use them
+      if (key.tab || key.rightArrow) {
         const order: Array<'T1' | 'T2' | 'T3'> = ['T1', 'T2', 'T3'];
         const idx = order.indexOf(state.tierSelectFocus);
         dispatch({ type: 'SET_TIER_FOCUS', tier: order[(idx + 1) % 3]! });
       }
-      if (key.return) dispatch({ type: 'GO_SAVE' });
+      // We will handle GO_SAVE within the onSelect of the final T3 tier or explicitly with a hotkey
     }
   });
 
@@ -552,7 +553,16 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
           <Box>
             <SelectInput
               items={modelOptions}
-              onSelect={(item) => dispatch({ type: 'SET_TIER', tier, value: item.value })}
+              onSelect={(item) => {
+                dispatch({ type: 'SET_TIER', tier, value: item.value });
+                const order: Array<'T1' | 'T2' | 'T3'> = ['T1', 'T2', 'T3'];
+                const idx = order.indexOf(tier);
+                if (idx < 2) {
+                  dispatch({ type: 'SET_TIER_FOCUS', tier: order[idx + 1]! });
+                } else {
+                  dispatch({ type: 'GO_SAVE' });
+                }
+              }}
               indicatorComponent={({ isSelected }) => <Text color="magenta">{isSelected ? '❯ ' : '  '}</Text>}
               itemComponent={({ isSelected, label }) => <Text color={isSelected ? 'magenta' : 'white'}>{label}</Text>}
             />
