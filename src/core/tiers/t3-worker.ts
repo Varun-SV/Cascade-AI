@@ -81,7 +81,8 @@ export class T3Worker extends BaseTier {
     this.audit = new AuditLogger(store, sessionId);
   }
 
-  async execute(assignment: T2ToT3Assignment, taskId: string): Promise<T3Result> {
+  async execute(assignment: T2ToT3Assignment, taskId: string, signal?: AbortSignal): Promise<T3Result> {
+    this.signal = signal;
     this.assignment = assignment;
     this.taskId = taskId;
     this.setLabel(assignment.subtaskTitle);
@@ -263,6 +264,9 @@ export class T3Worker extends BaseTier {
 
     while (iterations < MAX_ITERATIONS) {
       iterations++;
+
+      // ── Cancellation checkpoint (before every LLM call) ──────────────
+      this.throwIfCancelled();
 
       const options: GenerateOptions = {
         messages: this.context.getMessages(),

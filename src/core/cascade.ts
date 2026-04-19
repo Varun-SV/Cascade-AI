@@ -27,6 +27,7 @@ import { validateConfig } from '../config/validate.js';
 import { Telemetry, noopTelemetry } from '../telemetry/index.js';
 import { TaskAnalyzer } from './router/task-analyzer.js';
 import { ToolCreator } from '../tools/tool-creator.js';
+import { CascadeCancelledError } from '../utils/retry.js';
 
 export class Cascade extends EventEmitter {
   private router: CascadeRouter;
@@ -385,7 +386,7 @@ ${prompt}`
         peerT3Ids: [],
         parentT2: 'root'
       };
-      const t3Result = await t3.execute(assignment, taskId);
+      const t3Result = await t3.execute(assignment, taskId, options.signal);
       finalOutput = typeof t3Result.output === 'string' ? t3Result.output : JSON.stringify(t3Result.output);
       this.emit('tier:status', { tierId: 't3-root', status: 'COMPLETED', role: 'T3' });
     } else if (complexity === 'Moderate') {
@@ -408,7 +409,7 @@ ${prompt}`
         constraints: [],
         t3Subtasks: []
       };
-      const t2Result = await t2.execute(assignment, taskId);
+      const t2Result = await t2.execute(assignment, taskId, options.signal);
       this.emit('tier:status', { tierId: 't2-root', status: 'COMPLETED', role: 'T2' });
       t2Results = [t2Result];
       const completed = t2Result.t3Results.filter((r: T3Result) => r.status === 'COMPLETED');
@@ -431,13 +432,24 @@ ${prompt}`
       bindTierEvents(t1);
       t1.on('plan', (e) => this.emit('plan', e));
       
-      const result = await t1.execute(options.prompt, options.images);
+      const result = await t1.execute(options.prompt, options.images, undefined, options.signal);
       finalOutput = result.output;
       t2Results = result.t2Results;
     }
     } catch (err) {
-      runError = err;
-      throw err;
+      // ── Graceful cancellation handling ──────────────────────────────
+      // When aborted, don't re-throw — resolve with what we have so far.
+      if (err instanceof CascadeCancelledError) {
+        this.emit('run:cancelled', {
+          taskId,
+          reason: err.message,
+          partialOutput: finalOutput || '',
+        });
+        runError = null; // suppress telemetry error flag for intentional cancels
+      } else {
+        runError = err;
+        throw err;
+      }
     } finally {
       // Always release pending permission escalations so they don't leak
       // across runs — even on error paths. cancelAllPending is safe to call

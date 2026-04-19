@@ -643,6 +643,19 @@ export interface CascadeRunOptions {
   conversationHistory?: ConversationMessage[];
   streamCallback?: (chunk: StreamChunk) => void;
   approvalCallback?: (request: ApprovalRequest) => Promise<boolean | { approved: boolean; always: boolean }>;
+  /**
+   * An optional `AbortSignal` to cancel the run mid-execution.
+   * When aborted, all tiers (T1 → T2 → T3) stop at the next safe checkpoint
+   * and a `run:cancelled` event is emitted on the Cascade instance.
+   * The `run()` call resolves (not rejects) with a partial result.
+   *
+   * @example
+   * const controller = new AbortController();
+   * cascade.run({ prompt: '...', signal: controller.signal });
+   * // later:
+   * controller.abort();
+   */
+  signal?: AbortSignal;
 }
 
 export interface CascadeRunResult {

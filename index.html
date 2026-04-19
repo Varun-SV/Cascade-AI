@@ -927,7 +927,7 @@
     <div class="container">
       <div class="hero-eyebrow">
         <span class="hero-eyebrow-dot"></span>
-        Open-source · MIT License · v0.2.5
+        Open-source · MIT License · v0.2.6
       </div>
 
       <h1 class="reveal">
@@ -1186,6 +1186,11 @@
           <div class="feature-icon blue">🎛️</div>
           <h3>Interactive Model Picker</h3>
           <p>Run <code>/model</code> inside the REPL for a three-step picker — provider → tier → model — with Auto at every step. Arrow keys, Tab, j/k and number keys all work; selections write <code>.cascade/config.json</code> and hot-swap the live router, no restart required.</p>
+        </div>
+        <div class="feature-cell">
+          <div class="feature-icon red">⛔</div>
+          <h3>Task Cancellation via AbortSignal</h3>
+          <p>Pass an <code>AbortSignal</code> to <code>cascade.run()</code> to stop any in-progress run mid-flight. All active tiers (T1 → T2 → T3) halt at the next safe checkpoint before the next LLM call — no mid-stream interruptions, no orphaned agents. A <code>run:cancelled</code> event fires with partial output so you can still surface what was produced. Prevents runaway token spend on long tasks.</p>
         </div>
       </div>
     </div>

@@ -10,6 +10,7 @@ import type {
   TierRole,
   TierStatus,
 } from '../../types.js';
+import { CascadeCancelledError } from '../../utils/retry.js';
 
 export abstract class BaseTier extends EventEmitter {
   readonly id: string;
@@ -20,6 +21,8 @@ export abstract class BaseTier extends EventEmitter {
   protected label: string;
   protected systemPromptOverride: string = '';
   protected hierarchyContext: string = '';
+  /** Propagated AbortSignal — set by the tier's `execute()` before work begins. */
+  protected signal?: AbortSignal;
 
   constructor(role: TierRole, id?: string, parentId?: string) {
     super();
@@ -94,5 +97,20 @@ export abstract class BaseTier extends EventEmitter {
 
   protected log(message: string, data?: unknown): void {
     this.emit('log', { tierId: this.id, role: this.role, message, data, timestamp: new Date().toISOString() });
+  }
+
+  /**
+   * Throws `CascadeCancelledError` if the run's `AbortSignal` has fired.
+   * Call this at safe checkpoints (before LLM calls, between T3 dispatches)
+   * to provide a fast, clean cancellation path.
+   */
+  protected throwIfCancelled(): void {
+    if (this.signal?.aborted) {
+      throw new CascadeCancelledError(
+        typeof this.signal.reason === 'string'
+          ? this.signal.reason
+          : 'Run cancelled by caller',
+      );
+    }
   }
 }
