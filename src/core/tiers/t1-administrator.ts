@@ -47,10 +47,10 @@ Rules:
 - If the user asks for Excel/Zip/complex processing, use "run_code" with Python or Node.js
 - Ensure every plan includes explicit creation and verification steps for requested artifacts
 
-EXECUTION MODE GUIDANCE:
-- Use "parallel" for sections that are independent (e.g. writing different files, researching different topics).
-- Use "sequential" ONLY when a later section strictly depends on the output of an earlier one (e.g. write code → then test it).
-- Prefer parallel execution: it is significantly faster and reduces total wall-clock time.
+DEPENDENCY GUIDANCE:
+- Leave "dependsOn" empty [] for sections that are independent (e.g. writing different files, researching different topics).
+- Populate "dependsOn" with section IDs ONLY when a later section strictly depends on the output of an earlier one (e.g. write code → then test it).
+- Prefer empty dependencies (parallel execution): it is significantly faster and reduces total wall-clock time.
 - Within a sequential section, mark T3 subtasks with "dependsOn" only when they truly block each other.
 
 QUALITY RULES:
@@ -153,7 +153,36 @@ export class T1Administrator extends BaseTier {
     this.throwIfCancelled();
 
     // Step 3: Dispatch T2 managers in parallel
-    const t2Results = await this.dispatchT2Managers(plan.sections);
+    let allT2Results = await this.dispatchT2Managers(plan.sections);
+
+    // Step 4: T1 Reviewer Phase
+    let pass = 1;
+    const MAX_REPLAN_PASSES = 2;
+    while (pass <= MAX_REPLAN_PASSES) {
+      const reviewResult = await this.reviewT2Outputs(enrichedPrompt, plan, allT2Results);
+      if (reviewResult.approved) {
+        this.log('T1 Review passed.');
+        break;
+      }
+
+      this.log(`T1 Review rejected outputs. Replanning (Pass ${pass}). Reason: ${reviewResult.reason}`);
+      this.sendStatusUpdate({
+        progressPct: 80 + (pass * 5),
+        currentAction: `Review failed: ${reviewResult.reason}. Replanning...`,
+        status: 'IN_PROGRESS',
+      });
+
+      const correctionPlan = await this.decomposeTask(`The previous execution plan failed to fully satisfy the original goal or encountered errors.
+Review reason: ${reviewResult.reason}
+
+Original goal: ${enrichedPrompt}
+
+Create a CORRECTION PLAN that contains only the new sections needed to fix the issues. Do not repeat successful sections.`);
+      
+      const correctionResults = await this.dispatchT2Managers(correctionPlan.sections);
+      allT2Results = [...allT2Results, ...correctionResults];
+      pass++;
+    }
 
     this.sendStatusUpdate({
       progressPct: 95,
@@ -161,13 +190,13 @@ export class T1Administrator extends BaseTier {
       status: 'IN_PROGRESS',
     });
 
-    // Step 4: Compile final output
-    const output = await this.compileFinalOutput(userPrompt, plan, t2Results);
+    // Step 5: Compile final output
+    const output = await this.compileFinalOutput(userPrompt, plan, allT2Results);
 
     this.setStatus('COMPLETED');
     this.sendStatusUpdate({ progressPct: 100, currentAction: 'Task complete', status: 'IN_PROGRESS' });
 
-    return { output, t2Results, taskId: this.taskId, complexity: plan.complexity };
+    return { output, t2Results: allT2Results, taskId: this.taskId, complexity: plan.complexity };
   }
 
   getEscalations(): EscalationPayload[] {
@@ -175,6 +204,53 @@ export class T1Administrator extends BaseTier {
   }
 
   // ── Private ──────────────────────────────────
+
+  private async reviewT2Outputs(
+    originalPrompt: string,
+    plan: TaskPlan,
+    t2Results: T2Result[],
+  ): Promise<{ approved: boolean; reason?: string }> {
+    const failedSections = t2Results.filter(r => r.status === 'FAILED');
+    if (failedSections.length > 0) {
+      return { 
+        approved: false, 
+        reason: `Some T2 managers failed entirely: ${failedSections.map(s => s.sectionTitle).join(', ')}. Errors: ${failedSections.flatMap(s => s.issues).join('; ')}`
+      };
+    }
+
+    const sectionsText = t2Results
+      .map((r) => `**${r.sectionTitle}**\n${r.sectionSummary}`)
+      .join('\n\n');
+
+    const prompt = `You are a strict QA Reviewer for the Cascade AI system.
+Review the following execution outputs against the original user prompt.
+
+Original Request: ${originalPrompt}
+
+T2 Manager Summaries:
+${sectionsText}
+
+Does the current state of the workspace and the outputs fully satisfy the user's request?
+If yes, reply with exactly: "APPROVED".
+If no, reply with "REJECTED: [Detailed reason explaining exactly what is missing or incorrect]".`;
+
+    try {
+      const result = await this.router.generate('T1', {
+        messages: [{ role: 'user', content: prompt }],
+        systemPrompt: this.systemPromptOverride + 'You are a QA Reviewer.',
+        maxTokens: 500,
+        temperature: 0,
+      });
+      const response = result.content.trim();
+      if (response.toUpperCase().startsWith('APPROVED')) {
+        return { approved: true };
+      }
+      return { approved: false, reason: response.replace(/^REJECTED:\s*/i, '') };
+    } catch {
+      // If review fails to generate, default to approve to avoid infinite loops on rate limits
+      return { approved: true };
+    }
+  }
 
   private async analyzeImages(prompt: string, images: ImageAttachment[]): Promise<string> {
     const visionModel = this.router.getModelForTier('T1');
@@ -203,29 +279,35 @@ export class T1Administrator extends BaseTier {
     Example: if asked to create files "inside python_exclusive", every subtask that 
     creates a file must use "python_exclusive/filename.ext" as the path.
 
-Return JSON where subtasks can declare dependencies:
+Return JSON where SECTIONS can declare dependencies on other SECTIONS:
 {
   "sections": [{
+    "sectionId": "s1",
+    "sectionTitle": "Setup Project",
+    "description": "Initialize the project",
+    "expectedOutput": "Basic structure created",
+    "constraints": [],
+    "dependsOn": [],           // ← empty = runs immediately
     "t3Subtasks": [{
       "subtaskId": "t1",
-      "subtaskTitle": "Generate Source Code",
-      "dependsOn": [],           // ← empty = runs immediately
-      "executionMode": "parallel"
-    }, {
-      "subtaskId": "t2", 
-      "subtaskTitle": "Save Code to File",
-      "dependsOn": ["t1"],       // ← waits for t1 to complete first
-      "executionMode": "parallel"
-    }, {
-      "subtaskId": "t3",
-      "subtaskTitle": "Execute and Verify",
-      "dependsOn": ["t2"],       // ← waits for t2
-      "executionMode": "parallel"
+      "subtaskTitle": "Init NPM",
+      "description": "Run npm init",
+      "expectedOutput": "package.json created",
+      "constraints": [],
+      "dependsOn": []
     }]
+  }, {
+    "sectionId": "s2", 
+    "sectionTitle": "Write Tests",
+    "description": "Write tests for the project",
+    "expectedOutput": "Tests passing",
+    "constraints": [],
+    "dependsOn": ["s1"],       // ← waits for section s1 to complete first
+    "t3Subtasks": [...]
   }]
 }
-Use dependsOn when a subtask needs the output of a previous one.
-Leave dependsOn empty for subtasks that can run immediately in parallel.`;
+Use dependsOn at the SECTION level when a whole T2 Manager needs the output of a previous T2 Manager.
+Leave dependsOn empty for sections that can run immediately in parallel.`;
 
     const messages: ConversationMessage[] = [{ role: 'user', content: decompositionPrompt }];
     const result = await this.router.generate('T1', {
@@ -386,101 +468,155 @@ Leave dependsOn empty for subtasks that can run immediately in parallel.`;
       m.setHierarchyContext(context);
     });
 
-    // If overlaps detected globally, switch to sequential execution for safety
-    if (overlapSections.size > 0 && !sections.some(s => s.executionMode === 'sequential')) {
-      this.log('Overlap detected — switching to sequential execution for conflicting sections');
-      for (const section of sections) {
-        if (overlapSections.has(section.sectionId)) {
-          section.executionMode = 'sequential';
+    // If overlaps detected globally, add sequential dependencies for safety
+    if (overlapSections.size > 0) {
+      this.log('Overlap detected — adding sequential dependencies for conflicting sections to prevent race conditions');
+      const overlapArray = Array.from(overlapSections);
+      for (let i = 1; i < overlapArray.length; i++) {
+        const section = sections.find(s => s.sectionId === overlapArray[i]);
+        if (section) {
+          section.dependsOn = [...(section.dependsOn || []), overlapArray[i - 1]!];
         }
       }
     }
 
-    const pct = (i: number) => 10 + Math.floor((i / sections.length) * 85);
-    const isSequential = sections.some(s => s.executionMode === 'sequential');
     const t2Results: T2Result[] = [];
 
     try {
-    if (isSequential) {
-      this.log('Dispatching T2 managers sequentially');
-      for (let i = 0; i < managers.length; i++) {
-        const m = managers[i]!;
+      t2Results.push(...await this.runT2sWithDependencies(sections, managers, this.taskId));
+    } finally {
+      cleanup();
+    }
+
+    return t2Results;
+  }
+
+  /**
+   * Runs T2 managers respecting dependsOn declarations using Kahn's algorithm.
+   */
+  private async runT2sWithDependencies(
+    sections: T1ToT2Assignment[],
+    managers: T2Manager[],
+    taskId: string,
+  ): Promise<T2Result[]> {
+    const adj = new Map<string, Set<string>>();
+    const inDegree = new Map<string, number>();
+    const resultMap = new Map<string, T2Result>();
+    const allKeys = new Set(sections.map(s => s.sectionId));
+
+    for (const s of sections) {
+      if (!adj.has(s.sectionId)) adj.set(s.sectionId, new Set());
+      inDegree.set(s.sectionId, 0);
+      // Sanitize dependencies
+      s.dependsOn = (s.dependsOn ?? []).filter(d => allKeys.has(d));
+    }
+
+    for (const s of sections) {
+      for (const dep of (s.dependsOn ?? [])) {
+        adj.get(dep)!.add(s.sectionId);
+        inDegree.set(s.sectionId, (inDegree.get(s.sectionId) ?? 0) + 1);
+      }
+    }
+
+    // Break cycles
+    const queue: string[] = [];
+    const degree = new Map(inDegree);
+    for (const [id, deg] of degree.entries()) if (deg === 0) queue.push(id);
+    const visited = new Set<string>();
+    while (queue.length > 0) {
+      const u = queue.shift()!;
+      visited.add(u);
+      for (const v of adj.get(u) ?? new Set()) {
+        const newDeg = (degree.get(v) ?? 1) - 1;
+        degree.set(v, newDeg);
+        if (newDeg === 0) queue.push(v);
+      }
+    }
+    const cycleNodes = [...inDegree.keys()].filter(id => !visited.has(id));
+    if (cycleNodes.length > 0) {
+      this.log(`⚠ Circular dependency detected among sections: [${cycleNodes.join(', ')}]. Breaking cycles.`);
+      for (const s of sections) {
+        if (cycleNodes.includes(s.sectionId)) {
+          const safeDeps = (s.dependsOn ?? []).filter(d => !cycleNodes.includes(d));
+          for (const removed of (s.dependsOn ?? []).filter(d => cycleNodes.includes(d))) {
+            inDegree.set(s.sectionId, Math.max(0, (inDegree.get(s.sectionId) ?? 1) - 1));
+            adj.get(removed)?.delete(s.sectionId);
+          }
+          s.dependsOn = safeDeps;
+        }
+      }
+    }
+
+    // Wave-based execution
+    const totalSections = sections.length;
+    let completedSections = 0;
+    const executeWave = async () => {
+      const readyIds: string[] = [];
+      for (const [id, deg] of inDegree.entries()) {
+        if (deg === 0 && !resultMap.has(id)) {
+          readyIds.push(id);
+        }
+      }
+      if (readyIds.length === 0) return;
+
+      await Promise.all(readyIds.map(async (id) => {
+        // Mark as started (prevent picking it up in next wave before it finishes)
+        resultMap.set(id, null as any);
+
+        const index = sections.findIndex(s => s.sectionId === id);
+        const section = sections[index]!;
+        const manager = managers[index]!;
+
+        const progressPct = 10 + Math.floor((completedSections / totalSections) * 85);
         this.sendStatusUpdate({
-          progressPct: pct(i),
-          currentAction: `T2 working on: ${sections[i]!.sectionTitle} (Sequential)`,
+          progressPct,
+          currentAction: `T2 working on: ${section.sectionTitle}`,
           status: 'IN_PROGRESS',
         });
-        // ── Cancellation checkpoint: between each sequential T2 ────────
+
         this.throwIfCancelled();
+
+        let result: T2Result;
         try {
-          const result = await m.execute(sections[i]!, this.taskId, this.signal);
-          t2Results.push(result);
-          // Phase 2: Reactive — share completed section output with siblings
-          m.shareCompletedOutput(sections[i]!.sectionId, result.sectionSummary);
+          result = await manager.execute(section, taskId, this.signal);
+          manager.shareCompletedOutput(section.sectionId, result.sectionSummary);
           if (result.status === 'ESCALATED') {
             this.escalations.push({
-              raisedBy: `T2_${sections[i]!.sectionId}`,
-              sectionId: sections[i]!.sectionId,
+              raisedBy: `T2_${section.sectionId}`,
+              sectionId: section.sectionId,
               attempted: result.issues,
               blocker: result.issues.join('; '),
               needs: 'Human review required',
             });
           }
         } catch (err) {
-          t2Results.push({
-            sectionId: sections[i]!.sectionId,
-            sectionTitle: sections[i]!.sectionTitle,
+          result = {
+            sectionId: section.sectionId,
+            sectionTitle: section.sectionTitle,
             status: 'FAILED',
             t3Results: [],
             sectionSummary: '',
             issues: [err instanceof Error ? err.message : String(err)],
-          });
+          };
         }
-      }
-    } else {
-      const results = await Promise.allSettled(
-        managers.map((m, i) => {
-          this.sendStatusUpdate({
-            progressPct: pct(i),
-            currentAction: `T2 working on: ${sections[i]!.sectionTitle}`,
-            status: 'IN_PROGRESS',
-          });
-          return m.execute(sections[i]!, this.taskId, this.signal);
-        }),
-      );
 
-      for (let i = 0; i < results.length; i++) {
-        const r = results[i]!;
-        if (r.status === 'fulfilled') {
-          t2Results.push(r.value);
-          // Phase 2: Reactive — share completed section output with siblings
-          managers[i]!.shareCompletedOutput(sections[i]!.sectionId, r.value.sectionSummary);
-          if (r.value.status === 'ESCALATED') {
-            this.escalations.push({
-              raisedBy: `T2_${sections[i]!.sectionId}`,
-              sectionId: sections[i]!.sectionId,
-              attempted: r.value.issues,
-              blocker: r.value.issues.join('; '),
-              needs: 'Human review required',
-            });
-          }
-        } else {
-          t2Results.push({
-            sectionId: sections[i]!.sectionId,
-            sectionTitle: sections[i]!.sectionTitle,
-            status: 'FAILED',
-            t3Results: [],
-            sectionSummary: '',
-            issues: [r.reason instanceof Error ? r.reason.message : String(r.reason)],
-          });
+        resultMap.set(id, result);
+        completedSections++;
+
+        for (const dependentId of adj.get(id) ?? new Set()) {
+          inDegree.set(dependentId, Math.max(0, (inDegree.get(dependentId) ?? 1) - 1));
         }
-      }
-    }
-    } finally {
-      cleanup();
-    }
+      }));
 
-    return t2Results;
+      // Check if more are ready after this wave
+      if (Array.from(inDegree.values()).some(deg => deg === 0) && resultMap.size < totalSections) {
+        await executeWave();
+      }
+    };
+
+    await executeWave();
+
+    return sections.map(s => resultMap.get(s.sectionId)!).filter(Boolean);
   }
 
   private async compileFinalOutput(
