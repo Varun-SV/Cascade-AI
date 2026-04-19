@@ -192,6 +192,7 @@ export interface T1ToT2Assignment {
   constraints: string[];
   t3Subtasks: T3SubtaskSpec[];
   executionMode?: 'parallel' | 'sequential';
+  dependsOn?: string[];
   peerT2Ids?: string[];
 }
 

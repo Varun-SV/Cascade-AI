@@ -52,7 +52,7 @@ describe('Cascade routing complexity', () => {
       { role: 'user', content: 'Sounds good.' },
     ];
 
-    const complexity = await (cascade as any).determineComplexity('proceed', history);
+    const complexity = await (cascade as any).determineComplexity('proceed', '/dummy', history);
     const routedPrompt = generate.mock.calls[0]?.[1]?.messages?.[0]?.content as string;
 
     expect(complexity).toBe('Complex');

@@ -1,5 +1,7 @@
 import EventEmitter from 'node:events';
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
+import { glob } from 'glob';
 import type {
   ApprovalRequest,
   ApprovalResponse,
@@ -180,13 +182,29 @@ export class Cascade extends EventEmitter {
 
   private async determineComplexity(
     prompt: string,
+    workspacePath: string,
     conversationHistory: ConversationMessage[] = [],
   ): Promise<TaskComplexity> {
     if (this.looksLikeSimpleArtifactTask(prompt)) {
       return 'Simple';
     }
 
+    // Quick workspace scout
+    let workspaceContext = '';
+    try {
+      const files = await glob('**/*.*', {
+        cwd: workspacePath,
+        ignore: ['node_modules/**', '.git/**', 'dist/**', 'build/**'],
+        nodir: true,
+      });
+      workspaceContext = `Workspace Scout: Found ~${files.length} source files in the project.`;
+    } catch {
+      workspaceContext = 'Workspace Scout: Could not scan workspace.';
+    }
+
     const sysPrompt = `You are a routing classifier for a hierarchical AI system. Determine task complexity using BOTH the latest user message and the recent conversation context.
+
+${workspaceContext}
 
 Classification:
 - "Simple": basic conversation, direct single-step work, or small troubleshooting
@@ -279,7 +297,7 @@ ${prompt}`
     });
 
     // 1. Determine complexity
-    const complexity = await this.determineComplexity(options.prompt, options.conversationHistory);
+    const complexity = await this.determineComplexity(options.prompt, options.workspacePath || process.cwd(), options.conversationHistory);
 
     this.telemetry.capture('cascade:session_start', {
       complexity,
