@@ -3,6 +3,18 @@
 // ─────────────────────────────────────────────
 
 /**
+ * Thrown when a Cascade run is aborted via `AbortSignal`.
+ * Caught at the `Cascade.run()` boundary — does NOT propagate as an
+ * unhandled rejection. Callers receive a partial result instead.
+ */
+export class CascadeCancelledError extends Error {
+  constructor(reason?: string) {
+    super(reason ?? 'Run was cancelled via AbortSignal');
+    this.name = 'CascadeCancelledError';
+  }
+}
+
+/**
  * A retryable error that carries a `.userMessage` for display.
  */
 export class CascadeToolError extends Error {

@@ -105,12 +105,14 @@ export class T1Administrator extends BaseTier {
     userPrompt: string,
     images?: ImageAttachment[],
     systemContext?: string,
+    signal?: AbortSignal,
   ): Promise<{
     output: string;
     t2Results: T2Result[];
     taskId: string;
     complexity: TaskComplexity;
   }> {
+    this.signal = signal;
     this.taskId = randomUUID();
     this.setLabel('Administrator');
     this.setStatus('ACTIVE');
@@ -124,11 +126,17 @@ export class T1Administrator extends BaseTier {
 
     this.log(`T1 received task: ${userPrompt.slice(0, 100)}...`);
 
+    // ── Cancellation checkpoint: before image analysis ──
+    this.throwIfCancelled();
+
     // Step 1: Analyze images if present (T1 processes top-level images)
     let enrichedPrompt = userPrompt;
     if (images?.length) {
       enrichedPrompt = await this.analyzeImages(userPrompt, images);
     }
+
+    // ── Cancellation checkpoint: after image analysis, before planning ──
+    this.throwIfCancelled();
 
     // Step 2: Decompose task into sections
     const plan = await this.decomposeTask(enrichedPrompt, systemContext);
@@ -140,6 +148,9 @@ export class T1Administrator extends BaseTier {
     });
 
     this.emit('plan', { taskId: this.taskId, plan });
+
+    // ── Cancellation checkpoint: after planning, before T2 dispatch ──
+    this.throwIfCancelled();
 
     // Step 3: Dispatch T2 managers in parallel
     const t2Results = await this.dispatchT2Managers(plan.sections);
@@ -399,8 +410,10 @@ Leave dependsOn empty for subtasks that can run immediately in parallel.`;
           currentAction: `T2 working on: ${sections[i]!.sectionTitle} (Sequential)`,
           status: 'IN_PROGRESS',
         });
+        // ── Cancellation checkpoint: between each sequential T2 ────────
+        this.throwIfCancelled();
         try {
-          const result = await m.execute(sections[i]!, this.taskId);
+          const result = await m.execute(sections[i]!, this.taskId, this.signal);
           t2Results.push(result);
           // Phase 2: Reactive — share completed section output with siblings
           m.shareCompletedOutput(sections[i]!.sectionId, result.sectionSummary);
@@ -432,7 +445,7 @@ Leave dependsOn empty for subtasks that can run immediately in parallel.`;
             currentAction: `T2 working on: ${sections[i]!.sectionTitle}`,
             status: 'IN_PROGRESS',
           });
-          return m.execute(sections[i]!, this.taskId);
+          return m.execute(sections[i]!, this.taskId, this.signal);
         }),
       );
 

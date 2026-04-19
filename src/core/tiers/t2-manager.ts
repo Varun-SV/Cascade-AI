@@ -123,7 +123,8 @@ export class T2Manager extends BaseTier {
     this.emit('peer-sync-received', { fromId, content });
   }
 
-  async execute(assignment: T1ToT2Assignment, taskId: string): Promise<T2Result> {
+  async execute(assignment: T1ToT2Assignment, taskId: string, signal?: AbortSignal): Promise<T2Result> {
+    this.signal = signal;
     this.assignment = assignment;
     this.taskId = taskId;
     this.setLabel(assignment.sectionTitle);
@@ -138,6 +139,9 @@ export class T2Manager extends BaseTier {
     this.log(`T2 managing section: ${assignment.sectionTitle}`);
 
     try {
+      // ── Cancellation checkpoint: before section decomposition ──
+      this.throwIfCancelled();
+
       const subtasks = assignment.t3Subtasks.length > 0
         ? assignment.t3Subtasks
         : await this.decomposeSection(assignment);
@@ -147,6 +151,9 @@ export class T2Manager extends BaseTier {
         currentAction: `Dispatching ${subtasks.length} T3 workers`,
         status: 'IN_PROGRESS',
       });
+
+      // ── Cancellation checkpoint: before T3 dispatch ──
+      this.throwIfCancelled();
 
       const t3Results = await this.executeSubtasks(subtasks, taskId);
 
@@ -386,12 +393,15 @@ Return ONLY the JSON array.`;
         status: 'IN_PROGRESS',
       });
 
+      // ── Cancellation checkpoint: between each T3 wave ────────────
+      this.throwIfCancelled();
+
       // Execute this wave in parallel
       const waveResults = await Promise.allSettled(
         runnableIds.map(async (id) => {
           const assignment = sanitizedAssignments.find((a) => a.subtaskId === id)!;
           const worker = workerMap.get(id)!;
-          const result = await worker.execute(assignment, taskId);
+          const result = await worker.execute(assignment, taskId, this.signal);
           resultMap.set(id, result);
           return result;
         }),
@@ -494,6 +504,7 @@ Return ONLY the JSON array.`;
     return worker.execute(
       { ...assignment, description: `[RETRY] ${assignment.description}` },
       taskId,
+      this.signal,
     );
   }
 

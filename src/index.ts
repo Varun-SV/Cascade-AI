@@ -24,3 +24,4 @@ export { Telemetry } from './telemetry/index.js';
 
 export * from './types.js';
 export * from './constants.js';
+export { CascadeCancelledError, CascadeToolError } from './utils/retry.js';

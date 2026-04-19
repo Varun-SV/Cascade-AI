@@ -84,6 +84,7 @@ User prompt
 - **Provider failover** — auto-switches provider on rate limits (exponential backoff); automatically re-enables recovered providers on success
 - **Context auto-summarization** — compresses history when the context window fills
 - **Conversation branching** — fork a session to try parallel approaches
+- **Task cancellation** — pass an `AbortSignal` to stop any run mid-flight; all tiers halt at the next safe checkpoint and emit `run:cancelled` with partial output
 
 ### AI Providers
 - Anthropic (Claude Opus 4, Sonnet 4, Haiku 3.5)
@@ -420,6 +421,38 @@ const result = await cascade.run({
   streamCallback: (chunk) => process.stdout.write(chunk.text),
 });
 ```
+
+### Cancellation
+
+Pass an `AbortSignal` to stop a run mid-execution. All active tiers (T1 → T2 → T3) halt at the next safe checkpoint, preventing further token spend. The `run()` call resolves with whatever partial output has been produced so far.
+
+```typescript
+import { createCascade, CascadeCancelledError } from 'cascade-ai';
+
+const cascade = createCascade({ /* config */ });
+await cascade.init();
+
+const controller = new AbortController();
+
+// Listen for the cancellation event
+cascade.on('run:cancelled', ({ taskId, reason, partialOutput }) => {
+  console.log(`Task ${taskId} cancelled: ${reason}`);
+  console.log('Partial output so far:', partialOutput);
+});
+
+// Start the run (non-blocking)
+const runPromise = cascade.run({
+  prompt: 'Perform a deep codebase audit',
+  signal: controller.signal,
+});
+
+// Cancel after 10 seconds (e.g. user pressed Ctrl-C)
+setTimeout(() => controller.abort('User requested stop'), 10_000);
+
+const result = await runPromise; // resolves gracefully, not rejected
+```
+
+**How it propagates:** The signal is threaded through `T1Administrator → T2Manager → T3Worker`. Each tier checks for cancellation before every LLM call so the run stops as soon as the current in-flight request completes — no mid-stream interruptions.
 
 ---
 
