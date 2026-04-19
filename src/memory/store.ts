@@ -25,9 +25,10 @@ export class MemoryStore {
   constructor(dbPath: string) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     try {
-      this.db = new Database(dbPath);
+      this.db = new Database(dbPath, { timeout: 5000 });
       this.db.pragma('journal_mode = WAL');
       this.db.pragma('foreign_keys = ON');
+      this.db.pragma('synchronous = NORMAL'); // Better concurrency with WAL
       this.migrate();
     } catch (err) {
       if (err instanceof Error && err.message.includes('Could not locate the bindings file')) {
@@ -39,6 +40,42 @@ export class MemoryStore {
       }
       throw err;
     }
+  }
+
+  // ── Async Write Queue ─────────────────────────
+
+  private writeQueue: Array<() => void> = [];
+  private isProcessingQueue = false;
+
+  private async processQueue() {
+    if (this.isProcessingQueue) return;
+    this.isProcessingQueue = true;
+    while (this.writeQueue.length > 0) {
+      const op = this.writeQueue.shift();
+      if (op) {
+        let attempts = 0;
+        while (attempts < 5) {
+          try {
+            op();
+            break;
+          } catch (err: unknown) {
+            if (err instanceof Error && (err as any).code === 'SQLITE_BUSY') {
+              attempts++;
+              await new Promise(r => setTimeout(r, 100 * Math.pow(2, attempts)));
+            } else {
+              console.error('Cascade AI: DB Write Error:', err);
+              break;
+            }
+          }
+        }
+      }
+    }
+    this.isProcessingQueue = false;
+  }
+
+  private enqueueWrite(op: () => void) {
+    this.writeQueue.push(op);
+    this.processQueue().catch(console.error);
   }
 
   // ── Sessions ──────────────────────────────────
@@ -132,26 +169,28 @@ export class MemoryStore {
   // ── Runtime Sessions / Nodes ─────────────────
 
   upsertRuntimeSession(session: RuntimeSession): void {
-    this.db.prepare(`
-      INSERT INTO runtime_sessions (session_id, title, workspace_path, status, started_at, updated_at, latest_prompt, is_global)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(session_id) DO UPDATE SET
-        title = excluded.title,
-        workspace_path = excluded.workspace_path,
-        status = excluded.status,
-        updated_at = excluded.updated_at,
-        latest_prompt = excluded.latest_prompt,
-        is_global = excluded.is_global
-    `).run(
-      session.sessionId,
-      session.title,
-      session.workspacePath,
-      session.status,
-      session.startedAt,
-      session.updatedAt,
-      session.latestPrompt ?? null,
-      session.isGlobal ? 1 : 0,
-    );
+    this.enqueueWrite(() => {
+      this.db.prepare(`
+        INSERT INTO runtime_sessions (session_id, title, workspace_path, status, started_at, updated_at, latest_prompt, is_global)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(session_id) DO UPDATE SET
+          title = excluded.title,
+          workspace_path = excluded.workspace_path,
+          status = excluded.status,
+          updated_at = excluded.updated_at,
+          latest_prompt = excluded.latest_prompt,
+          is_global = excluded.is_global
+      `).run(
+        session.sessionId,
+        session.title,
+        session.workspacePath,
+        session.status,
+        session.startedAt,
+        session.updatedAt,
+        session.latestPrompt ?? null,
+        session.isGlobal ? 1 : 0,
+      );
+    });
   }
 
   listRuntimeSessions(limit = 100): RuntimeSession[] {
@@ -171,33 +210,35 @@ export class MemoryStore {
   }
 
   upsertRuntimeNode(node: RuntimeNode): void {
-    this.db.prepare(`
-      INSERT INTO runtime_nodes (tier_id, session_id, parent_id, role, label, status, current_action, progress_pct, updated_at, workspace_path, is_global)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(tier_id) DO UPDATE SET
-        session_id = excluded.session_id,
-        parent_id = excluded.parent_id,
-        role = excluded.role,
-        label = excluded.label,
-        status = excluded.status,
-        current_action = excluded.current_action,
-        progress_pct = excluded.progress_pct,
-        updated_at = excluded.updated_at,
-        workspace_path = excluded.workspace_path,
-        is_global = excluded.is_global
-    `).run(
-      node.tierId,
-      node.sessionId,
-      node.parentId ?? null,
-      node.role,
-      node.label,
-      node.status,
-      node.currentAction ?? null,
-      node.progressPct ?? null,
-      node.updatedAt,
-      node.workspacePath ?? null,
-      node.isGlobal ? 1 : 0,
-    );
+    this.enqueueWrite(() => {
+      this.db.prepare(`
+        INSERT INTO runtime_nodes (tier_id, session_id, parent_id, role, label, status, current_action, progress_pct, updated_at, workspace_path, is_global)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(tier_id) DO UPDATE SET
+          session_id = excluded.session_id,
+          parent_id = excluded.parent_id,
+          role = excluded.role,
+          label = excluded.label,
+          status = excluded.status,
+          current_action = excluded.current_action,
+          progress_pct = excluded.progress_pct,
+          updated_at = excluded.updated_at,
+          workspace_path = excluded.workspace_path,
+          is_global = excluded.is_global
+      `).run(
+        node.tierId,
+        node.sessionId,
+        node.parentId ?? null,
+        node.role,
+        node.label,
+        node.status,
+        node.currentAction ?? null,
+        node.progressPct ?? null,
+        node.updatedAt,
+        node.workspacePath ?? null,
+        node.isGlobal ? 1 : 0,
+      );
+    });
   }
 
   listRuntimeNodes(sessionId?: string, limit = 500): RuntimeNode[] {
@@ -225,31 +266,33 @@ export class MemoryStore {
   }
 
   addRuntimeNodeLog(log: RuntimeNodeLog): void {
-    this.db.prepare(`
-      INSERT INTO runtime_node_logs (id, session_id, tier_id, role, label, status, current_action, progress_pct, timestamp, workspace_path, is_global)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      log.id,
-      log.sessionId,
-      log.tierId,
-      log.role,
-      log.label,
-      log.status,
-      log.currentAction ?? null,
-      log.progressPct ?? null,
-      log.timestamp,
-      log.workspacePath ?? null,
-      log.isGlobal ? 1 : 0,
-    );
+    this.enqueueWrite(() => {
+      this.db.prepare(`
+        INSERT INTO runtime_node_logs (id, session_id, tier_id, role, label, status, current_action, progress_pct, timestamp, workspace_path, is_global)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        log.id,
+        log.sessionId,
+        log.tierId,
+        log.role,
+        log.label,
+        log.status,
+        log.currentAction ?? null,
+        log.progressPct ?? null,
+        log.timestamp,
+        log.workspacePath ?? null,
+        log.isGlobal ? 1 : 0,
+      );
 
-    this.db.prepare(`
-      DELETE FROM runtime_node_logs
-      WHERE id NOT IN (
-        SELECT id FROM runtime_node_logs
-        ORDER BY timestamp DESC
-        LIMIT 2000
-      )
-    `).run();
+      this.db.prepare(`
+        DELETE FROM runtime_node_logs
+        WHERE id NOT IN (
+          SELECT id FROM runtime_node_logs
+          ORDER BY timestamp DESC
+          LIMIT 2000
+        )
+      `).run();
+    });
   }
 
   listRuntimeNodeLogs(sessionId?: string, tierId?: string, limit = 200): RuntimeNodeLog[] {
@@ -292,19 +335,21 @@ export class MemoryStore {
   // ── Messages ──────────────────────────────────
 
   addMessage(message: StoredMessage): void {
-    this.db.prepare(`
-      INSERT INTO messages (id, session_id, role, content, timestamp, tokens, agent_messages)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      message.id,
-      message.sessionId,
-      message.role,
-      typeof message.content === 'string' ? message.content : JSON.stringify(message.content),
-      message.timestamp,
-      message.tokens ? JSON.stringify(message.tokens) : null,
-      message.agentMessages ? JSON.stringify(message.agentMessages) : null,
-    );
-    this.db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(message.timestamp, message.sessionId);
+    this.enqueueWrite(() => {
+      this.db.prepare(`
+        INSERT INTO messages (id, session_id, role, content, timestamp, tokens, agent_messages)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        message.id,
+        message.sessionId,
+        message.role,
+        typeof message.content === 'string' ? message.content : JSON.stringify(message.content),
+        message.timestamp,
+        message.tokens ? JSON.stringify(message.tokens) : null,
+        message.agentMessages ? JSON.stringify(message.agentMessages) : null,
+      );
+      this.db.prepare('UPDATE sessions SET updated_at = ? WHERE id = ?').run(message.timestamp, message.sessionId);
+    });
   }
 
   getSessionMessages(sessionId: string): StoredMessage[] {
@@ -387,10 +432,12 @@ export class MemoryStore {
   // ── Audit Log ─────────────────────────────────
 
   addAuditEntry(entry: AuditEntry): void {
-    this.db.prepare(`
-      INSERT INTO audit_log (id, session_id, timestamp, tier_id, action, details)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(entry.id, entry.sessionId, entry.timestamp, entry.tierId, entry.action, JSON.stringify(entry.details));
+    this.enqueueWrite(() => {
+      this.db.prepare(`
+        INSERT INTO audit_log (id, session_id, timestamp, tier_id, action, details)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(entry.id, entry.sessionId, entry.timestamp, entry.tierId, entry.action, JSON.stringify(entry.details));
+    });
   }
 
   getAuditLog(sessionId: string, limit = 100): AuditEntry[] {
@@ -408,10 +455,12 @@ export class MemoryStore {
   // ── File Snapshots ────────────────────────────
 
   addFileSnapshot(sessionId: string, filePath: string, content: string): void {
-    this.db.prepare(`
-      INSERT INTO file_snapshots (id, session_id, file_path, content, timestamp)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(randomUUID(), sessionId, filePath, content, new Date().toISOString());
+    this.enqueueWrite(() => {
+      this.db.prepare(`
+        INSERT INTO file_snapshots (id, session_id, file_path, content, timestamp)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(randomUUID(), sessionId, filePath, content, new Date().toISOString());
+    });
   }
 
   getLatestFileSnapshots(sessionId: string): Array<{ filePath: string; content: string }> {

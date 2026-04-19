@@ -19,8 +19,20 @@ import { modelsCommand } from './commands/models.js';
 import { exportCommand } from './commands/export.js';
 import { telemetryCommand } from './commands/telemetry.js';
 import { runSetupWizard } from './setup/index.js';
+import { McpClient } from '../mcp/client.js';
 
 dotenv.config();
+
+// Global cleanup handlers to prevent zombie MCP processes
+process.on('exit', () => McpClient.killAllProcesses());
+process.on('SIGINT', () => {
+  McpClient.killAllProcesses();
+  process.exit(0);
+});
+process.on('SIGTERM', () => {
+  McpClient.killAllProcesses();
+  process.exit(0);
+});
 
 const program = new Command();
 

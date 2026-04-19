@@ -35,7 +35,25 @@ export interface McpClientOptions {
 }
 
 export class McpClient {
+  private static activeProcessPids = new Set<number>();
+
+  /** 
+   * Forcefully kills all known MCP child processes. 
+   * Call this from global process exit handlers to prevent zombie processes.
+   */
+  static killAllProcesses(): void {
+    for (const pid of McpClient.activeProcessPids) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // Ignore errors (process already dead, etc.)
+      }
+    }
+    McpClient.activeProcessPids.clear();
+  }
+
   private clients: Map<string, Client> = new Map();
+  private transports: Map<string, StdioClientTransport> = new Map();
   private tools: Map<string, McpTool> = new Map();
   private trustedServers: Set<string>;
   private approvalCallback: McpApprovalCallback | undefined;
@@ -74,6 +92,10 @@ export class McpClient {
 
     await client.connect(transport);
     this.clients.set(server.name, client);
+    this.transports.set(server.name, transport);
+
+    // @ts-expect-error accessing undocumented but public getter in SDK
+    if (transport.pid) McpClient.activeProcessPids.add(transport.pid);
 
     // Discover tools from this server. If another server already registered
     // a tool with the same bare name, emit a console warning but keep the
@@ -101,8 +123,13 @@ export class McpClient {
   async disconnect(serverName: string): Promise<void> {
     const client = this.clients.get(serverName);
     if (client) {
+      const transport = this.transports.get(serverName);
+      // @ts-expect-error accessing undocumented but public getter in SDK
+      if (transport?.pid) McpClient.activeProcessPids.delete(transport.pid);
+
       await client.close();
       this.clients.delete(serverName);
+      this.transports.delete(serverName);
       for (const key of this.tools.keys()) {
         if (key.startsWith(`${serverName}::`)) this.tools.delete(key);
       }
@@ -134,6 +161,15 @@ export class McpClient {
 
   getConnectedServers(): string[] {
     return Array.from(this.clients.keys());
+  }
+
+  getActivePids(): number[] {
+    const pids: number[] = [];
+    for (const transport of this.transports.values()) {
+      // @ts-expect-error accessing undocumented but public getter in SDK
+      if (transport.pid) pids.push(transport.pid);
+    }
+    return pids;
   }
 
   isConnected(serverName: string): boolean {
