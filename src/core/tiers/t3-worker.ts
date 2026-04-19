@@ -289,23 +289,14 @@ export class T3Worker extends BaseTier {
         if (requiresArtifact) {
           stalledArtifactIterations += 1;
           if (stalledArtifactIterations >= 2) {
-            // Attempt to create a runtime tool if ToolCreator is available
-            if (this.toolCreator && stalledArtifactIterations === 2) {
-              const toolName = await this.toolCreator.createTool(
-                `Help complete: ${this.assignment?.subtaskTitle ?? 'unknown task'}`,
-                this.assignment?.description ?? '',
+            if (stalledArtifactIterations === 2) {
+              return this.buildResult(
+                'ESCALATED',
+                'Worker stalled waiting for artifact creation. Requesting dynamic tool generation from T2 Manager.',
+                { checksRun: [], passed: [], failed: [] },
+                [`Failed to create required artifact. Need a specialized tool for: ${this.assignment?.subtaskTitle ?? 'unknown task'}`],
+                0,
               );
-              if (toolName) {
-                // Refresh tool definitions with newly created tool
-                tools = this.toolRegistry.getToolDefinitions();
-                this.sendStatusUpdate({
-                  progressPct: 50,
-                  currentAction: `Dynamic tool created: ${toolName}`,
-                  status: 'IN_PROGRESS',
-                });
-                this.emit('tool:created', { tierId: this.id, toolName });
-                continue;
-              }
             }
             throw new Error('Artifact-producing task stalled without creating or verifying the required files');
           }
@@ -491,6 +482,9 @@ ${assignment.expectedOutput}`;
     if (!artifactPaths.length) return { ok: true, issues: [] };
 
     const issues: string[] = [];
+    const { exec } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const execAsync = promisify(exec);
 
     for (const artifactPath of artifactPaths) {
       const absolutePath = path.resolve(process.cwd(), artifactPath);
@@ -509,9 +503,27 @@ ${assignment.expectedOutput}`;
           const content = await fs.readFile(absolutePath, 'utf-8');
           if (!content.trim()) {
             issues.push(`Artifact content is empty: ${artifactPath}`);
+            continue;
           }
         } else if (stat.size < 100) {
           issues.push(`PDF artifact looks too small to be valid: ${artifactPath}`);
+          continue;
+        }
+
+        // Semantic checks
+        const ext = path.extname(absolutePath).toLowerCase();
+        try {
+          if (ext === '.ts' || ext === '.tsx') {
+            await execAsync(`npx tsc --noEmit ${absolutePath}`, { timeout: 10000 });
+          } else if (ext === '.js' || ext === '.jsx') {
+            await execAsync(`node --check ${absolutePath}`, { timeout: 10000 });
+          } else if (ext === '.py') {
+            await execAsync(`python -m py_compile ${absolutePath}`, { timeout: 10000 });
+          }
+        } catch (err: any) {
+          const stderr = err?.stderr || String(err);
+          const stdout = err?.stdout || '';
+          issues.push(`Semantic error in ${artifactPath}:\n${stderr}\n${stdout}`);
         }
       } catch {
         issues.push(`Required artifact was not created: ${artifactPath}`);

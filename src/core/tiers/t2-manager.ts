@@ -418,6 +418,59 @@ Return ONLY the JSON array.`;
           const assignment = sanitizedAssignments.find((a) => a.subtaskId === id)!;
           const retried = await this.retryT3(assignment, taskId);
           resultMap.set(id, retried);
+        } else if (r.status === 'fulfilled' && r.value.status === 'ESCALATED' && r.value.issues.some(i => i.includes('dynamic tool generation'))) {
+          // Tool Creation Redesign: T2 spawns builder -> verifies -> original T3 uses it
+          const assignment = sanitizedAssignments.find((a) => a.subtaskId === id)!;
+          if (this.toolCreator) {
+            this.log(`T3 escalated for tool. T2 spawning Tool-Builder T3 for: ${assignment.subtaskTitle}`);
+            this.sendStatusUpdate({
+              progressPct: 50,
+              currentAction: `Spawning Tool-Builder T3 for: ${assignment.subtaskTitle}`,
+              status: 'IN_PROGRESS',
+            });
+            const toolName = await this.toolCreator.createTool(
+              `Help complete: ${assignment.subtaskTitle}`,
+              assignment.description,
+            );
+            if (toolName) {
+              this.log(`T2 verifying new tool: ${toolName}`);
+              this.sendStatusUpdate({
+                progressPct: 60,
+                currentAction: `T2 Verifying new tool: ${toolName}`,
+                status: 'IN_PROGRESS',
+              });
+              // Verification step via T2 model
+              try {
+                const verifyResult = await this.router.generate('T2', {
+                  messages: [{ role: 'user', content: `A new tool named "${toolName}" was just created dynamically to help with: ${assignment.description}. Based on its name and purpose, does this seem like a valid addition? Reply "VERIFIED" or "REJECTED".` }],
+                  systemPrompt: this.systemPromptOverride + 'You are T2 Manager verifying a dynamic tool.',
+                  maxTokens: 50,
+                });
+                if (!verifyResult.content.toUpperCase().includes('REJECTED')) {
+                  this.log(`T2 verification passed for ${toolName}. Restarting original T3.`);
+                  const retried = await this.retryT3({
+                    ...assignment,
+                    description: `${assignment.description}\n\n[SYSTEM NOTIFICATION]: A new dynamic tool "${toolName}" has been built and verified for you. Use it to complete your task.`
+                  }, taskId);
+                  resultMap.set(id, retried);
+                } else {
+                  this.log(`T2 rejected the dynamic tool: ${toolName}`);
+                  resultMap.set(id, r.value);
+                }
+              } catch {
+                // If verification generation fails, gracefully accept the tool
+                const retried = await this.retryT3({
+                  ...assignment,
+                  description: `${assignment.description}\n\n[SYSTEM NOTIFICATION]: A new dynamic tool "${toolName}" has been built for you. Use it to complete your task.`
+                }, taskId);
+                resultMap.set(id, retried);
+              }
+            } else {
+              resultMap.set(id, r.value);
+            }
+          } else {
+            resultMap.set(id, r.value);
+          }
         }
 
         for (const dependent of adj.get(id) ?? []) {
@@ -524,30 +577,52 @@ Return ONLY the JSON array.`;
     const completed = results.filter((r) => r.status === 'COMPLETED');
     if (!completed.length) return `Section ${assignment.sectionTitle} failed — no T3 workers completed.`;
 
-    const outputs = completed.map((r, i) => `[T3-${i + 1}]: ${r.output}`).join('\n\n');
-    
     const peerOutputs = this.peerSyncBuffer
       .filter(p => (p.content as any)?.type === 'T2_SECTION_OUTPUT')
       .map(p => `[Peer ${p.fromId} Output]: ${(p.content as any).output}`)
       .join('\n\n');
 
-    const prompt = `Summarize these T3 worker outputs for section "${assignment.sectionTitle}" in 2-3 sentences:\n\n${outputs}
-${peerOutputs ? `\n\nContext from sibling T2 completed sections (use this to ensure your summary aligns with the overall state):\n${peerOutputs}` : ''}`;
+    const peerContext = peerOutputs ? `\n\nContext from sibling T2 completed sections (use this to ensure your summary aligns with the overall state):\n${peerOutputs}` : '';
+    const MAX_CHUNK_LENGTH = 15000; // Roughly ~3.5k tokens safety limit
 
-    const messages: ConversationMessage[] = [{ role: 'user', content: prompt }];
-    try {
-      const result = await this.router.generate('T2', {
-        messages,
-        systemPrompt: this.systemPromptOverride + 'You are a T2 Manager. Summarize the work of your T3 workers succinctly.' + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
-        maxTokens: 300
-      });
-      return result.content;
-    } catch (err) {
-      this.log(`aggregateResults: LLM summarization failed — returning raw T3 outputs. Error: ${err instanceof Error ? err.message : String(err)}`);
-      return outputs;
+    let currentSummary = '';
+    let i = 0;
+
+    // Rolling map-reduce for large outputs
+    while (i < completed.length) {
+      let chunkText = '';
+      let chunkEnd = i;
+
+      while (chunkEnd < completed.length) {
+        const nextOutput = `[T3-${chunkEnd + 1}]: ${completed[chunkEnd]!.output}\n\n`;
+        if (chunkText.length + nextOutput.length > MAX_CHUNK_LENGTH && chunkEnd > i) {
+          break; // Stop if adding this output exceeds the chunk limit (and we have at least one)
+        }
+        chunkText += nextOutput;
+        chunkEnd++;
+      }
+
+      i = chunkEnd;
+
+      const prompt = `Summarize these T3 worker outputs for section "${assignment.sectionTitle}" in 2-3 sentences.
+  ${currentSummary ? `\nPREVIOUS SUMMARY SO FAR:\n${currentSummary}\n\nNEW OUTPUTS TO INTEGRATE:\n` : '\nOUTPUTS:\n'}${chunkText}${peerContext}`;
+
+      const messages: ConversationMessage[] = [{ role: 'user', content: prompt }];
+      try {
+        const result = await this.router.generate('T2', {
+          messages,
+          systemPrompt: this.systemPromptOverride + 'You are a T2 Manager. Summarize the work of your T3 workers succinctly.' + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
+          maxTokens: 500
+        });
+        currentSummary = result.content;
+      } catch (err) {
+        this.log(`aggregateResults: LLM summarization failed at chunk — returning raw T3 outputs. Error: ${err instanceof Error ? err.message : String(err)}`);
+        return currentSummary + '\n\n' + chunkText; // Best effort fallback
+      }
     }
-  }
 
+    return currentSummary;
+  }
   private determineStatus(results: T3Result[]): T2Result['status'] {
     if (results.every((r) => r.status === 'COMPLETED')) return 'COMPLETED';
     if (results.some((r) => r.status === 'COMPLETED')) return 'PARTIAL';
