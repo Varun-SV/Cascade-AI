@@ -94,7 +94,7 @@ export class McpClient {
     this.clients.set(server.name, client);
     this.transports.set(server.name, transport);
 
-    // @ts-expect-error accessing undocumented but public getter in SDK
+    // Accessing undocumented but public getter in SDK
     if (transport.pid) McpClient.activeProcessPids.add(transport.pid);
 
     // Discover tools from this server. If another server already registered
@@ -124,7 +124,7 @@ export class McpClient {
     const client = this.clients.get(serverName);
     if (client) {
       const transport = this.transports.get(serverName);
-      // @ts-expect-error accessing undocumented but public getter in SDK
+      // Accessing undocumented but public getter in SDK
       if (transport?.pid) McpClient.activeProcessPids.delete(transport.pid);
 
       await client.close();
@@ -166,7 +166,7 @@ export class McpClient {
   getActivePids(): number[] {
     const pids: number[] = [];
     for (const transport of this.transports.values()) {
-      // @ts-expect-error accessing undocumented but public getter in SDK
+      // Accessing undocumented but public getter in SDK
       if (transport.pid) pids.push(transport.pid);
     }
     return pids;
