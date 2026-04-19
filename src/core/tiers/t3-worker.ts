@@ -290,13 +290,7 @@ export class T3Worker extends BaseTier {
           stalledArtifactIterations += 1;
           if (stalledArtifactIterations >= 2) {
             if (stalledArtifactIterations === 2) {
-              return this.buildResult(
-                'ESCALATED',
-                'Worker stalled waiting for artifact creation. Requesting dynamic tool generation from T2 Manager.',
-                { checksRun: [], passed: [], failed: [] },
-                [`Failed to create required artifact. Need a specialized tool for: ${this.assignment?.subtaskTitle ?? 'unknown task'}`],
-                0,
-              );
+              throw new Error(`Worker stalled waiting for artifact creation. Requesting dynamic tool generation from T2 Manager for: ${this.assignment?.subtaskTitle ?? 'unknown task'}`);
             }
             throw new Error('Artifact-producing task stalled without creating or verifying the required files');
           }
