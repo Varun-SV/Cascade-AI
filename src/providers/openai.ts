@@ -82,10 +82,28 @@ export class OpenAIProvider extends BaseProvider {
     }
 
     const toolCallsMap: Record<number, { id: string; name: string; args: string }> = {};
+    let isThinking = false;
 
     for await (const chunk of stream) {
       const delta = chunk.choices[0]?.delta;
+
+      const reasoningContent = (delta as any)?.reasoning_content;
+      if (reasoningContent) {
+        if (!isThinking) {
+          isThinking = true;
+          fullContent += '<think>\n';
+          onChunk({ text: '<think>\n', finishReason: null });
+        }
+        fullContent += reasoningContent;
+        onChunk({ text: reasoningContent, finishReason: null });
+      }
+
       if (delta?.content) {
+        if (isThinking) {
+          isThinking = false;
+          fullContent += '\n</think>\n\n';
+          onChunk({ text: '\n</think>\n\n', finishReason: null });
+        }
         fullContent += delta.content;
         onChunk({ text: delta.content, finishReason: null });
       }
@@ -107,6 +125,11 @@ export class OpenAIProvider extends BaseProvider {
         inputTokens = chunk.usage.prompt_tokens;
         outputTokens = chunk.usage.completion_tokens;
       }
+    }
+
+    if (isThinking) {
+      fullContent += '\n</think>\n\n';
+      onChunk({ text: '\n</think>\n\n', finishReason: null });
     }
 
     const toolCalls = Object.values(toolCallsMap).map((tc) => {

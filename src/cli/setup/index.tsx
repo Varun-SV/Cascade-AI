@@ -53,6 +53,7 @@ interface WizardState {
   currentEntryIdx: number;           // which entry we are collecting keys for
   addingAnotherAzure: boolean;
   addingAnotherCompat: boolean;
+  addingAnotherOllama: boolean;
   fetchedModels: FetchedModel[];
   fetchLog: string[];
   tierT1: string;                    // 'auto' or model id
@@ -71,6 +72,7 @@ type WizardAction =
   | { type: 'NEXT_ENTRY' }
   | { type: 'ADD_AZURE' }
   | { type: 'ADD_COMPAT' }
+  | { type: 'ADD_OLLAMA' }
   | { type: 'SKIP_MORE' }
   | { type: 'SET_FETCH_LOG'; line: string }
   | { type: 'SET_MODELS'; models: FetchedModel[] }
@@ -169,8 +171,21 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
         addingAnotherCompat: false,
       };
     }
+    case 'ADD_OLLAMA': {
+      const newEntry: ProviderEntry = {
+        id: randomUUID(),
+        type: 'ollama',
+        label: `Ollama endpoint ${state.entries.filter(e => e.type === 'ollama').length + 1}`,
+      };
+      return {
+        ...state,
+        entries: [...state.entries, newEntry],
+        currentEntryIdx: state.entries.length,
+        addingAnotherOllama: false,
+      };
+    }
     case 'SKIP_MORE':
-      return { ...state, addingAnotherAzure: false, addingAnotherCompat: false, step: 'FETCH_MODELS', currentEntryIdx: 0 };
+      return { ...state, addingAnotherAzure: false, addingAnotherCompat: false, addingAnotherOllama: false, step: 'FETCH_MODELS', currentEntryIdx: 0 };
     case 'GO_FETCH':
       return { ...state, step: 'FETCH_MODELS', fetchLog: [], fetchedModels: [] };
     case 'SET_FETCH_LOG':
@@ -212,6 +227,7 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
     currentEntryIdx: 0,
     addingAnotherAzure: false,
     addingAnotherCompat: false,
+    addingAnotherOllama: false,
     fetchedModels: [],
     fetchLog: [],
     tierT1: 'auto',
@@ -328,13 +344,16 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
   // ── Input handling ────────────────────────────
   useInput((_input, key) => {
     if (state.step === 'PROVIDER_SELECT') {
-      if (key.upArrow) setProviderCursor(p => Math.max(0, p - 1));
-      if (key.downArrow) setProviderCursor(p => Math.min(providerOrder.length - 1, p + 1));
+      if (key.upArrow) setProviderCursor(p => (p <= 0 ? providerOrder.length - 1 : p - 1));
+      if (key.downArrow) setProviderCursor(p => (p >= providerOrder.length - 1 ? 0 : p + 1));
       if (_input === ' ') dispatch({ type: 'TOGGLE_PROVIDER', provider: providerOrder[providerCursor]! });
       if (_input === 'a') dispatch({ type: 'TOGGLE_ALL' });
       if (_input === 'i') dispatch({ type: 'INVERT_SELECTION' });
       if (key.return) {
-        if (state.selectedTypes.size === 0) return;
+        if (state.selectedTypes.size === 0) {
+          dispatch({ type: 'SET_ERROR', error: 'Please select at least one provider using <space> before pressing <enter>.' });
+          return;
+        }
         dispatch({ type: 'CONFIRM_PROVIDERS' });
         const firstType = [...state.selectedTypes][0];
         setFieldStage(firstType === 'azure' ? 'deploymentName' : firstType === 'openai-compatible' ? 'label' : firstType === 'ollama' ? 'baseUrl' : 'apiKey');
@@ -397,11 +416,7 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
     } else if (currentEntry.type === 'ollama') {
       dispatch({ type: 'SET_ENTRY_FIELD', field: 'baseUrl', value: val || 'http://localhost:11434' });
       setFieldBuffer('');
-      const nextEntry = state.entries[state.currentEntryIdx + 1];
-      if (nextEntry) {
-        setFieldStage(nextEntry.type === 'azure' ? 'deploymentName' : nextEntry.type === 'openai-compatible' ? 'label' : nextEntry.type === 'ollama' ? 'baseUrl' : 'apiKey');
-      }
-      dispatch({ type: 'NEXT_ENTRY' });
+      setFieldStage('askMore');
     } else {
       // anthropic / openai / gemini — just need apiKey
       dispatch({ type: 'SET_ENTRY_FIELD', field: 'apiKey', value: val });
@@ -458,7 +473,7 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
         <Box flexDirection="column" paddingX={2} paddingY={1}>
           <Box marginBottom={1}>
             <Text color="magenta" bold>? </Text>
-            <Text bold>{isAzure ? 'Add another Azure deployment? (y/n)' : 'Add another custom endpoint? (y/n)'}</Text>
+            <Text bold>{isAzure ? 'Add another Azure deployment? (y/n)' : isOllama ? 'Add another Ollama endpoint? (y/n)' : 'Add another custom endpoint? (y/n)'}</Text>
           </Box>
           <Box>
             <SelectInput
@@ -471,8 +486,9 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
               onSelect={(item) => {
                 if (item.value === 'yes') {
                   if (isAzure) dispatch({ type: 'ADD_AZURE' });
+                  else if (isOllama) dispatch({ type: 'ADD_OLLAMA' });
                   else dispatch({ type: 'ADD_COMPAT' });
-                  setFieldStage(isAzure ? 'deploymentName' : 'label');
+                  setFieldStage(isAzure ? 'deploymentName' : isOllama ? 'baseUrl' : 'label');
                   setFieldBuffer('');
                 } else {
                   const nextEntry = state.entries[state.currentEntryIdx + 1];
@@ -497,7 +513,7 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
       isOllama ? `Ollama URL (Enter for http://localhost:11434)` :
       `${currentEntry.label} API Key`;
 
-    const isMasked = fieldStage === 'apiKey';
+    const isMasked = fieldStage === 'apiKey' && !isOllama;
 
     return (
       <Box flexDirection="column" paddingX={2} paddingY={1}>

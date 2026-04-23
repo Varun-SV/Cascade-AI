@@ -176,11 +176,6 @@ export class SlashCommandRegistry {
       handler: (_args, ctx) => ({ output: ctx.onModelInfo(), handled: true }),
     });
 
-    this.register({
-      command: '/models',
-      description: 'Browse available models by provider',
-      handler: (_args, ctx) => ({ output: ctx.onModelsInfo(), handled: true }),
-    });
 
     this.register({
       command: '/providers',

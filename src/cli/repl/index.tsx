@@ -840,7 +840,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const costHeight = state.showCost ? 6 : 0;
   const approvalHeight = state.approvalRequest ? 12 : 0;
   const slashVisibleCount = Math.min(SLASH_PAGE_SIZE, slashEntries.length);
-  const slashHeight = slashVisibleCount > 0 ? slashVisibleCount + 2 : 0; // +2 for border + header row
+  const slashHeight = isTypingCommand ? SLASH_PAGE_SIZE + 2 : 0; // Fixes flicker by preserving constant layout height during command typing
   const chromeHeight = statusHeight + costHeight + approvalHeight + slashHeight + 7; // Input(3) + Status(2) + Margins(2)
   const totalCap = Math.floor(height * 0.7);
 
