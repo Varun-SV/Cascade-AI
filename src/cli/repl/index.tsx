@@ -94,6 +94,7 @@ interface TierStatusEvent {
   status: RuntimeNode['status'];
   currentAction?: string;
   progressPct?: number;
+  output?: string;
 }
 
 interface ReplState {
@@ -339,7 +340,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     treeNodesRef.current.set(event.tierId, node);
     const store = storeRef.current;
     if (store) {
-      const runtimeNode: RuntimeNode = { tierId: node.id, sessionId: sessionIdRef.current, parentId: node.parentId, role: node.role, label: node.label, status: node.status, currentAction: node.currentAction, progressPct: node.progressPct, updatedAt: new Date().toISOString(), workspacePath, isGlobal: false };
+      const runtimeNode: RuntimeNode = { tierId: node.id, sessionId: sessionIdRef.current, parentId: node.parentId, role: node.role, label: node.label, status: node.status, currentAction: node.currentAction, progressPct: node.progressPct, updatedAt: new Date().toISOString(), workspacePath, isGlobal: false, output: event.output };
       store.upsertRuntimeNode(runtimeNode);
       globalStoreRef.current?.upsertRuntimeNode({ ...runtimeNode, isGlobal: true });
     }
@@ -352,8 +353,6 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     // Silence verbose SDK warnings that pollute the TUI
     const originalWarn = console.warn;
     const originalLog = console.log;
-    
-    process.stdout.write('\x1bc');
 
     console.warn = (...args: unknown[]) => {
       const msg = args.join(' ');

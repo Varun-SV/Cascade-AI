@@ -525,9 +525,9 @@ export class DashboardServer {
       void (async () => {
         const cascade = new Cascade(this.config, this.workspacePath, this.store);
 
-        cascade.on('stream:token', (e: { text: string }) => {
-          this.socket.broadcast('stream:token', { sessionId, token: e.text });
-          this.socket.broadcastToRoom(`session:${sessionId}`, 'stream:token', { sessionId, token: e.text });
+        cascade.on('stream:token', (e: { text: string; tierId: string }) => {
+          this.socket.broadcast('stream:token', { sessionId, tierId: e.tierId, text: e.text });
+          this.socket.broadcastToRoom(`session:${sessionId}`, 'stream:token', { sessionId, tierId: e.tierId, text: e.text });
         });
         cascade.on('tier:status', (e: unknown) => {
           this.socket.broadcast('tier:status', { sessionId, ...(e as object) });

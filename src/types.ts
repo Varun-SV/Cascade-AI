@@ -230,6 +230,7 @@ export interface StatusUpdate {
   progressPct: number;
   currentAction: string;
   status: 'IN_PROGRESS' | 'BLOCKED' | 'ESCALATING';
+  output?: string;
 }
 
 export interface T2Result {
@@ -347,6 +348,7 @@ export interface RuntimeNode {
   updatedAt: string;
   workspacePath?: string;
   isGlobal?: boolean;
+  output?: string;
 }
 
 export interface RuntimeNodeLog {
@@ -361,6 +363,7 @@ export interface RuntimeNodeLog {
   timestamp: string;
   workspacePath?: string;
   isGlobal?: boolean;
+  output?: string;
 }
 
 export type RuntimeScope = 'workspace' | 'global';

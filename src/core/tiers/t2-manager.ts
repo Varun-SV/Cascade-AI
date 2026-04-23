@@ -169,9 +169,10 @@ export class T2Manager extends BaseTier {
         .flatMap((r) => r.issues);
 
       const overallStatus = this.determineStatus(t3Results);
-      this.setStatus(overallStatus === 'COMPLETED' ? 'COMPLETED' : 'FAILED');
+      const isOk = overallStatus === 'COMPLETED' || overallStatus === 'PARTIAL';
+      this.setStatus(isOk ? 'COMPLETED' : 'FAILED', summary);
 
-      this.sendStatusUpdate({ progressPct: 100, currentAction: 'Section complete', status: 'IN_PROGRESS' });
+      this.sendStatusUpdate({ progressPct: 100, currentAction: 'Section complete', status: 'IN_PROGRESS', output: summary });
 
       // ── Build result first, then publish to peers ──
       const result: T2Result = {
@@ -189,7 +190,7 @@ export class T2Manager extends BaseTier {
 
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      this.setStatus('FAILED');
+      this.setStatus('FAILED', errMsg);
 
       const failedResult: T2Result = {
         sectionId: assignment.sectionId,

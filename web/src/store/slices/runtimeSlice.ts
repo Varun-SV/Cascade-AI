@@ -28,6 +28,7 @@ export const fetchHistory = createAsyncThunk(
 
 // ── State shape ────────────────────────────────
 
+
 interface RuntimeState {
   sessions: Record<string, RuntimeSession>;
   nodes: Record<string, RuntimeNode>;
@@ -61,7 +62,11 @@ function mergeNodes(
     // Nodes from REST snapshots may not carry sessionId; fill it in when provided
     const sid = n.sessionId ?? sessionId ?? '';
     const key = `${sid}:${n.tierId}`;
-    nodeMap[key] = { ...nodeMap[key], ...n, sessionId: sid };
+    const existing = nodeMap[key];
+    // Preserve a non-null existing output — a later status-only update
+    // (which has output: undefined) must NOT overwrite a previously-persisted result.
+    const preservedOutput = n.output ?? existing?.output;
+    nodeMap[key] = { ...existing, ...n, sessionId: sid, output: preservedOutput };
   }
 }
 
