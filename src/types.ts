@@ -99,6 +99,13 @@ export interface ToolDefinition {
   description: string;
   inputSchema: Record<string, unknown>;
 }
+
+export interface WebSearchConfig {
+  searxngUrl?: string;
+  braveApiKey?: string;
+  tavilyApiKey?: string;
+  maxResults?: number;
+}
 // ... (omitted lines for brevity, but I will provide full replacement in a moment)
 
 export interface Message {
@@ -431,6 +438,8 @@ export interface ToolsConfig {
    * approval before they are spawned.
    */
   mcpTrusted?: string[];
+  /** Web search backends — at least one should be configured for best results */
+  webSearch?: WebSearchConfig;
 }
 
 export interface HooksConfig {
