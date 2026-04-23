@@ -27,12 +27,25 @@ export const McpServerConfigSchema = z.object({
   env: z.record(z.string()).optional(),
 });
 
+export const WebSearchConfigSchema = z.object({
+  /** Base URL of your SearXNG instance (e.g. http://localhost:8080) */
+  searxngUrl: z.string().optional(),
+  /** Brave Search API key — get one at https://api.search.brave.com */
+  braveApiKey: z.string().optional(),
+  /** Tavily API key — get one at https://tavily.com */
+  tavilyApiKey: z.string().optional(),
+  /** Max results per search (default 5) */
+  maxResults: z.number().default(5),
+});
+
 export const ToolsConfigSchema = z.object({
   shellAllowlist: z.array(z.string()).default([]),
   shellBlocklist: z.array(z.string()).default(['rm -rf', 'sudo rm', 'format', 'mkfs']),
   requireApprovalFor: z.array(z.string()).default([]),
   browserEnabled: z.boolean().default(false),
   mcpServers: z.array(McpServerConfigSchema).optional(),
+  /** Web search backends — at least one should be configured for best results */
+  webSearch: WebSearchConfigSchema.optional(),
 });
 
 export const HookDefinitionSchema = z.object({

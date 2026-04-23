@@ -8,6 +8,7 @@ import { SafeTextInput } from '../components/SafeTextInput.js';
 import { sanitizeTerminalInput, containsMouseSequence } from '../utils/terminal-input.js';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import type {
   ApprovalRequest,
@@ -369,7 +370,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
 
     const store = new MemoryStore(path.join(workspacePath, CASCADE_DB_FILE));
     storeRef.current = store;
-    globalStoreRef.current = new MemoryStore(path.join(process.env['HOME'] ?? process.cwd(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE));
+    globalStoreRef.current = new MemoryStore(path.join(os.homedir(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE));
     const identityRows = store.listIdentities().map(i => ({ id: i.id, name: i.name, isDefault: i.isDefault }));
     setIdentities(identityRows);
     let initialIdentityId = config.defaultIdentityId ?? identityRows.find(i => i.isDefault)?.id ?? identityRows[0]?.id;

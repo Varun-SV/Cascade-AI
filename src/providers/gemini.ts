@@ -76,12 +76,13 @@ export class GeminiProvider extends BaseProvider {
       for (const candidate of candidates) {
         for (const part of candidate?.content?.parts ?? []) {
           if (part.functionCall) {
-            toolCalls.push({
-              id: `gemini-tool-${Date.now()}-${toolCalls.length}`,
-              name: part.functionCall.name as string,
-              input: (part.functionCall.args ?? {}) as Record<string, unknown>,
-            });
-            finishReason = 'tool_use';
+              // Use function name as ID — Gemini matches functionResponse by name, not timestamp
+              toolCalls.push({
+                id: part.functionCall.name as string,
+                name: part.functionCall.name as string,
+                input: (part.functionCall.args ?? {}) as Record<string, unknown>,
+              });
+              finishReason = 'tool_use';
           }
         }
         // Capture finish reason from candidate
@@ -188,15 +189,87 @@ export class GeminiProvider extends BaseProvider {
     messages: ConversationMessage[],
     extraImages?: ImageAttachment[],
   ): Content[] {
-    return messages
-      .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .map((m) => ({
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts:
-          typeof m.content === 'string'
-            ? [{ text: m.content }]
-            : this.convertMessageContent(m, extraImages),
-      }));
+    const contents: Content[] = [];
+
+    for (const m of messages) {
+      // ── System messages in history: prepend to the next user turn ──────
+      // Gemini only accepts systemInstruction at the top level; mid-conversation
+      // system messages are folded into the following user turn as context.
+      if (m.role === 'system') {
+        const text = typeof m.content === 'string' ? m.content : '';
+        if (!text.trim()) continue;
+        // Merge into previous user turn or create a new one
+        const prev = contents[contents.length - 1];
+        if (prev?.role === 'user') {
+          (prev.parts as Part[]).unshift({ text: `[System context]: ${text}\n\n` });
+        } else {
+          contents.push({ role: 'user', parts: [{ text: `[System context]: ${text}` }] });
+        }
+        continue;
+      }
+
+      // ── Tool result messages → Gemini functionResponse in a user turn ──
+      if (m.role === 'tool') {
+        const toolContent = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+        // toolCallId carries the function name for Gemini (set by gemini provider using tool name)
+        const functionName = m.toolCallId ?? 'unknown_function';
+        contents.push({
+          role: 'user',
+          parts: [{
+            functionResponse: {
+              name: functionName,
+              response: { output: toolContent },
+            },
+          }] as Part[],
+        });
+        continue;
+      }
+
+      // ── Assistant messages: may include functionCall parts ─────────────
+      if (m.role === 'assistant') {
+        const parts: Part[] = [];
+
+        // Text content
+        const textContent = typeof m.content === 'string' ? m.content : '';
+        if (textContent) parts.push({ text: textContent });
+
+        // Tool calls → functionCall parts
+        for (const tc of m.toolCalls ?? []) {
+          parts.push({
+            functionCall: {
+              name: tc.name,
+              args: tc.input as Record<string, unknown>,
+            },
+          } as Part);
+        }
+
+        if (parts.length > 0) {
+          contents.push({ role: 'model', parts });
+        }
+        continue;
+      }
+
+      // ── User messages ─────────────────────────────────────────────────
+      if (m.role === 'user') {
+        const parts = this.convertMessageContent(m, contents.length === 0 ? extraImages : undefined);
+        // Attach extra images only to the LAST user message
+        if (extraImages?.length && contents.length > 0) {
+          const isLastUser = !messages.slice(messages.indexOf(m) + 1).some(x => x.role === 'user');
+          if (isLastUser) {
+            for (const img of extraImages) {
+              if (img.type === 'base64') {
+                parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
+              }
+            }
+          }
+        }
+        if (parts.length > 0) {
+          contents.push({ role: 'user', parts });
+        }
+      }
+    }
+
+    return contents;
   }
 
   private convertMessageContent(

@@ -142,34 +142,74 @@ export class AnthropicProvider extends BaseProvider {
   }
 
   private convertMessages(messages: ConversationMessage[]): Anthropic.MessageParam[] {
-    return messages
-      .filter((m) => m.role !== 'system')
-      .map((m) => {
-        if (typeof m.content === 'string') {
-          return { role: m.role as 'user' | 'assistant', content: m.content };
-        }
-        const content: any[] = m.content.map((block) => {
-          if (block.type === 'text') return { type: 'text' as const, text: block.text };
-          if (block.type === 'image') {
-            const img = block.image as ImageAttachment;
-            if (img.type === 'base64') {
-              return {
-                type: 'image' as const,
-                source: {
-                  type: 'base64' as const,
-                  media_type: img.mimeType,
-                  data: img.data,
-                },
-              };
-            }
-            return {
-              type: 'image' as const,
-              source: { type: 'url' as const, url: img.data } as any,
-            };
-          }
-          return { type: 'text' as const, text: '' };
+    const result: Anthropic.MessageParam[] = [];
+
+    for (const m of messages) {
+      // System messages in history are skipped — they're passed via the top-level `system` field
+      if (m.role === 'system') continue;
+
+      // ── Tool result messages → Anthropic tool_result content block ─────
+      if (m.role === 'tool') {
+        const toolContent = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+        result.push({
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: m.toolCallId ?? '',
+            content: toolContent,
+          }] as any,
         });
-        return { role: m.role as 'user' | 'assistant', content };
-      });
+        continue;
+      }
+
+      // ── Assistant messages: may carry tool_use blocks ──────────────────
+      if (m.role === 'assistant') {
+        const content: any[] = [];
+
+        // Text part
+        const text = typeof m.content === 'string' ? m.content : '';
+        if (text) content.push({ type: 'text', text });
+
+        // Tool calls → tool_use blocks
+        for (const tc of m.toolCalls ?? []) {
+          content.push({
+            type: 'tool_use',
+            id: tc.id,
+            name: tc.name,
+            input: tc.input,
+          });
+        }
+
+        if (content.length > 0) {
+          result.push({ role: 'assistant', content });
+        }
+        continue;
+      }
+
+      // ── User messages ──────────────────────────────────────────────────
+      if (m.role === 'user') {
+        if (typeof m.content === 'string') {
+          result.push({ role: 'user', content: m.content });
+        } else {
+          const content: any[] = m.content.map((block) => {
+            if (block.type === 'text') return { type: 'text' as const, text: block.text };
+            if (block.type === 'image') {
+              const img = block.image as ImageAttachment;
+              if (img.type === 'base64') {
+                return {
+                  type: 'image' as const,
+                  source: { type: 'base64' as const, media_type: img.mimeType, data: img.data },
+                };
+              }
+              return { type: 'image' as const, source: { type: 'url' as const, url: img.data } as any };
+            }
+            return { type: 'text' as const, text: '' };
+          });
+          result.push({ role: 'user', content });
+        }
+      }
+    }
+
+    return result;
   }
 }

@@ -334,6 +334,7 @@ export const TOOL_NAMES = {
   PDF_CREATE: 'pdf_create',
   RUN_CODE: 'run_code',
   PEER_MESSAGE: 'peer_message',
+  WEB_SEARCH: 'web_search',
 } as const;
 
 // Defaults that require approval
