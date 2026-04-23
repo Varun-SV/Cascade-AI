@@ -67,7 +67,7 @@ export class GitHubTool extends BaseTool {
           case 404: return `Not found: Repository "${repo}" does not exist, or your token cannot access it.`;
           case 422: return `Validation error from ${platform}: ${msg || 'Check your input parameters (branch names, base/head refs, etc.).'}`;
           case 429: return `Rate limited by ${platform}. Please wait a moment before trying again.`;
-          default: return `${platform} API error (${status}): ${msg || axiosErr.message ?? 'Unknown error'}`;
+          default: return `${platform} API error (${status}): ${msg || (axiosErr.message ?? 'Unknown error')}`;
         }
       }
       return `${platform} request failed: ${axiosErr.message ?? String(err)}`;

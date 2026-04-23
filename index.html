@@ -1,48 +1,60 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Cascade AI — Multi-Tier Agent Orchestration</title>
-  <meta name="description" content="Open-source CLI tool that runs prompts through a hierarchical three-tier agent system. T1 plans, T2 manages, T3 executes." />
+  <meta name="description"
+    content="Open-source CLI tool that runs prompts through a hierarchical three-tier agent system. T1 plans, T2 manages, T3 executes." />
   <meta property="og:title" content="Cascade AI" />
   <meta property="og:description" content="Multi-tier AI orchestration. T1 → T2 → T3." />
   <meta property="og:type" content="website" />
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@300;400;500;700&display=swap" rel="stylesheet" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@300;400;500;700&display=swap"
+    rel="stylesheet" />
 
   <style>
     /* ════════════════════════════════════════
        TOKENS
     ════════════════════════════════════════ */
     :root {
-      --bg:        #060a0e;
-      --bg-2:      #0b1017;
-      --bg-3:      #111820;
-      --border:    rgba(255,255,255,0.06);
-      --border-2:  rgba(255,255,255,0.11);
+      --bg: #060a0e;
+      --bg-2: #0b1017;
+      --bg-3: #111820;
+      --border: rgba(255, 255, 255, 0.06);
+      --border-2: rgba(255, 255, 255, 0.11);
 
-      --lime:      #aaff00;
-      --lime-dim:  rgba(170,255,0,0.12);
-      --lime-glow: rgba(170,255,0,0.25);
+      --lime: #aaff00;
+      --lime-dim: rgba(170, 255, 0, 0.12);
+      --lime-glow: rgba(170, 255, 0, 0.25);
 
-      --amber:     #f5a623;
-      --violet:    #a78bff;
-      --cyan:      #00d4e8;
+      --amber: #f5a623;
+      --violet: #a78bff;
+      --cyan: #00d4e8;
 
-      --text-1:    #dce4f0;
-      --text-2:    #7a8899;
-      --text-3:    #3a4555;
+      --text-1: #dce4f0;
+      --text-2: #7a8899;
+      --text-3: #3a4555;
 
       --font-display: 'Syne', sans-serif;
-      --font-mono:    'IBM Plex Mono', monospace;
+      --font-mono: 'IBM Plex Mono', monospace;
     }
 
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
 
-    html { scroll-behavior: smooth; }
+    html {
+      scroll-behavior: smooth;
+    }
 
     body {
       background: var(--bg);
@@ -54,11 +66,23 @@
       overflow-x: hidden;
     }
 
-    ::selection { background: var(--lime-dim); color: var(--lime); }
+    ::selection {
+      background: var(--lime-dim);
+      color: var(--lime);
+    }
 
-    ::-webkit-scrollbar { width: 4px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 99px; }
+    ::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--border-2);
+      border-radius: 99px;
+    }
 
     /* ════════════════════════════════════════
        NOISE GRAIN OVERLAY
@@ -93,7 +117,7 @@
       right: 0;
       z-index: 100;
       border-bottom: 1px solid var(--border);
-      background: rgba(6,10,14,0.85);
+      background: rgba(6, 10, 14, 0.85);
       backdrop-filter: blur(20px);
     }
 
@@ -155,7 +179,10 @@
       transition: color 0.12s, background 0.12s;
     }
 
-    .nav-link:hover { color: var(--text-1); background: rgba(255,255,255,0.04); }
+    .nav-link:hover {
+      color: var(--text-1);
+      background: rgba(255, 255, 255, 0.04);
+    }
 
     .nav-cta {
       display: flex;
@@ -175,7 +202,10 @@
       box-shadow: 0 0 18px var(--lime-glow);
     }
 
-    .nav-cta:hover { opacity: 0.88; box-shadow: 0 0 28px var(--lime-glow); }
+    .nav-cta:hover {
+      opacity: 0.88;
+      box-shadow: 0 0 28px var(--lime-glow);
+    }
 
     /* ════════════════════════════════════════
        HERO
@@ -195,7 +225,7 @@
       transform: translateX(-50%);
       width: 600px;
       height: 400px;
-      background: radial-gradient(ellipse, rgba(170,255,0,0.06) 0%, transparent 70%);
+      background: radial-gradient(ellipse, rgba(170, 255, 0, 0.06) 0%, transparent 70%);
       pointer-events: none;
     }
 
@@ -207,8 +237,8 @@
       letter-spacing: 0.18em;
       text-transform: uppercase;
       color: var(--lime);
-      border: 1px solid rgba(170,255,0,0.22);
-      background: rgba(170,255,0,0.06);
+      border: 1px solid rgba(170, 255, 0, 0.22);
+      background: rgba(170, 255, 0, 0.06);
       padding: 5px 12px;
       border-radius: 3px;
       margin-bottom: 28px;
@@ -223,7 +253,17 @@
       animation: blink 2s step-start infinite;
     }
 
-    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
+    @keyframes blink {
+
+      0%,
+      100% {
+        opacity: 1
+      }
+
+      50% {
+        opacity: 0.2
+      }
+    }
 
     h1 {
       font-family: var(--font-display);
@@ -236,8 +276,13 @@
       margin-bottom: 24px;
     }
 
-    h1 .accent { color: var(--lime); }
-    h1 .dim { color: var(--text-3); }
+    h1 .accent {
+      color: var(--lime);
+    }
+
+    h1 .dim {
+      color: var(--text-3);
+    }
 
     .hero-sub {
       font-size: 15px;
@@ -271,7 +316,11 @@
       box-shadow: 0 0 24px var(--lime-glow);
     }
 
-    .btn-primary:hover { opacity: 0.88; transform: translateY(-1px); box-shadow: 0 0 36px var(--lime-glow); }
+    .btn-primary:hover {
+      opacity: 0.88;
+      transform: translateY(-1px);
+      box-shadow: 0 0 36px var(--lime-glow);
+    }
 
     .btn-ghost {
       display: inline-flex;
@@ -288,7 +337,11 @@
       transition: all 0.14s;
     }
 
-    .btn-ghost:hover { color: var(--text-1); border-color: rgba(255,255,255,0.22); background: rgba(255,255,255,0.03); }
+    .btn-ghost:hover {
+      color: var(--text-1);
+      border-color: rgba(255, 255, 255, 0.22);
+      background: rgba(255, 255, 255, 0.03);
+    }
 
     /* ════════════════════════════════════════
        TERMINAL INSTALL BLOCK
@@ -310,10 +363,19 @@
       position: relative;
     }
 
-    .install-block:hover { border-color: rgba(170,255,0,0.3); }
+    .install-block:hover {
+      border-color: rgba(170, 255, 0, 0.3);
+    }
 
-    .install-block .prompt { color: var(--lime); user-select: none; }
-    .install-block .cmd { color: var(--text-1); }
+    .install-block .prompt {
+      color: var(--lime);
+      user-select: none;
+    }
+
+    .install-block .cmd {
+      color: var(--text-1);
+    }
+
     .install-block .copy-hint {
       margin-left: 8px;
       font-size: 10px;
@@ -333,7 +395,9 @@
       transition: opacity 0.2s;
     }
 
-    .install-block.did-copy .copied { opacity: 1; }
+    .install-block.did-copy .copied {
+      opacity: 1;
+    }
 
     /* ════════════════════════════════════════
        ARCHITECTURE CARD (animated)
@@ -382,7 +446,7 @@
       content: '';
       position: absolute;
       inset: 0;
-      background: radial-gradient(ellipse at 50% 0%, rgba(170,255,0,0.04) 0%, transparent 60%);
+      background: radial-gradient(ellipse at 50% 0%, rgba(170, 255, 0, 0.04) 0%, transparent 60%);
       pointer-events: none;
     }
 
@@ -423,34 +487,57 @@
     }
 
     .tier-node.t1 {
-      background: rgba(245,166,35,0.06);
-      border-color: rgba(245,166,35,0.18);
+      background: rgba(245, 166, 35, 0.06);
+      border-color: rgba(245, 166, 35, 0.18);
       animation: pulse-t1 3s ease-in-out infinite;
     }
 
     .tier-node.t2 {
-      background: rgba(167,139,255,0.06);
-      border-color: rgba(167,139,255,0.18);
+      background: rgba(167, 139, 255, 0.06);
+      border-color: rgba(167, 139, 255, 0.18);
       animation: pulse-t2 3.5s ease-in-out infinite 0.5s;
     }
 
     .tier-node.t3 {
-      background: rgba(0,212,232,0.05);
-      border-color: rgba(0,212,232,0.16);
+      background: rgba(0, 212, 232, 0.05);
+      border-color: rgba(0, 212, 232, 0.16);
       animation: pulse-t3 4s ease-in-out infinite 1s;
     }
 
     @keyframes pulse-t1 {
-      0%,100%{ box-shadow: 0 0 0 rgba(245,166,35,0); }
-      50%    { box-shadow: 0 0 24px rgba(245,166,35,0.12); }
+
+      0%,
+      100% {
+        box-shadow: 0 0 0 rgba(245, 166, 35, 0);
+      }
+
+      50% {
+        box-shadow: 0 0 24px rgba(245, 166, 35, 0.12);
+      }
     }
+
     @keyframes pulse-t2 {
-      0%,100%{ box-shadow: 0 0 0 rgba(167,139,255,0); }
-      50%    { box-shadow: 0 0 24px rgba(167,139,255,0.12); }
+
+      0%,
+      100% {
+        box-shadow: 0 0 0 rgba(167, 139, 255, 0);
+      }
+
+      50% {
+        box-shadow: 0 0 24px rgba(167, 139, 255, 0.12);
+      }
     }
+
     @keyframes pulse-t3 {
-      0%,100%{ box-shadow: 0 0 0 rgba(0,212,232,0); }
-      50%    { box-shadow: 0 0 24px rgba(0,212,232,0.12); }
+
+      0%,
+      100% {
+        box-shadow: 0 0 0 rgba(0, 212, 232, 0);
+      }
+
+      50% {
+        box-shadow: 0 0 24px rgba(0, 212, 232, 0.12);
+      }
     }
 
     .tier-badge {
@@ -466,9 +553,20 @@
       flex-shrink: 0;
     }
 
-    .tier-badge.t1 { background: rgba(245,166,35,0.15); color: var(--amber); }
-    .tier-badge.t2 { background: rgba(167,139,255,0.15); color: var(--violet); }
-    .tier-badge.t3 { background: rgba(0,212,232,0.12); color: var(--cyan); }
+    .tier-badge.t1 {
+      background: rgba(245, 166, 35, 0.15);
+      color: var(--amber);
+    }
+
+    .tier-badge.t2 {
+      background: rgba(167, 139, 255, 0.15);
+      color: var(--violet);
+    }
+
+    .tier-badge.t3 {
+      background: rgba(0, 212, 232, 0.12);
+      color: var(--cyan);
+    }
 
     .tier-info h3 {
       font-family: var(--font-display);
@@ -494,9 +592,9 @@
     }
 
     .tier-status.active {
-      background: rgba(170,255,0,0.08);
+      background: rgba(170, 255, 0, 0.08);
       color: var(--lime);
-      border: 1px solid rgba(170,255,0,0.18);
+      border: 1px solid rgba(170, 255, 0, 0.18);
     }
 
     /* T2s in parallel */
@@ -524,8 +622,15 @@
       gap: 6px;
     }
 
-    .tier-mini.t2 { background: rgba(167,139,255,0.05); border-color: rgba(167,139,255,0.14); }
-    .tier-mini.t3 { background: rgba(0,212,232,0.04); border-color: rgba(0,212,232,0.12); }
+    .tier-mini.t2 {
+      background: rgba(167, 139, 255, 0.05);
+      border-color: rgba(167, 139, 255, 0.14);
+    }
+
+    .tier-mini.t3 {
+      background: rgba(0, 212, 232, 0.04);
+      border-color: rgba(0, 212, 232, 0.12);
+    }
 
     .tier-mini .mini-badge {
       font-size: 9px;
@@ -533,10 +638,19 @@
       letter-spacing: 0.1em;
       text-transform: uppercase;
     }
-    .tier-mini.t2 .mini-badge { color: var(--violet); }
-    .tier-mini.t3 .mini-badge { color: var(--cyan); }
 
-    .tier-mini .mini-label { font-size: 10px; color: var(--text-2); }
+    .tier-mini.t2 .mini-badge {
+      color: var(--violet);
+    }
+
+    .tier-mini.t3 .mini-badge {
+      color: var(--cyan);
+    }
+
+    .tier-mini .mini-label {
+      font-size: 10px;
+      color: var(--text-2);
+    }
 
     /* animated activity indicator */
     .activity {
@@ -544,19 +658,47 @@
       gap: 3px;
       align-items: center;
     }
+
     .activity-dot {
       width: 4px;
       height: 4px;
       border-radius: 50%;
     }
-    .t3 .activity-dot { background: var(--cyan); }
-    .t2 .activity-dot { background: var(--violet); }
 
-    .activity-dot:nth-child(1) { animation: bounce 1.4s ease-in-out infinite; }
-    .activity-dot:nth-child(2) { animation: bounce 1.4s ease-in-out 0.15s infinite; }
-    .activity-dot:nth-child(3) { animation: bounce 1.4s ease-in-out 0.3s infinite; }
+    .t3 .activity-dot {
+      background: var(--cyan);
+    }
 
-    @keyframes bounce { 0%,80%,100%{transform:scale(0.7);opacity:0.4} 40%{transform:scale(1.1);opacity:1} }
+    .t2 .activity-dot {
+      background: var(--violet);
+    }
+
+    .activity-dot:nth-child(1) {
+      animation: bounce 1.4s ease-in-out infinite;
+    }
+
+    .activity-dot:nth-child(2) {
+      animation: bounce 1.4s ease-in-out 0.15s infinite;
+    }
+
+    .activity-dot:nth-child(3) {
+      animation: bounce 1.4s ease-in-out 0.3s infinite;
+    }
+
+    @keyframes bounce {
+
+      0%,
+      80%,
+      100% {
+        transform: scale(0.7);
+        opacity: 0.4
+      }
+
+      40% {
+        transform: scale(1.1);
+        opacity: 1
+      }
+    }
 
     /* arrows between tiers */
     .arch-arrow {
@@ -584,7 +726,9 @@
     /* ════════════════════════════════════════
        FEATURES GRID
     ════════════════════════════════════════ */
-    .features-section { padding: 80px 0; }
+    .features-section {
+      padding: 80px 0;
+    }
 
     .features-grid {
       display: grid;
@@ -603,7 +747,9 @@
       transition: background 0.14s;
     }
 
-    .feature-cell:hover { background: var(--bg-3); }
+    .feature-cell:hover {
+      background: var(--bg-3);
+    }
 
     .feature-icon {
       width: 36px;
@@ -616,12 +762,29 @@
       margin-bottom: 16px;
     }
 
-    .feature-icon.lime { background: rgba(170,255,0,0.1); }
-    .feature-icon.amber { background: rgba(245,166,35,0.1); }
-    .feature-icon.violet { background: rgba(167,139,255,0.1); }
-    .feature-icon.cyan { background: rgba(0,212,232,0.08); }
-    .feature-icon.red { background: rgba(255,77,100,0.08); }
-    .feature-icon.green { background: rgba(34,212,122,0.08); }
+    .feature-icon.lime {
+      background: rgba(170, 255, 0, 0.1);
+    }
+
+    .feature-icon.amber {
+      background: rgba(245, 166, 35, 0.1);
+    }
+
+    .feature-icon.violet {
+      background: rgba(167, 139, 255, 0.1);
+    }
+
+    .feature-icon.cyan {
+      background: rgba(0, 212, 232, 0.08);
+    }
+
+    .feature-icon.red {
+      background: rgba(255, 77, 100, 0.08);
+    }
+
+    .feature-icon.green {
+      background: rgba(34, 212, 122, 0.08);
+    }
 
     .feature-cell h3 {
       font-family: var(--font-display);
@@ -631,7 +794,11 @@
       margin-bottom: 8px;
     }
 
-    .feature-cell p { font-size: 12px; color: var(--text-2); line-height: 1.65; }
+    .feature-cell p {
+      font-size: 12px;
+      color: var(--text-2);
+      line-height: 1.65;
+    }
 
     /* ════════════════════════════════════════
        PROVIDERS STRIP
@@ -672,7 +839,10 @@
       transition: border-color 0.14s, color 0.14s;
     }
 
-    .provider-pill:hover { border-color: var(--border-2); color: var(--text-1); }
+    .provider-pill:hover {
+      border-color: var(--border-2);
+      color: var(--text-1);
+    }
 
     .provider-pill .dot {
       width: 6px;
@@ -708,13 +878,26 @@
       gap: 6px;
       padding: 12px 16px;
       border-bottom: 1px solid var(--border);
-      background: rgba(255,255,255,0.02);
+      background: rgba(255, 255, 255, 0.02);
     }
 
-    .code-dot { width: 8px; height: 8px; border-radius: 50%; }
-    .code-dot.red   { background: #ff5f57; }
-    .code-dot.amber { background: #ffbd2e; }
-    .code-dot.green { background: #28c840; }
+    .code-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+    }
+
+    .code-dot.red {
+      background: #ff5f57;
+    }
+
+    .code-dot.amber {
+      background: #ffbd2e;
+    }
+
+    .code-dot.green {
+      background: #28c840;
+    }
 
     .code-filename {
       margin-left: 6px;
@@ -732,14 +915,36 @@
       color: var(--text-2);
     }
 
-    .kw  { color: var(--violet); }
-    .fn  { color: var(--cyan); }
-    .str { color: var(--lime); }
-    .cm  { color: var(--text-3); }
-    .num { color: var(--amber); }
+    .kw {
+      color: var(--violet);
+    }
 
-    .code-right h2 { margin-bottom: 16px; }
-    .code-right p { color: var(--text-2); font-size: 13px; line-height: 1.7; margin-bottom: 20px; }
+    .fn {
+      color: var(--cyan);
+    }
+
+    .str {
+      color: var(--lime);
+    }
+
+    .cm {
+      color: var(--text-3);
+    }
+
+    .num {
+      color: var(--amber);
+    }
+
+    .code-right h2 {
+      margin-bottom: 16px;
+    }
+
+    .code-right p {
+      color: var(--text-2);
+      font-size: 13px;
+      line-height: 1.7;
+      margin-bottom: 20px;
+    }
 
     .code-bullet {
       display: flex;
@@ -747,6 +952,7 @@
       gap: 10px;
       margin-bottom: 12px;
     }
+
     .code-bullet-dot {
       width: 5px;
       height: 5px;
@@ -755,12 +961,17 @@
       flex-shrink: 0;
       margin-top: 7px;
     }
-    .code-bullet p { margin: 0; }
+
+    .code-bullet p {
+      margin: 0;
+    }
 
     /* ════════════════════════════════════════
        COMPLEXITY TABLE
     ════════════════════════════════════════ */
-    .complexity-section { padding: 80px 0; }
+    .complexity-section {
+      padding: 80px 0;
+    }
 
     .complexity-table {
       width: 100%;
@@ -789,8 +1000,13 @@
       color: var(--text-2);
     }
 
-    .complexity-table tr:last-child td { border-bottom: none; }
-    .complexity-table tr:hover td { background: rgba(255,255,255,0.015); }
+    .complexity-table tr:last-child td {
+      border-bottom: none;
+    }
+
+    .complexity-table tr:hover td {
+      background: rgba(255, 255, 255, 0.015);
+    }
 
     .complexity-badge {
       display: inline-flex;
@@ -803,12 +1019,32 @@
       text-transform: uppercase;
     }
 
-    .complexity-badge.simple  { background: rgba(34,212,122,0.1); color: #22d47a; }
-    .complexity-badge.mod     { background: rgba(167,139,255,0.1); color: var(--violet); }
-    .complexity-badge.complex { background: rgba(245,166,35,0.1); color: var(--amber); }
-    .complexity-badge.high    { background: rgba(255,77,100,0.1); color: #ff4d64; }
+    .complexity-badge.simple {
+      background: rgba(34, 212, 122, 0.1);
+      color: #22d47a;
+    }
 
-    .tier-chips { display: flex; align-items: center; gap: 6px; }
+    .complexity-badge.mod {
+      background: rgba(167, 139, 255, 0.1);
+      color: var(--violet);
+    }
+
+    .complexity-badge.complex {
+      background: rgba(245, 166, 35, 0.1);
+      color: var(--amber);
+    }
+
+    .complexity-badge.high {
+      background: rgba(255, 77, 100, 0.1);
+      color: #ff4d64;
+    }
+
+    .tier-chips {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
     .tier-chip {
       padding: 2px 8px;
       border-radius: 3px;
@@ -816,9 +1052,21 @@
       font-weight: 700;
       font-family: var(--font-mono);
     }
-    .tier-chip.t1 { background: rgba(245,166,35,0.1); color: var(--amber); }
-    .tier-chip.t2 { background: rgba(167,139,255,0.1); color: var(--violet); }
-    .tier-chip.t3 { background: rgba(0,212,232,0.08); color: var(--cyan); }
+
+    .tier-chip.t1 {
+      background: rgba(245, 166, 35, 0.1);
+      color: var(--amber);
+    }
+
+    .tier-chip.t2 {
+      background: rgba(167, 139, 255, 0.1);
+      color: var(--violet);
+    }
+
+    .tier-chip.t3 {
+      background: rgba(0, 212, 232, 0.08);
+      color: var(--cyan);
+    }
 
     /* ════════════════════════════════════════
        CTA BAND
@@ -834,16 +1082,30 @@
       position: absolute;
       left: 50%;
       top: 50%;
-      transform: translate(-50%,-50%);
+      transform: translate(-50%, -50%);
       width: 700px;
       height: 350px;
-      background: radial-gradient(ellipse, rgba(170,255,0,0.05) 0%, transparent 70%);
+      background: radial-gradient(ellipse, rgba(170, 255, 0, 0.05) 0%, transparent 70%);
       pointer-events: none;
     }
 
-    .cta-section h2 { margin-bottom: 16px; }
-    .cta-section p { color: var(--text-2); font-size: 14px; margin-bottom: 36px; }
-    .cta-actions { display: flex; align-items: center; justify-content: center; gap: 14px; flex-wrap: wrap; }
+    .cta-section h2 {
+      margin-bottom: 16px;
+    }
+
+    .cta-section p {
+      color: var(--text-2);
+      font-size: 14px;
+      margin-bottom: 36px;
+    }
+
+    .cta-actions {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
 
     /* ════════════════════════════════════════
        FOOTER
@@ -859,19 +1121,47 @@
       justify-content: space-between;
     }
 
-    .footer-left { display: flex; align-items: center; gap: 10px; }
-    .footer-logo { width: 22px; height: 22px; background: var(--lime); border-radius: 4px; display:flex; align-items:center; justify-content:center; font-family:var(--font-display); font-weight:800; font-size:11px; color:var(--bg); }
+    .footer-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
 
-    .footer-copy { font-size: 11px; color: var(--text-3); }
+    .footer-logo {
+      width: 22px;
+      height: 22px;
+      background: var(--lime);
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--font-display);
+      font-weight: 800;
+      font-size: 11px;
+      color: var(--bg);
+    }
 
-    .footer-links { display: flex; align-items: center; gap: 20px; }
+    .footer-copy {
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    .footer-links {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+
     .footer-link {
       font-size: 11px;
       color: var(--text-3);
       text-decoration: none;
       transition: color 0.12s;
     }
-    .footer-link:hover { color: var(--text-2); }
+
+    .footer-link:hover {
+      color: var(--text-2);
+    }
 
     /* ════════════════════════════════════════
        ANIMATIONS (staggered reveal)
@@ -879,27 +1169,62 @@
     .reveal {
       opacity: 0;
       transform: translateY(22px);
-      transition: opacity 0.6s ease, transform 0.6s cubic-bezier(.22,.68,0,1.1);
+      transition: opacity 0.6s ease, transform 0.6s cubic-bezier(.22, .68, 0, 1.1);
     }
-    .reveal.visible { opacity: 1; transform: none; }
+
+    .reveal.visible {
+      opacity: 1;
+      transform: none;
+    }
 
     /* ════════════════════════════════════════
        RESPONSIVE
     ════════════════════════════════════════ */
     @media (max-width: 768px) {
-      .container { padding: 0 20px; }
-      .nav-links { display: none; }
-      h1 { font-size: 36px; }
-      .features-grid { grid-template-columns: 1fr; }
-      .code-split { grid-template-columns: 1fr; }
-      .tier-parallel { grid-template-columns: 1fr 1fr; }
-      .tier-parallel-t3 { grid-template-columns: repeat(3, 1fr); }
-      .arch-card { padding: 24px; }
-      .footer-inner { flex-direction: column; gap: 20px; }
-      .complexity-table { font-size: 11px; }
+      .container {
+        padding: 0 20px;
+      }
+
+      .nav-links {
+        display: none;
+      }
+
+      h1 {
+        font-size: 36px;
+      }
+
+      .features-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .code-split {
+        grid-template-columns: 1fr;
+      }
+
+      .tier-parallel {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .tier-parallel-t3 {
+        grid-template-columns: repeat(3, 1fr);
+      }
+
+      .arch-card {
+        padding: 24px;
+      }
+
+      .footer-inner {
+        flex-direction: column;
+        gap: 20px;
+      }
+
+      .complexity-table {
+        font-size: 11px;
+      }
     }
   </style>
 </head>
+
 <body>
 
   <!-- ── NAV ─────────────────────────────── -->
@@ -916,7 +1241,10 @@
         <a href="https://github.com/Varun-SV/Cascade-AI" target="_blank" class="nav-link">GitHub</a>
       </div>
       <a href="https://github.com/Varun-SV/Cascade-AI" target="_blank" class="nav-cta">
-        <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+          <path
+            d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+        </svg>
         View on GitHub
       </a>
     </div>
@@ -927,22 +1255,25 @@
     <div class="container">
       <div class="hero-eyebrow">
         <span class="hero-eyebrow-dot"></span>
-        Open-source · MIT License · v0.2.10
+        Open-source · MIT License · v0.2.11
       </div>
 
       <h1 class="reveal">
-        Agents that<br/>
+        Agents that<br />
         <span class="accent">think in tiers</span><span class="dim">.</span>
       </h1>
 
       <p class="hero-sub reveal">
-        Cascade is a CLI orchestration system that decomposes any task into a three-tier hierarchy — Administrator → Manager → Worker — routing work across the best available models automatically.
+        Cascade is a CLI orchestration system that decomposes any task into a three-tier hierarchy — Administrator →
+        Manager → Worker — routing work across the best available models automatically.
       </p>
 
       <div class="hero-actions reveal">
         <a href="https://github.com/Varun-SV/Cascade-AI" target="_blank" class="btn-primary">
           Get Started
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M7 17L17 7M17 7H7M17 7v10"/></svg>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M7 17L17 7M17 7H7M17 7v10" />
+          </svg>
         </a>
         <a href="#architecture" class="btn-ghost">
           See how it works
@@ -964,7 +1295,8 @@
       <div class="section-label reveal">How it works</div>
       <h2 class="reveal">Three tiers. One coherent output.</h2>
       <p class="section-desc reveal">
-        Every prompt flows through a hierarchy. T1 plans, spawns T2 managers in parallel, each of which orchestrates T3 workers — all streaming back into a single final answer.
+        Every prompt flows through a hierarchy. T1 plans, spawns T2 managers in parallel, each of which orchestrates T3
+        workers — all streaming back into a single final answer.
       </p>
 
       <div class="arch-card reveal">
@@ -993,17 +1325,29 @@
           <div class="tier-mini t2">
             <div class="mini-badge t2">T2 — Section 1</div>
             <div class="mini-label">Auth module refactor</div>
-            <div class="activity"><div class="activity-dot"></div><div class="activity-dot"></div><div class="activity-dot"></div></div>
+            <div class="activity">
+              <div class="activity-dot"></div>
+              <div class="activity-dot"></div>
+              <div class="activity-dot"></div>
+            </div>
           </div>
           <div class="tier-mini t2">
             <div class="mini-badge t2">T2 — Section 2</div>
             <div class="mini-label">Test generation</div>
-            <div class="activity"><div class="activity-dot"></div><div class="activity-dot"></div><div class="activity-dot"></div></div>
+            <div class="activity">
+              <div class="activity-dot"></div>
+              <div class="activity-dot"></div>
+              <div class="activity-dot"></div>
+            </div>
           </div>
           <div class="tier-mini t2">
             <div class="mini-badge t2">T2 — Section 3</div>
             <div class="mini-label">Open pull request</div>
-            <div class="activity"><div class="activity-dot"></div><div class="activity-dot"></div><div class="activity-dot"></div></div>
+            <div class="activity">
+              <div class="activity-dot"></div>
+              <div class="activity-dot"></div>
+              <div class="activity-dot"></div>
+            </div>
           </div>
         </div>
 
@@ -1019,27 +1363,47 @@
           <div class="tier-mini t3">
             <div class="mini-badge t3">T3</div>
             <div class="mini-label">Read files</div>
-            <div class="activity"><div class="activity-dot"></div><div class="activity-dot"></div><div class="activity-dot"></div></div>
+            <div class="activity">
+              <div class="activity-dot"></div>
+              <div class="activity-dot"></div>
+              <div class="activity-dot"></div>
+            </div>
           </div>
           <div class="tier-mini t3">
             <div class="mini-badge t3">T3</div>
             <div class="mini-label">Write JWT logic</div>
-            <div class="activity"><div class="activity-dot"></div><div class="activity-dot"></div><div class="activity-dot"></div></div>
+            <div class="activity">
+              <div class="activity-dot"></div>
+              <div class="activity-dot"></div>
+              <div class="activity-dot"></div>
+            </div>
           </div>
           <div class="tier-mini t3">
             <div class="mini-badge t3">T3</div>
             <div class="mini-label">Run tests</div>
-            <div class="activity"><div class="activity-dot"></div><div class="activity-dot"></div><div class="activity-dot"></div></div>
+            <div class="activity">
+              <div class="activity-dot"></div>
+              <div class="activity-dot"></div>
+              <div class="activity-dot"></div>
+            </div>
           </div>
           <div class="tier-mini t3">
             <div class="mini-badge t3">T3</div>
             <div class="mini-label">Write test file</div>
-            <div class="activity"><div class="activity-dot"></div><div class="activity-dot"></div><div class="activity-dot"></div></div>
+            <div class="activity">
+              <div class="activity-dot"></div>
+              <div class="activity-dot"></div>
+              <div class="activity-dot"></div>
+            </div>
           </div>
           <div class="tier-mini t3">
             <div class="mini-badge t3">T3</div>
             <div class="mini-label">git commit &amp; push</div>
-            <div class="activity"><div class="activity-dot"></div><div class="activity-dot"></div><div class="activity-dot"></div></div>
+            <div class="activity">
+              <div class="activity-dot"></div>
+              <div class="activity-dot"></div>
+              <div class="activity-dot"></div>
+            </div>
           </div>
         </div>
 
@@ -1052,7 +1416,8 @@
     <div class="container">
       <div class="section-label reveal">Auto-routing</div>
       <h2 class="reveal">Complexity determines the tier count.</h2>
-      <p class="section-desc reveal">Cascade classifies your prompt before dispatching — simple questions go direct to a T3 worker, complex implementations spin up a full hierarchy.</p>
+      <p class="section-desc reveal">Cascade classifies your prompt before dispatching — simple questions go direct to a
+        T3 worker, complex implementations spin up a full hierarchy.</p>
 
       <table class="complexity-table reveal">
         <thead>
@@ -1155,7 +1520,8 @@
         <div class="feature-cell">
           <div class="feature-icon cyan">🛠️</div>
           <h3>Full Tool Suite</h3>
-          <p>Shell, file CRUD, git, GitHub/GitLab PRs, Playwright browser automation, PDF creation, code interpreter.</p>
+          <p>Shell, file CRUD, git, GitHub/GitLab PRs, Playwright browser automation, PDF creation, code interpreter.
+          </p>
         </div>
         <div class="feature-cell">
           <div class="feature-icon red">🌐</div>
@@ -1170,27 +1536,38 @@
         <div class="feature-cell">
           <div class="feature-icon amber">💰</div>
           <h3>Per-Tier Cost Breakdown &amp; Budget Control</h3>
-          <p>Every result exposes <code>costByTier</code>, <code>tokensByTier</code>, and percentage attribution. Set a live session budget with <code>/budget set 0.50</code> — Cascade warns you at 80% spend (configurable via <code>warnAtPct</code>) and stops new tasks the moment the cap is hit, with no config-file edits required.</p>
+          <p>Every result exposes <code>costByTier</code>, <code>tokensByTier</code>, and percentage attribution. Set a
+            live session budget with <code>/budget set 0.50</code> — Cascade warns you at 80% spend (configurable via
+            <code>warnAtPct</code>) and stops new tasks the moment the cap is hit, with no config-file edits required.
+          </p>
         </div>
         <div class="feature-cell">
           <div class="feature-icon lime">⌨️</div>
           <h3>Guided Setup Wizard</h3>
-          <p>First-run TUI collects API keys for every provider — including multiple Azure deployments and custom OpenAI-compatible endpoints. Fetches live model lists, then assign T1/T2/T3 models or let Cascade Auto decide.</p>
+          <p>First-run TUI collects API keys for every provider — including multiple Azure deployments and custom
+            OpenAI-compatible endpoints. Fetches live model lists, then assign T1/T2/T3 models or let Cascade Auto
+            decide.</p>
         </div>
         <div class="feature-cell">
           <div class="feature-icon violet">🖥️</div>
           <h3>Claude Code-Style CLI</h3>
-          <p>Redesigned terminal UI with a top status bar showing live tier models and cost, a compact agent tree for T1→T2→T3 progress, and a keyboard hint bar — all purpose-built for Cascade's multi-tier hierarchy.</p>
+          <p>Redesigned terminal UI with a top status bar showing live tier models and cost, a compact agent tree for
+            T1→T2→T3 progress, and a keyboard hint bar — all purpose-built for Cascade's multi-tier hierarchy.</p>
         </div>
         <div class="feature-cell">
           <div class="feature-icon blue">🎛️</div>
           <h3>Interactive Model Picker</h3>
-          <p>Run <code>/model</code> inside the REPL for a three-step picker — provider → tier → model — with Auto at every step. Arrow keys, Tab, j/k and number keys all work; selections write <code>.cascade/config.json</code> and hot-swap the live router, no restart required.</p>
+          <p>Run <code>/model</code> inside the REPL for a three-step picker — provider → tier → model — with Auto at
+            every step. Arrow keys, Tab, j/k and number keys all work; selections write
+            <code>.cascade/config.json</code> and hot-swap the live router, no restart required.</p>
         </div>
         <div class="feature-cell">
           <div class="feature-icon red">⛔</div>
           <h3>Task Cancellation via AbortSignal</h3>
-          <p>Pass an <code>AbortSignal</code> to <code>cascade.run()</code> to stop any in-progress run mid-flight. All active tiers (T1 → T2 → T3) halt at the next safe checkpoint before the next LLM call — no mid-stream interruptions, no orphaned agents. A <code>run:cancelled</code> event fires with partial output so you can still surface what was produced. Prevents runaway token spend on long tasks.</p>
+          <p>Pass an <code>AbortSignal</code> to <code>cascade.run()</code> to stop any in-progress run mid-flight. All
+            active tiers (T1 → T2 → T3) halt at the next safe checkpoint before the next LLM call — no mid-stream
+            interruptions, no orphaned agents. A <code>run:cancelled</code> event fires with partial output so you can
+            still surface what was produced. Prevents runaway token spend on long tasks.</p>
         </div>
       </div>
     </div>
@@ -1229,8 +1606,9 @@
 
         <div class="code-right reveal">
           <div class="section-label">SDK usage</div>
-          <h2>Embed in any<br/>Node.js project.</h2>
-          <p>Cascade exposes a first-class TypeScript SDK. Bring your own approval flow, stream tokens to any UI, or wire it into a CI pipeline.</p>
+          <h2>Embed in any<br />Node.js project.</h2>
+          <p>Cascade exposes a first-class TypeScript SDK. Bring your own approval flow, stream tokens to any UI, or
+            wire it into a CI pipeline.</p>
 
           <div class="code-bullet">
             <div class="code-bullet-dot"></div>
@@ -1246,11 +1624,14 @@
           </div>
           <div class="code-bullet">
             <div class="code-bullet-dot"></div>
-            <p>Per-tier cost &amp; token breakdown — <code>costByTier</code>, <code>tokensByTier</code>, and percentage attribution in every result</p>
+            <p>Per-tier cost &amp; token breakdown — <code>costByTier</code>, <code>tokensByTier</code>, and percentage
+              attribution in every result</p>
           </div>
           <div class="code-bullet">
             <div class="code-bullet-dot"></div>
-            <p>Live budget management — <code>/budget set &lt;$amount&gt;</code> caps session spend at runtime; <code>/budget</code> shows a visual spend bar; proactive warning fires at 80% (configurable <code>warnAtPct</code>) before the hard stop</p>
+            <p>Live budget management — <code>/budget set &lt;$amount&gt;</code> caps session spend at runtime;
+              <code>/budget</code> shows a visual spend bar; proactive warning fires at 80% (configurable
+              <code>warnAtPct</code>) before the hard stop</p>
           </div>
           <div class="code-bullet">
             <div class="code-bullet-dot"></div>
@@ -1289,10 +1670,14 @@
     <div class="container">
       <div class="section-label reveal">Get started</div>
       <h2 class="reveal">One command away.</h2>
-      <p class="reveal">Open-source, MIT licensed. No telemetry by default. Runs local models via Ollama — your code never leaves your machine if you don't want it to.</p>
+      <p class="reveal">Open-source, MIT licensed. No telemetry by default. Runs local models via Ollama — your code
+        never leaves your machine if you don't want it to.</p>
       <div class="cta-actions reveal">
         <a href="https://github.com/Varun-SV/Cascade-AI" target="_blank" class="btn-primary">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+            <path
+              d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+          </svg>
           Star on GitHub
         </a>
         <a href="https://github.com/Varun-SV/Cascade-AI#readme" target="_blank" class="btn-ghost">
@@ -1312,7 +1697,8 @@
         </div>
         <div class="footer-links">
           <a href="https://github.com/Varun-SV/Cascade-AI" target="_blank" class="footer-link">GitHub</a>
-          <a href="https://github.com/Varun-SV/Cascade-AI/blob/main/CONTRIBUTING.md" target="_blank" class="footer-link">Contributing</a>
+          <a href="https://github.com/Varun-SV/Cascade-AI/blob/main/CONTRIBUTING.md" target="_blank"
+            class="footer-link">Contributing</a>
           <a href="https://github.com/Varun-SV/Cascade-AI/issues" target="_blank" class="footer-link">Issues</a>
         </div>
       </div>
@@ -1349,4 +1735,5 @@
     });
   </script>
 </body>
+
 </html>
