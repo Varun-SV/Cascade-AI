@@ -206,8 +206,8 @@ export class T3Worker extends BaseTier {
         }
       }
 
-      this.setStatus('COMPLETED');
-      this.sendStatusUpdate({ progressPct: 100, currentAction: 'Subtask complete', status: 'IN_PROGRESS' });
+      this.setStatus('COMPLETED', output);
+      this.sendStatusUpdate({ progressPct: 100, currentAction: 'Subtask complete', status: 'IN_PROGRESS', output });
 
       // ── Publish success to peers ─────────────
       this.peerBus?.publish(this.id, assignment.subtaskId, output, 'COMPLETED');
@@ -216,9 +216,10 @@ export class T3Worker extends BaseTier {
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       issues.push(`Execution error: ${errMsg}`);
-      this.setStatus('FAILED');
-      this.peerBus?.publish(this.id, assignment.subtaskId, errMsg, 'FAILED');
-      return this.buildResult('ESCALATED', output || errMsg, { checksRun, passed, failed }, issues, correctionAttempts);
+      const finalOutput = output || errMsg;
+      this.setStatus('FAILED', finalOutput);
+      this.peerBus?.publish(this.id, assignment.subtaskId, finalOutput, 'FAILED');
+      return this.buildResult('ESCALATED', finalOutput, { checksRun, passed, failed }, issues, correctionAttempts);
     }
   }
 

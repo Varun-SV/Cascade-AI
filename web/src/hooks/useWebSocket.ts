@@ -33,7 +33,7 @@ interface UseWebSocketOptions {
   /** Called when the server requests a runtime refresh */
   onRuntimeRefresh?: (scope?: RuntimeScope) => void;
   /** Called on every streamed LLM token */
-  onStreamToken?: (data: { text: string }) => void;
+  onStreamToken?: (data: { text: string; tierId: string }) => void;
   /** Called on cost:update events */
   onCostUpdate?: (data: CostUpdate) => void;
   /** Called when the server requires a human permission decision */
@@ -133,7 +133,7 @@ export function useWebSocket({
     });
 
     s.on('stream:token', (d: unknown) => {
-      cbStream.current?.(d as { text: string });
+      cbStream.current?.(d as { text: string; tierId: string });
     });
 
     s.on('cost:update', (d: unknown) => {

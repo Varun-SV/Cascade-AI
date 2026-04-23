@@ -36,7 +36,7 @@ export abstract class BaseTier extends EventEmitter {
     return this.status;
   }
 
-  protected setStatus(status: TierStatus): void {
+  protected setStatus(status: TierStatus, output?: string): void {
     this.status = status;
     const timestamp = new Date().toISOString();
     const event = {
@@ -46,6 +46,7 @@ export abstract class BaseTier extends EventEmitter {
       label: this.label,
       status,
       timestamp,
+      output,
     };
     this.emit('status', event);
     this.emit('tier:status', event);
@@ -76,6 +77,7 @@ export abstract class BaseTier extends EventEmitter {
       currentAction: update.currentAction,
       progressPct: update.progressPct,
       timestamp,
+      output: update.output,
     });
   }
 

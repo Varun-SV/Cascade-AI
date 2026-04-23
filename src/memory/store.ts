@@ -212,8 +212,8 @@ export class MemoryStore {
   upsertRuntimeNode(node: RuntimeNode): void {
     this.enqueueWrite(() => {
       this.db.prepare(`
-        INSERT INTO runtime_nodes (tier_id, session_id, parent_id, role, label, status, current_action, progress_pct, updated_at, workspace_path, is_global)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO runtime_nodes (tier_id, session_id, parent_id, role, label, status, current_action, progress_pct, updated_at, workspace_path, is_global, output)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(tier_id) DO UPDATE SET
           session_id = excluded.session_id,
           parent_id = excluded.parent_id,
@@ -224,7 +224,8 @@ export class MemoryStore {
           progress_pct = excluded.progress_pct,
           updated_at = excluded.updated_at,
           workspace_path = excluded.workspace_path,
-          is_global = excluded.is_global
+          is_global = excluded.is_global,
+          output = excluded.output
       `).run(
         node.tierId,
         node.sessionId,
@@ -237,6 +238,7 @@ export class MemoryStore {
         node.updatedAt,
         node.workspacePath ?? null,
         node.isGlobal ? 1 : 0,
+        node.output ?? null,
       );
     });
   }
@@ -262,14 +264,15 @@ export class MemoryStore {
       updatedAt: row.updated_at,
       workspacePath: row.workspace_path ?? undefined,
       isGlobal: row.is_global === 1,
+      output: row.output ?? undefined,
     }));
   }
 
   addRuntimeNodeLog(log: RuntimeNodeLog): void {
     this.enqueueWrite(() => {
       this.db.prepare(`
-        INSERT INTO runtime_node_logs (id, session_id, tier_id, role, label, status, current_action, progress_pct, timestamp, workspace_path, is_global)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO runtime_node_logs (id, session_id, tier_id, role, label, status, current_action, progress_pct, timestamp, workspace_path, is_global, output)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         log.id,
         log.sessionId,
@@ -282,6 +285,7 @@ export class MemoryStore {
         log.timestamp,
         log.workspacePath ?? null,
         log.isGlobal ? 1 : 0,
+        log.output ?? null,
       );
 
       this.db.prepare(`
@@ -329,6 +333,7 @@ export class MemoryStore {
       timestamp: row.timestamp,
       workspacePath: row.workspace_path ?? undefined,
       isGlobal: row.is_global === 1,
+      output: row.output ?? undefined,
     }));
   }
 
@@ -667,7 +672,8 @@ export class MemoryStore {
         progress_pct INTEGER,
         updated_at TEXT NOT NULL,
         workspace_path TEXT,
-        is_global INTEGER NOT NULL DEFAULT 0
+        is_global INTEGER NOT NULL DEFAULT 0,
+        output TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_runtime_nodes_session ON runtime_nodes(session_id);
@@ -684,7 +690,8 @@ export class MemoryStore {
         progress_pct INTEGER,
         timestamp TEXT NOT NULL,
         workspace_path TEXT,
-        is_global INTEGER NOT NULL DEFAULT 0
+        is_global INTEGER NOT NULL DEFAULT 0,
+        output TEXT
       );
 
       CREATE TABLE IF NOT EXISTS model_cache (
@@ -713,6 +720,10 @@ export class MemoryStore {
 
       CREATE INDEX IF NOT EXISTS idx_file_snapshots_session ON file_snapshots(session_id);
     `);
+
+    // Auto-migrate: Add 'output' column if missing
+    try { this.db.exec('ALTER TABLE runtime_nodes ADD COLUMN output TEXT'); } catch { /* ignore */ }
+    try { this.db.exec('ALTER TABLE runtime_node_logs ADD COLUMN output TEXT'); } catch { /* ignore */ }
   }
 
   // ── Deserializers ─────────────────────────────
@@ -799,10 +810,10 @@ interface DbRuntimeSession {
 interface DbRuntimeNode {
   tier_id: string; session_id: string; parent_id: string | null; role: string;
   label: string; status: string; current_action: string | null; progress_pct: number | null;
-  updated_at: string; workspace_path: string | null; is_global: number;
+  updated_at: string; workspace_path: string | null; is_global: number; output: string | null;
 }
 interface DbRuntimeNodeLog {
   id: string; session_id: string; tier_id: string; role: string; label: string;
   status: string; current_action: string | null; progress_pct: number | null; timestamp: string;
-  workspace_path: string | null; is_global: number;
+  workspace_path: string | null; is_global: number; output: string | null;
 }

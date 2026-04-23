@@ -83,29 +83,71 @@ interface T2RowProps {
 
 function T2Row({ node, theme, isLast }: T2RowProps): React.ReactElement {
   const connector = isLast ? '└─ ' : '├─ ';
-  const t3Active = countByRoleAndStatus(node, 'T3', 'ACTIVE');
-  const t3Total = countByRole(node, 'T3');
-  const workerSuffix = t3Total > 0 ? `  T3×${t3Total}` : '';
+  const t3Nodes = (node.children ?? []).filter(c => c.role === 'T3');
+  const t3ActiveCount = t3Nodes.filter(c => c.status === 'ACTIVE').length;
 
   const label = stripRolePrefix(node.label, node.role);
   const action = node.currentAction ? `  ${node.currentAction.slice(0, 38)}` : '';
 
   return (
+    <Box flexDirection="column">
+      <Box>
+        <Text color={theme.colors.muted}>  {connector}</Text>
+        <Text color={theme.colors.t2Color} bold>[T2]</Text>
+        <Text color={theme.colors.foreground}> {label}</Text>
+        {node.status === 'ACTIVE' && (
+          <>
+            {action ? <Text color={theme.colors.muted}>{action}</Text> : null}
+            <Text> </Text><Spinner type="dots" />
+            {t3ActiveCount > 0 ? <Text color={theme.colors.muted}> ({t3ActiveCount} running)</Text> : null}
+          </>
+        )}
+        {node.status === 'COMPLETED' && <Text color={theme.colors.success}> ✔</Text>}
+        {node.status === 'FAILED' && <Text color={theme.colors.error}> ✘</Text>}
+        {node.status === 'ESCALATED' && <Text color={theme.colors.warning}> ▲</Text>}
+      </Box>
+
+      {/* Render T3 workers for this T2 section */}
+      {t3Nodes.map((t3, idx) => (
+        <T3Row 
+          key={t3.id} 
+          node={t3} 
+          theme={theme} 
+          isLast={idx === t3Nodes.length - 1} 
+          parentIsLast={isLast}
+        />
+      ))}
+    </Box>
+  );
+}
+
+interface T3RowProps {
+  node: TierNode;
+  theme: Theme;
+  isLast: boolean;
+  parentIsLast: boolean;
+}
+
+function T3Row({ node, theme, isLast, parentIsLast }: T3RowProps): React.ReactElement {
+  const indent = parentIsLast ? '      ' : '  │   ';
+  const connector = isLast ? '└─ ' : '├─ ';
+  
+  const label = stripRolePrefix(node.label, node.role);
+  const action = node.currentAction ? ` ${node.currentAction.slice(0, 42)}` : '';
+
+  return (
     <Box>
-      <Text color={theme.colors.muted}>  {connector}</Text>
-      <Text color={theme.colors.t2Color} bold>[T2]</Text>
-      <Text color={theme.colors.foreground}> {label}</Text>
-      {workerSuffix ? <Text color={theme.colors.muted}>{workerSuffix}</Text> : null}
+      <Text color={theme.colors.muted}>{indent}{connector}</Text>
+      <Text color={theme.colors.t3Color}>[T3]</Text>
+      <Text color={theme.colors.muted}> {label}</Text>
       {node.status === 'ACTIVE' && (
         <>
           {action ? <Text color={theme.colors.muted}>{action}</Text> : null}
           <Text> </Text><Spinner type="dots" />
-          {t3Active > 0 ? <Text color={theme.colors.muted}> ({t3Active} running)</Text> : null}
         </>
       )}
       {node.status === 'COMPLETED' && <Text color={theme.colors.success}> ✔</Text>}
       {node.status === 'FAILED' && <Text color={theme.colors.error}> ✘</Text>}
-      {node.status === 'ESCALATED' && <Text color={theme.colors.warning}> ▲</Text>}
     </Box>
   );
 }

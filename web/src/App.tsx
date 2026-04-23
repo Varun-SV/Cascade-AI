@@ -100,7 +100,7 @@ function Dashboard({
   const dispatch = useAppDispatch();
   const [activeTab, setActiveTab] = useState<NavTab>('topology');
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [streamLog, setStreamLog] = useState('');
+  const [nodeStreams, setNodeStreams] = useState<Record<string, string>>({});
   const [pendingEscalation, setPendingEscalation] = useState<PermissionRequest | null>(null);
   const [costUsd, setCostUsd] = useState(0);
   const [totalTokens, setTotalTokens] = useState(0);
@@ -134,7 +134,15 @@ function Dashboard({
     token,
     activeSessionId: activeSession?.sessionId,
     onRuntimeRefresh: (scope) => refreshRuntime(scope ?? 'workspace'),
-    onStreamToken: (d) => setStreamLog((prev) => (prev + d.text).slice(-8000)),
+    onStreamToken: (d) => {
+      setNodeStreams((prev) => {
+        const existing = prev[d.tierId] || '';
+        return {
+          ...prev,
+          [d.tierId]: (existing + d.text).slice(-8000),
+        };
+      });
+    },
     onCostUpdate: (d) => {
       if (typeof d.totalCostUsd === 'number') setCostUsd(d.totalCostUsd);
       if (typeof d.totalTokens  === 'number') setTotalTokens(d.totalTokens);
@@ -206,7 +214,7 @@ function Dashboard({
           {activeTab === 'topology' && showInspector && (
             <InspectorPanel
               node={selectedNode}
-              streamLog={streamLog}
+              streamLog={selectedNodeId ? nodeStreams[selectedNodeId] || '' : ''}
               onClose={() => setSelectedNodeId(null)}
             />
           )}

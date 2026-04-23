@@ -167,6 +167,14 @@ async function startRepl(options: {
     config = cm.getConfig();
   }
 
+  // Clear the screen before handing control to Ink.
+  // Use the safe two-part sequence (erase + cursor-home) rather than the
+  // destructive full reset (\x1bc) which wipes the terminal state and causes
+  // Ink to render a blank screen until the next keypress / state change.
+  if (process.stdout.isTTY) {
+    process.stdout.write('\x1B[2J\x1B[H');
+  }
+
   // Render ink REPL
   const { waitUntilExit } = render(
     React.createElement(Repl, {

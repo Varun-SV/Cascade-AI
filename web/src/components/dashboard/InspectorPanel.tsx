@@ -142,14 +142,16 @@ export const InspectorPanel = memo(function InspectorPanel({
               aria-live="polite"
               aria-label="Live token stream"
             >
-              {streamLog ? (
+              {node.output ? (
+                <span>{node.output}</span>
+              ) : streamLog && node.status === 'ACTIVE' ? (
                 <span>
                   {streamLog.slice(-4000)}
                   <span className="animate-blink text-[var(--t3-color)]">█</span>
                 </span>
               ) : (
                 <span className="text-[var(--text-faint)] italic">
-                  Waiting for output…
+                  {node.status === 'COMPLETED' ? 'No output recorded.' : 'Waiting for output…'}
                 </span>
               )}
             </div>

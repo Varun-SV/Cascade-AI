@@ -193,8 +193,8 @@ Create a CORRECTION PLAN that contains only the new sections needed to fix the i
     // Step 5: Compile final output
     const output = await this.compileFinalOutput(userPrompt, plan, allT2Results);
 
-    this.setStatus('COMPLETED');
-    this.sendStatusUpdate({ progressPct: 100, currentAction: 'Task complete', status: 'IN_PROGRESS' });
+    this.setStatus('COMPLETED', output);
+    this.sendStatusUpdate({ progressPct: 100, currentAction: 'Task complete', status: 'IN_PROGRESS', output });
 
     return { output, t2Results: allT2Results, taskId: this.taskId, complexity: plan.complexity };
   }
