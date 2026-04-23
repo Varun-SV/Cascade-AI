@@ -1,6 +1,6 @@
 {
   "name": "cascade-ai",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "description": "Multi-tier AI orchestration CLI — T1/T2/T3 hierarchical agent system",
   "type": "module",
   "main": "dist/index.cjs",
@@ -39,8 +39,8 @@
     "README.md"
   ],
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.30.0",
-    "@google/genai": "^1.0.0",
+    "@anthropic-ai/sdk": "^0.90.0",
+    "@google/genai": "^1.50.1",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "axios": "1.13.6",
     "bcryptjs": "^2.4.3",
@@ -53,7 +53,7 @@
     "dotenv": "^16.4.0",
     "express": "^4.21.0",
     "express-rate-limit": "^7.4.0",
-    "glob": "^11.0.0",
+    "glob": "^13.0.6",
     "highlight.js": "^11.10.0",
     "ignore": "^6.0.2",
     "ink": "^5.1.0",
@@ -66,7 +66,7 @@
     "node-notifier": "^10.0.1",
     "openai": "^4.67.0",
     "ora": "^8.1.0",
-    "pdfkit": "^0.15.0",
+    "pdfkit": "^0.18.0",
     "posthog-node": "^4.2.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
@@ -131,5 +131,8 @@
   },
   "bugs": {
     "url": "https://github.com/Varun-SV/Cascade-AI/issues"
+  },
+  "overrides": {
+    "node-domexception": "npm:domexception@^4.0.0"
   }
 }

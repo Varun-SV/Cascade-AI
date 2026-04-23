@@ -110,6 +110,8 @@ export class ConfigManager {
   }
 
   private async injectEnvKeys(): Promise<void> {
+    const isFirstRun = this.config.providers.length === 0;
+
     const envProviders: Array<{ env: string; type: CascadeConfig['providers'][0]['type'] }> = [
       { env: 'ANTHROPIC_API_KEY', type: 'anthropic' },
       { env: 'OPENAI_API_KEY', type: 'openai' },
@@ -121,11 +123,15 @@ export class ConfigManager {
       const key = process.env[env];
       if (!key) continue;
       const existing = this.config.providers.find((p) => p.type === type);
-      if (!existing) this.config.providers.push({ type, apiKey: key });
-      else if (!existing.apiKey) existing.apiKey = key;
+      
+      if (!existing && isFirstRun) {
+        this.config.providers.push({ type, apiKey: key });
+      } else if (existing && !existing.apiKey) {
+        existing.apiKey = key;
+      }
     }
 
-    if (!this.config.providers.find((p) => p.type === 'ollama')) {
+    if (isFirstRun && !this.config.providers.find((p) => p.type === 'ollama')) {
       this.config.providers.push({ type: 'ollama' });
     }
   }

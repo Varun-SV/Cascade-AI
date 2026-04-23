@@ -54,16 +54,39 @@ export class AnthropicProvider extends BaseProvider {
       tools: tools?.length ? tools : undefined,
     });
 
+    let isThinking = false;
+
     for await (const event of stream) {
-      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-        const text = event.delta.text;
-        fullContent += text;
-        onChunk({ text, finishReason: null });
+      if (event.type === 'content_block_delta') {
+        if ((event.delta as any).type === 'thinking_delta') {
+          if (!isThinking) {
+            isThinking = true;
+            fullContent += '<think>\n';
+            onChunk({ text: '<think>\n', finishReason: null });
+          }
+          const text = (event.delta as any).thinking;
+          fullContent += text;
+          onChunk({ text, finishReason: null });
+        } else if (event.delta.type === 'text_delta') {
+          if (isThinking) {
+            isThinking = false;
+            fullContent += '\n</think>\n\n';
+            onChunk({ text: '\n</think>\n\n', finishReason: null });
+          }
+          const text = event.delta.text;
+          fullContent += text;
+          onChunk({ text, finishReason: null });
+        }
       } else if (event.type === 'message_delta' && event.usage) {
         outputTokens = event.usage.output_tokens;
       } else if (event.type === 'message_start' && event.message.usage) {
         inputTokens = event.message.usage.input_tokens;
       }
+    }
+
+    if (isThinking) {
+      fullContent += '\n</think>\n\n';
+      onChunk({ text: '\n</think>\n\n', finishReason: null });
     }
 
     const finalMessage = await stream.finalMessage();
