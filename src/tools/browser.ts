@@ -5,6 +5,8 @@
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
 
+const BROWSER_LAUNCH_TIMEOUT_MS = 15_000;
+
 export class BrowserTool extends BaseTool {
   readonly name = 'browser';
   readonly description = 'Control a browser: navigate to URLs, click elements, fill forms, take screenshots. Only available with multimodal models.';
@@ -13,7 +15,7 @@ export class BrowserTool extends BaseTool {
     properties: {
       action: {
         type: 'string',
-        enum: ['navigate', 'click', 'fill', 'screenshot', 'evaluate', 'extract_text', 'wait'],
+        enum: ['navigate', 'click', 'fill', 'screenshot', 'evaluate', 'extract_text', 'wait', 'close'],
       },
       url: { type: 'string', description: 'URL to navigate to' },
       selector: { type: 'string', description: 'CSS selector for click/fill' },
@@ -24,8 +26,8 @@ export class BrowserTool extends BaseTool {
     required: ['action'],
   };
 
-  private browser: unknown = null;
-  private page: unknown = null;
+  private browser: import('playwright').Browser | null = null;
+  private page: import('playwright').Page | null = null;
 
   isDangerous(): boolean { return true; }
 
@@ -34,57 +36,96 @@ export class BrowserTool extends BaseTool {
     try {
       playwright = await import('playwright');
     } catch {
-      throw new Error('Playwright is not installed. Run: npm install playwright && npx playwright install chromium');
+      return 'Error: Playwright is not installed. Run: npm install playwright && npx playwright install chromium';
     }
 
-    if (!this.browser) {
-      const pw = playwright as typeof import('playwright');
-      this.browser = await pw.chromium.launch({ headless: true });
-      const b = this.browser as import('playwright').Browser;
-      this.page = await b.newPage();
-    }
-
-    const page = this.page as import('playwright').Page;
     const action = input['action'] as string;
     const timeout = (input['timeout'] as number | undefined) ?? 10_000;
 
-    switch (action) {
-      case 'navigate': {
-        await page.goto(input['url'] as string, { timeout });
-        return `Navigated to ${input['url']}`;
+    // Allow explicit close action to clean up
+    if (action === 'close') {
+      await this.close();
+      return 'Browser closed.';
+    }
+
+    // Lazy-initialize browser with a launch timeout
+    if (!this.browser || !this.page) {
+      await this.close(); // clean up any partial state
+
+      const launchPromise = playwright.chromium.launch({ headless: true });
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`Browser launch timed out after ${BROWSER_LAUNCH_TIMEOUT_MS}ms. Is Chromium installed? Run: npx playwright install chromium`)), BROWSER_LAUNCH_TIMEOUT_MS),
+      );
+
+      try {
+        this.browser = await Promise.race([launchPromise, timeoutPromise]);
+        this.page = await this.browser.newPage();
+      } catch (err) {
+        this.browser = null;
+        this.page = null;
+        return `Browser launch failed: ${err instanceof Error ? err.message : String(err)}`;
       }
-      case 'click': {
-        await page.click(input['selector'] as string, { timeout });
-        return `Clicked ${input['selector']}`;
+    }
+
+    const page = this.page;
+
+    try {
+      switch (action) {
+        case 'navigate': {
+          await page.goto(input['url'] as string, { timeout });
+          const title = await page.title();
+          return `Navigated to ${input['url']} (title: "${title}")`;
+        }
+        case 'click': {
+          await page.click(input['selector'] as string, { timeout });
+          return `Clicked ${input['selector']}`;
+        }
+        case 'fill': {
+          await page.fill(input['selector'] as string, input['value'] as string);
+          return `Filled ${input['selector']} with value`;
+        }
+        case 'screenshot': {
+          const buf = await page.screenshot({ type: 'png' });
+          return `data:image/png;base64,${buf.toString('base64')}`;
+        }
+        case 'evaluate': {
+          const result = await page.evaluate(input['script'] as string);
+          return JSON.stringify(result);
+        }
+        case 'extract_text': {
+          const text = await page.locator('body').innerText();
+          return text.slice(0, 10_000);
+        }
+        case 'wait': {
+          await page.waitForTimeout(timeout);
+          return `Waited ${timeout}ms`;
+        }
+        default:
+          return `Unknown browser action: ${action}. Supported: navigate, click, fill, screenshot, evaluate, extract_text, wait, close`;
       }
-      case 'fill': {
-        await page.fill(input['selector'] as string, input['value'] as string);
-        return `Filled ${input['selector']} with value`;
+    } catch (err) {
+      // If the page crashed or navigated away mid-action, reset so next call re-initializes
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (/Target closed|Page crashed|Navigation failed/i.test(errMsg)) {
+        await this.close();
+        return `Browser error (page reset): ${errMsg}`;
       }
-      case 'screenshot': {
-        const buf = await page.screenshot({ type: 'png' });
-        return `data:image/png;base64,${buf.toString('base64')}`;
-      }
-      case 'evaluate': {
-        const result = await page.evaluate(input['script'] as string);
-        return JSON.stringify(result);
-      }
-      case 'extract_text': {
-        const text = await page.locator('body').innerText();
-        return text.slice(0, 10_000);
-      }
-      case 'wait': {
-        await page.waitForTimeout(timeout);
-        return `Waited ${timeout}ms`;
-      }
-      default:
-        throw new Error(`Unknown browser action: ${action}`);
+      return `Browser action "${action}" failed: ${errMsg}`;
     }
   }
 
   async close(): Promise<void> {
-    if (this.browser) {
-      await (this.browser as import('playwright').Browser).close();
+    try {
+      if (this.page) {
+        await this.page.close().catch(() => {});
+        this.page = null;
+      }
+      if (this.browser) {
+        await this.browser.close().catch(() => {});
+        this.browser = null;
+      }
+    } catch {
+      // Swallow errors on cleanup — the browser may already be dead
       this.browser = null;
       this.page = null;
     }

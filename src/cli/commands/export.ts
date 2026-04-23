@@ -3,11 +3,12 @@
 // ─────────────────────────────────────────────
 
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import chalk from 'chalk';
 import ora from 'ora';
 import { MemoryStore } from '../../memory/store.js';
-import { GLOBAL_CONFIG_DIR, GLOBAL_DB_FILE } from '../../constants.js';
+import { GLOBAL_CONFIG_DIR, GLOBAL_DB_FILE, CASCADE_DB_FILE } from '../../constants.js';
 import type { Session, StoredMessage } from '../../types.js';
 
 export interface ExportOptions {
@@ -15,6 +16,8 @@ export interface ExportOptions {
   format?: 'markdown' | 'json';
   output?: string;
   last?: number;
+  /** Override workspace path (defaults to cwd). */
+  workspacePath?: string;
 }
 
 export async function exportCommand(options: ExportOptions = {}): Promise<void> {
@@ -23,7 +26,21 @@ export async function exportCommand(options: ExportOptions = {}): Promise<void> 
 
   let store: MemoryStore;
   try {
-    const dbPath = path.join(process.env['HOME'] ?? '~', GLOBAL_CONFIG_DIR, GLOBAL_DB_FILE);
+    // Prefer the workspace DB where sessions are actually stored (.cascade/memory.db).
+    // Fall back to the global DB only if the workspace DB doesn't exist.
+    const workspacePath = options.workspacePath ?? process.cwd();
+    const workspaceDbPath = path.join(workspacePath, CASCADE_DB_FILE);
+    const globalDbPath = path.join(os.homedir(), GLOBAL_CONFIG_DIR, GLOBAL_DB_FILE);
+
+    // Check if file exists synchronously to pick the right DB
+    let dbPath = globalDbPath;
+    try {
+      await fs.access(workspaceDbPath);
+      dbPath = workspaceDbPath;
+    } catch {
+      // Workspace DB doesn't exist, fall back to global
+    }
+
     store = new MemoryStore(dbPath);
   } catch (err) {
     spin.fail(chalk.red(`Cannot open memory store: ${err instanceof Error ? err.message : String(err)}`));

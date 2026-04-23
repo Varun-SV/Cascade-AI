@@ -29,6 +29,7 @@ Rules:
 - Execute the subtask completely — do not stop partway through.
 - Use tools when needed. Ask for approval only when the tool registry requires it.
 - If the task asks for a file or artifact, you must actually create it in the workspace, verify that it exists, and inspect it before claiming success.
+- Use the "web_search" tool to find current information, documentation, news, or general web data.
 - Use the "pdf_create" tool for PDF requests.
 - Use the "run_code" tool for any file types (Excel, Zip, csv, etc.) or complex processing not covered by other tools. Always cleanup after code execution.
 - If you are not making meaningful progress, stop and escalate rather than looping or padding the response.

@@ -23,6 +23,7 @@ import { ImageAnalyzeTool } from './image.js';
 import { PDFCreateTool } from './pdf.js';
 import { CodeInterpreterTool } from './interpreter.js';
 import { PeerCommunicationTool } from './peer.js';
+import { WebSearchTool } from './web-search.js';
 import { McpClient } from '../mcp/client.js';
 import { McpToolWrapper } from './mcp.js';
 
@@ -183,6 +184,7 @@ export class ToolRegistry {
       new PDFCreateTool(),
       new CodeInterpreterTool(),
       new PeerCommunicationTool(),
+      new WebSearchTool(this.config.webSearch),
     ];
 
     for (const tool of tools) {

@@ -32,14 +32,46 @@ export class GitHubTool extends BaseTool {
 
   async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
     const platform = (input['platform'] as string | undefined) ?? 'github';
-    const token = (input['token'] as string | undefined) ?? process.env['GITHUB_TOKEN'] ?? process.env['GITLAB_TOKEN'] ?? '';
     const operation = input['operation'] as string;
     const repo = input['repo'] as string;
 
-    if (platform === 'github') {
-      return this.executeGitHub(operation, repo, token, input);
+    // Resolve token per platform to avoid accidentally sending GITLAB_TOKEN to GitHub
+    let token = input['token'] as string | undefined;
+    if (!token) {
+      if (platform === 'github') {
+        token = process.env['GITHUB_TOKEN'];
+      } else {
+        token = process.env['GITLAB_TOKEN'];
+      }
     }
-    return this.executeGitLab(operation, repo, token, input);
+
+    if (!token) {
+      const envName = platform === 'github' ? 'GITHUB_TOKEN' : 'GITLAB_TOKEN';
+      return `Error: No ${platform} token provided. Set the ${envName} environment variable or pass a "token" field in the input.`;
+    }
+
+    try {
+      if (platform === 'github') {
+        return await this.executeGitHub(operation, repo, token, input);
+      }
+      return await this.executeGitLab(operation, repo, token, input);
+    } catch (err: unknown) {
+      // Surface HTTP errors with actionable messages
+      const axiosErr = err as { response?: { status?: number; data?: { message?: string } }; message?: string };
+      if (axiosErr?.response?.status) {
+        const status = axiosErr.response.status;
+        const msg = axiosErr.response.data?.message ?? '';
+        switch (status) {
+          case 401: return `Authentication failed: Your ${platform} token is invalid or expired. Check your token and try again.`;
+          case 403: return `Permission denied: Your ${platform} token lacks the required scopes for this operation. Needed: repo or workflow.`;
+          case 404: return `Not found: Repository "${repo}" does not exist, or your token cannot access it.`;
+          case 422: return `Validation error from ${platform}: ${msg || 'Check your input parameters (branch names, base/head refs, etc.).'}`;
+          case 429: return `Rate limited by ${platform}. Please wait a moment before trying again.`;
+          default: return `${platform} API error (${status}): ${msg || axiosErr.message ?? 'Unknown error'}`;
+        }
+      }
+      return `${platform} request failed: ${axiosErr.message ?? String(err)}`;
+    }
   }
 
   private async executeGitHub(

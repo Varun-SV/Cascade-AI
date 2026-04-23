@@ -4,6 +4,7 @@
 
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
+import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import express, { type Request, type Response } from 'express';
@@ -137,7 +138,7 @@ export class DashboardServer {
 
   private getGlobalStore(): MemoryStore {
     if (!this.globalStore) {
-      const globalDbPath = path.join(process.env['HOME'] ?? process.cwd(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
+      const globalDbPath = path.join(os.homedir(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
       this.globalStore = new MemoryStore(globalDbPath);
     }
     return this.globalStore;
@@ -206,7 +207,7 @@ export class DashboardServer {
 
   watchRuntimeChanges(): void {
     const workspaceDbPath = path.join(this.workspacePath, CASCADE_DB_FILE);
-    const globalDbPath = path.join(process.env['HOME'] ?? process.cwd(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
+    const globalDbPath = path.join(os.homedir(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
     const watchPaths = [workspaceDbPath, globalDbPath].filter((p, index, arr) => arr.indexOf(p) === index);
 
     for (const watchPath of watchPaths) {
@@ -335,7 +336,7 @@ export class DashboardServer {
       this.store.deleteSession(sessionId);
       this.store.deleteRuntimeSession(sessionId);
 
-      const globalDbPath = path.join(process.env['HOME'] ?? process.cwd(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
+      const globalDbPath = path.join(os.homedir(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
       const globalStore = new MemoryStore(globalDbPath);
       try {
         globalStore.deleteRuntimeSession(sessionId);
@@ -351,7 +352,7 @@ export class DashboardServer {
 
     this.app.delete('/api/sessions', auth, (req: Request, res: Response) => {
       const body = req.body as { ids?: string[] } | undefined;
-      const globalDbPath = path.join(process.env['HOME'] ?? process.cwd(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
+      const globalDbPath = path.join(os.homedir(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
 
       if (body?.ids && Array.isArray(body.ids) && body.ids.length > 0) {
         // Bulk delete specific sessions by IDs
@@ -378,7 +379,7 @@ export class DashboardServer {
 
     this.app.delete('/api/runtime', auth, (_req, res) => {
       this.store.deleteAllRuntimeNodes();
-      const globalDbPath = path.join(process.env['HOME'] ?? process.cwd(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
+      const globalDbPath = path.join(os.homedir(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
       const globalStore = new MemoryStore(globalDbPath);
       try {
         globalStore.deleteAllRuntimeNodes();
@@ -488,7 +489,7 @@ export class DashboardServer {
     this.app.get('/api/runtime', auth, (req, res) => {
       const scope = (req.query['scope'] as string | undefined) ?? 'workspace';
       if (scope === 'global') {
-        const globalDbPath = path.join(process.env['HOME'] ?? process.cwd(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
+        const globalDbPath = path.join(os.homedir(), GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE);
         const globalStore = new MemoryStore(globalDbPath);
         try {
           res.json({
