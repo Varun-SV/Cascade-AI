@@ -287,7 +287,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     if (sel.kind === 'auto') {
       delete (config.models as Record<string, string | undefined>)[tierKey];
     } else {
-      (config.models as Record<string, string | undefined>)[tierKey] = sel.modelId;
+      (config.models as Record<string, string | undefined>)[tierKey] = `${sel.provider}:${sel.modelId}`;
     }
 
     // Hot-swap the live router — best-effort.
@@ -824,9 +824,18 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   let agentTreeHeight = 0;
   if (state.agentTree && hasActiveOrFailed(state.agentTree)) {
     agentTreeHeight = 1; // Header row
-    const childrenCount = state.agentTree.children?.length ?? 0;
-    agentTreeHeight += Math.min(childrenCount, 6); // Up to 6 T2 rows
-    if (childrenCount > 6) agentTreeHeight += 1; // "... more sections" row
+    const visibleT2s = state.agentTree.children?.slice(0, 6) ?? [];
+    agentTreeHeight += visibleT2s.length; // T2 rows
+
+    // Add height for T3 rows rendered under each visible T2
+    for (const t2 of visibleT2s) {
+      const t3Count = (t2.children ?? []).filter(c => c.role === 'T3').length;
+      agentTreeHeight += t3Count;
+    }
+
+    if ((state.agentTree.children?.length ?? 0) > 6) {
+      agentTreeHeight += 1; // "... more sections" row
+    }
   }
 
   let timelineHeight = 0;
@@ -1065,6 +1074,13 @@ async function validateConfiguredModels(config: CascadeConfig): Promise<string |
 }
 
 function inferProviderFromModelId(id: string, providers: CascadeConfig['providers']): ProviderType | null {
+  if (id.includes(':')) {
+    const prefix = id.split(':')[0]!.toLowerCase();
+    const validProviders = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama'];
+    if (validProviders.includes(prefix)) {
+      return prefix as ProviderType;
+    }
+  }
   const lower = id.toLowerCase();
   if (lower.includes('gpt')) return 'openai';
   if (lower.includes('claude')) return 'anthropic';

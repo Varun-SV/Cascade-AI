@@ -107,7 +107,7 @@ export class CascadeRouter extends EventEmitter {
         throw new Error(`Configured model "${override}" for ${tier} could not be loaded. Check provider availability and exact model name.`);
       }
 
-      if (model.id !== override) {
+      if (model.id !== override && `${model.provider}:${model.id}` !== override) {
         throw new Error(`Configured model "${override}" for ${tier} resolved to "${model.id}". Use the exact provider model ID or prefix the provider (e.g. gemini:${override}).`);
       }
 
