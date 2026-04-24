@@ -12,6 +12,7 @@ cascade "Refactor the auth module to use JWT, add tests, and open a PR"
 
 ## Table of Contents
 
+- [What's New in v0.5.0](#whats-new-in-v050)
 - [How It Works](#how-it-works)
 - [Features](#features)
 - [Installation](#installation)
@@ -31,6 +32,30 @@ cascade "Refactor the auth module to use JWT, add tests, and open a PR"
 - [Shell Completions](#shell-completions)
 - [Architecture](#architecture)
 - [Roadmap](#roadmap)
+
+---
+
+## What's New in v0.5.0
+
+### Bug Fixes
+- **SettingsView error handling** — tier limits and budget panels now surface network/auth errors instead of silently failing
+- **LoginView token trimming** — whitespace is stripped from the API token before use
+- **SessionList delete feedback** — delete failures now show a user-visible error; `isDeleting` no longer gets stuck on network errors
+- **`cost:update` field name mismatch** — dashboard cost/token counters now update correctly after remote runs
+
+### Security
+- **Symlink sandbox** — workspace path resolution now calls `realpathSync` so symlinks pointing outside the workspace are rejected
+- **Rate limiting** — mutation endpoints (`/api/run`, `/api/force-halt`, `/api/approve`, `/api/inject`) are rate-limited to 10 req/min; all API routes to 60 req/min
+- **Atomic config write** — config is written to a temp file and renamed atomically, preventing corruption on crash
+- **Request body validation** — `inject` and `config` endpoints validate shape at runtime before processing
+
+### New Features
+- **URL hash routing** — the dashboard tab survives page refresh; browser Back/Forward works
+- **Plugin loading from config** — add `"plugins": ["./my-plugin.js"]` to `.cascade/config.json` to load custom tool plugins at startup
+- **Conversational fast-path** — greetings and simple questions (≤12 words, matching conversational patterns) skip the T1 orchestration workflow entirely, returning a direct response at a fraction of the cost
+- **Auto model specialization** — when `cascadeAuto: true`, Cascade profiles each configured model at startup (via OpenRouter API or a lightweight LLM query), stores specializations in SQLite, and ranks models by task-type fit at execution time
+- **T3 text-tool fallback** — Ollama and other models that don't support native tool use now receive tools as structured text (`<tool_call>…</tool_call>` blocks) that are parsed and executed identically to native tool calls
+- **Peer communication visualization** — the web dashboard topology view shows animated dashed edges between agents exchanging messages; the Inspector panel adds a **Communications** tab listing every peer message for the selected agent
 
 ---
 
@@ -118,10 +143,12 @@ User prompt
 
 ### Web Dashboard
 - Real-time agent execution graph (ReactFlow)
+- **Peer communication edges** — animated dashed lines between agents as they exchange messages
+- **Agent Inspector** — click any node to see live output stream and peer communications
 - Session browser with cost/token stats
 - Config viewer
 - JWT auth (password-protected)
-- Single-tenant and multi-tenant team modes
+- URL hash routing (`#topology`, `#sessions`, `#logs`, `#settings`)
 - WebSocket live updates
 
 ---
@@ -196,7 +223,8 @@ Cascade loads config from `.cascade/config.json` in your project directory.
     "teamMode": "single"
   },
   "theme":  "cascade",
-  "telemetry": { "enabled": false }
+  "telemetry": { "enabled": false },
+  "plugins": ["./plugins/my-tool.js"]
 }
 ```
 
@@ -635,6 +663,11 @@ web/
 | ✓ | Hooks system |
 | ✓ | Scheduler + notifications |
 | ✓ | SDK |
+| ✓ | Plugin loading from config |
+| ✓ | Auto model specialization discovery |
+| ✓ | T3 text-tool fallback (Ollama support) |
+| ✓ | Peer communication visualization in dashboard |
+| ✓ | Conversational fast-path (bypass T1 for simple prompts) |
 | 🔜 | VSCode extension (`cascade-vscode`) |
 | 🔜 | JetBrains extension (`cascade-jetbrains`) |
 | 🔜 | Cascade Cloud (hosted dashboard) |
