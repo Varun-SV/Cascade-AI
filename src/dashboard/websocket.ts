@@ -112,9 +112,6 @@ export class DashboardSocket {
         const { sessionId } = normalizeSessionSubscriptionPayload(payload);
         socket.leave(`session:${sessionId}`);
       });
-      socket.on('join:tenant', (tenantId: string) => {
-        socket.join(`tenant:${tenantId}`);
-      });
     });
   }
 

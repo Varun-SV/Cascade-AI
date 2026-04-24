@@ -126,6 +126,12 @@ export const CascadeConfigSchema = z.object({
    * HTTP calls from generated tools require approval.
    */
   enableToolCreation: z.boolean().default(false),
+  /**
+   * External plugin paths or npm package names to load at startup.
+   * Each entry must export a default ToolPlugin object.
+   * Example: ["./plugins/my-tool.js", "cascade-plugin-slack"]
+   */
+  plugins: z.array(z.string()).default([]),
 });
 
 export type CascadeConfigInput = z.input<typeof CascadeConfigSchema>;

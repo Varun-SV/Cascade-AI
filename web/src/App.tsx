@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useMemo, useState, useCallback, useRef, useLayoutEffect } from 'react';
 import { useAppSelector, useAppDispatch } from './store';
 import {
   updateRTKSnapshot,
@@ -98,7 +98,24 @@ function Dashboard({
   onNeedAuth: () => void;
 }) {
   const dispatch = useAppDispatch();
-  const [activeTab, setActiveTab] = useState<NavTab>('topology');
+
+  const getTabFromHash = (): NavTab => {
+    const hash = window.location.hash.slice(1) as NavTab;
+    return ['topology', 'sessions', 'logs', 'settings'].includes(hash) ? hash : 'topology';
+  };
+
+  const [activeTab, setActiveTab] = useState<NavTab>(getTabFromHash);
+
+  const handleTabChange = useCallback((tab: NavTab) => {
+    setActiveTab(tab);
+    window.location.hash = tab;
+  }, []);
+
+  useLayoutEffect(() => {
+    const handler = () => setActiveTab(getTabFromHash());
+    window.addEventListener('popstate', handler);
+    return () => window.removeEventListener('popstate', handler);
+  }, []);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [nodeStreams, setNodeStreams] = useState<Record<string, string>>({});
   const [pendingEscalation, setPendingEscalation] = useState<PermissionRequest | null>(null);
@@ -191,7 +208,7 @@ function Dashboard({
 
   return (
     <div className="flex h-full w-full overflow-hidden bg-[var(--bg-base)]">
-      <NavRail activeTab={activeTab} onTabChange={setActiveTab} onLogout={onLogout} />
+      <NavRail activeTab={activeTab} onTabChange={handleTabChange} onLogout={onLogout} />
 
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
         <TopBar isConnected={isConnected} totalCostUsd={costUsd} totalTokens={totalTokens} />

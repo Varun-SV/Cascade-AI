@@ -162,6 +162,24 @@ export class Cascade extends EventEmitter {
         }
       }
 
+      // Load external plugins declared in config.plugins
+      const pluginPaths = (this.config as unknown as Record<string, unknown>)['plugins'] as string[] | undefined;
+      if (pluginPaths?.length) {
+        for (const pluginPath of pluginPaths) {
+          try {
+            const mod = await import(pluginPath);
+            const plugin = (mod.default ?? mod) as import('../tools/registry.js').ToolPlugin;
+            if (plugin && Array.isArray(plugin.tools)) {
+              this.toolRegistry.registerPlugin(plugin);
+            } else {
+              console.warn(`[cascade] Plugin "${pluginPath}" does not export a valid ToolPlugin.`);
+            }
+          } catch (err) {
+            console.warn(`[cascade] Failed to load plugin "${pluginPath}":`, err);
+          }
+        }
+      }
+
       this.initOptionalFeatures();
       this.initialized = true;
     })();

@@ -9,7 +9,6 @@ export interface DashboardUser {
   id: string;
   username: string;
   role: 'admin' | 'viewer';
-  tenantId?: string;   // For multi-tenant mode
 }
 
 export function createToken(user: DashboardUser, secret: string): string {
