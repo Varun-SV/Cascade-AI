@@ -175,6 +175,11 @@ export class Cascade extends EventEmitter {
     }
   }
 
+  private isCasualGreeting(prompt: string): boolean {
+    const casual = /^(hi|hello|hey|greetings|thanks|thank you|thx|bye|goodbye|cya)$/i.test(prompt.trim().replace(/[!?.]+$/, ''));
+    return casual;
+  }
+
   private looksLikeSimpleArtifactTask(prompt: string): boolean {
     return /create .*\.(txt|md|json|csv)\b/i.test(prompt)
       && !/(research|compare|thorough|pdf|report|analy[sz]e|architecture|multi-agent)/i.test(prompt);
@@ -185,6 +190,10 @@ export class Cascade extends EventEmitter {
     workspacePath: string,
     conversationHistory: ConversationMessage[] = [],
   ): Promise<TaskComplexity> {
+    if (this.isCasualGreeting(prompt)) {
+      return 'Simple';
+    }
+
     if (this.looksLikeSimpleArtifactTask(prompt)) {
       return 'Simple';
     }

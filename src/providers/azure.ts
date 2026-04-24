@@ -2,29 +2,29 @@
 //  Cascade AI — Azure OpenAI Provider
 // ─────────────────────────────────────────────
 
-import OpenAI from 'openai';
+import { AzureOpenAI } from 'openai';
 import { AZURE_BASE_URL_TEMPLATE } from '../constants.js';
 import type { ModelInfo, ProviderConfig } from '../types.js';
 import { OpenAIProvider } from './openai.js';
 
 export class AzureOpenAIProvider extends OpenAIProvider {
   constructor(config: ProviderConfig, model: ModelInfo) {
-    const baseUrl = config.baseUrl
-      ?? AZURE_BASE_URL_TEMPLATE.replace('{resource}', 'YOUR_RESOURCE');
+    const rawUrl = config.baseUrl ?? AZURE_BASE_URL_TEMPLATE.replace('{resource}', 'YOUR_RESOURCE');
+    const endpoint = rawUrl.replace(/\/+$/, ''); // Strip trailing slashes
     super(
       {
         ...config,
-        baseUrl: `${baseUrl}/openai/deployments/${config.deploymentName ?? model.id}`,
+        baseUrl: endpoint, // Kept for superclass compatibility if it reads it
       },
       model,
     );
 
-    // Override client with Azure-specific configuration
-    this.client = new OpenAI({
+    // Use the official AzureOpenAI SDK class which correctly handles pathing and API keys natively
+    this.client = new AzureOpenAI({
       apiKey: config.apiKey,
-      baseURL: `${baseUrl}/openai/deployments/${config.deploymentName ?? model.id}`,
-      defaultQuery: { 'api-version': config.apiVersion ?? '2024-08-01-preview' },
-      defaultHeaders: { 'api-key': config.apiKey ?? '' },
+      endpoint: endpoint,
+      deployment: config.deploymentName ?? model.id,
+      apiVersion: config.apiVersion ?? '2024-08-01-preview',
     });
   }
 

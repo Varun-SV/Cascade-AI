@@ -289,6 +289,11 @@ export class T3Worker extends BaseTier {
 
       if (!result.toolCalls?.length) {
         if (requiresArtifact) {
+          const artifactCheck = await this.verifyArtifacts(this.assignment!);
+          if (artifactCheck.ok) {
+            return { output: result.content, toolCalls: allToolCalls };
+          }
+
           stalledArtifactIterations += 1;
           if (stalledArtifactIterations >= 2) {
             if (stalledArtifactIterations === 2) {
@@ -298,7 +303,7 @@ export class T3Worker extends BaseTier {
           }
           await this.context.addMessage({
             role: 'user',
-            content: 'You have not yet created and verified the required artifact. Use tools to create the file in the workspace, verify it exists, and inspect the result before concluding.',
+            content: `You have not yet created and verified the required artifact. Issues: ${artifactCheck.issues.join('; ')}. Use tools to create the file in the workspace, verify it exists, and inspect the result before concluding.`,
           });
           continue;
         }
@@ -307,8 +312,15 @@ export class T3Worker extends BaseTier {
 
       stalledArtifactIterations = 0;
 
-      if (result.finishReason === 'stop' && !requiresArtifact) {
-        return { output: result.content, toolCalls: allToolCalls };
+      if (result.finishReason === 'stop') {
+        if (requiresArtifact) {
+          const artifactCheck = await this.verifyArtifacts(this.assignment!);
+          if (artifactCheck.ok) {
+            return { output: result.content, toolCalls: allToolCalls };
+          }
+        } else {
+          return { output: result.content, toolCalls: allToolCalls };
+        }
       }
 
       for (const tc of result.toolCalls) {
