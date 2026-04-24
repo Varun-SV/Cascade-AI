@@ -276,23 +276,29 @@ function TierLimitsPanel({ token }: { token: string }) {
   const [limits, setLimits] = useState<TierLimits>({});
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState('');
 
   useEffect(() => {
     fetch('/api/config', { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.json())
-      .then((cfg: { tierLimits?: TierLimits }) => { if (cfg.tierLimits) setLimits(cfg.tierLimits); });
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then((cfg: { tierLimits?: TierLimits }) => { if (cfg.tierLimits) setLimits(cfg.tierLimits); })
+      .catch(() => setError('Failed to load tier limits.'));
   }, [token]);
 
   const handleSave = async () => {
     setSaving(true);
+    setError('');
     try {
-      await fetch('/api/config', {
+      const r = await fetch('/api/config', {
         method: 'PUT',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ tierLimits: limits }),
       });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
+    } catch {
+      setError('Failed to save tier limits.');
     } finally {
       setSaving(false);
     }
@@ -338,6 +344,7 @@ function TierLimitsPanel({ token }: { token: string }) {
           {saving ? 'Saving…' : saved ? '✓ Saved' : 'Save Limits'}
         </button>
         {saved && <span className="text-xs text-green-400 font-mono">Persisted to .cascade/config.json</span>}
+        {error && <span className="text-xs text-[var(--error)] font-mono">{error}</span>}
       </div>
     </section>
   );
@@ -350,26 +357,33 @@ function BudgetPanel({ token }: { token: string }) {
   const [stats, setStats] = useState<{ totalCostUsd: number } | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState('');
 
   useEffect(() => {
     fetch('/api/config', { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.json())
-      .then((cfg: { budget?: BudgetConfig }) => { if (cfg.budget) setBudget(cfg.budget); });
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then((cfg: { budget?: BudgetConfig }) => { if (cfg.budget) setBudget(cfg.budget); })
+      .catch(() => setError('Failed to load budget config.'));
     fetch('/api/stats', { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.json())
-      .then((s: { totalCostUsd: number }) => setStats(s));
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then((s: { totalCostUsd: number }) => setStats(s))
+      .catch(() => { /* stats are informational — fail silently */ });
   }, [token]);
 
   const handleSave = async () => {
     setSaving(true);
+    setError('');
     try {
-      await fetch('/api/config', {
+      const r = await fetch('/api/config', {
         method: 'PUT',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ budget }),
       });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
+    } catch {
+      setError('Failed to save budget.');
     } finally {
       setSaving(false);
     }
@@ -464,6 +478,7 @@ function BudgetPanel({ token }: { token: string }) {
           {saving ? 'Saving…' : saved ? '✓ Saved' : 'Save Budget'}
         </button>
         {saved && <span className="text-xs text-green-400 font-mono">Persisted to .cascade/config.json</span>}
+        {error && <span className="text-xs text-[var(--error)] font-mono">{error}</span>}
       </div>
     </section>
   );

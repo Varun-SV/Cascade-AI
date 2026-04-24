@@ -18,14 +18,15 @@ export const LoginView = memo(function LoginView({ onLogin }: LoginViewProps) {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!token.trim()) return;
+    const trimmed = token.trim();
+    if (!trimmed) return;
     setLoading(true);
     setError('');
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: 'admin', password: token }),
+        body: JSON.stringify({ username: 'admin', password: trimmed }),
       });
       if (res.ok) {
         const data = await res.json();

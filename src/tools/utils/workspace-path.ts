@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────
 
 import path from 'node:path';
+import fs from 'node:fs';
 
 export class WorkspaceSandboxError extends Error {
   constructor(attempted: string, workspaceRoot: string) {
@@ -28,9 +29,23 @@ export function resolveInWorkspace(workspaceRoot: string, input: string): string
   const abs = path.isAbsolute(input) ? path.resolve(input) : path.resolve(root, input);
   const rel = path.relative(root, abs);
 
-  if (rel === '' || rel === '.') return abs;
-  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+  if (rel === '' || rel === '.') {
+    // still verify symlink target for the root itself
+  } else if (rel.startsWith('..') || path.isAbsolute(rel)) {
     throw new WorkspaceSandboxError(input, root);
   }
+
+  // Dereference symlinks so a link inside the workspace pointing outside is caught.
+  try {
+    const real = fs.realpathSync(abs);
+    const realRel = path.relative(root, real);
+    if (realRel !== '' && realRel !== '.' && (realRel.startsWith('..') || path.isAbsolute(realRel))) {
+      throw new WorkspaceSandboxError(input, root);
+    }
+  } catch (e) {
+    if (e instanceof WorkspaceSandboxError) throw e;
+    // Path doesn't exist yet (new file being created) — symlink check not applicable.
+  }
+
   return abs;
 }

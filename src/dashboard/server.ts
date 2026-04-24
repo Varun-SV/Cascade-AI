@@ -243,14 +243,32 @@ export class DashboardServer {
     const auth = authMiddleware(this.dashboardSecret, authRequired);
     const passwordHash = authRequired ? this.resolvePasswordHash() : null;
 
-    // Brute-force protection: 5 attempts / 15 min per IP. Applied only to
-    // the login route so a bad password cannot be rapidly guessed.
+    // Brute-force protection: 5 attempts / 15 min per IP.
     const loginLimiter = rateLimit({
       windowMs: 15 * 60 * 1000,
       limit: 5,
       standardHeaders: 'draft-7',
       legacyHeaders: false,
       message: { error: 'Too many login attempts. Try again in 15 minutes.' },
+    });
+
+    // General API limiter: 60 req/min per IP on all /api routes.
+    const apiLimiter = rateLimit({
+      windowMs: 60 * 1000,
+      limit: 60,
+      standardHeaders: 'draft-7',
+      legacyHeaders: false,
+      message: { error: 'Too many requests. Slow down.' },
+    });
+    this.app.use('/api', apiLimiter);
+
+    // Stricter limiter for mutation/execution endpoints: 10 req/min per IP.
+    const mutationLimiter = rateLimit({
+      windowMs: 60 * 1000,
+      limit: 10,
+      standardHeaders: 'draft-7',
+      legacyHeaders: false,
+      message: { error: 'Too many requests on this endpoint.' },
     });
 
     // ── Auth ────────────────────────────────────
@@ -294,24 +312,35 @@ export class DashboardServer {
     });
 
     // ── Commands ────────────────────────────────────
-    this.app.post('/api/force-halt', auth, (req: Request, res: Response) => {
-      const { sessionId, nodeId } = req.body as { sessionId?: string; nodeId?: string };
+    this.app.post('/api/force-halt', auth, mutationLimiter, (req: Request, res: Response) => {
+      const body = req.body as Record<string, unknown>;
+      const sessionId = typeof body['sessionId'] === 'string' ? body['sessionId'] : undefined;
+      const nodeId = typeof body['nodeId'] === 'string' ? body['nodeId'] : undefined;
       const payload = { sessionId, nodeId, requestedAt: new Date().toISOString() };
       this.socket.broadcast('session:halt', payload);
       if (sessionId) this.socket.broadcastToRoom(`session:${sessionId}`, 'session:halt', payload);
       res.json({ success: true, ...payload });
     });
 
-    this.app.post('/api/approve', auth, (req: Request, res: Response) => {
-      const { nodeId, sessionId } = req.body as { nodeId?: string; sessionId?: string };
+    this.app.post('/api/approve', auth, mutationLimiter, (req: Request, res: Response) => {
+      const body = req.body as Record<string, unknown>;
+      const sessionId = typeof body['sessionId'] === 'string' ? body['sessionId'] : undefined;
+      const nodeId = typeof body['nodeId'] === 'string' ? body['nodeId'] : undefined;
       const payload = { sessionId, nodeId, requestedAt: new Date().toISOString() };
       this.socket.broadcast('session:approve', payload);
       if (sessionId) this.socket.broadcastToRoom(`session:${sessionId}`, 'session:approve', payload);
       res.json({ success: true, ...payload });
     });
 
-    this.app.post('/api/inject', auth, (req: Request, res: Response) => {
-      const { message, sessionId, nodeId } = req.body as { message?: string; sessionId?: string; nodeId?: string };
+    this.app.post('/api/inject', auth, mutationLimiter, (req: Request, res: Response) => {
+      const body = req.body as Record<string, unknown>;
+      const message = typeof body['message'] === 'string' ? body['message'] : undefined;
+      const sessionId = typeof body['sessionId'] === 'string' ? body['sessionId'] : undefined;
+      const nodeId = typeof body['nodeId'] === 'string' ? body['nodeId'] : undefined;
+      if (!message) {
+        res.status(400).json({ error: 'message is required and must be a string' });
+        return;
+      }
       const payload = { sessionId, nodeId, message, requestedAt: new Date().toISOString() };
       this.socket.broadcast('session:message-injected', payload);
       if (sessionId) this.socket.broadcastToRoom(`session:${sessionId}`, 'session:message-injected', payload);
@@ -447,18 +476,29 @@ export class DashboardServer {
     });
 
     this.app.put('/api/config', auth, async (req: Request, res: Response) => {
-      const body = req.body as { tierLimits?: TierLimits; budget?: BudgetConfig };
-      if (body.tierLimits) this.config.tierLimits = { ...this.config.tierLimits, ...body.tierLimits };
-      if (body.budget)     this.config.budget     = { ...this.config.budget,     ...body.budget };
-      // Persist to .cascade/config.json
+      const body = req.body as Record<string, unknown>;
+      // Validate shape before mutating in-memory config
+      if (body['tierLimits'] !== undefined && (typeof body['tierLimits'] !== 'object' || Array.isArray(body['tierLimits']))) {
+        res.status(400).json({ error: 'tierLimits must be an object' });
+        return;
+      }
+      if (body['budget'] !== undefined && (typeof body['budget'] !== 'object' || Array.isArray(body['budget']))) {
+        res.status(400).json({ error: 'budget must be an object' });
+        return;
+      }
+      if (body['tierLimits']) this.config.tierLimits = { ...this.config.tierLimits, ...(body['tierLimits'] as TierLimits) };
+      if (body['budget'])     this.config.budget     = { ...this.config.budget,     ...(body['budget'] as BudgetConfig) };
+      // Persist to .cascade/config.json atomically (write temp + rename)
       try {
         const configPath = path.join(this.workspacePath, CASCADE_CONFIG_FILE);
         const existing = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf-8')) : {};
         const updated = { ...existing, tierLimits: this.config.tierLimits, budget: this.config.budget };
-        fs.writeFileSync(configPath, JSON.stringify(updated, null, 2), 'utf-8');
+        const tmp = configPath + '.tmp';
+        fs.writeFileSync(tmp, JSON.stringify(updated, null, 2), 'utf-8');
+        fs.renameSync(tmp, configPath);
         res.json({ ok: true });
       } catch (err) {
-        res.status(500).json({ error: `Failed to save config: ${String(err)}` });
+        res.status(500).json({ error: `Failed to save config: ${err instanceof Error ? err.message : String(err)}` });
       }
     });
 
@@ -512,7 +552,7 @@ export class DashboardServer {
     });
 
     // ── Remote Run ──────────────────────────────
-    this.app.post('/api/run', auth, (req: Request, res: Response) => {
+    this.app.post('/api/run', auth, mutationLimiter, (req: Request, res: Response) => {
       const body = req.body as { prompt?: string; identityId?: string };
       if (!body.prompt || typeof body.prompt !== 'string') {
         res.status(400).json({ error: 'prompt is required' });
@@ -541,8 +581,8 @@ export class DashboardServer {
           const result = await cascade.run({ prompt: body.prompt!, identityId: body.identityId });
           this.socket.broadcast('cost:update', {
             sessionId,
-            tokens: result.usage.totalTokens,
-            costUsd: result.usage.estimatedCostUsd,
+            totalTokens: result.usage.totalTokens,
+            totalCostUsd: result.usage.estimatedCostUsd,
           });
           this.socket.broadcastToRoom(`session:${sessionId}`, 'session:complete', { sessionId, result });
           this.throttledBroadcast('workspace');
