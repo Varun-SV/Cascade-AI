@@ -35,6 +35,7 @@ export const SessionList = memo(function SessionList() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [lastSelectedIdx, setLastSelectedIdx] = useState<number | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
 
   const handleSelect = useCallback((id: string) => {
     if (selectedIds.size === 0) {
@@ -73,6 +74,7 @@ export const SessionList = memo(function SessionList() {
   const handleBulkDelete = useCallback(async () => {
     if (selectedIds.size === 0 || isDeleting) return;
     setIsDeleting(true);
+    setDeleteError('');
     try {
       const ids = Array.from(selectedIds);
       const res = await fetch('/api/sessions', {
@@ -84,7 +86,11 @@ export const SessionList = memo(function SessionList() {
         dispatch(removeSessionsBulk(ids));
         setSelectedIds(new Set());
         setLastSelectedIdx(null);
+      } else {
+        setDeleteError('Delete failed. Please try again.');
       }
+    } catch {
+      setDeleteError('Network error. Please try again.');
     } finally {
       setIsDeleting(false);
     }
@@ -241,6 +247,9 @@ export const SessionList = memo(function SessionList() {
           <span className="text-[11px] font-mono text-[var(--text-muted)]">
             {selectedIds.size} selected
           </span>
+          {deleteError && (
+            <span className="text-[11px] font-mono text-[var(--error)]">{deleteError}</span>
+          )}
           <button
             onClick={handleBulkDelete}
             disabled={isDeleting}

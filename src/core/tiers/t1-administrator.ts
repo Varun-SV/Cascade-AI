@@ -8,6 +8,7 @@ import type {
   ConversationMessage,
   EscalationPayload,
   ImageAttachment,
+  PeerMessageEvent,
   PermissionDecision,
   PermissionRequest,
   T1ToT2Assignment,
@@ -76,6 +77,8 @@ export class T1Administrator extends BaseTier {
   private toolCreator?: ToolCreator;
   /** Stored overall task goal — used when evaluating escalated permissions */
   private taskGoal = '';
+  private peerMessageCallback?: (event: PeerMessageEvent) => void;
+  private peerMessageSessionId = '';
 
   constructor(router: CascadeRouter, toolRegistry: ToolRegistry, config: CascadeConfig) {
     super('T1', 'T1');
@@ -99,6 +102,13 @@ export class T1Administrator extends BaseTier {
 
   setToolCreator(creator: ToolCreator): void {
     this.toolCreator = creator;
+  }
+
+  setPeerMessageCallback(cb: (event: PeerMessageEvent) => void, sessionId: string): void {
+    this.peerMessageCallback = cb;
+    this.peerMessageSessionId = sessionId;
+    this.t2PeerBus.onPeerMessage = cb;
+    this.t2PeerBus.sessionId = sessionId;
   }
 
   async execute(
@@ -383,6 +393,10 @@ Leave dependsOn empty for sections that can run immediately in parallel.`;
         manager.setStore(this.store);
       }
       manager.setPeerBus(this.t2PeerBus);
+
+      if (this.peerMessageCallback) {
+        manager.setPeerMessageCallback(this.peerMessageCallback, this.peerMessageSessionId);
+      }
 
       if (this.permissionEscalator) {
         manager.setPermissionEscalator(this.permissionEscalator);

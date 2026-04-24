@@ -162,6 +162,29 @@ export class Cascade extends EventEmitter {
         }
       }
 
+      // Load external plugins declared in config.plugins
+      const pluginPaths = (this.config as unknown as Record<string, unknown>)['plugins'] as string[] | undefined;
+      if (pluginPaths?.length) {
+        for (const pluginPath of pluginPaths) {
+          try {
+            const mod = await import(pluginPath);
+            const plugin = (mod.default ?? mod) as import('../tools/registry.js').ToolPlugin;
+            if (plugin && Array.isArray(plugin.tools)) {
+              this.toolRegistry.registerPlugin(plugin);
+            } else {
+              console.warn(`[cascade] Plugin "${pluginPath}" does not export a valid ToolPlugin.`);
+            }
+          } catch (err) {
+            console.warn(`[cascade] Failed to load plugin "${pluginPath}":`, err);
+          }
+        }
+      }
+
+      // Model specialization profiling (cascadeAuto mode) — non-blocking
+      if (this.config.cascadeAuto && this.store) {
+        this.router.profileModels(this.store).catch(() => { /* non-fatal */ });
+      }
+
       this.initOptionalFeatures();
       this.initialized = true;
     })();
@@ -185,28 +208,50 @@ export class Cascade extends EventEmitter {
       && !/(research|compare|thorough|pdf|report|analy[sz]e|architecture|multi-agent)/i.test(prompt);
   }
 
-  private async determineComplexity(
-    prompt: string,
-    workspacePath: string,
-    conversationHistory: ConversationMessage[] = [],
-  ): Promise<TaskComplexity> {
-    if (this.isCasualGreeting(prompt)) {
-      return 'Simple';
-    }
+  private looksLikeConversational(prompt: string): boolean {
+    const LOW_COMPLEXITY = [
+      /^(?:hi|hello|hey|thanks|thank you|ok|okay|yes|no|sure|got it|sounds good)\b/i,
+      /^(?:what is|what are|list|show me|tell me|who is|where is|when is|how do i)\b/i,
+      /\b(?:simple|quick|brief|small|single|one-line|typo|rename)\b/i,
+    ];
+    const wordCount = prompt.trim().split(/\s+/).length;
+    return wordCount <= 12 && LOW_COMPLEXITY.some(re => re.test(prompt.trim()));
+  }
 
-    if (this.looksLikeSimpleArtifactTask(prompt)) {
-      return 'Simple';
-    }
+  // Cache glob scan results per workspace path to avoid repeated I/O.
+  private static globCache = new Map<string, { count: number; expiresAt: number }>();
 
-    // Quick workspace scout
-    let workspaceContext = '';
+  private async countWorkspaceFiles(workspacePath: string): Promise<number> {
+    const now = Date.now();
+    const cached = Cascade.globCache.get(workspacePath);
+    if (cached && cached.expiresAt > now) return cached.count;
     try {
       const files = await glob('**/*.*', {
         cwd: workspacePath,
         ignore: ['node_modules/**', '.git/**', 'dist/**', 'build/**'],
         nodir: true,
       });
-      workspaceContext = `Workspace Scout: Found ~${files.length} source files in the project.`;
+      Cascade.globCache.set(workspacePath, { count: files.length, expiresAt: now + 30_000 });
+      return files.length;
+    } catch {
+      return 0;
+    }
+  }
+
+  private async determineComplexity(
+    prompt: string,
+    workspacePath: string,
+    conversationHistory: ConversationMessage[] = [],
+  ): Promise<TaskComplexity> {
+    if (this.isCasualGreeting(prompt)) return 'Simple';
+    if (this.looksLikeSimpleArtifactTask(prompt)) return 'Simple';
+    if (this.looksLikeConversational(prompt)) return 'Simple';
+
+    // Quick workspace scout (cached for 30s)
+    let workspaceContext = '';
+    try {
+      const count = await this.countWorkspaceFiles(workspacePath);
+      workspaceContext = `Workspace Scout: Found ~${count} source files in the project.`;
     } catch {
       workspaceContext = 'Workspace Scout: Could not scan workspace.';
     }
@@ -427,6 +472,7 @@ ${prompt}`
       }
       t2.setPermissionEscalator(escalator);
       if (toolCreator) t2.setToolCreator(toolCreator);
+      t2.setPeerMessageCallback((e) => this.emit('peer:message', e), options.sessionId ?? '');
       bindTierEvents(t2);
       const assignment = {
         sectionId: taskId,
@@ -456,6 +502,7 @@ ${prompt}`
       }
       t1.setPermissionEscalator(escalator);
       if (toolCreator) t1.setToolCreator(toolCreator);
+      t1.setPeerMessageCallback((e) => this.emit('peer:message', e), options.sessionId ?? '');
       bindTierEvents(t1);
       t1.on('plan', (e) => this.emit('plan', e));
       

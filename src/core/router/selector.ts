@@ -96,6 +96,12 @@ export class ModelSelector {
     }
   }
 
+  getAllAvailableModels(): ModelInfo[] {
+    return Array.from(this.availableModels.values()).filter(m =>
+      this.availableProviders.has(m.provider),
+    );
+  }
+
   isProviderAvailable(provider: ProviderType): boolean {
     return this.availableProviders.has(provider);
   }

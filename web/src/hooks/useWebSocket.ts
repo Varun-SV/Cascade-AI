@@ -17,6 +17,8 @@ import {
   updateRTKSnapshot,
   updateSessionDetails,
   appendLog,
+  addPeerMessage,
+  type PeerMessageRecord,
 } from '../store/slices/runtimeSlice';
 
 export interface CostUpdate {
@@ -142,6 +144,10 @@ export function useWebSocket({
 
     s.on('permission:user-required', (d: unknown) => {
       cbEscalation.current?.(d as PermissionRequest);
+    });
+
+    s.on('peer:message', (d: unknown) => {
+      dispatch(addPeerMessage(d as PeerMessageRecord));
     });
 
     return () => {

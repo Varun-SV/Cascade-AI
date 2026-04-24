@@ -7,6 +7,7 @@ import parser from 'socket.io-msgpack-parser';
 import type { Server as HttpServer } from 'node:http';
 import type {
   CascadeEvent,
+  PeerMessageEvent,
   PermissionDecisionPayload,
   PermissionRequest,
   RuntimeRefreshPayload,
@@ -63,6 +64,10 @@ export class DashboardSocket {
     this.io.to(`session:${sessionId}`).emit('stream:token', { tierId, text, sessionId });
   }
 
+  emitPeerMessage(event: PeerMessageEvent): void {
+    this.io.to(`session:${event.sessionId}`).emit('peer:message', event);
+  }
+
   emitApprovalRequest(request: PermissionRequest): void {
     this.io.emit('permission:user-required', request);
   }
@@ -111,9 +116,6 @@ export class DashboardSocket {
       socket.on('leave:session', (payload: SessionSubscriptionPayload) => {
         const { sessionId } = normalizeSessionSubscriptionPayload(payload);
         socket.leave(`session:${sessionId}`);
-      });
-      socket.on('join:tenant', (tenantId: string) => {
-        socket.join(`tenant:${tenantId}`);
       });
     });
   }

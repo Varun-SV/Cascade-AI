@@ -27,6 +27,8 @@ import { TpmLimiter } from './tpm-limiter.js';
 import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
 import { calculateCost } from '../../utils/cost.js';
 import { withTimeout } from '../../utils/retry.js';
+import { ModelProfiler } from './model-profiler.js';
+import type { MemoryStore } from '../../memory/store.js';
 
 export interface RouterStats {
   totalTokens: number;
@@ -124,6 +126,18 @@ export class CascadeRouter extends EventEmitter {
         this.ensureProvider(model, config.providers);
       }
     }
+  }
+
+  /**
+   * Run model specialization profiling in the background.
+   * Only profiles models that haven't been profiled yet (cache-first).
+   * No-op if store is not provided.
+   */
+  async profileModels(store: MemoryStore): Promise<void> {
+    const allModels = this.selector.getAllAvailableModels();
+    const profiler = new ModelProfiler(store, this);
+    // Run in background — don't block task execution
+    profiler.profileAll(allModels).catch(() => { /* non-fatal */ });
   }
 
   async generate(

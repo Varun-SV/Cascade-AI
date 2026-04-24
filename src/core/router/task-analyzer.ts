@@ -8,10 +8,10 @@
 //    2. AI inference fallback (when heuristic confidence < 0.7)
 //
 
-import type { TierRole } from '../../types.js';
-import type { ModelInfo } from '../../types.js';
+import type { TierRole, ModelInfo } from '../../types.js';
 import type { ModelSelector } from './selector.js';
 import type { CascadeRouter } from './index.js';
+import { rankModels } from './model-ranker.js';
 
 export type TaskType = 'code' | 'analysis' | 'creative' | 'data' | 'mixed';
 
@@ -212,6 +212,7 @@ export class TaskAnalyzer {
 
   /**
    * Select the optimal model for a given tier based on task analysis.
+   * Uses specialization ranking when profile data is available.
    */
   async selectModel(
     prompt: string,
@@ -219,6 +220,25 @@ export class TaskAnalyzer {
     selector: ModelSelector,
   ): Promise<ModelInfo | null> {
     const profile = await this.analyze(prompt);
+
+    // Try specialization-based ranking first
+    const candidates = selector.getAllAvailableModels().filter(m => {
+      // Rough tier affinity: T3 → local/cheap, T1 → capable
+      if (tier === 'T3') return m.isLocal || (m.inputCostPer1kTokens ?? 0) < 0.02;
+      if (tier === 'T1') return !m.isLocal;
+      return true;
+    });
+
+    if (candidates.some(m => m.specializations?.length)) {
+      const ranked = rankModels(candidates, {
+        taskType: profile.type,
+        tier,
+        estimatedTokens: profile.estimatedTokens,
+        requiresToolUse: tier === 'T3',
+      });
+      if (ranked.length > 0) return ranked[0]!;
+    }
+
     return selectModelFromProfile(profile, tier, selector);
   }
 

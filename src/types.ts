@@ -24,6 +24,10 @@ export interface ModelInfo {
   supportsStreaming: boolean;
   isLocal: boolean;
   minSizeB?: number;              // For local models: param count in billions
+  /** Tool-use capability. False for Ollama; true for all cloud providers. */
+  supportsToolUse?: boolean;
+  /** Self-declared or API-sourced specialization categories. */
+  specializations?: string[];
 }
 
 export interface ProviderConfig {
@@ -290,6 +294,15 @@ export interface PeerMessage {
   syncType?: PeerSyncType;
   payload: unknown;
   timestamp: string;
+}
+
+export interface PeerMessageEvent {
+  fromId: string;
+  toId?: string;          // undefined = broadcast to all peers
+  syncType: PeerSyncType;
+  payload?: string;
+  timestamp: string;
+  sessionId: string;
 }
 
 // ── Session & Memory ──────────────────────────

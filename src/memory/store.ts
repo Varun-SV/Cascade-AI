@@ -533,6 +533,32 @@ export class MemoryStore {
     return Date.now() - new Date(row.oldest).getTime();
   }
 
+  saveModelProfile(modelId: string, provider: ProviderType, specializations: string[]): void {
+    const cacheKey = `${provider}:${modelId}`;
+    const existing = this.db.prepare('SELECT metadata FROM model_cache WHERE id = ?').get(cacheKey) as { metadata: string } | undefined;
+    const meta: ModelInfo = existing
+      ? JSON.parse(existing.metadata) as ModelInfo
+      : { id: modelId, provider, name: modelId, contextWindow: 0, isVisionCapable: false, inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, maxOutputTokens: 0, supportsStreaming: false, isLocal: false };
+    meta.specializations = specializations;
+    this.db.prepare(`
+      INSERT INTO model_cache (id, provider, model_id, name, metadata, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET metadata = excluded.metadata, updated_at = excluded.updated_at
+    `).run(cacheKey, provider, modelId, meta.name ?? modelId, JSON.stringify(meta), new Date().toISOString());
+  }
+
+  getModelProfile(modelId: string, provider: ProviderType): ModelInfo | undefined {
+    const row = this.db.prepare('SELECT metadata FROM model_cache WHERE id = ?').get(`${provider}:${modelId}`) as { metadata: string } | undefined;
+    return row ? JSON.parse(row.metadata) as ModelInfo : undefined;
+  }
+
+  getProfiledModelIds(): string[] {
+    const rows = this.db.prepare(
+      "SELECT model_id FROM model_cache WHERE json_extract(metadata, '$.specializations') IS NOT NULL"
+    ).all() as { model_id: string }[];
+    return rows.map(r => r.model_id);
+  }
+
   // ── Tool Result Cache (in-memory, TTL-based) ──────────────────────────
   // Avoids redundant calls for read-only tools within a short window.
   // Not persisted to DB — cleared on process restart.

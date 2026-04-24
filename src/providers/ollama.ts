@@ -133,6 +133,7 @@ export class OllamaProvider extends BaseProvider {
           maxOutputTokens: 4_000,
           supportsStreaming: true,
           isLocal: true,
+          supportsToolUse: false,
           minSizeB: this.parseSizeB(m.details?.parameter_size),
         }));
     } catch {
