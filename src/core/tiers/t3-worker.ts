@@ -22,6 +22,11 @@ import { MemoryStore } from '../../memory/store.js';
 import type { PeerBus } from '../peer/bus.js';
 import type { PermissionEscalator } from '../permissions/escalator.js';
 import type { ToolCreator } from '../../tools/tool-creator.js';
+import {
+  parseTextToolCalls,
+  toToolCall,
+  buildTextToolSystemPrompt,
+} from '../../tools/text-tool-parser.js';
 
 const T3_SYSTEM_PROMPT = `You are a T3 Worker agent in the Cascade AI system. Your job is to execute a specific subtask completely and accurately.
 
@@ -264,6 +269,11 @@ export class T3Worker extends BaseTier {
     // `tools` is reassigned when a dynamic tool is created — must be a let
     tools = [...tools];
 
+    // Detect if T3 model supports native tool use
+    const t3Model = this.router.getModelForTier('T3');
+    const useTextTools = t3Model?.supportsToolUse === false && tools.length > 0;
+    const textToolSuffix = useTextTools ? buildTextToolSystemPrompt(tools) : '';
+
     while (iterations < MAX_ITERATIONS) {
       iterations++;
 
@@ -272,8 +282,11 @@ export class T3Worker extends BaseTier {
 
       const options: GenerateOptions = {
         messages: this.context.getMessages(),
-        systemPrompt: this.systemPromptOverride + systemPrompt + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
-        tools: tools.length ? tools : undefined,
+        systemPrompt: this.systemPromptOverride + systemPrompt
+          + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : '')
+          + textToolSuffix,
+        // Don't pass tools array when model can't use them natively
+        tools: useTextTools ? undefined : (tools.length ? tools : undefined),
         maxTokens: 4096,
       };
 
@@ -285,9 +298,17 @@ export class T3Worker extends BaseTier {
         },
       );
 
-      await this.context.addMessage({ role: 'assistant', content: result.content, toolCalls: result.toolCalls });
+      // For text-tool mode: parse <tool_call> blocks and inject as native tool calls
+      let effectiveToolCalls = result.toolCalls ?? [];
+      if (useTextTools && effectiveToolCalls.length === 0) {
+        const textCalls = parseTextToolCalls(result.content);
+        effectiveToolCalls = textCalls.map((tc, i) => toToolCall(tc, i));
+      }
+      const effectiveResult = { ...result, toolCalls: effectiveToolCalls };
 
-      if (!result.toolCalls?.length) {
+      await this.context.addMessage({ role: 'assistant', content: result.content, toolCalls: effectiveToolCalls });
+
+      if (!effectiveResult.toolCalls?.length) {
         if (requiresArtifact) {
           const artifactCheck = await this.verifyArtifacts(this.assignment!);
           if (artifactCheck.ok) {
@@ -312,7 +333,7 @@ export class T3Worker extends BaseTier {
 
       stalledArtifactIterations = 0;
 
-      if (result.finishReason === 'stop') {
+      if (effectiveResult.finishReason === 'stop' && effectiveResult.toolCalls.length === 0) {
         if (requiresArtifact) {
           const artifactCheck = await this.verifyArtifacts(this.assignment!);
           if (artifactCheck.ok) {
@@ -323,7 +344,7 @@ export class T3Worker extends BaseTier {
         }
       }
 
-      for (const tc of result.toolCalls) {
+      for (const tc of effectiveResult.toolCalls) {
         allToolCalls.push(tc);
         const toolResult = await this.executeTool(tc);
         await this.context.addMessage({

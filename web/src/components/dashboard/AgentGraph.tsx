@@ -178,6 +178,7 @@ export interface AgentGraphNode {
 interface AgentGraphProps {
   nodes: AgentGraphNode[];
   edges: { from: string; to: string }[];
+  peerEdges?: Array<{ from: string; to: string; syncType: string; id: string }>;
   selectedNodeId?: string;
   onSelectNode: (id: string | null) => void;
 }
@@ -185,6 +186,7 @@ interface AgentGraphProps {
 export const AgentGraph = memo(function AgentGraph({
   nodes: agentNodes,
   edges: agentEdges,
+  peerEdges = [],
   selectedNodeId,
   onSelectNode,
 }: AgentGraphProps) {
@@ -224,8 +226,8 @@ export const AgentGraph = memo(function AgentGraph({
     });
   }, [agentNodes, selectedNodeId]);
 
-  const flowEdges: Edge[] = useMemo(() =>
-    agentEdges.map((e, i) => ({
+  const flowEdges: Edge[] = useMemo(() => {
+    const hierarchy = agentEdges.map((e, i) => ({
       id: `e${i}`,
       source: e.from,
       target: e.to,
@@ -237,8 +239,27 @@ export const AgentGraph = memo(function AgentGraph({
         width: 10,
         height: 10,
       },
-    })),
-    [agentEdges]);
+    }));
+
+    const peer = peerEdges.map((e) => ({
+      id: e.id,
+      source: e.from,
+      target: e.to,
+      animated: true,
+      label: e.syncType,
+      labelStyle: { fontSize: 9, fill: 'rgba(255,165,0,0.85)' },
+      labelBgStyle: { fill: 'var(--bg-base)', fillOpacity: 0.7 },
+      style: { stroke: 'rgba(255,140,0,0.7)', strokeWidth: 1.5, strokeDasharray: '5,3' },
+      markerEnd: {
+        type: MarkerType.ArrowClosed,
+        color: 'rgba(255,140,0,0.7)',
+        width: 8,
+        height: 8,
+      },
+    }));
+
+    return [...hierarchy, ...peer];
+  }, [agentEdges, peerEdges]);
 
   const handleNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
     onSelectNode(node.id === selectedNodeId ? null : node.id);

@@ -3,7 +3,7 @@
 // ─────────────────────────────────────────────
 
 import EventEmitter from 'node:events';
-import type { PeerMessage, PeerSyncType } from '../../types.js';
+import type { PeerMessage, PeerMessageEvent, PeerSyncType } from '../../types.js';
 
 interface PeerOutput {
   subtaskId: string;
@@ -37,6 +37,10 @@ export class PeerBus extends EventEmitter {
   private barriers: Map<string, { total: number; arrived: Set<string> }> = new Map();
   private broadcastLog: BroadcastMessage[] = [];
   private fileLocks: Map<string, FileLock> = new Map();
+
+  /** Called when any peer message or broadcast is sent — used for dashboard visibility. */
+  onPeerMessage?: (event: PeerMessageEvent) => void;
+  sessionId = '';
 
   register(peerId: string): void {
     this.members.add(peerId);
@@ -105,6 +109,7 @@ export class PeerBus extends EventEmitter {
    * Also logs to broadcastLog so collect() can retrieve recent broadcasts.
    */
   broadcast(fromId: string, payload: unknown): void {
+    const timestamp = new Date().toISOString();
     const msg: PeerMessage = {
       fromId,
       toId: '*',
@@ -112,10 +117,18 @@ export class PeerBus extends EventEmitter {
       subtaskId: '',
       syncType: 'SHARE_OUTPUT',
       payload,
-      timestamp: new Date().toISOString(),
+      timestamp,
     };
-    this.broadcastLog.push({ fromId, payload, timestamp: msg.timestamp });
+    this.broadcastLog.push({ fromId, payload, timestamp });
     this.emit('broadcast', msg);
+    this.onPeerMessage?.({
+      fromId,
+      toId: undefined,
+      syncType: 'SHARE_OUTPUT',
+      payload: typeof payload === 'string' ? payload : JSON.stringify(payload),
+      timestamp,
+      sessionId: this.sessionId,
+    });
   }
 
   /**
@@ -233,6 +246,7 @@ export class PeerBus extends EventEmitter {
     subtaskId: string,
     payload: unknown,
   ): void {
+    const timestamp = new Date().toISOString();
     const msg: PeerMessage = {
       fromId,
       toId,
@@ -240,10 +254,18 @@ export class PeerBus extends EventEmitter {
       subtaskId,
       syncType,
       payload,
-      timestamp: new Date().toISOString(),
+      timestamp,
     };
     this.emit(`message:${toId}`, msg);
     this.emit('message', msg);
+    this.onPeerMessage?.({
+      fromId,
+      toId,
+      syncType: syncType ?? 'SHARE_OUTPUT',
+      payload: typeof payload === 'string' ? payload : JSON.stringify(payload),
+      timestamp,
+      sessionId: this.sessionId,
+    });
   }
 
   /**

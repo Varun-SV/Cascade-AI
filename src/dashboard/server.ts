@@ -576,6 +576,9 @@ export class DashboardServer {
         cascade.on('permission:user-required', (e: unknown) => {
           this.socket.broadcastToRoom(`session:${sessionId}`, 'permission:user-required', { sessionId, ...(e as object) });
         });
+        cascade.on('peer:message', (e: unknown) => {
+          this.socket.emitPeerMessage(e as import('../types.js').PeerMessageEvent);
+        });
 
         try {
           const result = await cascade.run({ prompt: body.prompt!, identityId: body.identityId });

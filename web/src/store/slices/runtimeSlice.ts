@@ -26,8 +26,18 @@ export const fetchHistory = createAsyncThunk(
   },
 );
 
-// ── State shape ────────────────────────────────
+// ── Peer message type ──────────────────────────
 
+export interface PeerMessageRecord {
+  fromId: string;
+  toId?: string;
+  syncType: string;
+  payload?: string;
+  timestamp: string;
+  sessionId: string;
+}
+
+// ── State shape ────────────────────────────────
 
 interface RuntimeState {
   sessions: Record<string, RuntimeSession>;
@@ -38,6 +48,7 @@ interface RuntimeState {
   activeSessionId: string | null;
   scope: RuntimeScope;
   connected: boolean;
+  peerMessages: PeerMessageRecord[];
 }
 
 const initialState: RuntimeState = {
@@ -48,6 +59,7 @@ const initialState: RuntimeState = {
   activeSessionId: null,
   scope: 'workspace',
   connected: false,
+  peerMessages: [],
 };
 
 // ── Helpers ────────────────────────────────────
@@ -191,6 +203,14 @@ export const runtimeSlice = createSlice({
         state.activeSessionId = remaining[0]?.sessionId ?? null;
       }
     },
+
+    addPeerMessage(state: RuntimeState, action: PayloadAction<PeerMessageRecord>) {
+      state.peerMessages.push(action.payload);
+      // Cap at 200 messages to prevent unbounded growth
+      if (state.peerMessages.length > 200) {
+        state.peerMessages = state.peerMessages.slice(-200);
+      }
+    },
   },
 
   extraReducers(builder) {
@@ -213,6 +233,7 @@ export const {
   appendLog,
   clearFrontendGraphs,
   removeSessionsBulk,
+  addPeerMessage,
 } = runtimeSlice.actions;
 
 // ── Selectors ──────────────────────────────────
@@ -239,5 +260,7 @@ export const selectActiveLogs = createSelector(selectRuntime, (r: RuntimeState) 
 );
 
 export const selectIsConnected = createSelector(selectRuntime, (r: RuntimeState) => r.connected);
+
+export const selectPeerMessages = createSelector(selectRuntime, (r: RuntimeState) => r.peerMessages);
 
 export default runtimeSlice.reducer;

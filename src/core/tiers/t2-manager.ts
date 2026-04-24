@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   ConversationMessage,
   EscalationPayload,
+  PeerMessageEvent,
   PermissionRequest,
   PermissionDecision,
   T1ToT2Assignment,
@@ -50,6 +51,15 @@ export class T2Manager extends BaseTier {
       this.log(`T2 peer message from ${msg.fromId}`);
       this.receivePeerSync(msg.fromId, msg.payload);
     });
+  }
+
+  setPeerMessageCallback(cb: (event: PeerMessageEvent) => void, sessionId: string): void {
+    this.t3PeerBus.onPeerMessage = cb;
+    this.t3PeerBus.sessionId = sessionId;
+    if (this.t2PeerBus) {
+      this.t2PeerBus.onPeerMessage = cb;
+      this.t2PeerBus.sessionId = sessionId;
+    }
   }
 
 

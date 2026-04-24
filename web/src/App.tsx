@@ -5,6 +5,8 @@ import {
   selectActiveNodes,
   selectActiveSession,
   selectIsConnected,
+  selectPeerMessages,
+  type PeerMessageRecord,
 } from './store/slices/runtimeSlice';
 import {
   useWebSocket,
@@ -121,10 +123,12 @@ function Dashboard({
   const [pendingEscalation, setPendingEscalation] = useState<PermissionRequest | null>(null);
   const [costUsd, setCostUsd] = useState(0);
   const [totalTokens, setTotalTokens] = useState(0);
+  const [activePeerEdges, setActivePeerEdges] = useState<Array<{ from: string; to: string; syncType: string; id: string }>>([]);
 
   const activeNodes   = useAppSelector(selectActiveNodes);
   const activeSession = useAppSelector(selectActiveSession);
   const isConnected   = useAppSelector(selectIsConnected);
+  const peerMessages  = useAppSelector(selectPeerMessages);
 
   // Guard: never overwrite an unresolved escalation
   const pendingRef = useRef(pendingEscalation);
@@ -170,6 +174,29 @@ function Dashboard({
   });
 
   useEffect(() => { refreshRuntime(); }, [refreshRuntime]);
+
+  // ── Peer edge auto-fade ───────────────────────
+  const prevPeerMsgLen = useRef(0);
+  useEffect(() => {
+    const newMsgs = peerMessages.slice(prevPeerMsgLen.current);
+    prevPeerMsgLen.current = peerMessages.length;
+    if (!newMsgs.length) return;
+
+    const newEdges = newMsgs
+      .filter((m: PeerMessageRecord) => m.fromId && (m.toId || activeNodes.some(n => n.tierId !== m.fromId)))
+      .map((m: PeerMessageRecord) => ({
+        id: `peer-${m.timestamp}-${m.fromId}`,
+        from: m.fromId,
+        to: m.toId ?? activeNodes.find(n => n.tierId !== m.fromId)?.tierId ?? '',
+        syncType: m.syncType,
+      }))
+      .filter(e => e.to);
+
+    if (!newEdges.length) return;
+    setActivePeerEdges(prev => [...prev, ...newEdges]);
+    const ids = new Set(newEdges.map(e => e.id));
+    setTimeout(() => setActivePeerEdges(prev => prev.filter(e => !ids.has(e.id))), 3000);
+  }, [peerMessages, activeNodes]);
 
   // ── Derived graph data ────────────────────────
   const graphNodes = useMemo(() => activeNodes.map((n: RuntimeNode) => ({
@@ -219,6 +246,7 @@ function Dashboard({
               <AgentGraph
                 nodes={graphNodes}
                 edges={graphEdges}
+                peerEdges={activePeerEdges}
                 selectedNodeId={selectedNodeId ?? undefined}
                 onSelectNode={setSelectedNodeId}
               />
@@ -232,6 +260,7 @@ function Dashboard({
             <InspectorPanel
               node={selectedNode}
               streamLog={selectedNodeId ? nodeStreams[selectedNodeId] || '' : ''}
+              peerMessages={peerMessages.filter((m: PeerMessageRecord) => m.fromId === selectedNodeId || m.toId === selectedNodeId)}
               onClose={() => setSelectedNodeId(null)}
             />
           )}

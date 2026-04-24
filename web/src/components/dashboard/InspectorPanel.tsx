@@ -1,10 +1,12 @@
-import React, { memo, useEffect, useRef } from 'react';
-import { X, Cpu, Activity, Clock, ChevronRight } from 'lucide-react';
+import React, { memo, useEffect, useRef, useState } from 'react';
+import { X, Cpu, Activity, Clock, ChevronRight, MessageSquare } from 'lucide-react';
 import type { RuntimeNode } from '../../types/protocol';
+import type { PeerMessageRecord } from '../../store/slices/runtimeSlice';
 
 interface InspectorPanelProps {
   node: RuntimeNode | null;
   streamLog: string;
+  peerMessages?: PeerMessageRecord[];
   onClose: () => void;
 }
 
@@ -35,9 +37,11 @@ function InfoRow({ icon: Icon, label, children }: {
 export const InspectorPanel = memo(function InspectorPanel({
   node,
   streamLog,
+  peerMessages = [],
   onClose,
 }: InspectorPanelProps) {
   const streamRef = useRef<HTMLDivElement>(null);
+  const [activeTab, setActiveTab] = useState<'output' | 'comms'>('output');
 
   // Auto-scroll stream to bottom on new tokens
   useEffect(() => {
@@ -126,36 +130,88 @@ export const InspectorPanel = memo(function InspectorPanel({
             </p>
           </InfoRow>
 
-          {/* Live stream — terminal style */}
-          <div className="flex flex-col flex-1 min-h-0 px-3 py-3">
-            <p className="section-label mb-2 flex-shrink-0">Live output</p>
-            <div
-              ref={streamRef}
-              className="
-                flex-1 overflow-y-auto font-mono text-[9.5px]
-                text-[var(--t3-color)] leading-[1.7]
-                whitespace-pre-wrap break-words
-                bg-[var(--bg-base)] rounded-[var(--radius-xs)]
-                p-2.5 border border-[var(--border-subtle)]
-                scrollbar-thin
-              "
-              aria-live="polite"
-              aria-label="Live token stream"
-            >
-              {node.output ? (
-                <span>{node.output}</span>
-              ) : streamLog && node.status === 'ACTIVE' ? (
-                <span>
-                  {streamLog.slice(-4000)}
-                  <span className="animate-blink text-[var(--t3-color)]">█</span>
-                </span>
-              ) : (
-                <span className="text-[var(--text-faint)] italic">
-                  {node.status === 'COMPLETED' ? 'No output recorded.' : 'Waiting for output…'}
-                </span>
-              )}
-            </div>
+          {/* Tabs: Output / Communications */}
+          <div className="flex gap-0 px-3 pt-2 flex-shrink-0 border-b border-[var(--border-subtle)]">
+            {(['output', 'comms'] as const).map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={`
+                  flex items-center gap-1 px-2.5 py-1.5 text-[9.5px] font-medium rounded-t-sm
+                  transition-colors border-b-2 -mb-px
+                  ${activeTab === tab
+                    ? 'text-[var(--accent)] border-[var(--accent)]'
+                    : 'text-[var(--text-muted)] border-transparent hover:text-[var(--text-primary)]'}
+                `}
+              >
+                {tab === 'output' ? <Cpu size={9} /> : <MessageSquare size={9} />}
+                {tab === 'output' ? 'Output' : `Comms${peerMessages.length ? ` (${peerMessages.length})` : ''}`}
+              </button>
+            ))}
           </div>
+
+          {activeTab === 'output' && (
+            <div className="flex flex-col flex-1 min-h-0 px-3 py-3">
+              <div
+                ref={streamRef}
+                className="
+                  flex-1 overflow-y-auto font-mono text-[9.5px]
+                  text-[var(--t3-color)] leading-[1.7]
+                  whitespace-pre-wrap break-words
+                  bg-[var(--bg-base)] rounded-[var(--radius-xs)]
+                  p-2.5 border border-[var(--border-subtle)]
+                  scrollbar-thin
+                "
+                aria-live="polite"
+                aria-label="Live token stream"
+              >
+                {node.output ? (
+                  <span>{node.output}</span>
+                ) : streamLog && node.status === 'ACTIVE' ? (
+                  <span>
+                    {streamLog.slice(-4000)}
+                    <span className="animate-blink text-[var(--t3-color)]">█</span>
+                  </span>
+                ) : (
+                  <span className="text-[var(--text-faint)] italic">
+                    {node.status === 'COMPLETED' ? 'No output recorded.' : 'Waiting for output…'}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'comms' && (
+            <div className="flex flex-col flex-1 min-h-0 px-3 py-3">
+              <div className="flex-1 overflow-y-auto scrollbar-thin space-y-1.5">
+                {peerMessages.length === 0 ? (
+                  <p className="text-[10px] text-[var(--text-faint)] italic text-center py-6">
+                    No peer communications yet
+                  </p>
+                ) : [...peerMessages].reverse().map((msg, i) => (
+                  <div
+                    key={i}
+                    className="text-[9.5px] rounded-[var(--radius-xs)] bg-[var(--bg-base)] border border-[var(--border-subtle)] px-2.5 py-2"
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="font-mono text-[var(--warning)] font-medium">{msg.syncType}</span>
+                      <span className="text-[var(--text-faint)]">
+                        {new Date(msg.timestamp).toLocaleTimeString()}
+                      </span>
+                    </div>
+                    <div className="text-[var(--text-muted)] font-mono">
+                      <span className="text-[var(--text-primary)]">{msg.fromId.slice(0, 12)}</span>
+                      {' → '}
+                      <span className="text-[var(--text-primary)]">{msg.toId ? msg.toId.slice(0, 12) : 'all'}</span>
+                    </div>
+                    {msg.payload && (
+                      <p className="mt-1 text-[var(--text-faint)] truncate">{msg.payload.slice(0, 80)}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <div className="flex flex-col items-center justify-center flex-1 gap-3 text-center p-6">

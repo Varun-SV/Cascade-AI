@@ -180,6 +180,11 @@ export class Cascade extends EventEmitter {
         }
       }
 
+      // Model specialization profiling (cascadeAuto mode) — non-blocking
+      if (this.config.cascadeAuto && this.store) {
+        this.router.profileModels(this.store).catch(() => { /* non-fatal */ });
+      }
+
       this.initOptionalFeatures();
       this.initialized = true;
     })();
@@ -467,6 +472,7 @@ ${prompt}`
       }
       t2.setPermissionEscalator(escalator);
       if (toolCreator) t2.setToolCreator(toolCreator);
+      t2.setPeerMessageCallback((e) => this.emit('peer:message', e), options.sessionId ?? '');
       bindTierEvents(t2);
       const assignment = {
         sectionId: taskId,
@@ -496,6 +502,7 @@ ${prompt}`
       }
       t1.setPermissionEscalator(escalator);
       if (toolCreator) t1.setToolCreator(toolCreator);
+      t1.setPeerMessageCallback((e) => this.emit('peer:message', e), options.sessionId ?? '');
       bindTierEvents(t1);
       t1.on('plan', (e) => this.emit('plan', e));
       
