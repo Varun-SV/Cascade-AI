@@ -41,6 +41,8 @@ export class T2Manager extends BaseTier {
   private t2PeerBus?: PeerBus;
   private permissionEscalator?: PermissionEscalator;
   private toolCreator?: ToolCreator;
+  /** AbortController for the current T3 wave — aborted on cancel-and-respawn */
+  private waveAbortController: AbortController | null = null;
 
   setPeerBus(bus: PeerBus): void {
     this.t2PeerBus = bus;
@@ -270,6 +272,30 @@ Return ONLY the JSON array.`;
     }
   }
 
+  private buildWorkerMap(assignments: T2ToT3Assignment[], taskId: string): Map<string, T3Worker> {
+    const workerMap = new Map<string, T3Worker>();
+    for (const a of assignments) {
+      const worker = new T3Worker(this.router, this.toolRegistry, this.id);
+      if (this.store) worker.setStore(this.store, taskId);
+      worker.setPeerBus(this.t3PeerBus);
+      if (this.permissionEscalator) worker.setPermissionEscalator(this.permissionEscalator);
+      if (this.toolCreator) worker.setToolCreator(this.toolCreator);
+
+      workerMap.set(a.subtaskId, worker);
+      this.t3Workers.set(a.subtaskId, worker);
+
+      worker.on('stream:token', (e) => this.emit('stream:token', e));
+      worker.on('log', (e) => this.emit('log', e));
+      worker.on('tier:status', (e) => this.emit('tier:status', e));
+      worker.on('tool:approval-request', (e) => this.emit('tool:approval-request', {
+        ...e,
+        __cascadeResponder: (decision: { approved: boolean; always?: boolean }) =>
+          worker.emit(`tool:approval-response:${e.id}`, decision),
+      }));
+    }
+    return workerMap;
+  }
+
   private async executeSubtasks(
     subtasks: Array<Omit<T2ToT3Assignment, 'parentT2'>>,
     taskId: string,
@@ -288,42 +314,7 @@ Return ONLY the JSON array.`;
       a.dependsOn = (a.dependsOn ?? []).filter((d) => allKeys.has(d));
     }
 
-    // Create T3 workers
-    const workerMap = new Map<string, T3Worker>();
-    const workers: T3Worker[] = assignments.map((a) => {
-      const worker = new T3Worker(this.router, this.toolRegistry, this.id);
-      if (this.store) worker.setStore(this.store, taskId);
-
-      // ← Inject the shared T3 peer bus
-      worker.setPeerBus(this.t3PeerBus);
-
-      // ← Inject the permission escalator so T3 uses T2→T1→User flow
-      if (this.permissionEscalator) {
-        worker.setPermissionEscalator(this.permissionEscalator);
-      }
-
-      // ← Inject optional ToolCreator for runtime tool generation
-      if (this.toolCreator) {
-        worker.setToolCreator(this.toolCreator);
-      }
-
-      workerMap.set(a.subtaskId, worker);
-      this.t3Workers.set(a.subtaskId, worker);
-
-      // Bubble up events
-      worker.on('stream:token', (e) => this.emit('stream:token', e));
-      worker.on('log', (e) => this.emit('log', e));
-      worker.on('tier:status', (e) => this.emit('tier:status', e));
-      worker.on('tool:approval-request', (e) => this.emit('tool:approval-request', {
-        ...e,
-        __cascadeResponder: (decision: { approved: boolean; always?: boolean }) =>
-          worker.emit(`tool:approval-response:${e.id}`, decision),
-      }));
-
-      return worker;
-    });
-
-    // ── Dependency-aware execution ────────────
+    const workerMap = this.buildWorkerMap(assignments, taskId);
     return this.runWithDependencies(assignments, workerMap, taskId);
   }
 
@@ -375,9 +366,13 @@ Return ONLY the JSON array.`;
     //
     // Each iteration: collect all tasks with inDegree = 0, run them in parallel,
     // then decrement in-degrees of their dependents.
+    //
+    // respawnBudget: how many times a wave may be cancelled and re-run after
+    // dynamic tool synthesis. Capped at 1 to prevent infinite loops.
 
     let remaining = new Set(sanitizedAssignments.map((a) => a.subtaskId));
     let wave = 0;
+    let respawnBudget = 1;
 
     while (remaining.size > 0) {
       // Collect all runnable tasks this wave
@@ -407,18 +402,83 @@ Return ONLY the JSON array.`;
       // ── Cancellation checkpoint: between each T3 wave ────────────
       this.throwIfCancelled();
 
+      // Fresh AbortController per wave — aborted on cancel-and-respawn
+      this.waveAbortController = new AbortController();
+      const waveSignal = AbortSignal.any(
+        [this.signal, this.waveAbortController.signal].filter(Boolean) as AbortSignal[],
+      );
+
       // Execute this wave in parallel
       const waveResults = await Promise.allSettled(
         runnableIds.map(async (id) => {
           const assignment = sanitizedAssignments.find((a) => a.subtaskId === id)!;
           const worker = workerMap.get(id)!;
-          const result = await worker.execute(assignment, taskId, this.signal);
+          const result = await worker.execute(assignment, taskId, waveSignal);
           resultMap.set(id, result);
           return result;
         }),
       );
 
-      // Reduce in-degrees for dependents of completed tasks
+      // ── Cancel-and-respawn: if ANY worker in this wave escalated for tool synthesis,
+      // cancel the whole wave, synthesize the tool once, then re-run ALL wave workers
+      // with fresh instances that have the new tool available.
+      const escalatedToolIdx = respawnBudget > 0
+        ? waveResults.findIndex(
+            (r) => r.status === 'fulfilled' &&
+              r.value.status === 'ESCALATED' &&
+              r.value.issues.some((iss) => iss.includes('dynamic tool generation')),
+          )
+        : -1;
+
+      if (escalatedToolIdx !== -1 && this.toolCreator) {
+        respawnBudget--;
+        this.waveAbortController.abort();
+
+        const escalatedId = runnableIds[escalatedToolIdx]!;
+        const escalatedAssignment = sanitizedAssignments.find((a) => a.subtaskId === escalatedId)!;
+
+        this.log(`Wave ${wave}: tool escalation detected — synthesizing tool then respawning all ${runnableIds.length} worker(s)`);
+        this.sendStatusUpdate({
+          progressPct: 50,
+          currentAction: `Synthesizing dynamic tool for: ${escalatedAssignment.subtaskTitle}`,
+          status: 'IN_PROGRESS',
+        });
+
+        const toolName = await this.toolCreator.createTool(
+          `Help complete: ${escalatedAssignment.subtaskTitle}`,
+          escalatedAssignment.description,
+        );
+
+        if (toolName) {
+          this.log(`Tool "${toolName}" created — respawning wave ${wave} workers`);
+          // Stamp all wave assignments so fresh T3s know about the tool
+          for (const a of sanitizedAssignments) {
+            if (runnableIds.includes(a.subtaskId)) {
+              a.description += `\n\n[SYSTEM]: Dynamic tool "${toolName}" is now available — use it to complete your task.`;
+            }
+          }
+        }
+
+        // Reset PeerBus so fresh workers start with clean output state
+        this.t3PeerBus.reset();
+
+        // Rebuild fresh T3Worker instances for this wave
+        const freshMap = this.buildWorkerMap(
+          sanitizedAssignments.filter((a) => runnableIds.includes(a.subtaskId)),
+          taskId,
+        );
+        for (const [k, v] of freshMap) workerMap.set(k, v);
+
+        // Re-queue all wave IDs
+        for (const id of runnableIds) {
+          remaining.add(id);
+          inDegree.set(id, 0);
+        }
+        wave--; // keep wave counter accurate (will be incremented again at top)
+        continue;
+      }
+
+      // ── Normal wave completion: reduce in-degrees, handle rejections ─
       for (let i = 0; i < runnableIds.length; i++) {
         const id = runnableIds[i]!;
         remaining.delete(id);
@@ -429,61 +489,6 @@ Return ONLY the JSON array.`;
           const assignment = sanitizedAssignments.find((a) => a.subtaskId === id)!;
           const retried = await this.retryT3(assignment, taskId);
           resultMap.set(id, retried);
-        } else if (r.status === 'fulfilled' && r.value.status === 'ESCALATED' && r.value.issues.some(i => i.includes('dynamic tool generation'))) {
-          // T2 tool-creation retry: mark the subtaskId as retry-pending so dependent T3s
-          // re-wait on the bus instead of immediately cascading failure.
-          const assignment = sanitizedAssignments.find((a) => a.subtaskId === id)!;
-          this.t3PeerBus?.markRetryPending(id);
-
-          if (this.toolCreator) {
-            this.log(`T3 escalated for tool. T2 spawning Tool-Builder T3 for: ${assignment.subtaskTitle}`);
-            this.sendStatusUpdate({
-              progressPct: 50,
-              currentAction: `Spawning Tool-Builder T3 for: ${assignment.subtaskTitle}`,
-              status: 'IN_PROGRESS',
-            });
-            const toolName = await this.toolCreator.createTool(
-              `Help complete: ${assignment.subtaskTitle}`,
-              assignment.description,
-            );
-            if (toolName) {
-              this.log(`T2 verifying new tool: ${toolName}`);
-              this.sendStatusUpdate({
-                progressPct: 60,
-                currentAction: `T2 Verifying new tool: ${toolName}`,
-                status: 'IN_PROGRESS',
-              });
-              try {
-                const verifyResult = await this.router.generate('T2', {
-                  messages: [{ role: 'user', content: `A new tool named "${toolName}" was just created dynamically to help with: ${assignment.description}. Based on its name and purpose, does this seem like a valid addition? Reply "VERIFIED" or "REJECTED".` }],
-                  systemPrompt: this.systemPromptOverride + 'You are T2 Manager verifying a dynamic tool.',
-                  maxTokens: 50,
-                });
-                if (!verifyResult.content.toUpperCase().includes('REJECTED')) {
-                  this.log(`T2 verification passed for ${toolName}. Restarting original T3.`);
-                  const retried = await this.retryT3({
-                    ...assignment,
-                    description: `${assignment.description}\n\n[SYSTEM NOTIFICATION]: A new dynamic tool "${toolName}" has been built and verified for you. Use it to complete your task.`
-                  }, taskId);
-                  resultMap.set(id, retried);
-                } else {
-                  this.log(`T2 rejected the dynamic tool: ${toolName}`);
-                  resultMap.set(id, r.value);
-                }
-              } catch {
-                const retried = await this.retryT3({
-                  ...assignment,
-                  description: `${assignment.description}\n\n[SYSTEM NOTIFICATION]: A new dynamic tool "${toolName}" has been built for you. Use it to complete your task.`
-                }, taskId);
-                resultMap.set(id, retried);
-              }
-            } else {
-              resultMap.set(id, r.value);
-            }
-          } else {
-            resultMap.set(id, r.value);
-          }
-          this.t3PeerBus?.clearRetryPending(id);
         }
 
         for (const dependent of adj.get(id) ?? []) {

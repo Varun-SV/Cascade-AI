@@ -2,6 +2,7 @@
 //  Cascade AI — Tool Registry
 // ─────────────────────────────────────────────
 
+import EventEmitter from 'node:events';
 import path from 'node:path';
 import ignoreFactory, { type Ignore } from 'ignore';
 
@@ -57,7 +58,7 @@ export interface ToolPlugin {
   onRegister?: (registry: ToolRegistry) => void;
 }
 
-export class ToolRegistry {
+export class ToolRegistry extends EventEmitter {
   private tools: Map<string, BaseTool> = new Map();
   private config: ToolsConfig;
   private ignoreMatcher: Ignore = ignore();
@@ -66,6 +67,7 @@ export class ToolRegistry {
   private plugins: Map<string, ToolPlugin> = new Map();
 
   constructor(config: ToolsConfig, workspaceRoot: string = process.cwd()) {
+    super();
     this.config = config;
     this.workspaceRoot = workspaceRoot;
     this.registerDefaults();
@@ -73,6 +75,31 @@ export class ToolRegistry {
 
   register(tool: BaseTool): void {
     this.tools.set(tool.name, tool);
+    this.emit('tool:added', tool.name);
+  }
+
+  /**
+   * Wait until a named tool is registered, resolving immediately if it already exists.
+   * T3 workers can call this after encountering a missing-tool error to resume
+   * automatically once T2 synthesizes the tool.
+   */
+  waitForTool(toolName: string, timeoutMs = 60_000): Promise<void> {
+    if (this.tools.has(toolName)) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.off('tool:added', handler);
+        reject(new Error(`Timeout waiting for tool: ${toolName}`));
+      }, timeoutMs);
+
+      const handler = (name: string) => {
+        if (name === toolName) {
+          clearTimeout(timer);
+          this.off('tool:added', handler);
+          resolve();
+        }
+      };
+      this.on('tool:added', handler);
+    });
   }
 
   /**

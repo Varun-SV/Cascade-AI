@@ -252,6 +252,17 @@ export class PeerBus extends EventEmitter {
   }
 
   /**
+   * Reset all runtime output/waiter state for a fresh T3 respawn wave.
+   * Preserves member registrations and barrier definitions.
+   */
+  reset(): void {
+    this.outputs.clear();
+    this.waiters.clear();
+    this.retryPending.clear();
+    this.broadcastLog = [];
+  }
+
+  /**
    * Clear broadcast log — call between phases to avoid stale announcements.
    */
   clearBroadcastLog(): void {
