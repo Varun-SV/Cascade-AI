@@ -430,8 +430,11 @@ Return ONLY the JSON array.`;
           const retried = await this.retryT3(assignment, taskId);
           resultMap.set(id, retried);
         } else if (r.status === 'fulfilled' && r.value.status === 'ESCALATED' && r.value.issues.some(i => i.includes('dynamic tool generation'))) {
-          // Tool Creation Redesign: T2 spawns builder -> verifies -> original T3 uses it
+          // T2 tool-creation retry: mark the subtaskId as retry-pending so dependent T3s
+          // re-wait on the bus instead of immediately cascading failure.
           const assignment = sanitizedAssignments.find((a) => a.subtaskId === id)!;
+          this.t3PeerBus?.markRetryPending(id);
+
           if (this.toolCreator) {
             this.log(`T3 escalated for tool. T2 spawning Tool-Builder T3 for: ${assignment.subtaskTitle}`);
             this.sendStatusUpdate({
@@ -450,7 +453,6 @@ Return ONLY the JSON array.`;
                 currentAction: `T2 Verifying new tool: ${toolName}`,
                 status: 'IN_PROGRESS',
               });
-              // Verification step via T2 model
               try {
                 const verifyResult = await this.router.generate('T2', {
                   messages: [{ role: 'user', content: `A new tool named "${toolName}" was just created dynamically to help with: ${assignment.description}. Based on its name and purpose, does this seem like a valid addition? Reply "VERIFIED" or "REJECTED".` }],
@@ -469,7 +471,6 @@ Return ONLY the JSON array.`;
                   resultMap.set(id, r.value);
                 }
               } catch {
-                // If verification generation fails, gracefully accept the tool
                 const retried = await this.retryT3({
                   ...assignment,
                   description: `${assignment.description}\n\n[SYSTEM NOTIFICATION]: A new dynamic tool "${toolName}" has been built for you. Use it to complete your task.`
@@ -482,6 +483,7 @@ Return ONLY the JSON array.`;
           } else {
             resultMap.set(id, r.value);
           }
+          this.t3PeerBus?.clearRetryPending(id);
         }
 
         for (const dependent of adj.get(id) ?? []) {

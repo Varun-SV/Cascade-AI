@@ -375,6 +375,7 @@ ${prompt}`
 
     // Register ToolCreator with the T3 instances (done below, passed via closure)
     const toolCreator = this.toolCreator;
+    if (toolCreator) toolCreator.setPermissionEscalator(escalator);
 
     let finalOutput = '';
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
