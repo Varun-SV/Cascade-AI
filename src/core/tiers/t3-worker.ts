@@ -436,8 +436,82 @@ export class T3Worker extends BaseTier {
       this.emit('tool:result', { tierId: this.id, toolName: tc.name, result });
       return typeof result === 'string' ? result : JSON.stringify(result);
     } catch (err) {
-      return `Tool error: ${err instanceof Error ? err.message : String(err)}`;
+      const originalError = `Tool error: ${err instanceof Error ? err.message : String(err)}`;
+      return this.adaptiveFallback(tc, originalError);
     }
+  }
+
+  /**
+   * Adaptive fallback cascade — invoked when executeTool() fails.
+   * Strategy order:
+   *   1. Find a semantically similar registered tool and retry with same input
+   *   2. Synthesize a new tool via ToolCreator (if available) and run it
+   *   3. Return the original error so the agent loop can decide what to do next
+   */
+  private async adaptiveFallback(tc: ToolCall, originalError: string): Promise<string> {
+    // Strategy 1: alternative tool with overlapping purpose
+    const altTool = this.findAlternativeTool(tc.name);
+    if (altTool) {
+      this.log(`Adaptive fallback: trying alternative tool "${altTool}" for failed "${tc.name}"`);
+      this.sendStatusUpdate({ progressPct: 50, currentAction: `Fallback: trying ${altTool}`, status: 'IN_PROGRESS' });
+      try {
+        const result = await this.toolRegistry.execute(altTool, tc.input, {
+          tierId: this.id,
+          sessionId: this.taskId,
+          requireApproval: false,
+        });
+        const str = typeof result === 'string' ? result : JSON.stringify(result);
+        if (!str.startsWith('Tool error:') && !str.startsWith('Error:')) {
+          return `[Fallback via ${altTool}]: ${str}`;
+        }
+      } catch { /* fall through to next strategy */ }
+    }
+
+    // Strategy 2: synthesize a new tool via ToolCreator
+    if (this.toolCreator) {
+      this.log(`Adaptive fallback: requesting dynamic tool synthesis for "${tc.name}"`);
+      this.sendStatusUpdate({ progressPct: 55, currentAction: `Synthesizing fallback tool for: ${tc.name}`, status: 'IN_PROGRESS' });
+      try {
+        const newToolName = await this.toolCreator.createTool(
+          `Replacement for "${tc.name}" — original failed with: ${originalError.slice(0, 150)}`,
+          this.assignment?.subtaskTitle ?? tc.name,
+        );
+        if (newToolName) {
+          this.log(`Adaptive fallback: synthesized "${newToolName}", retrying`);
+          const result = await this.toolRegistry.execute(newToolName, tc.input, {
+            tierId: this.id,
+            sessionId: this.taskId,
+            requireApproval: false,
+          });
+          const str = typeof result === 'string' ? result : JSON.stringify(result);
+          if (!str.startsWith('Tool error:')) return `[Synthesized ${newToolName}]: ${str}`;
+        }
+      } catch { /* fall through */ }
+    }
+
+    return originalError;
+  }
+
+  /**
+   * Find a registered tool whose name/description semantically overlaps with
+   * the failing tool. Returns the best candidate name, or null if none found.
+   */
+  private findAlternativeTool(failedToolName: string): string | null {
+    const failedKeywords = failedToolName.toLowerCase().split(/[_\-\s]+/);
+    const allTools = this.toolRegistry.getToolDefinitions();
+    let bestScore = 0;
+    let bestName: string | null = null;
+
+    for (const tool of allTools) {
+      if (tool.name === failedToolName) continue;
+      const toolWords = tool.name.toLowerCase().split(/[_\-\s]+/);
+      const score = failedKeywords.filter(k => toolWords.includes(k)).length;
+      if (score > bestScore && score >= 1) {
+        bestScore = score;
+        bestName = tool.name;
+      }
+    }
+    return bestName;
   }
 
   /**

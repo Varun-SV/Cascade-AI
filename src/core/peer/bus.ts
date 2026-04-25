@@ -37,6 +37,8 @@ export class PeerBus extends EventEmitter {
   private barriers: Map<string, { total: number; arrived: Set<string> }> = new Map();
   private broadcastLog: BroadcastMessage[] = [];
   private fileLocks: Map<string, FileLock> = new Map();
+  /** subtaskIds whose T3 is being retried by T2 — dependents should re-wait rather than fail fast */
+  private retryPending: Set<string> = new Set();
 
   /** Called when any peer message or broadcast is sent — used for dashboard visibility. */
   onPeerMessage?: (event: PeerMessageEvent) => void;
@@ -68,11 +70,31 @@ export class PeerBus extends EventEmitter {
   }
 
   /**
-   * Wait for a specific subtask's output — resolves immediately if already available
+   * Mark a subtask as retry-pending so dependents re-wait instead of failing fast
+   * when they see an ESCALATED status.
+   */
+  markRetryPending(subtaskId: string): void {
+    this.retryPending.add(subtaskId);
+    // Remove the cached ESCALATED output so waitFor() blocks for the retry result
+    this.outputs.delete(subtaskId);
+  }
+
+  /** Called by T2 after retry resolves (success or final failure). */
+  clearRetryPending(subtaskId: string): void {
+    this.retryPending.delete(subtaskId);
+  }
+
+  isRetryPending(subtaskId: string): boolean {
+    return this.retryPending.has(subtaskId);
+  }
+
+  /**
+   * Wait for a specific subtask's output — resolves immediately if already available.
+   * If the output is ESCALATED but a retry is pending, waits for the retry result.
    */
   waitFor(subtaskId: string, timeoutMs = 120_000): Promise<PeerOutput> {
     const existing = this.outputs.get(subtaskId);
-    if (existing) return Promise.resolve(existing);
+    if (existing && !this.retryPending.has(subtaskId)) return Promise.resolve(existing);
 
     return new Promise((resolve, reject) => {
       const resolver = (output: PeerOutput) => {
@@ -227,6 +249,17 @@ export class PeerBus extends EventEmitter {
    */
   isFileLocked(filePath: string): boolean {
     return this.fileLocks.has(filePath);
+  }
+
+  /**
+   * Reset all runtime output/waiter state for a fresh T3 respawn wave.
+   * Preserves member registrations and barrier definitions.
+   */
+  reset(): void {
+    this.outputs.clear();
+    this.waiters.clear();
+    this.retryPending.clear();
+    this.broadcastLog = [];
   }
 
   /**

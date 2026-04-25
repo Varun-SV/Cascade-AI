@@ -6,9 +6,11 @@
 //  existing tool can handle a required operation.
 //
 //  SAFETY:
-//  - Requires `enableToolCreation: true` in config (off by default)
-//  - Generated code runs in node:vm with a restricted sandbox context
-//  - HTTP (fetch) calls are allowed but gated by the approval workflow
+//  - Requires `enableToolCreation: true` in config (on by default)
+//  - Generated tools run in node:vm with a restricted sandbox
+//  - Generated tools CAN call existing registered cascade tools via callTool()
+//  - Dangerous tool access requires approval via the PermissionEscalator chain
+//    (T3 → T2 → T1 → user) before execution
 //  - Tools are session-scoped and not persisted
 //
 
@@ -17,6 +19,8 @@ import { BaseTool } from './base.js';
 import type { ToolExecuteOptions } from '../types.js';
 import type { ToolRegistry } from './registry.js';
 import type { CascadeRouter } from '../core/router/index.js';
+import type { PermissionEscalator } from '../core/permissions/escalator.js';
+import type { PermissionRequest } from '../types.js';
 
 // ── Generated tool schema ──────────────────────
 
@@ -24,7 +28,7 @@ interface GeneratedToolSpec {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
-  /** Raw JS function body — receives `input` and `fetch`, returns string | Promise<string> */
+  /** Raw JS function body — receives `input`, `fetch`, and `callTool`. Returns string | Promise<string> */
   executeCode: string;
   isDangerous: boolean;
 }
@@ -37,29 +41,70 @@ class DynamicTool extends BaseTool {
   readonly inputSchema: Record<string, unknown>;
   private executeCode: string;
   private _isDangerous: boolean;
+  private registry: ToolRegistry;
+  private escalator?: PermissionEscalator;
 
-  constructor(spec: GeneratedToolSpec) {
+  constructor(spec: GeneratedToolSpec, registry: ToolRegistry, escalator?: PermissionEscalator) {
     super();
     this.name = spec.name;
     this.description = spec.description;
     this.inputSchema = spec.inputSchema;
     this.executeCode = spec.executeCode;
     this._isDangerous = spec.isDangerous;
+    this.registry = registry;
+    this.escalator = escalator;
   }
 
   isDangerous(): boolean {
     return this._isDangerous;
   }
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
-    // Sandbox: expose only fetch and basic globals — no require, no fs, no process
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
+    const registry = this.registry;
+    const escalator = this.escalator;
+
+    // callTool gives generated tools access to the full registered cascade tool set.
+    // Dangerous tools require escalation approval before running.
+    const callTool = async (toolName: string, toolInput: Record<string, unknown>): Promise<string> => {
+      if (!registry.hasTool(toolName)) return `Tool not found: ${toolName}`;
+
+      if (registry.isDangerous(toolName)) {
+        if (escalator) {
+          const req: PermissionRequest = {
+            id: `dynamic-${this.name}-${toolName}-${Date.now()}`,
+            requestedBy: `dynamic_tool:${this.name}`,
+            parentT2Id: options.tierId,
+            toolName,
+            input: toolInput,
+            isDangerous: true,
+            subtaskContext: `Dynamic tool "${this.name}" requesting access to "${toolName}"`,
+            sectionContext: `Dynamic tool "${this.name}"`,
+          };
+          const decision = await escalator.requestPermission(req);
+          if (!decision.approved) {
+            return `Permission denied for ${toolName} (decided by ${decision.decidedBy}).`;
+          }
+        }
+        // No escalator: fall through and let tool's own approval gate handle it
+      }
+
+      try {
+        const result = await registry.execute(toolName, toolInput, options);
+        return typeof result === 'string' ? result : JSON.stringify(result);
+      } catch (err) {
+        return `Error calling ${toolName}: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    };
+
+    // Sandbox: fetch, JSON, Math, Date, and callTool for cascade tool access
     const sandbox: Record<string, unknown> = {
       input,
       fetch: globalThis.fetch,
+      callTool,
       JSON,
       Math,
       Date,
-      console: { log: () => {}, error: () => {} }, // Silenced
+      console: { log: () => {}, error: () => {} },
       setTimeout,
       clearTimeout,
       Promise,
@@ -97,23 +142,32 @@ Generate a minimal, safe JavaScript tool function for the described operation.
 
 Rules:
 - Return ONLY a JSON object with these fields: name, description, inputSchema, executeCode, isDangerous
-- executeCode is a self-contained JavaScript function body that:
-  - Receives: input (object), fetch (if HTTP needed)
+- executeCode is a self-contained JavaScript async function body that:
+  - Receives: input (object), fetch (for HTTP), callTool(toolName, input) (to call any registered cascade tool)
   - Returns: a string result
-  - Uses no require(), no fs, no process — only fetch, JSON, Math, Date, String, Number, Array, Object
+  - For file operations, prefer: await callTool('file_read', { path: input.path })
+  - For shell commands, prefer: await callTool('shell', { command: 'ls -la' })
+  - For pure computation / HTTP: use fetch or built-ins (JSON, Math, Date, String, Number, Array, Object)
   - Must complete in under 15 seconds
-- isDangerous should be true only if the tool makes write operations or external HTTP calls
+- isDangerous: true if the tool calls dangerous cascade tools (shell, file_write, file_delete, git) or makes HTTP calls that write data
 - name must be snake_case, start with "dynamic_", max 40 chars
 - description must be ≤ 120 chars
 
-Example executeCode for an HTTP tool:
-"const res = await fetch(input.url); const text = await res.text(); return text.slice(0, 2000);"
+Example for a file-summary tool:
+{
+  "name": "dynamic_summarize_file",
+  "description": "Read a file and return a one-paragraph summary",
+  "inputSchema": { "path": { "type": "string", "description": "File path to summarize" } },
+  "executeCode": "const content = await callTool('file_read', { path: input.path }); return content.slice(0, 500);",
+  "isDangerous": false
+}
 
 Return ONLY valid JSON — no other text.`;
 
 export class ToolCreator {
   private router: CascadeRouter;
   private registry: ToolRegistry;
+  private escalator?: PermissionEscalator;
   private createdTools: Set<string> = new Set();
 
   constructor(router: CascadeRouter, registry: ToolRegistry) {
@@ -121,8 +175,13 @@ export class ToolCreator {
     this.registry = registry;
   }
 
+  setPermissionEscalator(escalator: PermissionEscalator): void {
+    this.escalator = escalator;
+  }
+
   /**
    * Generate a new tool from a description and register it with the ToolRegistry.
+   * The generated tool has access to all registered cascade tools via callTool().
    * Returns the tool name if successful, null if generation failed.
    */
   async createTool(description: string, context: string): Promise<string | null> {
@@ -134,36 +193,29 @@ Required capability: ${description.slice(0, 300)}`;
     try {
       const result = await this.router.generate('T3', {
         messages: [{ role: 'user', content: prompt }],
-        maxTokens: 600,
+        maxTokens: 800,
       });
 
       const jsonMatch = /\{[\s\S]*\}/.exec(result.content);
-      if (!jsonMatch) {
-        return null;
-      }
+      if (!jsonMatch) return null;
 
       const spec = JSON.parse(jsonMatch[0]) as GeneratedToolSpec;
 
-      // Validate required fields
-      if (!spec.name || !spec.description || !spec.executeCode || !spec.inputSchema) {
-        return null;
-      }
+      if (!spec.name || !spec.description || !spec.executeCode || !spec.inputSchema) return null;
 
       // Ensure unique name in this session
       if (this.createdTools.has(spec.name) || this.registry.hasTool(spec.name)) {
         spec.name = `${spec.name}_${Date.now() % 10000}`;
       }
 
-      // Validate the generated code compiles (non-executing check)
+      // Syntax check only — don't execute
       try {
-        createContext({ input: {}, fetch: globalThis.fetch });
-        // Syntax check only — don't execute
-        new Function('input', 'fetch', spec.executeCode);
-      } catch (err) {
+        new Function('input', 'fetch', 'callTool', spec.executeCode);
+      } catch {
         return null;
       }
 
-      const tool = new DynamicTool(spec);
+      const tool = new DynamicTool(spec, this.registry, this.escalator);
       this.registry.register(tool);
       this.createdTools.add(spec.name);
 
@@ -173,9 +225,7 @@ Required capability: ${description.slice(0, 300)}`;
     }
   }
 
-  /**
-   * Returns the names of all tools created in this session.
-   */
+  /** Returns the names of all tools created in this session. */
   getCreatedTools(): string[] {
     return Array.from(this.createdTools);
   }

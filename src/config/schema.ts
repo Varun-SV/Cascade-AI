@@ -125,7 +125,7 @@ export const CascadeConfigSchema = z.object({
    * Generated tools are session-scoped and sandboxed in node:vm.
    * HTTP calls from generated tools require approval.
    */
-  enableToolCreation: z.boolean().default(false),
+  enableToolCreation: z.boolean().default(true),
   /**
    * External plugin paths or npm package names to load at startup.
    * Each entry must export a default ToolPlugin object.

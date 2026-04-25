@@ -226,6 +226,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const [startupWarning, setStartupWarning] = useState<string | null>(null);
   const [timelineIndex, setTimelineIndex] = useState(0);
   const [scrollOffset, setScrollOffset] = useState(0);
+  const [treeScrollOffset, setTreeScrollOffset] = useState(0);
   const [isAutoScrolling, setIsAutoScrolling] = useState(true);
   const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
   const [quitAttempted, setQuitAttempted] = useState(false);
@@ -619,7 +620,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'error', content: 'Cascade not initialised. Check your configuration and restart.', timestamp: new Date().toISOString() } });
       return;
     }
-    treeNodesRef.current.clear(); rebuildTree();
+    treeNodesRef.current.clear(); rebuildTree(); setTreeScrollOffset(0);
     const onRoot = ({ role }: RootTierEvent) => {
       const tierId = role === 'T1' ? 'T1' : `${role.toLowerCase()}-root` as 't2-root' | 't3-root';
       rootTierIdRef.current = tierId;
@@ -821,22 +822,12 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     return node.children?.some(hasActiveOrFailed) ?? false;
   };
 
-  let agentTreeHeight = 0;
-  if (state.agentTree && hasActiveOrFailed(state.agentTree)) {
-    agentTreeHeight = 1; // Header row
-    const visibleT2s = state.agentTree.children?.slice(0, 6) ?? [];
-    agentTreeHeight += visibleT2s.length; // T2 rows
-
-    // Add height for T3 rows rendered under each visible T2
-    for (const t2 of visibleT2s) {
-      const t3Count = (t2.children ?? []).filter(c => c.role === 'T3').length;
-      agentTreeHeight += t3Count;
-    }
-
-    if ((state.agentTree.children?.length ?? 0) > 6) {
-      agentTreeHeight += 1; // "... more sections" row
-    }
-  }
+  // Fixed height cap for the agent tree — keeps layout stable as T2/T3 nodes spawn.
+  // AgentTree internally handles scrolling within this budget.
+  const MAX_TREE_ROWS = 10;
+  const agentTreeHeight = (state.agentTree && hasActiveOrFailed(state.agentTree))
+    ? MAX_TREE_ROWS
+    : 0;
 
   let timelineHeight = 0;
   if (state.showDetails && treeNodesRef.current.size > 0) {
@@ -847,21 +838,20 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const statusHeight = agentTreeHeight + timelineHeight;
   const costHeight = state.showCost ? 6 : 0;
   const approvalHeight = state.approvalRequest ? 12 : 0;
-  const slashVisibleCount = Math.min(SLASH_PAGE_SIZE, slashEntries.length);
   const slashHeight = isTypingCommand ? SLASH_PAGE_SIZE + 2 : 0; // Fixes flicker by preserving constant layout height during command typing
   const chromeHeight = statusHeight + costHeight + approvalHeight + slashHeight + 7; // Input(3) + Status(2) + Margins(2)
-  const totalCap = Math.floor(height * 0.7);
 
   const availableHeight = Math.max(4, height - chromeHeight);
   const allLines = formatToLines(
-    state.isStreaming 
-      ? [...state.messages, { id: 'stream', role: 'assistant', content: state.streamBuffer, timestamp: new Date().toISOString() } as Message] 
+    state.isStreaming
+      ? [...state.messages, { id: 'stream', role: 'assistant', content: state.streamBuffer, timestamp: new Date().toISOString() } as Message]
       : state.messages,
     width - 4,
     theme
   );
 
-  const chatWindowHeight = Math.min(allLines.length || (state.isStreaming ? 0 : 4), availableHeight);
+  // Always occupy the full available height so the layout never shifts when content grows.
+  const chatWindowHeight = availableHeight;
   const maxScroll = Math.max(0, allLines.length - chatWindowHeight);
 
   useEffect(() => {
@@ -907,6 +897,16 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           }
         }
         return; // Consumed by mouse handler
+      }
+
+      // Ctrl+Up (\x1b[1;5A) / Ctrl+Down (\x1b[1;5B) — scroll the agent tree
+      if (str === '\x1b[1;5A') {
+        setTreeScrollOffset(p => Math.max(0, p - 1));
+        return;
+      }
+      if (str === '\x1b[1;5B') {
+        setTreeScrollOffset(p => p + 1);
+        return;
       }
 
       // Forward-delete (\x1b[3~) is handled by SafeTextInput's own raw-stdin
@@ -975,15 +975,17 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       </Box>
 
       {/* ── Compact agent tree — auto-hides when idle ── */}
-      <AgentTree root={state.agentTree} theme={theme} />
+      <AgentTree root={state.agentTree} theme={theme} scrollOffset={treeScrollOffset} maxRows={MAX_TREE_ROWS} />
 
       {state.showDetails && (
         <TimelinePanel nodes={[...treeNodesRef.current.values()]} theme={theme} currentIndex={timelineIndex} onChangeIndex={setTimelineIndex} />
       )}
       {state.showCost && <CostTracker theme={theme} totalTokens={state.totalTokens} totalCostUsd={state.totalCostUsd} callsByProvider={state.callsByProvider} callsByTier={state.callsByTier} costByTier={state.costByTier} tokensByTier={state.tokensByTier} />}
       {state.approvalRequest && <ApprovalPrompt request={state.approvalRequest} theme={theme} onDecision={(decision) => { dispatch({ type: 'SET_APPROVAL', request: null }); approvalResolverRef.current?.(decision); }} />}
-      {slashEntries.length > 0 && (
-        <Box flexDirection="column" borderStyle="round" borderColor={theme.colors.border} paddingX={1}>
+      {/* Always render at fixed height when the user is typing a command — prevents layout shift
+          as the suggestion list filters (grows/shrinks), which caused the chat window to flicker. */}
+      {isTypingCommand && (
+        <Box flexDirection="column" borderStyle="round" borderColor={theme.colors.border} paddingX={1} height={slashHeight}>
           <Box flexDirection="row" justifyContent="space-between">
             <Text color={theme.colors.muted}>Commands  ↑↓ navigate · ↵ select · Tab complete</Text>
             {slashEntries.length > SLASH_PAGE_SIZE && (
@@ -992,30 +994,36 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
               </Text>
             )}
           </Box>
-          {slashViewStart > 0 && (
-            <Text color={theme.colors.muted} dimColor>  ↑ {slashViewStart} more above</Text>
-          )}
-          {slashEntries.slice(slashViewStart, slashViewStart + SLASH_PAGE_SIZE).map((entry, i) => {
-            const globalIdx = slashViewStart + i;
-            const isSelected = globalIdx === slashIndex;
-            return (
-              <Box key={entry.command} flexDirection="row">
-                <Text color={isSelected ? theme.colors.accent : theme.colors.foreground} bold={isSelected}>
-                  {isSelected ? '› ' : '  '}
-                </Text>
-                <Box width={16}>
-                  <Text color={isSelected ? theme.colors.accent : theme.colors.foreground} bold={isSelected}>
-                    {entry.command}
-                  </Text>
-                </Box>
-                {entry.description ? (
-                  <Text color={theme.colors.muted} dimColor> {entry.description}</Text>
-                ) : null}
-              </Box>
-            );
-          })}
-          {slashViewStart + SLASH_PAGE_SIZE < slashEntries.length && (
-            <Text color={theme.colors.muted} dimColor>  ↓ {slashEntries.length - slashViewStart - SLASH_PAGE_SIZE} more below</Text>
+          {slashEntries.length === 0 ? (
+            <Text color={theme.colors.muted} dimColor>  No matching commands</Text>
+          ) : (
+            <>
+              {slashViewStart > 0 && (
+                <Text color={theme.colors.muted} dimColor>  ↑ {slashViewStart} more above</Text>
+              )}
+              {slashEntries.slice(slashViewStart, slashViewStart + SLASH_PAGE_SIZE).map((entry, i) => {
+                const globalIdx = slashViewStart + i;
+                const isSelected = globalIdx === slashIndex;
+                return (
+                  <Box key={entry.command} flexDirection="row">
+                    <Text color={isSelected ? theme.colors.accent : theme.colors.foreground} bold={isSelected}>
+                      {isSelected ? '› ' : '  '}
+                    </Text>
+                    <Box width={16}>
+                      <Text color={isSelected ? theme.colors.accent : theme.colors.foreground} bold={isSelected}>
+                        {entry.command}
+                      </Text>
+                    </Box>
+                    {entry.description ? (
+                      <Text color={theme.colors.muted} dimColor> {entry.description}</Text>
+                    ) : null}
+                  </Box>
+                );
+              })}
+              {slashViewStart + SLASH_PAGE_SIZE < slashEntries.length && (
+                <Text color={theme.colors.muted} dimColor>  ↓ {slashEntries.length - slashViewStart - SLASH_PAGE_SIZE} more below</Text>
+              )}
+            </>
           )}
         </Box>
       )}
