@@ -15,20 +15,23 @@ export function makeIdentityCommand(workspacePath = process.cwd()): Command {
     .description('List all available identities')
     .action(() => {
       const store = new MemoryStore(path.join(workspacePath, CASCADE_DB_FILE));
-      const identities = store.listIdentities();
-      
-      console.log(chalk.bold('\n  Identities:'));
-      if (identities.length === 0) {
-        console.log(chalk.gray('  No identities found.'));
-      } else {
-        identities.forEach(id => {
-          const defaultLabel = id.isDefault ? chalk.green(' [Default]') : '';
-          console.log(`  - ${chalk.cyan(id.name)}${defaultLabel}`);
-          console.log(chalk.gray(`    ID: ${id.id}`));
-          if (id.description) console.log(chalk.gray(`    ${id.description}`));
-        });
+      try {
+        const identities = store.listIdentities();
+        console.log(chalk.bold('\n  Identities:'));
+        if (identities.length === 0) {
+          console.log(chalk.gray('  No identities found.'));
+        } else {
+          identities.forEach(id => {
+            const defaultLabel = id.isDefault ? chalk.green(' [Default]') : '';
+            console.log(`  - ${chalk.cyan(id.name)}${defaultLabel}`);
+            console.log(chalk.gray(`    ID: ${id.id}`));
+            if (id.description) console.log(chalk.gray(`    ${id.description}`));
+          });
+        }
+        console.log();
+      } finally {
+        store.close();
       }
-      console.log();
     });
 
   identity
@@ -39,28 +42,30 @@ export function makeIdentityCommand(workspacePath = process.cwd()): Command {
     .option('--default', 'Set as default identity')
     .action((name, options) => {
       const store = new MemoryStore(path.join(workspacePath, CASCADE_DB_FILE));
-      
-      if (options.default) {
-        // Clear existing default
-        const existingDefault = store.getDefaultIdentity();
-        if (existingDefault) {
-          store.updateIdentity(existingDefault.id, { isDefault: false });
+      try {
+        if (options.default) {
+          const existingDefault = store.getDefaultIdentity();
+          if (existingDefault) {
+            store.updateIdentity(existingDefault.id, { isDefault: false });
+          }
         }
+
+        const id = randomUUID();
+        store.createIdentity({
+          id,
+          name,
+          description: options.desc,
+          systemPrompt: options.system,
+          isDefault: !!options.default,
+          createdAt: new Date().toISOString()
+        });
+
+        console.log(chalk.green(`\n  Successfully created identity: ${name} (${id})`));
+        if (options.default) console.log(chalk.green('  Set as default.'));
+        console.log();
+      } finally {
+        store.close();
       }
-
-      const id = randomUUID();
-      store.createIdentity({
-        id,
-        name,
-        description: options.desc,
-        systemPrompt: options.system,
-        isDefault: !!options.default,
-        createdAt: new Date().toISOString()
-      });
-
-      console.log(chalk.green(`\n  Successfully created identity: ${name} (${id})`));
-      if (options.default) console.log(chalk.green('  Set as default.'));
-      console.log();
     });
 
   identity
@@ -68,21 +73,25 @@ export function makeIdentityCommand(workspacePath = process.cwd()): Command {
     .description('Set an identity as default by name or ID')
     .action((query) => {
       const store = new MemoryStore(path.join(workspacePath, CASCADE_DB_FILE));
-      const identities = store.listIdentities();
-      const match = identities.find(i => i.id === query || i.name.toLowerCase() === query.toLowerCase());
+      try {
+        const identities = store.listIdentities();
+        const match = identities.find(i => i.id === query || i.name.toLowerCase() === query.toLowerCase());
 
-      if (!match) {
-        console.log(chalk.red(`\n  Identity '${query}' not found.\n`));
-        return;
+        if (!match) {
+          console.error(chalk.red(`\n  Identity '${query}' not found.\n`));
+          process.exit(1);
+        }
+
+        const existingDefault = store.getDefaultIdentity();
+        if (existingDefault && existingDefault.id !== match.id) {
+          store.updateIdentity(existingDefault.id, { isDefault: false });
+        }
+
+        store.updateIdentity(match.id, { isDefault: true });
+        console.log(chalk.green(`\n  Identity ${match.name} is now the default.\n`));
+      } finally {
+        store.close();
       }
-
-      const existingDefault = store.getDefaultIdentity();
-      if (existingDefault && existingDefault.id !== match.id) {
-        store.updateIdentity(existingDefault.id, { isDefault: false });
-      }
-
-      store.updateIdentity(match.id, { isDefault: true });
-      console.log(chalk.green(`\n  Identity ${match.name} is now the default.\n`));
     });
 
   return identity;

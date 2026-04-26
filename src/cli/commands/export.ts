@@ -65,15 +65,13 @@ export async function exportCommand(options: ExportOptions = {}): Promise<void> 
         return;
       }
 
-      // If no specific session requested, let the user know we'll export the most recent
-      if (!options.sessionId) {
-        const latest = sessions[0]!;
-        const full = store.getSession(latest.id);
-        sessions = full ? [full] : [];
-        if (sessions.length === 0) {
-          spin.fail(chalk.red('Could not load latest session.'));
-          process.exit(1);
-        }
+      // No specific session requested — load the most recent one in full.
+      const latest = sessions[0]!;
+      const full = store.getSession(latest.id);
+      sessions = full ? [full] : [];
+      if (sessions.length === 0) {
+        spin.fail(chalk.red('Could not load latest session.'));
+        process.exit(1);
       }
     }
 

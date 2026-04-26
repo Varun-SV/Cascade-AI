@@ -15,7 +15,8 @@ export async function updateCommand(): Promise<void> {
 
   try {
     const { stdout } = await execAsync('npm show cascade-ai version', { timeout: 10_000 });
-    const latest = stdout.trim();
+    // npm may prepend deprecation warnings or notices; the actual semver is always the last line.
+    const latest = stdout.trim().split('\n').filter(Boolean).pop() ?? '';
 
     if (latest === CASCADE_VERSION) {
       spin.succeed(chalk.green(`Already up to date (v${CASCADE_VERSION})`));

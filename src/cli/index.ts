@@ -49,7 +49,13 @@ program
     await startRepl(options);
   });
 
-program.addCommand(makeIdentityCommand());
+// Parse --workspace early so the identity subcommand can use the correct path.
+// Commander doesn't run the main action before subcommands, so we resolve the
+// workspace from argv directly rather than relying on action callbacks.
+const workspaceArgIdx = process.argv.findIndex((a) => a === '-w' || a === '--workspace');
+const earlyWorkspace =
+  workspaceArgIdx !== -1 ? process.argv[workspaceArgIdx + 1] : process.cwd();
+program.addCommand(makeIdentityCommand(earlyWorkspace));
 
 program
   .command('init [path]')
