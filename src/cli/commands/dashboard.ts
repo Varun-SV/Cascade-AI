@@ -20,7 +20,18 @@ export async function dashboardCommand(
   const store = new MemoryStore(path.join(workspacePath, CASCADE_DB_FILE));
   const server = new DashboardServer(config, store, workspacePath);
   server.watchRuntimeChanges();
-  (globalThis as typeof globalThis & { cascadeDashboardServer?: DashboardServer }).cascadeDashboardServer = server;
+
+  const gThis = globalThis as typeof globalThis & { cascadeDashboardServer?: DashboardServer };
+  gThis.cascadeDashboardServer = server;
+
+  // process.exit() bypasses async finally blocks, so we use the synchronous
+  // 'exit' event to guarantee the SQLite store is closed before the process
+  // terminates (handles both normal SIGINT and error exits).
+  const onExit = () => {
+    store.close();
+    delete gThis.cascadeDashboardServer;
+  };
+  process.once('exit', onExit);
 
   try {
     await server.start();
@@ -30,19 +41,15 @@ export async function dashboardCommand(
     server.refreshRuntime('global');
     console.log(chalk.gray(`  Press Ctrl+C to stop\n`));
 
-    process.on('SIGINT', async () => {
-      await server.stop();
-      process.exit(0);
-    });
-
-    // Keep alive
+    // Keep alive — the global SIGINT/SIGTERM handlers in cli/index.ts will call
+    // process.exit(0), which fires the 'exit' handler above to close the store.
     await new Promise(() => {});
   } catch (err) {
+    // Error path: clean up manually before exiting so server is stopped gracefully.
+    process.removeListener('exit', onExit);
     await server.stop().catch(() => {});
-    store.close();
+    onExit();
     spin.fail(chalk.red(`Dashboard failed: ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
-  } finally {
-    delete (globalThis as typeof globalThis & { cascadeDashboardServer?: DashboardServer }).cascadeDashboardServer;
   }
 }
