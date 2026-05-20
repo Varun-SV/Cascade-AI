@@ -433,6 +433,8 @@ export interface CascadeConfig {
   budget: BudgetConfig;
   theme: string;
   workspace: WorkspaceConfig;
+  localConcurrency?: number;
+  localInferenceTimeoutMs?: number;
 }
 
 export interface ModelOverrides {

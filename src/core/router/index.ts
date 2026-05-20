@@ -24,6 +24,7 @@ import type { BaseProvider } from '../../providers/base.js';
 import { ModelSelector } from './selector.js';
 import { FailoverManager } from './failover.js';
 import { TpmLimiter } from './tpm-limiter.js';
+import { LocalRequestQueue } from './local-queue.js';
 import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
 import { calculateCost } from '../../utils/cost.js';
 import { withTimeout } from '../../utils/retry.js';
@@ -71,6 +72,7 @@ export class CascadeRouter extends EventEmitter {
   private budgetState: 'ok' | 'warned' | 'exceeded' = 'ok';
   private budgetExceededReason: string | undefined;
   private tpmLimiter!: TpmLimiter;
+  private localQueue!: LocalRequestQueue;
 
   /** Thrown when the configured budget is exceeded. */
   static BudgetExceededError = class extends Error {
@@ -89,6 +91,8 @@ export class CascadeRouter extends EventEmitter {
     this.tpmLimiter = new TpmLimiter((config as unknown as {
       rateLimits?: { providerTpm?: Partial<Record<ProviderType, number>> };
     }).rateLimits?.providerTpm ?? {});
+
+    this.localQueue = new LocalRequestQueue(config.localConcurrency ?? 1);
 
     // Discover Ollama models and register them
     const ollamaCfg = config.providers.find((p) => p.type === 'ollama');
@@ -182,9 +186,35 @@ export class CascadeRouter extends EventEmitter {
 
     const useStream = Boolean(onChunk) && model.supportsStreaming && typeof provider.generateStream === 'function';
 
+    // Serialize requests to local providers (e.g. Ollama) to prevent GPU VRAM
+    // pressure when multiple T3 workers run in parallel on a single-GPU machine.
+    let releaseLocalSlot: (() => void) | undefined;
+    if (model.isLocal) {
+      const inferenceTimeoutMs = this.config.localInferenceTimeoutMs ?? 300_000;
+      // Allow up to half the inference timeout to wait in the queue itself.
+      const queueWaitMs = Math.round(inferenceTimeoutMs / 2);
+      releaseLocalSlot = await this.localQueue.acquire(queueWaitMs);
+    }
+
     try {
       let result: GenerateResult;
-      if (useStream && onChunk) {
+
+      if (model.isLocal) {
+        // Apply a hard timeout to local inference calls so a slow/overloaded
+        // model doesn't block the worker indefinitely.
+        const inferenceTimeoutMs = this.config.localInferenceTimeoutMs ?? 300_000;
+        const inferencePromise = useStream && onChunk
+          ? provider.generateStream(options, (chunk) => {
+              const text = typeof chunk?.text === 'string' ? chunk.text : '';
+              if (text) onChunk({ ...chunk, text });
+            })
+          : provider.generate(options);
+        result = await withTimeout(
+          inferencePromise,
+          inferenceTimeoutMs,
+          `Local model ${model.id} inference timed out after ${inferenceTimeoutMs}ms`,
+        );
+      } else if (useStream && onChunk) {
         try {
           result = await provider.generateStream(options, (chunk) => {
             const text = typeof chunk?.text === 'string' ? chunk.text : '';
@@ -196,6 +226,7 @@ export class CascadeRouter extends EventEmitter {
       } else {
         result = await provider.generate(options);
       }
+
       const correctedCost = calculateCost(
         result.usage.inputTokens,
         result.usage.outputTokens,
@@ -228,10 +259,16 @@ export class CascadeRouter extends EventEmitter {
         if (fallback) {
           this.tierModels.set(tier, fallback);
           this.ensureProvider(fallback, this.config.providers);
+          // Release the local slot before the recursive call so the fallback
+          // model (which may itself be local) can acquire its own slot.
+          releaseLocalSlot?.();
+          releaseLocalSlot = undefined;
           return this.generate(tier, options, onChunk, requireVision);
         }
       }
       throw err;
+    } finally {
+      releaseLocalSlot?.();
     }
   }
 

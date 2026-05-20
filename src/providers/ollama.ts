@@ -10,13 +10,58 @@ import type {
   ModelInfo,
   ProviderConfig,
   StreamChunk,
+  ToolCall,
 } from '../types.js';
 import { OLLAMA_BASE_URL } from '../constants.js';
 import { BaseProvider } from './base.js';
 
-interface OllamaMessage { role: string; content: string; images?: string[] }
-interface OllamaChatChunk { message?: { content: string }; done: boolean; prompt_eval_count?: number; eval_count?: number }
+// ── Ollama API types ───────────────────────────
+
+interface OllamaToolCall {
+  function: {
+    name: string;
+    // Ollama delivers arguments as an already-parsed object, not a JSON string.
+    // Some older Ollama releases may deliver a JSON string — handled defensively below.
+    arguments: Record<string, unknown> | string;
+  };
+}
+
+interface OllamaConversationMessage {
+  role: string;
+  content: string;
+  images?: string[];
+  // Present in assistant messages that contain native tool calls
+  tool_calls?: OllamaToolCall[];
+}
+
+interface OllamaChatChunk {
+  message?: {
+    content?: string;
+    tool_calls?: OllamaToolCall[];
+  };
+  done: boolean;
+  prompt_eval_count?: number;
+  eval_count?: number;
+}
+
 interface OllamaModelEntry { name: string; details?: { parameter_size?: string } }
+
+// ── Model family detection ─────────────────────
+
+const TOOL_CAPABLE_FAMILIES = [
+  'llama3.1', 'llama3.2', 'llama3.3',
+  'qwen2', 'qwen2.5', 'qwen3',
+  'mistral-nemo', 'mistral-small',
+  'command-r',
+  'firefunction',
+];
+
+function isToolCapable(modelName: string): boolean {
+  const name = modelName.toLowerCase();
+  return TOOL_CAPABLE_FAMILIES.some((family) => name.includes(family));
+}
+
+// ── Provider ───────────────────────────────────
 
 export class OllamaProvider extends BaseProvider {
   private baseUrl: string;
@@ -37,12 +82,23 @@ export class OllamaProvider extends BaseProvider {
   ): Promise<GenerateResult> {
     const messages = this.convertMessages(options.messages, options.systemPrompt);
 
+    // Convert tools to Ollama/OpenAI-compatible format when provided
+    const ollamaTools = options.tools?.map((t) => ({
+      type: 'function' as const,
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: t.inputSchema,
+      },
+    }));
+
     const response = await axios.post<any>(
       `${this.baseUrl}/api/chat`,
       {
         model: this.model.id,
         messages,
         stream: true,
+        tools: ollamaTools?.length ? ollamaTools : undefined,
         options: {
           num_predict: options.maxTokens ?? this.model.maxOutputTokens,
           temperature: options.temperature ?? 0.7,
@@ -54,6 +110,7 @@ export class OllamaProvider extends BaseProvider {
     let fullContent = '';
     let inputTokens = 0;
     let outputTokens = 0;
+    const pendingToolCalls: OllamaToolCall[] = [];
 
     await new Promise<void>((resolve, reject) => {
       let buffer = '';
@@ -68,6 +125,9 @@ export class OllamaProvider extends BaseProvider {
             if (parsed.message?.content) {
               fullContent += parsed.message.content;
               onChunk({ text: parsed.message.content, finishReason: null });
+            }
+            if (parsed.message?.tool_calls?.length) {
+              pendingToolCalls.push(...parsed.message.tool_calls);
             }
             if (parsed.done) {
               inputTokens = parsed.prompt_eval_count ?? 0;
@@ -89,6 +149,9 @@ export class OllamaProvider extends BaseProvider {
               fullContent += parsed.message.content;
               onChunk({ text: parsed.message.content, finishReason: null });
             }
+            if (parsed.message?.tool_calls?.length) {
+              pendingToolCalls.push(...parsed.message.tool_calls);
+            }
             if (parsed.done) {
               inputTokens = parsed.prompt_eval_count ?? inputTokens;
               outputTokens = parsed.eval_count ?? outputTokens;
@@ -100,12 +163,35 @@ export class OllamaProvider extends BaseProvider {
       response.data.on('error', reject);
     });
 
-    onChunk({ text: '', finishReason: 'stop' });
+    // Convert Ollama tool calls to the normalised ToolCall format.
+    // Ollama delivers arguments as an already-parsed object; some older versions
+    // may deliver a JSON string — handle both defensively.
+    const toolCalls: ToolCall[] = pendingToolCalls.map((tc, i) => {
+      let input: Record<string, unknown>;
+      if (typeof tc.function.arguments === 'string') {
+        try {
+          input = JSON.parse(tc.function.arguments) as Record<string, unknown>;
+        } catch {
+          input = { __rawArguments: tc.function.arguments };
+        }
+      } else {
+        input = tc.function.arguments as Record<string, unknown>;
+      }
+      return {
+        id: `ollama-tool-${Date.now()}-${i}`,
+        name: tc.function.name,
+        input,
+      };
+    });
+
+    const finishReason = toolCalls.length ? 'tool_use' : 'stop';
+    onChunk({ text: '', finishReason });
 
     return {
       content: fullContent,
       usage: this.makeUsage(inputTokens, outputTokens),
-      finishReason: 'stop',
+      toolCalls: toolCalls.length ? toolCalls : undefined,
+      finishReason,
     };
   }
 
@@ -133,7 +219,7 @@ export class OllamaProvider extends BaseProvider {
           maxOutputTokens: 4_000,
           supportsStreaming: true,
           isLocal: true,
-          supportsToolUse: false,
+          supportsToolUse: isToolCapable(m.name),
           minSizeB: this.parseSizeB(m.details?.parameter_size),
         }));
     } catch {
@@ -150,14 +236,39 @@ export class OllamaProvider extends BaseProvider {
     }
   }
 
-  private convertMessages(messages: ConversationMessage[], systemPrompt?: string): OllamaMessage[] {
-    const result: OllamaMessage[] = [];
+  private convertMessages(messages: ConversationMessage[], systemPrompt?: string): OllamaConversationMessage[] {
+    const result: OllamaConversationMessage[] = [];
     if (systemPrompt) result.push({ role: 'system', content: systemPrompt });
     for (const m of messages) {
       if (m.role === 'system') {
         result.push({ role: 'system', content: typeof m.content === 'string' ? m.content : '' });
         continue;
       }
+
+      // Tool result messages — role: 'tool' is supported by modern Ollama
+      if (m.role === 'tool') {
+        result.push({
+          role: 'tool',
+          content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+        });
+        continue;
+      }
+
+      // Assistant messages that carried native tool calls
+      if (m.role === 'assistant' && m.toolCalls?.length) {
+        result.push({
+          role: 'assistant',
+          content: typeof m.content === 'string' ? m.content : '',
+          tool_calls: m.toolCalls.map((tc) => ({
+            function: {
+              name: tc.name,
+              arguments: tc.input,
+            },
+          })),
+        });
+        continue;
+      }
+
       if (typeof m.content === 'string') {
         result.push({ role: m.role, content: m.content });
         continue;

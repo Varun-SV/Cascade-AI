@@ -132,6 +132,17 @@ export const CascadeConfigSchema = z.object({
    * Example: ["./plugins/my-tool.js", "cascade-plugin-slack"]
    */
   plugins: z.array(z.string()).default([]),
+  /**
+   * Maximum number of concurrent inference requests to any local model provider
+   * (e.g. Ollama). Defaults to 1 to prevent GPU memory pressure when multiple
+   * T3 workers run in parallel on a single-GPU machine.
+   */
+  localConcurrency: z.number().int().min(1).default(1),
+  /**
+   * Timeout in milliseconds for a single local model inference call.
+   * Local models can take minutes for large parameter counts. Default: 5 minutes.
+   */
+  localInferenceTimeoutMs: z.number().int().min(1000).default(300_000),
 });
 
 export type CascadeConfigInput = z.input<typeof CascadeConfigSchema>;
