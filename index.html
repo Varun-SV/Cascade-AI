@@ -1259,7 +1259,7 @@
     <div class="container">
       <div class="hero-eyebrow">
         <span class="hero-eyebrow-dot"></span>
-        Open-source · MIT License · v0.5.1
+        Open-source · MIT License · v0.5.2
       </div>
 
       <h1 class="reveal">
@@ -1492,7 +1492,7 @@
         <div class="provider-pill"><span class="dot" style="background:#19c37d"></span> OpenAI GPT</div>
         <div class="provider-pill"><span class="dot" style="background:#4285f4"></span> Google Gemini</div>
         <div class="provider-pill"><span class="dot" style="background:#0078d4"></span> Azure OpenAI</div>
-        <div class="provider-pill"><span class="dot" style="background:#e8632a"></span> Ollama (local)</div>
+        <div class="provider-pill"><span class="dot" style="background:#e8632a"></span> Ollama (local · native tools)</div>
         <div class="provider-pill"><span class="dot" style="background:#7a7a7a"></span> OpenAI-Compatible</div>
       </div>
     </div>
@@ -1574,6 +1574,20 @@
             interruptions, no orphaned agents. A <code>run:cancelled</code> event fires with partial output so you can
             still surface what was produced. Prevents runaway token spend on long tasks.</p>
         </div>
+        <div class="feature-cell">
+          <div class="feature-icon cyan">🔧</div>
+          <h3>Universal Tool Calling</h3>
+          <p>Native tool use for modern Ollama models (llama3.1, llama3.2, qwen2.5, mistral-nemo and more) via the
+            Ollama chat API. Older models fall back to a robust multi-format text parser that tries XML blocks, JSON
+            code blocks, and function-call objects — with a worked example baked into the system prompt.</p>
+        </div>
+        <div class="feature-cell">
+          <div class="feature-icon lime">🖥️</div>
+          <h3>Local GPU Queue</h3>
+          <p>Parallel T3 workers no longer hammer your GPU simultaneously. A FIFO concurrency limiter serializes all
+            Ollama requests (configurable via <code>localConcurrency</code>), and a hard per-call inference timeout
+            (<code>localInferenceTimeoutMs</code>, default 5 min) prevents workers from hanging on slow models.</p>
+        </div>
       </div>
     </div>
   </section>
@@ -1605,7 +1619,10 @@
   <span class="str">"tools"</span>: {
     <span class="str">"shellBlocklist"</span>: [<span class="str">"rm -rf"</span>],
     <span class="str">"requireApprovalFor"</span>: [<span class="str">"shell"</span>]
-  }
+  },
+  <span class="cm">// GPU queue — serialize Ollama calls on limited VRAM</span>
+  <span class="str">"localConcurrency"</span>: <span class="num">1</span>,
+  <span class="str">"localInferenceTimeoutMs"</span>: <span class="num">300000</span>
 }</code></pre>
         </div>
 
