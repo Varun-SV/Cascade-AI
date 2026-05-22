@@ -433,6 +433,9 @@ export interface CascadeConfig {
   budget: BudgetConfig;
   theme: string;
   workspace: WorkspaceConfig;
+  cascadeAuto?: boolean;
+  enableToolCreation?: boolean;
+  plugins?: string[];
   localConcurrency?: number;
   localInferenceTimeoutMs?: number;
 }
