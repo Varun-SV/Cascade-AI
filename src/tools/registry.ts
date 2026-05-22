@@ -25,6 +25,9 @@ import { PDFCreateTool } from './pdf.js';
 import { CodeInterpreterTool } from './interpreter.js';
 import { PeerCommunicationTool } from './peer.js';
 import { WebSearchTool } from './web-search.js';
+import { GlobTool } from './glob.js';
+import { GrepTool } from './grep.js';
+import { WebFetchTool } from './web-fetch.js';
 import { McpClient } from '../mcp/client.js';
 import { McpToolWrapper } from './mcp.js';
 
@@ -212,6 +215,9 @@ export class ToolRegistry extends EventEmitter {
       new CodeInterpreterTool(),
       new PeerCommunicationTool(),
       new WebSearchTool(this.config.webSearch),
+      new GlobTool(),
+      new GrepTool(),
+      new WebFetchTool(),
     ];
 
     for (const tool of tools) {

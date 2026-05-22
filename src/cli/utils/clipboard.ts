@@ -49,7 +49,7 @@ export function readClipboardSync(): string {
     try {
       const result = spawnSync(cmd, args, {
         encoding: 'utf-8',
-        timeout: 1500,
+        timeout: 300,
         // Hide any stderr output — we'll fall back silently.
         stdio: ['ignore', 'pipe', 'ignore'],
         windowsHide: true,

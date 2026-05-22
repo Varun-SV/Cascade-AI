@@ -84,6 +84,13 @@ export class PeerBus extends EventEmitter {
     this.retryPending.delete(subtaskId);
   }
 
+  /** Remove a single output entry so a respawned worker can republish without clearing prior-wave outputs. */
+  clearOutput(subtaskId: string): void {
+    this.outputs.delete(subtaskId);
+    this.waiters.delete(subtaskId);
+    this.retryPending.delete(subtaskId);
+  }
+
   isRetryPending(subtaskId: string): boolean {
     return this.retryPending.has(subtaskId);
   }

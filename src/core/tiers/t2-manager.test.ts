@@ -83,6 +83,7 @@ describe('T2Manager', () => {
 
         return makeResult('ok');
       }),
+      getModelForTier: () => undefined,
     } as unknown as CascadeRouter;
 
     const manager = new T2Manager(router, makeToolRegistry(), 't1-root');
@@ -106,6 +107,7 @@ describe('T2Manager', () => {
         }
         return makeResult('completed');
       }),
+      getModelForTier: () => undefined,
     } as unknown as CascadeRouter;
 
     const assignment = makeAssignment();

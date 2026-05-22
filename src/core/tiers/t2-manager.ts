@@ -314,7 +314,44 @@ Return ONLY the JSON array.`;
       a.dependsOn = (a.dependsOn ?? []).filter((d) => allKeys.has(d));
     }
 
-    const workerMap = this.buildWorkerMap(assignments, taskId);
+    // Create T3 workers
+    const workerMap = new Map<string, T3Worker>();
+    const workers: T3Worker[] = assignments.map((a) => {
+      const worker = new T3Worker(this.router, this.toolRegistry, this.id);
+      if (this.store) worker.setStore(this.store, taskId);
+
+      // ← Inject the shared T3 peer bus
+      worker.setPeerBus(this.t3PeerBus);
+
+      // ← Inject the permission escalator so T3 uses T2→T1→User flow
+      if (this.permissionEscalator) {
+        worker.setPermissionEscalator(this.permissionEscalator);
+      }
+
+      // ← Inject optional ToolCreator for runtime tool generation
+      if (this.toolCreator) {
+        worker.setToolCreator(this.toolCreator);
+      }
+
+      workerMap.set(a.subtaskId, worker);
+      this.t3Workers.set(a.subtaskId, worker);
+
+      // Bubble up events
+      worker.on('stream:token', (e) => this.emit('stream:token', e));
+      worker.on('log', (e) => this.emit('log', e));
+      worker.on('tier:status', (e) => this.emit('tier:status', e));
+      worker.on('tool:call', (e) => this.emit('tool:call', e));
+      worker.on('tool:result', (e) => this.emit('tool:result', e));
+      worker.on('tool:approval-request', (e) => this.emit('tool:approval-request', {
+        ...e,
+        __cascadeResponder: (decision: { approved: boolean; always?: boolean }) =>
+          worker.emit(`tool:approval-response:${e.id}`, decision),
+      }));
+
+      return worker;
+    });
+
+    // ── Dependency-aware execution ────────────
     return this.runWithDependencies(assignments, workerMap, taskId);
   }
 
@@ -459,8 +496,10 @@ Return ONLY the JSON array.`;
           }
         }
 
-        // Reset PeerBus so fresh workers start with clean output state
-        this.t3PeerBus.reset();
+        // Clear only current-wave outputs so prior-wave completions remain accessible to dependents
+        for (const id of runnableIds) {
+          this.t3PeerBus.clearOutput(id);
+        }
 
         // Rebuild fresh T3Worker instances for this wave
         const freshMap = this.buildWorkerMap(
@@ -487,8 +526,23 @@ Return ONLY the JSON array.`;
         if (r.status === 'rejected') {
           this.log(`T3 worker ${id} failed: ${r.reason instanceof Error ? r.reason.message : String(r.reason)} — retrying once`);
           const assignment = sanitizedAssignments.find((a) => a.subtaskId === id)!;
-          const retried = await this.retryT3(assignment, taskId);
-          resultMap.set(id, retried);
+          try {
+            const retried = await this.retryT3(assignment, taskId);
+            resultMap.set(id, retried);
+          } catch (retryErr) {
+            const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+            this.log(`T3 retry for ${id} threw before publishing — unblocking dependents with FAILED`);
+            this.t3PeerBus.publish(this.id, id, `Retry failed: ${msg}`, 'FAILED');
+            resultMap.set(id, {
+              subtaskId: id,
+              status: 'FAILED',
+              output: `Retry threw: ${msg}`,
+              testResults: { checksRun: [], passed: [], failed: [] },
+              issues: [msg],
+              peerSyncsUsed: [],
+              correctionAttempts: 1,
+            });
+          }
         }
 
         for (const dependent of adj.get(id) ?? []) {

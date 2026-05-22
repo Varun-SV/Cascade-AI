@@ -45,7 +45,11 @@ function makeAssignment(overrides: Partial<T2ToT3Assignment> = {}): T2ToT3Assign
 }
 
 function makeRouter(generateImpl: CascadeRouter['generate']): CascadeRouter {
-  return { generate: generateImpl } as unknown as CascadeRouter;
+  // runAgentLoop calls getModelForTier to decide native vs text tool-call mode
+  return {
+    generate: generateImpl,
+    getModelForTier: () => undefined,
+  } as unknown as CascadeRouter;
 }
 
 function makeToolRegistry(overrides: Partial<ToolRegistry> = {}): ToolRegistry {

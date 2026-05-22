@@ -411,6 +411,8 @@ Leave dependsOn empty for sections that can run immediately in parallel.`;
       bind(manager, 'stream:token', (e) => this.emit('stream:token', e));
       bind(manager, 'log', (e) => this.emit('log', e));
       bind(manager, 'tier:status', (e) => this.emit('tier:status', e));
+      bind(manager, 'tool:call', (e) => this.emit('tool:call', e));
+      bind(manager, 'tool:result', (e) => this.emit('tool:result', e));
       bind(manager, 'tool:approval-request', (e) => this.emit('tool:approval-request', e));
 
       bind(manager, 'message', (msg: { type: string; from: string; payload: Record<string, unknown> }) => {

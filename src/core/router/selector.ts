@@ -102,6 +102,22 @@ export class ModelSelector {
     );
   }
 
+  /**
+   * Returns all available models eligible for the given tier, ordered by the
+   * tier's priority chain. Use this as the candidate set for scored selection.
+   */
+  getCandidatesForTier(tier: TierRole): ModelInfo[] {
+    const priority = this.getPriorityList(tier);
+    const candidates: ModelInfo[] = [];
+    for (const key of priority) {
+      const model = this.availableModels.get(key);
+      if (model && this.availableProviders.has(model.provider)) {
+        candidates.push(model);
+      }
+    }
+    return candidates;
+  }
+
   isProviderAvailable(provider: ProviderType): boolean {
     return this.availableProviders.has(provider);
   }

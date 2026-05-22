@@ -18,6 +18,8 @@ import { CascadeConfigSchema } from '../../config/schema.js';
 import { CASCADE_CONFIG_FILE, GLOBAL_CONFIG_DIR } from '../../constants.js';
 import type { CascadeConfig } from '../../types.js';
 import { SafeTextInput } from '../components/SafeTextInput.js';
+import { getTheme } from '../themes/index.js';
+import { Frame, FieldBox, TierCard } from './components.js';
 
 // ── Types ─────────────────────────────────────
 
@@ -44,7 +46,8 @@ type WizardStep =
   | 'API_KEYS'
   | 'FETCH_MODELS'
   | 'TIER_ASSIGN'
-  | 'SAVE';
+  | 'SAVE'
+  | 'DONE';
 
 interface WizardState {
   step: WizardStep;
@@ -80,6 +83,7 @@ type WizardAction =
   | { type: 'SET_TIER'; tier: 'T1' | 'T2' | 'T3'; value: string }
   | { type: 'SET_TIER_FOCUS'; tier: 'T1' | 'T2' | 'T3' }
   | { type: 'GO_SAVE' }
+  | { type: 'GO_DONE' }
   | { type: 'SET_ERROR'; error: string };
 
 const PROVIDER_LABELS: Record<ProviderType, string> = {
@@ -203,6 +207,8 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
       return { ...state, tierSelectFocus: action.tier };
     case 'GO_SAVE':
       return { ...state, step: 'SAVE' };
+    case 'GO_DONE':
+      return { ...state, step: 'DONE' };
     case 'SET_ERROR':
       return { ...state, error: action.error };
     default:
@@ -219,6 +225,8 @@ interface SetupWizardProps {
 
 export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): React.ReactElement {
   const { exit } = useApp();
+  const theme = getTheme('cascade');
+  const savedConfigRef = useRef<CascadeConfig | null>(null);
 
   const [state, dispatch] = useReducer(wizardReducer, {
     step: 'PROVIDER_SELECT',
@@ -331,8 +339,8 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
         const configPath = path.join(workspacePath, CASCADE_CONFIG_FILE);
         await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8');
 
-        onComplete(config as CascadeConfig);
-        exit();
+        savedConfigRef.current = config as CascadeConfig;
+        dispatchRef.current({ type: 'GO_DONE' });
       } catch (err) {
         dispatchRef.current({ type: 'SET_ERROR', error: err instanceof Error ? err.message : String(err) });
       }
@@ -343,6 +351,13 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
 
   // ── Input handling ────────────────────────────
   useInput((_input, key) => {
+    if (state.step === 'DONE') {
+      if (key.return || key.escape) {
+        if (savedConfigRef.current) onComplete(savedConfigRef.current);
+        exit();
+      }
+      return;
+    }
     if (state.step === 'PROVIDER_SELECT') {
       if (key.upArrow) setProviderCursor(p => (p <= 0 ? providerOrder.length - 1 : p - 1));
       if (key.downArrow) setProviderCursor(p => (p >= providerOrder.length - 1 ? 0 : p + 1));
@@ -433,10 +448,10 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
 
   if (state.step === 'PROVIDER_SELECT') {
     return (
-      <Box flexDirection="column" paddingX={2} paddingY={1}>
+      <Frame theme={theme} phase="keys">
         <Box marginBottom={1}>
-          <Text color="magenta" bold>? </Text>
-          <Text bold>Which providers do you want to configure?</Text>
+          <Text color={theme.colors.primary} bold>? </Text>
+          <Text color={theme.colors.foreground} bold>Which providers do you want to configure?</Text>
         </Box>
         <Box flexDirection="column">
           {providerOrder.map((p, i) => {
@@ -444,21 +459,21 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
             const focused = i === providerCursor;
             return (
               <Box key={p}>
-                <Text color={focused ? 'magenta' : 'white'}>{focused ? '❯ ' : '  '}</Text>
-                <Text color={selected ? 'green' : 'white'}>{selected ? '◉ ' : '◯ '}</Text>
-                <Text color={focused ? 'magenta' : (selected ? 'white' : 'gray')}>{PROVIDER_LABELS[p]}</Text>
-                {p === 'azure' && <Text dimColor>  — multiple deployments supported</Text>}
-                {p === 'openai-compatible' && <Text dimColor>  — Groq, Together, custom</Text>}
-                {p === 'ollama' && <Text dimColor>  — no API key needed</Text>}
+                <Text color={focused ? theme.colors.primary : theme.colors.muted}>{focused ? '❯ ' : '  '}</Text>
+                <Text color={selected ? theme.colors.success : theme.colors.muted}>{selected ? '◉ ' : '◯ '}</Text>
+                <Text color={focused ? theme.colors.primary : (selected ? theme.colors.foreground : theme.colors.muted)}>{PROVIDER_LABELS[p]}</Text>
+                {p === 'azure' && <Text color={theme.colors.muted} dimColor>  — multiple deployments supported</Text>}
+                {p === 'openai-compatible' && <Text color={theme.colors.muted} dimColor>  — Groq, Together, custom</Text>}
+                {p === 'ollama' && <Text color={theme.colors.muted} dimColor>  — no API key needed</Text>}
               </Box>
             );
           })}
         </Box>
         <Box marginTop={1}>
-          <Text dimColor>(Press &lt;space&gt; to select, &lt;a&gt; to toggle all, &lt;i&gt; to invert selection, and &lt;enter&gt; to proceed)</Text>
+          <Text color={theme.colors.muted} dimColor>space select  ·  a all  ·  i invert  ·  enter continue</Text>
         </Box>
-        {state.error && <Text color="red">{state.error}</Text>}
-      </Box>
+        {state.error && <Text color={theme.colors.error}>{state.error}</Text>}
+      </Frame>
     );
   }
 
@@ -466,14 +481,15 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
     const isAzure = currentEntry.type === 'azure';
     const isCompat = currentEntry.type === 'openai-compatible';
     const isOllama = currentEntry.type === 'ollama';
+    const doneEntries = state.entries.slice(0, state.currentEntryIdx);
 
     if (fieldStage === 'askMore') {
       // After completing an Azure or compat entry, ask if they want another
       return (
-        <Box flexDirection="column" paddingX={2} paddingY={1}>
+        <Frame theme={theme} phase="keys">
           <Box marginBottom={1}>
-            <Text color="magenta" bold>? </Text>
-            <Text bold>{isAzure ? 'Add another Azure deployment? (y/n)' : isOllama ? 'Add another Ollama endpoint? (y/n)' : 'Add another custom endpoint? (y/n)'}</Text>
+            <Text color={theme.colors.primary} bold>? </Text>
+            <Text color={theme.colors.foreground} bold>{isAzure ? 'Add another Azure deployment?' : isOllama ? 'Add another Ollama endpoint?' : 'Add another custom endpoint?'}</Text>
           </Box>
           <Box>
             <SelectInput
@@ -481,8 +497,8 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
                 { label: 'Yes — add another', value: 'yes' },
                 { label: 'No — continue', value: 'no' },
               ]}
-              indicatorComponent={({ isSelected }) => <Text color="magenta">{isSelected ? '❯ ' : '  '}</Text>}
-              itemComponent={({ isSelected, label }) => <Text color={isSelected ? 'magenta' : 'white'}>{label}</Text>}
+              indicatorComponent={({ isSelected }) => <Text color={theme.colors.primary}>{isSelected ? '❯ ' : '  '}</Text>}
+              itemComponent={({ isSelected, label }) => <Text color={isSelected ? theme.colors.primary : theme.colors.muted}>{label}</Text>}
               onSelect={(item) => {
                 if (item.value === 'yes') {
                   if (isAzure) dispatch({ type: 'ADD_AZURE' });
@@ -501,7 +517,7 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
               }}
             />
           </Box>
-        </Box>
+        </Frame>
       );
     }
 
@@ -510,19 +526,33 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
       isAzure && fieldStage === 'baseUrl' ? `Azure endpoint URL` :
       isCompat && fieldStage === 'label' ? `Name for this endpoint (e.g. Groq)` :
       isCompat && fieldStage === 'baseUrl' ? `Base URL (e.g. https://api.groq.com/openai/v1)` :
-      isOllama ? `Ollama URL (Enter for http://localhost:11434)` :
+      isOllama ? `Ollama URL` :
       `${currentEntry.label} API Key`;
 
     const isMasked = fieldStage === 'apiKey' && !isOllama;
 
     return (
-      <Box flexDirection="column" paddingX={2} paddingY={1}>
+      <Frame theme={theme} phase="keys">
+        {doneEntries.length > 0 && (
+          <Box flexDirection="column" marginBottom={1}>
+            {doneEntries.map((e) => (
+              <Box key={e.id}>
+                <Text color={theme.colors.success}>✔ </Text>
+                <Text color={theme.colors.muted}>{e.label}</Text>
+              </Box>
+            ))}
+          </Box>
+        )}
         <Box marginBottom={1}>
-          <Text color="magenta" bold>? </Text>
-          <Text bold>{prompt}</Text>
+          <Text color={theme.colors.muted}>Provider {state.currentEntryIdx + 1} of {state.entries.length}</Text>
         </Box>
-        <Box>
-          <Text color="magenta">❯ </Text>
+        <FieldBox
+          theme={theme}
+          label={prompt}
+          tag={isOllama ? 'optional — Enter for default' : 'required'}
+          tagColor={isOllama ? theme.colors.muted : theme.colors.error}
+          active
+        >
           <SafeTextInput
             value={fieldBuffer}
             onChange={setFieldBuffer}
@@ -530,35 +560,40 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
             {...(isMasked ? { mask: '*' } : {})}
             placeholder={isOllama ? 'http://localhost:11434' : ''}
           />
-        </Box>
+        </FieldBox>
         {isMasked && (
-          <Box marginTop={1}>
-            <Text dimColor>
-              Tip: Ctrl+V pastes from clipboard. Most terminals also support right-click paste.
-            </Text>
-          </Box>
+          <Text color={theme.colors.muted} dimColor>
+            Tip: Ctrl+V pastes from clipboard. Most terminals also support right-click paste.
+          </Text>
         )}
-        {state.error && <Text color="red">{state.error}</Text>}
-      </Box>
+        {state.error && <Text color={theme.colors.error}>{state.error}</Text>}
+      </Frame>
     );
   }
 
   if (state.step === 'FETCH_MODELS') {
     return (
-      <Box flexDirection="column" paddingX={2} paddingY={1}>
+      <Frame theme={theme} phase="models">
         <Box marginBottom={1}>
-          <Text color="magenta" bold>? </Text>
-          <Text bold>Connecting to providers and fetching models...</Text>
+          <Text color={theme.colors.primary} bold>? </Text>
+          <Text color={theme.colors.foreground} bold>Connecting to providers and fetching models…</Text>
         </Box>
         <Box flexDirection="column">
-          {state.fetchLog.map((line, i) => <Text key={i}>{line}</Text>)}
+          {state.fetchLog.map((line, i) => {
+            const color = line.includes('✔')
+              ? theme.colors.success
+              : line.includes('✘')
+                ? theme.colors.error
+                : theme.colors.muted;
+            return <Text key={i} color={color}>{line}</Text>;
+          })}
           {state.fetchedModels.length === 0 && (
             <Box>
-              <Spinner type="dots" />
+              <Text color={theme.colors.accent}><Spinner type="dots" /></Text>
             </Box>
           )}
         </Box>
-      </Box>
+      </Frame>
     );
   }
 
@@ -571,75 +606,96 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
       })),
     ];
 
-    const tierLabel = (tier: 'T1' | 'T2' | 'T3', hint: string) => {
+    const tierCard = (tier: 'T1' | 'T2' | 'T3', role: string, hint: string) => {
       const isFocused = state.tierSelectFocus === tier;
       const current = tier === 'T1' ? state.tierT1 : tier === 'T2' ? state.tierT2 : state.tierT3;
-      
+      const currentLabel = current === 'auto'
+        ? 'Auto — let Cascade choose best available'
+        : state.fetchedModels.find(m => m.id === current)?.name || current;
+
       if (!isFocused) {
         return (
-          <Box key={tier}>
-            <Text color="green" bold>✔ </Text>
-            <Text bold>{tier} {hint}: </Text>
-            <Text color="magenta">{current === 'auto' ? 'Auto — let Cascade choose best available' : state.fetchedModels.find(m => m.id === current)?.name || current}</Text>
-          </Box>
+          <TierCard key={tier} theme={theme} tier={tier} role={role} hint={hint}>
+            <Box>
+              <Text color={theme.colors.success}>✔ </Text>
+              <Text color={theme.colors.foreground}>{currentLabel}</Text>
+            </Box>
+          </TierCard>
         );
       }
-      
+
       return (
-        <Box flexDirection="column" marginBottom={1} key={tier}>
-          <Box>
-            <Text color="magenta" bold>? </Text>
-            <Text bold>{tier} {hint}: </Text>
-          </Box>
-          <Box>
-            <SelectInput
-              items={modelOptions}
-              onSelect={(item) => {
-                dispatch({ type: 'SET_TIER', tier, value: item.value });
-                const order: Array<'T1' | 'T2' | 'T3'> = ['T1', 'T2', 'T3'];
-                const idx = order.indexOf(tier);
-                if (idx < 2) {
-                  dispatch({ type: 'SET_TIER_FOCUS', tier: order[idx + 1]! });
-                } else {
-                  dispatch({ type: 'GO_SAVE' });
-                }
-              }}
-              indicatorComponent={({ isSelected }) => <Text color="magenta">{isSelected ? '❯ ' : '  '}</Text>}
-              itemComponent={({ isSelected, label }) => <Text color={isSelected ? 'magenta' : 'white'}>{label}</Text>}
-            />
-          </Box>
-        </Box>
+        <TierCard key={tier} theme={theme} tier={tier} role={role} hint={hint} active>
+          <SelectInput
+            items={modelOptions}
+            onSelect={(item) => {
+              dispatch({ type: 'SET_TIER', tier, value: item.value });
+              const order: Array<'T1' | 'T2' | 'T3'> = ['T1', 'T2', 'T3'];
+              const idx = order.indexOf(tier);
+              if (idx < 2) {
+                dispatch({ type: 'SET_TIER_FOCUS', tier: order[idx + 1]! });
+              } else {
+                dispatch({ type: 'GO_SAVE' });
+              }
+            }}
+            indicatorComponent={({ isSelected }) => <Text color={theme.colors.primary}>{isSelected ? '❯ ' : '  '}</Text>}
+            itemComponent={({ isSelected, label }) => <Text color={isSelected ? theme.colors.primary : theme.colors.muted}>{label}</Text>}
+          />
+        </TierCard>
       );
     };
 
     return (
-      <Box flexDirection="column" paddingX={2} paddingY={1}>
+      <Frame theme={theme} phase="models">
+        <Box marginBottom={1}>
+          <Text color={theme.colors.primary} bold>? </Text>
+          <Text color={theme.colors.foreground} bold>Assign a model to each tier</Text>
+        </Box>
         <Box flexDirection="column">
-          {tierLabel('T1', '(Administrator — complex reasoning, runs once per task)')}
-          {tierLabel('T2', '(Manager — runs per section)')}
-          {tierLabel('T3', '(Worker — high volume, many parallel runs)')}
+          {tierCard('T1', 'Administrator', 'complex reasoning · once per task')}
+          {tierCard('T2', 'Manager', 'per-section planning')}
+          {tierCard('T3', 'Worker', 'high volume · many parallel runs')}
         </Box>
         <Box marginTop={1}>
-          <Text dimColor>(Tab/Arrow Down to skip tier, Enter to select or save)</Text>
+          <Text color={theme.colors.muted} dimColor>Tab to skip a tier  ·  ↑↓ + Enter to choose</Text>
         </Box>
-        {state.error && <Text color="red">{state.error}</Text>}
-      </Box>
+        {state.error && <Text color={theme.colors.error}>{state.error}</Text>}
+      </Frame>
     );
   }
 
   if (state.step === 'SAVE') {
     return (
-      <Box flexDirection="column" paddingX={2} paddingY={1}>
+      <Frame theme={theme} phase="complete">
         <Box>
-          <Text color="green" bold>✔ </Text>
-          <Text bold>Setup complete!</Text>
+          <Text color={theme.colors.accent}><Spinner type="dots" /></Text>
+          <Text color={theme.colors.foreground}> Writing .cascade/config.json…</Text>
         </Box>
-        <Box marginTop={1}>
-          <Spinner type="dots" />
-          <Text> Writing .cascade/config.json...</Text>
+        {state.error && <Text color={theme.colors.error}>Error: {state.error}</Text>}
+      </Frame>
+    );
+  }
+
+  if (state.step === 'DONE') {
+    return (
+      <Frame theme={theme} phase="complete">
+        <Box flexDirection="column" alignItems="center">
+          <Text color={theme.colors.primary} bold>◈</Text>
+          <Text color={theme.colors.success} bold>Cascade AI initialized successfully!</Text>
+          <Box marginTop={1}>
+            <Text color={theme.colors.muted}>Run </Text>
+            <Text color={theme.colors.primary} bold>cascade</Text>
+            <Text color={theme.colors.muted}> inside any project directory to start.</Text>
+          </Box>
+          <Box marginTop={1} borderStyle="round" borderColor={theme.colors.border} paddingX={2}>
+            <Text color={theme.colors.muted}>$ </Text>
+            <Text color={theme.colors.accent} bold>cascade</Text>
+          </Box>
+          <Box marginTop={1}>
+            <Text color={theme.colors.muted} dimColor>Press Enter to finish</Text>
+          </Box>
         </Box>
-        {state.error && <Text color="red">Error: {state.error}</Text>}
-      </Box>
+      </Frame>
     );
   }
 

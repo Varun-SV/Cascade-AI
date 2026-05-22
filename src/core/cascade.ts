@@ -28,6 +28,7 @@ import { PermissionEscalator } from './permissions/escalator.js';
 import { validateConfig } from '../config/validate.js';
 import { Telemetry, noopTelemetry } from '../telemetry/index.js';
 import { TaskAnalyzer } from './router/task-analyzer.js';
+import { ModelPerformanceTracker } from './router/model-performance-tracker.js';
 import { ToolCreator } from '../tools/tool-creator.js';
 import { CascadeCancelledError } from '../utils/retry.js';
 
@@ -42,6 +43,7 @@ export class Cascade extends EventEmitter {
   private audit?: AuditLogger;
   private telemetry: Pick<Telemetry, 'capture' | 'shutdown'>;
   private taskAnalyzer?: TaskAnalyzer;
+  private perfTracker?: ModelPerformanceTracker;
   private toolCreator?: ToolCreator;
 
   constructor(config: CascadeConfig, workspacePath: string, store?: MemoryStore) {
@@ -65,10 +67,12 @@ export class Cascade extends EventEmitter {
   }
 
   private initOptionalFeatures(): void {
-    const cfg = this.config as unknown as Record<string, unknown>;
-    if (cfg['cascadeAuto'] === true) {
-      this.taskAnalyzer = new TaskAnalyzer(this.router);
+    if (this.config.cascadeAuto === true) {
+      this.perfTracker = new ModelPerformanceTracker();
+      void this.perfTracker.load(); // non-blocking; stats available before first run completes
+      this.taskAnalyzer = new TaskAnalyzer(this.perfTracker);
     }
+    const cfg = this.config as unknown as Record<string, unknown>;
     if (cfg['enableToolCreation'] === true) {
       this.toolCreator = new ToolCreator(this.router, this.toolRegistry);
     }
@@ -356,7 +360,7 @@ ${prompt}`
     this.telemetry.capture('cascade:session_start', {
       complexity,
       providerCount: this.config.providers.length,
-      cascadeAutoEnabled: (this.config as unknown as Record<string, unknown>)['cascadeAuto'] === true,
+      cascadeAutoEnabled: this.config.cascadeAuto === true,
       toolCreationEnabled: (this.config as unknown as Record<string, unknown>)['enableToolCreation'] === true,
     });
 
@@ -417,6 +421,8 @@ ${prompt}`
       });
       tier.on('log', (e) => this.emit('log', e));
       tier.on('tier:status', (e) => this.emit('tier:status', e));
+      tier.on('tool:call', (e) => this.emit('tool:call', e));
+      tier.on('tool:result', (e) => this.emit('tool:result', e));
       // Legacy approval events (for tiers not yet wired to escalator)
       tier.on('tool:approval-request', async (request: ApprovalRequest & { __cascadeResponder?: (decision: { approved: boolean; always?: boolean }) => void }) => {
         this.emit('tool:approval-request', request);
@@ -530,6 +536,14 @@ ${prompt}`
       // across runs — even on error paths. cancelAllPending is safe to call
       // when there are no pending requests.
       try { escalator.cancelAllPending(); } catch { /* non-critical */ }
+
+      // Record model performance for future auto-selection
+      if (this.taskAnalyzer) {
+        try {
+          const stats = this.router.getStats();
+          this.taskAnalyzer.recordRunOutcome(runError ? 'failure' : 'success', stats.costByTier);
+        } catch { /* non-critical */ }
+      }
 
       // Always emit telemetry for completion (or failure) so dashboards
       // don't silently drop failed runs.

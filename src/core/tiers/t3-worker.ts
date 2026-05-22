@@ -410,6 +410,9 @@ export class T3Worker extends BaseTier {
       status: 'IN_PROGRESS',
     });
 
+    this.emit('tool:call', { id: tc.id, tierId: this.id, toolName: tc.name, input: tc.input });
+    const toolStartMs = Date.now();
+
     try {
       const result = await this.toolRegistry.execute(tc.name, tc.input, {
         tierId: this.id,
@@ -433,11 +436,14 @@ export class T3Worker extends BaseTier {
           this.audit.fileChange(this.id, (tc.input['path'] as string | undefined) ?? 'unknown', tc.name);
         }
       }
-      this.emit('tool:result', { tierId: this.id, toolName: tc.name, result });
+      const durationMs = Date.now() - toolStartMs;
+      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: tc.name, output: typeof result === 'string' ? result : JSON.stringify(result), durationMs });
       return typeof result === 'string' ? result : JSON.stringify(result);
     } catch (err) {
-      const originalError = `Tool error: ${err instanceof Error ? err.message : String(err)}`;
-      return this.adaptiveFallback(tc, originalError);
+      const durationMs = Date.now() - toolStartMs;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: tc.name, error: errMsg, durationMs });
+      return `Tool error: ${errMsg}`;
     }
   }
 

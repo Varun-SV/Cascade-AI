@@ -215,7 +215,7 @@ export class SlashCommandRegistry {
 
     this.register({
       command: '/tree',
-      description: 'Show current agent tree as text',
+      description: 'Toggle the execution timeline panel',
       handler: (_args, ctx) => ({ output: ctx.onTree(), handled: true }),
     });
 
@@ -254,7 +254,7 @@ export class SlashCommandRegistry {
 
     this.register({
       command: '/sessions',
-      description: 'List and resume past sessions',
+      description: 'List past sessions (use /resume to restore)',
       handler: async (args, ctx) => ({ output: await ctx.onSessions(args), handled: true }),
     });
 
