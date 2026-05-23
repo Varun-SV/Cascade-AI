@@ -628,6 +628,7 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
         <TierCard key={tier} theme={theme} tier={tier} role={role} hint={hint} active>
           <SelectInput
             items={modelOptions}
+            limit={8}
             onSelect={(item) => {
               dispatch({ type: 'SET_TIER', tier, value: item.value });
               const order: Array<'T1' | 'T2' | 'T3'> = ['T1', 'T2', 'T3'];

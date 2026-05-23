@@ -857,11 +857,13 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const MAX_TREE_ROWS = 10;
 
   useEffect(() => {
-    // Enable mouse reporting + strip mouse-sequence noise so right-click /
-    // scroll-wheel events don't leak into the input prompt. Chat scroll is
-    // handled by the terminal's native scrollback now — completed messages
-    // live in Ink Static and naturally flow into the scrollback.
-    process.stdout.write('\x1b[?1000h\x1b[?1006h');
+    // Actively DISABLE mouse reporting on mount so the terminal's own
+    // scrollback handles the wheel (and PgUp / PgDn). Completed messages
+    // live in the scrollback via Ink <Static> since v0.5.4 — if we
+    // capture mouse events here, the wheel scrolls nothing and the user
+    // can't see history. The strip-and-swallow branch below stays as
+    // defense-in-depth in case another layer turns capture back on.
+    process.stdout.write('\x1b[?1000l\x1b[?1006l');
 
     const onData = (data: Buffer) => {
       const str = data.toString();
