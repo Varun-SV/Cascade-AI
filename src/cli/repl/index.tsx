@@ -157,7 +157,7 @@ function replReducer(state: ReplState, action: ReplAction): ReplState {
     case 'SET_STREAMING':
       return { ...state, isStreaming: action.isStreaming };
     case 'CLEAR':
-      return { ...state, messages: [], agentTree: null, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, activeTool: null };
+      return { ...state, messages: [], agentTree: null, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, activeTool: null };
     case 'TOGGLE_COST':
       return { ...state, showCost: !state.showCost };
     case 'TOGGLE_DETAILS':
@@ -1097,7 +1097,19 @@ function inferProviderFromModelId(id: string, providers: CascadeConfig['provider
 }
 
 function listConfiguredProviders(config: CascadeConfig): string { return config.providers.map(p => p.type).join(', '); }
-function formatConfigSummary(config: CascadeConfig): string { return `Theme: ${config.theme}, Port: ${config.dashboard.port}`; }
+function formatConfigSummary(config: CascadeConfig): string {
+  const providers = config.providers?.map((p) => p.type).join(', ') || '(none)';
+  const t1 = config.models?.t1 ?? 'auto';
+  const t2 = config.models?.t2 ?? 'auto';
+  const t3 = config.models?.t3 ?? 'auto';
+  return [
+    `Theme:         ${config.theme ?? 'cascade'}`,
+    `Providers:     ${providers}`,
+    `Models:        T1 ${t1}  ·  T2 ${t2}  ·  T3 ${t3}`,
+    `Dashboard:     port ${config.dashboard?.port ?? '(unset)'}`,
+    `Cascade Auto:  ${config.cascadeAuto ? 'on' : 'off'}`,
+  ].join('\n');
+}
 function stringifySlashOutput(val: unknown): string { return typeof val === 'string' ? val : JSON.stringify(val); }
 async function searchSessionsAndMessages(query: string, workspacePath: string): Promise<string> {
   if (!query) return 'Usage: /search <query>';

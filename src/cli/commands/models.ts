@@ -42,10 +42,10 @@ export async function modelsCommand(options: { verbose?: boolean } = {}): Promis
       const vision  = model.isVisionCapable ? chalk.gray(' 👁') : '';
 
       console.log(
-        `  ${color.bold(tier)}  ${chalk.white(model.name.padEnd(24))}` +
-        `${chalk.gray(model.provider.padEnd(16))}` +
+        `  ${color.bold(tier)}  ${chalk.white(col(model.name, 24))}` +
+        `${chalk.gray(col(model.provider, 16))}` +
         (options.verbose
-          ? `${chalk.gray(ctx.padEnd(12))}${chalk.gray(`${costIn}, ${costOut}`)}`
+          ? `${chalk.gray(col(ctx, 12))}${chalk.gray(`${costIn}, ${costOut}`)}`
           : `${chalk.gray(ctx)}`) +
         local + vision,
       );
@@ -75,7 +75,7 @@ export async function modelsCommand(options: { verbose?: boolean } = {}): Promis
           : config.models.t2 === m.id ? ' ← T2'
           : config.models.t3 === m.id ? ' ← T3'
           : '';
-        console.log(`    ${chalk.white(m.name.padEnd(28))}${chalk.gray(m.id)}${chalk.yellow(override)}`);
+        console.log(`    ${chalk.white(col(m.name, 28))}${chalk.gray(m.id)}${chalk.yellow(override)}`);
       }
       console.log();
     }
@@ -86,4 +86,9 @@ export async function modelsCommand(options: { verbose?: boolean } = {}): Promis
   } else {
     console.log(chalk.green('  All tiers are configured.\n'));
   }
+}
+
+/** Pad a column to `width`, but always leave a 2-space gap if the value is too long. */
+function col(s: string, width: number): string {
+  return s.length < width ? s.padEnd(width) : `${s}  `;
 }

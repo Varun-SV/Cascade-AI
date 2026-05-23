@@ -10,6 +10,7 @@ import dotenv from 'dotenv';
 import { CASCADE_VERSION, DEFAULT_THEME } from '../constants.js';
 import { ConfigManager } from '../config/index.js';
 import { Repl } from './repl/index.js';
+import { Cascade } from '../core/cascade.js';
 import { initCommand } from './commands/init.js';
 import { doctorCommand } from './commands/doctor.js';
 import { updateCommand } from './commands/update.js';
@@ -46,7 +47,11 @@ program
   .option('-i, --identity <name>', 'Identity name or ID')
   .option('--no-color', 'Disable colors')
   .action(async (options) => {
-    await startRepl(options);
+    if (options.prompt) {
+      await runHeadless(options.prompt, options);
+    } else {
+      await startRepl(options);
+    }
   });
 
 // Parse --workspace early so the identity subcommand can use the correct path.
@@ -96,7 +101,7 @@ program
   .option('-t, --theme <name>', 'Color theme', DEFAULT_THEME)
   .option('-i, --identity <name>', 'Identity name or ID')
   .action(async (prompt: string, opts) => {
-    await startRepl({ prompt, theme: opts.theme, workspace: process.cwd(), identity: opts.identity });
+    await runHeadless(prompt, { theme: opts.theme, workspace: process.cwd(), identity: opts.identity });
   });
 
 program
@@ -194,6 +199,76 @@ async function startRepl(options: {
   );
 
   await waitUntilExit();
+  process.exit(0);
+}
+
+// ── Headless single-prompt execution (cascade run / -p) ────────
+//
+// Bypasses the Ink Repl so the command works in non-TTY contexts
+// (CI, pipes, scripts). Progress goes to stderr; the final answer
+// goes to stdout so `cascade run "..." | jq ...` works cleanly.
+
+async function runHeadless(prompt: string, options: {
+  theme?: string;
+  workspace?: string;
+  identity?: string;
+}): Promise<void> {
+  const workspacePath = options.workspace ?? process.cwd();
+
+  const cm = new ConfigManager(workspacePath);
+  try {
+    await cm.load();
+  } catch (err) {
+    console.error(chalk.red(`Config error: ${err instanceof Error ? err.message : String(err)}`));
+    console.error(chalk.gray('Run `cascade init` to set up this directory.'));
+    process.exit(1);
+  }
+  const config = cm.getConfig();
+
+  const needsSetup =
+    !config.providers?.length ||
+    config.providers.every((p: { type: string; apiKey?: string }) => p.type !== 'ollama' && !p.apiKey);
+  if (needsSetup) {
+    console.error(chalk.red('No providers configured. Run `cascade init` first.'));
+    process.exit(1);
+  }
+
+  const cascade = new Cascade(config, workspacePath);
+  try {
+    await cascade.init();
+  } catch (err) {
+    console.error(chalk.red(`Initialization failed: ${err instanceof Error ? err.message : String(err)}`));
+    process.exit(1);
+  }
+
+  console.error(chalk.gray('  ◈ Running headlessly — tool approvals are auto-granted.'));
+
+  // Dedup consecutive identical status lines to keep stderr tidy.
+  let lastProgress = '';
+  cascade.on('tier:status', (ev: { role?: string; currentAction?: string }) => {
+    const action = ev?.currentAction?.trim();
+    if (!action) return;
+    const line = `  · ${ev.role ?? ''} ${action}`.trimEnd();
+    if (line === lastProgress) return;
+    lastProgress = line;
+    console.error(chalk.gray(line));
+  });
+
+  try {
+    const result = await cascade.run({
+      prompt,
+      workspacePath,
+      identityId: options.identity,
+      approvalCallback: async () => ({ approved: true, always: true }),
+    });
+    process.stdout.write(result.output.trimEnd() + '\n');
+  } catch (err) {
+    console.error(chalk.red(`Error: ${err instanceof Error ? err.message : String(err)}`));
+    await cascade.close().catch(() => { /* ignore */ });
+    process.exit(1);
+  }
+
+  await cascade.close().catch(() => { /* ignore */ });
   process.exit(0);
 }
 

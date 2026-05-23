@@ -540,27 +540,6 @@ export interface ThemeColors {
   t3Color: string;
 }
 
-// ── Tool Call Blocks (for inline TUI rendering) ───
-
-export interface ToolCallBlock {
-  id: string;
-  toolName: string;
-  input: Record<string, unknown>;
-  output?: string;
-  error?: string;
-  status: 'pending' | 'running' | 'done' | 'error';
-  tierId: string;
-  durationMs?: number;
-}
-
-export interface ReplMessage {
-  id: string;
-  role: 'user' | 'assistant' | 'system' | 'error';
-  content: string;
-  timestamp: string;
-  toolBlocks?: ToolCallBlock[];
-}
-
 // ── Events ────────────────────────────────────
 
 export type CascadeEventType =
