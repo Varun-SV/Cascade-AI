@@ -29,7 +29,7 @@ export function WelcomeHeader({ theme }: { theme: Theme }): React.ReactElement {
       marginBottom={1}
     >
       <Text color={theme.colors.primary} bold>◈ Welcome to Cascade AI</Text>
-      <Text color={theme.colors.muted}>Multi-tier AI orchestration CLI  ·  v0.5.3</Text>
+      <Text color={theme.colors.muted}>Multi-tier AI orchestration CLI  ·  v0.5.4</Text>
     </Box>
   );
 }

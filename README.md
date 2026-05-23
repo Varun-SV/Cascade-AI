@@ -12,7 +12,7 @@ cascade "Refactor the auth module to use JWT, add tests, and open a PR"
 
 ## Table of Contents
 
-- [What's New in v0.5.3](#whats-new-in-v053)
+- [What's New in v0.5.4](#whats-new-in-v054)
 - [How It Works](#how-it-works)
 - [Features](#features)
 - [Installation](#installation)
@@ -35,7 +35,15 @@ cascade "Refactor the auth module to use JWT, add tests, and open a PR"
 
 ---
 
-## What's New in v0.5.3
+## What's New in v0.5.4
+
+### v0.5.4 — Maximized-terminal flicker fix + orchestrator resilience
+- **Static-based conversation rendering** — completed messages now go to the terminal's native scrollback via Ink `<Static>`; only the live area (status bar, streaming tail, agent tree, input) re-renders per batch. Effectively eliminates the maximized-window flicker on cmd / PowerShell.
+- **`tier:status` throttle** (100 ms) + `React.memo` on AgentTree / StatusBar / HintBar to cut per-event re-render churn.
+- **Auto-clear agent tree** — the tree auto-hides 8 s after a task completes (preserves conversation and cost data); cancelled if a new task starts.
+- **T3 critical-error detection** — rate-limit / auth / forbidden errors now short-circuit the agent loop via a typed `CriticalToolError`; the worker no longer loops 15× on a 429.
+- **T3 stall preserves partial output** via a typed `WorkerStallError` instead of throwing a bare `Error`.
+- **T1 failure summary** — when all sections fail, the user sees the actual root cause (e.g. `[CRITICAL_TOOL_ERROR] grep: 429 Rate limit reached for gpt-5.4-mini`) instead of a generic "all sections encountered errors".
 
 ### v0.5.3 — Headless mode and audit fixes
 - **Headless `cascade run` / `-p`** — works in non-TTY contexts (CI, pipes, scripts). Progress → stderr, final answer → stdout. Tool approvals are auto-granted in headless mode.
