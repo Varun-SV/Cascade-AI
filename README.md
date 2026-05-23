@@ -12,7 +12,7 @@ cascade "Refactor the auth module to use JWT, add tests, and open a PR"
 
 ## Table of Contents
 
-- [What's New in v0.5.0](#whats-new-in-v050)
+- [What's New in v0.5.3](#whats-new-in-v053)
 - [How It Works](#how-it-works)
 - [Features](#features)
 - [Installation](#installation)
@@ -35,27 +35,20 @@ cascade "Refactor the auth module to use JWT, add tests, and open a PR"
 
 ---
 
-## What's New in v0.5.0
+## What's New in v0.5.3
 
-### Bug Fixes
-- **SettingsView error handling** — tier limits and budget panels now surface network/auth errors instead of silently failing
-- **LoginView token trimming** — whitespace is stripped from the API token before use
-- **SessionList delete feedback** — delete failures now show a user-visible error; `isDeleting` no longer gets stuck on network errors
-- **`cost:update` field name mismatch** — dashboard cost/token counters now update correctly after remote runs
+### v0.5.3 — Headless mode and audit fixes
+- **Headless `cascade run` / `-p`** — works in non-TTY contexts (CI, pipes, scripts). Progress → stderr, final answer → stdout. Tool approvals are auto-granted in headless mode.
+- **`cascade models` columns** — long model IDs no longer collide with the provider column.
+- **`/clear` resets cost breakdowns** — per-provider / per-tier maps are reset, not just the totals.
+- **`/config`** — richer output (theme, providers, per-tier models, dashboard port, cascade-auto), guarded against an undefined `config.dashboard`.
+- **Type cleanup** — removed vestigial `ReplMessage` / `ToolCallBlock` interfaces.
 
-### Security
-- **Symlink sandbox** — workspace path resolution now calls `realpathSync` so symlinks pointing outside the workspace are rejected
-- **Rate limiting** — mutation endpoints (`/api/run`, `/api/force-halt`, `/api/approve`, `/api/inject`) are rate-limited to 10 req/min; all API routes to 60 req/min
-- **Atomic config write** — config is written to a temp file and renamed atomically, preventing corruption on crash
-- **Request body validation** — `inject` and `config` endpoints validate shape at runtime before processing
-
-### New Features
-- **URL hash routing** — the dashboard tab survives page refresh; browser Back/Forward works
-- **Plugin loading from config** — add `"plugins": ["./my-plugin.js"]` to `.cascade/config.json` to load custom tool plugins at startup
-- **Conversational fast-path** — greetings and simple questions (≤12 words, matching conversational patterns) skip the T1 orchestration workflow entirely, returning a direct response at a fraction of the cost
-- **Auto model specialization** — when `cascadeAuto: true`, Cascade profiles each configured model at startup (via OpenRouter API or a lightweight LLM query), stores specializations in SQLite, and ranks models by task-type fit at execution time
-- **T3 text-tool fallback** — Ollama and other models that don't support native tool use now receive tools as structured text (`<tool_call>…</tool_call>` blocks) that are parsed and executed identically to native tool calls
-- **Peer communication visualization** — the web dashboard topology view shows animated dashed edges between agents exchanging messages; the Inspector panel adds a **Communications** tab listing every peer message for the selected agent
+### v0.5.2 — Setup wizard redesign + new tools
+- **First-run setup wizard redesigned** to match the Cascade-AI TUI design — themed welcome header, phased step tabs (API Keys → Models → Complete), field boxes, tier cards, and a proper completion screen. All provider/model functionality preserved.
+- **New tools** — `glob`, `grep`, and `web-fetch` available to T3 workers.
+- **Model-performance tracker** — records per-model success/cost stats for scored selection when `cascadeAuto: true`.
+- **Fixes** — removed an accidental `cascade-ai` self-dependency in `package.json`; corrected misleading `/tree` and `/sessions` slash-command descriptions; fixed stale T2/T3 test mocks.
 
 ---
 
