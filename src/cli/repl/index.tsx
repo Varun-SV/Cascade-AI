@@ -839,9 +839,15 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const costHeight = state.showCost ? 6 : 0;
   const approvalHeight = state.approvalRequest ? 12 : 0;
   const slashHeight = isTypingCommand ? SLASH_PAGE_SIZE + 2 : 0; // Fixes flicker by preserving constant layout height during command typing
-  const chromeHeight = statusHeight + costHeight + approvalHeight + slashHeight + 7; // Input(3) + Status(2) + Margins(2)
+  // Elements rendered outside the chat box that the old calc was missing —
+  // omitting these caused the TUI to overshoot the terminal (top scrolled off).
+  const hintHeight = state.isExecuting ? 0 : 1;
+  const bannerHeight = (state.messages.length === 0 && !state.isStreaming) ? 7 : 0; // WelcomeBanner: paddingY(2) + 3 lines + marginTop(1) + 1 line
+  const modelsHeight = isShowingModels ? 14 : 0; // ModelsDisplay: border(2) + header(2) + page(8) + ↑/↓ hints(2)
+  const startupWarningHeight = startupWarning ? 1 : 0;
+  const chromeHeight = statusHeight + costHeight + approvalHeight + slashHeight + hintHeight + bannerHeight + modelsHeight + startupWarningHeight + 7; // Input(3) + StatusBar(2) + ChatBoxBorder(2)
 
-  const availableHeight = Math.max(4, height - chromeHeight);
+  const availableHeight = Math.max(0, height - chromeHeight);
   const allLines = formatToLines(
     state.isStreaming
       ? [...state.messages, { id: 'stream', role: 'assistant', content: state.streamBuffer, timestamp: new Date().toISOString() } as Message]
