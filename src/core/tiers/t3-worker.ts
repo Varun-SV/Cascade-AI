@@ -28,6 +28,32 @@ import {
   buildTextToolSystemPrompt,
 } from '../../tools/text-tool-parser.js';
 
+/**
+ * Thrown by executeTool() when the underlying tool error indicates an
+ * unrecoverable condition (rate limit, auth failure, forbidden) — the
+ * agent loop should NOT keep retrying and the worker should escalate
+ * fast with the real reason intact.
+ */
+export class CriticalToolError extends Error {
+  constructor(message: string, public readonly toolName: string) {
+    super(message);
+    this.name = 'CriticalToolError';
+  }
+}
+
+/**
+ * Thrown by runAgentLoop() when the worker is stuck producing an artifact
+ * that verifyArtifacts() rejects on consecutive iterations. Carries any
+ * partial output the worker had built so the caller can surface it
+ * instead of just the bare error string.
+ */
+export class WorkerStallError extends Error {
+  constructor(message: string, public readonly partialOutput: string) {
+    super(message);
+    this.name = 'WorkerStallError';
+  }
+}
+
 const T3_SYSTEM_PROMPT = `You are a T3 Worker agent in the Cascade AI system. Your job is to execute a specific subtask completely and accurately.
 
 Rules:
@@ -220,6 +246,23 @@ export class T3Worker extends BaseTier {
       return this.buildResult('COMPLETED', output, { checksRun, passed, failed }, issues, correctionAttempts);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
+      // Preserve partial output when the worker stalled mid-generation, and
+      // mark critical/unrecoverable errors so T2/T1 can surface them clearly
+      // instead of being swallowed under a generic "Execution error" prefix.
+      if (err instanceof WorkerStallError) {
+        issues.push(`Stalled: ${errMsg}`);
+        const finalOutput = err.partialOutput || output || errMsg;
+        this.setStatus('FAILED', finalOutput);
+        this.peerBus?.publish(this.id, assignment.subtaskId, finalOutput, 'FAILED');
+        return this.buildResult('ESCALATED', finalOutput, { checksRun, passed, failed }, issues, correctionAttempts);
+      }
+      if (err instanceof CriticalToolError) {
+        issues.push(`[CRITICAL_TOOL_ERROR] ${err.toolName}: ${errMsg}`);
+        const finalOutput = output || `Tool "${err.toolName}" failed unrecoverably: ${errMsg}`;
+        this.setStatus('FAILED', finalOutput);
+        this.peerBus?.publish(this.id, assignment.subtaskId, finalOutput, 'FAILED');
+        return this.buildResult('ESCALATED', finalOutput, { checksRun, passed, failed }, issues, correctionAttempts);
+      }
       issues.push(`Execution error: ${errMsg}`);
       const finalOutput = output || errMsg;
       this.setStatus('FAILED', finalOutput);
@@ -317,10 +360,17 @@ export class T3Worker extends BaseTier {
 
           stalledArtifactIterations += 1;
           if (stalledArtifactIterations >= 2) {
+            const partial = result.content || '';
             if (stalledArtifactIterations === 2) {
-              throw new Error(`Worker stalled waiting for artifact creation. Requesting dynamic tool generation from T2 Manager for: ${this.assignment?.subtaskTitle ?? 'unknown task'}`);
+              throw new WorkerStallError(
+                `Worker stalled waiting for artifact creation. Requesting dynamic tool generation from T2 Manager for: ${this.assignment?.subtaskTitle ?? 'unknown task'}`,
+                partial,
+              );
             }
-            throw new Error('Artifact-producing task stalled without creating or verifying the required files');
+            throw new WorkerStallError(
+              'Artifact-producing task stalled without creating or verifying the required files',
+              partial,
+            );
           }
           await this.context.addMessage({
             role: 'user',
@@ -443,6 +493,13 @@ export class T3Worker extends BaseTier {
       const durationMs = Date.now() - toolStartMs;
       const errMsg = err instanceof Error ? err.message : String(err);
       this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: tc.name, error: errMsg, durationMs });
+      // Unrecoverable conditions (rate-limit, auth, forbidden) — throw a
+      // CriticalToolError so the agent loop stops retrying and the worker
+      // escalates fast with the real reason intact (used to loop 15× then
+      // emit a generic failure).
+      if (/\b(429|rate.?limit|authentication|api.?key|forbidden|401|403)\b/i.test(errMsg)) {
+        throw new CriticalToolError(errMsg, tc.name);
+      }
       return `Tool error: ${errMsg}`;
     }
   }

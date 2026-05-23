@@ -643,7 +643,17 @@ Leave dependsOn empty for sections that can run immediately in parallel.`;
     const completedSections = t2Results.filter((r) => r.status !== 'FAILED');
 
     if (!completedSections.length) {
-      return 'Task failed — all sections encountered errors. Please check the escalation log.';
+      // Aggregate T3 issues across all FAILED sections to surface the root
+      // cause. Critical errors (rate-limit / auth / forbidden, marked with
+      // [CRITICAL_TOOL_ERROR] by t3-worker.ts) take precedence over generic
+      // stall / execution messages — this is what the user needs to act on
+      // (e.g. switch the T3 model away from a rate-limited one).
+      const allIssues = t2Results.flatMap((r) => r.t3Results.flatMap((t) => t.issues));
+      const critical = allIssues.find((i) => i.includes('[CRITICAL_TOOL_ERROR]'));
+      const stalled = allIssues.find((i) => /^Stalled:/.test(i));
+      const topReason = critical ?? stalled ?? allIssues[0] ?? 'no specific reason recorded';
+      const sectionWord = t2Results.length === 1 ? 'section' : 'sections';
+      return `Task failed — ${topReason}\n\nAll ${t2Results.length} ${sectionWord} encountered errors. Run \`/logs\` for details.`;
     }
 
     const sectionsText = completedSections
