@@ -70,9 +70,9 @@ export function AgentTree({
 }: AgentTreeProps): React.ReactElement | null {
   if (!root) return null;
 
-  const isActive = hasActiveOrFailed(root);
-  if (!isActive) return null;
-
+  // Render the tree whenever a root exists — including after all nodes have
+  // completed (✔ marks). Hiding the tree on completion caused a layout-shift
+  // flicker that was visible in the tree area and the input area below it.
   const allRows = buildRows(root);
   const total = allRows.length;
 

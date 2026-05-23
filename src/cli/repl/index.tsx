@@ -825,7 +825,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   // Fixed height cap for the agent tree — keeps layout stable as T2/T3 nodes spawn.
   // AgentTree internally handles scrolling within this budget.
   const MAX_TREE_ROWS = 10;
-  const agentTreeHeight = (state.agentTree && hasActiveOrFailed(state.agentTree))
+  // Reserve tree height continuously while a session is active (executing or
+  // tree exists) — toggling this caused the tree / input area to flicker as
+  // nodes transitioned in and out of ACTIVE during execution.
+  const agentTreeHeight = (state.isExecuting || state.agentTree != null)
     ? MAX_TREE_ROWS
     : 0;
 
