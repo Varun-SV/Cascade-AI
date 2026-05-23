@@ -3,7 +3,7 @@
 // ─────────────────────────────────────────────
 
 import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
-import { Box, Text, useApp, useInput, useStdout } from 'ink';
+import { Box, Static, Text, useApp, useInput, useStdout } from 'ink';
 import { SafeTextInput } from '../components/SafeTextInput.js';
 import { sanitizeTerminalInput, containsMouseSequence } from '../utils/terminal-input.js';
 import { randomUUID } from 'node:crypto';
@@ -42,7 +42,19 @@ import { ApprovalPrompt } from './components/ApprovalPrompt.js';
 import { ModelsDisplay, type ModelPickerSelection } from './components/ModelsDisplay.js';
 import { CostTracker } from './components/CostTracker.js';
 import { CompactStatus } from './components/CompactStatus.js';
-import { formatToLines } from './utils/line-buffer.js';
+import { ChatMessage } from './components/ChatMessage.js';
+
+// Auto-hide the agent tree this many ms after execution completes. Cancelled
+// if a new task starts. Tunable.
+const AUTO_CLEAR_TREE_MS = 8000;
+
+// Show only the last N lines of a streaming buffer in the live area so a
+// long generation can't push the rest of the TUI off-screen. The full text
+// appears in scrollback once the stream commits as a message.
+function tailLines(text: string, n: number): string[] {
+  const lines = text.split('\n');
+  return lines.slice(-n);
+}
 
 interface WelcomeBannerProps {
   theme: Theme;
@@ -129,7 +141,8 @@ type ReplAction =
   | { type: 'TOGGLE_COST' }
   | { type: 'TOGGLE_DETAILS' }
   | { type: 'SET_ERROR'; error: string | null }
-  | { type: 'SET_ACTIVE_TOOL'; toolName: string | null };
+  | { type: 'SET_ACTIVE_TOOL'; toolName: string | null }
+  | { type: 'CLEAR_TREE' };
 
 function replReducer(state: ReplState, action: ReplAction): ReplState {
   switch (action.type) {
@@ -158,6 +171,8 @@ function replReducer(state: ReplState, action: ReplAction): ReplState {
       return { ...state, isStreaming: action.isStreaming };
     case 'CLEAR':
       return { ...state, messages: [], agentTree: null, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, activeTool: null };
+    case 'CLEAR_TREE':
+      return { ...state, agentTree: null };
     case 'TOGGLE_COST':
       return { ...state, showCost: !state.showCost };
     case 'TOGGLE_DETAILS':
@@ -225,13 +240,12 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const nodeLogsRef = useRef<Map<string, string[]>>(new Map());
   const [startupWarning, setStartupWarning] = useState<string | null>(null);
   const [timelineIndex, setTimelineIndex] = useState(0);
-  const [scrollOffset, setScrollOffset] = useState(0);
   const [treeScrollOffset, setTreeScrollOffset] = useState(0);
-  const [isAutoScrolling, setIsAutoScrolling] = useState(true);
   const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
   const [quitAttempted, setQuitAttempted] = useState(false);
   const isInputLockedRef = useRef(false);
   const lockTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const autoClearTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const lockInputTemporarily = useCallback(() => {
     isInputLockedRef.current = true;
@@ -412,6 +426,30 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       setSlashIndex(0);
     }
   }, [slashCompletions.length, slashIndex]);
+
+  // Auto-hide the agent tree after a session completes. Clears the tree only
+  // (preserves messages, costs, active tool) AUTO_CLEAR_TREE_MS after execution
+  // finishes. Cancelled if a new task starts.
+  useEffect(() => {
+    if (state.isExecuting) {
+      if (autoClearTimerRef.current) {
+        clearTimeout(autoClearTimerRef.current);
+        autoClearTimerRef.current = null;
+      }
+      return;
+    }
+    if (state.agentTree == null) return;
+    autoClearTimerRef.current = setTimeout(() => {
+      dispatch({ type: 'CLEAR_TREE' });
+      autoClearTimerRef.current = null;
+    }, AUTO_CLEAR_TREE_MS);
+    return () => {
+      if (autoClearTimerRef.current) {
+        clearTimeout(autoClearTimerRef.current);
+        autoClearTimerRef.current = null;
+      }
+    };
+  }, [state.isExecuting, state.agentTree]);
 
   const handleSlashCommand = useCallback(async (trimmed: string) => {
     const result = await slashRef.current.handle(trimmed, {
@@ -629,22 +667,35 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     let currentStreamBuffer = '';
     let streamThrottleTimeout: NodeJS.Timeout | null = null;
     const flushStream = () => { if (currentStreamBuffer) { dispatch({ type: 'APPEND_STREAM', text: currentStreamBuffer }); currentStreamBuffer = ''; } streamThrottleTimeout = null; };
-    const onStream = ({ text, tierId }: { text: string; tierId: string }) => { 
+    const onStream = ({ text, tierId }: { text: string; tierId: string }) => {
       if (tierId !== rootTierIdRef.current) return; // Hide non-root streams from main chat
-      currentStreamBuffer += (text ?? ''); 
-      if (!streamThrottleTimeout) streamThrottleTimeout = setTimeout(flushStream, 50); 
+      currentStreamBuffer += (text ?? '');
+      if (!streamThrottleTimeout) streamThrottleTimeout = setTimeout(flushStream, 50);
+    };
+    // tier:status fires very frequently during execution. Coalesce into 100ms
+    // batches so we don't trigger SET_TREE + UPDATE_COST on every event — the
+    // unbatched version flickered badly on maximized terminals.
+    const pendingStatusEvents: TierStatusEvent[] = [];
+    let statusThrottleTimeout: NodeJS.Timeout | null = null;
+    const flushStatus = () => {
+      const events = pendingStatusEvents.splice(0);
+      let lastTool: string | null = null;
+      for (const ev of events) {
+        recordNodeEvent(ev);
+        if (ev.currentAction?.startsWith('Using tool:')) {
+          lastTool = ev.currentAction.replace('Using tool:', '').trim();
+        }
+      }
+      if (lastTool !== null) dispatch({ type: 'SET_ACTIVE_TOOL', toolName: lastTool });
+      const stats = cascade.getRouter().getStats();
+      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier });
+      statusThrottleTimeout = null;
     };
     cascade.on('tier:root', onRoot);
     cascade.on('stream:token', onStream);
     cascade.on('tier:status', (ev: TierStatusEvent) => {
-      recordNodeEvent(ev);
-      const stats = cascade.getRouter().getStats();
-      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier });
-      // Extract active tool from currentAction if present
-      if (ev.currentAction?.startsWith('Using tool:')) {
-        const toolName = ev.currentAction.replace('Using tool:', '').trim();
-        dispatch({ type: 'SET_ACTIVE_TOOL', toolName });
-      }
+      pendingStatusEvents.push(ev);
+      if (!statusThrottleTimeout) statusThrottleTimeout = setTimeout(flushStatus, 100);
     });
     cascade.on('budget:warning', (payload: { spentUsd: number; capUsd: number; spendPct: number; remainingUsd: number }) => {
       const bar = '█'.repeat(Math.round(payload.spendPct / 10)) + '░'.repeat(10 - Math.round(payload.spendPct / 10));
@@ -700,6 +751,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         }
       });
       flushStream();
+      flushStatus();
       const stats = cascade.getRouter().getStats();
       dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier });
       dispatch({ type: 'COMMIT_STREAM', finalText: result.output, timestamp: new Date().toISOString() });
@@ -718,8 +770,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       const message = err instanceof Error ? err.message : String(err);
       dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'error', content: message, timestamp: new Date().toISOString() } }); 
     }
-    finally { 
-      cascade.removeAllListeners(); 
+    finally {
+      if (streamThrottleTimeout) { clearTimeout(streamThrottleTimeout); streamThrottleTimeout = null; }
+      if (statusThrottleTimeout) { clearTimeout(statusThrottleTimeout); statusThrottleTimeout = null; }
+      cascade.removeAllListeners();
       const finalStats = cascade.getRouter().getStats();
       const currentSession = storeRef.current?.getSession(sessionIdRef.current);
       if (currentSession) {
@@ -790,138 +844,39 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         return;
       }
     }
-    const maxScroll = Math.max(0, allLines.length - chatWindowHeight);
-    if (key.pageUp || (key.shift && key.upArrow)) { 
-      setIsAutoScrolling(false); 
-      setScrollOffset(p => Math.max(0, p - 5)); 
-    }
-    if (key.pageDown || (key.shift && key.downArrow)) { 
-      setScrollOffset(p => { 
-        const next = p + 5; 
-        if (next >= maxScroll) { setIsAutoScrolling(true); return maxScroll; }
-        return next; 
-      }); 
-    }
-    
     // Ensure slashIndex is handled when characters are deleted
     if ((key.backspace || key.delete) && slashCompletions.length > 0) {
       setSlashIndex(0);
     }
   });
 
-  const allLinesRef = useRef<number>(0);
-  const chatWindowHeightRef = useRef<number>(10);
-  const isAutoScrollingRef = useRef<boolean>(true);
-
   const width = stdout?.columns ?? 100;
-  const height = stdout?.rows ?? 24;
-  
-  // Calculate dynamic heights exactly to prevent screen flickering
-  const hasActiveOrFailed = (node: TierNode): boolean => {
-    if (node.status === 'ACTIVE' || node.status === 'FAILED') return true;
-    return node.children?.some(hasActiveOrFailed) ?? false;
-  };
 
-  // Fixed height cap for the agent tree — keeps layout stable as T2/T3 nodes spawn.
-  // AgentTree internally handles scrolling within this budget.
+  // Fixed-height cap for the agent tree — keeps layout stable as nodes spawn.
+  // AgentTree scrolls internally within this budget.
   const MAX_TREE_ROWS = 10;
-  // Reserve tree height continuously while a session is active (executing or
-  // tree exists) — toggling this caused the tree / input area to flicker as
-  // nodes transitioned in and out of ACTIVE during execution.
-  const agentTreeHeight = (state.isExecuting || state.agentTree != null)
-    ? MAX_TREE_ROWS
-    : 0;
-
-  let timelineHeight = 0;
-  if (state.showDetails && treeNodesRef.current.size > 0) {
-    timelineHeight = 1; // "Activity Log" header
-    timelineHeight += Math.min(3, treeNodesRef.current.size); // Up to 3 logs
-  }
-
-  const statusHeight = agentTreeHeight + timelineHeight;
-  const costHeight = state.showCost ? 6 : 0;
-  const approvalHeight = state.approvalRequest ? 12 : 0;
-  const slashHeight = isTypingCommand ? SLASH_PAGE_SIZE + 2 : 0; // Fixes flicker by preserving constant layout height during command typing
-  // Elements rendered outside the chat box that the old calc was missing —
-  // omitting these caused the TUI to overshoot the terminal (top scrolled off).
-  const hintHeight = state.isExecuting ? 0 : 1;
-  const bannerHeight = (state.messages.length === 0 && !state.isStreaming) ? 7 : 0; // WelcomeBanner: paddingY(2) + 3 lines + marginTop(1) + 1 line
-  const modelsHeight = isShowingModels ? 14 : 0; // ModelsDisplay: border(2) + header(2) + page(8) + ↑/↓ hints(2)
-  const startupWarningHeight = startupWarning ? 1 : 0;
-  const chromeHeight = statusHeight + costHeight + approvalHeight + slashHeight + hintHeight + bannerHeight + modelsHeight + startupWarningHeight + 7; // Input(3) + StatusBar(2) + ChatBoxBorder(2)
-
-  const availableHeight = Math.max(0, height - chromeHeight);
-  const allLines = formatToLines(
-    state.isStreaming
-      ? [...state.messages, { id: 'stream', role: 'assistant', content: state.streamBuffer, timestamp: new Date().toISOString() } as Message]
-      : state.messages,
-    width - 4,
-    theme
-  );
-
-  // Always occupy the full available height so the layout never shifts when content grows.
-  const chatWindowHeight = availableHeight;
-  const maxScroll = Math.max(0, allLines.length - chatWindowHeight);
 
   useEffect(() => {
-    if (isAutoScrolling) {
-      setScrollOffset(maxScroll);
-    }
-  }, [allLines.length, isAutoScrolling, maxScroll]);
-
-  useEffect(() => {
-    allLinesRef.current = allLines.length;
-    chatWindowHeightRef.current = chatWindowHeight;
-    isAutoScrollingRef.current = isAutoScrolling;
-  }, [allLines.length, isAutoScrolling, chatWindowHeight]);
-
-  useEffect(() => {
-    // Enable mouse reporting (1000: mouse move/press, 1006: SGR mode).
-    // SafeTextInput honours `manageMouseReporting={false}` so it won't disable
-    // this on mount. Bracketed-paste mode is enabled by SafeTextInput itself.
+    // Enable mouse reporting + strip mouse-sequence noise so right-click /
+    // scroll-wheel events don't leak into the input prompt. Chat scroll is
+    // handled by the terminal's native scrollback now — completed messages
+    // live in Ink Static and naturally flow into the scrollback.
     process.stdout.write('\x1b[?1000h\x1b[?1006h');
 
     const onData = (data: Buffer) => {
       const str = data.toString();
 
-      // SGR mouse sequence → handle scroll wheel, swallow the rest.
       if (containsMouseSequence(str)) {
-        // Lock input ONLY for mouse sequences to prevent them leaking into the prompt.
-        // ⚠ Do NOT lock for all \x1b sequences — that would block Delete (\x1b[3~),
-        //   arrow keys, Home, End, and other navigation escape sequences.
         lockInputTemporarily();
-        const mouseMatch = str.match(/\x1b\[<(\d+);\d+;\d+[Mm]/);
-        if (mouseMatch) {
-          const code = parseInt(mouseMatch[1]!, 10);
-          if (code === 64) { // Wheel Up
-            setIsAutoScrolling(false);
-            setScrollOffset(p => Math.max(0, p - 3));
-          } else if (code === 65) { // Wheel Down
-            setScrollOffset(p => {
-              const next = p + 3;
-              const max = Math.max(0, allLinesRef.current - chatWindowHeightRef.current);
-              if (next >= max) { setIsAutoScrolling(true); return max; }
-              return next;
-            });
-          }
-        }
-        return; // Consumed by mouse handler
+        return; // swallow — the terminal's native scrollback handles wheel
       }
 
-      // Ctrl+Up (\x1b[1;5A) / Ctrl+Down (\x1b[1;5B) — scroll the agent tree
-      if (str === '\x1b[1;5A') {
-        setTreeScrollOffset(p => Math.max(0, p - 1));
-        return;
-      }
-      if (str === '\x1b[1;5B') {
-        setTreeScrollOffset(p => p + 1);
-        return;
-      }
+      // Ctrl+Up / Ctrl+Down — scroll the agent tree (not the chat).
+      if (str === '\x1b[1;5A') { setTreeScrollOffset(p => Math.max(0, p - 1)); return; }
+      if (str === '\x1b[1;5B') { setTreeScrollOffset(p => p + 1); return; }
 
       // Forward-delete (\x1b[3~) is handled by SafeTextInput's own raw-stdin
-      // listener — it correctly removes the character AT the cursor, not the
-      // last character of the buffer. We deliberately do NOT handle it here
-      // to avoid double-deletions.
+      // listener — we deliberately don't handle it here to avoid duplicates.
     };
 
     process.stdin.on('data', onData);
@@ -931,15 +886,25 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     };
   }, [lockInputTemporarily]);
 
-  const visibleLines = allLines.slice(scrollOffset, scrollOffset + chatWindowHeight);
-  const showScrollAlert = !isAutoScrolling;
-  const chatHeight = chatWindowHeight - (showScrollAlert ? 1 : 0);
-  const currentIdentity = identities.find((id) => id.id === currentIdentityId)?.name ?? 'Default';
-  const modelName = cascadeRef.current?.getRouter().getModelForTier('T1')?.name ?? 'Initializing...';
-
   return (
     <Box flexDirection="column" width={width}>
-      {/* ── Status bar — top, always visible ── */}
+      {/* Conversation history — Static items are written to the terminal
+          scrollback ONCE and never re-rendered. This is what kills the
+          per-render write cost that flickered on maximized terminals. */}
+      <Static items={state.messages}>
+        {(msg) => (
+          <ChatMessage
+            key={msg.id}
+            role={msg.role}
+            content={msg.content}
+            timestamp={msg.timestamp}
+            theme={theme}
+          />
+        )}
+      </Static>
+
+      {/* ── Live area: everything below re-renders on each batch ── */}
+
       <StatusBar
         theme={theme}
         tierModels={{
@@ -954,36 +919,43 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         activeTier={state.agentTree?.status === 'ACTIVE' ? 'T1' : undefined}
       />
 
-      <Box flexDirection="column" borderStyle="round" borderColor={theme.colors.border} paddingX={1} height={chatWindowHeight + 2}>
-        <Box flexDirection="column" flexGrow={1} overflow="hidden">
-          {showScrollAlert && (
-            <Box justifyContent="center" height={1}>
-              <Text backgroundColor="blue" color="white" bold> ⇡ SCROLLED UP — PgDn TO BOTTOM ⇣ </Text>
-            </Box>
-          )}
-          <Box flexDirection="column" height={chatHeight}>
-            {visibleLines.map((line, i) => (
-              <Text key={i}>{line}</Text>
-            ))}
-          </Box>
+      {startupWarning && (
+        <Box paddingX={2}>
+          <Text color="yellow">{startupWarning}</Text>
         </Box>
-      </Box>
+      )}
 
-      <Box flexDirection="column" paddingX={1}>
-        {state.messages.length === 0 && !state.isStreaming && (
-          <WelcomeBanner theme={theme} config={config} workspacePath={workspacePath} sessionId={sessionIdRef.current} />
-        )}
-        {isShowingModels && (
+      {state.messages.length === 0 && !state.isStreaming && (
+        <WelcomeBanner theme={theme} config={config} workspacePath={workspacePath} sessionId={sessionIdRef.current} />
+      )}
+
+      {/* Live streaming response — capped to the last 8 lines so a long
+          generation can't push the rest of the live area off-screen. The
+          full text shows in scrollback once it commits. */}
+      {state.isStreaming && state.streamBuffer && (
+        <Box flexDirection="column" paddingX={1} marginTop={1}>
+          <Box>
+            <Text color={theme.colors.accent} bold>◈ CASCADE</Text>
+            <Text color={theme.colors.muted}> streaming…</Text>
+          </Box>
+          {tailLines(state.streamBuffer, 8).map((line, i) => (
+            <Text key={i} wrap="wrap">{line}</Text>
+          ))}
+        </Box>
+      )}
+
+      {isShowingModels && (
+        <Box paddingX={1}>
           <ModelsDisplay
             providers={config.providers.map(p => p.type)}
             modelsByProvider={cachedModels}
             onSelect={(sel) => { void applyModelPick(sel); }}
             onClose={() => setIsShowingModels(false)}
           />
-        )}
-      </Box>
+        </Box>
+      )}
 
-      {/* ── Compact agent tree — auto-hides when idle ── */}
+      {/* Compact agent tree — auto-hides AUTO_CLEAR_TREE_MS after completion */}
       <AgentTree root={state.agentTree} theme={theme} scrollOffset={treeScrollOffset} maxRows={MAX_TREE_ROWS} />
 
       {state.showDetails && (
@@ -994,7 +966,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       {/* Always render at fixed height when the user is typing a command — prevents layout shift
           as the suggestion list filters (grows/shrinks), which caused the chat window to flicker. */}
       {isTypingCommand && (
-        <Box flexDirection="column" borderStyle="round" borderColor={theme.colors.border} paddingX={1} height={slashHeight}>
+        <Box flexDirection="column" borderStyle="round" borderColor={theme.colors.border} paddingX={1} height={SLASH_PAGE_SIZE + 2}>
           <Box flexDirection="row" justifyContent="space-between">
             <Text color={theme.colors.muted}>Commands  ↑↓ navigate · ↵ select · Tab complete</Text>
             {slashEntries.length > SLASH_PAGE_SIZE && (

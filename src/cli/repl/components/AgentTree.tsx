@@ -60,7 +60,7 @@ function buildRows(root: TierNode): TreeRow[] {
   return rows;
 }
 
-export function AgentTree({
+function AgentTreeInternal({
   root,
   theme,
   scrollOffset = 0,
@@ -188,3 +188,5 @@ function countByRoleAndStatus(node: TierNode, role: TierNode['role'], status: Ti
 function stripRolePrefix(label: string, role: string): string {
   return label.replace(new RegExp(`^\\[${role}\\]\\s*`, 'i'), '');
 }
+
+export const AgentTree = React.memo(AgentTreeInternal);

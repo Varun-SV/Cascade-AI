@@ -11,7 +11,7 @@ interface HintBarProps {
   isExecuting: boolean;
 }
 
-export function HintBar({ theme, isExecuting }: HintBarProps): React.ReactElement | null {
+function HintBarInternal({ theme, isExecuting }: HintBarProps): React.ReactElement | null {
   // Hide during execution to reclaim vertical space
   if (isExecuting) return null;
 
@@ -23,3 +23,5 @@ export function HintBar({ theme, isExecuting }: HintBarProps): React.ReactElemen
     </Box>
   );
 }
+
+export const HintBar = React.memo(HintBarInternal);
