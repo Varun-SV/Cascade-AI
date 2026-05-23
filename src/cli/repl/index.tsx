@@ -965,10 +965,11 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       )}
       {state.showCost && <CostTracker theme={theme} totalTokens={state.totalTokens} totalCostUsd={state.totalCostUsd} callsByProvider={state.callsByProvider} callsByTier={state.callsByTier} costByTier={state.costByTier} tokensByTier={state.tokensByTier} />}
       {state.approvalRequest && <ApprovalPrompt request={state.approvalRequest} theme={theme} onDecision={(decision) => { dispatch({ type: 'SET_APPROVAL', request: null }); approvalResolverRef.current?.(decision); }} />}
-      {/* Always render at fixed height when the user is typing a command — prevents layout shift
-          as the suggestion list filters (grows/shrinks), which caused the chat window to flicker. */}
+      {/* Suggestion panel — fixed height so the input below doesn't jump as
+          entries filter while typing. Sized for header (1) + 8 entries +
+          up to 2 scroll indicators = 11 rows worst case. */}
       {isTypingCommand && (
-        <Box flexDirection="column" borderStyle="round" borderColor={theme.colors.border} paddingX={1} height={SLASH_PAGE_SIZE + 2}>
+        <Box flexDirection="column" borderStyle="round" borderColor={theme.colors.border} paddingX={1} height={SLASH_PAGE_SIZE + 3}>
           <Box flexDirection="row" justifyContent="space-between">
             <Text color={theme.colors.muted}>Commands  ↑↓ navigate · ↵ select · Tab complete</Text>
             {slashEntries.length > SLASH_PAGE_SIZE && (
@@ -998,7 +999,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
                       </Text>
                     </Box>
                     {entry.description ? (
-                      <Text color={theme.colors.muted} dimColor> {entry.description}</Text>
+                      <Text color={theme.colors.muted} dimColor wrap="truncate"> {entry.description}</Text>
                     ) : null}
                   </Box>
                 );
