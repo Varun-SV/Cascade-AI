@@ -1021,7 +1021,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           </Box>
         )}
         <Box flexDirection="row">
-          <Text color={theme.colors.primary} bold>▸ {queuedMessages.length > 0 ? <Text color={theme.colors.accent}>[QUEUED] </Text> : ''}</Text>
+          <Text color={theme.colors.primary} bold>› {queuedMessages.length > 0 ? <Text color={theme.colors.accent}>[QUEUED] </Text> : ''}</Text>
           <SafeTextInput
             focus={!state.approvalRequest && !isShowingModels}
             value={input}

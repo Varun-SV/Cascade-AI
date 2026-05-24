@@ -97,8 +97,7 @@ function AgentTreeInternal({
           const activeLabel = (t2Active + t3Active) > 0 ? ` (${t2Active + t3Active} active)` : '';
           return (
             <Box key={`header-${i}`}>
-              <Text color={theme.colors.primary} bold>◈ T1{t2Label}{t3Label}</Text>
-              {activeLabel ? <Text color={theme.colors.muted}>{activeLabel}</Text> : null}
+              <Text color={theme.colors.primary} bold>◈ T1{t2Label}{t3Label}{activeLabel}</Text>
               {headerAction ? <Text color={theme.colors.muted}>  {headerAction}</Text> : null}
               <Text> </Text>
               {node.status === 'ACTIVE'
