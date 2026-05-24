@@ -27,6 +27,7 @@ CASCADE.md
 scripts/
 
 # AI tools & generated analysis artefacts
+Cascade-AI TUI Standalone.html
 .agent/
 .codex/
 .continue/

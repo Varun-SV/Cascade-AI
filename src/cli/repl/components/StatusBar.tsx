@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────
-//  Cascade AI — Status Bar (top, Claude Code style)
+//  Cascade AI — Status Bar (top, full-width purple strip)
 // ─────────────────────────────────────────────
 
 import React from 'react';
@@ -18,48 +18,28 @@ interface StatusBarProps {
 
 function StatusBarInternal({
   theme,
-  tierModels,
   tokens,
   costUsd,
-  workspacePath,
   isExecuting,
   activeTier,
 }: StatusBarProps): React.ReactElement {
   const { stdout } = useStdout();
-  const width = (stdout?.columns ?? 80) - 2;
+  const width = stdout?.columns ?? 80;
 
-  const t1Label = tierModels.t1 ? truncate(tierModels.t1, 18) : 'auto';
-  const folderName = workspacePath.split(/[/\\]/).pop() ?? workspacePath;
   const tierIndicator = activeTier ? ` [${activeTier}]` : '';
-
   const left = ` ◈ CASCADE${tierIndicator} `;
-  const mid = ` ${truncate(folderName, 24)}  T1:${t1Label} `;
   const right = ` ${formatTokens(tokens)} · $${costUsd.toFixed(4)} ${isExecuting ? '⚡' : '·'} `;
 
-  const totalUsed = left.length + mid.length + right.length;
-  const gap = Math.max(0, width - totalUsed);
-  const leftGap = ' '.repeat(Math.floor(gap / 2));
-  const rightGap = ' '.repeat(Math.ceil(gap / 2));
+  // Pad the gap between left and right so the strip spans the full terminal width
+  const gap = Math.max(0, width - left.length - right.length);
 
   return (
-    <Box
-      borderStyle="single"
-      borderTop={false}
-      borderBottom={true}
-      borderLeft={false}
-      borderRight={false}
-      borderColor={theme.colors.border}
-      width={width + 2}
-    >
+    <Box width={width} flexDirection="row">
       <Text backgroundColor={theme.colors.primary} color={theme.colors.background} bold>{left}</Text>
-      <Text color={theme.colors.muted}>{leftGap}{mid}{rightGap}</Text>
-      <Text color={theme.colors.muted}>{right}</Text>
+      <Text backgroundColor={theme.colors.primary} color={theme.colors.primary}>{' '.repeat(gap)}</Text>
+      <Text backgroundColor={theme.colors.primary} color={theme.colors.background} dimColor>{right}</Text>
     </Box>
   );
-}
-
-function truncate(s: string, max: number): string {
-  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
 }
 
 function formatTokens(n: number): string {

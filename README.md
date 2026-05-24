@@ -12,7 +12,7 @@ cascade "Refactor the auth module to use JWT, add tests, and open a PR"
 
 ## Table of Contents
 
-- [What's New in v0.5.5](#whats-new-in-v055)
+- [What's New in v0.5.6](#whats-new-in-v055)
 - [How It Works](#how-it-works)
 - [Features](#features)
 - [Installation](#installation)
@@ -35,9 +35,9 @@ cascade "Refactor the auth module to use JWT, add tests, and open a PR"
 
 ---
 
-## What's New in v0.5.5
+## What's New in v0.5.6
 
-### v0.5.5 — Wizard scrollable model list + chat scrollback + slash panel fix
+### v0.5.6 — Wizard scrollable model list + chat scrollback + slash panel fix
 - **Init wizard tier-model picker** — added `limit={8}` to the `SelectInput` so long model lists scroll with ↑/↓ indicators instead of overflowing off-screen.
 - **Chat scrolling restored** — the REPL was still enabling mouse-reporting on mount, which captured wheel events and broke the terminal's native scrollback (where Ink `<Static>` messages live since v0.5.4). Flipped the on-mount sequence to actively disable. Mouse-wheel-up now scrolls the terminal scrollback as expected.
 - **Slash-command suggestion panel** — long descriptions were wrapping to a second line and squishing two entries onto one row. Added `wrap="truncate"` on the description text and bumped the fixed panel height by one row to fit the worst-case content (header + 8 entries + both ↑/↓ indicators).

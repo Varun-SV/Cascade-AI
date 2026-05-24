@@ -524,11 +524,14 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
     const prompt =
       isAzure && fieldStage === 'deploymentName' ? `Azure deployment name (${currentEntry.label})` :
       isAzure && fieldStage === 'baseUrl' ? `Azure endpoint URL` :
+      isAzure && fieldStage === 'apiKey' ? `${currentEntry.label} API Key` :
+      isAzure && fieldStage === 'apiVersion' ? `Azure API version (e.g. 2024-08-01-preview)` :
       isCompat && fieldStage === 'label' ? `Name for this endpoint (e.g. Groq)` :
       isCompat && fieldStage === 'baseUrl' ? `Base URL (e.g. https://api.groq.com/openai/v1)` :
       isOllama ? `Ollama URL` :
       `${currentEntry.label} API Key`;
 
+    // apiVersion is not a secret — only mask the apiKey stage
     const isMasked = fieldStage === 'apiKey' && !isOllama;
 
     return (

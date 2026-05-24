@@ -17,8 +17,8 @@ function HintBarInternal({ theme, isExecuting }: HintBarProps): React.ReactEleme
 
   return (
     <Box paddingLeft={1}>
-      <Text color={theme.colors.muted} dimColor>
-        {'Esc cancel · ↑↓ history · / commands · Ctrl+C exit'}
+      <Text color={theme.colors.accent} dimColor>
+        {'/help · /clear · /theme · /cost · /model · /export'}
       </Text>
     </Box>
   );
