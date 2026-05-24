@@ -3,7 +3,8 @@
 // ─────────────────────────────────────────────
 
 import React from 'react';
-import { Box, Text, useStdout } from 'ink';
+import { Text, useStdout } from 'ink';
+import chalk from 'chalk';
 import type { Theme } from '../../../types.js';
 
 interface StatusBarProps {
@@ -24,22 +25,21 @@ function StatusBarInternal({
   activeTier,
 }: StatusBarProps): React.ReactElement {
   const { stdout } = useStdout();
-  const width = stdout?.columns ?? 80;
+  const width = stdout?.columns ?? 100;
 
   const tierIndicator = activeTier ? ` [${activeTier}]` : '';
-  const left = ` ◈ CASCADE${tierIndicator} `;
-  const right = ` ${formatTokens(tokens)} · $${costUsd.toFixed(4)} ${isExecuting ? '⚡' : '·'} `;
+  const leftStr = ` ◈ CASCADE${tierIndicator} `;
+  const rightStr = ` ${formatTokens(tokens)} · $${costUsd.toFixed(4)} ${isExecuting ? '⚡' : '·'} `;
 
-  // Pad the gap between left and right so the strip spans the full terminal width
-  const gap = Math.max(0, width - left.length - right.length);
+  const gap = Math.max(0, width - leftStr.length - rightStr.length);
 
-  return (
-    <Box width={width} flexDirection="row">
-      <Text backgroundColor={theme.colors.primary} color={theme.colors.background} bold>{left}</Text>
-      <Text backgroundColor={theme.colors.primary} color={theme.colors.primary}>{' '.repeat(gap)}</Text>
-      <Text backgroundColor={theme.colors.primary} color={theme.colors.background} dimColor>{right}</Text>
-    </Box>
-  );
+  // Single chalk call wrapping the full line avoids multi-Text background
+  // seam/reset issues that Ink's renderer can produce in interactive mode.
+  const line = chalk
+    .bgHex(theme.colors.primary)
+    .hex(theme.colors.background)(chalk.bold(leftStr) + ' '.repeat(gap) + rightStr);
+
+  return <Text>{line}</Text>;
 }
 
 function formatTokens(n: number): string {
