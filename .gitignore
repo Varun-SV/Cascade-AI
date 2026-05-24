@@ -25,3 +25,18 @@ CASCADE.md
 
 # Release / CI helper scripts (local use only)
 scripts/
+
+# AI tools & generated analysis artefacts
+.agent/
+.codex/
+.continue/
+.gemini/
+openspec/
+CODEBASE_SUMMARY_REPORT.md
+code_structure.json
+codebase_diagrams.md
+codebase_inventory.json
+dependency_graph.json
+generated-flowcharts.md
+requirements.txt
+src/cli/repl/utils/
