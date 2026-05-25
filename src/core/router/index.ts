@@ -110,11 +110,21 @@ export class CascadeRouter extends EventEmitter {
 
       const model = this.selector.selectForTier(tier, override);
       if (!model) {
-        throw new Error(`Configured model "${override}" for ${tier} could not be loaded. Check provider availability and exact model name.`);
-      }
-
-      if (model.id !== override && `${model.provider}:${model.id}` !== override) {
-        throw new Error(`Configured model "${override}" for ${tier} resolved to "${model.id}". Use the exact provider model ID or prefix the provider (e.g. gemini:${override}).`);
+        const knownProviders = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama'];
+        const hasProviderPrefix = override.includes(':') &&
+          knownProviders.some(p => override.startsWith(p + ':'));
+        if (hasProviderPrefix) {
+          const provider = override.split(':')[0];
+          throw new Error(
+            `Configured model "${override}" for ${tier} cannot be used: ` +
+            `provider '${provider}' is not available or unreachable. ` +
+            `Check that the provider is running and accessible.`
+          );
+        }
+        throw new Error(
+          `Configured model "${override}" for ${tier} could not be loaded. ` +
+          `Check provider availability and exact model name.`
+        );
       }
 
       this.tierModels.set(tier, model);

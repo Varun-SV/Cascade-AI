@@ -471,6 +471,7 @@ export interface HooksConfig {
 }
 
 export interface HookDefinition {
+  name?: string;
   command: string;
   tools?: string[];   // Only run for these tools (empty = all)
   timeout?: number;   // ms
@@ -548,16 +549,26 @@ export type CascadeEventType =
   | 'task:error'
   | 'tier:status'
   | 'tier:result'
+  | 'tier:root'
   | 'stream:token'
   | 'stream:done'
   | 'tool:approval-request'
   | 'tool:approval-response'
   | 'tool:execute'
   | 'tool:result'
+  | 'tool:call'
   | 'cost:update'
   | 'session:save'
   | 'escalation'
-  | 'peer:sync';
+  | 'peer:sync'
+  | 'peer:message'
+  | 'plan'
+  | 'log'
+  | 'run:cancelled'
+  | 'budget:warning'
+  | 'budget:exceeded'
+  | 'permission:user-required'
+  | 'mcp:approval-required';
 
 export interface CascadeEvent<T = unknown> {
   type: CascadeEventType;

@@ -6,6 +6,7 @@ import { z } from 'zod';
 
 export const ProviderConfigSchema = z.object({
   type: z.enum(['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama']),
+  label: z.string().optional(),
   apiKey: z.string().optional(),
   baseUrl: z.string().url().optional(),
   deploymentName: z.string().optional(),
@@ -44,11 +45,13 @@ export const ToolsConfigSchema = z.object({
   requireApprovalFor: z.array(z.string()).default([]),
   browserEnabled: z.boolean().default(false),
   mcpServers: z.array(McpServerConfigSchema).optional(),
+  mcpTrusted: z.array(z.string()).optional(),
   /** Web search backends — at least one should be configured for best results */
   webSearch: WebSearchConfigSchema.optional(),
 });
 
 export const HookDefinitionSchema = z.object({
+  name: z.string().optional(),
   command: z.string(),
   tools: z.array(z.string()).optional(),
   timeout: z.number().optional(),

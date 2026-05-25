@@ -45,6 +45,7 @@ export class ModelSelector {
         model = this.resolveDynamicModel(overrideModelId);
       }
       if (model && this.availableProviders.has(model.provider)) return model;
+      return null;
     }
 
     if (requireVision) {

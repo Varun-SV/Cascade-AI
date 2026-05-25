@@ -35,7 +35,7 @@ import { McpToolWrapper } from './mcp.js';
 //
 // Future plugin support. Plugins bundle one or more tools together with
 // optional lifecycle hooks. Use `registry.registerPlugin(plugin)` to register.
-// This is a stub — full implementation tracked in ROADMAP.md.
+// This is a stub — roadmap tracked in README.md under Roadmap.
 
 /**
  * A ToolPlugin bundles one or more custom tools that extend Cascade's capabilities.

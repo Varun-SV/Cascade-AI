@@ -12,7 +12,7 @@ cascade "Refactor the auth module to use JWT, add tests, and open a PR"
 
 ## Table of Contents
 
-- [What's New in v0.5.6](#whats-new-in-v055)
+- [What's New in v0.5.6](#whats-new-in-v056)
 - [How It Works](#how-it-works)
 - [Features](#features)
 - [Installation](#installation)
@@ -375,7 +375,7 @@ Type any of these inside the REPL:
 | `/model`     | Interactive picker — choose provider → tier → model (or Auto) |
 | `/model-info`| Show active models per tier                   |
 | `/models`    | Browse available models grouped by provider   |
-| `/cost`      | Toggle session cost / token usage panel       |
+| `/cost`      | Show session cost and token usage             |
 | `/export [markdown\|json]` | Export session to file             |
 | `/rollback`  | Undo all file changes made in this session    |
 | `/branch`    | Fork the session into parallel branches       |
