@@ -12,7 +12,7 @@ cascade "Refactor the auth module to use JWT, add tests, and open a PR"
 
 ## Table of Contents
 
-- [What's New in v0.5.6](#whats-new-in-v056)
+- [What's New in v0.5.7](#whats-new-in-v057)
 - [How It Works](#how-it-works)
 - [Features](#features)
 - [Installation](#installation)
@@ -35,7 +35,16 @@ cascade "Refactor the auth module to use JWT, add tests, and open a PR"
 
 ---
 
-## What's New in v0.5.6
+## What's New in v0.5.7
+
+### v0.5.7 — Security hardening pass
+A focused security review of the tool and dashboard surface. All changes are covered by tests (`tsc --noEmit` clean, full suite green).
+- **Dashboard binds to loopback by default** — the server previously listened on all interfaces (`0.0.0.0`), exposing `POST /api/run` (which executes a prompt through the full shell/file/code-interpreter tool set) to the local network. It now binds to `127.0.0.1` via the new `dashboard.host` config field; binding to a public interface requires opting in and prints a warning (louder still if `dashboard.auth` is off).
+- **SSRF protection for `web_fetch`** — agent-supplied URLs are validated against a new SSRF-safe fetch helper: http/https only, hostnames resolved and rejected if they map to loopback / link-local (cloud metadata `169.254.169.254`) / private / CGNAT ranges, and every redirect hop re-validated. Set `CASCADE_ALLOW_LOCAL_FETCH=1` to fetch local URLs. The runtime tool-creator sandbox's `fetch` uses the same guard.
+- **`file_edit` and `git` now require approval** — approval is gated by an allowlist that previously omitted both, so in-place file edits and `git commit`/`checkout`/`push` ran with no prompt while `file_write`/`file_delete` were gated. Both are now in the default approval set.
+- **Code interpreter argument injection fixed** — `run_code` now executes via `execFile` with an argv array instead of interpolating arguments into a shell string, so a crafted `args` value can no longer break out into a second command. Temp scripts are written under the workspace root.
+- **Dashboard JWT pinned to HS256** on both sign and verify (defense-in-depth against algorithm-confusion).
+- **Broadened shell dangerous-command patterns** — the built-in blocklist now tolerates flag reordering / extra whitespace (`rm -fr /`, `rm  -rf  /`) and catches a fork-bomb form. This is defense-in-depth; the approval prompt remains the real gate.
 
 ### v0.5.6 — Wizard scrollable model list + chat scrollback + slash panel fix
 - **Init wizard tier-model picker** — added `limit={8}` to the `SelectInput` so long model lists scroll with ↑/↓ indicators instead of overflowing off-screen.
@@ -224,6 +233,7 @@ Cascade loads config from `.cascade/config.json` in your project directory.
     "browserEnabled":     false
   },
   "dashboard": {
+    "host":     "127.0.0.1",
     "port":     4891,
     "auth":     true,
     "teamMode": "single"
