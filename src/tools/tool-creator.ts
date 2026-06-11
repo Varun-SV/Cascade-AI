@@ -16,6 +16,7 @@
 
 import { createContext, runInContext } from 'node:vm';
 import { BaseTool } from './base.js';
+import { safeFetch } from './utils/safe-fetch.js';
 import type { ToolExecuteOptions } from '../types.js';
 import type { ToolRegistry } from './registry.js';
 import type { CascadeRouter } from '../core/router/index.js';
@@ -96,10 +97,19 @@ class DynamicTool extends BaseTool {
       }
     };
 
+    // The sandboxed fetch is SSRF-guarded: a generated tool (whose source is
+    // produced by an LLM that may have ingested prompt-injected web content)
+    // must not be able to reach loopback / cloud-metadata / private hosts.
+    // NOTE: node:vm is NOT a security boundary against deliberately hostile
+    // code (Object/Function reachability allows escape); it bounds accidental
+    // misbehaviour and resource use. The real control is that dangerous
+    // registered tools are still gated through the PermissionEscalator above.
+    const guardedFetch = (url: string, init?: RequestInit) => safeFetch(url, init);
+
     // Sandbox: fetch, JSON, Math, Date, and callTool for cascade tool access
     const sandbox: Record<string, unknown> = {
       input,
-      fetch: globalThis.fetch,
+      fetch: guardedFetch,
       callTool,
       JSON,
       Math,

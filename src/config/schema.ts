@@ -66,6 +66,13 @@ export const HooksConfigSchema = z.object({
 
 export const DashboardConfigSchema = z.object({
   port: z.number().default(4891),
+  /**
+   * Interface to bind the dashboard HTTP/WebSocket server to. Defaults to
+   * loopback so the dashboard — which exposes /api/run (arbitrary task
+   * execution) and config mutation — is never reachable from the network
+   * unless the operator explicitly opts in (e.g. "0.0.0.0" for team mode).
+   */
+  host: z.string().default('127.0.0.1'),
   auth: z.boolean().default(true),
   teamMode: z.enum(['single', 'multi']).default('single'),
   secret: z.string().optional(),

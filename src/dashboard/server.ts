@@ -33,6 +33,7 @@ export class DashboardServer {
   private globalStore: MemoryStore | null = null;
   private broadcastTimer: NodeJS.Timeout | null = null;
   private port: number;
+  private host: string;
   private workspacePath: string;
 
   constructor(config: CascadeConfig, store: MemoryStore, workspacePath = process.cwd()) {
@@ -40,6 +41,7 @@ export class DashboardServer {
     this.store = store;
     this.workspacePath = workspacePath;
     this.port = config.dashboard.port ?? DEFAULT_DASHBOARD_PORT;
+    this.host = config.dashboard.host ?? '127.0.0.1';
     this.dashboardSecret = this.resolveDashboardSecret();
     this.app = express();
     this.httpServer = createServer(this.app);
@@ -55,10 +57,21 @@ export class DashboardServer {
   }
 
   async start(): Promise<void> {
+    const isLoopback = this.host === '127.0.0.1' || this.host === '::1' || this.host === 'localhost';
+    if (!isLoopback) {
+      console.warn(
+        `⚠ Dashboard is binding to ${this.host}:${this.port} — reachable from the network. ` +
+        `It exposes task execution (/api/run) and config endpoints. ` +
+        `Ensure dashboard.auth is enabled and CASCADE_DASHBOARD_PASSWORD is set.`,
+      );
+      if (!this.config.dashboard.auth) {
+        console.warn('⚠ Dashboard auth is DISABLED while bound to a non-loopback interface — this allows unauthenticated remote task execution.');
+      }
+    }
     await new Promise<void>((resolve, reject) => {
       const onError = (err: Error) => reject(err);
       this.httpServer.once('error', onError);
-      this.httpServer.listen(this.port, () => {
+      this.httpServer.listen(this.port, this.host, () => {
         this.httpServer.off('error', onError);
         resolve();
       });

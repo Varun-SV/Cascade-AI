@@ -56,13 +56,17 @@ export class ShellTool extends BaseTool {
   }
 
   private validateCommand(command: string): void {
-    // Block dangerous patterns
+    // Block obviously catastrophic patterns. This is defense-in-depth only —
+    // a blocklist can never be exhaustive; the approval prompt is the real
+    // gate. Patterns tolerate flag reordering and extra whitespace so trivial
+    // variants like `rm  -fr  /` don't slip through.
     const builtinDangerous = [
-      /rm\s+-rf\s+\//,
-      />\s*\/dev\/sda/,
-      /mkfs\./,
-      /dd\s+if=.*of=\/dev\//,
-      /chmod\s+777\s+\//,
+      /\brm\s+(?:-\w+\s+)*-\w*[rf]\w*[rf]\w*\s+(?:\/|~|\$HOME)(?:\s|$)/, // rm -rf / , rm -fr ~
+      />\s*\/dev\/[sh]d[a-z]/,
+      /\bmkfs[.\s]/,
+      /\bdd\s+.*\bof=\/dev\/[sh]d[a-z]/,
+      /\bchmod\s+(?:-\w+\s+)*-?R?\s*777\s+\//,
+      /:\(\)\s*\{\s*:\s*\|\s*:?\s*&\s*\}\s*;/, // fork bomb :(){ :|:& };:
     ];
 
     for (const pattern of builtinDangerous) {

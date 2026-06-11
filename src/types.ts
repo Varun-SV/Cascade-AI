@@ -479,6 +479,7 @@ export interface HookDefinition {
 
 export interface DashboardConfig {
   port: number;
+  host: string;       // interface to bind to; defaults to 127.0.0.1 (loopback)
   auth: boolean;
   teamMode: 'single' | 'multi';
   secret?: string;    // JWT secret

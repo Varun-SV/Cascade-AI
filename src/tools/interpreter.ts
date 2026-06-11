@@ -4,7 +4,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { exec, execSync } from 'node:child_process';
+import { execFile, execSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
@@ -71,7 +71,7 @@ export class CodeInterpreterTool extends BaseTool {
     }
 
     // Setup temporary directory structure in .cascade/tmp
-    const tmpDir = path.join(process.cwd(), '.cascade', 'tmp');
+    const tmpDir = path.join(this.workspaceRoot, '.cascade', 'tmp');
     if (!fs.existsSync(tmpDir)) {
       fs.mkdirSync(tmpDir, { recursive: true });
     }
@@ -83,15 +83,17 @@ export class CodeInterpreterTool extends BaseTool {
     // 1. Write the script
     fs.writeFileSync(filePath, code, 'utf-8');
 
-    // 2. Prepare command — quote paths to handle spaces in Windows paths
-    const quotedPath = `"${filePath}"`;
-    const quotedArgs = args.map((a) => `"${a}"`).join(' ');
-    const fullCmd = `${cmdPrefix} ${quotedPath}${quotedArgs ? ' ' + quotedArgs : ''}`;
+    // 2. Execute via execFile with an argv array — the interpreter and its
+    //    arguments are passed directly to the OS, never through a shell, so a
+    //    value like `"; rm -rf ~ #` in `args` is an inert string rather than a
+    //    second command. (Previously these were string-interpolated into an
+    //    `exec` command line.)
+    const execArgs = [filePath, ...args];
 
     // 3. Execute
     return new Promise((resolve) => {
       const startMs = Date.now();
-      exec(fullCmd, { cwd: process.cwd(), timeout: 30000 }, (error, stdout, stderr) => {
+      execFile(cmdPrefix, execArgs, { cwd: this.workspaceRoot, timeout: 30000 }, (error, stdout, stderr) => {
         const duration = Date.now() - startMs;
 
         // 4. Cleanup (Always delete the script from the filesystem)

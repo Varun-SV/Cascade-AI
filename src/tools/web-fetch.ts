@@ -4,6 +4,7 @@
 
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
+import { safeFetch, SsrfBlockedError } from './utils/safe-fetch.js';
 
 const MAX_CHARS = 50_000;
 const TIMEOUT_MS = 15_000;
@@ -73,15 +74,20 @@ export class WebFetchTool extends BaseTool {
 
     let resp: Response;
     try {
-      resp = await fetch(url, {
+      // safeFetch validates the scheme, blocks loopback/link-local/private
+      // hosts (SSRF — e.g. the cloud metadata endpoint), and re-checks every
+      // redirect hop. Set CASCADE_ALLOW_LOCAL_FETCH=1 to fetch local URLs.
+      resp = await safeFetch(url, {
         headers: {
           'User-Agent': 'Cascade-AI/1.0 WebFetchTool',
           Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5',
         },
         signal: AbortSignal.timeout(TIMEOUT_MS),
-        redirect: 'follow',
       });
     } catch (err) {
+      if (err instanceof SsrfBlockedError) {
+        return `Refused to fetch ${url}: ${err.message}`;
+      }
       return `Failed to fetch ${url}: ${err instanceof Error ? err.message : String(err)}`;
     }
 
