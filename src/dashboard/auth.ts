@@ -11,13 +11,17 @@ export interface DashboardUser {
   role: 'admin' | 'viewer';
 }
 
+// Pin the signing algorithm so a forged token cannot downgrade to `alg: none`
+// or trick verification into using an unexpected algorithm.
+const JWT_ALGORITHM = 'HS256' as const;
+
 export function createToken(user: DashboardUser, secret: string): string {
-  return jwt.sign(user, secret, { expiresIn: '24h' });
+  return jwt.sign(user, secret, { expiresIn: '24h', algorithm: JWT_ALGORITHM });
 }
 
 export function verifyToken(token: string, secret: string): DashboardUser | null {
   try {
-    return jwt.verify(token, secret) as DashboardUser;
+    return jwt.verify(token, secret, { algorithms: [JWT_ALGORITHM] }) as DashboardUser;
   } catch {
     return null;
   }

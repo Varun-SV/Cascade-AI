@@ -30,6 +30,19 @@ describe('ShellTool allowlist', () => {
     await expect(run(tool, 'mkfs.ext4 /dev/sda1')).rejects.toThrow(/dangerous/i);
   });
 
+  it('blocks dangerous variants (reversed flags, extra whitespace, fork bomb)', async () => {
+    const tool = new ShellTool();
+    await expect(run(tool, 'rm -fr  ~')).rejects.toThrow(/dangerous/i);
+    await expect(run(tool, 'rm  -rf  /')).rejects.toThrow(/dangerous/i);
+    await expect(run(tool, ':(){ :|:& };:')).rejects.toThrow(/dangerous/i);
+  });
+
+  it('does not block benign relative deletes', async () => {
+    const tool = new ShellTool(['rm']);
+    // Targets a relative path, not / ~ or $HOME — should pass validation.
+    await expect(run(tool, 'rm -rf ./does-not-exist-xyz')).resolves.toBeDefined();
+  });
+
   it('blocks blocklisted substrings case-insensitively', async () => {
     const tool = new ShellTool([], ['SECRET']);
     await expect(run(tool, 'echo $secret')).rejects.toThrow(/blocklist/i);

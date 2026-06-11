@@ -4,7 +4,7 @@
 
 import type { ModelInfo, ProviderType, ThemeName } from './types.js';
 
-export const CASCADE_VERSION = '0.5.6';
+export const CASCADE_VERSION = '0.5.7';
 export const CASCADE_CONFIG_DIR = '.cascade';
 export const CASCADE_MD_FILE = 'CASCADE.md';
 export const CASCADE_IGNORE_FILE = '.cascadeignore';
@@ -337,11 +337,19 @@ export const TOOL_NAMES = {
   WEB_SEARCH: 'web_search',
 } as const;
 
-// Defaults that require approval
+// Defaults that require approval.
+// NOTE: every tool that mutates the filesystem, runs code, or performs a
+// network-side write must be listed here — approval is gated solely by this
+// list (plus user config), not by isDangerous(). file_edit and git were
+// previously omitted, so the agent could rewrite files in place (file_edit)
+// or push/checkout/commit (git) with no prompt while file_write/file_delete
+// required one.
 export const DEFAULT_APPROVAL_REQUIRED = [
   TOOL_NAMES.SHELL,
   TOOL_NAMES.FILE_DELETE,
   TOOL_NAMES.FILE_WRITE,
+  TOOL_NAMES.FILE_EDIT,
+  TOOL_NAMES.GIT,
   TOOL_NAMES.BROWSER,
   TOOL_NAMES.GITHUB,
   'pdf_create',
