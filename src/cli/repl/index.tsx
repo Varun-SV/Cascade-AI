@@ -24,7 +24,7 @@ import type {
   Message,
 } from '../../types.js';
 import { CASCADE_DB_FILE, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE } from '../../constants.js';
-import { Cascade } from '../../core/cascade.js';
+import { Cascade, type DecisionLogEntry } from '../../core/cascade.js';
 import { MemoryStore } from '../../memory/store.js';
 import { ModelSelector } from '../../core/router/selector.js';
 import { OpenAIProvider } from '../../providers/openai.js';
@@ -252,6 +252,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const storeRef = useRef<MemoryStore | null>(null);
   const slashRef = useRef(new SlashCommandRegistry());
   const approvalResolverRef = useRef<((decision: { approved: boolean; always: boolean }) => void) | null>(null);
+  const decisionLogRef = useRef<DecisionLogEntry[]>([]);
   const sessionIdRef = useRef(randomUUID());
   const startedAtRef = useRef(new Date().toISOString());
   const treeNodesRef = useRef<Map<string, FlatTreeNode>>(new Map());
@@ -556,6 +557,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           ? `✔ Copied ${which} (${msg.content.length} chars) via terminal escape — works over SSH if your terminal supports OSC 52.`
           : `✔ Copied ${which} (${msg.content.length} chars) to clipboard.`;
       },
+      onWhy: () => formatDecisionTrail(decisionLogRef.current),
       onComms: () => {
         dispatch({ type: 'TOGGLE_COMMS' });
         return state.showComms
@@ -815,6 +817,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       if (streamThrottleTimeout) { clearTimeout(streamThrottleTimeout); streamThrottleTimeout = null; }
       if (statusThrottleTimeout) { clearTimeout(statusThrottleTimeout); statusThrottleTimeout = null; }
       if (peerThrottleTimeout) { clearTimeout(peerThrottleTimeout); peerThrottleTimeout = null; }
+      decisionLogRef.current = cascade.getDecisionLog();
       cascade.removeAllListeners();
       const finalStats = cascade.getRouter().getStats();
       const currentSession = storeRef.current?.getSession(sessionIdRef.current);
@@ -1117,6 +1120,21 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       </Box>
     </Box>
   );
+}
+
+const DECISION_KIND_LABEL: Record<DecisionLogEntry['kind'], string> = {
+  complexity: 'Complexity',
+  model: 'Models',
+  failover: 'Failover',
+  escalation: 'Escalation',
+};
+
+function formatDecisionTrail(entries: DecisionLogEntry[]): string {
+  if (!entries.length) {
+    return 'No decision trail yet — run a prompt first, then /why explains how it was routed.';
+  }
+  const lines = entries.map((e, i) => `  ${i + 1}. ${DECISION_KIND_LABEL[e.kind]}: ${e.detail}`);
+  return ['Decision trail for the last run', ...lines].join('\n');
 }
 
 function formatRunReceipt(

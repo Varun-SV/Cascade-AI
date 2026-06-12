@@ -32,11 +32,20 @@ import { ModelPerformanceTracker } from './router/model-performance-tracker.js';
 import { ToolCreator } from '../tools/tool-creator.js';
 import { CascadeCancelledError } from '../utils/retry.js';
 
+/** One entry in the per-run orchestration decision trail (see /why). */
+export interface DecisionLogEntry {
+  at: string;
+  kind: 'complexity' | 'model' | 'failover' | 'escalation';
+  detail: string;
+}
+
 export class Cascade extends EventEmitter {
   private router: CascadeRouter;
   private toolRegistry: ToolRegistry;
   private mcpClient: McpClient;
   private config: CascadeConfig;
+  /** Orchestration decisions for the CURRENT run — cleared on each run(). */
+  private decisionLog: DecisionLogEntry[] = [];
   private initialized = false;
   private initPromise?: Promise<void>;
   private store?: MemoryStore;
@@ -118,6 +127,19 @@ export class Cascade extends EventEmitter {
     });
   }
 
+  private recordDecision(kind: DecisionLogEntry['kind'], detail: string): void {
+    this.decisionLog.push({ at: new Date().toISOString(), kind, detail });
+  }
+
+  /**
+   * The orchestration decision trail for the most recent run: complexity
+   * verdict (and why), which model served each tier, failovers, and
+   * escalations. Powers the /why command.
+   */
+  getDecisionLog(): DecisionLogEntry[] {
+    return [...this.decisionLog];
+  }
+
   /** Resolve a pending MCP server approval from a REPL / dashboard listener. */
   resolveMcpApproval(serverName: string, approved: boolean): void {
     const resolver = this.pendingMcpApprovals.get(serverName);
@@ -147,6 +169,11 @@ export class Cascade extends EventEmitter {
         remainingUsd: number;
       }) => {
         this.emit('budget:warning', payload);
+      });
+
+      // Record provider failovers in the per-run decision trail (/why).
+      this.router.on('failover', (e: { tier: string; from: string; to: string; reason: string }) => {
+        this.recordDecision('failover', `${e.tier} ${e.from} → ${e.to} (${e.reason})`);
       });
 
       // Budget hard-kill: cancel any pending user approvals and notify
@@ -253,9 +280,18 @@ export class Cascade extends EventEmitter {
     workspacePath: string,
     conversationHistory: ConversationMessage[] = [],
   ): Promise<TaskComplexity> {
-    if (this.isCasualGreeting(prompt)) return 'Simple';
-    if (this.looksLikeSimpleArtifactTask(prompt)) return 'Simple';
-    if (this.looksLikeConversational(prompt)) return 'Simple';
+    if (this.isCasualGreeting(prompt)) {
+      this.recordDecision('complexity', 'Simple — heuristic: casual greeting (no classifier call)');
+      return 'Simple';
+    }
+    if (this.looksLikeSimpleArtifactTask(prompt)) {
+      this.recordDecision('complexity', 'Simple — heuristic: single-file artifact task (no classifier call)');
+      return 'Simple';
+    }
+    if (this.looksLikeConversational(prompt)) {
+      this.recordDecision('complexity', 'Simple — heuristic: short conversational message (no classifier call)');
+      return 'Simple';
+    }
 
     // Quick workspace scout (cached for 30s)
     let workspaceContext = '';
@@ -281,7 +317,8 @@ Important rules:
 - If the task asks for a simple single-file artifact like hello.txt, it is usually Moderate.
 - If the task asks for a saved report, PDF, implementation, or deeper verification workflow, it is at least Moderate and often Complex.
 
-Respond with exactly one word: Simple, Moderate, or Complex.`;
+Respond with the verdict word first, then a dash and a short reason (under 12 words).
+Format: <Simple|Moderate|Complex> — <reason>`;
 
     const recentHistory = conversationHistory.slice(-6);
     const contextBlock = recentHistory.map((message, index) => {
@@ -301,16 +338,24 @@ ${prompt}`
       const result = await this.router.generate('T1', {
         messages: [{ role: 'user', content: routedPrompt }],
         systemPrompt: sysPrompt,
-        maxTokens: 8,
+        maxTokens: 40,
         temperature: 0,
       });
-      const content = result.content.trim().toLowerCase();
-      if (content.includes('simple')) return 'Simple';
-      if (content.includes('moderate')) return 'Moderate';
-      return 'Complex';
+      const content = result.content.trim();
+      // Verdict is the FIRST word only — the reason text after the dash may
+      // legitimately mention other levels ("not complex enough for ...").
+      const firstWord = (content.split(/[\s—–-]+/)[0] ?? '').toLowerCase();
+      const reason = content.replace(/^\S+\s*[—–-]*\s*/, '').trim();
+      const verdict: TaskComplexity = firstWord.includes('simple')
+        ? 'Simple'
+        : firstWord.includes('moderate') ? 'Moderate' : 'Complex';
+      this.recordDecision('complexity', `${verdict} — classifier: ${reason || 'no reason given'}`);
+      return verdict;
     } catch {
       const followUpPrompt = /^(proceed|continue|go ahead|do it|yes|yep|ok|okay|carry on)$/i.test(prompt.trim());
-      if (followUpPrompt && recentHistory.length > 0) return 'Complex';
+      this.recordDecision('complexity', followUpPrompt && recentHistory.length > 0
+        ? 'Complex — classifier unavailable; short follow-up inherits prior context'
+        : 'Complex — classifier unavailable; defaulting to the safest (most capable) route');
       return 'Complex';
     }
   }
@@ -319,6 +364,7 @@ ${prompt}`
     await this.init();
     const startMs = Date.now();
     const taskId = randomUUID();
+    this.decisionLog = [];
 
     // Create a fresh permission escalator for this task run
     const escalator = new PermissionEscalator();
@@ -326,6 +372,7 @@ ${prompt}`
     // Wire escalator's user-required event → approvalCallback or direct event
     escalator.on('permission:user-required', async (req: PermissionRequest) => {
       this.emit('permission:user-required', req);
+      this.recordDecision('escalation', `"${req.toolName}" by ${req.requestedBy} — T2 and T1 both unsure, escalated to user`);
 
       // Build enriched context for the approval callback / REPL
       const enrichedRequest: ApprovalRequest & { escalationContext?: unknown } = {
@@ -372,16 +419,26 @@ ${prompt}`
 
     this.emit('tier:root', { role: complexity === 'Simple' ? 'T3' : complexity === 'Moderate' ? 'T2' : 'T1' });
 
+    const tiersInPlay: TierRole[] = complexity === 'Simple' ? ['T3'] : complexity === 'Moderate' ? ['T2', 'T3'] : ['T1', 'T2', 'T3'];
+
     // Cascade Auto: select optimal models for each tier based on task analysis
     if (this.taskAnalyzer) {
-      const tiers: TierRole[] = complexity === 'Simple' ? ['T3'] : complexity === 'Moderate' ? ['T2', 'T3'] : ['T1', 'T2', 'T3'];
-      await Promise.all(tiers.map(async (tier) => {
+      await Promise.all(tiersInPlay.map(async (tier) => {
         try {
           const model = await this.taskAnalyzer!.selectModel(options.prompt, tier, this.router.getSelector());
-          if (model) this.router.overrideTierModel(tier, model);
+          if (model) {
+            this.router.overrideTierModel(tier, model);
+            this.recordDecision('model', `${tier} → ${model.provider}:${model.id} — Cascade Auto picked it for this task`);
+          }
         } catch { /* non-critical — fall back to priority list */ }
       }));
     }
+
+    // Record what model actually serves each tier in play.
+    this.recordDecision('model', tiersInPlay.map((tier) => {
+      const m = this.router.getTierModel(tier);
+      return m ? `${tier} ${m.provider}:${m.id}${m.isLocal ? ' ⌂local' : ''}` : `${tier} (none)`;
+    }).join('  ·  '));
 
     // Register ToolCreator with the T3 instances (done below, passed via closure)
     const toolCreator = this.toolCreator;

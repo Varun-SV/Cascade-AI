@@ -44,6 +44,8 @@ export interface SlashCommandContext {
   onCopy: (args: string[]) => string | Promise<string>;
   /** Toggles the agent-to-agent comms feed. */
   onComms: () => string;
+  /** Explains the routing & delegation decisions of the last run. */
+  onWhy: () => string;
 }
 
 export interface SlashCommandResult {
@@ -284,6 +286,12 @@ export class SlashCommandRegistry {
       command: '/comms',
       description: 'Toggle the agent-to-agent comms feed',
       handler: (_args, ctx) => ({ output: ctx.onComms(), handled: true }),
+    });
+
+    this.register({
+      command: '/why',
+      description: 'Explain how the last run was routed (complexity, models, failovers)',
+      handler: (_args, ctx) => ({ output: ctx.onWhy(), handled: true }),
     });
 
     this.register({

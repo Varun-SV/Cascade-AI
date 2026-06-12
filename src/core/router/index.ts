@@ -270,6 +270,12 @@ export class CascadeRouter extends EventEmitter {
         if (fallback) {
           this.tierModels.set(tier, fallback);
           this.ensureProvider(fallback, this.config.providers);
+          this.emit('failover', {
+            tier,
+            from: `${model.provider}:${model.id}`,
+            to: `${fallback.provider}:${fallback.id}`,
+            reason: 'rate limit',
+          });
           // Release the local slot before the recursive call so the fallback
           // model (which may itself be local) can acquire its own slot.
           releaseLocalSlot?.();
