@@ -34,6 +34,8 @@ import { OpenAICompatibleProvider } from '../../providers/openai-compatible.js';
 import type { BaseProvider } from '../../providers/base.js';
 import { getTheme } from '../themes/index.js';
 import { SlashCommandRegistry } from '../slash/index.js';
+import { computeLiveAreaBudget } from './layout.js';
+import { disableMouseReporting } from '../utils/terminal-input.js';
 import { AgentTree, type TierNode } from './components/AgentTree.js';
 import { TimelinePanel } from './components/TimelinePanel.js';
 import { StatusBar } from './components/StatusBar.js';
@@ -850,20 +852,39 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     }
   });
 
-  const width = stdout?.columns ?? 100;
+  // Terminal dimensions react to resize events so the layout budget and
+  // StatusBar width never go stale mid-session (previously `columns` was
+  // read once per render with a 100-col fallback and never refreshed).
+  const [termSize, setTermSize] = useState(() => ({
+    columns: stdout?.columns ?? 100,
+    rows: stdout?.rows ?? 40,
+  }));
+  useEffect(() => {
+    if (!stdout) return;
+    const onResize = () => setTermSize({ columns: stdout.columns ?? 100, rows: stdout.rows ?? 40 });
+    stdout.on('resize', onResize);
+    return () => { stdout.off('resize', onResize); };
+  }, [stdout]);
+  const width = termSize.columns;
 
-  // Fixed-height cap for the agent tree — keeps layout stable as nodes spawn.
-  // AgentTree scrolls internally within this budget.
-  const MAX_TREE_ROWS = 10;
+  // Row budget for live panels — shrinks panels before the live area can
+  // outgrow the viewport, which would force Ink into full-screen redraws
+  // (the flicker users see on small/busy terminals).
+  const liveBudget = computeLiveAreaBudget(termSize.rows, {
+    isTypingCommand,
+    showCost: state.showCost,
+    showDetails: state.showDetails,
+  });
 
   useEffect(() => {
     // Actively DISABLE mouse reporting on mount so the terminal's own
-    // scrollback handles the wheel (and PgUp / PgDn). Completed messages
-    // live in the scrollback via Ink <Static> since v0.5.4 — if we
-    // capture mouse events here, the wheel scrolls nothing and the user
-    // can't see history. The strip-and-swallow branch below stays as
-    // defense-in-depth in case another layer turns capture back on.
-    process.stdout.write('\x1b[?1000l\x1b[?1006l');
+    // scrollback handles the wheel (and PgUp / PgDn) and native drag-select
+    // + right-click copy keep working. Completed messages live in the
+    // scrollback via Ink <Static> since v0.5.4 — if we capture mouse events
+    // here, the wheel scrolls nothing and the user can't see history. The
+    // strip-and-swallow branch below stays as defense-in-depth in case
+    // another layer turns capture back on.
+    disableMouseReporting();
 
     const onData = (data: Buffer) => {
       const str = data.toString();
@@ -883,7 +904,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
 
     process.stdin.on('data', onData);
     return () => {
-      process.stdout.write('\x1b[?1000l\x1b[?1006l');
+      disableMouseReporting();
       process.stdin.removeListener('data', onData);
     };
   }, [lockInputTemporarily]);
@@ -958,12 +979,15 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       )}
 
       {/* Compact agent tree — auto-hides AUTO_CLEAR_TREE_MS after completion */}
-      <AgentTree root={state.agentTree} theme={theme} scrollOffset={treeScrollOffset} maxRows={MAX_TREE_ROWS} />
+      <AgentTree root={state.agentTree} theme={theme} scrollOffset={treeScrollOffset} maxRows={liveBudget.treeMaxRows} />
 
-      {state.showDetails && (
+      {state.showDetails && liveBudget.showTimeline && (
         <TimelinePanel nodes={[...treeNodesRef.current.values()]} theme={theme} currentIndex={timelineIndex} onChangeIndex={setTimelineIndex} />
       )}
-      {state.showCost && <CostTracker theme={theme} totalTokens={state.totalTokens} totalCostUsd={state.totalCostUsd} callsByProvider={state.callsByProvider} callsByTier={state.callsByTier} costByTier={state.costByTier} tokensByTier={state.tokensByTier} />}
+      {state.showCost && <CostTracker theme={theme} totalTokens={state.totalTokens} totalCostUsd={state.totalCostUsd} callsByProvider={state.callsByProvider} callsByTier={state.callsByTier} costByTier={state.costByTier} tokensByTier={state.tokensByTier} compact={liveBudget.costCompact} />}
+      {liveBudget.collapsed && (state.showCost || state.showDetails || state.agentTree != null) && (
+        <Text color={theme.colors.muted} dimColor>  ▸ panels collapsed (small terminal)</Text>
+      )}
       {state.approvalRequest && <ApprovalPrompt request={state.approvalRequest} theme={theme} onDecision={(decision) => { dispatch({ type: 'SET_APPROVAL', request: null }); approvalResolverRef.current?.(decision); }} />}
       {/* Suggestion panel — fixed height so the input below doesn't jump as
           entries filter while typing. Sized for header (1) + 8 entries +

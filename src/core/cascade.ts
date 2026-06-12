@@ -59,6 +59,12 @@ export class Cascade extends EventEmitter {
         // consumers can all plug the same approval dialog in.
         return await this.requestMcpApproval(server);
       },
+      // Route warnings through the event stream when anyone is listening —
+      // a raw console write while the TUI is live corrupts Ink's frame.
+      onWarn: (message) => {
+        if (this.listenerCount('log') > 0) this.emit('log', { level: 'warn', message });
+        else console.warn(message);
+      },
     });
     this.toolRegistry = new ToolRegistry(this.config.tools, workspacePath);
     this.telemetry = config.telemetry?.enabled

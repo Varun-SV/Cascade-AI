@@ -65,7 +65,13 @@ export function disableBracketedPaste(): void {
   try { process.stdout.write('\x1b[?2004l'); } catch { /* non-TTY */ }
 }
 
-/** Disable any mouse reporting that a prior run or terminal may have left on. */
+/**
+ * Disable any mouse reporting that a prior run or terminal may have left on.
+ * Mouse capture MUST stay off while the TUI runs: it is what keeps native
+ * drag-select, right-click copy, and wheel scrollback working. (There is
+ * deliberately no enableMouseReporting counterpart — re-enabling capture
+ * anywhere would silently break selection across the whole app.)
+ */
 export function disableMouseReporting(): void {
   try {
     // 1000 = press/release, 1002 = button-motion, 1003 = any-motion,
@@ -74,9 +80,4 @@ export function disableMouseReporting(): void {
   } catch {
     /* non-TTY */
   }
-}
-
-/** Enable SGR mouse reporting (used only by the REPL for scroll handling). */
-export function enableMouseReporting(): void {
-  try { process.stdout.write('\x1b[?1000h\x1b[?1006h'); } catch { /* non-TTY */ }
 }

@@ -16,7 +16,16 @@ interface CostTrackerProps {
   costByTier?: Record<string, number>;
   /** Optional per-tier token totals. */
   tokensByTier?: Record<string, number>;
+  /**
+   * Summary-only rendering for small terminals — the live area must never
+   * outgrow the viewport or Ink falls back to full-screen redraws (flicker).
+   */
+  compact?: boolean;
 }
+
+// Cap the provider list so the panel height stays bounded no matter how
+// many providers a session touches.
+const MAX_PROVIDER_ROWS = 4;
 
 export function CostTracker({
   theme,
@@ -26,8 +35,33 @@ export function CostTracker({
   callsByTier,
   costByTier,
   tokensByTier,
+  compact = false,
 }: CostTrackerProps): React.ReactElement {
   const hasTierCost = costByTier && Object.keys(costByTier).length > 0;
+
+  if (compact) {
+    const tierSummary = Object.entries(costByTier ?? {})
+      .map(([tier, cost]) => `${tier} $${cost.toFixed(4)}`)
+      .join(' · ');
+    return (
+      <Box flexDirection="column" borderStyle="round" borderColor={theme.colors.border} paddingX={2}>
+        <Text color={theme.colors.primary} bold>Session Usage</Text>
+        <Box>
+          <Box width={20}><Text color={theme.colors.muted}>Total tokens:</Text></Box>
+          <Text color={theme.colors.foreground} bold>{totalTokens.toLocaleString()}</Text>
+        </Box>
+        <Box>
+          <Box width={20}><Text color={theme.colors.muted}>Estimated cost:</Text></Box>
+          <Text color={theme.colors.success} bold>${totalCostUsd.toFixed(6)}</Text>
+        </Box>
+        {tierSummary ? <Text color={theme.colors.muted} wrap="truncate-end">{tierSummary}</Text> : null}
+      </Box>
+    );
+  }
+
+  const providerEntries = Object.entries(callsByProvider);
+  const visibleProviders = providerEntries.slice(0, MAX_PROVIDER_ROWS);
+  const hiddenProviders = providerEntries.length - visibleProviders.length;
 
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={theme.colors.border} paddingX={2}>
@@ -42,15 +76,20 @@ export function CostTracker({
         <Text color={theme.colors.success} bold>${totalCostUsd.toFixed(6)}</Text>
       </Box>
 
-      {Object.keys(callsByProvider).length > 0 && (
+      {visibleProviders.length > 0 && (
         <Box flexDirection="column" marginTop={1}>
           <Text color={theme.colors.muted}>By provider:</Text>
-          {Object.entries(callsByProvider).map(([p, c]) => (
+          {visibleProviders.map(([p, c]) => (
             <Box key={p} marginLeft={2}>
               <Box width={20}><Text color={theme.colors.secondary}>{p}</Text></Box>
               <Text>{c} calls</Text>
             </Box>
           ))}
+          {hiddenProviders > 0 && (
+            <Box marginLeft={2}>
+              <Text color={theme.colors.muted} dimColor>… +{hiddenProviders} more</Text>
+            </Box>
+          )}
         </Box>
       )}
 

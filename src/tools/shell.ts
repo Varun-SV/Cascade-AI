@@ -43,7 +43,10 @@ export class ShellTool extends BaseTool {
     this.validateCommand(command);
 
     try {
-      const { stdout, stderr } = await execAsync(command, { cwd, timeout });
+      // windowsHide: prevent a console window flash per command on Windows.
+      // Output is piped (exec default), never inherited — it cannot write
+      // over the live TUI.
+      const { stdout, stderr } = await execAsync(command, { cwd, timeout, windowsHide: true });
       const out = [stdout, stderr].filter(Boolean).join('\n').trim();
       return out || '(no output)';
     } catch (err) {

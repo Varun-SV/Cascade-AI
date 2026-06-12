@@ -32,6 +32,12 @@ export interface McpClientOptions {
   trustedServers?: string[];
   /** Approval gate invoked when a server is NOT in the trusted list. */
   approvalCallback?: McpApprovalCallback;
+  /**
+   * Sink for non-fatal warnings. Hosts with a live TUI must route these
+   * away from the terminal — a raw console write mid-frame corrupts Ink's
+   * rendering. Defaults to console.warn.
+   */
+  onWarn?: (message: string) => void;
 }
 
 export class McpClient {
@@ -58,9 +64,12 @@ export class McpClient {
   private trustedServers: Set<string>;
   private approvalCallback: McpApprovalCallback | undefined;
 
+  private onWarn: (message: string) => void;
+
   constructor(options: McpClientOptions = {}) {
     this.trustedServers = new Set(options.trustedServers ?? []);
     this.approvalCallback = options.approvalCallback;
+    this.onWarn = options.onWarn ?? ((message) => console.warn(message));
   }
 
   async connect(server: McpServerConfig): Promise<void> {
@@ -104,7 +113,7 @@ export class McpClient {
     for (const tool of toolsResult.tools) {
       for (const existing of this.tools.values()) {
         if (existing.name === tool.name && existing.serverName !== server.name) {
-          console.warn(
+          this.onWarn(
             `[mcp] Tool "${tool.name}" is exposed by both "${existing.serverName}" and "${server.name}". ` +
             `Cascade disambiguates internally via mcp::<server>::<tool>.`,
           );
