@@ -35,7 +35,7 @@ import { OpenAICompatibleProvider } from '../../providers/openai-compatible.js';
 import type { BaseProvider } from '../../providers/base.js';
 import { getTheme } from '../themes/index.js';
 import { SlashCommandRegistry } from '../slash/index.js';
-import { computeLiveAreaBudget } from './layout.js';
+import { computeLiveAreaBudget, computeTranscriptRows, flattenTranscript, windowTranscript } from './layout.js';
 import { disableMouseReporting } from '../utils/terminal-input.js';
 import { writeClipboardSync } from '../utils/clipboard.js';
 import { AgentTree, type TierNode } from './components/AgentTree.js';
@@ -211,6 +211,8 @@ interface ReplProps {
   themeName: string;
   initialPrompt?: string;
   identityName?: string;
+  /** Alternate-screen mode: no terminal scrollback, so history renders as an in-app transcript. */
+  altScreen?: boolean;
 }
 
 async function refreshModelCache(store: MemoryStore, providers: CascadeConfig['providers']) {
@@ -236,7 +238,7 @@ async function refreshModelCache(store: MemoryStore, providers: CascadeConfig['p
   }
 }
 
-export function Repl({ config, workspacePath, themeName, initialPrompt, identityName }: ReplProps): React.ReactElement {
+export function Repl({ config, workspacePath, themeName, initialPrompt, identityName, altScreen = false }: ReplProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [theme, setTheme] = useState<Theme>(() => getTheme(themeName));
@@ -249,6 +251,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const [state, dispatch] = useReducer(replReducer, { messages: [], agentTree: null, isStreaming: false, isExecuting: false, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, savedUsd: 0, savedPct: 0, peerEvents: [], showComms: true, approvalRequest: null, showCost: false, showDetails: false, error: null, activeTool: null });
   const [isShowingModels, setIsShowingModels] = useState(false);
   const [planApprovalRequest, setPlanApprovalRequest] = useState<PlanApprovalRequest | null>(null);
+  // Alt-screen transcript scroll position, in lines up from the newest line.
+  const [historyOffset, setHistoryOffset] = useState(0);
+  // Current transcript geometry for the PgUp/PgDn handler (set during render).
+  const transcriptMetaRef = useRef({ rows: 0, lines: 0 });
   const [cachedModels, setCachedModels] = useState<Map<ProviderType, ModelInfo[]>>(new Map());
   const cascadeRef = useRef<Cascade | null>(null);
   const storeRef = useRef<MemoryStore | null>(null);
@@ -446,6 +452,11 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       setSlashIndex(0);
     }
   }, [slashCompletions.length, slashIndex]);
+
+  // New messages snap the alt-screen transcript back to the newest line.
+  useEffect(() => {
+    setHistoryOffset(0);
+  }, [state.messages.length]);
 
   // The completed agent tree collapses on the user's NEXT keystroke (see the
   // input onChange handler) rather than on an idle timer. A timer-driven
@@ -880,6 +891,14 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       setHistoryIndex(null);
       return;
     }
+    // Alt-screen transcript scrolling — PgUp/PgDn page through history.
+    if (altScreen && (key.pageUp || key.pageDown)) {
+      const { rows: tRows, lines: tLines } = transcriptMetaRef.current;
+      const step = Math.max(1, tRows - 1);
+      const maxOffset = Math.max(0, tLines - tRows);
+      setHistoryOffset((prev) => Math.min(Math.max(0, key.pageUp ? prev + step : prev - step), maxOffset));
+      return;
+    }
     if (key.upArrow && !input.includes('\n')) {
       if (slashCompletions.length > 0) { setSlashIndex(p => (p <= 0 ? slashCompletions.length - 1 : p - 1)); return; }
       const nextIndex = historyIndex === null ? 0 : Math.min(historyIndex + 1, inputHistory.length - 1);
@@ -920,12 +939,22 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   // Row budget for live panels — shrinks panels before the live area can
   // outgrow the viewport, which would force Ink into full-screen redraws
   // (the flicker users see on small/busy terminals).
-  const liveBudget = computeLiveAreaBudget(termSize.rows, {
+  const budgetOpts = {
     isTypingCommand,
     showCost: state.showCost,
     showDetails: state.showDetails,
     showComms: state.showComms && state.peerEvents.length > 0,
-  });
+  };
+  const liveBudget = computeLiveAreaBudget(termSize.rows, budgetOpts);
+
+  // Alt-screen transcript: history renders as a line-windowed view
+  // (PgUp/PgDn) because the alternate screen has no native scrollback.
+  const transcriptRows = altScreen
+    ? computeTranscriptRows(termSize.rows, liveBudget, { ...budgetOpts, treeVisible: state.agentTree != null })
+    : 0;
+  const transcriptLines = altScreen ? flattenTranscript(state.messages) : [];
+  const transcript = altScreen ? windowTranscript(transcriptLines, historyOffset, transcriptRows) : null;
+  transcriptMetaRef.current = { rows: transcriptRows, lines: transcriptLines.length };
 
   useEffect(() => {
     // Actively DISABLE mouse reporting on mount so the terminal's own
@@ -962,20 +991,45 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
 
   return (
     <Box flexDirection="column" width={width}>
-      {/* Conversation history — Static items are written to the terminal
-          scrollback ONCE and never re-rendered. This is what kills the
-          per-render write cost that flickered on maximized terminals. */}
-      <Static items={state.messages}>
-        {(msg) => (
-          <ChatMessage
-            key={msg.id}
-            role={msg.role}
-            content={msg.content}
-            timestamp={msg.timestamp}
-            theme={theme}
-          />
-        )}
-      </Static>
+      {/* Conversation history.
+          Normal mode: Static items are written to the terminal scrollback
+          ONCE and never re-rendered — this is what kills the per-render
+          write cost that flickered on maximized terminals.
+          Alt-screen mode: no scrollback exists, so history renders as a
+          fixed-height line window scrolled with PgUp/PgDn. */}
+      {altScreen && transcript ? (
+        <Box flexDirection="column" paddingX={1} height={transcriptRows + 2}>
+          <Text color={theme.colors.muted} dimColor>
+            {transcript.above > 0 ? `↑ ${transcript.above} more lines · PgUp` : ' '}
+          </Text>
+          {transcript.visible.map((line, i) => {
+            if (line.headerRole) {
+              const style = TRANSCRIPT_HEADER_STYLE[line.headerRole];
+              return (
+                <Text key={`h-${i}`} color={theme.colors[style.color]} bold>
+                  {style.prefix} {style.label}
+                </Text>
+              );
+            }
+            return <Text key={`l-${i}`} wrap="truncate-end">{line.text || ' '}</Text>;
+          })}
+          <Text color={theme.colors.muted} dimColor>
+            {transcript.below > 0 ? `↓ ${transcript.below} more lines · PgDn` : ' '}
+          </Text>
+        </Box>
+      ) : (
+        <Static items={state.messages}>
+          {(msg) => (
+            <ChatMessage
+              key={msg.id}
+              role={msg.role}
+              content={msg.content}
+              timestamp={msg.timestamp}
+              theme={theme}
+            />
+          )}
+        </Static>
+      )}
 
       {/* ── Live area: everything below re-renders on each batch ── */}
 
@@ -1138,6 +1192,13 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     </Box>
   );
 }
+
+const TRANSCRIPT_HEADER_STYLE: Record<'user' | 'assistant' | 'system' | 'error', { prefix: string; label: string; color: 'primary' | 'accent' | 'muted' | 'error' }> = {
+  user: { prefix: '▸', label: 'USER', color: 'primary' },
+  assistant: { prefix: '◈', label: 'CASCADE', color: 'accent' },
+  system: { prefix: '◦', label: 'SYSTEM', color: 'muted' },
+  error: { prefix: '✗', label: 'ERROR', color: 'error' },
+};
 
 const DECISION_KIND_LABEL: Record<DecisionLogEntry['kind'], string> = {
   complexity: 'Complexity',

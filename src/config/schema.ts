@@ -161,6 +161,13 @@ export const CascadeConfigSchema = z.object({
    * outside the TUI. Default: 'never' (no behavior change).
    */
   planApproval: z.enum(['always', 'never']).default('never'),
+  /**
+   * Render the TUI in the terminal's alternate screen buffer (like vim).
+   * Flicker-proof and restores the shell on exit, but native scrollback is
+   * unavailable — history scrolls in-app with PgUp/PgDn. Also enabled per
+   * session with the --alt-screen flag. Default: off.
+   */
+  altScreen: z.boolean().default(false),
 });
 
 export type CascadeConfigInput = z.input<typeof CascadeConfigSchema>;

@@ -107,3 +107,80 @@ export function computeLiveAreaBudget(rows: number, opts: LiveAreaOptions): Live
     collapsed: true,
   };
 }
+
+// ── Alt-screen transcript ────────────────────────────────────────────
+//
+// In --alt-screen mode there is no terminal scrollback, so conversation
+// history renders as a line-windowed transcript (like `less`) scrolled
+// with PgUp/PgDn instead of Ink <Static>.
+
+export interface TranscriptMessage {
+  role: 'user' | 'assistant' | 'system' | 'error';
+  content: string;
+  timestamp?: string;
+}
+
+export interface TranscriptLine {
+  text: string;
+  /** Set on message header lines; body lines leave it undefined. */
+  headerRole?: TranscriptMessage['role'];
+}
+
+/** Flatten messages into renderable lines: one header + body lines each. */
+export function flattenTranscript(messages: TranscriptMessage[]): TranscriptLine[] {
+  const lines: TranscriptLine[] = [];
+  for (const msg of messages) {
+    lines.push({ text: msg.role.toUpperCase(), headerRole: msg.role });
+    for (const line of msg.content.split('\n')) lines.push({ text: line });
+    lines.push({ text: '' });
+  }
+  return lines;
+}
+
+/**
+ * Rows the alt-screen transcript may use: whatever the live panels leave
+ * over, never below a readable minimum.
+ */
+export function computeTranscriptRows(
+  rows: number,
+  budget: LiveAreaBudget,
+  opts: LiveAreaOptions & { treeVisible: boolean },
+): number {
+  const safeRows = Number.isFinite(rows) && rows > 0 ? rows : 40;
+  const used = FIXED_CHROME_ROWS
+    + STREAM_TAIL_ROWS
+    + (opts.isTypingCommand ? SLASH_PANEL_ROWS : 0)
+    + (opts.treeVisible ? budget.treeMaxRows : 0)
+    + (opts.showDetails && budget.showTimeline ? TIMELINE_ROWS : 0)
+    + (opts.showCost ? (budget.costCompact ? COST_ROWS_COMPACT : COST_ROWS_FULL) : 0)
+    + (opts.showComms && budget.commsMaxEvents > 0 ? budget.commsMaxEvents + 1 : 0)
+    + 2; // scroll indicators
+  return Math.max(4, safeRows - 2 - used);
+}
+
+export interface TranscriptWindow<T> {
+  visible: T[];
+  above: number;
+  below: number;
+  /** Offset actually applied after clamping to the list bounds. */
+  clampedOffset: number;
+}
+
+/**
+ * Window the last `maxRows` lines, shifted up by `offsetFromBottom` lines.
+ * Offset 0 pins the view to the newest line.
+ */
+export function windowTranscript<T>(lines: T[], offsetFromBottom: number, maxRows: number): TranscriptWindow<T> {
+  const total = lines.length;
+  const rows = Math.max(1, maxRows);
+  const maxOffset = Math.max(0, total - rows);
+  const offset = Math.min(Math.max(0, offsetFromBottom), maxOffset);
+  const end = total - offset;
+  const start = Math.max(0, end - rows);
+  return {
+    visible: lines.slice(start, end),
+    above: start,
+    below: offset,
+    clampedOffset: offset,
+  };
+}

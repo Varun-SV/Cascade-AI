@@ -443,6 +443,8 @@ export interface CascadeConfig {
   localInferenceTimeoutMs?: number;
   /** Pause Complex runs for user approval of T1's plan ('always') or never (default). */
   planApproval?: 'always' | 'never';
+  /** Render the TUI in the alternate screen buffer (vim-style). Default: false. */
+  altScreen?: boolean;
 }
 
 export interface ModelOverrides {
