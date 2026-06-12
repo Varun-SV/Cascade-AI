@@ -12,6 +12,8 @@ export const ProviderConfigSchema = z.object({
   deploymentName: z.string().optional(),
   apiVersion: z.string().optional(),
   model: z.string().optional(),
+  authToken: z.string().optional(),
+  credentialSource: z.string().optional(),
 });
 
 export const ModelOverridesSchema = z.object({

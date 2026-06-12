@@ -18,6 +18,7 @@ import { dashboardCommand } from './commands/dashboard.js';
 import { makeIdentityCommand } from './commands/identity.js';
 import { modelsCommand } from './commands/models.js';
 import { exportCommand } from './commands/export.js';
+import { linkCommand } from './commands/link.js';
 import { telemetryCommand } from './commands/telemetry.js';
 import { runSetupWizard } from './setup/index.js';
 import { McpClient } from '../mcp/client.js';
@@ -94,6 +95,14 @@ program
   .description('Check system configuration and API key availability')
   .action(async () => {
     await doctorCommand();
+  });
+
+program
+  .command('link [provider]')
+  .description('Reuse credentials from other AI CLIs (Claude Code, Codex, Gemini CLI, Copilot)')
+  .option('--accept-risk', 'Adopt a subscription OAuth token despite the ToS warning')
+  .action(async (provider: string | undefined, opts: { acceptRisk?: boolean }) => {
+    await linkCommand(provider, { acceptRisk: opts.acceptRisk, workspace: process.cwd() });
   });
 
 program

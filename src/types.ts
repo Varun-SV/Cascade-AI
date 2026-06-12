@@ -38,6 +38,14 @@ export interface ProviderConfig {
   deploymentName?: string;        // Azure
   apiVersion?: string;            // Azure
   model?: string;
+  /**
+   * OAuth bearer token (e.g. a Claude Code subscription token) used instead
+   * of an API key. When set on an Anthropic provider, the request uses
+   * `Authorization: Bearer` + the oauth beta header rather than `x-api-key`.
+   */
+  authToken?: string;
+  /** Where an adopted credential came from, e.g. "Claude Code". Informational. */
+  credentialSource?: string;
 }
 
 export interface StreamChunk {

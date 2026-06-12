@@ -277,6 +277,27 @@ API keys are also read from environment variables:
 | Gemini    | `GOOGLE_API_KEY`     |
 | Azure     | `AZURE_OPENAI_KEY`   |
 
+### Linking credentials from other AI CLIs
+
+If you already use **Claude Code**, **OpenAI Codex**, **Gemini CLI**, or **GitHub Copilot CLI**, Cascade can reuse the credentials they store on your machine instead of asking you to paste keys again:
+
+```bash
+cascade link                      # list detected credentials
+cascade link anthropic            # adopt an API key for a provider
+cascade link anthropic --accept-risk   # adopt a Claude Code subscription token
+```
+
+`cascade doctor` also reports what's linkable. How each credential is treated:
+
+| Source | Stored as | Reusable? |
+|--------|-----------|-----------|
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` env | API key | ✅ directly |
+| Codex `~/.codex/auth.json` (API-key mode) | API key | ✅ directly |
+| Claude Code `~/.claude/.credentials.json` | OAuth token | ⚠️ as an Anthropic bearer token (needs `--accept-risk`) |
+| Codex ChatGPT login · Gemini CLI · Copilot CLI | vendor OAuth | ❌ detected only — locked to that vendor's backend |
+
+> ⚠️ **Terms of service:** reusing a *subscription* OAuth token (Claude Code, ChatGPT, Copilot) outside its own CLI may violate the vendor's terms and can get your account flagged. Cascade only ever reads **your own** local files, never adopts an OAuth token without `--accept-risk`, and never transmits a credential anywhere except to that credential's own provider. Use API keys where you can.
+
 ### CASCADE.md
 
 Create a `CASCADE.md` in your project root to give agents project-specific instructions — just like `CLAUDE.md`. Run `cascade init` to generate a template.
@@ -380,6 +401,7 @@ cascade [options]               Start interactive REPL
 cascade run <prompt>            Run a single prompt and exit
 cascade init [path]             Initialize Cascade in a directory
 cascade doctor                  Diagnose API keys, Ollama, config
+cascade link [provider]         Reuse credentials from Claude Code / Codex / Gemini / Copilot
 cascade update                  Update to the latest version
 cascade dashboard               Launch the web dashboard
 ```
