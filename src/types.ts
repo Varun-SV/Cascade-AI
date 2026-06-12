@@ -284,7 +284,10 @@ export type PeerSyncType =
   | 'RESOLVE_CONFLICT'
   | 'DIVIDE_WORK'
   | 'CHECK_ASSUMPTION'
-  | 'SIGNAL_READY';
+  | 'SIGNAL_READY'
+  // File-lock and barrier traffic — surfaced so UIs can visualize how the
+  // agents coordinate, not just what they hand each other.
+  | 'COORDINATION';
 
 export interface PeerMessage {
   fromId: string;

@@ -42,6 +42,8 @@ export interface SlashCommandContext {
   onMcpList: () => string | Promise<string>;
   /** Copies the last (or nth-last) assistant response to the clipboard. */
   onCopy: (args: string[]) => string | Promise<string>;
+  /** Toggles the agent-to-agent comms feed. */
+  onComms: () => string;
 }
 
 export interface SlashCommandResult {
@@ -276,6 +278,12 @@ export class SlashCommandRegistry {
       description: 'Copy the last response to the clipboard  /copy [n]',
       args: ['[n]'],
       handler: async (args, ctx) => ({ output: await ctx.onCopy(args), handled: true }),
+    });
+
+    this.register({
+      command: '/comms',
+      description: 'Toggle the agent-to-agent comms feed',
+      handler: (_args, ctx) => ({ output: ctx.onComms(), handled: true }),
     });
 
     this.register({

@@ -15,6 +15,7 @@ import type {
   CascadeConfig,
   ConversationMessage,
   ModelInfo,
+  PeerMessageEvent,
   ProviderType,
   RuntimeNode,
   RuntimeNodeLog,
@@ -46,6 +47,11 @@ import { ModelsDisplay, type ModelPickerSelection } from './components/ModelsDis
 import { CostTracker } from './components/CostTracker.js';
 import { CompactStatus } from './components/CompactStatus.js';
 import { ChatMessage } from './components/ChatMessage.js';
+import { PeerFeed } from './components/PeerFeed.js';
+
+// Keep only the most recent peer-comms events — a long run can produce
+// thousands and the feed only ever shows the last handful.
+const PEER_EVENT_BUFFER = 50;
 
 // Show only the last N lines of a streaming buffer in the live area so a
 // long generation can't push the rest of the TUI off-screen. The full text
@@ -122,6 +128,8 @@ interface ReplState {
   tokensByTier: Record<string, number>;
   savedUsd: number;
   savedPct: number;
+  peerEvents: PeerMessageEvent[];
+  showComms: boolean;
   approvalRequest: ApprovalRequest | null;
   showCost: boolean;
   showDetails: boolean;
@@ -138,6 +146,9 @@ type ReplAction =
   | { type: 'SET_APPROVAL'; request: ApprovalRequest | null }
   | { type: 'SET_EXECUTING'; isExecuting: boolean }
   | { type: 'SET_STREAMING'; isStreaming: boolean }
+  | { type: 'ADD_PEER_EVENTS'; events: PeerMessageEvent[] }
+  | { type: 'CLEAR_PEER_EVENTS' }
+  | { type: 'TOGGLE_COMMS' }
   | { type: 'CLEAR' }
   | { type: 'TOGGLE_COST' }
   | { type: 'TOGGLE_DETAILS' }
@@ -170,8 +181,14 @@ function replReducer(state: ReplState, action: ReplAction): ReplState {
       return { ...state, isExecuting: action.isExecuting };
     case 'SET_STREAMING':
       return { ...state, isStreaming: action.isStreaming };
+    case 'ADD_PEER_EVENTS':
+      return { ...state, peerEvents: [...state.peerEvents, ...action.events].slice(-PEER_EVENT_BUFFER) };
+    case 'CLEAR_PEER_EVENTS':
+      return state.peerEvents.length ? { ...state, peerEvents: [] } : state;
+    case 'TOGGLE_COMMS':
+      return { ...state, showComms: !state.showComms };
     case 'CLEAR':
-      return { ...state, messages: [], agentTree: null, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, savedUsd: 0, savedPct: 0, activeTool: null };
+      return { ...state, messages: [], agentTree: null, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, savedUsd: 0, savedPct: 0, peerEvents: [], activeTool: null };
     case 'CLEAR_TREE':
       return { ...state, agentTree: null };
     case 'TOGGLE_COST':
@@ -228,7 +245,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const [slashIndex, setSlashIndex] = useState(0);
   const [identities, setIdentities] = useState<Array<{ id: string; name: string; isDefault: boolean }>>([]);
   const [currentIdentityId, setCurrentIdentityId] = useState<string | undefined>(config.defaultIdentityId);
-  const [state, dispatch] = useReducer(replReducer, { messages: [], agentTree: null, isStreaming: false, isExecuting: false, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, savedUsd: 0, savedPct: 0, approvalRequest: null, showCost: false, showDetails: false, error: null, activeTool: null });
+  const [state, dispatch] = useReducer(replReducer, { messages: [], agentTree: null, isStreaming: false, isExecuting: false, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, savedUsd: 0, savedPct: 0, peerEvents: [], showComms: true, approvalRequest: null, showCost: false, showDetails: false, error: null, activeTool: null });
   const [isShowingModels, setIsShowingModels] = useState(false);
   const [cachedModels, setCachedModels] = useState<Map<ProviderType, ModelInfo[]>>(new Map());
   const cascadeRef = useRef<Cascade | null>(null);
@@ -539,6 +556,12 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           ? `✔ Copied ${which} (${msg.content.length} chars) via terminal escape — works over SSH if your terminal supports OSC 52.`
           : `✔ Copied ${which} (${msg.content.length} chars) to clipboard.`;
       },
+      onComms: () => {
+        dispatch({ type: 'TOGGLE_COMMS' });
+        return state.showComms
+          ? 'Agent comms feed hidden. /comms to bring it back.'
+          : 'Agent comms feed enabled — agent-to-agent traffic will appear during runs.';
+      },
       onCostInfo: () => { dispatch({ type: 'TOGGLE_COST' }); return ''; },
       onBudget: (args) => {
         const router = cascadeRef.current?.getRouter();
@@ -655,6 +678,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       return;
     }
     treeNodesRef.current.clear(); rebuildTree(); setTreeScrollOffset(0);
+    dispatch({ type: 'CLEAR_PEER_EVENTS' });
     const onRoot = ({ role }: RootTierEvent) => {
       const tierId = role === 'T1' ? 'T1' : `${role.toLowerCase()}-root` as 't2-root' | 't3-root';
       rootTierIdRef.current = tierId;
@@ -693,6 +717,19 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     cascade.on('tier:status', (ev: TierStatusEvent) => {
       pendingStatusEvents.push(ev);
       if (!statusThrottleTimeout) statusThrottleTimeout = setTimeout(flushStatus, 100);
+    });
+    // Agent-to-agent comms — same 100ms coalescing as tier:status so a
+    // chatty swarm of T3s can't render-thrash the live area.
+    const pendingPeerEvents: PeerMessageEvent[] = [];
+    let peerThrottleTimeout: NodeJS.Timeout | null = null;
+    const flushPeerEvents = () => {
+      const events = pendingPeerEvents.splice(0);
+      if (events.length) dispatch({ type: 'ADD_PEER_EVENTS', events });
+      peerThrottleTimeout = null;
+    };
+    cascade.on('peer:message', (ev: PeerMessageEvent) => {
+      pendingPeerEvents.push(ev);
+      if (!peerThrottleTimeout) peerThrottleTimeout = setTimeout(flushPeerEvents, 100);
     });
     cascade.on('budget:warning', (payload: { spentUsd: number; capUsd: number; spendPct: number; remainingUsd: number }) => {
       const bar = '█'.repeat(Math.round(payload.spendPct / 10)) + '░'.repeat(10 - Math.round(payload.spendPct / 10));
@@ -749,6 +786,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       });
       flushStream();
       flushStatus();
+      flushPeerEvents();
       const stats = cascade.getRouter().getStats();
       const savings = cascade.getRouter().getDelegationSavings();
       dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier, savedUsd: savings.savedUsd, savedPct: savings.savedPct });
@@ -776,6 +814,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     finally {
       if (streamThrottleTimeout) { clearTimeout(streamThrottleTimeout); streamThrottleTimeout = null; }
       if (statusThrottleTimeout) { clearTimeout(statusThrottleTimeout); statusThrottleTimeout = null; }
+      if (peerThrottleTimeout) { clearTimeout(peerThrottleTimeout); peerThrottleTimeout = null; }
       cascade.removeAllListeners();
       const finalStats = cascade.getRouter().getStats();
       const currentSession = storeRef.current?.getSession(sessionIdRef.current);
@@ -875,6 +914,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     isTypingCommand,
     showCost: state.showCost,
     showDetails: state.showDetails,
+    showComms: state.showComms && state.peerEvents.length > 0,
   });
 
   useEffect(() => {
@@ -983,6 +1023,11 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       {/* Compact agent tree — collapses on the next keystroke after completion */}
       <AgentTree root={state.agentTree} theme={theme} scrollOffset={treeScrollOffset} maxRows={liveBudget.treeMaxRows} />
 
+      {/* Agent-to-agent comms feed — the radio chatter between workers */}
+      {state.showComms && liveBudget.commsMaxEvents > 0 && (
+        <PeerFeed events={state.peerEvents} theme={theme} maxRows={liveBudget.commsMaxEvents} />
+      )}
+
       {state.showDetails && liveBudget.showTimeline && (
         <TimelinePanel nodes={[...treeNodesRef.current.values()]} theme={theme} currentIndex={timelineIndex} onChangeIndex={setTimelineIndex} />
       )}
@@ -1054,11 +1099,12 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
             manageMouseReporting={false}
             onChange={(val) => {
               if (isInputLockedRef.current) return;
-              // Collapse the completed agent tree now that the user is typing
-              // again — this replaces the old idle timer, whose repaint could
-              // wipe an in-progress mouse selection.
-              if (!state.isExecuting && state.agentTree != null && val.length > 0) {
-                dispatch({ type: 'CLEAR_TREE' });
+              // Collapse the completed agent tree and comms feed now that the
+              // user is typing again — this replaces the old idle timer, whose
+              // repaint could wipe an in-progress mouse selection.
+              if (!state.isExecuting && val.length > 0) {
+                if (state.agentTree != null) dispatch({ type: 'CLEAR_TREE' });
+                if (state.peerEvents.length > 0) dispatch({ type: 'CLEAR_PEER_EVENTS' });
               }
               // Defense in depth — SafeTextInput already sanitizes, but a brief
               // input-lock window can still pass through values we'd rather drop.

@@ -44,6 +44,18 @@ export class PeerBus extends EventEmitter {
   onPeerMessage?: (event: PeerMessageEvent) => void;
   sessionId = '';
 
+  /** Surface coordination traffic (locks, barriers) to the visibility hook. */
+  private emitCoordination(fromId: string, text: string): void {
+    this.onPeerMessage?.({
+      fromId,
+      toId: undefined,
+      syncType: 'COORDINATION',
+      payload: text,
+      timestamp: new Date().toISOString(),
+      sessionId: this.sessionId,
+    });
+  }
+
   register(peerId: string): void {
     this.members.add(peerId);
   }
@@ -202,9 +214,11 @@ export class PeerBus extends EventEmitter {
     const existing = this.fileLocks.get(filePath);
     if (!existing) {
       this.fileLocks.set(filePath, { holderId: tierId, lockedAt: new Date().toISOString(), waiters: [] });
+      this.emitCoordination(tierId, `🔒 locked ${filePath}`);
       return;
     }
 
+    this.emitCoordination(tierId, `⏳ waiting for ${filePath} (held by ${existing.holderId})`);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(new Error(`File lock timeout for ${filePath} (held by ${existing.holderId})`));
@@ -214,6 +228,7 @@ export class PeerBus extends EventEmitter {
         clearTimeout(timer);
         // Re-acquire for this tier
         this.fileLocks.set(filePath, { holderId: tierId, lockedAt: new Date().toISOString(), waiters: [] });
+        this.emitCoordination(tierId, `🔒 locked ${filePath}`);
         resolve();
       });
     });
@@ -226,6 +241,7 @@ export class PeerBus extends EventEmitter {
     const lock = this.fileLocks.get(filePath);
     if (!lock || lock.holderId !== tierId) return;
 
+    this.emitCoordination(tierId, `🔓 released ${filePath}`);
     const nextWaiter = lock.waiters.shift();
     if (nextWaiter) {
       nextWaiter();
@@ -319,6 +335,7 @@ export class PeerBus extends EventEmitter {
 
     const bar = this.barriers.get(barrierName)!;
     bar.arrived.add(peerId);
+    this.emitCoordination(peerId, `⊨ barrier "${barrierName}" (${bar.arrived.size}/${bar.total})`);
 
     if (bar.arrived.size >= bar.total) {
       this.emit(`barrier:${barrierName}`);
