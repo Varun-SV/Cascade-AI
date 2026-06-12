@@ -65,3 +65,67 @@ export function readClipboardSync(): string {
   }
   return '';
 }
+
+function writeCandidates(): Cmd[] {
+  if (process.platform === 'win32') {
+    return [
+      // clip.exe ships with every supported Windows version and reads stdin.
+      { cmd: 'clip.exe', args: [] },
+      { cmd: 'powershell.exe', args: ['-NoProfile', '-Command', '$input | Set-Clipboard'] },
+      { cmd: 'pwsh.exe', args: ['-NoProfile', '-Command', '$input | Set-Clipboard'] },
+    ];
+  }
+  if (process.platform === 'darwin') {
+    return [{ cmd: 'pbcopy', args: [] }];
+  }
+  const out: Cmd[] = [];
+  if (process.env['WAYLAND_DISPLAY']) {
+    out.push({ cmd: 'wl-copy', args: [] });
+  }
+  out.push({ cmd: 'xclip', args: ['-selection', 'clipboard', '-i'] });
+  out.push({ cmd: 'xsel', args: ['--clipboard', '--input'] });
+  // Termux on Android
+  out.push({ cmd: 'termux-clipboard-set', args: [] });
+  return out;
+}
+
+// Terminals commonly cap OSC 52 payloads around 100 KB of base64 — truncate
+// rather than silently sending an escape the terminal will drop entirely.
+const OSC52_MAX_CHARS = 70_000;
+
+/**
+ * Write text to the system clipboard. Tries the native OS clipboard tools
+ * first; when none are available (SSH sessions, containers, minimal
+ * installs) falls back to the OSC 52 terminal escape, which modern
+ * terminals translate into a clipboard write on the user's local machine.
+ *
+ * Returns how the copy was performed, or `false` if no path was available.
+ * Never throws.
+ */
+export function writeClipboardSync(text: string): 'native' | 'osc52' | false {
+  for (const { cmd, args } of writeCandidates()) {
+    try {
+      const result = spawnSync(cmd, args, {
+        input: text,
+        timeout: 500,
+        stdio: ['pipe', 'ignore', 'ignore'],
+        windowsHide: true,
+      });
+      if (result.status === 0) return 'native';
+    } catch {
+      // try next candidate
+    }
+  }
+
+  // OSC 52 fallback — only meaningful on a real terminal.
+  if (process.stdout.isTTY) {
+    try {
+      const payload = Buffer.from(text.slice(0, OSC52_MAX_CHARS), 'utf-8').toString('base64');
+      process.stdout.write(`\x1b]52;c;${payload}\x07`);
+      return 'osc52';
+    } catch {
+      /* fall through */
+    }
+  }
+  return false;
+}

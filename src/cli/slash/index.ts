@@ -40,6 +40,8 @@ export interface SlashCommandContext {
   onTree: () => string;
   onResume: (args: string[]) => Promise<string> | string;
   onMcpList: () => string | Promise<string>;
+  /** Copies the last (or nth-last) assistant response to the clipboard. */
+  onCopy: (args: string[]) => string | Promise<string>;
 }
 
 export interface SlashCommandResult {
@@ -267,6 +269,13 @@ export class SlashCommandRegistry {
       command: '/identity',
       description: 'Switch active identity',
       handler: async (args, ctx) => ({ output: await ctx.onIdentity(args), handled: true }),
+    });
+
+    this.register({
+      command: '/copy',
+      description: 'Copy the last response to the clipboard  /copy [n]',
+      args: ['[n]'],
+      handler: async (args, ctx) => ({ output: await ctx.onCopy(args), handled: true }),
     });
 
     this.register({

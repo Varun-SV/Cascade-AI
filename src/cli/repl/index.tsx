@@ -36,6 +36,7 @@ import { getTheme } from '../themes/index.js';
 import { SlashCommandRegistry } from '../slash/index.js';
 import { computeLiveAreaBudget } from './layout.js';
 import { disableMouseReporting } from '../utils/terminal-input.js';
+import { writeClipboardSync } from '../utils/clipboard.js';
 import { AgentTree, type TierNode } from './components/AgentTree.js';
 import { TimelinePanel } from './components/TimelinePanel.js';
 import { StatusBar } from './components/StatusBar.js';
@@ -45,10 +46,6 @@ import { ModelsDisplay, type ModelPickerSelection } from './components/ModelsDis
 import { CostTracker } from './components/CostTracker.js';
 import { CompactStatus } from './components/CompactStatus.js';
 import { ChatMessage } from './components/ChatMessage.js';
-
-// Auto-hide the agent tree this many ms after execution completes. Cancelled
-// if a new task starts. Tunable.
-const AUTO_CLEAR_TREE_MS = 8000;
 
 // Show only the last N lines of a streaming buffer in the live area so a
 // long generation can't push the rest of the TUI off-screen. The full text
@@ -247,7 +244,6 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const [quitAttempted, setQuitAttempted] = useState(false);
   const isInputLockedRef = useRef(false);
   const lockTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const autoClearTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const lockInputTemporarily = useCallback(() => {
     isInputLockedRef.current = true;
@@ -429,29 +425,11 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     }
   }, [slashCompletions.length, slashIndex]);
 
-  // Auto-hide the agent tree after a session completes. Clears the tree only
-  // (preserves messages, costs, active tool) AUTO_CLEAR_TREE_MS after execution
-  // finishes. Cancelled if a new task starts.
-  useEffect(() => {
-    if (state.isExecuting) {
-      if (autoClearTimerRef.current) {
-        clearTimeout(autoClearTimerRef.current);
-        autoClearTimerRef.current = null;
-      }
-      return;
-    }
-    if (state.agentTree == null) return;
-    autoClearTimerRef.current = setTimeout(() => {
-      dispatch({ type: 'CLEAR_TREE' });
-      autoClearTimerRef.current = null;
-    }, AUTO_CLEAR_TREE_MS);
-    return () => {
-      if (autoClearTimerRef.current) {
-        clearTimeout(autoClearTimerRef.current);
-        autoClearTimerRef.current = null;
-      }
-    };
-  }, [state.isExecuting, state.agentTree]);
+  // The completed agent tree collapses on the user's NEXT keystroke (see the
+  // input onChange handler) rather than on an idle timer. A timer-driven
+  // repaint while the user is away wipes any in-progress mouse selection —
+  // when nothing is executing and nobody is typing, the screen must stay
+  // perfectly still so native drag-select + right-click copy work.
 
   const handleSlashCommand = useCallback(async (trimmed: string) => {
     const result = await slashRef.current.handle(trimmed, {
@@ -544,6 +522,20 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           serverTools.forEach(t => lines.push(`  - ${t.name.split('::')[2]} — ${t.description.replace(`[MCP:${server}] `, '')}`));
         }
         return lines.join('\n');
+      },
+      onCopy: (args) => {
+        const n = Math.max(1, Number.parseInt(args[0] ?? '1', 10) || 1);
+        const assistants = state.messages.filter((m) => m.role === 'assistant');
+        const msg = assistants[assistants.length - n];
+        if (!msg) return n === 1 ? 'No assistant response to copy yet.' : `No response found ${n} back.`;
+        const method = writeClipboardSync(msg.content);
+        if (!method) {
+          return 'Copy failed — no clipboard tool found (pbcopy/clip/xclip/wl-copy) and not running in a terminal.';
+        }
+        const which = n === 1 ? 'last response' : `response ${n} back`;
+        return method === 'osc52'
+          ? `✔ Copied ${which} (${msg.content.length} chars) via terminal escape — works over SSH if your terminal supports OSC 52.`
+          : `✔ Copied ${which} (${msg.content.length} chars) to clipboard.`;
       },
       onCostInfo: () => { dispatch({ type: 'TOGGLE_COST' }); return ''; },
       onBudget: (args) => {
@@ -978,7 +970,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         </Box>
       )}
 
-      {/* Compact agent tree — auto-hides AUTO_CLEAR_TREE_MS after completion */}
+      {/* Compact agent tree — collapses on the next keystroke after completion */}
       <AgentTree root={state.agentTree} theme={theme} scrollOffset={treeScrollOffset} maxRows={liveBudget.treeMaxRows} />
 
       {state.showDetails && liveBudget.showTimeline && (
@@ -1052,6 +1044,12 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
             manageMouseReporting={false}
             onChange={(val) => {
               if (isInputLockedRef.current) return;
+              // Collapse the completed agent tree now that the user is typing
+              // again — this replaces the old idle timer, whose repaint could
+              // wipe an in-progress mouse selection.
+              if (!state.isExecuting && state.agentTree != null && val.length > 0) {
+                dispatch({ type: 'CLEAR_TREE' });
+              }
               // Defense in depth — SafeTextInput already sanitizes, but a brief
               // input-lock window can still pass through values we'd rather drop.
               setInput(sanitizeTerminalInput(val));
