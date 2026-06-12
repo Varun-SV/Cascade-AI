@@ -30,6 +30,7 @@ import { calculateCost } from '../../utils/cost.js';
 import { withTimeout } from '../../utils/retry.js';
 import { ModelProfiler } from './model-profiler.js';
 import type { MemoryStore } from '../../memory/store.js';
+import { computeDelegationSavings, type DelegationSavings } from './savings.js';
 
 export interface RouterStats {
   totalTokens: number;
@@ -312,6 +313,15 @@ export class CascadeRouter extends EventEmitter {
       inputTokensByTier: { ...this.stats.inputTokensByTier },
       outputTokensByTier: { ...this.stats.outputTokensByTier },
     };
+  }
+
+  /**
+   * What did delegation save? Compares actual spend against the
+   * counterfactual of every call running on the T1 model. This is the
+   * number only a tiered hierarchy can show.
+   */
+  getDelegationSavings(): DelegationSavings {
+    return computeDelegationSavings(this.stats, this.tierModels.get('T1'));
   }
 
   /**

@@ -120,6 +120,8 @@ interface ReplState {
   callsByTier: Record<string, number>;
   costByTier: Record<string, number>;
   tokensByTier: Record<string, number>;
+  savedUsd: number;
+  savedPct: number;
   approvalRequest: ApprovalRequest | null;
   showCost: boolean;
   showDetails: boolean;
@@ -132,7 +134,7 @@ type ReplAction =
   | { type: 'APPEND_STREAM'; text: string }
   | { type: 'COMMIT_STREAM'; finalText: string; timestamp?: string }
   | { type: 'SET_TREE'; tree: TierNode | null }
-  | { type: 'UPDATE_COST'; tokens: number; costUsd: number; byProvider: Record<string,number>; byTier: Record<string,number>; costByTier: Record<string,number>; tokensByTier: Record<string,number> }
+  | { type: 'UPDATE_COST'; tokens: number; costUsd: number; byProvider: Record<string,number>; byTier: Record<string,number>; costByTier: Record<string,number>; tokensByTier: Record<string,number>; savedUsd: number; savedPct: number }
   | { type: 'SET_APPROVAL'; request: ApprovalRequest | null }
   | { type: 'SET_EXECUTING'; isExecuting: boolean }
   | { type: 'SET_STREAMING'; isStreaming: boolean }
@@ -161,7 +163,7 @@ function replReducer(state: ReplState, action: ReplAction): ReplState {
     case 'SET_TREE':
       return { ...state, agentTree: action.tree };
     case 'UPDATE_COST':
-      return { ...state, totalTokens: action.tokens, totalCostUsd: action.costUsd, callsByProvider: action.byProvider, callsByTier: action.byTier, costByTier: action.costByTier, tokensByTier: action.tokensByTier };
+      return { ...state, totalTokens: action.tokens, totalCostUsd: action.costUsd, callsByProvider: action.byProvider, callsByTier: action.byTier, costByTier: action.costByTier, tokensByTier: action.tokensByTier, savedUsd: action.savedUsd, savedPct: action.savedPct };
     case 'SET_APPROVAL':
       return { ...state, approvalRequest: action.request };
     case 'SET_EXECUTING':
@@ -169,7 +171,7 @@ function replReducer(state: ReplState, action: ReplAction): ReplState {
     case 'SET_STREAMING':
       return { ...state, isStreaming: action.isStreaming };
     case 'CLEAR':
-      return { ...state, messages: [], agentTree: null, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, activeTool: null };
+      return { ...state, messages: [], agentTree: null, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, savedUsd: 0, savedPct: 0, activeTool: null };
     case 'CLEAR_TREE':
       return { ...state, agentTree: null };
     case 'TOGGLE_COST':
@@ -226,7 +228,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const [slashIndex, setSlashIndex] = useState(0);
   const [identities, setIdentities] = useState<Array<{ id: string; name: string; isDefault: boolean }>>([]);
   const [currentIdentityId, setCurrentIdentityId] = useState<string | undefined>(config.defaultIdentityId);
-  const [state, dispatch] = useReducer(replReducer, { messages: [], agentTree: null, isStreaming: false, isExecuting: false, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, approvalRequest: null, showCost: false, showDetails: false, error: null, activeTool: null });
+  const [state, dispatch] = useReducer(replReducer, { messages: [], agentTree: null, isStreaming: false, isExecuting: false, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, savedUsd: 0, savedPct: 0, approvalRequest: null, showCost: false, showDetails: false, error: null, activeTool: null });
   const [isShowingModels, setIsShowingModels] = useState(false);
   const [cachedModels, setCachedModels] = useState<Map<ProviderType, ModelInfo[]>>(new Map());
   const cascadeRef = useRef<Cascade | null>(null);
@@ -682,7 +684,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       }
       if (lastTool !== null) dispatch({ type: 'SET_ACTIVE_TOOL', toolName: lastTool });
       const stats = cascade.getRouter().getStats();
-      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier });
+      const savings = cascade.getRouter().getDelegationSavings();
+      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier, savedUsd: savings.savedUsd, savedPct: savings.savedPct });
       statusThrottleTimeout = null;
     };
     cascade.on('tier:root', onRoot);
@@ -747,9 +750,15 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       flushStream();
       flushStatus();
       const stats = cascade.getRouter().getStats();
-      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier });
+      const savings = cascade.getRouter().getDelegationSavings();
+      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier, savedUsd: savings.savedUsd, savedPct: savings.savedPct });
       dispatch({ type: 'COMMIT_STREAM', finalText: result.output, timestamp: new Date().toISOString() });
       persistMessage('assistant', result.output, new Date().toISOString());
+      // One-line run receipt — the delegation economics in scrollback.
+      const receipt = formatRunReceipt(result, stats.totalCostUsd, savings);
+      if (receipt) {
+        dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'system', content: receipt, timestamp: new Date().toISOString() } });
+      }
       // Generate AI session name on first exchange (async, fire-and-forget)
       if (!sessionTitleGeneratedRef.current && storeRef.current) {
         sessionTitleGeneratedRef.current = true;
@@ -929,6 +938,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         }}
         tokens={state.totalTokens}
         costUsd={state.totalCostUsd}
+        savedUsd={state.savedUsd}
         workspacePath={workspacePath}
         isExecuting={state.isExecuting}
         activeTier={state.agentTree?.status === 'ACTIVE' ? 'T1' : undefined}
@@ -976,7 +986,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       {state.showDetails && liveBudget.showTimeline && (
         <TimelinePanel nodes={[...treeNodesRef.current.values()]} theme={theme} currentIndex={timelineIndex} onChangeIndex={setTimelineIndex} />
       )}
-      {state.showCost && <CostTracker theme={theme} totalTokens={state.totalTokens} totalCostUsd={state.totalCostUsd} callsByProvider={state.callsByProvider} callsByTier={state.callsByTier} costByTier={state.costByTier} tokensByTier={state.tokensByTier} compact={liveBudget.costCompact} />}
+      {state.showCost && <CostTracker theme={theme} totalTokens={state.totalTokens} totalCostUsd={state.totalCostUsd} callsByProvider={state.callsByProvider} callsByTier={state.callsByTier} costByTier={state.costByTier} tokensByTier={state.tokensByTier} compact={liveBudget.costCompact} savedUsd={state.savedUsd} savedPct={state.savedPct} />}
       {liveBudget.collapsed && (state.showCost || state.showDetails || state.agentTree != null) && (
         <Text color={theme.colors.muted} dimColor>  ▸ panels collapsed (small terminal)</Text>
       )}
@@ -1061,6 +1071,24 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       </Box>
     </Box>
   );
+}
+
+function formatRunReceipt(
+  result: { durationMs: number; t2Results: Array<{ t3Results?: unknown[] }> },
+  totalCostUsd: number,
+  savings: { savedUsd: number; savedPct: number },
+): string {
+  const seconds = Math.max(1, Math.round(result.durationMs / 1000));
+  const managers = result.t2Results.length;
+  const workers = result.t2Results.reduce((sum, r) => sum + (r.t3Results?.length ?? 0), 0);
+  const parts = [`✔ Done in ${seconds}s`];
+  if (managers > 0) parts.push(`${managers} manager${managers !== 1 ? 's' : ''}`);
+  if (workers > 0) parts.push(`${workers} worker${workers !== 1 ? 's' : ''}`);
+  parts.push(`$${totalCostUsd.toFixed(4)}`);
+  const line = parts.join(' · ');
+  return savings.savedUsd > 0
+    ? `${line} (saved $${savings.savedUsd.toFixed(4)} — ${savings.savedPct}% vs. all-T1)`
+    : line;
 }
 
 function toConversationHistory(messages: Message[]): ConversationMessage[] {

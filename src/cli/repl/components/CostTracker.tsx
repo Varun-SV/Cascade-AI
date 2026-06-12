@@ -21,6 +21,10 @@ interface CostTrackerProps {
    * outgrow the viewport or Ink falls back to full-screen redraws (flicker).
    */
   compact?: boolean;
+  /** USD saved by tier delegation vs. running every call on T1. */
+  savedUsd?: number;
+  /** Percentage of the all-T1 counterfactual that was saved (0–100). */
+  savedPct?: number;
 }
 
 // Cap the provider list so the panel height stays bounded no matter how
@@ -36,8 +40,13 @@ export function CostTracker({
   costByTier,
   tokensByTier,
   compact = false,
+  savedUsd = 0,
+  savedPct = 0,
 }: CostTrackerProps): React.ReactElement {
   const hasTierCost = costByTier && Object.keys(costByTier).length > 0;
+  const savingsLine = savedUsd > 0
+    ? `Saved $${savedUsd.toFixed(4)} (${savedPct}%) vs. running every call on T1`
+    : null;
 
   if (compact) {
     const tierSummary = Object.entries(costByTier ?? {})
@@ -55,6 +64,7 @@ export function CostTracker({
           <Text color={theme.colors.success} bold>${totalCostUsd.toFixed(6)}</Text>
         </Box>
         {tierSummary ? <Text color={theme.colors.muted} wrap="truncate-end">{tierSummary}</Text> : null}
+        {savingsLine ? <Text color={theme.colors.success} wrap="truncate-end">{savingsLine}</Text> : null}
       </Box>
     );
   }
@@ -75,6 +85,12 @@ export function CostTracker({
         <Box width={20}><Text color={theme.colors.muted}>Estimated cost:</Text></Box>
         <Text color={theme.colors.success} bold>${totalCostUsd.toFixed(6)}</Text>
       </Box>
+      {savingsLine && (
+        <Box>
+          <Box width={20}><Text color={theme.colors.muted}>Delegation:</Text></Box>
+          <Text color={theme.colors.success}>{savingsLine}</Text>
+        </Box>
+      )}
 
       {visibleProviders.length > 0 && (
         <Box flexDirection="column" marginTop={1}>
