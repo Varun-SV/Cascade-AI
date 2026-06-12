@@ -59,10 +59,17 @@ QUALITY RULES:
 - Do NOT create trivial sections that only move files or print summaries — fold those into adjacent sections.
 - If the plan would naturally produce fewer than 2 independent sections, prefer Moderate routing (single T2).`;
 
-interface TaskPlan {
+export interface TaskPlan {
   complexity: TaskComplexity;
   sections: T1ToT2Assignment[];
   reasoning: string;
+}
+
+/** Decision returned by a plan-approval gate (the "boardroom"). */
+export interface PlanApprovalDecision {
+  approved: boolean;
+  /** Optional steering note — triggers ONE re-plan pass with the guidance. */
+  note?: string;
 }
 
 export class T1Administrator extends BaseTier {
@@ -79,6 +86,7 @@ export class T1Administrator extends BaseTier {
   private taskGoal = '';
   private peerMessageCallback?: (event: PeerMessageEvent) => void;
   private peerMessageSessionId = '';
+  private planApprovalCallback?: (plan: TaskPlan) => Promise<PlanApprovalDecision>;
 
   constructor(router: CascadeRouter, toolRegistry: ToolRegistry, config: CascadeConfig) {
     super('T1', 'T1');
@@ -109,6 +117,14 @@ export class T1Administrator extends BaseTier {
     this.peerMessageSessionId = sessionId;
     this.t2PeerBus.onPeerMessage = cb;
     this.t2PeerBus.sessionId = sessionId;
+  }
+
+  /**
+   * Install a "boardroom" gate: called with T1's plan BEFORE any T2 manager
+   * spawns. When unset, plans proceed immediately (headless/SDK unchanged).
+   */
+  setPlanApprovalCallback(cb: (plan: TaskPlan) => Promise<PlanApprovalDecision>): void {
+    this.planApprovalCallback = cb;
   }
 
   async execute(
@@ -149,7 +165,7 @@ export class T1Administrator extends BaseTier {
     this.throwIfCancelled();
 
     // Step 2: Decompose task into sections
-    const plan = await this.decomposeTask(enrichedPrompt, systemContext);
+    let plan = await this.decomposeTask(enrichedPrompt, systemContext);
 
     this.sendStatusUpdate({
       progressPct: 10,
@@ -158,6 +174,33 @@ export class T1Administrator extends BaseTier {
     });
 
     this.emit('plan', { taskId: this.taskId, plan });
+
+    // ── Boardroom gate: the user sits above T1 ──────────────────────
+    // When installed, the plan needs sign-off before any T2 spawns.
+    if (this.planApprovalCallback) {
+      this.sendStatusUpdate({
+        progressPct: 10,
+        currentAction: 'Boardroom: waiting for plan approval',
+        status: 'IN_PROGRESS',
+      });
+      const decision = await this.planApprovalCallback(plan);
+      if (!decision.approved) {
+        const output = 'Plan rejected in the boardroom — nothing was executed. Rephrase the request or adjust the plan with a new prompt.';
+        this.setStatus('COMPLETED', output);
+        this.sendStatusUpdate({ progressPct: 100, currentAction: 'Plan rejected by user', status: 'IN_PROGRESS', output });
+        return { output, t2Results: [], taskId: this.taskId, complexity: plan.complexity };
+      }
+      if (decision.note?.trim()) {
+        // One steering pass: re-plan with the board's guidance, then proceed
+        // without re-asking (avoids an approval loop).
+        this.log(`Boardroom note received — re-planning once: ${decision.note}`);
+        plan = await this.decomposeTask(
+          `${enrichedPrompt}\n\nBoard guidance (must be followed in the plan): ${decision.note}`,
+          systemContext,
+        );
+        this.emit('plan', { taskId: this.taskId, plan });
+      }
+    }
 
     // ── Cancellation checkpoint: after planning, before T2 dispatch ──
     this.throwIfCancelled();

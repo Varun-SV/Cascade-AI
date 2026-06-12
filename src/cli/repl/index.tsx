@@ -48,6 +48,7 @@ import { CostTracker } from './components/CostTracker.js';
 import { CompactStatus } from './components/CompactStatus.js';
 import { ChatMessage } from './components/ChatMessage.js';
 import { PeerFeed } from './components/PeerFeed.js';
+import { PlanApproval, type PlanApprovalRequest } from './components/PlanApproval.js';
 
 // Keep only the most recent peer-comms events — a long run can produce
 // thousands and the feed only ever shows the last handful.
@@ -247,6 +248,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const [currentIdentityId, setCurrentIdentityId] = useState<string | undefined>(config.defaultIdentityId);
   const [state, dispatch] = useReducer(replReducer, { messages: [], agentTree: null, isStreaming: false, isExecuting: false, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, savedUsd: 0, savedPct: 0, peerEvents: [], showComms: true, approvalRequest: null, showCost: false, showDetails: false, error: null, activeTool: null });
   const [isShowingModels, setIsShowingModels] = useState(false);
+  const [planApprovalRequest, setPlanApprovalRequest] = useState<PlanApprovalRequest | null>(null);
   const [cachedModels, setCachedModels] = useState<Map<ProviderType, ModelInfo[]>>(new Map());
   const cascadeRef = useRef<Cascade | null>(null);
   const storeRef = useRef<MemoryStore | null>(null);
@@ -756,6 +758,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         },
       });
     });
+    // Boardroom: pause Complex runs for plan sign-off (planApproval: 'always').
+    cascade.on('plan:approval-required', (payload: PlanApprovalRequest) => {
+      setPlanApprovalRequest(payload);
+    });
     // Re-use the approval dialog for MCP server spawn requests. These are the
     // riskiest events we expose — an arbitrary subprocess.
     cascade.on('mcp:approval-required', (payload: { server: { name: string; command: string; args?: string[] } }) => {
@@ -819,6 +825,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       if (peerThrottleTimeout) { clearTimeout(peerThrottleTimeout); peerThrottleTimeout = null; }
       decisionLogRef.current = cascade.getDecisionLog();
       cascade.removeAllListeners();
+      setPlanApprovalRequest(null);
       const finalStats = cascade.getRouter().getStats();
       const currentSession = storeRef.current?.getSession(sessionIdRef.current);
       if (currentSession) {
@@ -1039,6 +1046,16 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         <Text color={theme.colors.muted} dimColor>  ▸ panels collapsed (small terminal)</Text>
       )}
       {state.approvalRequest && <ApprovalPrompt request={state.approvalRequest} theme={theme} onDecision={(decision) => { dispatch({ type: 'SET_APPROVAL', request: null }); approvalResolverRef.current?.(decision); }} />}
+      {planApprovalRequest && (
+        <PlanApproval
+          request={planApprovalRequest}
+          theme={theme}
+          onDecision={(approved) => {
+            setPlanApprovalRequest(null);
+            cascadeRef.current?.resolvePlanApproval(approved);
+          }}
+        />
+      )}
       {/* Suggestion panel — fixed height so the input below doesn't jump as
           entries filter while typing. Sized for header (1) + 8 entries +
           up to 2 scroll indicators = 11 rows worst case. */}
@@ -1097,7 +1114,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         <Box flexDirection="row">
           <Text color={theme.colors.primary} bold>› {queuedMessages.length > 0 ? <Text color={theme.colors.accent}>[QUEUED] </Text> : ''}</Text>
           <SafeTextInput
-            focus={!state.approvalRequest && !isShowingModels}
+            focus={!state.approvalRequest && !planApprovalRequest && !isShowingModels}
             value={input}
             manageMouseReporting={false}
             onChange={(val) => {

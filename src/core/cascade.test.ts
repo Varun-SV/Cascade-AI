@@ -93,3 +93,45 @@ describe('Cascade routing complexity', () => {
     expect(cascade.getDecisionLog()[0]!.detail).toContain('heuristic: casual greeting');
   });
 });
+
+describe('Boardroom plan approval gate', () => {
+  const plan = {
+    complexity: 'Complex' as const,
+    reasoning: 'test',
+    sections: [
+      { sectionId: 's1', sectionTitle: 'Build', description: '', expectedOutput: '', constraints: [], t3Subtasks: [{}, {}] },
+      { sectionId: 's2', sectionTitle: 'Verify', description: '', expectedOutput: '', constraints: [], t3Subtasks: [{}] },
+    ],
+  };
+
+  it('default-approves when nobody is listening (SDK/headless unchanged)', async () => {
+    const cascade = new Cascade(baseConfig, process.cwd());
+    const decision = await (cascade as any).requestPlanApproval(plan, 'task-1');
+    expect(decision).toEqual({ approved: true });
+  });
+
+  it('emits the org-chart summary and resolves with the listener decision', async () => {
+    const cascade = new Cascade(baseConfig, process.cwd());
+    (cascade as any).router = { getTierModel: () => null };
+
+    let payload: any;
+    cascade.on('plan:approval-required', (p) => {
+      payload = p;
+      cascade.resolvePlanApproval(false);
+    });
+
+    const decision = await (cascade as any).requestPlanApproval(plan, 'task-2');
+    expect(decision.approved).toBe(false);
+    expect(payload.t2Count).toBe(2);
+    expect(payload.t3Count).toBe(3);
+    expect(payload.estCostUsd).toBe(0); // no models resolved → no estimate
+  });
+
+  it('estimates plan cost from the resolved T2/T3 model pricing', () => {
+    const cascade = new Cascade(baseConfig, process.cwd());
+    const model = { inputCostPer1kTokens: 1, outputCostPer1kTokens: 1, isLocal: false };
+    (cascade as any).router = { getTierModel: () => model };
+    const est = (cascade as any).estimatePlanCost(plan);
+    expect(est).toBeGreaterThan(0);
+  });
+});

@@ -17,7 +17,8 @@ import type {
   T3Result
 } from '../types.js';
 import { CascadeRouter } from './router/index.js';
-import { T1Administrator } from './tiers/t1-administrator.js';
+import { T1Administrator, type PlanApprovalDecision, type TaskPlan } from './tiers/t1-administrator.js';
+import { calculateCost } from '../utils/cost.js';
 import { T2Manager } from './tiers/t2-manager.js';
 import { T3Worker } from './tiers/t3-worker.js';
 import { ToolRegistry } from '../tools/registry.js';
@@ -147,6 +148,67 @@ export class Cascade extends EventEmitter {
       this.pendingMcpApprovals.delete(serverName);
       resolver(approved);
     }
+  }
+
+  // ── Boardroom plan approval ─────────────────────────────────────────
+  // Same gate pattern as MCP approvals, with the opposite default: plans
+  // are work the user asked for, so no listener (SDK/headless) or a
+  // timeout means PROCEED, not reject.
+
+  private pendingPlanApproval?: (decision: PlanApprovalDecision) => void;
+
+  private async requestPlanApproval(plan: TaskPlan, taskId: string): Promise<PlanApprovalDecision> {
+    if (this.listenerCount('plan:approval-required') === 0) {
+      return { approved: true };
+    }
+    const t2Count = plan.sections.length;
+    const t3Count = plan.sections.reduce((sum, s) => sum + (s.t3Subtasks?.length ?? 0), 0);
+    return await new Promise<PlanApprovalDecision>((resolve) => {
+      const timeout = setTimeout(() => {
+        if (this.pendingPlanApproval) {
+          this.pendingPlanApproval = undefined;
+          resolve({ approved: true });
+        }
+      }, 120_000);
+      this.pendingPlanApproval = (decision) => {
+        clearTimeout(timeout);
+        this.pendingPlanApproval = undefined;
+        resolve(decision);
+      };
+      this.emit('plan:approval-required', {
+        taskId,
+        plan,
+        t2Count,
+        t3Count,
+        estCostUsd: this.estimatePlanCost(plan),
+      });
+    });
+  }
+
+  /** Resolve a pending boardroom plan approval from a REPL / dashboard listener. */
+  resolvePlanApproval(approved: boolean, note?: string): void {
+    this.pendingPlanApproval?.({ approved, note });
+  }
+
+  /**
+   * Rough pre-execution cost estimate for a plan: ~3 T2 calls per section
+   * plus ~4 T3 calls per subtask at typical token volumes. A ballpark for
+   * the approval dialog, not an invoice — always label it "est."
+   */
+  private estimatePlanCost(plan: TaskPlan): number {
+    const T2_CALLS_PER_SECTION = 3;
+    const T3_CALLS_PER_SUBTASK = 4;
+    const IN_TOKENS = 1500;
+    const OUT_TOKENS = 700;
+    const t2Model = this.router.getTierModel('T2');
+    const t3Model = this.router.getTierModel('T3');
+    let est = 0;
+    for (const section of plan.sections) {
+      if (t2Model) est += T2_CALLS_PER_SECTION * calculateCost(IN_TOKENS, OUT_TOKENS, t2Model);
+      const subtasks = section.t3Subtasks?.length ?? 1;
+      if (t3Model) est += subtasks * T3_CALLS_PER_SUBTASK * calculateCost(IN_TOKENS, OUT_TOKENS, t3Model);
+    }
+    return est;
   }
 
   async init(): Promise<void> {
@@ -575,6 +637,15 @@ ${prompt}`
       t1.setPeerMessageCallback((e) => this.emit('peer:message', e), options.sessionId ?? '');
       bindTierEvents(t1);
       t1.on('plan', (e) => this.emit('plan', e));
+      if (this.config.planApproval === 'always') {
+        t1.setPlanApprovalCallback(async (plan) => {
+          const decision = await this.requestPlanApproval(plan, taskId);
+          this.recordDecision('escalation', decision.approved
+            ? `Boardroom: plan approved (${plan.sections.length} sections)${decision.note ? ' with a steering note' : ''}`
+            : 'Boardroom: plan rejected — run stopped before any T2 spawned');
+          return decision;
+        });
+      }
       
       const result = await t1.execute(options.prompt, options.images, undefined, options.signal);
       finalOutput = result.output;

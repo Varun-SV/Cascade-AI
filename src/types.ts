@@ -441,6 +441,8 @@ export interface CascadeConfig {
   plugins?: string[];
   localConcurrency?: number;
   localInferenceTimeoutMs?: number;
+  /** Pause Complex runs for user approval of T1's plan ('always') or never (default). */
+  planApproval?: 'always' | 'never';
 }
 
 export interface ModelOverrides {
@@ -572,7 +574,8 @@ export type CascadeEventType =
   | 'budget:warning'
   | 'budget:exceeded'
   | 'permission:user-required'
-  | 'mcp:approval-required';
+  | 'mcp:approval-required'
+  | 'plan:approval-required';
 
 export interface CascadeEvent<T = unknown> {
   type: CascadeEventType;

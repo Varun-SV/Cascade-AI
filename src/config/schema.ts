@@ -153,6 +153,14 @@ export const CascadeConfigSchema = z.object({
    * Local models can take minutes for large parameter counts. Default: 5 minutes.
    */
   localInferenceTimeoutMs: z.number().int().min(1000).default(300_000),
+  /**
+   * Boardroom plan approval: when 'always', Complex tasks pause after T1
+   * produces its plan so the user can approve the org chart (sections,
+   * workers, estimated cost) before any T2 manager spawns. Headless/SDK
+   * consumers without a listener auto-approve, so 'always' is still safe
+   * outside the TUI. Default: 'never' (no behavior change).
+   */
+  planApproval: z.enum(['always', 'never']).default('never'),
 });
 
 export type CascadeConfigInput = z.input<typeof CascadeConfigSchema>;
