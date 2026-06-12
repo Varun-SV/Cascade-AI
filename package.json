@@ -56,7 +56,7 @@
     "glob": "^13.0.6",
     "highlight.js": "^11.10.0",
     "ignore": "^6.0.2",
-    "ink": "^5.1.0",
+    "ink": "^6.8.0",
     "ink-select-input": "^6.0.0",
     "ink-spinner": "^5.0.0",
     "ink-text-input": "^6.0.0",
@@ -68,8 +68,8 @@
     "ora": "^8.1.0",
     "pdfkit": "^0.18.0",
     "posthog-node": "^4.2.0",
-    "react": "^18.3.0",
-    "react-dom": "^18.3.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
     "simple-git": "^3.27.0",
     "socket.io": "^4.8.0",
     "socket.io-msgpack-parser": "^3.0.2",
@@ -102,14 +102,14 @@
     "@types/node-cron": "^3.0.11",
     "@types/node-notifier": "^8.0.5",
     "@types/pdfkit": "^0.17.5",
-    "@types/react": "^18.3.12",
-    "@types/react-dom": "^18.3.1",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
     "tsup": "^8.3.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "keywords": [
     "ai",
