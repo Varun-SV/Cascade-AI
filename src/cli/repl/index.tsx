@@ -1114,7 +1114,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           entries filter while typing. Sized for header (1) + 8 entries +
           up to 2 scroll indicators = 11 rows worst case. */}
       {isTypingCommand && (
-        <Box flexDirection="column" borderStyle="round" borderColor={theme.colors.border} paddingX={1} height={SLASH_PAGE_SIZE + 3}>
+        <Box flexDirection="column" borderStyle="round" borderColor={theme.colors.border} paddingX={1}>
           <Box flexDirection="row" justifyContent="space-between">
             <Text color={theme.colors.muted}>Commands  ↑↓ navigate · ↵ select · Tab complete</Text>
             {slashEntries.length > SLASH_PAGE_SIZE && (
@@ -1123,37 +1123,36 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
               </Text>
             )}
           </Box>
-          {slashEntries.length === 0 ? (
-            <Text color={theme.colors.muted} dimColor>  No matching commands</Text>
-          ) : (
-            <>
-              {slashViewStart > 0 && (
-                <Text color={theme.colors.muted} dimColor>  ↑ {slashViewStart} more above</Text>
-              )}
-              {slashEntries.slice(slashViewStart, slashViewStart + SLASH_PAGE_SIZE).map((entry, i) => {
-                const globalIdx = slashViewStart + i;
-                const isSelected = globalIdx === slashIndex;
-                return (
-                  <Box key={entry.command} flexDirection="row">
-                    <Text color={isSelected ? theme.colors.accent : theme.colors.foreground} bold={isSelected}>
-                      {isSelected ? '› ' : '  '}
-                    </Text>
-                    <Box width={16}>
-                      <Text color={isSelected ? theme.colors.accent : theme.colors.foreground} bold={isSelected}>
-                        {entry.command}
-                      </Text>
-                    </Box>
-                    {entry.description ? (
-                      <Text color={theme.colors.muted} dimColor wrap="truncate"> {entry.description}</Text>
-                    ) : null}
-                  </Box>
-                );
-              })}
-              {slashViewStart + SLASH_PAGE_SIZE < slashEntries.length && (
-                <Text color={theme.colors.muted} dimColor>  ↓ {slashEntries.length - slashViewStart - SLASH_PAGE_SIZE} more below</Text>
-              )}
-            </>
-          )}
+          {/* Constant layout: 1 "above" row + exactly SLASH_PAGE_SIZE item rows
+              + 1 "below" row, every slot always rendered (blank when empty). A
+              stable row count and one <Text> per row let Ink fully clear each
+              line, so scrolling never leaves residue from a longer prior frame. */}
+          <Text color={theme.colors.muted} dimColor wrap="truncate">
+            {slashViewStart > 0 ? `  ↑ ${slashViewStart} more above` : ' '}
+          </Text>
+          {Array.from({ length: SLASH_PAGE_SIZE }).map((_, i) => {
+            const globalIdx = slashViewStart + i;
+            const entry = slashEntries[globalIdx];
+            if (!entry) return <Text key={`slash-empty-${i}`}> </Text>;
+            const isSelected = globalIdx === slashIndex;
+            return (
+              <Box key={entry.command} flexDirection="row">
+                <Box width={18} flexShrink={0}>
+                  <Text color={isSelected ? theme.colors.accent : theme.colors.foreground} bold={isSelected} wrap="truncate">
+                    {(isSelected ? '› ' : '  ') + entry.command}
+                  </Text>
+                </Box>
+                <Text color={theme.colors.muted} dimColor wrap="truncate">
+                  {entry.description || ' '}
+                </Text>
+              </Box>
+            );
+          })}
+          <Text color={theme.colors.muted} dimColor wrap="truncate">
+            {slashViewStart + SLASH_PAGE_SIZE < slashEntries.length
+              ? `  ↓ ${slashEntries.length - slashViewStart - SLASH_PAGE_SIZE} more below`
+              : ' '}
+          </Text>
         </Box>
       )}
       {/* ── Hint bar — keyboard shortcuts, hidden during execution ── */}

@@ -25,6 +25,7 @@ import { ModelSelector } from './selector.js';
 import { FailoverManager } from './failover.js';
 import { TpmLimiter } from './tpm-limiter.js';
 import { LocalRequestQueue } from './local-queue.js';
+import type { TaskAnalyzer } from './task-analyzer.js';
 import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
 import { calculateCost } from '../../utils/cost.js';
 import { withTimeout } from '../../utils/retry.js';
@@ -64,6 +65,12 @@ export class CascadeRouter extends EventEmitter {
   private tierModels: Map<TierRole, ModelInfo> = new Map();
   private config!: CascadeConfig;
   private sessionCostUsd = 0;
+  // Per-run accounting for the hard per-task cap. Reset by beginRun() at the
+  // start of every `cascade run`, independent of the session-wide budget.
+  private runTokens = 0;
+  private runCostUsd = 0;
+  private runBudgetExceeded = false;
+  private runBudgetExceededReason: string | undefined;
   /**
    * Budget state machine — guards against two concurrent `generate()` calls
    * each firing the warning or both slipping past the hard cap. All
@@ -74,6 +81,7 @@ export class CascadeRouter extends EventEmitter {
   private budgetExceededReason: string | undefined;
   private tpmLimiter!: TpmLimiter;
   private localQueue!: LocalRequestQueue;
+  private taskAnalyzer?: TaskAnalyzer;
 
   /** Thrown when the configured budget is exceeded. */
   static BudgetExceededError = class extends Error {
@@ -169,6 +177,13 @@ export class CascadeRouter extends EventEmitter {
         this.budgetExceededReason ?? 'Session budget exceeded.',
       );
     }
+    // Hard per-task ceiling — stop the moment a single run goes over, so a
+    // mis-routed task cannot keep spawning LLM calls.
+    if (this.runBudgetExceeded) {
+      throw new CascadeRouter.BudgetExceededError(
+        this.runBudgetExceededReason ?? 'Per-task budget exceeded.',
+      );
+    }
 
     // ── Apply per-tier token limit ──────────────
     const limits = this.config?.tierLimits;
@@ -177,9 +192,14 @@ export class CascadeRouter extends EventEmitter {
     if (tierMaxTokens && (!options.maxTokens || options.maxTokens > tierMaxTokens)) {
       options = { ...options, maxTokens: tierMaxTokens };
     }
+    // Per-call override (Cascade Auto per-subtask routing) wins over the shared
+    // tier model, except when a vision model is explicitly required.
+    if (options.model && !requireVision) {
+      this.ensureProvider(options.model, this.config.providers);
+    }
     const model = requireVision
       ? this.selector.selectVisionModel()
-      : this.tierModels.get(tier);
+      : (options.model ?? this.tierModels.get(tier));
 
     if (!model) throw new Error(`No model available for tier ${tier}`);
 
@@ -305,6 +325,26 @@ export class CascadeRouter extends EventEmitter {
 
   getSelector(): import('./selector.js').ModelSelector {
     return this.selector;
+  }
+
+  /** Wire the Cascade Auto task analyzer used for per-subtask model routing. */
+  setTaskAnalyzer(analyzer: TaskAnalyzer): void {
+    this.taskAnalyzer = analyzer;
+  }
+
+  /**
+   * Cascade Auto per-subtask routing: pick the benchmark-best model for a
+   * specific subtask's text, scoped to the tier's eligible candidates. Returns
+   * null when Cascade Auto is off (callers then use the shared tier model).
+   * Pure heuristic — no extra LLM call.
+   */
+  async selectModelForSubtask(tier: TierRole, text: string): Promise<ModelInfo | null> {
+    if (!this.config?.cascadeAuto || !this.taskAnalyzer || !text.trim()) return null;
+    try {
+      return await this.taskAnalyzer.selectModel(text, tier, this.selector);
+    } catch {
+      return null;
+    }
   }
 
   getStats(): RouterStats {
@@ -508,8 +548,47 @@ export class CascadeRouter extends EventEmitter {
     this.stats.inputTokensByTier[tier] = (this.stats.inputTokensByTier[tier] ?? 0) + usage.inputTokens;
     this.stats.outputTokensByTier[tier] = (this.stats.outputTokensByTier[tier] ?? 0) + usage.outputTokens;
 
+    // ── Per-run accounting (hard per-task ceiling) ──
+    this.runTokens += usage.totalTokens;
+    this.runCostUsd += usage.estimatedCostUsd;
+
     // ── Budget enforcement & warning (atomic state transitions) ─
     this.updateBudgetState();
+    this.enforceRunBudget();
+  }
+
+  /**
+   * Resets per-run accounting at the start of each `cascade run`. Session
+   * totals and a session-wide budget halt are deliberately preserved; only the
+   * per-task ceiling is cleared so the next task starts with a fresh allowance.
+   */
+  beginRun(): void {
+    this.runTokens = 0;
+    this.runCostUsd = 0;
+    this.runBudgetExceeded = false;
+    this.runBudgetExceededReason = undefined;
+  }
+
+  /**
+   * Enforce the hard per-task ceiling. Once tripped, the flag makes every
+   * subsequent (and concurrent) generate() call in this run fail fast.
+   */
+  private enforceRunBudget(): void {
+    if (this.runBudgetExceeded) return;
+    const budget = this.config?.budget;
+    const maxTokens = budget?.maxTokensPerRun;
+    const maxCost = budget?.maxCostPerRunUsd;
+    const overTokens = maxTokens != null && this.runTokens >= maxTokens;
+    const overCost = maxCost != null && this.runCostUsd >= maxCost;
+    if (!overTokens && !overCost) return;
+
+    const reason = overTokens
+      ? `Per-task token cap of ${maxTokens!.toLocaleString()} reached (used ${this.runTokens.toLocaleString()}). Stopping this run to avoid runaway cost — raise budget.maxTokensPerRun for larger jobs.`
+      : `Per-task cost cap of $${maxCost!.toFixed(4)} reached (spent $${this.runCostUsd.toFixed(4)}). Stopping this run to avoid runaway cost.`;
+    this.runBudgetExceeded = true;
+    this.runBudgetExceededReason = reason;
+    this.emit('budget:exceeded', { reason, spentUsd: this.sessionCostUsd });
+    throw new CascadeRouter.BudgetExceededError(reason);
   }
 
   /**

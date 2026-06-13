@@ -163,4 +163,33 @@ describe('Budget warning event', () => {
       expect(handler).toHaveBeenCalledTimes(2);
     });
   });
+
+  describe('per-task token cap (maxTokensPerRun)', () => {
+    it('throws BudgetExceededError once a run crosses the per-task token cap', async () => {
+      router = await makeRouter({ maxTokensPerRun: 1000, warnAtPct: 80 });
+      router.beginRun();
+      // simulateCall adds 150 tokens each — 6 calls = 900, under the 1000 cap.
+      for (let i = 0; i < 6; i++) simulateCall(router, 'T3', 0.001);
+      // 7th call pushes the run to 1050 ≥ 1000 → hard stop.
+      expect(() => simulateCall(router, 'T3', 0.001)).toThrow(/Per-task token cap/);
+    });
+
+    it('beginRun() resets the per-task allowance for the next run', async () => {
+      router = await makeRouter({ maxTokensPerRun: 1000, warnAtPct: 80 });
+      router.beginRun();
+      for (let i = 0; i < 6; i++) simulateCall(router, 'T3', 0.001); // 900 tokens
+      router.beginRun(); // fresh allowance
+      expect(() => {
+        for (let i = 0; i < 6; i++) simulateCall(router, 'T3', 0.001);
+      }).not.toThrow();
+    });
+
+    it('does not enforce a per-task cap when none is configured', async () => {
+      router = await makeRouter(); // no budget object at all
+      router.beginRun();
+      expect(() => {
+        for (let i = 0; i < 100; i++) simulateCall(router, 'T3', 0.001);
+      }).not.toThrow();
+    });
+  });
 });

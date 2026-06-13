@@ -69,6 +69,13 @@ export interface GenerateOptions {
   tools?: ToolDefinition[];
   images?: ImageAttachment[];
   stream?: boolean;
+  /**
+   * Per-call model override. When set, this exact model is used for the call
+   * instead of the tier's default — lets Cascade Auto route each subtask to the
+   * best model for its type without disturbing the shared per-tier model that
+   * concurrent workers rely on. Ignored when a vision model is required.
+   */
+  model?: ModelInfo;
 }
 
 export interface GenerateResult {
@@ -293,6 +300,9 @@ export type PeerSyncType =
   | 'DIVIDE_WORK'
   | 'CHECK_ASSUMPTION'
   | 'SIGNAL_READY'
+  // Broadcast when a worker generates a new runtime tool, so peers register it
+  // instead of re-creating the same capability.
+  | 'TOOL_CREATED'
   // File-lock and barrier traffic — surfaced so UIs can visualize how the
   // agents coordinate, not just what they hand each other.
   | 'COORDINATION';
@@ -521,6 +531,10 @@ export interface TierLimits {
 export interface BudgetConfig {
   dailyBudgetUsd?: number;
   sessionBudgetUsd?: number;
+  /** Hard per-task token ceiling. Resets each run. Default 200k. */
+  maxTokensPerRun?: number;
+  /** Optional hard per-task cost ceiling (USD). */
+  maxCostPerRunUsd?: number;
   warnAtPct: number; // 0-100, default 80
 }
 

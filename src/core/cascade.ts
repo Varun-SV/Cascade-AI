@@ -55,11 +55,13 @@ export class Cascade extends EventEmitter {
   private taskAnalyzer?: TaskAnalyzer;
   private perfTracker?: ModelPerformanceTracker;
   private toolCreator?: ToolCreator;
+  private workspacePath: string;
 
   constructor(config: CascadeConfig, workspacePath: string, store?: MemoryStore) {
     super();
     // Validate config eagerly so users get a clear error at startup, not at run time
     this.config = validateConfig(config) as CascadeConfig;
+    this.workspacePath = workspacePath;
     this.store = store;
     this.router = new CascadeRouter();
     this.mcpClient = new McpClient({
@@ -87,10 +89,16 @@ export class Cascade extends EventEmitter {
       this.perfTracker = new ModelPerformanceTracker();
       void this.perfTracker.load(); // non-blocking; stats available before first run completes
       this.taskAnalyzer = new TaskAnalyzer(this.perfTracker);
+      // Share the analyzer with the router so workers can route each subtask to
+      // the benchmark-best model for its type.
+      this.router.setTaskAnalyzer(this.taskAnalyzer);
     }
     const cfg = this.config as unknown as Record<string, unknown>;
     if (cfg['enableToolCreation'] === true) {
-      this.toolCreator = new ToolCreator(this.router, this.toolRegistry);
+      this.toolCreator = new ToolCreator(this.router, this.toolRegistry, this.workspacePath);
+      this.toolCreator.setLogger((m) => {
+        if (this.listenerCount('log') > 0) this.emit('log', { level: 'info', message: m });
+      });
     }
   }
 
@@ -285,6 +293,9 @@ export class Cascade extends EventEmitter {
       }
 
       this.initOptionalFeatures();
+      // Re-register tools created in previous runs so identical capabilities
+      // aren't generated again from scratch.
+      if (this.toolCreator) await this.toolCreator.loadPersistedTools();
       this.initialized = true;
     })();
 
@@ -315,6 +326,21 @@ export class Cascade extends EventEmitter {
     ];
     const wordCount = prompt.trim().split(/\s+/).length;
     return wordCount <= 12 && LOW_COMPLEXITY.some(re => re.test(prompt.trim()));
+  }
+
+  /**
+   * Read-only inquiries about existing content ("read / review / explain /
+   * summarize / analyze this file or codebase and tell me …") are single-agent
+   * work — one worker with file/grep tools answers directly, no T1→T2→T3 fan-out.
+   * They must NOT ask to create, build, implement, refactor, or save an artifact;
+   * those stay on the heavier classifier path. This keeps trivial "what does this
+   * do?" requests from being mis-routed into a multi-agent, multi-thousand-token run.
+   */
+  private looksLikeReadOnlyInquiry(prompt: string): boolean {
+    const p = prompt.trim();
+    const inquiry = /\b(?:read|review|explain|describe|summari[sz]e|analy[sz]e|assess|evaluate|inspect|examine|explore|go through|look at|tell me about|what (?:is|are|does|do)|is it|understand|novelty|novel idea)\b/i.test(p);
+    const producesArtifact = /\b(?:create|build|implement|generate|write|refactor|rewrite|add|fix|deploy|install|migrate|scaffold|set up|save (?:a|the)|report|\.(?:pdf|md|txt|json|csv|py|js|ts|tsx|jsx|html|docx?))\b/i.test(p);
+    return inquiry && !producesArtifact;
   }
 
   // Cache glob scan results per workspace path to avoid repeated I/O.
@@ -354,6 +380,10 @@ export class Cascade extends EventEmitter {
       this.recordDecision('complexity', 'Simple — heuristic: short conversational message (no classifier call)');
       return 'Simple';
     }
+    if (this.looksLikeReadOnlyInquiry(prompt)) {
+      this.recordDecision('complexity', 'Simple — heuristic: read-only inquiry over existing content (single agent, no classifier call)');
+      return 'Simple';
+    }
 
     // Quick workspace scout (cached for 30s)
     let workspaceContext = '';
@@ -376,6 +406,7 @@ Classification:
 Important rules:
 - Treat short follow-ups like "proceed", "continue", "do it", "yes" as referring to the recent context.
 - If the earlier context is complex, keep the inherited complexity unless the user clearly narrows scope.
+- Reading, explaining, summarizing, or analyzing existing files/code and answering a question — WITHOUT creating files or implementing changes — is "Simple" (single agent), never "Complex".
 - If the task asks for a simple single-file artifact like hello.txt, it is usually Moderate.
 - If the task asks for a saved report, PDF, implementation, or deeper verification workflow, it is at least Moderate and often Complex.
 
@@ -415,15 +446,21 @@ ${prompt}`
       return verdict;
     } catch {
       const followUpPrompt = /^(proceed|continue|go ahead|do it|yes|yep|ok|okay|carry on)$/i.test(prompt.trim());
-      this.recordDecision('complexity', followUpPrompt && recentHistory.length > 0
-        ? 'Complex — classifier unavailable; short follow-up inherits prior context'
-        : 'Complex — classifier unavailable; defaulting to the safest (most capable) route');
-      return 'Complex';
+      if (followUpPrompt && recentHistory.length > 0) {
+        this.recordDecision('complexity', 'Complex — classifier unavailable; short follow-up inherits prior context');
+        return 'Complex';
+      }
+      // A transient classifier failure must not silently route every task into
+      // the most expensive full-hierarchy path — default to Moderate instead.
+      this.recordDecision('complexity', 'Moderate — classifier unavailable; defaulting to the mid-cost route');
+      return 'Moderate';
     }
   }
 
   async run(options: CascadeRunOptions): Promise<CascadeRunResult> {
     await this.init();
+    // Reset the per-task budget allowance so this run starts with a fresh ceiling.
+    this.router.beginRun();
     const startMs = Date.now();
     const taskId = randomUUID();
     this.decisionLog = [];
@@ -661,6 +698,16 @@ ${prompt}`
           partialOutput: finalOutput || '',
         });
         runError = null; // suppress telemetry error flag for intentional cancels
+      } else if (err instanceof Error && err.name === 'BudgetExceededError') {
+        // Per-task (or session) budget ceiling hit — stop gracefully with a
+        // clear message instead of letting a runaway task throw to the user.
+        this.emit('run:budget-exceeded', {
+          taskId,
+          reason: err.message,
+          partialOutput: finalOutput || '',
+        });
+        if (!finalOutput) finalOutput = `⚠ Stopped to avoid runaway cost: ${err.message}`;
+        runError = null;
       } else {
         runError = err;
         throw err;

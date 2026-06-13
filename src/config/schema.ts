@@ -101,6 +101,15 @@ export const TierLimitsSchema = z.object({
 export const BudgetConfigSchema = z.object({
   dailyBudgetUsd:   z.number().optional(),
   sessionBudgetUsd: z.number().optional(),
+  /**
+   * Hard per-task token ceiling. A single `cascade run` is stopped once its
+   * combined token usage crosses this, so a mis-routed trivial task can never
+   * fan out into a runaway multi-agent burn. Resets every run. Raise it for
+   * genuinely large jobs. Defaults to 200k.
+   */
+  maxTokensPerRun:  z.number().int().positive().default(200_000),
+  /** Optional hard per-task cost ceiling (USD). Unset = only the token cap applies. */
+  maxCostPerRunUsd: z.number().positive().optional(),
   warnAtPct:        z.number().default(80),
 });
 

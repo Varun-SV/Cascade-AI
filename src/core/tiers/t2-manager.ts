@@ -494,6 +494,10 @@ Return ONLY the JSON array.`;
               a.description += `\n\n[SYSTEM]: Dynamic tool "${toolName}" is now available — use it to complete your task.`;
             }
           }
+          // Share the new tool over the worker bus so peers register it instead
+          // of regenerating the same capability.
+          const spec = this.toolCreator.getSpec(toolName);
+          if (spec) this.t3PeerBus.broadcast(this.id, { type: 'TOOL_CREATED', spec });
         }
 
         // Clear only current-wave outputs so prior-wave completions remain accessible to dependents
