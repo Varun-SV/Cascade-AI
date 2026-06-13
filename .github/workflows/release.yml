@@ -1,0 +1,68 @@
+# Publishes a GitHub Release whenever package.json's version on main has no
+# release yet. Idempotent: every push to main checks the current version and
+# creates a release only if one doesn't already exist, so merging a version bump
+# (or this workflow itself) publishes the release automatically.
+name: Release on version change
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version from package.json
+        id: ver
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether this release already exists
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v${{ steps.ver.outputs.version }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release v${{ steps.ver.outputs.version }} already exists — nothing to do."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract release notes from CHANGELOG.md
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          # Pull the section between "## [VERSION]" and the next "## [" header.
+          awk -v ver="$VERSION" '
+            index($0, "## [" ver "]") == 1 { flag=1; next }
+            flag && index($0, "## [") == 1 { flag=0 }
+            flag { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md || true
+          # Fall back to a stub if the changelog has no matching section.
+          if ! grep -q "[^[:space:]]" RELEASE_NOTES.md 2>/dev/null; then
+            printf 'Release v%s\n' "$VERSION" > RELEASE_NOTES.md
+          fi
+          echo "----- release notes -----"
+          cat RELEASE_NOTES.md
+
+      - name: Create GitHub release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ steps.ver.outputs.version }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "v${{ steps.ver.outputs.version }}" \
+            --notes-file RELEASE_NOTES.md
