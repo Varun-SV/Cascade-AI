@@ -9,6 +9,7 @@
 import type { TierRole, ModelInfo } from '../../types.js';
 import type { ModelSelector } from './selector.js';
 import type { ModelPerformanceTracker } from './model-performance-tracker.js';
+import { benchmarkScore01 } from './benchmarks.js';
 
 export type TaskType = 'code' | 'analysis' | 'creative' | 'data' | 'mixed';
 
@@ -208,7 +209,12 @@ export class TaskAnalyzer {
     const perf = this.tracker?.performanceScore(model.id, profile.type) ?? 0.5;
     const costEff = this.costEfficiency(model, profile.complexity);
     const match = this.taskMatchScore(model, profile);
-    return perf * costEff * match;
+    // Public-benchmark strength for this task type dominates the choice (so a
+    // coding subtask prefers Claude, a writing one GPT/Gemini, etc.) while cost
+    // efficiency still breaks ties on trivial work. The 0.3 floor keeps a
+    // benchmark-unknown model competitive rather than zeroing it out.
+    const benchmark = 0.3 + 0.7 * benchmarkScore01(model, profile.type);
+    return perf * costEff * match * benchmark;
   }
 
   private costEfficiency(model: ModelInfo, complexity: 1 | 2 | 3 | 4 | 5): number {

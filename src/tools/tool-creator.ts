@@ -15,6 +15,8 @@
 //
 
 import { createContext, runInContext } from 'node:vm';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { BaseTool } from './base.js';
 import { safeFetch } from './utils/safe-fetch.js';
 import type { ToolExecuteOptions } from '../types.js';
@@ -25,13 +27,42 @@ import type { PermissionRequest } from '../types.js';
 
 // ── Generated tool schema ──────────────────────
 
-interface GeneratedToolSpec {
+export interface GeneratedToolSpec {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
   /** Raw JS function body — receives `input`, `fetch`, and `callTool`. Returns string | Promise<string> */
   executeCode: string;
   isDangerous: boolean;
+}
+
+/** File (under .cascade/) where created tools persist between runs. */
+const DYNAMIC_TOOLS_FILE = 'dynamic-tools.json';
+
+/**
+ * Wrap a generated `inputSchema` into a valid JSON Schema object. LLMs commonly
+ * emit just a properties map (`{ path: { type, description } }`); passed through
+ * as-is that is malformed for every provider's function-calling. Detect the
+ * already-correct shape and otherwise wrap it so created tools are callable on
+ * Anthropic, OpenAI, Gemini, and Ollama alike.
+ */
+export function normalizeToolSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  if (schema && schema['type'] === 'object' && typeof schema['properties'] === 'object') {
+    return schema;
+  }
+  const properties = (schema && typeof schema === 'object') ? schema : {};
+  return {
+    type: 'object',
+    properties,
+    required: Object.keys(properties),
+  };
+}
+
+/** Normalised capability fingerprint, used to avoid re-creating the same tool. */
+function capabilityKey(text: string): string {
+  return Array.from(
+    new Set((text.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter(w => w.length > 2)),
+  ).sort().join(' ');
 }
 
 // ── Dynamic tool class factory ─────────────────
@@ -178,65 +209,165 @@ export class ToolCreator {
   private router: CascadeRouter;
   private registry: ToolRegistry;
   private escalator?: PermissionEscalator;
-  private createdTools: Set<string> = new Set();
+  private workspacePath?: string;
+  private logger?: (msg: string) => void;
+  /** name → spec, for persistence, broadcast, and re-registration. */
+  private specs = new Map<string, GeneratedToolSpec>();
+  /** capability fingerprint → tool name, so the same need isn't re-generated. */
+  private capabilityIndex = new Map<string, string>();
 
-  constructor(router: CascadeRouter, registry: ToolRegistry) {
+  constructor(router: CascadeRouter, registry: ToolRegistry, workspacePath?: string) {
     this.router = router;
     this.registry = registry;
+    this.workspacePath = workspacePath;
   }
 
   setPermissionEscalator(escalator: PermissionEscalator): void {
     this.escalator = escalator;
   }
 
+  /** Route diagnostics through the host (Cascade) so they survive the Ink TUI. */
+  setLogger(fn: (msg: string) => void): void {
+    this.logger = fn;
+  }
+
+  /** Returns the stored spec for a created tool (for peer broadcast). */
+  getSpec(name: string): GeneratedToolSpec | undefined {
+    return this.specs.get(name);
+  }
+
+  private log(msg: string): void {
+    if (this.logger) this.logger(msg);
+  }
+
   /**
    * Generate a new tool from a description and register it with the ToolRegistry.
-   * The generated tool has access to all registered cascade tools via callTool().
-   * Returns the tool name if successful, null if generation failed.
+   * Returns the tool name on success, or null on failure (with a logged reason —
+   * failures are no longer swallowed silently). Reuses an existing tool when the
+   * same capability has already been created (dedup) so peers/runs don't
+   * regenerate identical tools.
    */
   async createTool(description: string, context: string): Promise<string | null> {
+    // ── Dedup: reuse a previously created tool for the same capability ──
+    const key = capabilityKey(`${description} ${context}`);
+    const existing = this.capabilityIndex.get(key);
+    if (existing && this.registry.hasTool(existing)) {
+      this.log(`[tool-creator] Reusing existing tool "${existing}" for: ${description.slice(0, 80)}`);
+      return existing;
+    }
+
     const prompt = `${TOOL_CREATOR_PROMPT}
 
 Task context: ${context.slice(0, 200)}
 Required capability: ${description.slice(0, 300)}`;
 
-    try {
-      const result = await this.router.generate('T3', {
-        messages: [{ role: 'user', content: prompt }],
-        maxTokens: 800,
-      });
-
-      const jsonMatch = /\{[\s\S]*\}/.exec(result.content);
-      if (!jsonMatch) return null;
-
-      const spec = JSON.parse(jsonMatch[0]) as GeneratedToolSpec;
-
-      if (!spec.name || !spec.description || !spec.executeCode || !spec.inputSchema) return null;
-
-      // Ensure unique name in this session
-      if (this.createdTools.has(spec.name) || this.registry.hasTool(spec.name)) {
-        spec.name = `${spec.name}_${Date.now() % 10000}`;
-      }
-
-      // Syntax check only — don't execute
+    let spec: GeneratedToolSpec | null = null;
+    // One retry — weak models often miss strict-JSON on the first attempt.
+    for (let attempt = 1; attempt <= 2 && !spec; attempt++) {
       try {
-        new Function('input', 'fetch', 'callTool', spec.executeCode);
-      } catch {
-        return null;
+        const result = await this.router.generate('T3', {
+          messages: [{ role: 'user', content: prompt }],
+          maxTokens: 800,
+        });
+        const jsonMatch = /\{[\s\S]*\}/.exec(result.content);
+        if (!jsonMatch) {
+          this.log(`[tool-creator] Attempt ${attempt}: model returned no JSON object.`);
+          continue;
+        }
+        const parsed = JSON.parse(jsonMatch[0]) as GeneratedToolSpec;
+        if (!parsed.name || !parsed.description || !parsed.executeCode || !parsed.inputSchema) {
+          this.log(`[tool-creator] Attempt ${attempt}: spec missing required fields (name/description/executeCode/inputSchema).`);
+          continue;
+        }
+        spec = parsed;
+      } catch (err) {
+        this.log(`[tool-creator] Attempt ${attempt} failed: ${err instanceof Error ? err.message : String(err)}`);
       }
-
-      const tool = new DynamicTool(spec, this.registry, this.escalator);
-      this.registry.register(tool);
-      this.createdTools.add(spec.name);
-
-      return spec.name;
-    } catch {
+    }
+    if (!spec) {
+      this.log(`[tool-creator] Could not generate a tool for: ${description.slice(0, 80)}`);
       return null;
+    }
+
+    // Wrap a bare properties map into a valid object schema so the tool is
+    // callable across every provider.
+    spec.inputSchema = normalizeToolSchema(spec.inputSchema);
+
+    // Ensure a unique name
+    if (this.specs.has(spec.name) || this.registry.hasTool(spec.name)) {
+      spec.name = `${spec.name}_${Date.now() % 10000}`;
+    }
+
+    // Syntax check only — don't execute
+    try {
+      new Function('input', 'fetch', 'callTool', spec.executeCode);
+    } catch (err) {
+      this.log(`[tool-creator] Generated code for "${spec.name}" has a syntax error: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+
+    this.registerSpec(spec);
+    this.capabilityIndex.set(key, spec.name);
+    this.log(`[tool-creator] Created tool "${spec.name}".`);
+
+    // Persist so the tool survives future runs (peers are notified by the T2
+    // manager over its worker bus right after this returns).
+    void this.persist();
+
+    return spec.name;
+  }
+
+  /**
+   * Register a spec (from createTool, disk, or a peer) into the registry.
+   * Idempotent — a name already present is skipped.
+   */
+  registerSpec(spec: GeneratedToolSpec): void {
+    if (this.registry.hasTool(spec.name)) {
+      this.specs.set(spec.name, spec);
+      return;
+    }
+    const tool = new DynamicTool(spec, this.registry, this.escalator);
+    this.registry.register(tool);
+    this.specs.set(spec.name, spec);
+    this.capabilityIndex.set(capabilityKey(`${spec.description}`), spec.name);
+  }
+
+  /** Load tools persisted by previous runs and register them. */
+  async loadPersistedTools(): Promise<void> {
+    if (!this.workspacePath) return;
+    const file = path.join(this.workspacePath, '.cascade', DYNAMIC_TOOLS_FILE);
+    try {
+      const raw = await fs.readFile(file, 'utf-8');
+      const specs = JSON.parse(raw) as GeneratedToolSpec[];
+      if (!Array.isArray(specs)) return;
+      let loaded = 0;
+      for (const spec of specs) {
+        if (spec?.name && spec.description && spec.executeCode && spec.inputSchema) {
+          spec.inputSchema = normalizeToolSchema(spec.inputSchema);
+          this.registerSpec(spec);
+          loaded++;
+        }
+      }
+      if (loaded) this.log(`[tool-creator] Loaded ${loaded} persisted tool(s).`);
+    } catch {
+      // No persisted file yet, or unreadable — start fresh.
+    }
+  }
+
+  private async persist(): Promise<void> {
+    if (!this.workspacePath) return;
+    const dir = path.join(this.workspacePath, '.cascade');
+    const file = path.join(dir, DYNAMIC_TOOLS_FILE);
+    try {
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(file, JSON.stringify(Array.from(this.specs.values()), null, 2), 'utf-8');
+    } catch (err) {
+      this.log(`[tool-creator] Failed to persist tools: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
   /** Returns the names of all tools created in this session. */
   getCreatedTools(): string[] {
-    return Array.from(this.createdTools);
+    return Array.from(this.specs.keys());
   }
 }

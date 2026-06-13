@@ -7,6 +7,9 @@ import { Command } from 'commander';
 import React from 'react';
 import chalk from 'chalk';
 import dotenv from 'dotenv';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { CASCADE_VERSION, DEFAULT_THEME } from '../constants.js';
 import { ConfigManager } from '../config/index.js';
 import { Repl } from './repl/index.js';
@@ -24,6 +27,35 @@ import { runSetupWizard } from './setup/index.js';
 import { McpClient } from '../mcp/client.js';
 
 dotenv.config();
+
+// ── Stale-build detection ─────────────────────────────────────────────
+// CASCADE_VERSION is a literal baked into the bundle at build time. When
+// running from a repo checkout whose package.json has since moved on
+// (pull without rebuild), the compiled dist/ silently runs old code —
+// warn instead of letting users chase bugs that are already fixed.
+function warnIfBuildIsStale(): void {
+  try {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    for (const rel of ['..', '../..']) {
+      const pkgPath = path.join(here, rel, 'package.json');
+      if (!fs.existsSync(pkgPath)) continue;
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')) as { name?: string; version?: string };
+      if (pkg.name !== 'cascade-ai') continue;
+      if (pkg.version && pkg.version !== CASCADE_VERSION) {
+        console.error(
+          chalk.yellow(
+            `⚠ Stale build: compiled output is v${CASCADE_VERSION} but the source tree is v${pkg.version}.\n` +
+            `  Run: npm install && npm run build`,
+          ),
+        );
+      }
+      return;
+    }
+  } catch {
+    // Never block startup over a version probe.
+  }
+}
+warnIfBuildIsStale();
 
 // ── Alternate screen buffer (--alt-screen) ───────────────────────────
 // Entered before Ink renders; ALWAYS left again on exit — including

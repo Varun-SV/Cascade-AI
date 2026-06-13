@@ -11,7 +11,7 @@ export default defineConfig({
   sourcemap: true,
   splitting: false,
   treeshake: true,
-  target: 'node18',
+  target: 'node20',
   external: [
     'better-sqlite3',
     'playwright',

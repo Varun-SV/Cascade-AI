@@ -759,7 +759,30 @@ web/
 ```bash
 git clone https://github.com/Varun-SV/Cascade-AI.git
 cd Cascade-AI
-npm install   # installs root + web via npm workspaces
+npm install               # CLI dependencies (uses the committed package-lock.json)
+npm --prefix web install  # web dashboard dependencies (needed by `npm run build`)
+npm run build
+```
+
+### Upgrading an existing checkout (v0.5.7+: Ink 6 / React 19)
+
+v0.5.7 moved from Ink 5 / React 18 to **Ink 6.8 / React 19** and raised the
+Node.js floor to **20**. The repo now commits `package-lock.json`, so after a
+pull a plain `npm install` upgrades even a stale `node_modules` in place —
+then rebuild with `npm run build` so `dist/` matches the source (the CLI warns
+on startup when it detects a stale build).
+
+If `git pull` refuses because your old untracked `package-lock.json` would be
+overwritten, or `npm install` still reports `ERESOLVE` (this happens on
+checkouts that predate the committed lockfile — npm keeps the installed
+`react@18` in place while `ink@6` needs `react>=19`), do a clean install:
+
+```bash
+rm -rf node_modules web/node_modules package-lock.json web/package-lock.json
+git pull
+npm install
+npm --prefix web install
+npm run build
 ```
 
 ### Development commands

@@ -3,9 +3,12 @@
 // ─────────────────────────────────────────────
 //
 //  Parses ReAct-style tool invocations from LLM text output.
-//  Used when the model does not support native tool-use (e.g. Ollama).
+//  Used when the model does not support native tool-use (e.g. many Ollama
+//  models). Deliberately tolerant: weaker models rarely emit the exact format,
+//  so we accept <tool_call> blocks, fenced JSON, OpenAI-style {function:{…}}
+//  echoes, and bare {name, input|arguments} objects anywhere in the text.
 //
-//  Format:
+//  Format we teach:
 //    <tool_call>
 //    {"name": "shell", "input": {"command": "ls -la"}}
 //    </tool_call>
@@ -14,10 +17,8 @@
 import type { ToolCall } from '../types.js';
 
 const TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
-// Pattern B: ```json {...} ``` blocks containing a tool-call shaped object
-const JSON_BLOCK_RE = /```json\s*([\s\S]*?)\s*```/g;
-// Pattern C: inline {"function": {"name": "...", "arguments": {...}}} objects (OpenAI echo format)
-const FUNCTION_OBJ_RE = /\{\s*"function"\s*:\s*\{[^}]*"name"\s*:[^}]*\}\s*\}/g;
+// Fenced code blocks: ```json / ```tool_call / ``` … ``` containing a call object
+const JSON_BLOCK_RE = /```(?:json|tool_call|tool)?\s*([\s\S]*?)```/g;
 
 export interface ParsedTextToolCall {
   name: string;
@@ -25,84 +26,112 @@ export interface ParsedTextToolCall {
 }
 
 /**
- * Extract tool calls from a text response.
- *
- * Tries three strategies in priority order, stopping at the first that yields results:
- *   1. <tool_call>…</tool_call> XML blocks (primary format)
- *   2. ```json … ``` code blocks containing a {name, input} object
- *   3. {"function": {"name": "…", "arguments": {…}}} inline objects (OpenAI echo format)
+ * Extract tool calls from a text response. Tries progressively looser
+ * strategies, stopping at the first that yields results:
+ *   1. <tool_call>…</tool_call> blocks (the taught format)
+ *   2. ```json|tool_call``` fenced blocks
+ *   3. bare {name, input|arguments} (or {function:{…}}) objects anywhere in text
  */
 export function parseTextToolCalls(text: string): ParsedTextToolCall[] {
-  const results = tryXmlBlocks(text);
-  if (results.length > 0) return results;
+  const xml = collect(text, TOOL_CALL_RE);
+  if (xml.length > 0) return xml;
 
-  const jsonBlockResults = tryJsonCodeBlocks(text);
-  if (jsonBlockResults.length > 0) return jsonBlockResults;
+  const fenced = collect(text, JSON_BLOCK_RE);
+  if (fenced.length > 0) return fenced;
 
-  return tryFunctionCallObjects(text);
+  return tryBareObjects(text);
 }
 
-function tryXmlBlocks(text: string): ParsedTextToolCall[] {
+/** Run a capturing regex over the text and coerce each captured group into a call. */
+function collect(text: string, re: RegExp): ParsedTextToolCall[] {
   const results: ParsedTextToolCall[] = [];
   let match: RegExpExecArray | null;
-  TOOL_CALL_RE.lastIndex = 0;
-
-  while ((match = TOOL_CALL_RE.exec(text)) !== null) {
-    try {
-      const raw = JSON.parse(match[1]!) as { name?: unknown; input?: unknown };
-      if (typeof raw.name !== 'string') continue;
-      const input = typeof raw.input === 'object' && raw.input !== null
-        ? raw.input as Record<string, unknown>
-        : {};
-      results.push({ name: raw.name, input });
-    } catch {
-      // Skip malformed block
-    }
+  re.lastIndex = 0;
+  while ((match = re.exec(text)) !== null) {
+    const body = (match[1] ?? '').trim();
+    const parsed = parseJsonLoose(body);
+    const call = coerceCall(parsed);
+    if (call) results.push(call);
   }
   return results;
 }
 
-function tryJsonCodeBlocks(text: string): ParsedTextToolCall[] {
+/**
+ * Scan the text for balanced {…} objects that look like a tool call and parse
+ * them. Brace matching is string-aware so quoted braces don't confuse depth.
+ */
+function tryBareObjects(text: string): ParsedTextToolCall[] {
   const results: ParsedTextToolCall[] = [];
-  let match: RegExpExecArray | null;
-  JSON_BLOCK_RE.lastIndex = 0;
-
-  while ((match = JSON_BLOCK_RE.exec(text)) !== null) {
-    try {
-      const raw = JSON.parse(match[1]!) as { name?: unknown; input?: unknown };
-      if (typeof raw.name !== 'string') continue;
-      const input = typeof raw.input === 'object' && raw.input !== null
-        ? raw.input as Record<string, unknown>
-        : {};
-      results.push({ name: raw.name, input });
-    } catch {
-      // Skip malformed block
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== '{') continue;
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    let end = -1;
+    for (let j = i; j < text.length; j++) {
+      const c = text[j]!;
+      if (esc) { esc = false; continue; }
+      if (c === '\\') { esc = true; continue; }
+      if (c === '"') { inStr = !inStr; continue; }
+      if (inStr) continue;
+      if (c === '{') depth++;
+      else if (c === '}') { depth--; if (depth === 0) { end = j; break; } }
     }
+    if (end === -1) break;
+    const candidate = text.slice(i, end + 1);
+    // Accept both double- and single-quoted keys; parseJsonLoose normalises the
+    // latter before parsing.
+    if (/['"]name['"]\s*:/.test(candidate) && /['"](?:input|arguments)['"]\s*:/.test(candidate)) {
+      const call = coerceCall(parseJsonLoose(candidate));
+      if (call) results.push(call);
+    }
+    i = end;
   }
   return results;
 }
 
-function tryFunctionCallObjects(text: string): ParsedTextToolCall[] {
-  const results: ParsedTextToolCall[] = [];
-  let match: RegExpExecArray | null;
-  FUNCTION_OBJ_RE.lastIndex = 0;
-
-  while ((match = FUNCTION_OBJ_RE.exec(text)) !== null) {
+/** Parse JSON, retrying once with single-quotes normalised to double-quotes. */
+function parseJsonLoose(raw: string): unknown {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    // Some models emit single-quoted JSON; normalise quotes that aren't already
+    // inside a double-quoted string and retry. Best-effort only.
     try {
-      const raw = JSON.parse(match[0]!) as {
-        function?: { name?: unknown; arguments?: unknown }
-      };
-      const fn = raw.function;
-      if (!fn || typeof fn.name !== 'string') continue;
-      const input = typeof fn.arguments === 'object' && fn.arguments !== null
-        ? fn.arguments as Record<string, unknown>
-        : {};
-      results.push({ name: fn.name, input });
+      return JSON.parse(raw.replace(/'/g, '"'));
     } catch {
-      // Skip malformed object
+      return null;
     }
   }
-  return results;
+}
+
+/**
+ * Normalise the many shapes weak models emit into {name, input}:
+ *   {name, input}             {name, arguments}        {function:{name, arguments}}
+ * `arguments` may itself be a JSON string.
+ */
+function coerceCall(raw: unknown): ParsedTextToolCall | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  const fn = obj.function && typeof obj.function === 'object'
+    ? obj.function as Record<string, unknown>
+    : null;
+
+  const name = typeof obj.name === 'string'
+    ? obj.name
+    : fn && typeof fn.name === 'string' ? fn.name : null;
+  if (!name) return null;
+
+  const rawInput = obj.input ?? obj.arguments ?? (fn ? (fn.input ?? fn.arguments) : undefined);
+  let input: Record<string, unknown> = {};
+  if (rawInput && typeof rawInput === 'object') {
+    input = rawInput as Record<string, unknown>;
+  } else if (typeof rawInput === 'string') {
+    const parsed = parseJsonLoose(rawInput);
+    if (parsed && typeof parsed === 'object') input = parsed as Record<string, unknown>;
+  }
+  return { name, input };
 }
 
 /**
@@ -116,35 +145,59 @@ export function toToolCall(parsed: ParsedTextToolCall, index: number): ToolCall 
   };
 }
 
+interface SchemaProp {
+  type?: unknown;
+  description?: unknown;
+  enum?: unknown;
+}
+
 /**
- * Build the system-prompt appendix that teaches a non-tool-capable model
- * how to invoke tools via text.
+ * Build the system-prompt appendix that teaches a non-tool-capable model how to
+ * invoke tools via text. Unlike the previous version this carries the FULL
+ * parameter contract — types, required-ness, and enum values — so the model
+ * emits valid arguments instead of guessing from a description alone.
  */
-export function buildTextToolSystemPrompt(tools: Array<{ name: string; description: string; inputSchema?: { properties?: Record<string, { description?: string }> } }>): string {
+export function buildTextToolSystemPrompt(
+  tools: Array<{ name: string; description: string; inputSchema?: Record<string, unknown> }>,
+): string {
   const toolDefs = tools.map(t => {
-    const props = t.inputSchema?.properties ?? {};
-    const paramLines = Object.entries(props)
-      .map(([k, v]) => `    "${k}": "<${v.description ?? k}>"`);
-    return `• ${t.name}: ${t.description}
-  Input: {${paramLines.length ? '\n' + paramLines.join(',\n') + '\n  ' : ''}}`;
+    const schema = (t.inputSchema ?? {}) as { properties?: unknown; required?: unknown };
+    const props = (schema.properties && typeof schema.properties === 'object'
+      ? schema.properties as Record<string, SchemaProp>
+      : {});
+    const required = Array.isArray(schema.required) ? schema.required as string[] : [];
+    const paramLines = Object.entries(props).map(([k, v]) => {
+      const type = typeof v.type === 'string' ? v.type : 'any';
+      const desc = typeof v.description === 'string' ? v.description : k;
+      const req = required.includes(k) ? ' [required]' : '';
+      const enumVals = Array.isArray(v.enum)
+        ? ` (one of: ${(v.enum as unknown[]).map(e => JSON.stringify(e)).join(', ')})`
+        : '';
+      return `    - ${k} (${type})${req}: ${desc}${enumVals}`;
+    });
+    return `• ${t.name} — ${t.description}${paramLines.length ? '\n' + paramLines.join('\n') : '\n    (no parameters)'}`;
   }).join('\n');
 
   return `
 TOOL USE INSTRUCTIONS:
-You do not have native tool-use capability. To call a tool, write a <tool_call> block:
+You do not have native tool-use capability. To call a tool, output a single <tool_call> block containing JSON with the tool name and its input arguments:
 
 <tool_call>
-{"name": "<tool_name>", "input": {<parameters>}}
+{"name": "<tool_name>", "input": { ...arguments... }}
 </tool_call>
+
+Rules:
+- Use exactly the parameter names shown below and include every [required] parameter.
+- For parameters that list "one of", use one of those values verbatim.
+- Emit valid JSON with double quotes. Call only ONE tool at a time, then wait for the result.
 
 Available tools:
 ${toolDefs}
 
 EXAMPLE — calling the "shell" tool to list files:
 <tool_call>
-{"name": "shell", "input": {"command": "ls -la /workspace"}}
+{"name": "shell", "input": {"command": "ls -la"}}
 </tool_call>
 
-You will then receive a user message with the result, then continue your work.
-Only call one tool at a time. When you have enough information, provide your final answer.`;
+When you have enough information, stop calling tools and write your final answer.`;
 }

@@ -116,6 +116,20 @@ export class ModelSelector {
         candidates.push(model);
       }
     }
+    // Local-only tier: when the only available provider is Ollama, widen the
+    // candidate set to EVERY available local model — including ones discovered
+    // from Ollama that aren't in the static priority chain — so "best available
+    // local model" can actually be selected for the task.
+    const localOnly = this.availableProviders.size > 0 &&
+      Array.from(this.availableProviders).every((p) => p === 'ollama');
+    if (localOnly) {
+      for (const model of this.availableModels.values()) {
+        if (model.isLocal && this.availableProviders.has(model.provider) &&
+            !candidates.some((c) => c.id === model.id)) {
+          candidates.push(model);
+        }
+      }
+    }
     return candidates;
   }
 

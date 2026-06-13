@@ -331,7 +331,16 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
         if (state.tierT2 !== 'auto') models['t2'] = state.tierT2;
         if (state.tierT3 !== 'auto') models['t3'] = state.tierT3;
 
-        const rawConfig = { providers, ...(Object.keys(models).length ? { models } : {}) };
+        // Any tier left on "Auto" turns on Cascade Auto so the task analyzer
+        // routes each subtask to the benchmark-best model for its type. Without
+        // this flag "Auto" silently fell back to the static priority list.
+        const anyAuto = state.tierT1 === 'auto' || state.tierT2 === 'auto' || state.tierT3 === 'auto';
+
+        const rawConfig = {
+          providers,
+          ...(Object.keys(models).length ? { models } : {}),
+          ...(anyAuto ? { cascadeAuto: true } : {}),
+        };
         const config = CascadeConfigSchema.parse(rawConfig);
 
         const configDir = path.join(workspacePath, '.cascade');

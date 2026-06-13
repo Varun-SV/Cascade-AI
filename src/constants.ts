@@ -255,6 +255,15 @@ export const MODELS: Record<string, ModelInfo> = {
   },
 };
 
+// Make tool-capability explicit for every catalog model so the agent loop's
+// native-vs-text decision is intentional rather than "undefined ⇒ assume
+// native". Cloud models support native function-calling; hardcoded local
+// entries fall back to the text-tool emulation path (discovered Ollama models
+// get a per-family flag at runtime — see isToolCapable in providers/ollama.ts).
+for (const _m of Object.values(MODELS)) {
+  if (_m.supportsToolUse === undefined) _m.supportsToolUse = !_m.isLocal;
+}
+
 // ── Tier Model Priority Chains ─────────────────
 
 export const T1_MODEL_PRIORITY: string[] = [

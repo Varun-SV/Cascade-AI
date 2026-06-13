@@ -7,6 +7,7 @@ import path from 'node:path';
 import type {
   ConversationMessage,
   GenerateOptions,
+  ModelInfo,
   PermissionRequest,
   T2ToT3Assignment,
   T3Result,
@@ -21,7 +22,7 @@ import { AuditLogger } from '../../audit/log.js';
 import { MemoryStore } from '../../memory/store.js';
 import type { PeerBus } from '../peer/bus.js';
 import type { PermissionEscalator } from '../permissions/escalator.js';
-import type { ToolCreator } from '../../tools/tool-creator.js';
+import type { ToolCreator, GeneratedToolSpec } from '../../tools/tool-creator.js';
 import {
   parseTextToolCalls,
   toToolCall,
@@ -90,6 +91,17 @@ export class T3Worker extends BaseTier {
     this.peerBus.on(`message:${this.id}`, (msg) => {
       this.log(`Peer message from ${msg.fromId}: ${msg.type}`);
       this.receivePeerSync(msg.fromId, msg.payload);
+    });
+
+    // A peer created a runtime tool — register it locally and refresh our tool
+    // list so we can use it without regenerating the same capability.
+    this.peerBus.on('broadcast', (msg) => {
+      const payload = msg?.payload as { type?: string; spec?: GeneratedToolSpec } | undefined;
+      if (payload?.type === 'TOOL_CREATED' && payload.spec && this.toolCreator) {
+        this.toolCreator.registerSpec(payload.spec);
+        this.tools = this.toolRegistry.getToolDefinitions();
+        this.log(`Registered peer tool "${payload.spec.name}" from broadcast.`);
+      }
     });
   }
 
@@ -312,9 +324,22 @@ export class T3Worker extends BaseTier {
     // `tools` is reassigned when a dynamic tool is created — must be a let
     tools = [...tools];
 
-    // Detect if T3 model supports native tool use
-    const t3Model = this.router.getModelForTier('T3');
-    const useTextTools = t3Model?.supportsToolUse === false && tools.length > 0;
+    // Cascade Auto: route this specific subtask to the benchmark-best model for
+    // its type (coding → Claude, writing → GPT/Gemini, …). Returns null when
+    // Cascade Auto is off, in which case the shared tier model is used.
+    let subtaskModel: ModelInfo | undefined;
+    try {
+      const subtaskText = `${this.assignment?.subtaskTitle ?? ''} ${this.assignment?.description ?? ''} ${this.assignment?.expectedOutput ?? ''}`;
+      subtaskModel = (await this.router.selectModelForSubtask('T3', subtaskText)) ?? undefined;
+      if (subtaskModel) {
+        this.log(`Cascade Auto: routing this subtask to ${subtaskModel.provider}:${subtaskModel.id}`);
+      }
+    } catch { /* fall back to the tier model */ }
+
+    // Detect tool-use mode against the EFFECTIVE model (per-subtask override if
+    // any, else the tier default).
+    const effectiveModel = subtaskModel ?? this.router.getModelForTier('T3');
+    const useTextTools = effectiveModel?.supportsToolUse === false && tools.length > 0;
     const textToolSuffix = useTextTools ? buildTextToolSystemPrompt(tools) : '';
 
     while (iterations < MAX_ITERATIONS) {
@@ -331,6 +356,7 @@ export class T3Worker extends BaseTier {
         // Don't pass tools array when model can't use them natively
         tools: useTextTools ? undefined : (tools.length ? tools : undefined),
         maxTokens: 4096,
+        ...(subtaskModel ? { model: subtaskModel } : {}),
       };
 
       const result = await this.router.generate(
@@ -412,7 +438,46 @@ export class T3Worker extends BaseTier {
     };
   }
 
+  /**
+   * Lightweight argument check against the tool's JSON Schema: required fields
+   * present and enum values in range. Not a full validator — just the two
+   * failure modes weak models hit most. Returns an error message, or null if OK.
+   */
+  private validateToolInput(tc: ToolCall): string | null {
+    const def = this.tools.find(t => t.name === tc.name);
+    const schema = def?.inputSchema as {
+      properties?: Record<string, { enum?: unknown[] }>;
+      required?: string[];
+    } | undefined;
+    if (!schema) return null;
+
+    const required = Array.isArray(schema.required) ? schema.required : [];
+    const missing = required.filter(k => tc.input[k] === undefined || tc.input[k] === null || tc.input[k] === '');
+    if (missing.length) {
+      return `Tool error: missing required parameter(s) for "${tc.name}": ${missing.join(', ')}. Expected: ${JSON.stringify(schema)}. Supply them and call the tool again.`;
+    }
+
+    if (schema.properties) {
+      for (const [k, prop] of Object.entries(schema.properties)) {
+        const allowed = Array.isArray(prop?.enum) ? prop.enum : null;
+        if (allowed && tc.input[k] !== undefined && !allowed.includes(tc.input[k])) {
+          return `Tool error: invalid value for "${k}" in "${tc.name}": ${JSON.stringify(tc.input[k])}. Must be one of ${JSON.stringify(allowed)}.`;
+        }
+      }
+    }
+    return null;
+  }
+
   private async executeTool(tc: ToolCall): Promise<string> {
+    // Reject malformed calls early (before any approval prompt) with a clear,
+    // self-correcting message — weaker models often omit required parameters or
+    // pass an out-of-range enum value, which otherwise fails opaquely at run time.
+    const validationError = this.validateToolInput(tc);
+    if (validationError) {
+      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: tc.name, error: validationError, durationMs: 0 });
+      return validationError;
+    }
+
     const needsApproval = this.toolRegistry.requiresApproval(tc.name);
 
     if (needsApproval) {
@@ -500,7 +565,9 @@ export class T3Worker extends BaseTier {
       if (/\b(429|rate.?limit|authentication|api.?key|forbidden|401|403)\b/i.test(errMsg)) {
         throw new CriticalToolError(errMsg, tc.name);
       }
-      return `Tool error: ${errMsg}`;
+      // Try to recover via a sibling tool or a synthesized one before giving up;
+      // returns the original error string if no fallback succeeds.
+      return await this.adaptiveFallback(tc, `Tool error: ${errMsg}`);
     }
   }
 
@@ -584,6 +651,14 @@ export class T3Worker extends BaseTier {
    */
   private async coordinateFileIntents(assignment: T2ToT3Assignment): Promise<void> {
     if (!this.peerBus) return;
+    // Only coordinate locks for tasks that will actually WRITE files. A read or
+    // analyze task that merely mentions a filename in prose (e.g. "is the README
+    // a novel idea?") must not lock it — locking phantom or read-only paths
+    // previously caused waits that could stall the whole run for minutes.
+    const haystack = `${assignment.description}\n${assignment.expectedOutput}`;
+    if (!/\b(create|write|save|generate|produce|output|edit|update|modify|append|overwrite|rewrite)\b/i.test(haystack)) {
+      return;
+    }
     const plannedFiles = this.extractArtifactPaths(assignment);
     if (!plannedFiles.length) return;
 
@@ -597,19 +672,26 @@ export class T3Worker extends BaseTier {
     // Give siblings 500ms to announce their intents
     await new Promise(r => setTimeout(r, 500));
 
-    // Acquire locks on all planned files (in deterministic order to avoid deadlock)
+    // Acquire locks on all planned files (deterministic order to avoid deadlock).
+    // Lock coordination is best-effort and time-boxed: a stuck or never-released
+    // lock must never hang the actual work, so any wait failure falls through to
+    // proceeding without the lock.
     const sortedFiles = [...plannedFiles].sort();
     for (const filePath of sortedFiles) {
-      if (this.peerBus.isFileLocked(filePath)) {
-        this.log(`[T3] Waiting for file lock: ${filePath}`);
-        this.sendStatusUpdate({
-          progressPct: 5,
-          currentAction: `Waiting for peer to finish editing: ${filePath}`,
-          status: 'IN_PROGRESS',
-        });
-        await this.peerBus.waitForFileRelease(filePath);
+      try {
+        if (this.peerBus.isFileLocked(filePath)) {
+          this.log(`[T3] Waiting for file lock: ${filePath}`);
+          this.sendStatusUpdate({
+            progressPct: 5,
+            currentAction: `Waiting for peer to finish editing: ${filePath}`,
+            status: 'IN_PROGRESS',
+          });
+          await this.peerBus.waitForFileRelease(filePath, 10_000).catch(() => { /* proceed unlocked */ });
+        }
+        await this.peerBus.lockFile(this.id, filePath, 10_000).catch(() => { /* proceed unlocked */ });
+      } catch (err) {
+        this.log(`[T3] Lock coordination skipped for ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
       }
-      await this.peerBus.lockFile(this.id, filePath);
     }
 
     // Register cleanup: release all locks when this worker finishes
