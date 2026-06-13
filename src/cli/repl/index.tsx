@@ -15,6 +15,7 @@ import type {
   CascadeConfig,
   ConversationMessage,
   ModelInfo,
+  PeerMessageEvent,
   ProviderType,
   RuntimeNode,
   RuntimeNodeLog,
@@ -23,7 +24,7 @@ import type {
   Message,
 } from '../../types.js';
 import { CASCADE_DB_FILE, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE } from '../../constants.js';
-import { Cascade } from '../../core/cascade.js';
+import { Cascade, type DecisionLogEntry } from '../../core/cascade.js';
 import { MemoryStore } from '../../memory/store.js';
 import { ModelSelector } from '../../core/router/selector.js';
 import { OpenAIProvider } from '../../providers/openai.js';
@@ -34,6 +35,9 @@ import { OpenAICompatibleProvider } from '../../providers/openai-compatible.js';
 import type { BaseProvider } from '../../providers/base.js';
 import { getTheme } from '../themes/index.js';
 import { SlashCommandRegistry } from '../slash/index.js';
+import { computeLiveAreaBudget, computeTranscriptRows, flattenTranscript, windowTranscript } from './layout.js';
+import { disableMouseReporting } from '../utils/terminal-input.js';
+import { writeClipboardSync } from '../utils/clipboard.js';
 import { AgentTree, type TierNode } from './components/AgentTree.js';
 import { TimelinePanel } from './components/TimelinePanel.js';
 import { StatusBar } from './components/StatusBar.js';
@@ -43,10 +47,12 @@ import { ModelsDisplay, type ModelPickerSelection } from './components/ModelsDis
 import { CostTracker } from './components/CostTracker.js';
 import { CompactStatus } from './components/CompactStatus.js';
 import { ChatMessage } from './components/ChatMessage.js';
+import { PeerFeed } from './components/PeerFeed.js';
+import { PlanApproval, type PlanApprovalRequest } from './components/PlanApproval.js';
 
-// Auto-hide the agent tree this many ms after execution completes. Cancelled
-// if a new task starts. Tunable.
-const AUTO_CLEAR_TREE_MS = 8000;
+// Keep only the most recent peer-comms events — a long run can produce
+// thousands and the feed only ever shows the last handful.
+const PEER_EVENT_BUFFER = 50;
 
 // Show only the last N lines of a streaming buffer in the live area so a
 // long generation can't push the rest of the TUI off-screen. The full text
@@ -121,6 +127,10 @@ interface ReplState {
   callsByTier: Record<string, number>;
   costByTier: Record<string, number>;
   tokensByTier: Record<string, number>;
+  savedUsd: number;
+  savedPct: number;
+  peerEvents: PeerMessageEvent[];
+  showComms: boolean;
   approvalRequest: ApprovalRequest | null;
   showCost: boolean;
   showDetails: boolean;
@@ -133,10 +143,13 @@ type ReplAction =
   | { type: 'APPEND_STREAM'; text: string }
   | { type: 'COMMIT_STREAM'; finalText: string; timestamp?: string }
   | { type: 'SET_TREE'; tree: TierNode | null }
-  | { type: 'UPDATE_COST'; tokens: number; costUsd: number; byProvider: Record<string,number>; byTier: Record<string,number>; costByTier: Record<string,number>; tokensByTier: Record<string,number> }
+  | { type: 'UPDATE_COST'; tokens: number; costUsd: number; byProvider: Record<string,number>; byTier: Record<string,number>; costByTier: Record<string,number>; tokensByTier: Record<string,number>; savedUsd: number; savedPct: number }
   | { type: 'SET_APPROVAL'; request: ApprovalRequest | null }
   | { type: 'SET_EXECUTING'; isExecuting: boolean }
   | { type: 'SET_STREAMING'; isStreaming: boolean }
+  | { type: 'ADD_PEER_EVENTS'; events: PeerMessageEvent[] }
+  | { type: 'CLEAR_PEER_EVENTS' }
+  | { type: 'TOGGLE_COMMS' }
   | { type: 'CLEAR' }
   | { type: 'TOGGLE_COST' }
   | { type: 'TOGGLE_DETAILS' }
@@ -162,15 +175,21 @@ function replReducer(state: ReplState, action: ReplAction): ReplState {
     case 'SET_TREE':
       return { ...state, agentTree: action.tree };
     case 'UPDATE_COST':
-      return { ...state, totalTokens: action.tokens, totalCostUsd: action.costUsd, callsByProvider: action.byProvider, callsByTier: action.byTier, costByTier: action.costByTier, tokensByTier: action.tokensByTier };
+      return { ...state, totalTokens: action.tokens, totalCostUsd: action.costUsd, callsByProvider: action.byProvider, callsByTier: action.byTier, costByTier: action.costByTier, tokensByTier: action.tokensByTier, savedUsd: action.savedUsd, savedPct: action.savedPct };
     case 'SET_APPROVAL':
       return { ...state, approvalRequest: action.request };
     case 'SET_EXECUTING':
       return { ...state, isExecuting: action.isExecuting };
     case 'SET_STREAMING':
       return { ...state, isStreaming: action.isStreaming };
+    case 'ADD_PEER_EVENTS':
+      return { ...state, peerEvents: [...state.peerEvents, ...action.events].slice(-PEER_EVENT_BUFFER) };
+    case 'CLEAR_PEER_EVENTS':
+      return state.peerEvents.length ? { ...state, peerEvents: [] } : state;
+    case 'TOGGLE_COMMS':
+      return { ...state, showComms: !state.showComms };
     case 'CLEAR':
-      return { ...state, messages: [], agentTree: null, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, activeTool: null };
+      return { ...state, messages: [], agentTree: null, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, savedUsd: 0, savedPct: 0, peerEvents: [], activeTool: null };
     case 'CLEAR_TREE':
       return { ...state, agentTree: null };
     case 'TOGGLE_COST':
@@ -192,6 +211,8 @@ interface ReplProps {
   themeName: string;
   initialPrompt?: string;
   identityName?: string;
+  /** Alternate-screen mode: no terminal scrollback, so history renders as an in-app transcript. */
+  altScreen?: boolean;
 }
 
 async function refreshModelCache(store: MemoryStore, providers: CascadeConfig['providers']) {
@@ -217,7 +238,7 @@ async function refreshModelCache(store: MemoryStore, providers: CascadeConfig['p
   }
 }
 
-export function Repl({ config, workspacePath, themeName, initialPrompt, identityName }: ReplProps): React.ReactElement {
+export function Repl({ config, workspacePath, themeName, initialPrompt, identityName, altScreen = false }: ReplProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [theme, setTheme] = useState<Theme>(() => getTheme(themeName));
@@ -227,13 +248,19 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const [slashIndex, setSlashIndex] = useState(0);
   const [identities, setIdentities] = useState<Array<{ id: string; name: string; isDefault: boolean }>>([]);
   const [currentIdentityId, setCurrentIdentityId] = useState<string | undefined>(config.defaultIdentityId);
-  const [state, dispatch] = useReducer(replReducer, { messages: [], agentTree: null, isStreaming: false, isExecuting: false, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, approvalRequest: null, showCost: false, showDetails: false, error: null, activeTool: null });
+  const [state, dispatch] = useReducer(replReducer, { messages: [], agentTree: null, isStreaming: false, isExecuting: false, streamBuffer: '', totalTokens: 0, totalCostUsd: 0, callsByProvider: {}, callsByTier: {}, costByTier: {}, tokensByTier: {}, savedUsd: 0, savedPct: 0, peerEvents: [], showComms: true, approvalRequest: null, showCost: false, showDetails: false, error: null, activeTool: null });
   const [isShowingModels, setIsShowingModels] = useState(false);
+  const [planApprovalRequest, setPlanApprovalRequest] = useState<PlanApprovalRequest | null>(null);
+  // Alt-screen transcript scroll position, in lines up from the newest line.
+  const [historyOffset, setHistoryOffset] = useState(0);
+  // Current transcript geometry for the PgUp/PgDn handler (set during render).
+  const transcriptMetaRef = useRef({ rows: 0, lines: 0 });
   const [cachedModels, setCachedModels] = useState<Map<ProviderType, ModelInfo[]>>(new Map());
   const cascadeRef = useRef<Cascade | null>(null);
   const storeRef = useRef<MemoryStore | null>(null);
   const slashRef = useRef(new SlashCommandRegistry());
   const approvalResolverRef = useRef<((decision: { approved: boolean; always: boolean }) => void) | null>(null);
+  const decisionLogRef = useRef<DecisionLogEntry[]>([]);
   const sessionIdRef = useRef(randomUUID());
   const startedAtRef = useRef(new Date().toISOString());
   const treeNodesRef = useRef<Map<string, FlatTreeNode>>(new Map());
@@ -245,7 +272,6 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const [quitAttempted, setQuitAttempted] = useState(false);
   const isInputLockedRef = useRef(false);
   const lockTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const autoClearTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const lockInputTemporarily = useCallback(() => {
     isInputLockedRef.current = true;
@@ -427,29 +453,16 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     }
   }, [slashCompletions.length, slashIndex]);
 
-  // Auto-hide the agent tree after a session completes. Clears the tree only
-  // (preserves messages, costs, active tool) AUTO_CLEAR_TREE_MS after execution
-  // finishes. Cancelled if a new task starts.
+  // New messages snap the alt-screen transcript back to the newest line.
   useEffect(() => {
-    if (state.isExecuting) {
-      if (autoClearTimerRef.current) {
-        clearTimeout(autoClearTimerRef.current);
-        autoClearTimerRef.current = null;
-      }
-      return;
-    }
-    if (state.agentTree == null) return;
-    autoClearTimerRef.current = setTimeout(() => {
-      dispatch({ type: 'CLEAR_TREE' });
-      autoClearTimerRef.current = null;
-    }, AUTO_CLEAR_TREE_MS);
-    return () => {
-      if (autoClearTimerRef.current) {
-        clearTimeout(autoClearTimerRef.current);
-        autoClearTimerRef.current = null;
-      }
-    };
-  }, [state.isExecuting, state.agentTree]);
+    setHistoryOffset(0);
+  }, [state.messages.length]);
+
+  // The completed agent tree collapses on the user's NEXT keystroke (see the
+  // input onChange handler) rather than on an idle timer. A timer-driven
+  // repaint while the user is away wipes any in-progress mouse selection —
+  // when nothing is executing and nobody is typing, the screen must stay
+  // perfectly still so native drag-select + right-click copy work.
 
   const handleSlashCommand = useCallback(async (trimmed: string) => {
     const result = await slashRef.current.handle(trimmed, {
@@ -542,6 +555,27 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           serverTools.forEach(t => lines.push(`  - ${t.name.split('::')[2]} — ${t.description.replace(`[MCP:${server}] `, '')}`));
         }
         return lines.join('\n');
+      },
+      onCopy: (args) => {
+        const n = Math.max(1, Number.parseInt(args[0] ?? '1', 10) || 1);
+        const assistants = state.messages.filter((m) => m.role === 'assistant');
+        const msg = assistants[assistants.length - n];
+        if (!msg) return n === 1 ? 'No assistant response to copy yet.' : `No response found ${n} back.`;
+        const method = writeClipboardSync(msg.content);
+        if (!method) {
+          return 'Copy failed — no clipboard tool found (pbcopy/clip/xclip/wl-copy) and not running in a terminal.';
+        }
+        const which = n === 1 ? 'last response' : `response ${n} back`;
+        return method === 'osc52'
+          ? `✔ Copied ${which} (${msg.content.length} chars) via terminal escape — works over SSH if your terminal supports OSC 52.`
+          : `✔ Copied ${which} (${msg.content.length} chars) to clipboard.`;
+      },
+      onWhy: () => formatDecisionTrail(decisionLogRef.current),
+      onComms: () => {
+        dispatch({ type: 'TOGGLE_COMMS' });
+        return state.showComms
+          ? 'Agent comms feed hidden. /comms to bring it back.'
+          : 'Agent comms feed enabled — agent-to-agent traffic will appear during runs.';
       },
       onCostInfo: () => { dispatch({ type: 'TOGGLE_COST' }); return ''; },
       onBudget: (args) => {
@@ -659,6 +693,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       return;
     }
     treeNodesRef.current.clear(); rebuildTree(); setTreeScrollOffset(0);
+    dispatch({ type: 'CLEAR_PEER_EVENTS' });
     const onRoot = ({ role }: RootTierEvent) => {
       const tierId = role === 'T1' ? 'T1' : `${role.toLowerCase()}-root` as 't2-root' | 't3-root';
       rootTierIdRef.current = tierId;
@@ -688,7 +723,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       }
       if (lastTool !== null) dispatch({ type: 'SET_ACTIVE_TOOL', toolName: lastTool });
       const stats = cascade.getRouter().getStats();
-      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier });
+      const savings = cascade.getRouter().getDelegationSavings();
+      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier, savedUsd: savings.savedUsd, savedPct: savings.savedPct });
       statusThrottleTimeout = null;
     };
     cascade.on('tier:root', onRoot);
@@ -696,6 +732,19 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     cascade.on('tier:status', (ev: TierStatusEvent) => {
       pendingStatusEvents.push(ev);
       if (!statusThrottleTimeout) statusThrottleTimeout = setTimeout(flushStatus, 100);
+    });
+    // Agent-to-agent comms — same 100ms coalescing as tier:status so a
+    // chatty swarm of T3s can't render-thrash the live area.
+    const pendingPeerEvents: PeerMessageEvent[] = [];
+    let peerThrottleTimeout: NodeJS.Timeout | null = null;
+    const flushPeerEvents = () => {
+      const events = pendingPeerEvents.splice(0);
+      if (events.length) dispatch({ type: 'ADD_PEER_EVENTS', events });
+      peerThrottleTimeout = null;
+    };
+    cascade.on('peer:message', (ev: PeerMessageEvent) => {
+      pendingPeerEvents.push(ev);
+      if (!peerThrottleTimeout) peerThrottleTimeout = setTimeout(flushPeerEvents, 100);
     });
     cascade.on('budget:warning', (payload: { spentUsd: number; capUsd: number; spendPct: number; remainingUsd: number }) => {
       const bar = '█'.repeat(Math.round(payload.spendPct / 10)) + '░'.repeat(10 - Math.round(payload.spendPct / 10));
@@ -719,6 +768,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           timestamp: new Date().toISOString(),
         },
       });
+    });
+    // Boardroom: pause Complex runs for plan sign-off (planApproval: 'always').
+    cascade.on('plan:approval-required', (payload: PlanApprovalRequest) => {
+      setPlanApprovalRequest(payload);
     });
     // Re-use the approval dialog for MCP server spawn requests. These are the
     // riskiest events we expose — an arbitrary subprocess.
@@ -752,10 +805,17 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       });
       flushStream();
       flushStatus();
+      flushPeerEvents();
       const stats = cascade.getRouter().getStats();
-      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier });
+      const savings = cascade.getRouter().getDelegationSavings();
+      dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier, savedUsd: savings.savedUsd, savedPct: savings.savedPct });
       dispatch({ type: 'COMMIT_STREAM', finalText: result.output, timestamp: new Date().toISOString() });
       persistMessage('assistant', result.output, new Date().toISOString());
+      // One-line run receipt — the delegation economics in scrollback.
+      const receipt = formatRunReceipt(result, stats.totalCostUsd, savings);
+      if (receipt) {
+        dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'system', content: receipt, timestamp: new Date().toISOString() } });
+      }
       // Generate AI session name on first exchange (async, fire-and-forget)
       if (!sessionTitleGeneratedRef.current && storeRef.current) {
         sessionTitleGeneratedRef.current = true;
@@ -773,7 +833,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     finally {
       if (streamThrottleTimeout) { clearTimeout(streamThrottleTimeout); streamThrottleTimeout = null; }
       if (statusThrottleTimeout) { clearTimeout(statusThrottleTimeout); statusThrottleTimeout = null; }
+      if (peerThrottleTimeout) { clearTimeout(peerThrottleTimeout); peerThrottleTimeout = null; }
+      decisionLogRef.current = cascade.getDecisionLog();
       cascade.removeAllListeners();
+      setPlanApprovalRequest(null);
       const finalStats = cascade.getRouter().getStats();
       const currentSession = storeRef.current?.getSession(sessionIdRef.current);
       if (currentSession) {
@@ -828,6 +891,14 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       setHistoryIndex(null);
       return;
     }
+    // Alt-screen transcript scrolling — PgUp/PgDn page through history.
+    if (altScreen && (key.pageUp || key.pageDown)) {
+      const { rows: tRows, lines: tLines } = transcriptMetaRef.current;
+      const step = Math.max(1, tRows - 1);
+      const maxOffset = Math.max(0, tLines - tRows);
+      setHistoryOffset((prev) => Math.min(Math.max(0, key.pageUp ? prev + step : prev - step), maxOffset));
+      return;
+    }
     if (key.upArrow && !input.includes('\n')) {
       if (slashCompletions.length > 0) { setSlashIndex(p => (p <= 0 ? slashCompletions.length - 1 : p - 1)); return; }
       const nextIndex = historyIndex === null ? 0 : Math.min(historyIndex + 1, inputHistory.length - 1);
@@ -850,20 +921,50 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     }
   });
 
-  const width = stdout?.columns ?? 100;
+  // Terminal dimensions react to resize events so the layout budget and
+  // StatusBar width never go stale mid-session (previously `columns` was
+  // read once per render with a 100-col fallback and never refreshed).
+  const [termSize, setTermSize] = useState(() => ({
+    columns: stdout?.columns ?? 100,
+    rows: stdout?.rows ?? 40,
+  }));
+  useEffect(() => {
+    if (!stdout) return;
+    const onResize = () => setTermSize({ columns: stdout.columns ?? 100, rows: stdout.rows ?? 40 });
+    stdout.on('resize', onResize);
+    return () => { stdout.off('resize', onResize); };
+  }, [stdout]);
+  const width = termSize.columns;
 
-  // Fixed-height cap for the agent tree — keeps layout stable as nodes spawn.
-  // AgentTree scrolls internally within this budget.
-  const MAX_TREE_ROWS = 10;
+  // Row budget for live panels — shrinks panels before the live area can
+  // outgrow the viewport, which would force Ink into full-screen redraws
+  // (the flicker users see on small/busy terminals).
+  const budgetOpts = {
+    isTypingCommand,
+    showCost: state.showCost,
+    showDetails: state.showDetails,
+    showComms: state.showComms && state.peerEvents.length > 0,
+  };
+  const liveBudget = computeLiveAreaBudget(termSize.rows, budgetOpts);
+
+  // Alt-screen transcript: history renders as a line-windowed view
+  // (PgUp/PgDn) because the alternate screen has no native scrollback.
+  const transcriptRows = altScreen
+    ? computeTranscriptRows(termSize.rows, liveBudget, { ...budgetOpts, treeVisible: state.agentTree != null })
+    : 0;
+  const transcriptLines = altScreen ? flattenTranscript(state.messages) : [];
+  const transcript = altScreen ? windowTranscript(transcriptLines, historyOffset, transcriptRows) : null;
+  transcriptMetaRef.current = { rows: transcriptRows, lines: transcriptLines.length };
 
   useEffect(() => {
     // Actively DISABLE mouse reporting on mount so the terminal's own
-    // scrollback handles the wheel (and PgUp / PgDn). Completed messages
-    // live in the scrollback via Ink <Static> since v0.5.4 — if we
-    // capture mouse events here, the wheel scrolls nothing and the user
-    // can't see history. The strip-and-swallow branch below stays as
-    // defense-in-depth in case another layer turns capture back on.
-    process.stdout.write('\x1b[?1000l\x1b[?1006l');
+    // scrollback handles the wheel (and PgUp / PgDn) and native drag-select
+    // + right-click copy keep working. Completed messages live in the
+    // scrollback via Ink <Static> since v0.5.4 — if we capture mouse events
+    // here, the wheel scrolls nothing and the user can't see history. The
+    // strip-and-swallow branch below stays as defense-in-depth in case
+    // another layer turns capture back on.
+    disableMouseReporting();
 
     const onData = (data: Buffer) => {
       const str = data.toString();
@@ -883,27 +984,52 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
 
     process.stdin.on('data', onData);
     return () => {
-      process.stdout.write('\x1b[?1000l\x1b[?1006l');
+      disableMouseReporting();
       process.stdin.removeListener('data', onData);
     };
   }, [lockInputTemporarily]);
 
   return (
     <Box flexDirection="column" width={width}>
-      {/* Conversation history — Static items are written to the terminal
-          scrollback ONCE and never re-rendered. This is what kills the
-          per-render write cost that flickered on maximized terminals. */}
-      <Static items={state.messages}>
-        {(msg) => (
-          <ChatMessage
-            key={msg.id}
-            role={msg.role}
-            content={msg.content}
-            timestamp={msg.timestamp}
-            theme={theme}
-          />
-        )}
-      </Static>
+      {/* Conversation history.
+          Normal mode: Static items are written to the terminal scrollback
+          ONCE and never re-rendered — this is what kills the per-render
+          write cost that flickered on maximized terminals.
+          Alt-screen mode: no scrollback exists, so history renders as a
+          fixed-height line window scrolled with PgUp/PgDn. */}
+      {altScreen && transcript ? (
+        <Box flexDirection="column" paddingX={1} height={transcriptRows + 2}>
+          <Text color={theme.colors.muted} dimColor>
+            {transcript.above > 0 ? `↑ ${transcript.above} more lines · PgUp` : ' '}
+          </Text>
+          {transcript.visible.map((line, i) => {
+            if (line.headerRole) {
+              const style = TRANSCRIPT_HEADER_STYLE[line.headerRole];
+              return (
+                <Text key={`h-${i}`} color={theme.colors[style.color]} bold>
+                  {style.prefix} {style.label}
+                </Text>
+              );
+            }
+            return <Text key={`l-${i}`} wrap="truncate-end">{line.text || ' '}</Text>;
+          })}
+          <Text color={theme.colors.muted} dimColor>
+            {transcript.below > 0 ? `↓ ${transcript.below} more lines · PgDn` : ' '}
+          </Text>
+        </Box>
+      ) : (
+        <Static items={state.messages}>
+          {(msg) => (
+            <ChatMessage
+              key={msg.id}
+              role={msg.role}
+              content={msg.content}
+              timestamp={msg.timestamp}
+              theme={theme}
+            />
+          )}
+        </Static>
+      )}
 
       {/* ── Live area: everything below re-renders on each batch ── */}
 
@@ -916,6 +1042,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         }}
         tokens={state.totalTokens}
         costUsd={state.totalCostUsd}
+        savedUsd={state.savedUsd}
         workspacePath={workspacePath}
         isExecuting={state.isExecuting}
         activeTier={state.agentTree?.status === 'ACTIVE' ? 'T1' : undefined}
@@ -957,14 +1084,32 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         </Box>
       )}
 
-      {/* Compact agent tree — auto-hides AUTO_CLEAR_TREE_MS after completion */}
-      <AgentTree root={state.agentTree} theme={theme} scrollOffset={treeScrollOffset} maxRows={MAX_TREE_ROWS} />
+      {/* Compact agent tree — collapses on the next keystroke after completion */}
+      <AgentTree root={state.agentTree} theme={theme} scrollOffset={treeScrollOffset} maxRows={liveBudget.treeMaxRows} />
 
-      {state.showDetails && (
+      {/* Agent-to-agent comms feed — the radio chatter between workers */}
+      {state.showComms && liveBudget.commsMaxEvents > 0 && (
+        <PeerFeed events={state.peerEvents} theme={theme} maxRows={liveBudget.commsMaxEvents} />
+      )}
+
+      {state.showDetails && liveBudget.showTimeline && (
         <TimelinePanel nodes={[...treeNodesRef.current.values()]} theme={theme} currentIndex={timelineIndex} onChangeIndex={setTimelineIndex} />
       )}
-      {state.showCost && <CostTracker theme={theme} totalTokens={state.totalTokens} totalCostUsd={state.totalCostUsd} callsByProvider={state.callsByProvider} callsByTier={state.callsByTier} costByTier={state.costByTier} tokensByTier={state.tokensByTier} />}
+      {state.showCost && <CostTracker theme={theme} totalTokens={state.totalTokens} totalCostUsd={state.totalCostUsd} callsByProvider={state.callsByProvider} callsByTier={state.callsByTier} costByTier={state.costByTier} tokensByTier={state.tokensByTier} compact={liveBudget.costCompact} savedUsd={state.savedUsd} savedPct={state.savedPct} />}
+      {liveBudget.collapsed && (state.showCost || state.showDetails || state.agentTree != null) && (
+        <Text color={theme.colors.muted} dimColor>  ▸ panels collapsed (small terminal)</Text>
+      )}
       {state.approvalRequest && <ApprovalPrompt request={state.approvalRequest} theme={theme} onDecision={(decision) => { dispatch({ type: 'SET_APPROVAL', request: null }); approvalResolverRef.current?.(decision); }} />}
+      {planApprovalRequest && (
+        <PlanApproval
+          request={planApprovalRequest}
+          theme={theme}
+          onDecision={(approved) => {
+            setPlanApprovalRequest(null);
+            cascadeRef.current?.resolvePlanApproval(approved);
+          }}
+        />
+      )}
       {/* Suggestion panel — fixed height so the input below doesn't jump as
           entries filter while typing. Sized for header (1) + 8 entries +
           up to 2 scroll indicators = 11 rows worst case. */}
@@ -1023,11 +1168,18 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         <Box flexDirection="row">
           <Text color={theme.colors.primary} bold>› {queuedMessages.length > 0 ? <Text color={theme.colors.accent}>[QUEUED] </Text> : ''}</Text>
           <SafeTextInput
-            focus={!state.approvalRequest && !isShowingModels}
+            focus={!state.approvalRequest && !planApprovalRequest && !isShowingModels}
             value={input}
             manageMouseReporting={false}
             onChange={(val) => {
               if (isInputLockedRef.current) return;
+              // Collapse the completed agent tree and comms feed now that the
+              // user is typing again — this replaces the old idle timer, whose
+              // repaint could wipe an in-progress mouse selection.
+              if (!state.isExecuting && val.length > 0) {
+                if (state.agentTree != null) dispatch({ type: 'CLEAR_TREE' });
+                if (state.peerEvents.length > 0) dispatch({ type: 'CLEAR_PEER_EVENTS' });
+              }
               // Defense in depth — SafeTextInput already sanitizes, but a brief
               // input-lock window can still pass through values we'd rather drop.
               setInput(sanitizeTerminalInput(val));
@@ -1039,6 +1191,46 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       </Box>
     </Box>
   );
+}
+
+const TRANSCRIPT_HEADER_STYLE: Record<'user' | 'assistant' | 'system' | 'error', { prefix: string; label: string; color: 'primary' | 'accent' | 'muted' | 'error' }> = {
+  user: { prefix: '▸', label: 'USER', color: 'primary' },
+  assistant: { prefix: '◈', label: 'CASCADE', color: 'accent' },
+  system: { prefix: '◦', label: 'SYSTEM', color: 'muted' },
+  error: { prefix: '✗', label: 'ERROR', color: 'error' },
+};
+
+const DECISION_KIND_LABEL: Record<DecisionLogEntry['kind'], string> = {
+  complexity: 'Complexity',
+  model: 'Models',
+  failover: 'Failover',
+  escalation: 'Escalation',
+};
+
+function formatDecisionTrail(entries: DecisionLogEntry[]): string {
+  if (!entries.length) {
+    return 'No decision trail yet — run a prompt first, then /why explains how it was routed.';
+  }
+  const lines = entries.map((e, i) => `  ${i + 1}. ${DECISION_KIND_LABEL[e.kind]}: ${e.detail}`);
+  return ['Decision trail for the last run', ...lines].join('\n');
+}
+
+function formatRunReceipt(
+  result: { durationMs: number; t2Results: Array<{ t3Results?: unknown[] }> },
+  totalCostUsd: number,
+  savings: { savedUsd: number; savedPct: number },
+): string {
+  const seconds = Math.max(1, Math.round(result.durationMs / 1000));
+  const managers = result.t2Results.length;
+  const workers = result.t2Results.reduce((sum, r) => sum + (r.t3Results?.length ?? 0), 0);
+  const parts = [`✔ Done in ${seconds}s`];
+  if (managers > 0) parts.push(`${managers} manager${managers !== 1 ? 's' : ''}`);
+  if (workers > 0) parts.push(`${workers} worker${workers !== 1 ? 's' : ''}`);
+  parts.push(`$${totalCostUsd.toFixed(4)}`);
+  const line = parts.join(' · ');
+  return savings.savedUsd > 0
+    ? `${line} (saved $${savings.savedUsd.toFixed(4)} — ${savings.savedPct}% vs. all-T1)`
+    : line;
 }
 
 function toConversationHistory(messages: Message[]): ConversationMessage[] {

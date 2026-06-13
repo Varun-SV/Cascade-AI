@@ -7,6 +7,7 @@ import chalk from 'chalk';
 import path from 'node:path';
 import { CASCADE_CONFIG_FILE, LM_STUDIO_BASE_URL, OLLAMA_BASE_URL } from '../../constants.js';
 import { ConfigManager } from '../../config/index.js';
+import { discoverCredentials } from '../../config/credential-discovery.js';
 
 interface CheckResult {
   label: string;
@@ -121,6 +122,19 @@ export async function doctorCommand(): Promise<void> {
       ? 'ON — toggle with `cascade telemetry off`'
       : 'OFF (default) — toggle with `cascade telemetry on`',
   });
+
+  // Reusable credentials from other AI CLIs (Claude Code, Codex, Gemini, Copilot)
+  try {
+    const discovered = await discoverCredentials();
+    if (discovered.length > 0) {
+      const usable = discovered.filter((d) => d.directlyUsable).length;
+      checks.push({
+        label: 'Linkable credentials',
+        ok: true,
+        detail: `${discovered.length} found (${usable} usable) — run \`cascade link\` to adopt`,
+      });
+    }
+  } catch { /* discovery is best-effort */ }
 
   // Print results
   for (const c of checks) {

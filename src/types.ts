@@ -38,6 +38,14 @@ export interface ProviderConfig {
   deploymentName?: string;        // Azure
   apiVersion?: string;            // Azure
   model?: string;
+  /**
+   * OAuth bearer token (e.g. a Claude Code subscription token) used instead
+   * of an API key. When set on an Anthropic provider, the request uses
+   * `Authorization: Bearer` + the oauth beta header rather than `x-api-key`.
+   */
+  authToken?: string;
+  /** Where an adopted credential came from, e.g. "Claude Code". Informational. */
+  credentialSource?: string;
 }
 
 export interface StreamChunk {
@@ -284,7 +292,10 @@ export type PeerSyncType =
   | 'RESOLVE_CONFLICT'
   | 'DIVIDE_WORK'
   | 'CHECK_ASSUMPTION'
-  | 'SIGNAL_READY';
+  | 'SIGNAL_READY'
+  // File-lock and barrier traffic — surfaced so UIs can visualize how the
+  // agents coordinate, not just what they hand each other.
+  | 'COORDINATION';
 
 export interface PeerMessage {
   fromId: string;
@@ -438,6 +449,10 @@ export interface CascadeConfig {
   plugins?: string[];
   localConcurrency?: number;
   localInferenceTimeoutMs?: number;
+  /** Pause Complex runs for user approval of T1's plan ('always') or never (default). */
+  planApproval?: 'always' | 'never';
+  /** Render the TUI in the alternate screen buffer (vim-style). Default: false. */
+  altScreen?: boolean;
 }
 
 export interface ModelOverrides {
@@ -569,7 +584,8 @@ export type CascadeEventType =
   | 'budget:warning'
   | 'budget:exceeded'
   | 'permission:user-required'
-  | 'mcp:approval-required';
+  | 'mcp:approval-required'
+  | 'plan:approval-required';
 
 export interface CascadeEvent<T = unknown> {
   type: CascadeEventType;

@@ -12,6 +12,8 @@ interface StatusBarProps {
   tierModels: { t1?: string; t2?: string; t3?: string };
   tokens: number;
   costUsd: number;
+  /** USD saved by tier delegation vs. running every call on T1. */
+  savedUsd?: number;
   workspacePath: string;
   isExecuting: boolean;
   activeTier?: string;
@@ -21,6 +23,7 @@ function StatusBarInternal({
   theme,
   tokens,
   costUsd,
+  savedUsd = 0,
   isExecuting,
   activeTier,
 }: StatusBarProps): React.ReactElement {
@@ -29,7 +32,8 @@ function StatusBarInternal({
 
   const tierIndicator = activeTier ? ` [${activeTier}]` : '';
   const leftStr = ` ◈ CASCADE${tierIndicator} `;
-  const rightStr = ` ${formatTokens(tokens)} · $${costUsd.toFixed(4)} ${isExecuting ? '⚡' : '·'} `;
+  const savedStr = savedUsd > 0 ? ` · saved $${savedUsd.toFixed(4)}` : '';
+  const rightStr = ` ${formatTokens(tokens)} · $${costUsd.toFixed(4)}${savedStr} ${isExecuting ? '⚡' : '·'} `;
 
   const gap = Math.max(0, width - leftStr.length - rightStr.length);
 

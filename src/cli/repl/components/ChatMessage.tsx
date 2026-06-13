@@ -61,6 +61,10 @@ function normalizeContent(content: string | unknown): string {
   return typeof content === 'object' ? JSON.stringify(content) : String(content);
 }
 
+// Cap rendered code blocks so a giant snippet can't dominate the scrollback
+// commit (and, while still live, can't push the layout past the viewport).
+const MAX_CODE_LINES = 40;
+
 function renderContent(content: string, theme: Theme): React.ReactElement[] {
   // Split into code blocks and text
   const parts = content.split(/(```[\s\S]*?```)/g);
@@ -69,12 +73,17 @@ function renderContent(content: string, theme: Theme): React.ReactElement[] {
     if (part.startsWith('```')) {
       const lines = part.split('\n');
       const lang = lines[0]?.replace('```', '').trim() ?? '';
-      const code = lines.slice(1, -1).join('\n');
+      const codeLines = lines.slice(1, -1);
+      const truncated = codeLines.length - MAX_CODE_LINES;
+      const code = codeLines.slice(0, MAX_CODE_LINES).join('\n');
       return (
         <Box key={i} flexDirection="column" marginY={1} paddingX={2}
           borderStyle="single" borderColor={theme.colors.border}>
           {lang && <Text color={theme.colors.muted}>{lang}</Text>}
           <Text>{code}</Text>
+          {truncated > 0 && (
+            <Text color={theme.colors.muted} dimColor>… ({truncated} more lines — /export to get the full text)</Text>
+          )}
         </Box>
       );
     }

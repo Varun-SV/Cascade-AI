@@ -40,6 +40,12 @@ export interface SlashCommandContext {
   onTree: () => string;
   onResume: (args: string[]) => Promise<string> | string;
   onMcpList: () => string | Promise<string>;
+  /** Copies the last (or nth-last) assistant response to the clipboard. */
+  onCopy: (args: string[]) => string | Promise<string>;
+  /** Toggles the agent-to-agent comms feed. */
+  onComms: () => string;
+  /** Explains the routing & delegation decisions of the last run. */
+  onWhy: () => string;
 }
 
 export interface SlashCommandResult {
@@ -267,6 +273,25 @@ export class SlashCommandRegistry {
       command: '/identity',
       description: 'Switch active identity',
       handler: async (args, ctx) => ({ output: await ctx.onIdentity(args), handled: true }),
+    });
+
+    this.register({
+      command: '/copy',
+      description: 'Copy the last response to the clipboard  /copy [n]',
+      args: ['[n]'],
+      handler: async (args, ctx) => ({ output: await ctx.onCopy(args), handled: true }),
+    });
+
+    this.register({
+      command: '/comms',
+      description: 'Toggle the agent-to-agent comms feed',
+      handler: (_args, ctx) => ({ output: ctx.onComms(), handled: true }),
+    });
+
+    this.register({
+      command: '/why',
+      description: 'Explain how the last run was routed (complexity, models, failovers)',
+      handler: (_args, ctx) => ({ output: ctx.onWhy(), handled: true }),
     });
 
     this.register({

@@ -8,6 +8,15 @@ Cascade is an open-source CLI tool that runs your prompts through a hierarchical
 cascade "Refactor the auth module to use JWT, add tests, and open a PR"
 ```
 
+## Why Cascade is one of a kind
+
+Other AI CLIs run a single agent. Cascade runs a visible **organization** — and the terminal shows you the org at work:
+
+- **Delegation savings** — the status bar and every run receipt show what the hierarchy saved you (`$0.031 · saved $0.094 — 75% vs. all-T1`), because cheap local T3 workers do the heavy lifting while a premium T1 model only administrates. No flat-agent tool can show this number.
+- **Agent comms feed** (`/comms`) — live radio chatter between workers: peer messages, broadcasts, file locks, barrier syncs. No other CLI has agent-to-agent communication at all, let alone on screen.
+- **`/why`** — every run can explain itself: the complexity verdict and the classifier's reasoning, which model served each tier, failovers, and escalations.
+- **The boardroom** (`planApproval: "always"`) — Complex runs pause so you can approve T1's proposed org chart and budget ("3 managers · 7 workers · est. $0.40") before anything spawns. You sit above T1.
+
 ---
 
 ## Table of Contents
@@ -36,6 +45,16 @@ cascade "Refactor the auth module to use JWT, add tests, and open a PR"
 ---
 
 ## What's New in v0.5.7
+
+### Unreleased — the visible organization + a flicker-free TUI
+- **Delegation savings counter** — live `saved $X (Y%) vs. all-T1` in the StatusBar and `/cost`, plus a one-line receipt after every run (duration · managers · workers · cost · savings).
+- **Agent comms feed** — `/comms` toggles a live ticker of PeerBus traffic (peer messages, broadcasts, file locks, barriers). The events always existed for the web dashboard; the terminal now shows them too.
+- **`/why`** — prints the decision trail for the last run: complexity verdict with the classifier's reason (or which heuristic short-circuited), models per tier, Cascade Auto picks, provider failovers, and escalations.
+- **Boardroom plan approval** — with `planApproval: "always"`, Complex runs pause after T1 plans so you can approve the org chart + estimated cost before any T2 spawns. SDK/headless auto-approve, so default behavior is unchanged.
+- **Flicker fix** — the live area now always fits the viewport (per-panel row budgets, terminal-resize handling, capped panels), which stops Ink's full-screen redraw fallback — the root cause of flicker in long sessions on small/maximized terminals.
+- **Native mouse selection works** — idle repaints no longer wipe an in-progress drag-select; the completed agent tree collapses on your next keystroke instead of an 8s timer. `/copy [n]` copies a response via native clipboard tools with an OSC 52 escape fallback (works over SSH).
+- **`--alt-screen`** — opt-in vim-style alternate-screen mode: flicker-proof by construction, shell restored on exit (even on crashes); history scrolls in-app with PgUp/PgDn.
+- **Ink 6.8 + React 19** — renderer upgrade; Node.js floor rises to **20** (18 is EOL).
 
 ### v0.5.7 — Security hardening pass
 A focused security review of the tool and dashboard surface. All changes are covered by tests (`tsc --noEmit` clean, full suite green).
@@ -174,7 +193,7 @@ User prompt
 npm install -g cascade-ai
 ```
 
-> Requires **Node.js ≥ 18**.
+> Requires **Node.js ≥ 20**.
 
 ---
 
@@ -240,9 +259,14 @@ Cascade loads config from `.cascade/config.json` in your project directory.
   },
   "theme":  "cascade",
   "telemetry": { "enabled": false },
-  "plugins": ["./plugins/my-tool.js"]
+  "plugins": ["./plugins/my-tool.js"],
+  "planApproval": "never",
+  "altScreen": false
 }
 ```
+
+- `planApproval: "always"` pauses Complex runs in the **boardroom**: approve T1's proposed sections, worker counts, and estimated cost before any T2 manager spawns. Headless/SDK runs auto-approve.
+- `altScreen: true` (or the `--alt-screen` flag) renders the TUI in the terminal's alternate screen buffer — vim-style, flicker-proof, shell restored on exit. History scrolls in-app with PgUp/PgDn since the alt screen has no native scrollback.
 
 API keys are also read from environment variables:
 
@@ -252,6 +276,27 @@ API keys are also read from environment variables:
 | OpenAI    | `OPENAI_API_KEY`     |
 | Gemini    | `GOOGLE_API_KEY`     |
 | Azure     | `AZURE_OPENAI_KEY`   |
+
+### Linking credentials from other AI CLIs
+
+If you already use **Claude Code**, **OpenAI Codex**, **Gemini CLI**, or **GitHub Copilot CLI**, Cascade can reuse the credentials they store on your machine instead of asking you to paste keys again:
+
+```bash
+cascade link                      # list detected credentials
+cascade link anthropic            # adopt an API key for a provider
+cascade link anthropic --accept-risk   # adopt a Claude Code subscription token
+```
+
+`cascade doctor` also reports what's linkable. How each credential is treated:
+
+| Source | Stored as | Reusable? |
+|--------|-----------|-----------|
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` env | API key | ✅ directly |
+| Codex `~/.codex/auth.json` (API-key mode) | API key | ✅ directly |
+| Claude Code `~/.claude/.credentials.json` | OAuth token | ⚠️ as an Anthropic bearer token (needs `--accept-risk`) |
+| Codex ChatGPT login · Gemini CLI · Copilot CLI | vendor OAuth | ❌ detected only — locked to that vendor's backend |
+
+> ⚠️ **Terms of service:** reusing a *subscription* OAuth token (Claude Code, ChatGPT, Copilot) outside its own CLI may violate the vendor's terms and can get your account flagged. Cascade only ever reads **your own** local files, never adopts an OAuth token without `--accept-risk`, and never transmits a credential anywhere except to that credential's own provider. Use API keys where you can.
 
 ### CASCADE.md
 
@@ -356,6 +401,7 @@ cascade [options]               Start interactive REPL
 cascade run <prompt>            Run a single prompt and exit
 cascade init [path]             Initialize Cascade in a directory
 cascade doctor                  Diagnose API keys, Ollama, config
+cascade link [provider]         Reuse credentials from Claude Code / Codex / Gemini / Copilot
 cascade update                  Update to the latest version
 cascade dashboard               Launch the web dashboard
 ```
@@ -367,6 +413,7 @@ cascade dashboard               Launch the web dashboard
 -t, --theme  <name>    Color theme (cascade|dark|light|dracula|nord|solarized)
 -w, --workspace <path> Workspace path (default: cwd)
 -v, --version          Show version
+    --alt-screen       Vim-style alternate screen (flicker-proof; PgUp/PgDn history)
     --no-color         Disable colors
 ```
 
@@ -385,7 +432,10 @@ Type any of these inside the REPL:
 | `/model`     | Interactive picker — choose provider → tier → model (or Auto) |
 | `/model-info`| Show active models per tier                   |
 | `/models`    | Browse available models grouped by provider   |
-| `/cost`      | Show session cost and token usage             |
+| `/cost`      | Show session cost, token usage, and delegation savings |
+| `/why`       | Explain how the last run was routed (complexity, models, failovers) |
+| `/comms`     | Toggle the live agent-to-agent comms feed     |
+| `/copy [n]`  | Copy the last (or nth-last) response to the clipboard |
 | `/export [markdown\|json]` | Export session to file             |
 | `/rollback`  | Undo all file changes made in this session    |
 | `/branch`    | Fork the session into parallel branches       |
@@ -393,6 +443,8 @@ Type any of these inside the REPL:
 | `/identity`  | Switch active identity                        |
 | `/sessions`  | List and resume past sessions                 |
 | `/status`    | Show live agent tree status                   |
+
+> **Selection & copy:** mouse capture stays off, so native drag-select and right-click copy work in your terminal. When idle, the screen never repaints under you; `/copy` covers the one case selection can't — grabbing text while output is still streaming (with an OSC 52 fallback that works over SSH).
 
 ---
 

@@ -12,6 +12,8 @@ export const ProviderConfigSchema = z.object({
   deploymentName: z.string().optional(),
   apiVersion: z.string().optional(),
   model: z.string().optional(),
+  authToken: z.string().optional(),
+  credentialSource: z.string().optional(),
 });
 
 export const ModelOverridesSchema = z.object({
@@ -153,6 +155,21 @@ export const CascadeConfigSchema = z.object({
    * Local models can take minutes for large parameter counts. Default: 5 minutes.
    */
   localInferenceTimeoutMs: z.number().int().min(1000).default(300_000),
+  /**
+   * Boardroom plan approval: when 'always', Complex tasks pause after T1
+   * produces its plan so the user can approve the org chart (sections,
+   * workers, estimated cost) before any T2 manager spawns. Headless/SDK
+   * consumers without a listener auto-approve, so 'always' is still safe
+   * outside the TUI. Default: 'never' (no behavior change).
+   */
+  planApproval: z.enum(['always', 'never']).default('never'),
+  /**
+   * Render the TUI in the terminal's alternate screen buffer (like vim).
+   * Flicker-proof and restores the shell on exit, but native scrollback is
+   * unavailable — history scrolls in-app with PgUp/PgDn. Also enabled per
+   * session with the --alt-screen flag. Default: off.
+   */
+  altScreen: z.boolean().default(false),
 });
 
 export type CascadeConfigInput = z.input<typeof CascadeConfigSchema>;

@@ -18,14 +18,34 @@ import { dashboardCommand } from './commands/dashboard.js';
 import { makeIdentityCommand } from './commands/identity.js';
 import { modelsCommand } from './commands/models.js';
 import { exportCommand } from './commands/export.js';
+import { linkCommand } from './commands/link.js';
 import { telemetryCommand } from './commands/telemetry.js';
 import { runSetupWizard } from './setup/index.js';
 import { McpClient } from '../mcp/client.js';
 
 dotenv.config();
 
+// ── Alternate screen buffer (--alt-screen) ───────────────────────────
+// Entered before Ink renders; ALWAYS left again on exit — including
+// SIGINT/SIGTERM and crashes — so the user's shell is never left inside
+// the alt screen with an invisible prompt.
+let altScreenActive = false;
+function enterAltScreen(): void {
+  if (altScreenActive || !process.stdout.isTTY) return;
+  process.stdout.write('\x1b[?1049h\x1b[H');
+  altScreenActive = true;
+}
+function leaveAltScreen(): void {
+  if (!altScreenActive) return;
+  process.stdout.write('\x1b[?1049l');
+  altScreenActive = false;
+}
+
 // Global cleanup handlers to prevent zombie MCP processes
-process.on('exit', () => McpClient.killAllProcesses());
+process.on('exit', () => {
+  leaveAltScreen();
+  McpClient.killAllProcesses();
+});
 process.on('SIGINT', () => {
   McpClient.killAllProcesses();
   process.exit(0);
@@ -45,6 +65,7 @@ program
   .option('-t, --theme <name>', 'Color theme', DEFAULT_THEME)
   .option('-w, --workspace <path>', 'Workspace path', process.cwd())
   .option('-i, --identity <name>', 'Identity name or ID')
+  .option('--alt-screen', 'Render in the alternate screen buffer (vim-style; flicker-proof, no native scrollback)')
   .option('--no-color', 'Disable colors')
   .action(async (options) => {
     if (options.prompt) {
@@ -74,6 +95,14 @@ program
   .description('Check system configuration and API key availability')
   .action(async () => {
     await doctorCommand();
+  });
+
+program
+  .command('link [provider]')
+  .description('Reuse credentials from other AI CLIs (Claude Code, Codex, Gemini CLI, Copilot)')
+  .option('--accept-risk', 'Adopt a subscription OAuth token despite the ToS warning')
+  .action(async (provider: string | undefined, opts: { acceptRisk?: boolean }) => {
+    await linkCommand(provider, { acceptRisk: opts.acceptRisk, workspace: process.cwd() });
   });
 
 program
@@ -145,6 +174,7 @@ async function startRepl(options: {
   theme?: string;
   workspace?: string;
   identity?: string;
+  altScreen?: boolean;
 }): Promise<void> {
   const workspacePath = options.workspace ?? process.cwd();
 
@@ -178,11 +208,17 @@ async function startRepl(options: {
     config = cm.getConfig();
   }
 
-  // Clear the screen before handing control to Ink.
-  // Use the safe two-part sequence (erase + cursor-home) rather than the
-  // destructive full reset (\x1bc) which wipes the terminal state and causes
-  // Ink to render a blank screen until the next keypress / state change.
-  if (process.stdout.isTTY) {
+  const useAltScreen = Boolean(options.altScreen ?? config.altScreen) && process.stdout.isTTY;
+
+  if (useAltScreen) {
+    // Alt screen starts blank and isolated; the exit handler restores the
+    // user's original screen even on crashes.
+    enterAltScreen();
+  } else if (process.stdout.isTTY) {
+    // Clear the screen before handing control to Ink.
+    // Use the safe two-part sequence (erase + cursor-home) rather than the
+    // destructive full reset (\x1bc) which wipes the terminal state and causes
+    // Ink to render a blank screen until the next keypress / state change.
     process.stdout.write('\x1B[2J\x1B[H');
   }
 
@@ -194,11 +230,13 @@ async function startRepl(options: {
       themeName: options.theme ?? config.theme ?? DEFAULT_THEME,
       initialPrompt: options.prompt,
       identityName: options.identity,
+      altScreen: useAltScreen,
     }),
     { exitOnCtrlC: false },
   );
 
   await waitUntilExit();
+  leaveAltScreen();
   process.exit(0);
 }
 

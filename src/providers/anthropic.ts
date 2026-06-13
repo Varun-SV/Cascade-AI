@@ -20,9 +20,18 @@ export class AnthropicProvider extends BaseProvider {
 
   constructor(config: ProviderConfig, model: ModelInfo) {
     super(config, model);
-    this.client = new Anthropic({
-      apiKey: config.apiKey,
-    });
+    // OAuth bearer (e.g. a Claude Code subscription token) authenticates via
+    // Authorization: Bearer + the oauth beta header instead of x-api-key.
+    if (config.authToken) {
+      this.client = new Anthropic({
+        authToken: config.authToken,
+        defaultHeaders: { 'anthropic-beta': 'oauth-2025-04-20' },
+      });
+    } else {
+      this.client = new Anthropic({
+        apiKey: config.apiKey,
+      });
+    }
   }
 
   async generate(options: GenerateOptions): Promise<GenerateResult> {
@@ -157,8 +166,8 @@ export class AnthropicProvider extends BaseProvider {
 
   async isAvailable(): Promise<boolean> {
     try {
-      // Basic check for API key presence
-      return !!this.config.apiKey;
+      // Available with either an API key or an OAuth bearer token.
+      return !!(this.config.apiKey || this.config.authToken);
     } catch {
       return false;
     }
