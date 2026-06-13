@@ -8,6 +8,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import type { Theme } from '../../types.js';
+import { CASCADE_VERSION } from '../../constants.js';
 
 export type SetupPhase = 'keys' | 'models' | 'complete';
 
@@ -29,7 +30,7 @@ export function WelcomeHeader({ theme }: { theme: Theme }): React.ReactElement {
       marginBottom={1}
     >
       <Text color={theme.colors.primary} bold>◈ Welcome to Cascade AI</Text>
-      <Text color={theme.colors.muted}>Multi-tier AI orchestration CLI  ·  v0.5.5</Text>
+      <Text color={theme.colors.muted}>Multi-tier AI orchestration CLI  ·  v{CASCADE_VERSION}</Text>
     </Box>
   );
 }
