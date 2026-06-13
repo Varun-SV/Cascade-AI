@@ -13,6 +13,9 @@ import { benchmarkScore01 } from './benchmarks.js';
 
 export type TaskType = 'code' | 'analysis' | 'creative' | 'data' | 'mixed';
 
+/** Cascade Auto cost/quality trade-off bias. See CascadeConfig.autoBias. */
+export type AutoBias = 'balanced' | 'quality' | 'cost';
+
 export interface TaskProfile {
   type: TaskType;
   /** 1 = trivial, 5 = research-grade */
@@ -125,15 +128,22 @@ const TASK_TYPE_TAGS: Record<TaskType, string[]> = {
 
 export class TaskAnalyzer {
   private tracker?: ModelPerformanceTracker;
+  private bias: AutoBias;
   private lastProfile: TaskProfile | null = null;
   private lastSelectedModels = new Map<TierRole, ModelInfo>();
 
-  constructor(tracker?: ModelPerformanceTracker) {
+  constructor(tracker?: ModelPerformanceTracker, bias: AutoBias = 'balanced') {
     this.tracker = tracker;
+    this.bias = bias;
   }
 
   setTracker(tracker: ModelPerformanceTracker): void {
     this.tracker = tracker;
+  }
+
+  /** Change the cost/quality bias at runtime (e.g. when config reloads). */
+  setBias(bias: AutoBias): void {
+    this.bias = bias;
   }
 
   /** Returns the TaskProfile from the most recent analyze() call — used for outcome recording. */
@@ -214,7 +224,21 @@ export class TaskAnalyzer {
     // efficiency still breaks ties on trivial work. The 0.3 floor keeps a
     // benchmark-unknown model competitive rather than zeroing it out.
     const benchmark = 0.3 + 0.7 * benchmarkScore01(model, profile.type);
-    return perf * costEff * match * benchmark;
+
+    // autoBias reshapes the same factors:
+    //   balanced — quality × cost-efficiency (default; unchanged behavior).
+    //   quality  — benchmark dominates; cost is only a light tiebreak.
+    //   cost     — cheapest wins, but √benchmark keeps a soft quality floor so a
+    //              dirt-cheap weak model can't win a hard task outright.
+    switch (this.bias) {
+      case 'quality':
+        return perf * match * (benchmark ** 2) * (0.85 + 0.15 * costEff);
+      case 'cost':
+        return perf * match * (costEff ** 1.5) * Math.sqrt(benchmark);
+      case 'balanced':
+      default:
+        return perf * costEff * match * benchmark;
+    }
   }
 
   private costEfficiency(model: ModelInfo, complexity: 1 | 2 | 3 | 4 | 5): number {

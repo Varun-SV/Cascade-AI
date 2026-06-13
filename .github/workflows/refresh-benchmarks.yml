@@ -1,0 +1,65 @@
+# Refreshes the public-benchmark snapshot that Cascade Auto routes on.
+# Runs weekly (and on demand). Opens a PR ONLY when the data actually changed.
+# The PR touches data only (no version bump), so merging it does NOT trigger
+# the release workflow.
+name: Refresh benchmark snapshot
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: refresh-benchmarks
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Refresh snapshot
+        env:
+          # Optional: set as a repo variable to merge an external quality source.
+          BENCHMARK_SOURCE_URL: ${{ vars.BENCHMARK_SOURCE_URL }}
+        run: node scripts/refresh-benchmarks.mjs
+
+      - name: Detect changes
+        id: diff
+        run: |
+          if git diff --quiet -- src/core/router/benchmark-data.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No snapshot changes — nothing to do."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open pull request
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DATE=$(date -u +%Y-%m-%d)
+          BRANCH="chore/benchmark-refresh-$DATE"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add src/core/router/benchmark-data.json
+          git commit -m "chore(data): refresh benchmark snapshot ($DATE)"
+          git push --force-with-lease origin "$BRANCH"
+          gh pr create \
+            --title "chore(data): refresh benchmark snapshot ($DATE)" \
+            --body "Automated refresh of \`src/core/router/benchmark-data.json\` (Cascade Auto routing scores). Data-only — no version bump, so this does not trigger a release." \
+            --base main \
+            --head "$BRANCH" || echo "PR may already exist for $BRANCH"

@@ -16,8 +16,19 @@
 
 import type { ModelInfo } from '../../types.js';
 import type { TaskType } from './task-analyzer.js';
+import type { LiveDataProvider } from './live-data.js';
 
 export type BenchmarkProfile = Partial<Record<Exclude<TaskType, 'mixed'>, number>>;
+
+// Optional live/cached data source. When set (Cascade Auto with benchmarks.live
+// on), current public scores override the bundled table below; otherwise the
+// bundled table is the offline baseline. Type-only import keeps this decoupled.
+let liveProvider: LiveDataProvider | null = null;
+
+/** Wire a live data source so benchmarkScore01 prefers current public scores. */
+export function setBenchmarkLiveProvider(provider: LiveDataProvider | null): void {
+  liveProvider = provider;
+}
 
 const FAMILY_BENCHMARKS: Record<string, BenchmarkProfile> = {
   // Anthropic — strongest at coding and agentic tool-use.
@@ -71,7 +82,7 @@ const FAMILY_MATCHERS: Array<[RegExp, string]> = [
   [/gemma/i, 'gemma'],
 ];
 
-function resolveFamily(model: ModelInfo): string | null {
+export function resolveFamily(model: ModelInfo): string | null {
   const hay = `${model.id} ${model.name}`;
   for (const [re, fam] of FAMILY_MATCHERS) {
     if (re.test(hay)) return fam;
@@ -86,7 +97,9 @@ function resolveFamily(model: ModelInfo): string | null {
  */
 export function benchmarkScore01(model: ModelInfo, taskType: TaskType): number {
   const fam = resolveFamily(model);
-  const profile = fam ? FAMILY_BENCHMARKS[fam] : undefined;
+  if (!fam) return 0.5;
+  // Prefer current live/cached scores; fall back to the bundled table.
+  const profile = liveProvider?.getQualityProfile(fam) ?? FAMILY_BENCHMARKS[fam];
   if (!profile) return 0.5;
 
   let score: number;

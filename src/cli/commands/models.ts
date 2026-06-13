@@ -5,6 +5,8 @@
 import chalk from 'chalk';
 import { ConfigManager } from '../../config/index.js';
 import { CascadeRouter } from '../../core/router/index.js';
+import { benchmarkScore01 } from '../../core/router/benchmarks.js';
+import { withTimeout } from '../../utils/retry.js';
 
 export async function modelsCommand(options: { verbose?: boolean } = {}): Promise<void> {
   console.log(chalk.magenta('\n  ◈ Cascade Models\n'));
@@ -20,6 +22,11 @@ export async function modelsCommand(options: { verbose?: boolean } = {}): Promis
     console.error(chalk.red(`  Failed to initialize router: ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
   }
+
+  // Best-effort: pull current public benchmark scores + prices so the listing
+  // reflects live data. Time-boxed so the command stays snappy offline.
+  await withTimeout(router.refreshLiveData(), 6_000, 'live data timeout').catch(() => { /* show bundled */ });
+  const liveData = router.getLiveData();
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const tiers: Array<{ tier: 'T1' | 'T2' | 'T3'; label: string; color: any }> = [
@@ -40,13 +47,14 @@ export async function modelsCommand(options: { verbose?: boolean } = {}): Promis
         : `${(model.contextWindow / 1_000).toFixed(0)}K ctx`;
       const local   = model.isLocal ? chalk.gray(' [local]') : '';
       const vision  = model.isVisionCapable ? chalk.gray(' 👁') : '';
+      const bench   = Math.round(benchmarkScore01(model, 'mixed') * 100);
 
       console.log(
         `  ${color.bold(tier)}  ${chalk.white(col(model.name, 24))}` +
         `${chalk.gray(col(model.provider, 16))}` +
         (options.verbose
-          ? `${chalk.gray(col(ctx, 12))}${chalk.gray(`${costIn}, ${costOut}`)}`
-          : `${chalk.gray(ctx)}`) +
+          ? `${chalk.gray(col(ctx, 12))}${chalk.gray(col(`bench ${bench}/100`, 14))}${chalk.gray(`${costIn}, ${costOut}`)}`
+          : `${chalk.gray(col(ctx, 10))}${chalk.gray(`bench ${bench}/100`)}`) +
         local + vision,
       );
     } else {
@@ -60,6 +68,18 @@ export async function modelsCommand(options: { verbose?: boolean } = {}): Promis
   // Configured providers
   const providers = config.providers.map((p) => p.type).join(', ') || '(none)';
   console.log(chalk.gray(`  Configured providers: ${providers}`));
+
+  // Where the routing scores + prices came from (Cascade Auto data provenance).
+  if (liveData) {
+    const src = liveData.getDataSource();
+    const gen = liveData.getGeneratedAt();
+    const srcLabel = src === 'live' ? 'live (just fetched)' : src === 'cache' ? 'cached' : 'bundled';
+    console.log(chalk.gray(
+      `  Benchmark data: ${srcLabel}` +
+      (gen ? ` · updated ${gen.slice(0, 10)}` : '') +
+      ` · pricing: ${liveData.hasLivePricing() ? 'live (OpenRouter)' : 'catalog'}`,
+    ));
+  }
 
   if (options.verbose) {
     // Show all available models grouped by provider

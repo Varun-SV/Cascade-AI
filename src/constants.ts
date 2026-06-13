@@ -4,7 +4,7 @@
 
 import type { ModelInfo, ProviderType, ThemeName } from './types.js';
 
-export const CASCADE_VERSION = '0.5.7';
+export const CASCADE_VERSION = '0.6.0';
 export const CASCADE_CONFIG_DIR = '.cascade';
 export const CASCADE_MD_FILE = 'CASCADE.md';
 export const CASCADE_IGNORE_FILE = '.cascadeignore';
@@ -177,7 +177,7 @@ export const MODELS: Record<string, ModelInfo> = {
     isLocal: false,
   },
   'gemini-2.5-pro': {
-    id: 'gemini-2.5-pro-preview-05-06',
+    id: 'gemini-2.5-pro',
     name: 'Gemini 2.5 Pro',
     provider: 'gemini',
     contextWindow: 1_000_000,
@@ -189,7 +189,7 @@ export const MODELS: Record<string, ModelInfo> = {
     isLocal: false,
   },
   'gemini-2.5-flash': {
-    id: 'gemini-2.5-flash-preview-04-17',
+    id: 'gemini-2.5-flash',
     name: 'Gemini 2.5 Flash',
     provider: 'gemini',
     contextWindow: 1_000_000,

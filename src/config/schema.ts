@@ -141,6 +141,34 @@ export const CascadeConfigSchema = z.object({
    */
   cascadeAuto: z.boolean().default(false),
   /**
+   * Cascade Auto trade-off bias when picking a model for a task:
+   *   - 'balanced' (default): quality × cost-efficiency — cheap models win
+   *     trivial tasks, strong models win hard ones.
+   *   - 'quality': pick the highest-benchmark model; cost only breaks ties.
+   *   - 'cost': pick the cheapest model that clears a per-task quality floor.
+   */
+  autoBias: z.enum(['balanced', 'quality', 'cost']).default('balanced'),
+  /**
+   * Public-benchmark data source for Cascade Auto. All fields have safe
+   * defaults so zero config "just works" — live data is fetched in the
+   * background and the bundled snapshot is used until it arrives (or offline).
+   */
+  benchmarks: z
+    .object({
+      /** Fetch current quality scores from a public source. Default: true. */
+      live: z.boolean().default(true),
+      /** How long a fetched snapshot stays fresh before re-fetching (hours). */
+      refreshHours: z.number().min(0).default(24),
+      /**
+       * Override the quality-benchmark source URL (must return the snapshot
+       * JSON shape). When unset, the maintained GitHub-raw snapshot is used.
+       */
+      sourceUrl: z.string().url().optional(),
+      /** Fetch current per-token prices from OpenRouter (free, no key). */
+      pricingLive: z.boolean().default(true),
+    })
+    .default({}),
+  /**
    * Runtime Tool Creation: when true, T3 workers can generate and register new tools
    * at runtime via the ToolCreator when no existing tool can handle a required operation.
    * Generated tools are session-scoped and sandboxed in node:vm.

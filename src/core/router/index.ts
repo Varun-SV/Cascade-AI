@@ -32,6 +32,8 @@ import { withTimeout } from '../../utils/retry.js';
 import { ModelProfiler } from './model-profiler.js';
 import type { MemoryStore } from '../../memory/store.js';
 import { computeDelegationSavings, type DelegationSavings } from './savings.js';
+import { LiveDataProvider } from './live-data.js';
+import { setBenchmarkLiveProvider } from './benchmarks.js';
 
 export interface RouterStats {
   totalTokens: number;
@@ -82,6 +84,7 @@ export class CascadeRouter extends EventEmitter {
   private tpmLimiter!: TpmLimiter;
   private localQueue!: LocalRequestQueue;
   private taskAnalyzer?: TaskAnalyzer;
+  private liveData?: LiveDataProvider;
 
   /** Thrown when the configured budget is exceeded. */
   static BudgetExceededError = class extends Error {
@@ -161,6 +164,72 @@ export class CascadeRouter extends EventEmitter {
     const profiler = new ModelProfiler(store, this);
     // Run in background — don't block task execution
     profiler.profileAll(allModels).catch(() => { /* non-fatal */ });
+  }
+
+  /**
+   * Cascade Auto live data: discover/validate real model ids from each cloud
+   * provider, then fetch current public quality scores + per-token prices and
+   * apply the prices to the available-model set. Best-effort and safe to run in
+   * the background — any failure leaves the bundled catalog/benchmarks in effect.
+   */
+  async refreshLiveData(): Promise<void> {
+    const benchCfg = this.config.benchmarks ?? {};
+    if (!this.liveData) {
+      this.liveData = new LiveDataProvider({
+        live: benchCfg.live,
+        pricingLive: benchCfg.pricingLive,
+        refreshHours: benchCfg.refreshHours,
+        sourceUrl: benchCfg.sourceUrl,
+      });
+      // Route benchmarkScore01 through the live source for this process.
+      setBenchmarkLiveProvider(this.liveData);
+    }
+    await this.discoverProviderModels();
+    await this.liveData.refresh().catch(() => { /* keep last-known-good */ });
+    this.applyLivePricing();
+  }
+
+  /** Returns the live-data provider once refreshLiveData has run (UX/insight). */
+  getLiveData(): LiveDataProvider | undefined {
+    return this.liveData;
+  }
+
+  /**
+   * Query each available cloud provider's live model list and register the
+   * results. Confirms catalog ids still exist and surfaces newly released
+   * models without a package upgrade. Mirrors discoverOllamaModels.
+   */
+  private async discoverProviderModels(): Promise<void> {
+    const cloud: ProviderType[] = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible'];
+    const tasks = cloud.map(async (type) => {
+      if (!this.selector.isProviderAvailable(type)) return;
+      const seed = this.getAnyModelForProvider(type);
+      if (!seed) return;
+      const cfg = this.config.providers.find((p) => p.type === type) ?? { type };
+      try {
+        const provider = this.createProvider(cfg, seed);
+        if (typeof provider.listModels !== 'function') return;
+        const models = await provider.listModels();
+        for (const m of models) this.selector.addDynamicModel(m);
+      } catch { /* provider listing unavailable — non-fatal */ }
+    });
+    await Promise.allSettled(tasks);
+  }
+
+  /**
+   * Replace available models with live-priced copies and refresh the already
+   * resolved tier models so shared-tier cost accounting uses current prices.
+   */
+  private applyLivePricing(): void {
+    if (!this.liveData?.hasLivePricing()) return;
+    const updated = this.liveData.applyLivePricing(this.selector.getAllAvailableModels());
+    for (const m of updated) this.selector.addDynamicModel(m);
+    for (const tier of ['T1', 'T2', 'T3'] as TierRole[]) {
+      const cur = this.tierModels.get(tier);
+      if (!cur) continue;
+      const fresh = this.selector.getModelById(cur.id);
+      if (fresh) this.tierModels.set(tier, fresh);
+    }
   }
 
   async generate(
@@ -301,6 +370,31 @@ export class CascadeRouter extends EventEmitter {
           releaseLocalSlot?.();
           releaseLocalSlot = undefined;
           return this.generate(tier, options, onChunk, requireVision);
+        }
+      }
+      // Stale / invalid model id (e.g. a retired preview that 404s). Drop it so
+      // it is never selected again this session and fail over to the next
+      // candidate, instead of surfacing the raw provider error to the user.
+      if (isModelNotFoundError(errMsg)) {
+        this.selector.removeModel(model.id);
+        const next = this.selector.selectForTier(tier);
+        if (next && next.id !== model.id) {
+          this.tierModels.set(tier, next);
+          this.ensureProvider(next, this.config.providers);
+          this.emit('failover', {
+            tier,
+            from: `${model.provider}:${model.id}`,
+            to: `${next.provider}:${next.id}`,
+            reason: 'model not found',
+          });
+          releaseLocalSlot?.();
+          releaseLocalSlot = undefined;
+          // Clear a per-subtask override that pointed at the dead model so the
+          // recursive call resolves the tier's next-best model.
+          const retryOpts = options.model && options.model.id === model.id
+            ? { ...options, model: undefined }
+            : options;
+          return this.generate(tier, retryOpts, onChunk, requireVision);
         }
       }
       throw err;
@@ -644,4 +738,14 @@ export class CascadeRouter extends EventEmitter {
   private isRateLimitError(msg: string): boolean {
     return /rate.?limit|429|too.?many.?requests|quota/i.test(msg);
   }
+}
+
+/**
+ * Detects "this model id doesn't exist / isn't usable" errors so a stale
+ * catalog entry self-heals instead of hard-failing. Covers the Gemini
+ * "is not found … NOT_FOUND … is not supported for generateContent" shape
+ * plus the OpenAI/Anthropic equivalents. Exported for unit testing.
+ */
+export function isModelNotFoundError(msg: string): boolean {
+  return /not[_\s]?found|404|does not exist|no such model|unknown model|invalid model|model_not_found|not supported for generatecontent|is not supported for/i.test(msg);
 }
