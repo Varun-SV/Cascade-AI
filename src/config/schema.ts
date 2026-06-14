@@ -231,6 +231,18 @@ export const CascadeConfigSchema = z.object({
     })
     .default({}),
   /**
+   * Autonomy level. 'manual' (default): plan + tool approvals prompt as usual.
+   * 'auto': hands-off — the plan gate auto-approves and the escalator
+   * auto-approves NON-dangerous tools, while dangerous tools still escalate and
+   * budget caps remain the hard stop. Toggle at runtime with /auto.
+   */
+  autonomy: z.enum(['manual', 'auto']).default('manual'),
+  /**
+   * Max corrective re-plan passes T1's reviewer runs before returning the best
+   * partial result. The run also stops early when a pass makes no net progress.
+   */
+  maxReplanPasses: z.number().int().min(0).max(10).default(2),
+  /**
    * Render the TUI in the terminal's alternate screen buffer (like vim).
    * Flicker-proof and restores the shell on exit, but native scrollback is
    * unavailable — history scrolls in-app with PgUp/PgDn. Also enabled per

@@ -641,6 +641,41 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         storeRef.current?.updateSession(sessionIdRef.current, { identityId: match.id, updatedAt: new Date().toISOString() });
         return `Active identity set to ${match.name}`;
       },
+      onAuto: (args) => {
+        const cascade = cascadeRef.current;
+        if (!cascade) return 'Not ready yet.';
+        const sub = (args[0] ?? '').toLowerCase();
+        if (sub === 'on' || sub === 'enable') {
+          cascade.setAutonomy('auto');
+          return '✔ Autonomous mode ON — plans auto-approve and non-dangerous tools run without prompts. Dangerous tools still ask, and budget caps still stop runaway cost.';
+        }
+        if (sub === 'off' || sub === 'disable') {
+          cascade.setAutonomy('manual');
+          return '✔ Autonomous mode OFF — plan and tool approvals will prompt as usual.';
+        }
+        return `Autonomous mode: ${cascade.getAutonomy() === 'auto' ? 'ON' : 'OFF'}\nToggle with  /auto on  or  /auto off`;
+      },
+      onPlan: async (args) => {
+        const cascade = cascadeRef.current;
+        if (!cascade) return 'Not ready yet.';
+        const prompt = args.join(' ').trim();
+        if (!prompt) return 'Usage: /plan <prompt> — previews the decomposition without running it.';
+        try {
+          return formatPlanPreview(await cascade.previewPlan(prompt));
+        } catch (e) {
+          return `Could not build a plan preview: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      },
+      onReplan: async (args) => {
+        const lastUser = [...state.messages].reverse().find((m) => m.role === 'user');
+        if (!lastUser || typeof lastUser.content !== 'string') return 'Nothing to re-plan yet — run a task first.';
+        const guidance = args.join(' ').trim();
+        const prompt = guidance
+          ? `Re-plan and improve on the previous attempt. Guidance: ${guidance}\n\nOriginal task: ${lastUser.content}`
+          : `Re-plan and improve on the previous attempt at this task:\n\n${lastUser.content}`;
+        await handleSubmit(prompt);
+        return guidance ? 'Re-planning with your guidance…' : 'Re-planning the last task…';
+      },
     });
 
     if (result.output) {
@@ -1207,6 +1242,21 @@ const DECISION_KIND_LABEL: Record<DecisionLogEntry['kind'], string> = {
   failover: 'Failover',
   escalation: 'Escalation',
 };
+
+function formatPlanPreview(plan: { complexity: string; sections: Array<{ sectionTitle: string; t3Subtasks?: unknown[] }>; reasoning?: string }): string {
+  if (!plan?.sections?.length) return 'No plan could be produced for that prompt.';
+  const lines = plan.sections.map((s, i) => {
+    const workers = s.t3Subtasks?.length ?? 0;
+    return `  ${i + 1}. ${s.sectionTitle}${workers ? `  (${workers} worker${workers !== 1 ? 's' : ''})` : ''}`;
+  });
+  const n = plan.sections.length;
+  return [
+    `Plan preview — ${plan.complexity} · ${n} section${n !== 1 ? 's' : ''} (not executed):`,
+    ...lines,
+    plan.reasoning ? `\n${plan.reasoning}` : '',
+    '\nSend the prompt normally to run it.',
+  ].filter(Boolean).join('\n');
+}
 
 function formatDecisionTrail(entries: DecisionLogEntry[]): string {
   if (!entries.length) {

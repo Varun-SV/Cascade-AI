@@ -167,6 +167,10 @@ export class Cascade extends EventEmitter {
   private pendingPlanApproval?: (decision: PlanApprovalDecision) => void;
 
   private async requestPlanApproval(plan: TaskPlan, taskId: string, critique?: string, summary?: string): Promise<PlanApprovalDecision> {
+    // Autonomous mode: skip the boardroom wait and proceed.
+    if (this.config.autonomy === 'auto') {
+      return { approved: true };
+    }
     if (this.listenerCount('plan:approval-required') === 0) {
       return { approved: true };
     }
@@ -203,6 +207,30 @@ export class Cascade extends EventEmitter {
    */
   resolvePlanApproval(approved: boolean, note?: string, editedPlan?: TaskPlan): void {
     this.pendingPlanApproval?.({ approved, note, editedPlan });
+  }
+
+  /**
+   * Autonomy control (used by the /auto command). 'auto' makes the next run
+   * hands-off: the plan gate auto-approves and non-dangerous tools auto-approve,
+   * while dangerous tools still escalate and budget caps remain the hard stop.
+   */
+  setAutonomy(mode: 'manual' | 'auto'): void {
+    this.config = { ...this.config, autonomy: mode };
+  }
+
+  getAutonomy(): 'manual' | 'auto' {
+    return this.config.autonomy === 'auto' ? 'auto' : 'manual';
+  }
+
+  /**
+   * Preview T1's decomposition for a prompt WITHOUT executing it (powers /plan).
+   * Idempotent init guard, so it works before the first run.
+   */
+  async previewPlan(prompt: string): Promise<TaskPlan> {
+    await this.init();
+    const t1 = new T1Administrator(this.router, this.toolRegistry, this.config);
+    if (this.store) t1.setStore(this.store);
+    return t1.previewPlan(prompt);
   }
 
   /**
@@ -480,7 +508,7 @@ ${prompt}`
     this.decisionLog = [];
 
     // Create a fresh permission escalator for this task run
-    const escalator = new PermissionEscalator(this.config.approvalTimeoutMs ?? 600_000);
+    const escalator = new PermissionEscalator(this.config.approvalTimeoutMs ?? 600_000, this.config.autonomy === 'auto');
 
     // Wire escalator's user-required event → approvalCallback or direct event
     escalator.on('permission:user-required', async (req: PermissionRequest) => {

@@ -232,4 +232,43 @@ describe('PermissionEscalator', () => {
     expect(decision.approved).toBe(true);
     expect(decision.reasoning).toBeUndefined(); // not the timeout path
   });
+
+  // ── Autonomous mode (autonomy: 'auto') ──
+
+  it('autonomous mode auto-approves a non-dangerous tool without escalating', async () => {
+    const auto = new PermissionEscalator(600_000, true);
+    const t2 = vi.fn().mockResolvedValue(null);
+    auto.setT2Evaluator(t2 as any);
+
+    const decision = await auto.requestPermission(makeRequest({ toolName: 'file_write', isDangerous: false }));
+
+    expect(decision.approved).toBe(true);
+    expect(decision.reasoning).toContain('Autonomous');
+    expect(t2).not.toHaveBeenCalled();
+  });
+
+  it('autonomous mode still escalates DANGEROUS tools (safety floor)', async () => {
+    const auto = new PermissionEscalator(600_000, true);
+    const t2 = vi.fn().mockResolvedValue(null);
+    const t1 = vi.fn().mockResolvedValue(null);
+    auto.setT2Evaluator(t2 as any);
+    auto.setT1Evaluator(t1 as any);
+
+    const req = makeRequest({ toolName: 'shell_run', isDangerous: true, id: 'req-danger' });
+    const promise = auto.requestPermission(req);
+    await flushPromises();
+    auto.resolveUserDecision('req-danger', false);
+    const decision = await promise;
+
+    expect(t2).toHaveBeenCalled();        // escalated, not auto-approved
+    expect(decision.approved).toBe(false);
+  });
+
+  it('setAutonomous toggles the behavior at runtime', async () => {
+    const e = new PermissionEscalator();
+    e.setAutonomous(true);
+    const decision = await e.requestPermission(makeRequest({ toolName: 'file_write', isDangerous: false }));
+    expect(decision.approved).toBe(true);
+    expect(decision.reasoning).toContain('Autonomous');
+  });
 });

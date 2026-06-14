@@ -49,10 +49,18 @@ export class PermissionEscalator extends EventEmitter {
 
   /** ms to wait for a user approval decision before denying for safety. */
   private readonly approvalTimeoutMs: number;
+  /** Autonomous mode (autonomy: 'auto'): non-dangerous tools auto-approve. */
+  private autonomous: boolean;
 
-  constructor(approvalTimeoutMs = 600_000) {
+  constructor(approvalTimeoutMs = 600_000, autonomous = false) {
     super();
     this.approvalTimeoutMs = approvalTimeoutMs;
+    this.autonomous = autonomous;
+  }
+
+  /** Toggle autonomous auto-approval at runtime (e.g. from /auto). */
+  setAutonomous(on: boolean): void {
+    this.autonomous = on;
   }
 
   setT2Evaluator(evaluator: T2Evaluator): void {
@@ -92,6 +100,18 @@ export class PermissionEscalator extends EventEmitter {
       };
       this.sessionCache.set(cacheKey, true);
       return decision;
+    }
+
+    // ── 2b. Autonomous mode: auto-approve any NON-dangerous tool ──
+    // Dangerous tools still fall through to T2/T1/user escalation below.
+    if (this.autonomous && !req.isDangerous) {
+      return {
+        requestId: req.id,
+        approved: true,
+        always: false,
+        decidedBy: 'T1',
+        reasoning: 'Autonomous mode — non-dangerous tool auto-approved',
+      };
     }
 
     // ── 3. Ask T2 evaluator ───────────────────

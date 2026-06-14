@@ -46,6 +46,12 @@ export interface SlashCommandContext {
   onComms: () => string;
   /** Explains the routing & delegation decisions of the last run. */
   onWhy: () => string;
+  /** Toggles autonomous (hands-off) mode: /auto [on|off|status]. */
+  onAuto: (args: string[]) => string;
+  /** Previews T1's plan/decomposition for a prompt WITHOUT executing it: /plan <prompt>. */
+  onPlan: (args: string[]) => Promise<string> | string;
+  /** Triggers one corrective re-plan pass on the last run: /replan [guidance]. */
+  onReplan: (args: string[]) => Promise<string> | string;
 }
 
 export interface SlashCommandResult {
@@ -292,6 +298,27 @@ export class SlashCommandRegistry {
       command: '/why',
       description: 'Explain how the last run was routed (complexity, models, failovers)',
       handler: (_args, ctx) => ({ output: ctx.onWhy(), handled: true }),
+    });
+
+    this.register({
+      command: '/auto',
+      description: 'Toggle autonomous (hands-off) mode  /auto [on | off | status]',
+      args: ['on', 'off', 'status'],
+      handler: (args, ctx) => ({ output: ctx.onAuto(args), handled: true }),
+    });
+
+    this.register({
+      command: '/plan',
+      description: 'Preview the plan for a prompt without running it  /plan <prompt>',
+      args: ['<prompt>'],
+      handler: async (args, ctx) => ({ output: await ctx.onPlan(args), handled: true }),
+    });
+
+    this.register({
+      command: '/replan',
+      description: 'Run one corrective re-plan pass on the last task  /replan [guidance]',
+      args: ['[guidance]'],
+      handler: async (args, ctx) => ({ output: await ctx.onReplan(args), handled: true }),
     });
 
     this.register({
