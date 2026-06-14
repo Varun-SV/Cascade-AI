@@ -41,6 +41,11 @@ export class T2Manager extends BaseTier {
   private t2PeerBus?: PeerBus;
   private permissionEscalator?: PermissionEscalator;
   private toolCreator?: ToolCreator;
+  /** Optional boardroom gate (Moderate / root-T2 runs) — pauses after decomposition. */
+  private planApprovalCallback?: (
+    subtasks: ReadonlyArray<{ subtaskId: string; subtaskTitle: string; description: string }>,
+    sectionTitle: string,
+  ) => Promise<{ approved: boolean; note?: string; keepSubtaskIds?: string[] }>;
   /** AbortController for the current T3 wave — aborted on cancel-and-respawn */
   private waveAbortController: AbortController | null = null;
 
@@ -87,6 +92,16 @@ export class T2Manager extends BaseTier {
 
   setToolCreator(creator: ToolCreator): void {
     this.toolCreator = creator;
+  }
+
+  /** Boardroom gate for Moderate (root-T2) runs: pause after decomposition. */
+  setPlanApprovalCallback(
+    cb: (
+      subtasks: ReadonlyArray<{ subtaskId: string; subtaskTitle: string; description: string }>,
+      sectionTitle: string,
+    ) => Promise<{ approved: boolean; note?: string; keepSubtaskIds?: string[] }>,
+  ): void {
+    this.planApprovalCallback = cb;
   }
 
   /**
@@ -154,9 +169,31 @@ export class T2Manager extends BaseTier {
       // ── Cancellation checkpoint: before section decomposition ──
       this.throwIfCancelled();
 
-      const subtasks = assignment.t3Subtasks.length > 0
+      let subtasks = assignment.t3Subtasks.length > 0
         ? assignment.t3Subtasks
         : await this.decomposeSection(assignment);
+
+      // Boardroom gate (planApproval: 'all'): review the decomposition before any
+      // T3 spawns — approve, drop subtasks, or steer with one re-decompose pass.
+      if (this.planApprovalCallback) {
+        const decision = await this.planApprovalCallback(subtasks, assignment.sectionTitle);
+        if (!decision.approved) {
+          const output = 'Plan rejected — nothing was executed.';
+          this.setStatus('COMPLETED', output);
+          this.sendStatusUpdate({ progressPct: 100, currentAction: 'Plan rejected by user', status: 'IN_PROGRESS', output });
+          return { sectionId: assignment.sectionId, sectionTitle: assignment.sectionTitle, status: 'COMPLETED', t3Results: [], sectionSummary: output, issues: [] };
+        }
+        if (decision.keepSubtaskIds?.length) {
+          const keep = new Set(decision.keepSubtaskIds);
+          subtasks = subtasks.filter((s) => keep.has(s.subtaskId));
+        }
+        if (decision.note?.trim()) {
+          subtasks = await this.decomposeSection({
+            ...assignment,
+            description: `${assignment.description}\n\nGuidance (must be followed): ${decision.note}`,
+          });
+        }
+      }
 
       this.sendStatusUpdate({
         progressPct: 20,

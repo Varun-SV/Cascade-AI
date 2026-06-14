@@ -467,10 +467,24 @@ export interface CascadeConfig {
   cloudInferenceTimeoutMs?: number;
   /** Timeout (ms) for a tool-approval decision; denies (never auto-approves) on timeout. Default: 600000. */
   approvalTimeoutMs?: number;
-  /** Pause Complex runs for user approval of T1's plan ('always') or never (default). */
-  planApproval?: 'always' | 'never';
+  /**
+   * Pause for user approval of the plan. 'never' (default), 'complex' (Complex
+   * runs only; 'always' is an alias), or 'all' (Moderate + Complex).
+   */
+  planApproval?: 'never' | 'complex' | 'all' | 'always';
+  /** Plan-review behaviour for the boardroom gate. */
+  planReview?: PlanReviewConfig;
   /** Render the TUI in the alternate screen buffer (vim-style). Default: false. */
   altScreen?: boolean;
+}
+
+export interface PlanReviewConfig {
+  /** A reviewer model critiques the plan (gaps/risks/cost) before you see it. Default: false. */
+  autoReviewer?: boolean;
+  /** Allow editing the plan (drop sections) in the approval dialog. Default: true. */
+  editable?: boolean;
+  /** Steering-note → re-plan → re-ask rounds allowed before proceeding. Default: 5. */
+  maxRevisionRounds?: number;
 }
 
 export interface ModelOverrides {

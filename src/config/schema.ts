@@ -205,13 +205,31 @@ export const CascadeConfigSchema = z.object({
    */
   approvalTimeoutMs: z.number().int().min(1000).default(600_000),
   /**
-   * Boardroom plan approval: when 'always', Complex tasks pause after T1
-   * produces its plan so the user can approve the org chart (sections,
-   * workers, estimated cost) before any T2 manager spawns. Headless/SDK
-   * consumers without a listener auto-approve, so 'always' is still safe
-   * outside the TUI. Default: 'never' (no behavior change).
+   * Boardroom plan approval: pause after the plan is produced so the user can
+   * review the org chart (sections, workers, estimated cost) before any worker
+   * spawns. Scope:
+   *   'never'   — never pause (default; no behavior change).
+   *   'complex' — pause Complex runs only ('always' is kept as an alias).
+   *   'all'     — pause Moderate and Complex runs.
+   * Headless/SDK consumers without a listener auto-approve, so pausing is safe
+   * outside the TUI.
    */
-  planApproval: z.enum(['always', 'never']).default('never'),
+  planApproval: z.enum(['never', 'complex', 'all', 'always']).default('never'),
+  /**
+   * Plan-review behaviour for the boardroom gate:
+   *   autoReviewer      — a reviewer model critiques the plan (gaps/risks/cost)
+   *                       before you see it, and the critique is shown in the dialog.
+   *   editable          — allow editing the plan (drop sections) in the dialog.
+   *   maxRevisionRounds — how many steering-note → re-plan → re-ask rounds the
+   *                       boardroom allows before proceeding with the last plan.
+   */
+  planReview: z
+    .object({
+      autoReviewer: z.boolean().default(false),
+      editable: z.boolean().default(true),
+      maxRevisionRounds: z.number().int().min(1).max(20).default(5),
+    })
+    .default({}),
   /**
    * Render the TUI in the terminal's alternate screen buffer (like vim).
    * Flicker-proof and restores the shell on exit, but native scrollback is
