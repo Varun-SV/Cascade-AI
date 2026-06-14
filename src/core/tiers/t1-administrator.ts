@@ -68,8 +68,16 @@ export interface TaskPlan {
 /** Decision returned by a plan-approval gate (the "boardroom"). */
 export interface PlanApprovalDecision {
   approved: boolean;
-  /** Optional steering note — triggers ONE re-plan pass with the guidance. */
+  /** Optional steering note — triggers a re-plan pass, then re-asks (up to maxRevisionRounds). */
   note?: string;
+  /** Optional user-edited plan — applied directly (no re-decompose) before proceeding. */
+  editedPlan?: TaskPlan;
+}
+
+/** Extra context surfaced to the approval gate alongside the plan. */
+export interface PlanApprovalMeta {
+  /** Automated reviewer's critique of the plan (when planReview.autoReviewer is on). */
+  critique?: string;
 }
 
 export class T1Administrator extends BaseTier {
@@ -86,7 +94,7 @@ export class T1Administrator extends BaseTier {
   private taskGoal = '';
   private peerMessageCallback?: (event: PeerMessageEvent) => void;
   private peerMessageSessionId = '';
-  private planApprovalCallback?: (plan: TaskPlan) => Promise<PlanApprovalDecision>;
+  private planApprovalCallback?: (plan: TaskPlan, meta?: PlanApprovalMeta) => Promise<PlanApprovalDecision>;
 
   constructor(router: CascadeRouter, toolRegistry: ToolRegistry, config: CascadeConfig) {
     super('T1', 'T1');
@@ -123,7 +131,7 @@ export class T1Administrator extends BaseTier {
    * Install a "boardroom" gate: called with T1's plan BEFORE any T2 manager
    * spawns. When unset, plans proceed immediately (headless/SDK unchanged).
    */
-  setPlanApprovalCallback(cb: (plan: TaskPlan) => Promise<PlanApprovalDecision>): void {
+  setPlanApprovalCallback(cb: (plan: TaskPlan, meta?: PlanApprovalMeta) => Promise<PlanApprovalDecision>): void {
     this.planApprovalCallback = cb;
   }
 
@@ -176,29 +184,51 @@ export class T1Administrator extends BaseTier {
     this.emit('plan', { taskId: this.taskId, plan });
 
     // ── Boardroom gate: the user sits above T1 ──────────────────────
-    // When installed, the plan needs sign-off before any T2 spawns.
+    // When installed, the plan needs sign-off before any T2 spawns. Review is
+    // iterative: an edited plan is applied directly, and a steering note
+    // re-plans then RE-ASKS — up to maxRevisionRounds — so the board can refine
+    // the plan across rounds rather than a single take-it-or-leave-it pass.
     if (this.planApprovalCallback) {
-      this.sendStatusUpdate({
-        progressPct: 10,
-        currentAction: 'Boardroom: waiting for plan approval',
-        status: 'IN_PROGRESS',
-      });
-      const decision = await this.planApprovalCallback(plan);
-      if (!decision.approved) {
-        const output = 'Plan rejected in the boardroom — nothing was executed. Rephrase the request or adjust the plan with a new prompt.';
-        this.setStatus('COMPLETED', output);
-        this.sendStatusUpdate({ progressPct: 100, currentAction: 'Plan rejected by user', status: 'IN_PROGRESS', output });
-        return { output, t2Results: [], taskId: this.taskId, complexity: plan.complexity };
-      }
-      if (decision.note?.trim()) {
-        // One steering pass: re-plan with the board's guidance, then proceed
-        // without re-asking (avoids an approval loop).
-        this.log(`Boardroom note received — re-planning once: ${decision.note}`);
-        plan = await this.decomposeTask(
-          `${enrichedPrompt}\n\nBoard guidance (must be followed in the plan): ${decision.note}`,
-          systemContext,
-        );
-        this.emit('plan', { taskId: this.taskId, plan });
+      const maxRounds = this.config.planReview?.maxRevisionRounds ?? 5;
+      const reviewer = this.config.planReview?.autoReviewer === true;
+      let round = 0;
+      for (;;) {
+        // Optional automated critique of the CURRENT plan, shown in the dialog.
+        const critique = reviewer ? (await this.reviewPlan(plan, enrichedPrompt)) ?? undefined : undefined;
+        this.sendStatusUpdate({
+          progressPct: 10,
+          currentAction: 'Boardroom: waiting for plan approval',
+          status: 'IN_PROGRESS',
+        });
+        const decision = await this.planApprovalCallback(plan, { critique });
+
+        if (!decision.approved) {
+          const output = 'Plan rejected in the boardroom — nothing was executed. Rephrase the request or adjust the plan with a new prompt.';
+          this.setStatus('COMPLETED', output);
+          this.sendStatusUpdate({ progressPct: 100, currentAction: 'Plan rejected by user', status: 'IN_PROGRESS', output });
+          return { output, t2Results: [], taskId: this.taskId, complexity: plan.complexity };
+        }
+
+        // Apply a user-edited plan directly (no LLM re-decompose).
+        if (decision.editedPlan?.sections?.length) {
+          plan = decision.editedPlan;
+          try { this.validatePlan(plan); } catch { /* best-effort: keep user edits even if thin */ }
+          this.emit('plan', { taskId: this.taskId, plan });
+        }
+
+        // A steering note re-plans and re-asks, until the round cap.
+        if (decision.note?.trim() && round < maxRounds) {
+          round++;
+          this.log(`Boardroom note — re-planning (round ${round}/${maxRounds}): ${decision.note}`);
+          plan = await this.decomposeTask(
+            `${enrichedPrompt}\n\nBoard guidance (must be followed in the plan): ${decision.note}`,
+            systemContext,
+          );
+          this.emit('plan', { taskId: this.taskId, plan });
+          continue; // re-ask with the revised plan
+        }
+
+        break; // approved with no further revision → proceed
       }
     }
 
@@ -319,6 +349,37 @@ If no, reply with "REJECTED: [Detailed reason explaining exactly what is missing
 
     const result = await this.router.generate('T1', { messages, maxTokens: 1000 }, undefined, true);
     return `${prompt}\n\n[Image context: ${result.content}]`;
+  }
+
+  /**
+   * Automated reviewer pass: a single T1 critique of the plan before the user
+   * sees it (planReview.autoReviewer). Best-effort — returns null on any error
+   * so it never blocks the approval gate.
+   */
+  private async reviewPlan(plan: TaskPlan, goal: string): Promise<string | null> {
+    try {
+      const sections = plan.sections
+        .map((s, i) => `${i + 1}. ${s.sectionTitle} — ${s.description} (${s.t3Subtasks?.length ?? 0} subtasks${s.dependsOn?.length ? `, depends on: ${s.dependsOn.join(', ')}` : ''})`)
+        .join('\n');
+      const prompt = `You are a senior engineer reviewing an execution plan BEFORE it runs.
+
+GOAL:
+${goal}
+
+PLAN (${plan.complexity}, ${plan.sections.length} sections):
+${sections}
+
+In 3-5 terse bullets, flag the most important RISKS, GAPS, or over-/under-decomposition the operator should weigh before approving. If the plan is sound, say so in one line. Output plain-text bullets only - no preamble.`;
+      const result = await this.router.generate('T1', {
+        messages: [{ role: 'user', content: prompt }],
+        systemPrompt: 'You are a concise, critical plan reviewer. Be specific and brief.',
+        maxTokens: 400,
+      });
+      const text = (result.content ?? '').trim();
+      return text.length ? text : null;
+    } catch {
+      return null; // reviewer is advisory — never block the gate
+    }
   }
 
   private async decomposeTask(prompt: string, systemContext?: string): Promise<TaskPlan> {

@@ -166,7 +166,7 @@ export class Cascade extends EventEmitter {
 
   private pendingPlanApproval?: (decision: PlanApprovalDecision) => void;
 
-  private async requestPlanApproval(plan: TaskPlan, taskId: string): Promise<PlanApprovalDecision> {
+  private async requestPlanApproval(plan: TaskPlan, taskId: string, critique?: string, summary?: string): Promise<PlanApprovalDecision> {
     if (this.listenerCount('plan:approval-required') === 0) {
       return { approved: true };
     }
@@ -190,13 +190,19 @@ export class Cascade extends EventEmitter {
         t2Count,
         t3Count,
         estCostUsd: this.estimatePlanCost(plan),
+        critique,
+        summary,
       });
     });
   }
 
-  /** Resolve a pending boardroom plan approval from a REPL / dashboard listener. */
-  resolvePlanApproval(approved: boolean, note?: string): void {
-    this.pendingPlanApproval?.({ approved, note });
+  /**
+   * Resolve a pending boardroom plan approval from a REPL / dashboard listener.
+   * An optional `note` re-plans and re-asks; an optional `editedPlan` is applied
+   * directly (no re-decompose).
+   */
+  resolvePlanApproval(approved: boolean, note?: string, editedPlan?: TaskPlan): void {
+    this.pendingPlanApproval?.({ approved, note, editedPlan });
   }
 
   /**
@@ -661,6 +667,29 @@ ${prompt}`
       if (toolCreator) t2.setToolCreator(toolCreator);
       t2.setPeerMessageCallback((e) => this.emit('peer:message', e), options.sessionId ?? '');
       bindTierEvents(t2);
+      // Boardroom gate for Moderate (root-T2) runs when planApproval is 'all':
+      // review the decomposed subtasks before any worker spawns.
+      if (this.config.planApproval === 'all') {
+        t2.setPlanApprovalCallback(async (subtasks) => {
+          const pseudoPlan = {
+            complexity: 'Moderate',
+            reasoning: '',
+            sections: subtasks.map((st) => ({
+              sectionId: st.subtaskId,
+              sectionTitle: st.subtaskTitle,
+              description: st.description,
+              t3Subtasks: [],
+            })),
+          } as unknown as TaskPlan;
+          const n = subtasks.length;
+          const summary = `${n} worker${n !== 1 ? 's' : ''} · 1 root manager · est. $${this.estimatePlanCost(pseudoPlan).toFixed(4)}`;
+          const decision = await this.requestPlanApproval(pseudoPlan, taskId, undefined, summary);
+          const keepSubtaskIds = decision.editedPlan?.sections
+            ?.map((s) => (s as { sectionId?: string }).sectionId)
+            .filter((id): id is string => Boolean(id));
+          return { approved: decision.approved, note: decision.note, keepSubtaskIds };
+        });
+      }
       const assignment = {
         sectionId: taskId,
         sectionTitle: 'Direct Task',
@@ -692,11 +721,12 @@ ${prompt}`
       t1.setPeerMessageCallback((e) => this.emit('peer:message', e), options.sessionId ?? '');
       bindTierEvents(t1);
       t1.on('plan', (e) => this.emit('plan', e));
-      if (this.config.planApproval === 'always') {
-        t1.setPlanApprovalCallback(async (plan) => {
-          const decision = await this.requestPlanApproval(plan, taskId);
+      // Gate Complex runs for 'complex' | 'all' | 'always' (anything but 'never').
+      if (this.config.planApproval != null && this.config.planApproval !== 'never') {
+        t1.setPlanApprovalCallback(async (plan, meta) => {
+          const decision = await this.requestPlanApproval(plan, taskId, meta?.critique);
           this.recordDecision('escalation', decision.approved
-            ? `Boardroom: plan approved (${plan.sections.length} sections)${decision.note ? ' with a steering note' : ''}`
+            ? `Boardroom: plan approved (${plan.sections.length} sections)${decision.note ? ' with a steering note' : ''}${decision.editedPlan ? ' (edited)' : ''}`
             : 'Boardroom: plan rejected — run stopped before any T2 spawned');
           return decision;
         });

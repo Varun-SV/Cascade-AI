@@ -120,4 +120,47 @@ describe('T2Manager', () => {
     expect(result.t3Results).toHaveLength(2);
     expect(result.t3Results.every((t3) => t3.status === 'COMPLETED')).toBe(true);
   });
+
+  // ── Boardroom gate (Moderate / planApproval: 'all') ──
+
+  it('gate reject stops the section before any worker runs', async () => {
+    const router = {
+      generate: vi.fn(async () => makeResult('should not run')),
+      getModelForTier: () => undefined,
+    } as unknown as CascadeRouter;
+
+    const manager = new T2Manager(router, makeToolRegistry(), 'root');
+    manager.setPlanApprovalCallback(async () => ({ approved: false }));
+    const result = await manager.execute(makeAssignment(), 'task-reject');
+
+    expect(result.t3Results).toHaveLength(0);
+    expect(result.sectionSummary).toContain('rejected');
+    expect(router.generate).not.toHaveBeenCalled();
+  });
+
+  it('gate keepSubtaskIds drops the other subtasks before dispatch', async () => {
+    const executed: string[] = [];
+    const router = {
+      generate: vi.fn(async (tier, options) => {
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        if (content.startsWith('Execute the following subtask completely:')) {
+          executed.push(/\*\*(.+?)\*\*/.exec(content)?.[1] ?? 'unknown');
+          return makeResult('done');
+        }
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        if (tier === 'T2') return makeResult('merged');
+        return makeResult('ok');
+      }),
+      getModelForTier: () => undefined,
+    } as unknown as CascadeRouter;
+
+    const manager = new T2Manager(router, makeToolRegistry(), 'root');
+    manager.setPlanApprovalCallback(async () => ({ approved: true, keepSubtaskIds: ['draft'] }));
+    await manager.execute(makeAssignment(), 'task-keep');
+
+    expect(executed).toEqual(['Draft notes']); // 'Finalize notes' was dropped
+  });
 });
