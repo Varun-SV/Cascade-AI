@@ -193,6 +193,18 @@ export const CascadeConfigSchema = z.object({
    */
   localInferenceTimeoutMs: z.number().int().min(1000).default(300_000),
   /**
+   * Timeout (ms) for a single cloud LLM call (streaming or not). Guards against
+   * a stalled provider stream hanging the whole run with no output. On timeout
+   * the call errors and the worker escalates. Default: 2 minutes.
+   */
+  cloudInferenceTimeoutMs: z.number().int().min(1000).default(120_000),
+  /**
+   * Timeout (ms) for a tool-approval decision. If no decision arrives in time the
+   * request is DENIED (never auto-approved) so the run continues rather than
+   * hanging on an unanswered prompt. Default: 10 minutes.
+   */
+  approvalTimeoutMs: z.number().int().min(1000).default(600_000),
+  /**
    * Boardroom plan approval: when 'always', Complex tasks pause after T1
    * produces its plan so the user can approve the org chart (sections,
    * workers, estimated cost) before any T2 manager spawns. Headless/SDK

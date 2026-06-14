@@ -463,6 +463,10 @@ export interface CascadeConfig {
   plugins?: string[];
   localConcurrency?: number;
   localInferenceTimeoutMs?: number;
+  /** Timeout (ms) for a single cloud LLM call (streaming or not). Default: 120000. */
+  cloudInferenceTimeoutMs?: number;
+  /** Timeout (ms) for a tool-approval decision; denies (never auto-approves) on timeout. Default: 600000. */
+  approvalTimeoutMs?: number;
   /** Pause Complex runs for user approval of T1's plan ('always') or never (default). */
   planApproval?: 'always' | 'never';
   /** Render the TUI in the alternate screen buffer (vim-style). Default: false. */

@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Pasting an API key inserted it twice with `[200~` markers** — Ink 6's native
   bracketed-paste handling raced our raw-stdin handler. Paste is now owned by a single
   handler, and bare (ESC-less) `[200~`/`[201~` markers are stripped as a safety net.
+- **Runs could freeze with no output** — a stalled cloud stream (TCP open, no terminal
+  chunk) or an unanswered tool-approval prompt awaited forever. Cloud LLM calls are now
+  time-boxed (`cloudInferenceTimeoutMs`, default 2 min) and approval waits deny on timeout
+  (`approvalTimeoutMs`, default 10 min), so one stuck call can no longer hang the whole run.
 
 ## [0.5.7] - 2026-06-13
 

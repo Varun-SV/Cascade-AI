@@ -474,7 +474,7 @@ ${prompt}`
     this.decisionLog = [];
 
     // Create a fresh permission escalator for this task run
-    const escalator = new PermissionEscalator();
+    const escalator = new PermissionEscalator(this.config.approvalTimeoutMs ?? 600_000);
 
     // Wire escalator's user-required event → approvalCallback or direct event
     escalator.on('permission:user-required', async (req: PermissionRequest) => {

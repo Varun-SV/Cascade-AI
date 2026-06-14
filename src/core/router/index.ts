@@ -315,16 +315,34 @@ export class CascadeRouter extends EventEmitter {
           `Local model ${model.id} inference timed out after ${inferenceTimeoutMs}ms`,
         );
       } else if (useStream && onChunk) {
+        // Cloud streaming MUST be time-boxed: a stalled SSE connection (TCP open,
+        // no terminal chunk) would otherwise hang the whole run with no output.
+        const cloudTimeoutMs = this.config.cloudInferenceTimeoutMs ?? 120_000;
         try {
-          result = await provider.generateStream(options, (chunk) => {
-            const text = typeof chunk?.text === 'string' ? chunk.text : '';
-            if (text) onChunk({ ...chunk, text });
-          });
+          result = await withTimeout(
+            provider.generateStream(options, (chunk) => {
+              const text = typeof chunk?.text === 'string' ? chunk.text : '';
+              if (text) onChunk({ ...chunk, text });
+            }),
+            cloudTimeoutMs,
+            `Model ${model.id} stream timed out after ${cloudTimeoutMs}ms`,
+          );
         } catch {
-          result = await provider.generate(options);
+          // Stream stalled or errored — fall back to a (also time-boxed)
+          // non-streaming call rather than letting a hung stream freeze the run.
+          result = await withTimeout(
+            provider.generate(options),
+            cloudTimeoutMs,
+            `Model ${model.id} inference timed out after ${cloudTimeoutMs}ms`,
+          );
         }
       } else {
-        result = await provider.generate(options);
+        const cloudTimeoutMs = this.config.cloudInferenceTimeoutMs ?? 120_000;
+        result = await withTimeout(
+          provider.generate(options),
+          cloudTimeoutMs,
+          `Model ${model.id} inference timed out after ${cloudTimeoutMs}ms`,
+        );
       }
 
       const correctedCost = calculateCost(
