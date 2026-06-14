@@ -5,6 +5,27 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-06-14
+
+Agentic controls — autonomy, smarter re-planning, and new slash commands (sub-agent
+spawning follows in v0.9.0).
+
+### Added
+- **Autonomous mode** + **`/auto [on|off|status]`** — hands-off runs: the plan gate
+  auto-approves and **non-dangerous** tools run without prompts, while **dangerous** tools
+  still escalate and budget caps remain the hard stop. Config: `autonomy: 'manual' | 'auto'`.
+- **Dynamic re-planning with early-stop** — T1's reviewer loop now **stops early when a
+  corrective pass makes no net progress**, returning the best partial result instead of
+  burning passes (and tokens) toward the budget cap. Config: `maxReplanPasses` (default 2).
+- **`/plan <prompt>`** — preview T1's decomposition **without executing it** (the command
+  deferred from v0.7.0).
+- **`/replan [guidance]`** — re-run the last task with a corrective/steering framing.
+
+### Notes
+- New config: `autonomy`, `maxReplanPasses`. All slash commands registered in `/help`.
+- Motivated by a real run that burned ~115 min before the budget cap stopped it; early-stop
+  cuts that short when work isn't converging.
+
 ## [0.7.0] - 2026-06-14
 
 Plan-review upgrade — the boardroom gate becomes a real review loop (the agentic

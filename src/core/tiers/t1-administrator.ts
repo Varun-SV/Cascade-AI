@@ -135,6 +135,11 @@ export class T1Administrator extends BaseTier {
     this.planApprovalCallback = cb;
   }
 
+  /** Decompose a prompt into a plan WITHOUT executing it (powers /plan preview). */
+  async previewPlan(prompt: string): Promise<TaskPlan> {
+    return this.decomposeTask(prompt);
+  }
+
   async execute(
     userPrompt: string,
     images?: ImageAttachment[],
@@ -238,32 +243,43 @@ export class T1Administrator extends BaseTier {
     // Step 3: Dispatch T2 managers in parallel
     let allT2Results = await this.dispatchT2Managers(plan.sections);
 
-    // Step 4: T1 Reviewer Phase
+    // Step 4: T1 Reviewer Phase — corrective re-plan passes with early-stop.
     let pass = 1;
-    const MAX_REPLAN_PASSES = 2;
-    while (pass <= MAX_REPLAN_PASSES) {
+    const maxReplanPasses = this.config.maxReplanPasses ?? 2;
+    const okCount = (rs: T2Result[]) =>
+      rs.filter((r) => r.status === 'COMPLETED' || r.status === 'PARTIAL').length;
+    while (pass <= maxReplanPasses) {
       const reviewResult = await this.reviewT2Outputs(enrichedPrompt, plan, allT2Results);
       if (reviewResult.approved) {
         this.log('T1 Review passed.');
         break;
       }
 
-      this.log(`T1 Review rejected outputs. Replanning (Pass ${pass}). Reason: ${reviewResult.reason}`);
+      this.log(`T1 Review rejected outputs. Replanning (Pass ${pass}/${maxReplanPasses}). Reason: ${reviewResult.reason}`);
       this.sendStatusUpdate({
         progressPct: 80 + (pass * 5),
         currentAction: `Review failed: ${reviewResult.reason}. Replanning...`,
         status: 'IN_PROGRESS',
       });
 
+      const okBefore = okCount(allT2Results);
       const correctionPlan = await this.decomposeTask(`The previous execution plan failed to fully satisfy the original goal or encountered errors.
 Review reason: ${reviewResult.reason}
 
 Original goal: ${enrichedPrompt}
 
 Create a CORRECTION PLAN that contains only the new sections needed to fix the issues. Do not repeat successful sections.`);
-      
+
       const correctionResults = await this.dispatchT2Managers(correctionPlan.sections);
       allT2Results = [...allT2Results, ...correctionResults];
+
+      // Early-stop: a corrective pass that produced NO new successful/partial
+      // section isn't converging — stop now with the best partial result instead
+      // of burning further passes (and tokens) toward the budget cap.
+      if (okCount(allT2Results) <= okBefore) {
+        this.log('T1 Review: corrective pass made no net progress — stopping early with the best partial result.');
+        break;
+      }
       pass++;
     }
 

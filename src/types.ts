@@ -474,6 +474,10 @@ export interface CascadeConfig {
   planApproval?: 'never' | 'complex' | 'all' | 'always';
   /** Plan-review behaviour for the boardroom gate. */
   planReview?: PlanReviewConfig;
+  /** Autonomy level: 'manual' (default, prompts) or 'auto' (hands-off within guardrails). */
+  autonomy?: 'manual' | 'auto';
+  /** Max corrective re-plan passes before T1 returns the best partial. Default: 2. */
+  maxReplanPasses?: number;
   /** Render the TUI in the alternate screen buffer (vim-style). Default: false. */
   altScreen?: boolean;
 }
