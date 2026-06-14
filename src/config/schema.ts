@@ -141,6 +141,34 @@ export const CascadeConfigSchema = z.object({
    */
   cascadeAuto: z.boolean().default(false),
   /**
+   * Cascade Auto trade-off bias when picking a model for a task:
+   *   - 'balanced' (default): quality × cost-efficiency — cheap models win
+   *     trivial tasks, strong models win hard ones.
+   *   - 'quality': pick the highest-benchmark model; cost only breaks ties.
+   *   - 'cost': pick the cheapest model that clears a per-task quality floor.
+   */
+  autoBias: z.enum(['balanced', 'quality', 'cost']).default('balanced'),
+  /**
+   * Public-benchmark data source for Cascade Auto. All fields have safe
+   * defaults so zero config "just works" — live data is fetched in the
+   * background and the bundled snapshot is used until it arrives (or offline).
+   */
+  benchmarks: z
+    .object({
+      /** Fetch current quality scores from a public source. Default: true. */
+      live: z.boolean().default(true),
+      /** How long a fetched snapshot stays fresh before re-fetching (hours). */
+      refreshHours: z.number().min(0).default(24),
+      /**
+       * Override the quality-benchmark source URL (must return the snapshot
+       * JSON shape). When unset, the maintained GitHub-raw snapshot is used.
+       */
+      sourceUrl: z.string().url().optional(),
+      /** Fetch current per-token prices from OpenRouter (free, no key). */
+      pricingLive: z.boolean().default(true),
+    })
+    .default({}),
+  /**
    * Runtime Tool Creation: when true, T3 workers can generate and register new tools
    * at runtime via the ToolCreator when no existing tool can handle a required operation.
    * Generated tools are session-scoped and sandboxed in node:vm.
@@ -164,6 +192,18 @@ export const CascadeConfigSchema = z.object({
    * Local models can take minutes for large parameter counts. Default: 5 minutes.
    */
   localInferenceTimeoutMs: z.number().int().min(1000).default(300_000),
+  /**
+   * Timeout (ms) for a single cloud LLM call (streaming or not). Guards against
+   * a stalled provider stream hanging the whole run with no output. On timeout
+   * the call errors and the worker escalates. Default: 2 minutes.
+   */
+  cloudInferenceTimeoutMs: z.number().int().min(1000).default(120_000),
+  /**
+   * Timeout (ms) for a tool-approval decision. If no decision arrives in time the
+   * request is DENIED (never auto-approved) so the run continues rather than
+   * hanging on an unanswered prompt. Default: 10 minutes.
+   */
+  approvalTimeoutMs: z.number().int().min(1000).default(600_000),
   /**
    * Boardroom plan approval: when 'always', Complex tasks pause after T1
    * produces its plan so the user can approve the org chart (sections,

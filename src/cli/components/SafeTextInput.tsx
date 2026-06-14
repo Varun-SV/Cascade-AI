@@ -56,6 +56,11 @@ export interface SafeTextInputProps {
 }
 
 const PASTE_BUFFER_TIMEOUT_MS = 500;
+// After the raw listener handles a paste, briefly ignore the duplicate that
+// Ink 6's own input pipeline re-dispatches for the same bytes.
+const PASTE_GUARD_MS = 250;
+// Bracketed-paste markers, with or without the leading ESC (Ink may strip it).
+const PASTE_MARKER_RE = /\x1b?\[20[01]~/;
 
 export function SafeTextInput(props: SafeTextInputProps): React.ReactElement {
   const {
@@ -103,6 +108,9 @@ export function SafeTextInput(props: SafeTextInputProps): React.ReactElement {
   // Bracketed-paste buffer state.
   const pasteBufferRef = useRef<string | null>(null);
   const pasteTimerRef = useRef<NodeJS.Timeout | null>(null);
+  // Timestamp until which the useInput handler ignores Ink's duplicate dispatch
+  // of a paste the raw stdin listener already inserted (Ink 6 native paste).
+  const pasteGuardRef = useRef<number>(0);
 
   // Tracks the most recent forward-delete (ESC[3~) handled in the raw stdin
   // listener. Ink surfaces BOTH backspace (\x7F) and forward-delete (\x1b[3~)
@@ -119,6 +127,7 @@ export function SafeTextInput(props: SafeTextInputProps): React.ReactElement {
     if (buf === null) return;
     const content = sanitizeTerminalInput(buf);
     if (content) insertAtCursor(content);
+    pasteGuardRef.current = Date.now() + PASTE_GUARD_MS;
   }, [insertAtCursor]);
 
   // Enable bracketed paste + (optionally) disable mouse reporting on mount.
@@ -140,6 +149,7 @@ export function SafeTextInput(props: SafeTextInputProps): React.ReactElement {
 
       // Continue an in-flight paste.
       if (pasteBufferRef.current !== null) {
+        pasteGuardRef.current = Date.now() + PASTE_GUARD_MS;
         const endIdx = chunk.indexOf(PASTE_END);
         if (endIdx === -1) {
           pasteBufferRef.current += chunk;
@@ -153,6 +163,7 @@ export function SafeTextInput(props: SafeTextInputProps): React.ReactElement {
       // Detect a new paste.
       const startIdx = chunk.indexOf(PASTE_START);
       if (startIdx !== -1) {
+        pasteGuardRef.current = Date.now() + PASTE_GUARD_MS;
         const after = chunk.slice(startIdx + PASTE_START.length);
         const endIdx = after.indexOf(PASTE_END);
         if (endIdx !== -1) {
@@ -243,6 +254,14 @@ export function SafeTextInput(props: SafeTextInputProps): React.ReactElement {
     }
 
     if (!input) return;
+
+    // The raw stdin listener owns bracketed paste. Ignore anything Ink 6
+    // re-dispatches for the same paste: leftover marker text, or — just after a
+    // handled paste — the bulk body that arrives with the ESC already stripped.
+    // Single characters are never suppressed, so live typing is unaffected.
+    if (PASTE_MARKER_RE.test(input) || (Date.now() < pasteGuardRef.current && input.length > 1)) {
+      return;
+    }
 
     // Any modifier-key combo we don't explicitly handle is ignored so
     // that stray Ctrl+<letter> keystrokes don't type a literal letter.

@@ -202,4 +202,34 @@ describe('PermissionEscalator', () => {
     expect(decision.decidedBy).toBe('T1');
     expect(t1).toHaveBeenCalledOnce();
   });
+
+  // ── Approval timeout (anti-hang) ──────────
+
+  it('denies (instead of hanging) when no user decision arrives before the timeout', async () => {
+    const fast = new PermissionEscalator(40); // 40ms approval window
+    fast.setT2Evaluator(vi.fn().mockResolvedValue(null) as any);
+    fast.setT1Evaluator(vi.fn().mockResolvedValue(null) as any);
+
+    const req = makeRequest({ toolName: 'shell_run', isDangerous: true });
+    const decision = await fast.requestPermission(req); // never resolved by a user
+
+    expect(decision.approved).toBe(false);
+    expect(decision.reasoning).toContain('timed out');
+    expect(fast.hasPendingUserDecisions()).toBe(false);
+  });
+
+  it('a user decision before the timeout still wins (timer is cleared)', async () => {
+    const fast = new PermissionEscalator(10_000);
+    fast.setT2Evaluator(vi.fn().mockResolvedValue(null) as any);
+    fast.setT1Evaluator(vi.fn().mockResolvedValue(null) as any);
+
+    const req = makeRequest({ toolName: 'shell_run', isDangerous: true });
+    const promise = fast.requestPermission(req);
+    await flushPromises();
+    fast.resolveUserDecision(req.id, true, false);
+    const decision = await promise;
+
+    expect(decision.approved).toBe(true);
+    expect(decision.reasoning).toBeUndefined(); // not the timeout path
+  });
 });

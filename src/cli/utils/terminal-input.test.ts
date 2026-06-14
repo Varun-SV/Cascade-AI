@@ -80,4 +80,20 @@ describe('bracketed paste markers', () => {
     expect(PASTE_START).toBe('\x1b[200~');
     expect(PASTE_END).toBe('\x1b[201~');
   });
+
+  it('strips ESC-prefixed paste markers, keeping the pasted content', () => {
+    expect(sanitizeTerminalInput('\x1b[200~sk-proj-abc123\x1b[201~')).toBe('sk-proj-abc123');
+  });
+
+  it('strips BARE (ESC-less) paste markers that Ink 6 re-dispatches', () => {
+    // This is the exact leak the user saw: "[200~" around a duplicated paste.
+    expect(sanitizeTerminalInput('[200~sk-proj-abc123[201~')).toBe('sk-proj-abc123');
+    expect(sanitizeTerminalInput('[200~')).toBe('');
+    expect(sanitizeTerminalInput('[201~')).toBe('');
+  });
+
+  it('does not strip lookalikes that are not paste markers', () => {
+    expect(sanitizeTerminalInput('[2001~')).toBe('[2001~');
+    expect(sanitizeTerminalInput('[202~')).toBe('[202~');
+  });
 });

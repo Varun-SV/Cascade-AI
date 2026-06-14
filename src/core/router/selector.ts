@@ -24,6 +24,21 @@ export class ModelSelector {
     this.availableModels.set(model.id, model);
   }
 
+  /**
+   * Permanently drop a model from the available set for this session. Used by
+   * the router's 404 / "model not found" self-heal so a dead id is never
+   * selected again after it fails once.
+   */
+  removeModel(id: string): void {
+    this.availableModels.delete(id);
+  }
+
+  /** Look up an available model by exact id (post-discovery/pricing lookups). */
+  getModelById(id: string): ModelInfo | undefined {
+    const m = this.availableModels.get(id);
+    return m && this.availableProviders.has(m.provider) ? m : undefined;
+  }
+
   getAvailableModelsForProvider(provider: ProviderType): ModelInfo[] {
     const models = new Map<string, ModelInfo>();
     for (const model of this.availableModels.values()) {

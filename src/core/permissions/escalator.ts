@@ -47,6 +47,14 @@ export class PermissionEscalator extends EventEmitter {
     (decision: PermissionDecision) => void
   >();
 
+  /** ms to wait for a user approval decision before denying for safety. */
+  private readonly approvalTimeoutMs: number;
+
+  constructor(approvalTimeoutMs = 600_000) {
+    super();
+    this.approvalTimeoutMs = approvalTimeoutMs;
+  }
+
   setT2Evaluator(evaluator: T2Evaluator): void {
     this.t2Evaluator = evaluator;
   }
@@ -143,7 +151,9 @@ export class PermissionEscalator extends EventEmitter {
 
   private waitForUserDecision(req: PermissionRequest): Promise<PermissionDecision> {
     return new Promise<PermissionDecision>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const wrappedResolver = (decision: PermissionDecision) => {
+        if (timer) clearTimeout(timer);
         if (decision.always) {
           this.sessionCache.set(`${req.parentT2Id}:${req.toolName}`, decision.approved);
         }
@@ -151,6 +161,24 @@ export class PermissionEscalator extends EventEmitter {
       };
 
       this.pendingUserDecisions.set(req.id, wrappedResolver);
+
+      // Time-box the wait: if no decision arrives (prompt unanswered or never
+      // rendered), DENY — never auto-approve — so the run continues instead of
+      // hanging forever on the pending Promise.
+      if (this.approvalTimeoutMs > 0 && Number.isFinite(this.approvalTimeoutMs)) {
+        timer = setTimeout(() => {
+          if (this.pendingUserDecisions.delete(req.id)) {
+            resolve({
+              requestId: req.id,
+              approved: false,
+              decidedBy: 'USER',
+              reasoning: `Approval timed out after ${this.approvalTimeoutMs}ms — denied for safety`,
+            });
+          }
+        }, this.approvalTimeoutMs);
+        // Don't keep the event loop alive solely for this timer.
+        timer.unref?.();
+      }
 
       // Emit event so cascade.ts / REPL can pick it up
       this.emit('permission:user-required', req);

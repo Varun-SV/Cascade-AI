@@ -30,6 +30,7 @@ import { validateConfig } from '../config/validate.js';
 import { Telemetry, noopTelemetry } from '../telemetry/index.js';
 import { TaskAnalyzer } from './router/task-analyzer.js';
 import { ModelPerformanceTracker } from './router/model-performance-tracker.js';
+import { benchmarkScore01 } from './router/benchmarks.js';
 import { ToolCreator } from '../tools/tool-creator.js';
 import { CascadeCancelledError } from '../utils/retry.js';
 
@@ -88,7 +89,7 @@ export class Cascade extends EventEmitter {
     if (this.config.cascadeAuto === true) {
       this.perfTracker = new ModelPerformanceTracker();
       void this.perfTracker.load(); // non-blocking; stats available before first run completes
-      this.taskAnalyzer = new TaskAnalyzer(this.perfTracker);
+      this.taskAnalyzer = new TaskAnalyzer(this.perfTracker, this.config.autoBias ?? 'balanced');
       // Share the analyzer with the router so workers can route each subtask to
       // the benchmark-best model for its type.
       this.router.setTaskAnalyzer(this.taskAnalyzer);
@@ -292,6 +293,13 @@ export class Cascade extends EventEmitter {
         this.router.profileModels(this.store).catch(() => { /* non-fatal */ });
       }
 
+      // Cascade Auto live data: validate model ids against each provider and
+      // fetch current public benchmark scores + prices. Background, non-blocking
+      // — the bundled catalog/benchmarks are used until (or unless) it lands.
+      if (this.config.cascadeAuto) {
+        this.router.refreshLiveData().catch(() => { /* non-fatal */ });
+      }
+
       this.initOptionalFeatures();
       // Re-register tools created in previous runs so identical capabilities
       // aren't generated again from scratch.
@@ -466,7 +474,7 @@ ${prompt}`
     this.decisionLog = [];
 
     // Create a fresh permission escalator for this task run
-    const escalator = new PermissionEscalator();
+    const escalator = new PermissionEscalator(this.config.approvalTimeoutMs ?? 600_000);
 
     // Wire escalator's user-required event → approvalCallback or direct event
     escalator.on('permission:user-required', async (req: PermissionRequest) => {
@@ -527,7 +535,17 @@ ${prompt}`
           const model = await this.taskAnalyzer!.selectModel(options.prompt, tier, this.router.getSelector());
           if (model) {
             this.router.overrideTierModel(tier, model);
-            this.recordDecision('model', `${tier} → ${model.provider}:${model.id} — Cascade Auto picked it for this task`);
+            const taskType = this.taskAnalyzer!.getLastProfile()?.type ?? 'mixed';
+            const bench = Math.round(benchmarkScore01(model, taskType) * 100);
+            const price = model.inputCostPer1kTokens === 0 && model.outputCostPer1kTokens === 0
+              ? 'free'
+              : `$${model.outputCostPer1kTokens.toFixed(4)}/1K out`;
+            const dataSrc = this.router.getLiveData()?.getDataSource() ?? 'bundled';
+            this.recordDecision(
+              'model',
+              `${tier} → ${model.provider}:${model.id} — Cascade Auto: best value for ${taskType} ` +
+              `(bench ${bench}/100, ${price}, data: ${dataSrc})`,
+            );
           }
         } catch { /* non-critical — fall back to priority list */ }
       }));

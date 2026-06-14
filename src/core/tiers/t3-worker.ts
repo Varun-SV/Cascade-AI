@@ -501,7 +501,16 @@ export class T3Worker extends BaseTier {
           const wasApproved = this.sessionApprovals.get(tc.name)!;
           if (!wasApproved) return `Tool ${tc.name} was denied by user.`;
         } else {
+          // Time-box this fallback too (default 10 min → deny) so a missing or
+          // unanswered approval prompt can't hang the worker indefinitely.
+          const LEGACY_APPROVAL_TIMEOUT_MS = 600_000;
           const legacyDecision = await new Promise<{ approved: boolean; always?: boolean }>((resolve) => {
+            const eventName = `tool:approval-response:${this.id}-${tc.id}`;
+            const timer = setTimeout(() => {
+              this.removeAllListeners(eventName);
+              resolve({ approved: false });
+            }, LEGACY_APPROVAL_TIMEOUT_MS);
+            timer.unref?.();
             this.emit('tool:approval-request', {
               id: `${this.id}-${tc.id}`,
               tierId: this.id,
@@ -510,7 +519,10 @@ export class T3Worker extends BaseTier {
               description: `T3 (${this.assignment?.subtaskTitle}) wants to run "${tc.name}"`,
               isDangerous: this.toolRegistry.isDangerous(tc.name),
             });
-            this.once(`tool:approval-response:${this.id}-${tc.id}`, resolve);
+            this.once(eventName, (d: { approved: boolean; always?: boolean }) => {
+              clearTimeout(timer);
+              resolve(d);
+            });
           });
           if (legacyDecision.always) this.sessionApprovals.set(tc.name, legacyDecision.approved);
           if (!legacyDecision.approved) return `Tool ${tc.name} was denied by user.`;

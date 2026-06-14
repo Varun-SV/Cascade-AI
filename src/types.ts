@@ -455,10 +455,18 @@ export interface CascadeConfig {
   theme: string;
   workspace: WorkspaceConfig;
   cascadeAuto?: boolean;
+  /** Cascade Auto trade-off bias when picking a model. Default: 'balanced'. */
+  autoBias?: 'balanced' | 'quality' | 'cost';
+  /** Public-benchmark data source settings for Cascade Auto. */
+  benchmarks?: BenchmarksConfig;
   enableToolCreation?: boolean;
   plugins?: string[];
   localConcurrency?: number;
   localInferenceTimeoutMs?: number;
+  /** Timeout (ms) for a single cloud LLM call (streaming or not). Default: 120000. */
+  cloudInferenceTimeoutMs?: number;
+  /** Timeout (ms) for a tool-approval decision; denies (never auto-approves) on timeout. Default: 600000. */
+  approvalTimeoutMs?: number;
   /** Pause Complex runs for user approval of T1's plan ('always') or never (default). */
   planApproval?: 'always' | 'never';
   /** Render the TUI in the alternate screen buffer (vim-style). Default: false. */
@@ -470,6 +478,17 @@ export interface ModelOverrides {
   t2?: string;
   t3?: string;
   vision?: string;
+}
+
+export interface BenchmarksConfig {
+  /** Fetch current quality scores from a public source. Default: true. */
+  live?: boolean;
+  /** How long a fetched snapshot stays fresh before re-fetching (hours). Default: 24. */
+  refreshHours?: number;
+  /** Override the quality-benchmark source URL. When unset, the bundled GitHub-raw snapshot is used. */
+  sourceUrl?: string;
+  /** Fetch current per-token prices from OpenRouter (free, no key). Default: true. */
+  pricingLive?: boolean;
 }
 
 export interface ToolsConfig {

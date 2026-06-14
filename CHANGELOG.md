@@ -5,6 +5,39 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-06-14
+
+### Added
+- **Live benchmark-aware Cascade Auto** — when a tier is set to Auto, each task is
+  routed to the model that is the best *value* (quality × cost-efficiency) for its
+  type, using **current** public data. Quality scores come from a hybrid source
+  (live GitHub-raw snapshot → on-disk cache → bundled table); per-token prices come
+  live from OpenRouter (free, no key). All fetching is background and time-boxed —
+  fully offline-safe.
+- **Live model discovery** — each configured provider's live model list is queried
+  on startup so newly released models are usable and stale catalog ids are caught.
+- **`autoBias` config** (`balanced` default · `quality` · `cost`) to tune the
+  cost/quality trade-off, plus a `benchmarks` config block (live toggle, refresh
+  interval, custom source URL, pricing toggle).
+- **Routing transparency** — `cascade models` shows each tier's benchmark score and
+  the data source (live/cached/bundled) + pricing origin; `/why` reports the score,
+  price, and data source behind each Cascade Auto pick.
+- **Scheduled benchmark refresh** — a weekly workflow regenerates the bundled
+  snapshot and opens a data-only PR (no version bump, so it never triggers a release).
+
+### Fixed
+- **Gemini `404 … is not found` on Auto** — the catalog mapped `gemini-2.5-flash`/
+  `gemini-2.5-pro` to retired `-preview-*` ids; updated to the GA ids. The router now
+  also **self-heals**: a "model not found" error drops the dead model and fails over
+  to the next candidate instead of surfacing the raw error.
+- **Pasting an API key inserted it twice with `[200~` markers** — Ink 6's native
+  bracketed-paste handling raced our raw-stdin handler. Paste is now owned by a single
+  handler, and bare (ESC-less) `[200~`/`[201~` markers are stripped as a safety net.
+- **Runs could freeze with no output** — a stalled cloud stream (TCP open, no terminal
+  chunk) or an unanswered tool-approval prompt awaited forever. Cloud LLM calls are now
+  time-boxed (`cloudInferenceTimeoutMs`, default 2 min) and approval waits deny on timeout
+  (`approvalTimeoutMs`, default 10 min), so one stuck call can no longer hang the whole run.
+
 ## [0.5.7] - 2026-06-13
 
 The first tagged release since v0.5.5 — it rolls up the v0.5.6/v0.5.7 work plus

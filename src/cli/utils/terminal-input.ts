@@ -40,8 +40,11 @@ export const PASTE_END = '\x1b[201~';
 // Order matters: put the legacy 3-byte mouse sequence BEFORE any shorter
 // pattern that could match `\x1b[M` alone, otherwise the trailing raw
 // bytes leak through.
+// The leading `\x1b?\[20[01]~` alt strips bracketed-paste markers even when the
+// ESC byte has been stripped upstream (Ink 6 re-dispatch) — `\x1b[200~` is also
+// covered by the generic CSI alt, but the bare `[200~` would otherwise leak.
 const ESC_SANITIZER_RE =
-  /(?:\x1b\[<\d+;\d+;\d+[Mm])|(?:\x1b\[M[\s\S]{3})|(?:\x1b\[\d+[Mm])|(?:\x1b\[\?[0-9;]*[a-zA-Z])|(?:\x1b\[[0-9;?]*[\x40-\x7E])|(?:\x1bO[\x40-\x7E])|(?:\x1b[PX^_][\s\S]*?\x1b\\)|(?:\x1b\][\s\S]*?(?:\x07|\x1b\\))|[\x00-\x08\x0B-\x1F]/g;
+  /(?:\x1b?\[20[01]~)|(?:\x1b\[<\d+;\d+;\d+[Mm])|(?:\x1b\[M[\s\S]{3})|(?:\x1b\[\d+[Mm])|(?:\x1b\[\?[0-9;]*[a-zA-Z])|(?:\x1b\[[0-9;?]*[\x40-\x7E])|(?:\x1bO[\x40-\x7E])|(?:\x1b[PX^_][\s\S]*?\x1b\\)|(?:\x1b\][\s\S]*?(?:\x07|\x1b\\))|[\x00-\x08\x0B-\x1F]/g;
 
 export function sanitizeTerminalInput(value: string): string {
   return value.replace(ESC_SANITIZER_RE, '');
