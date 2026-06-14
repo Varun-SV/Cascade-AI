@@ -5,6 +5,28 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-06-14
+
+Plan-review upgrade — the boardroom gate becomes a real review loop (the agentic
+features — dynamic re-planning, autonomous mode, sub-agent spawning — follow in v0.8.0).
+
+### Added
+- **Iterative plan revision** — a steering note now re-plans **and re-asks**, so the
+  board can refine T1's plan across multiple rounds (capped by `planReview.maxRevisionRounds`,
+  default 5) instead of a single take-it-or-leave-it pass.
+- **Automated plan reviewer** — with `planReview.autoReviewer`, a reviewer model critiques
+  the plan (risks, gaps, over-/under-decomposition) and the critique is shown in the approval
+  dialog before you decide.
+- **Editable plan** — drop sections inline in the approval dialog (↑/↓ to move, `x` to drop,
+  `m` to add a steering note); the edited plan runs directly without a re-decompose.
+- **Wider gate** — `planApproval` gains `'complex'` and `'all'` (`'always'` kept as an alias);
+  `'all'` also gates **Moderate** runs, pausing to review the worker decomposition before any
+  worker spawns. (`planReview.editable` toggles inline editing.)
+
+### Notes
+- `planApproval` accepts `'never' | 'complex' | 'all' | 'always'`; new `planReview` config block.
+- An on-demand `/plan` preview command is planned for a follow-up.
+
 ## [0.6.0] - 2026-06-14
 
 ### Added

@@ -1104,9 +1104,11 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         <PlanApproval
           request={planApprovalRequest}
           theme={theme}
-          onDecision={(approved) => {
+          editable={config.planReview?.editable !== false}
+          onDecision={(approved, note, editedPlan) => {
             setPlanApprovalRequest(null);
-            cascadeRef.current?.resolvePlanApproval(approved);
+            // editedPlan is structurally a TaskPlan (the original minus dropped sections).
+            cascadeRef.current?.resolvePlanApproval(approved, note, editedPlan as never);
           }}
         />
       )}
