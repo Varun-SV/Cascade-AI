@@ -482,16 +482,26 @@ Return ONLY the JSON array.`;
         [this.signal, this.waveAbortController.signal].filter(Boolean) as AbortSignal[],
       );
 
-      // Execute this wave in parallel
-      const waveResults = await Promise.allSettled(
-        runnableIds.map(async (id) => {
-          const assignment = sanitizedAssignments.find((a) => a.subtaskId === id)!;
-          const worker = workerMap.get(id)!;
-          const result = await worker.execute(assignment, taskId, waveSignal);
-          resultMap.set(id, result);
-          return result;
-        }),
-      );
+      // Execute this wave — parallel for cloud, sequential for local (t3Execution).
+      const runOne = async (id: string) => {
+        const assignment = sanitizedAssignments.find((a) => a.subtaskId === id)!;
+        const worker = workerMap.get(id)!;
+        const result = await worker.execute(assignment, taskId, waveSignal);
+        resultMap.set(id, result);
+        return result;
+      };
+
+      let waveResults: PromiseSettledResult<Awaited<ReturnType<typeof runOne>>>[];
+      if (this.router.getT3ExecutionMode?.() === 'sequential') {
+        this.log(`Wave ${wave}: running ${runnableIds.length} subtask(s) sequentially (local tier)`);
+        waveResults = [];
+        for (const id of runnableIds) {
+          try { waveResults.push({ status: 'fulfilled', value: await runOne(id) }); }
+          catch (reason) { waveResults.push({ status: 'rejected', reason }); }
+        }
+      } else {
+        waveResults = await Promise.allSettled(runnableIds.map(runOne));
+      }
 
       // ── Cancel-and-respawn: if ANY worker in this wave escalated for tool synthesis,
       // cancel the whole wave, synthesize the tool once, then re-run ALL wave workers

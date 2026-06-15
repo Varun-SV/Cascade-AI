@@ -49,6 +49,8 @@ export class Cascade extends EventEmitter {
   /** Orchestration decisions for the CURRENT run — cleared on each run(). */
   private decisionLog: DecisionLogEntry[] = [];
   private initialized = false;
+  /** Last task that stopped at the budget cap — powers /continue (resumeRun). */
+  private lastInterruptedRun?: { prompt: string; partialOutput: string; taskId: string };
   private initPromise?: Promise<void>;
   private store?: MemoryStore;
   private audit?: AuditLogger;
@@ -231,6 +233,44 @@ export class Cascade extends EventEmitter {
     const t1 = new T1Administrator(this.router, this.toolRegistry, this.config);
     if (this.store) t1.setStore(this.store);
     return t1.previewPlan(prompt);
+  }
+
+  /** True when a task stopped at the budget cap and can be resumed via /continue. */
+  hasResumableRun(): boolean {
+    return this.lastInterruptedRun != null;
+  }
+
+  /**
+   * Raise the per-run token budget for a resume and return the continuation
+   * prompt (or null when nothing is resumable). Consumes the interrupted-run
+   * state. The REPL submits the returned prompt through its normal flow so the
+   * resumed run renders like any other; `resumeRun` wraps this for SDK callers.
+   */
+  prepareResume(opts: { maxTokens?: number } = {}): string | null {
+    const last = this.lastInterruptedRun;
+    if (!last) return null;
+    this.lastInterruptedRun = undefined; // consume it
+
+    const raised = opts.maxTokens ?? Math.round((this.config.budget?.maxTokensPerRun ?? 200_000) * 2);
+    this.config = { ...this.config, budget: { ...this.config.budget, maxTokensPerRun: raised } };
+    this.router.setMaxTokensPerRun(raised);
+
+    return (
+      'Continue and FINISH this task. A previous attempt was interrupted before completion; ' +
+      'any files already created are on disk — build on them, do NOT recreate them. Complete only the remaining work.\n\n' +
+      `Original task: ${last.prompt}` +
+      (last.partialOutput ? `\n\nPartial result so far:\n${last.partialOutput}` : '')
+    );
+  }
+
+  /**
+   * Resume the last budget-capped task with a raised budget (SDK/headless).
+   * Returns null when there is nothing to resume.
+   */
+  async resumeRun(opts: { maxTokens?: number } = {}): Promise<CascadeRunResult | null> {
+    const prompt = this.prepareResume(opts);
+    if (!prompt) return null;
+    return this.run({ prompt });
   }
 
   /**
@@ -782,6 +822,9 @@ ${prompt}`
           reason: err.message,
           partialOutput: finalOutput || '',
         });
+        // Remember the interrupted task so /continue can resume it with a raised
+        // budget (files already created persist on disk via snapshots).
+        this.lastInterruptedRun = { prompt: options.prompt, partialOutput: finalOutput || '', taskId };
         if (!finalOutput) finalOutput = `⚠ Stopped to avoid runaway cost: ${err.message}`;
         runError = null;
       } else {

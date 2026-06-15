@@ -249,6 +249,16 @@ export class T3Worker extends BaseTier {
         }
       }
 
+      // ── Reflection / self-critique (goal-alignment, opt-in) ──
+      // The self-test above only checks the subtask spec. When enabled, reflect
+      // on whether the output truly serves the goal and revise once if it falls
+      // short — distinct from, and on top of, the pass/fail self-test.
+      const reflectCfg = this.router.getReflectionConfig?.() ?? { enabled: false, maxRounds: 1 };
+      if (reflectCfg.enabled) {
+        this.sendStatusUpdate({ progressPct: 85, currentAction: 'Reflecting on output', status: 'IN_PROGRESS' });
+        output = await this.reflectAndImprove(assignment, output, reflectCfg.maxRounds);
+      }
+
       this.setStatus('COMPLETED', output);
       this.sendStatusUpdate({ progressPct: 100, currentAction: 'Subtask complete', status: 'IN_PROGRESS', output });
 
@@ -791,6 +801,65 @@ ${assignment.expectedOutput}`;
     }
 
     return { ok: issues.length === 0, issues };
+  }
+
+  /**
+   * Reflection / self-critique: critique the output against the broader GOAL
+   * (not just the subtask spec the self-test checks) and revise once if it falls
+   * short. Two cheap calls per round — a JSON verdict, then a rewrite only if
+   * needed. Best-effort: any parse/error just keeps the current output.
+   */
+  private async reflectAndImprove(
+    assignment: T2ToT3Assignment,
+    output: string,
+    maxRounds: number,
+  ): Promise<string> {
+    const sys = this.systemPromptOverride + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : '');
+    let current = output;
+    for (let round = 0; round < Math.max(1, maxRounds); round++) {
+      try {
+        const verdict = await this.router.generate('T3', {
+          messages: [{
+            role: 'user',
+            content: `Does this output FULLY achieve the goal — not just the literal task, but the intent behind it?
+
+Goal / expected: ${assignment.expectedOutput}
+Subtask: ${assignment.description}
+
+Output:
+${current}
+
+Reply with ONLY JSON: {"sufficient": true|false, "notes": "what is weak or missing if not sufficient"}`,
+          }],
+          systemPrompt: sys,
+          maxTokens: 400,
+        });
+        const parsed = JSON.parse(/\{[\s\S]*\}/.exec(verdict.content)?.[0] ?? '{}') as { sufficient?: boolean; notes?: string };
+        if (parsed.sufficient !== false) break; // sufficient (or unclear) → stop
+
+        const improved = await this.router.generate('T3', {
+          messages: [{
+            role: 'user',
+            content: `Improve the following so it fully achieves the goal. Address specifically: ${parsed.notes ?? 'gaps vs the goal'}.
+Output ONLY the improved result — no preamble, no commentary.
+
+Goal / expected: ${assignment.expectedOutput}
+
+Current output:
+${current}`,
+          }],
+          systemPrompt: sys,
+          maxTokens: 4096,
+        });
+        const next = (improved.content ?? '').trim();
+        if (!next) break;
+        current = next;
+        this.log('Reflection: revised output for better goal alignment.');
+      } catch {
+        break; // reflection is advisory — never fail the worker on it
+      }
+    }
+    return current;
   }
 
   private async selfTest(

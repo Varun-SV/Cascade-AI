@@ -243,6 +243,26 @@ export const CascadeConfigSchema = z.object({
    */
   maxReplanPasses: z.number().int().min(0).max(10).default(2),
   /**
+   * Reflection / self-critique. When enabled, after a worker's pass/fail self-test
+   * succeeds it runs a goal-alignment critique and revises once if the output is
+   * weak against the broader goal (not just the subtask spec). Off by default — it
+   * adds an LLM call per worker.
+   */
+  reflection: z
+    .object({
+      enabled: z.boolean().default(false),
+      maxRounds: z.number().int().min(1).max(3).default(1),
+    })
+    .default({}),
+  /**
+   * T3 worker execution within a dependency wave:
+   *   'auto' (default) — sequential when the T3 tier is a LOCAL model (a single
+   *     GPU serializes anyway, so parallel just thrashes the queue), parallel for
+   *     cloud models.
+   *   'parallel' / 'sequential' — force it.
+   */
+  t3Execution: z.enum(['auto', 'parallel', 'sequential']).default('auto'),
+  /**
    * Render the TUI in the terminal's alternate screen buffer (like vim).
    * Flicker-proof and restores the shell on exit, but native scrollback is
    * unavailable — history scrolls in-app with PgUp/PgDn. Also enabled per

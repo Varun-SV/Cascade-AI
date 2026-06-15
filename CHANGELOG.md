@@ -5,6 +5,27 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-06-15
+
+Resumability, reflection, and smarter local execution.
+
+### Added
+- **Run resumability** + **`/continue [tokens]`** — when a task stops at the budget cap, resume
+  it with a raised budget instead of redoing it. Files already created persist on disk (via
+  snapshots), so only the remaining work runs. `Cascade.resumeRun()` for SDK use.
+- **Reflection / self-critique** (`reflection.enabled`, off by default) — after a worker's
+  pass/fail self-test, an optional **goal-alignment** critique revises the output once if it
+  falls short of the intent (distinct from, and on top of, the self-test).
+- **`t3Execution`** (`'auto'` default · `'parallel'` · `'sequential'`) — T3 waves now run
+  **sequentially for a local (Ollama) tier** (a single GPU serializes anyway, so parallel just
+  thrashed the queue and risked slot-wait timeouts) and **parallel for cloud**. Force either if
+  you prefer.
+
+### Notes
+- New config: `reflection`, `t3Execution`. Sub-agent spawning was re-scoped to a lighter
+  "T3→T2 reinforcement request" for a later release (the T1/T2/T3 tiers are already an agent
+  hierarchy, so a 4th tier was redundant and brought local-deadlock risk).
+
 ## [0.8.0] - 2026-06-14
 
 Agentic controls — autonomy, smarter re-planning, and new slash commands (sub-agent
