@@ -2,7 +2,6 @@
 //  Cascade AI — `cascade doctor` Command
 // ─────────────────────────────────────────────
 
-import axios from 'axios';
 import chalk from 'chalk';
 import path from 'node:path';
 import { CASCADE_CONFIG_FILE, LM_STUDIO_BASE_URL, OLLAMA_BASE_URL } from '../../constants.js';
@@ -160,10 +159,14 @@ export async function doctorCommand(): Promise<void> {
 }
 
 async function checkEndpoint(url: string): Promise<boolean> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 2000);
   try {
-    await axios.get(url, { timeout: 2000 });
-    return true;
+    const res = await fetch(url, { signal: ac.signal });
+    return res.ok;
   } catch {
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }

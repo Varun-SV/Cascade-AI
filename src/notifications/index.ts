@@ -2,7 +2,6 @@
 //  Cascade AI — Desktop Notifications + Webhooks
 // ─────────────────────────────────────────────
 
-import axios from 'axios';
 import notifier from 'node-notifier';
 import type { WebhookConfig } from '../types.js';
 
@@ -25,16 +24,24 @@ export class NotificationManager {
     );
 
     await Promise.allSettled(
-      applicable.map((w) =>
-        axios.post(w.url, { event, payload, timestamp: new Date().toISOString() }, {
-          headers: {
-            'Content-Type': 'application/json',
-            ...(w.secret ? { 'X-Cascade-Secret': w.secret } : {}),
-            ...(w.headers ?? {}),
-          },
-          timeout: 5_000,
-        }),
-      ),
+      applicable.map(async (w) => {
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 5_000);
+        try {
+          await fetch(w.url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(w.secret ? { 'X-Cascade-Secret': w.secret } : {}),
+              ...(w.headers ?? {}),
+            },
+            body: JSON.stringify({ event, payload, timestamp: new Date().toISOString() }),
+            signal: ac.signal,
+          });
+        } finally {
+          clearTimeout(timer);
+        }
+      }),
     );
   }
 
