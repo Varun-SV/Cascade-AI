@@ -5,6 +5,25 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] - 2026-06-16
+
+### Security
+- **Dropped axios entirely.** The pinned axios 1.13.6 carried ~24 HIGH advisories (SSRF,
+  prototype-pollution credential theft, proxy-auth leakage). Rather than upgrade it (which
+  conflicts with the project's long-standing axios pin), the **4 runtime call sites were
+  migrated to native `fetch`** — the Ollama provider (streaming via the async-iterable
+  response body), the GitHub/GitLab tool (status-aware error handling preserved), webhook
+  notifications, and `cascade doctor` — and **`posthog-node` was bumped to v5**, which no
+  longer depends on axios. `axios` is now absent from the dependency tree (`npm ls axios` is
+  empty), and the shipped CLI is axios-free.
+
+### Notes
+- The remaining `npm audit` findings are pre-existing transitive / dev-only dependencies that
+  each need a breaking major bump, so they're deferred (out of scope for the axios pass) to
+  avoid a breaking-change cascade pre-1.0: **esbuild** (build/dev-server only — not shipped to
+  CLI users), **ws** and **uuid** (transitive via socket.io / node-cron / @google/genai / ink),
+  and **@anthropic-ai/sdk** / **diff**.
+
 ## [0.9.2] - 2026-06-16
 
 ### Added

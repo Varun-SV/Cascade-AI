@@ -2,7 +2,6 @@
 //  Cascade AI — Ollama Local Provider
 // ─────────────────────────────────────────────
 
-import axios from 'axios';
 import type {
   ConversationMessage,
   GenerateOptions,
@@ -92,9 +91,10 @@ export class OllamaProvider extends BaseProvider {
       },
     }));
 
-    const response = await axios.post<any>(
-      `${this.baseUrl}/api/chat`,
-      {
+    const response = await fetch(`${this.baseUrl}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
         model: this.model.id,
         messages,
         stream: true,
@@ -103,65 +103,48 @@ export class OllamaProvider extends BaseProvider {
           num_predict: options.maxTokens ?? this.model.maxOutputTokens,
           temperature: options.temperature ?? 0.7,
         },
-      },
-      { responseType: 'stream' },
-    );
+      }),
+    });
+    if (!response.ok || !response.body) {
+      throw new Error(`Ollama chat request failed: ${response.status} ${response.statusText}`);
+    }
 
     let fullContent = '';
     let inputTokens = 0;
     let outputTokens = 0;
     const pendingToolCalls: OllamaToolCall[] = [];
 
-    await new Promise<void>((resolve, reject) => {
-      let buffer = '';
-      response.data.on('data', (chunk: Buffer) => {
-        buffer += chunk.toString();
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const parsed = JSON.parse(line) as OllamaChatChunk;
-            if (parsed.message?.content) {
-              fullContent += parsed.message.content;
-              onChunk({ text: parsed.message.content, finishReason: null });
-            }
-            if (parsed.message?.tool_calls?.length) {
-              pendingToolCalls.push(...parsed.message.tool_calls);
-            }
-            if (parsed.done) {
-              inputTokens = parsed.prompt_eval_count ?? 0;
-              outputTokens = parsed.eval_count ?? 0;
-            }
-          } catch { /* ignore parse errors */ }
+    // Parse one NDJSON line of the streaming response.
+    const handleLine = (line: string): void => {
+      if (!line.trim()) return;
+      try {
+        const parsed = JSON.parse(line) as OllamaChatChunk;
+        if (parsed.message?.content) {
+          fullContent += parsed.message.content;
+          onChunk({ text: parsed.message.content, finishReason: null });
         }
-      });
-      response.data.on('end', () => {
-        // Flush any trailing JSON line that was not newline-terminated.
-        // Ollama usually ends each NDJSON line with "\n", but if the server
-        // disconnects on the last message the final response would otherwise
-        // be lost and the task would report `done: false`.
-        const tail = buffer.trim();
-        if (tail) {
-          try {
-            const parsed = JSON.parse(tail) as OllamaChatChunk;
-            if (parsed.message?.content) {
-              fullContent += parsed.message.content;
-              onChunk({ text: parsed.message.content, finishReason: null });
-            }
-            if (parsed.message?.tool_calls?.length) {
-              pendingToolCalls.push(...parsed.message.tool_calls);
-            }
-            if (parsed.done) {
-              inputTokens = parsed.prompt_eval_count ?? inputTokens;
-              outputTokens = parsed.eval_count ?? outputTokens;
-            }
-          } catch { /* ignore malformed tail */ }
+        if (parsed.message?.tool_calls?.length) {
+          pendingToolCalls.push(...parsed.message.tool_calls);
         }
-        resolve();
-      });
-      response.data.on('error', reject);
-    });
+        if (parsed.done) {
+          inputTokens = parsed.prompt_eval_count ?? inputTokens;
+          outputTokens = parsed.eval_count ?? outputTokens;
+        }
+      } catch { /* ignore parse errors */ }
+    };
+
+    // Node's fetch body is an async-iterable stream of byte chunks.
+    let buffer = '';
+    const decoder = new TextDecoder();
+    for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+      buffer += decoder.decode(chunk, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) handleLine(line);
+    }
+    // Flush any trailing JSON line that was not newline-terminated (e.g. the
+    // server disconnects on the last message) so `done` isn't lost.
+    handleLine(buffer);
 
     // Convert Ollama tool calls to the normalised ToolCall format.
     // Ollama delivers arguments as an already-parsed object; some older versions
@@ -201,9 +184,11 @@ export class OllamaProvider extends BaseProvider {
 
   async listModels(): Promise<ModelInfo[]> {
     try {
-      const response = await axios.get<{ models: OllamaModelEntry[] }>(`${this.baseUrl}/api/tags`);
+      const response = await fetch(`${this.baseUrl}/api/tags`);
+      if (!response.ok) return [];
+      const data = await response.json() as { models: OllamaModelEntry[] };
       const supportedKeywords = ['llama3', 'llama2', 'gemma', 'mistral', 'mixtral', 'qwen', 'phi3', 'codellama', 'deepseek', 'llava', 'starcoder', 'stable-code', 'nomic-embed'];
-      return response.data.models
+      return data.models
         .filter((m) => {
           const name = m.name.toLowerCase();
           return supportedKeywords.some((k) => name.includes(k));
@@ -228,11 +213,15 @@ export class OllamaProvider extends BaseProvider {
   }
 
   async isAvailable(): Promise<boolean> {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 2000);
     try {
-      await axios.get(`${this.baseUrl}/api/tags`, { timeout: 2000 });
-      return true;
+      const response = await fetch(`${this.baseUrl}/api/tags`, { signal: ac.signal });
+      return response.ok;
     } catch {
       return false;
+    } finally {
+      clearTimeout(timer);
     }
   }
 

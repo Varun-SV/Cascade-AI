@@ -2,9 +2,14 @@
 //  Cascade AI — GitHub / GitLab Tool
 // ─────────────────────────────────────────────
 
-import axios from 'axios';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
+
+/** Error thrown by the fetch helpers, carrying the HTTP status + parsed body. */
+interface HttpError extends Error {
+  status: number;
+  data?: { message?: string } | unknown;
+}
 
 export class GitHubTool extends BaseTool {
   readonly name = 'github';
@@ -29,6 +34,33 @@ export class GitHubTool extends BaseTool {
   };
 
   isDangerous(): boolean { return true; }
+
+  // ── fetch helpers (replace axios) ──────────────
+  private async request<T>(url: string, init: RequestInit): Promise<T> {
+    const res = await fetch(url, init);
+    const text = await res.text();
+    let data: unknown;
+    try { data = text ? JSON.parse(text) : undefined; } catch { data = text; }
+    if (!res.ok) {
+      const err = new Error(`HTTP ${res.status}`) as HttpError;
+      err.status = res.status;
+      err.data = data;
+      throw err;
+    }
+    return data as T;
+  }
+
+  private apiGet<T>(url: string, headers: Record<string, string>): Promise<T> {
+    return this.request<T>(url, { headers });
+  }
+
+  private apiPost<T>(url: string, body: unknown, headers: Record<string, string>): Promise<T> {
+    return this.request<T>(url, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
 
   async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
     const platform = (input['platform'] as string | undefined) ?? 'github';
@@ -57,20 +89,20 @@ export class GitHubTool extends BaseTool {
       return await this.executeGitLab(operation, repo, token, input);
     } catch (err: unknown) {
       // Surface HTTP errors with actionable messages
-      const axiosErr = err as { response?: { status?: number; data?: { message?: string } }; message?: string };
-      if (axiosErr?.response?.status) {
-        const status = axiosErr.response.status;
-        const msg = axiosErr.response.data?.message ?? '';
+      const httpErr = err as { status?: number; data?: { message?: string }; message?: string };
+      if (httpErr?.status) {
+        const status = httpErr.status;
+        const msg = httpErr.data?.message ?? '';
         switch (status) {
           case 401: return `Authentication failed: Your ${platform} token is invalid or expired. Check your token and try again.`;
           case 403: return `Permission denied: Your ${platform} token lacks the required scopes for this operation. Needed: repo or workflow.`;
           case 404: return `Not found: Repository "${repo}" does not exist, or your token cannot access it.`;
           case 422: return `Validation error from ${platform}: ${msg || 'Check your input parameters (branch names, base/head refs, etc.).'}`;
           case 429: return `Rate limited by ${platform}. Please wait a moment before trying again.`;
-          default: return `${platform} API error (${status}): ${msg || (axiosErr.message ?? 'Unknown error')}`;
+          default: return `${platform} API error (${status}): ${msg || (httpErr.message ?? 'Unknown error')}`;
         }
       }
-      return `${platform} request failed: ${axiosErr.message ?? String(err)}`;
+      return `${platform} request failed: ${httpErr.message ?? String(err)}`;
     }
   }
 
@@ -88,31 +120,31 @@ export class GitHubTool extends BaseTool {
 
     switch (operation) {
       case 'list_issues': {
-        const response = await axios.get<Array<{ number: number; title: string; state: string }>>(`${base}/issues`, { headers });
-        return response.data.map((i) => `#${i.number} [${i.state}] ${i.title}`).join('\n');
+        const data = await this.apiGet<Array<{ number: number; title: string; state: string }>>(`${base}/issues`, headers);
+        return data.map((i) => `#${i.number} [${i.state}] ${i.title}`).join('\n');
       }
       case 'list_prs': {
-        const response = await axios.get<Array<{ number: number; title: string; state: string; head: { ref: string }; base: { ref: string } }>>(`${base}/pulls`, { headers });
-        return response.data.map((p) => `#${p.number} [${p.state}] ${p.title} (${p.head.ref} → ${p.base.ref})`).join('\n');
+        const data = await this.apiGet<Array<{ number: number; title: string; state: string; head: { ref: string }; base: { ref: string } }>>(`${base}/pulls`, headers);
+        return data.map((p) => `#${p.number} [${p.state}] ${p.title} (${p.head.ref} → ${p.base.ref})`).join('\n');
       }
       case 'create_pr': {
-        const response = await axios.post<{ number: number; html_url: string }>(`${base}/pulls`, {
+        const data = await this.apiPost<{ number: number; html_url: string }>(`${base}/pulls`, {
           title: input['title'],
           body: input['body'] ?? '',
           head: input['head'],
           base: input['base'] ?? 'main',
-        }, { headers });
-        return `Created PR #${response.data.number}: ${response.data.html_url}`;
+        }, headers);
+        return `Created PR #${data.number}: ${data.html_url}`;
       }
       case 'comment_issue': {
         const num = input['issue_number'] as number;
-        await axios.post(`${base}/issues/${num}/comments`, { body: input['body'] }, { headers });
+        await this.apiPost(`${base}/issues/${num}/comments`, { body: input['body'] }, headers);
         return `Comment added to #${num}`;
       }
       case 'get_pr': {
         const num = input['issue_number'] as number;
-        const response = await axios.get<{ title: string; state: string; body: string; html_url: string }>(`${base}/pulls/${num}`, { headers });
-        return `PR #${num}: ${response.data.title}\nState: ${response.data.state}\n${response.data.html_url}\n\n${response.data.body}`;
+        const data = await this.apiGet<{ title: string; state: string; body: string; html_url: string }>(`${base}/pulls/${num}`, headers);
+        return `PR #${num}: ${data.title}\nState: ${data.state}\n${data.html_url}\n\n${data.body}`;
       }
       default:
         throw new Error(`Unknown GitHub operation: ${operation}`);
@@ -131,31 +163,31 @@ export class GitHubTool extends BaseTool {
 
     switch (operation) {
       case 'list_issues': {
-        const response = await axios.get<Array<{ iid: number; title: string; state: string }>>(`${base}/issues`, { headers });
-        return response.data.map((i) => `#${i.iid} [${i.state}] ${i.title}`).join('\n');
+        const data = await this.apiGet<Array<{ iid: number; title: string; state: string }>>(`${base}/issues`, headers);
+        return data.map((i) => `#${i.iid} [${i.state}] ${i.title}`).join('\n');
       }
       case 'create_pr': {
-        const response = await axios.post<{ iid: number; web_url: string }>(`${base}/merge_requests`, {
+        const data = await this.apiPost<{ iid: number; web_url: string }>(`${base}/merge_requests`, {
           title: input['title'],
           description: input['body'] ?? '',
           source_branch: input['head'],
           target_branch: input['base'] ?? 'main',
-        }, { headers });
-        return `Created MR !${response.data.iid}: ${response.data.web_url}`;
+        }, headers);
+        return `Created MR !${data.iid}: ${data.web_url}`;
       }
       case 'list_prs': {
-        const response = await axios.get<Array<{ iid: number; title: string; state: string; source_branch: string; target_branch: string }>>(`${base}/merge_requests`, { headers });
-        return response.data.map((p) => `!${p.iid} [${p.state}] ${p.title} (${p.source_branch} → ${p.target_branch})`).join('\n');
+        const data = await this.apiGet<Array<{ iid: number; title: string; state: string; source_branch: string; target_branch: string }>>(`${base}/merge_requests`, headers);
+        return data.map((p) => `!${p.iid} [${p.state}] ${p.title} (${p.source_branch} → ${p.target_branch})`).join('\n');
       }
       case 'comment_issue': {
         const num = input['issue_number'] as number;
-        await axios.post(`${base}/issues/${num}/notes`, { body: input['body'] }, { headers });
+        await this.apiPost(`${base}/issues/${num}/notes`, { body: input['body'] }, headers);
         return `Comment added to #${num}`;
       }
       case 'get_pr': {
         const num = input['issue_number'] as number;
-        const response = await axios.get<{ title: string; state: string; description: string; web_url: string }>(`${base}/merge_requests/${num}`, { headers });
-        return `MR !${num}: ${response.data.title}\nState: ${response.data.state}\n${response.data.web_url}\n\n${response.data.description}`;
+        const data = await this.apiGet<{ title: string; state: string; description: string; web_url: string }>(`${base}/merge_requests/${num}`, headers);
+        return `MR !${num}: ${data.title}\nState: ${data.state}\n${data.web_url}\n\n${data.description}`;
       }
       default:
         throw new Error(`GitLab operation not supported: ${operation}`);
