@@ -676,6 +676,16 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         await handleSubmit(prompt);
         return guidance ? 'Re-planning with your guidance…' : 'Re-planning the last task…';
       },
+      onContinue: async (args) => {
+        const cascade = cascadeRef.current;
+        if (!cascade) return 'Not ready yet.';
+        if (!cascade.hasResumableRun()) return 'Nothing to continue — no task was stopped by the budget cap.';
+        const n = args[0] ? parseInt(args[0].replace(/[^0-9]/g, ''), 10) : NaN;
+        const prompt = cascade.prepareResume(Number.isFinite(n) && n > 0 ? { maxTokens: n } : {});
+        if (!prompt) return 'Nothing to continue.';
+        await handleSubmit(prompt);
+        return '';
+      },
     });
 
     if (result.output) {

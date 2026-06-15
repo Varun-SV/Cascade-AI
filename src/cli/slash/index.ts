@@ -52,6 +52,8 @@ export interface SlashCommandContext {
   onPlan: (args: string[]) => Promise<string> | string;
   /** Triggers one corrective re-plan pass on the last run: /replan [guidance]. */
   onReplan: (args: string[]) => Promise<string> | string;
+  /** Resume the last task that hit the budget cap, with a raised budget: /continue [tokens]. */
+  onContinue: (args: string[]) => Promise<string> | string;
 }
 
 export interface SlashCommandResult {
@@ -319,6 +321,13 @@ export class SlashCommandRegistry {
       description: 'Run one corrective re-plan pass on the last task  /replan [guidance]',
       args: ['[guidance]'],
       handler: async (args, ctx) => ({ output: await ctx.onReplan(args), handled: true }),
+    });
+
+    this.register({
+      command: '/continue',
+      description: 'Resume the last task that hit the budget cap, with a raised budget  /continue [tokens]',
+      args: ['[tokens]'],
+      handler: async (args, ctx) => ({ output: await ctx.onContinue(args), handled: true }),
     });
 
     this.register({

@@ -425,6 +425,23 @@ export class CascadeRouter extends EventEmitter {
     return this.tierModels.get(tier);
   }
 
+  /** Reflection settings for workers (config.reflection). Off unless enabled. */
+  getReflectionConfig(): { enabled: boolean; maxRounds: number } {
+    const r = this.config?.reflection;
+    return { enabled: r?.enabled === true, maxRounds: r?.maxRounds ?? 1 };
+  }
+
+  /**
+   * Resolved T3 wave execution mode. 'auto' becomes 'sequential' when the T3
+   * tier resolves to a LOCAL model (the single-GPU queue serializes anyway, so
+   * running them in parallel just thrashes it), and 'parallel' for cloud.
+   */
+  getT3ExecutionMode(): 'parallel' | 'sequential' {
+    const mode = this.config?.t3Execution ?? 'auto';
+    if (mode === 'parallel' || mode === 'sequential') return mode;
+    return this.tierModels.get('T3')?.isLocal ? 'sequential' : 'parallel';
+  }
+
   /**
    * Cascade Auto: temporarily override the model for a tier.
    * Used by TaskAnalyzer to inject task-optimal models before execution.
@@ -545,6 +562,12 @@ export class CascadeRouter extends EventEmitter {
    * Sets (or clears) a runtime session budget cap (USD).
    * Pass null to remove the cap.
    */
+  /** Raise/set the per-task token cap at runtime (used by /continue resume). */
+  setMaxTokensPerRun(maxTokens: number): void {
+    if (!this.config) return;
+    this.config = { ...this.config, budget: { ...this.config.budget, maxTokensPerRun: maxTokens } };
+  }
+
   setSessionBudget(usd: number | null): void {
     if (!this.config) return;
     if (!this.config.budget) {

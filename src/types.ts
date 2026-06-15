@@ -478,6 +478,10 @@ export interface CascadeConfig {
   autonomy?: 'manual' | 'auto';
   /** Max corrective re-plan passes before T1 returns the best partial. Default: 2. */
   maxReplanPasses?: number;
+  /** Reflection / self-critique: goal-alignment critique + revise after self-test. Off by default. */
+  reflection?: { enabled?: boolean; maxRounds?: number };
+  /** T3 wave execution: 'auto' (sequential for local, parallel for cloud), or force one. Default: 'auto'. */
+  t3Execution?: 'auto' | 'parallel' | 'sequential';
   /** Render the TUI in the alternate screen buffer (vim-style). Default: false. */
   altScreen?: boolean;
 }
