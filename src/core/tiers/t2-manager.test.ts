@@ -163,4 +163,56 @@ describe('T2Manager', () => {
 
     expect(executed).toEqual(['Draft notes']); // 'Finalize notes' was dropped
   });
+
+  // ── T3→T2 reinforcement request ──
+
+  it('spawns reinforcement sibling workers when a T3 calls request_workers', async () => {
+    const executed: string[] = [];
+    const router = {
+      generate: vi.fn(async (_tier, options) => {
+        const msgs = options.messages as Array<{ role: string; content: unknown }>;
+        const last = msgs[msgs.length - 1];
+        const content = typeof last?.content === 'string' ? last.content : '';
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        if (content.startsWith('Summarize')) return makeResult('merged');
+        // Once the request_workers tool result is in the conversation, finish.
+        if (msgs.some((m) => m.role === 'tool')) return makeResult('done');
+        if (content.startsWith('Execute the following subtask completely:')) {
+          const title = /\*\*(.+?)\*\*/.exec(content)?.[1] ?? '?';
+          executed.push(title);
+          if (content.includes('FANOUT')) {
+            return {
+              content: 'requesting help',
+              finishReason: 'tool_use' as const,
+              usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimatedCostUsd: 0 },
+              toolCalls: [{ id: 'tc1', name: 'request_workers', input: { subtasks: [
+                { title: 'Helper A', description: 'do A' },
+                { title: 'Helper B', description: 'do B' },
+              ] } }],
+            };
+          }
+          return makeResult(`${title} done`);
+        }
+        return makeResult('ok');
+      }),
+      getModelForTier: () => undefined,
+      getReinforcementsConfig: () => ({ enabled: true, maxPerSection: 4 }),
+    } as unknown as CascadeRouter;
+
+    const assignment: T1ToT2Assignment = {
+      sectionId: 'sec', sectionTitle: 'Section', description: 'd', expectedOutput: 'o', constraints: [],
+      executionMode: 'parallel',
+      t3Subtasks: [{ subtaskId: 'main', subtaskTitle: 'Main', description: 'FANOUT this big task', expectedOutput: 'o', constraints: [], peerT3Ids: [], dependsOn: [] }],
+    };
+
+    const manager = new T2Manager(router, makeToolRegistry(), 't1-root');
+    await manager.execute(assignment, 'task-reinf');
+
+    // The worker requested two helpers; T2 spawned and ran both as siblings.
+    expect(executed).toContain('Main');
+    expect(executed).toContain('Helper A');
+    expect(executed).toContain('Helper B');
+  });
 });

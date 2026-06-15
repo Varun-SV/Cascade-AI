@@ -5,6 +5,20 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-06-15
+
+### Added
+- **T3→T2 reinforcement request** (`reinforcements.enabled`, off by default) — a worker that
+  discovers its subtask should fan out can call a new **`request_workers`** tool to have its
+  **manager spawn bounded sibling workers** for the new pieces. No 4th tier: the new workers are
+  ordinary siblings under the same T2 (so they honor `t3Execution`), bounded by
+  `reinforcements.maxPerSection` (default 4) and **depth-1** (reinforcement workers can't request
+  more). This is the lighter replacement for sub-agent spawning — the T1/T2/T3 tiers are already
+  an agent hierarchy, so a recursive 4th tier was redundant and risked local-Ollama contention.
+
+### Docs
+- Refreshed the landing page (`index.html`) and `README.md`.
+
 ## [0.9.0] - 2026-06-15
 
 Resumability, reflection, and smarter local execution.

@@ -273,6 +273,8 @@ export interface T3ResultPayload {
   issues: string[];
   peerSyncsUsed: string[];
   correctionAttempts: number;
+  /** Sibling workers this T3 asked its T2 to spawn (T3→T2 reinforcement request). */
+  reinforcements?: T2ToT3Assignment[];
 }
 
 export interface T3Result extends T3ResultPayload { }
@@ -482,6 +484,8 @@ export interface CascadeConfig {
   reflection?: { enabled?: boolean; maxRounds?: number };
   /** T3 wave execution: 'auto' (sequential for local, parallel for cloud), or force one. Default: 'auto'. */
   t3Execution?: 'auto' | 'parallel' | 'sequential';
+  /** T3→T2 reinforcement: let a worker ask its manager to spawn sibling workers. Off by default. */
+  reinforcements?: { enabled?: boolean; maxPerSection?: number };
   /** Render the TUI in the alternate screen buffer (vim-style). Default: false. */
   altScreen?: boolean;
 }

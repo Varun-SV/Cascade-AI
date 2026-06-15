@@ -1,12 +1,29 @@
 # ◈ Cascade AI
 
-> Multi-tier AI orchestration CLI — built for developers who think in systems.
+> **One prompt → an organization of AI agents that plan, delegate, and execute in parallel.**
+> Auto-routed to the cheapest model that's best at each step. **Up to 90% cheaper** than running everything on one frontier model.
 
-Cascade is an open-source CLI tool that runs your prompts through a hierarchical three-tier agent system (T1 → T2 → T3), automatically routing work across the best available models, executing tools, and compiling a single coherent result. Inspired by Claude Code, Gemini CLI, and GitHub Copilot CLI — but uniquely structured around orchestration.
+[![npm](https://img.shields.io/npm/v/cascade-ai?color=aaff00&label=npm)](https://www.npmjs.com/package/cascade-ai)
+[![license](https://img.shields.io/badge/license-MIT-aaff00.svg)](LICENSE)
+[![node](https://img.shields.io/badge/node-%E2%89%A520-5AB4E8.svg)](#installation)
+[![providers](https://img.shields.io/badge/providers-6-a78bff.svg)](#ai-providers)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-f5a623.svg)](CONTRIBUTING.md)
+
+Cascade is an open-source CLI that runs your prompt through a hierarchical three-tier agent system — **T1 plans → T2 manages → T3 executes** — auto-routing each step to the best-value model, running tools, and compiling one coherent result. Think Claude Code / Gemini CLI / Copilot CLI, but uniquely built around **orchestration**.
 
 ```
 cascade "Refactor the auth module to use JWT, add tests, and open a PR"
 ```
+
+## ✨ Highlights
+
+- 🧠 **Live benchmark Auto-routing** — set a tier to `Auto` and Cascade fuses *live* public benchmark scores with *live* pricing to pick the best-**value** model for each task.
+- 🤖 **Autonomous mode** (`/auto`) — hands-off runs: safe tools run silently, dangerous ones still ask, budget caps stay the hard stop.
+- 📋 **Boardroom plan review** — pause to review, **edit**, or steer T1's plan (with an AI reviewer's critique) before any worker spawns.
+- ⏯️ **Run resumability** (`/continue`) — hit the budget cap on a big task? Resume from the partial state instead of redoing it.
+- 👥 **Workers recruit help** — a worker can ask its manager to spawn bounded sibling workers when the work fans out — dynamic parallelism, no rigid plan.
+- 💸 **Delegation savings** — every run shows what the hierarchy saved you (`saved $5.63 — 90% vs. all-T1`); no flat-agent tool can show this number.
+- 🛡️ **Safe by default** — permission escalation (T3→T2→T1→you), SSRF-guarded fetch, loopback-only dashboard, and a budget kill-switch.
 
 ## Why Cascade is one of a kind
 
@@ -21,7 +38,7 @@ Other AI CLIs run a single agent. Cascade runs a visible **organization** — an
 
 ## Table of Contents
 
-- [What's New in v0.5.7](#whats-new-in-v057)
+- [What's New](#whats-new)
 - [How It Works](#how-it-works)
 - [Features](#features)
 - [Installation](#installation)
@@ -44,9 +61,18 @@ Other AI CLIs run a single agent. Cascade runs a visible **organization** — an
 
 ---
 
-## What's New in v0.5.7
+## What's New
 
-### Unreleased — the visible organization + a flicker-free TUI
+### v0.6 → v0.9.1 — the agentic releases
+- **v0.9.1 — Workers recruit help.** A T3 worker that discovers its task should fan out can call `request_workers` to have its T2 spawn bounded sibling workers (no recursive 4th tier; depth-capped + budget-bounded).
+- **v0.9.0 — Resumability, reflection, smarter local exec.** `/continue` resumes a budget-capped task from its partial state; opt-in **reflection** revises a worker's output against the goal; `t3Execution: auto` runs T3 waves sequentially on local/Ollama tiers and parallel on cloud.
+- **v0.8.0 — Autonomous mode + smarter re-planning.** `/auto` for hands-off runs (safe tools auto-approve, dangerous still gated); T1's reviewer **stops early** when a corrective pass isn't converging; new `/plan` (preview a decomposition) and `/replan`.
+- **v0.7.0 — Boardroom plan review.** Iterative revision (steer → re-plan → re-ask), an AI **plan reviewer**, inline **editable** plans, and a wider gate that can pause Moderate runs too.
+- **v0.6.0 — Live benchmark Auto-routing + fixes.** `Auto` picks the best-value model per task from live public benchmarks + live OpenRouter pricing, with live provider model discovery. Plus the Gemini stale-id 404 self-heal, the Ink-6 paste fix, and run-hang timeouts.
+
+<details><summary>Earlier — the visible organization + a flicker-free TUI (v0.5.x)</summary>
+
+### The visible organization + a flicker-free TUI
 - **Delegation savings counter** — live `saved $X (Y%) vs. all-T1` in the StatusBar and `/cost`, plus a one-line receipt after every run (duration · managers · workers · cost · savings).
 - **Agent comms feed** — `/comms` toggles a live ticker of PeerBus traffic (peer messages, broadcasts, file locks, barriers). The events always existed for the web dashboard; the terminal now shows them too.
 - **`/why`** — prints the decision trail for the last run: complexity verdict with the classifier's reason (or which heuristic short-circuited), models per tier, Cascade Auto picks, provider failovers, and escalations.
@@ -90,6 +116,8 @@ A focused security review of the tool and dashboard surface. All changes are cov
 - **New tools** — `glob`, `grep`, and `web-fetch` available to T3 workers.
 - **Model-performance tracker** — records per-model success/cost stats for scored selection when `cascadeAuto: true`.
 - **Fixes** — removed an accidental `cascade-ai` self-dependency in `package.json`; corrected misleading `/tree` and `/sessions` slash-command descriptions; fixed stale T2/T3 test mocks.
+
+</details>
 
 ---
 

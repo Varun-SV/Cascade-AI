@@ -431,6 +431,12 @@ export class CascadeRouter extends EventEmitter {
     return { enabled: r?.enabled === true, maxRounds: r?.maxRounds ?? 1 };
   }
 
+  /** T3→T2 reinforcement settings (config.reinforcements). Off unless enabled. */
+  getReinforcementsConfig(): { enabled: boolean; maxPerSection: number } {
+    const r = this.config?.reinforcements;
+    return { enabled: r?.enabled === true, maxPerSection: r?.maxPerSection ?? 4 };
+  }
+
   /**
    * Resolved T3 wave execution mode. 'auto' becomes 'sequential' when the T3
    * tier resolves to a LOCAL model (the single-GPU queue serializes anyway, so

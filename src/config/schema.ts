@@ -263,6 +263,17 @@ export const CascadeConfigSchema = z.object({
    */
   t3Execution: z.enum(['auto', 'parallel', 'sequential']).default('auto'),
   /**
+   * T3→T2 reinforcement: when enabled, a worker that discovers its subtask should
+   * fan out can call the `request_workers` tool to have its T2 manager spawn
+   * sibling workers for the new pieces (no 4th tier; bounded). Off by default.
+   */
+  reinforcements: z
+    .object({
+      enabled: z.boolean().default(false),
+      maxPerSection: z.number().int().min(1).max(20).default(4),
+    })
+    .default({}),
+  /**
    * Render the TUI in the terminal's alternate screen buffer (like vim).
    * Flicker-proof and restores the shell on exit, but native scrollback is
    * unavailable — history scrolls in-app with PgUp/PgDn. Also enabled per
