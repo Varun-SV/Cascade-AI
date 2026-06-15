@@ -5,6 +5,16 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2] - 2026-06-16
+
+### Added
+- **Ctrl+C / ESC now cancel the running task** instead of only quitting. While a task is in
+  progress: the first Ctrl+C warns ("press again to cancel the task"), the second **cancels the
+  run** and keeps Cascade open; **ESC cancels outright**. When idle, Ctrl+C keeps its old
+  double-press **quit** behavior. The run's partial output is preserved (a `⊘ Task cancelled`
+  note is shown). Wires the REPL to the existing `AbortSignal` cancellation path
+  (`cascade.run({ signal })` → `run:cancelled`).
+
 ## [0.9.1] - 2026-06-15
 
 ### Added

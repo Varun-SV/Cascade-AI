@@ -270,6 +270,9 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const [treeScrollOffset, setTreeScrollOffset] = useState(0);
   const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
   const [quitAttempted, setQuitAttempted] = useState(false);
+  const [cancelAttempted, setCancelAttempted] = useState(false);
+  // AbortController for the in-progress run, so Ctrl+C / ESC can cancel the task.
+  const runAbortRef = useRef<AbortController | null>(null);
   const isInputLockedRef = useRef(false);
   const lockTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -791,6 +794,17 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       pendingPeerEvents.push(ev);
       if (!peerThrottleTimeout) peerThrottleTimeout = setTimeout(flushPeerEvents, 100);
     });
+    cascade.on('run:cancelled', (payload: { reason?: string; partialOutput?: string }) => {
+      dispatch({
+        type: 'ADD_MESSAGE',
+        message: {
+          id: randomUUID(),
+          role: 'system',
+          content: `⊘ Task cancelled${payload.partialOutput ? ' — partial work above is kept.' : '.'}`,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    });
     cascade.on('budget:warning', (payload: { spentUsd: number; capUsd: number; spendPct: number; remainingUsd: number }) => {
       const bar = '█'.repeat(Math.round(payload.spendPct / 10)) + '░'.repeat(10 - Math.round(payload.spendPct / 10));
       dispatch({
@@ -836,9 +850,11 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       approvalResolverRef.current = ({ approved }) => cascade.resolveMcpApproval(server.name, approved);
     });
     try {
+      runAbortRef.current = new AbortController();
       const result = await cascade.run({
         prompt: trimmed,
         workspacePath,
+        signal: runAbortRef.current.signal,
         identityId: currentIdentityId,
         conversationHistory: toConversationHistory(state.messages),
         approvalCallback: async (req) => {
@@ -893,6 +909,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           }
         });
       }
+      runAbortRef.current = null;
+      setCancelAttempted(false);
       dispatch({ type: 'SET_EXECUTING', isExecuting: false });
     }
   }, [handleSlashCommand, persistMessage, state.messages, workspacePath, rebuildTree, recordNodeEvent, slashCompletions, slashIndex, state.isExecuting]);
@@ -911,6 +929,17 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       return;
     }
     if (key.ctrl && _input === 'c') {
+      // A task is running → Ctrl+C cancels it (double-press confirm), not exit.
+      if (state.isExecuting) {
+        if (cancelAttempted) {
+          runAbortRef.current?.abort();
+          setCancelAttempted(false);
+          return;
+        }
+        setCancelAttempted(true);
+        return;
+      }
+      // Idle → quit Cascade (double-press confirm).
       if (quitAttempted) {
         exit();
         return;
@@ -919,6 +948,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       return;
     }
     if (key.escape) {
+      // ESC cancels a running task outright (single press).
+      if (state.isExecuting) { runAbortRef.current?.abort(); setCancelAttempted(false); return; }
       if (quitAttempted) { setQuitAttempted(false); return; }
       if (isShowingModels) { setIsShowingModels(false); return; }
       if (queuedMessages.length > 0) {
@@ -1205,12 +1236,16 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       {/* ── Hint bar — keyboard shortcuts, hidden during execution ── */}
       <HintBar theme={theme} isExecuting={state.isExecuting} />
 
-      <Box borderStyle="round" borderColor={quitAttempted ? 'red' : (state.isStreaming ? theme.colors.accent : theme.colors.border)} paddingX={2} flexDirection="column">
-        {quitAttempted && (
+      <Box borderStyle="round" borderColor={(quitAttempted || cancelAttempted) ? 'red' : (state.isStreaming ? theme.colors.accent : theme.colors.border)} paddingX={2} flexDirection="column">
+        {cancelAttempted ? (
+          <Box marginBottom={0}>
+            <Text color="red" bold> Press Ctrl+C again (or ESC) to cancel the running task </Text>
+          </Box>
+        ) : quitAttempted ? (
           <Box marginBottom={0}>
             <Text color="red" bold> Press Ctrl+C again to quit or ESC to return to TUI </Text>
           </Box>
-        )}
+        ) : null}
         <Box flexDirection="row">
           <Text color={theme.colors.primary} bold>› {queuedMessages.length > 0 ? <Text color={theme.colors.accent}>[QUEUED] </Text> : ''}</Text>
           <SafeTextInput
