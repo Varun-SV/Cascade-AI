@@ -447,6 +447,9 @@ Return ONLY the JSON array.`;
     let remaining = new Set(sanitizedAssignments.map((a) => a.subtaskId));
     let wave = 0;
     let respawnBudget = 1;
+    // T3→T2 reinforcement: bounded sibling-worker spawns requested by workers.
+    const reinforceCfg = this.router.getReinforcementsConfig?.() ?? { enabled: false, maxPerSection: 4 };
+    let reinforcementsAdded = 0;
 
     while (remaining.size > 0) {
       // Collect all runnable tasks this wave
@@ -598,6 +601,36 @@ Return ONLY the JSON array.`;
 
         for (const dependent of adj.get(id) ?? []) {
           inDegree.set(dependent, Math.max(0, (inDegree.get(dependent) ?? 0) - 1));
+        }
+      }
+
+      // ── T3→T2 reinforcement: spawn the sibling workers requested this wave ──
+      // (bounded by maxPerSection; the workers are depth-1 so they can't request
+      // more, and the while-loop runs them as a normal wave honoring t3Execution).
+      if (reinforceCfg.enabled && reinforcementsAdded < reinforceCfg.maxPerSection) {
+        let addedThisWave = 0;
+        for (const id of runnableIds) {
+          for (const req of resultMap.get(id)?.reinforcements ?? []) {
+            if (reinforcementsAdded >= reinforceCfg.maxPerSection) break;
+            reinforcementsAdded++;
+            addedThisWave++;
+            const assignment: T2ToT3Assignment = {
+              ...req,
+              subtaskId: `reinf-${this.id}-${reinforcementsAdded}`,
+              dependsOn: [],
+              peerT3Ids: [],
+            };
+            sanitizedAssignments.push(assignment);
+            adj.set(assignment.subtaskId, new Set());
+            inDegree.set(assignment.subtaskId, 0);
+            remaining.add(assignment.subtaskId);
+            const fresh = this.buildWorkerMap([assignment], taskId);
+            for (const [k, v] of fresh) { v.markAsReinforcement(); workerMap.set(k, v); }
+            this.log(`Reinforcement: spawned worker "${assignment.subtaskTitle}" (requested by ${id})`);
+          }
+        }
+        if (addedThisWave > 0) {
+          this.sendStatusUpdate({ progressPct: 55, currentAction: `Added ${addedThisWave} reinforcement worker(s)`, status: 'IN_PROGRESS' });
         }
       }
     }

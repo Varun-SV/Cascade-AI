@@ -4,7 +4,7 @@
 
 import type { ModelInfo, ProviderType, ThemeName } from './types.js';
 
-export const CASCADE_VERSION = '0.9.0';
+export const CASCADE_VERSION = '0.9.1';
 export const CASCADE_CONFIG_DIR = '.cascade';
 export const CASCADE_MD_FILE = 'CASCADE.md';
 export const CASCADE_IGNORE_FILE = '.cascadeignore';
@@ -344,6 +344,7 @@ export const TOOL_NAMES = {
   RUN_CODE: 'run_code',
   PEER_MESSAGE: 'peer_message',
   WEB_SEARCH: 'web_search',
+  REQUEST_WORKERS: 'request_workers',
 } as const;
 
 // Defaults that require approval.

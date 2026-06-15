@@ -6,9 +6,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Cascade AI — Multi-Tier Agent Orchestration</title>
   <meta name="description"
-    content="Open-source CLI tool that runs prompts through a hierarchical three-tier agent system. T1 plans, T2 manages, T3 executes." />
-  <meta property="og:title" content="Cascade AI" />
-  <meta property="og:description" content="Multi-tier AI orchestration. T1 → T2 → T3." />
+    content="Cascade AI — one prompt becomes a self-organizing hierarchy of AI agents that plan, delegate, and execute in parallel. Auto-routes each step to the cheapest model that's best at it. Up to 90% cheaper than one frontier model. Open-source, MIT." />
+  <meta property="og:title" content="Cascade AI — multi-tier agent orchestration" />
+  <meta property="og:description" content="One prompt → a hierarchy of AI agents that plan, delegate & execute in parallel. Autonomous mode, live benchmark routing, plan review, resumability. Up to 90% cheaper than one frontier model. MIT." />
   <meta property="og:type" content="website" />
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -397,6 +397,78 @@
 
     .install-block.did-copy .copied {
       opacity: 1;
+    }
+
+    /* ════════════════════════════════════════
+       STATS BAND
+    ════════════════════════════════════════ */
+    .stats-section {
+      padding: 8px 0 64px;
+    }
+
+    .stats-row {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    .stat {
+      background: var(--bg-2);
+      padding: 28px 24px;
+      text-align: center;
+      transition: background 0.14s;
+    }
+
+    .stat:hover {
+      background: var(--bg-3);
+    }
+
+    .stat-num {
+      font-family: var(--font-display);
+      font-weight: 800;
+      font-size: clamp(30px, 4vw, 44px);
+      line-height: 1;
+      color: var(--lime);
+      letter-spacing: -0.02em;
+      text-shadow: 0 0 28px var(--lime-glow);
+    }
+
+    .stat-label {
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--text-2);
+      margin-top: 10px;
+    }
+
+    /* highlight strong text in hero sub */
+    .hero-sub strong {
+      color: var(--lime);
+      font-weight: 700;
+    }
+
+    /* "new" tag on feature cells */
+    .feature-cell {
+      position: relative;
+    }
+
+    .feature-new {
+      position: absolute;
+      top: 18px;
+      right: 18px;
+      font-size: 8px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--lime);
+      background: rgba(170, 255, 0, 0.1);
+      border: 1px solid rgba(170, 255, 0, 0.25);
+      padding: 3px 7px;
+      border-radius: 3px;
     }
 
     /* ════════════════════════════════════════
@@ -1201,6 +1273,10 @@
         grid-template-columns: 1fr;
       }
 
+      .stats-row {
+        grid-template-columns: 1fr 1fr;
+      }
+
       .code-split {
         grid-template-columns: 1fr;
       }
@@ -1259,7 +1335,7 @@
     <div class="container">
       <div class="hero-eyebrow">
         <span class="hero-eyebrow-dot"></span>
-        Open-source · MIT License · v0.5.7
+        Open-source · MIT · v0.9.1 — Autonomous Mode is here
       </div>
 
       <h1 class="reveal">
@@ -1268,8 +1344,9 @@
       </h1>
 
       <p class="hero-sub reveal">
-        Cascade is a CLI orchestration system that decomposes any task into a three-tier hierarchy — Administrator →
-        Manager → Worker — routing work across the best available models automatically.
+        One prompt becomes a self-organizing hierarchy of AI agents that plan, delegate, and execute in
+        parallel — auto-routing every step to the cheapest model that's best at it.
+        <strong>Up to 90% cheaper</strong> than running everything on one frontier model.
       </p>
 
       <div class="hero-actions reveal">
@@ -1289,6 +1366,30 @@
         <span class="cmd">npm install -g cascade-ai</span>
         <span class="copy-hint">click to copy</span>
         <span class="copied">✓ copied</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── STATS BAND ───────────────────────── -->
+  <section class="stats-section">
+    <div class="container">
+      <div class="stats-row reveal">
+        <div class="stat">
+          <div class="stat-num">90%</div>
+          <div class="stat-label">cheaper vs. all-frontier</div>
+        </div>
+        <div class="stat">
+          <div class="stat-num">3</div>
+          <div class="stat-label">tiers, fully parallel</div>
+        </div>
+        <div class="stat">
+          <div class="stat-num">6</div>
+          <div class="stat-label">model providers</div>
+        </div>
+        <div class="stat">
+          <div class="stat-num">0</div>
+          <div class="stat-label">config to start</div>
+        </div>
       </div>
     </div>
   </section>
@@ -1506,6 +1607,36 @@
       <p class="section-desc reveal">No plugin store to browse. The tools your agents need are already wired in.</p>
 
       <div class="features-grid reveal">
+        <div class="feature-cell">
+          <span class="feature-new">New · v0.6</span>
+          <div class="feature-icon green">📊</div>
+          <h3>Live Benchmark Auto-Routing</h3>
+          <p>Set any tier to <strong>Auto</strong> and Cascade picks the <em>best-value</em> model per task — fusing live public benchmark scores with live OpenRouter pricing. Cheap models win trivial work; frontier models win the hard parts.</p>
+        </div>
+        <div class="feature-cell">
+          <span class="feature-new">New · v0.8</span>
+          <div class="feature-icon lime">🤖</div>
+          <h3>Autonomous Mode</h3>
+          <p>Type <code>/auto on</code> for hands-off runs: the plan auto-approves and safe tools run without prompts — while dangerous tools still ask and budget caps stay the hard stop.</p>
+        </div>
+        <div class="feature-cell">
+          <span class="feature-new">New · v0.7</span>
+          <div class="feature-icon violet">📋</div>
+          <h3>Boardroom Plan Review</h3>
+          <p>Pause before any worker spawns to review T1's plan — an AI reviewer critiques it, you drop sections inline or add a steering note, and it re-plans until you approve.</p>
+        </div>
+        <div class="feature-cell">
+          <span class="feature-new">New · v0.9</span>
+          <div class="feature-icon amber">⏯️</div>
+          <h3>Run Resumability</h3>
+          <p>Hit the budget cap on a big task? <code>/continue</code> resumes with a raised budget — files already created persist on disk, so only the remaining work runs. No redo.</p>
+        </div>
+        <div class="feature-cell">
+          <span class="feature-new">New · v0.9.1</span>
+          <div class="feature-icon cyan">👥</div>
+          <h3>Workers Recruit Help</h3>
+          <p>A worker that discovers its task should fan out asks its manager to spawn bounded sibling workers on the fly — dynamic parallelism, no rigid up-front plan, no runaway recursion.</p>
+        </div>
         <div class="feature-cell">
           <div class="feature-icon lime">⚡</div>
           <h3>Live Agent Tree</h3>

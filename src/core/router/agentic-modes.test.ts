@@ -45,4 +45,10 @@ describe('router agentic modes', () => {
     const cfg = (router as unknown as { config: CascadeConfig }).config;
     expect(cfg.budget.maxTokensPerRun).toBe(500);
   });
+
+  it('reinforcements: off by default, honored when configured', async () => {
+    expect((await makeRouter({})).getReinforcementsConfig()).toEqual({ enabled: false, maxPerSection: 4 });
+    expect((await makeRouter({ reinforcements: { enabled: true, maxPerSection: 2 } })).getReinforcementsConfig())
+      .toEqual({ enabled: true, maxPerSection: 2 });
+  });
 });

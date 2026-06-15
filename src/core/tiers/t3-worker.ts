@@ -77,6 +77,10 @@ export class T3Worker extends BaseTier {
   private store?: MemoryStore;
   private audit?: AuditLogger;
   private tools: ToolDefinition[] = [];
+  /** 0 = top-level worker (may request reinforcements); 1 = a spawned reinforcement (may not). */
+  private reinforcementDepth = 0;
+  /** Sibling-worker requests this worker made via request_workers (T3→T2). */
+  private pendingReinforcements: T2ToT3Assignment[] = [];
   /** @deprecated — kept only as fallback when no escalator is attached */
   private sessionApprovals: Map<string, boolean> = new Map();
   private peerBus?: PeerBus;
@@ -109,6 +113,11 @@ export class T3Worker extends BaseTier {
     this.permissionEscalator = escalator;
   }
 
+  /** Marks this worker as a spawned reinforcement (depth 1 — cannot request more). */
+  markAsReinforcement(): void {
+    this.reinforcementDepth = 1;
+  }
+
   setToolCreator(creator: ToolCreator): void {
     this.toolCreator = creator;
   }
@@ -133,6 +142,32 @@ export class T3Worker extends BaseTier {
     this.setStatus('ACTIVE');
 
     this.tools = this.toolRegistry.getToolDefinitions();
+    // T3→T2 reinforcement: surface request_workers to top-level workers only, when enabled.
+    if (this.reinforcementDepth === 0 && this.router.getReinforcementsConfig?.()?.enabled) {
+      this.tools = [...this.tools, {
+        name: 'request_workers',
+        description: 'Ask your manager to spawn additional sibling workers for sub-problems you discover are too large or parallelizable to finish alone. Use sparingly — only when the work genuinely needs to fan out.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            subtasks: {
+              type: 'array',
+              description: 'New sibling subtasks for your manager to spawn.',
+              items: {
+                type: 'object',
+                properties: {
+                  title: { type: 'string' },
+                  description: { type: 'string' },
+                  expectedOutput: { type: 'string' },
+                },
+                required: ['title', 'description'],
+              },
+            },
+          },
+          required: ['subtasks'],
+        },
+      }];
+    }
 
     // ── Step 0: Wait for dependencies ──────────
     if (assignment.dependsOn?.length && this.peerBus) {
@@ -479,6 +514,15 @@ export class T3Worker extends BaseTier {
   }
 
   private async executeTool(tc: ToolCall): Promise<string> {
+    // T3→T2 reinforcement: handle locally (record the request for the manager) —
+    // it is a signal, not a real side-effecting tool, so it skips registry
+    // validation and approval.
+    if (tc.name === 'request_workers') {
+      const msg = this.recordReinforcements(tc.input);
+      this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: tc.name, output: msg, durationMs: 0 });
+      return msg;
+    }
+
     // Reject malformed calls early (before any approval prompt) with a clear,
     // self-correcting message — weaker models often omit required parameters or
     // pass an out-of-range enum value, which otherwise fails opaquely at run time.
@@ -950,6 +994,40 @@ ${assignment.constraints.map((c) => `- ${c}`).join('\n')}
 Begin execution now.`;
   }
 
+  /**
+   * Records a request_workers call (T3→T2 reinforcement). Capped at
+   * maxPerSection; reinforcement workers (depth 1) cannot request more.
+   */
+  private recordReinforcements(input: Record<string, unknown>): string {
+    if (this.reinforcementDepth !== 0) {
+      return 'request_workers is unavailable to reinforcement workers — complete your assigned subtask.';
+    }
+    const max = this.router.getReinforcementsConfig?.()?.maxPerSection ?? 4;
+    const raw = Array.isArray((input as { subtasks?: unknown }).subtasks)
+      ? (input as { subtasks: unknown[] }).subtasks
+      : [];
+    let added = 0;
+    for (const s of raw) {
+      if (this.pendingReinforcements.length >= max) break;
+      const o = s as { title?: unknown; description?: unknown; expectedOutput?: unknown };
+      if (typeof o?.title !== 'string' || typeof o?.description !== 'string') continue;
+      this.pendingReinforcements.push({
+        subtaskId: `reinf-${this.id}-${this.pendingReinforcements.length + 1}`,
+        subtaskTitle: o.title,
+        description: o.description,
+        expectedOutput: typeof o.expectedOutput === 'string' ? o.expectedOutput : o.title,
+        constraints: [],
+        peerT3Ids: [],
+        parentT2: this.parentId ?? 'root',
+        dependsOn: [],
+      });
+      added++;
+    }
+    return added > 0
+      ? `Requested ${added} reinforcement worker(s) from your manager; they will run in parallel. Focus on your own part — do not redo their work.`
+      : 'No valid reinforcement subtasks (each needs a title and description), or the per-section limit was reached.';
+  }
+
   private buildResult(
     status: T3Result['status'],
     output: string,
@@ -965,6 +1043,7 @@ Begin execution now.`;
       issues,
       peerSyncsUsed: this.peerSyncBuffer.map(m => m.fromId),
       correctionAttempts,
+      reinforcements: this.pendingReinforcements.length ? this.pendingReinforcements : undefined,
     };
   }
 
