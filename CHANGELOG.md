@@ -5,6 +5,41 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.5] - 2026-06-16
+
+Dependency-hardening pass (safe + tested bumps only) plus a tool-generation correctness fix
+surfaced while auditing the tool system.
+
+### Fixed
+- **Runtime tool generation was broken for any tool that did I/O.** `ToolCreator` validates
+  generated code with a syntax check before registering it, but compiled it as a *synchronous*
+  function while the runtime executes it inside an `async` IIFE. Every generated tool that used
+  `await callTool(...)` or `await fetch(...)` — i.e. essentially all useful tools, including the
+  generator prompt's own `file_read` example — was rejected as "await is only valid in async
+  functions" and silently discarded. The check now validates with `AsyncFunction` semantics.
+
+### Security / Dependencies
+- **Cleared the `ws` DoS advisory (GHSA-96hv-2xvq-fx4p) on the server side.** Added an
+  `overrides` pin of `ws` to `^8.21.0` (patched), unifying the socket.io server chain on the
+  fixed release. This removes the 3 high-severity server-side findings; the only residual `ws`
+  node is the **browser** socket.io-client, where the Node `ws` library is never executed
+  (browsers use the native `WebSocket`), so it is not exploitable in the shipped dashboard.
+- **Removed the unused `uuid` dependency.** Cascade generates IDs with `node:crypto.randomUUID`
+  and never imported the `uuid` package — it was a vestigial direct dependency.
+- **Safe in-range refreshes** (semver-compatible, full suite + build verified): `better-sqlite3`
+  → 12.11.1, `undici` → 6.27.0, `playwright` → 1.61.0, `@tanstack/react-virtual` → 3.14.3.
+- **Deferred (intentionally not forced):** the remaining audit findings all require *breaking*
+  major upgrades and are tracked for a dedicated pass — runtime: `@anthropic-ai/sdk`, `node-cron`,
+  `node-notifier`, transitive `uuid` (via the two former); dev/build-only and never shipped to
+  npm consumers: `vitest`/`vite`/`esbuild`/`tsup`/`vite-node`. Production-only `npm audit` is down
+  to 8 (from a chain of ws-driven highs), and none of the residual highs are reachable at runtime.
+
+### Tests
+- Added `src/tools/tool-creator.test.ts` (8 cases) — the tool-generation capability previously had
+  **no coverage**, which is how the async-syntax-check regression shipped. Covers schema
+  normalization, pure-compute generation, `await callTool()` (regression guard), the SSRF guard on
+  the sandboxed `fetch`, syntax-error rejection, capability dedup, and dangerous-tool escalation.
+
 ## [0.9.4] - 2026-06-16
 
 ### Fixed

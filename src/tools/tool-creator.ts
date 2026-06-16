@@ -298,9 +298,15 @@ Required capability: ${description.slice(0, 300)}`;
       spec.name = `${spec.name}_${Date.now() % 10000}`;
     }
 
-    // Syntax check only — don't execute
+    // Syntax check only — don't execute. Validate with ASYNC semantics: the
+    // runtime wraps executeCode in an `async () => { ... }` IIFE, so generated
+    // code uses `await callTool(...)` / `await fetch(...)` (the prompt explicitly
+    // asks for this). Compiling it as a plain sync `new Function` rejected every
+    // I/O tool with "await is only valid in async functions" — i.e. nearly all
+    // useful tools. Use the AsyncFunction constructor so `await` is valid here.
     try {
-      new Function('input', 'fetch', 'callTool', spec.executeCode);
+      const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as FunctionConstructor;
+      new AsyncFunction('input', 'fetch', 'callTool', spec.executeCode);
     } catch (err) {
       this.log(`[tool-creator] Generated code for "${spec.name}" has a syntax error: ${err instanceof Error ? err.message : String(err)}`);
       return null;
