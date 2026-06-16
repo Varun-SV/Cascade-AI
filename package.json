@@ -1,6 +1,6 @@
 {
   "name": "cascade-ai",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "description": "Multi-tier AI orchestration CLI — T1/T2/T3 hierarchical agent system",
   "type": "module",
   "main": "dist/index.cjs",
@@ -74,7 +74,6 @@
     "socket.io-msgpack-parser": "^3.0.2",
     "undici": "^6.21.0",
     "update-notifier": "^7.3.0",
-    "uuid": "^10.0.0",
     "winston": "^3.15.0",
     "wrap-ansi": "^10.0.0",
     "zod": "^3.23.8"
@@ -132,6 +131,7 @@
     "url": "https://github.com/Varun-SV/Cascade-AI/issues"
   },
   "overrides": {
-    "node-domexception": "npm:domexception@^4.0.0"
+    "node-domexception": "npm:domexception@^4.0.0",
+    "ws": "^8.21.0"
   }
 }
