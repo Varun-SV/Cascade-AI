@@ -271,8 +271,13 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
   const [quitAttempted, setQuitAttempted] = useState(false);
   const [cancelAttempted, setCancelAttempted] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [commandRunning, setCommandRunning] = useState(false);
   // AbortController for the in-progress run, so Ctrl+C / ESC can cancel the task.
   const runAbortRef = useRef<AbortController | null>(null);
+  // Ref mirror of cancelAttempted — read synchronously in the key handler so a
+  // rapid double-press isn't dropped by a stale React state value.
+  const cancelArmedRef = useRef(false);
   const isInputLockedRef = useRef(false);
   const lockTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -713,16 +718,29 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     if (state.isExecuting) {
       if (slashRef.current.isSlashCommand(trimmed)) {
         setInput('');
-        await handleSlashCommand(trimmed);
+        dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'user', content: trimmed, timestamp: new Date().toISOString() } });
+        setCommandRunning(true);
+        try { await handleSlashCommand(trimmed); } finally { setCommandRunning(false); }
         return;
       }
       setQueuedMessages(prev => [...prev, trimmed]);
       setInput('');
       return;
     }
-    setInputHistory((prev) => [trimmed, ...prev.filter((item) => item !== trimmed)].slice(0, 100));
+    // Don't record slash commands in the up-arrow history — recalling /why, /cost
+    // etc. isn't useful and conflicts with the scroll mechanism. Only real prompts.
+    if (!slashRef.current.isSlashCommand(trimmed)) {
+      setInputHistory((prev) => [trimmed, ...prev.filter((item) => item !== trimmed)].slice(0, 100));
+    }
     setHistoryIndex(null);
-    if (slashRef.current.isSlashCommand(trimmed)) { await handleSlashCommand(trimmed); return; }
+    if (slashRef.current.isSlashCommand(trimmed)) {
+      // Echo the command immediately so there's a visual cue it was sent, and
+      // show a running indicator while async commands (e.g. /plan) do their work.
+      dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'user', content: trimmed, timestamp: new Date().toISOString() } });
+      setCommandRunning(true);
+      try { await handleSlashCommand(trimmed); } finally { setCommandRunning(false); }
+      return;
+    }
     const timestamp = new Date().toISOString();
     dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'user', content: trimmed, timestamp } });
     persistMessage('user', trimmed, timestamp);
@@ -910,7 +928,9 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         });
       }
       runAbortRef.current = null;
+      cancelArmedRef.current = false;
       setCancelAttempted(false);
+      setCancelling(false);
       dispatch({ type: 'SET_EXECUTING', isExecuting: false });
     }
   }, [handleSlashCommand, persistMessage, state.messages, workspacePath, rebuildTree, recordNodeEvent, slashCompletions, slashIndex, state.isExecuting]);
@@ -931,11 +951,14 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     if (key.ctrl && _input === 'c') {
       // A task is running → Ctrl+C cancels it (double-press confirm), not exit.
       if (state.isExecuting) {
-        if (cancelAttempted) {
-          runAbortRef.current?.abort();
+        if (cancelArmedRef.current) {
+          cancelArmedRef.current = false;
           setCancelAttempted(false);
+          setCancelling(true);
+          runAbortRef.current?.abort();
           return;
         }
+        cancelArmedRef.current = true;
         setCancelAttempted(true);
         return;
       }
@@ -949,7 +972,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     }
     if (key.escape) {
       // ESC cancels a running task outright (single press).
-      if (state.isExecuting) { runAbortRef.current?.abort(); setCancelAttempted(false); return; }
+      if (state.isExecuting) { cancelArmedRef.current = false; setCancelAttempted(false); setCancelling(true); runAbortRef.current?.abort(); return; }
       if (quitAttempted) { setQuitAttempted(false); return; }
       if (isShowingModels) { setIsShowingModels(false); return; }
       if (queuedMessages.length > 0) {
@@ -1236,14 +1259,22 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       {/* ── Hint bar — keyboard shortcuts, hidden during execution ── */}
       <HintBar theme={theme} isExecuting={state.isExecuting} />
 
-      <Box borderStyle="round" borderColor={(quitAttempted || cancelAttempted) ? 'red' : (state.isStreaming ? theme.colors.accent : theme.colors.border)} paddingX={2} flexDirection="column">
-        {cancelAttempted ? (
+      <Box borderStyle="round" borderColor={(quitAttempted || cancelAttempted || cancelling) ? 'red' : (state.isStreaming ? theme.colors.accent : theme.colors.border)} paddingX={2} flexDirection="column">
+        {cancelling ? (
+          <Box marginBottom={0}>
+            <Text color="red" bold> ⊘ Cancelling — stopping in-flight work… </Text>
+          </Box>
+        ) : cancelAttempted ? (
           <Box marginBottom={0}>
             <Text color="red" bold> Press Ctrl+C again (or ESC) to cancel the running task </Text>
           </Box>
         ) : quitAttempted ? (
           <Box marginBottom={0}>
             <Text color="red" bold> Press Ctrl+C again to quit or ESC to return to TUI </Text>
+          </Box>
+        ) : commandRunning ? (
+          <Box marginBottom={0}>
+            <Text color={theme.colors.accent} bold> ⠋ Running command… </Text>
           </Box>
         ) : null}
         <Box flexDirection="row">

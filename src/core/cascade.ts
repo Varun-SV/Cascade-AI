@@ -543,6 +543,9 @@ ${prompt}`
     await this.init();
     // Reset the per-task budget allowance so this run starts with a fresh ceiling.
     this.router.beginRun();
+    // Wire the abort signal into the router so a cancel aborts in-flight LLM
+    // calls (not just the checkpoints between them) — i.e. near-instant cancel.
+    this.router.setRunSignal(options.signal);
     const startMs = Date.now();
     const taskId = randomUUID();
     this.decisionLog = [];
@@ -605,6 +608,11 @@ ${prompt}`
     // Cascade Auto: select optimal models for each tier based on task analysis
     if (this.taskAnalyzer) {
       await Promise.all(tiersInPlay.map(async (tier) => {
+        // Respect an explicitly-configured model — Cascade Auto only routes
+        // tiers the user left on 'auto' (otherwise it would silently switch the
+        // configured model, which /why then surfaces).
+        const tierKey = tier.toLowerCase() as 't1' | 't2' | 't3';
+        if (this.config.models?.[tierKey]) return;
         try {
           const model = await this.taskAnalyzer!.selectModel(options.prompt, tier, this.router.getSelector());
           if (model) {
@@ -806,11 +814,16 @@ ${prompt}`
     }
     } catch (err) {
       // ── Graceful cancellation handling ──────────────────────────────
-      // When aborted, don't re-throw — resolve with what we have so far.
-      if (err instanceof CascadeCancelledError) {
+      // When aborted, don't re-throw — resolve with what we have so far. This
+      // covers both the checkpoint-based CascadeCancelledError and the
+      // AbortError thrown by a provider whose in-flight request was aborted
+      // (instant cancel), plus any error surfacing while the signal is aborted.
+      if (err instanceof CascadeCancelledError
+        || (err instanceof Error && err.name === 'AbortError')
+        || options.signal?.aborted) {
         this.emit('run:cancelled', {
           taskId,
-          reason: err.message,
+          reason: err instanceof Error ? err.message : 'Task cancelled',
           partialOutput: finalOutput || '',
         });
         runError = null; // suppress telemetry error flag for intentional cancels
@@ -836,6 +849,11 @@ ${prompt}`
       // across runs — even on error paths. cancelAllPending is safe to call
       // when there are no pending requests.
       try { escalator.cancelAllPending(); } catch { /* non-critical */ }
+
+      // Restore tier models to the configured baseline so Cascade Auto's
+      // per-task picks don't leak into /why, the status bar, or the next run.
+      this.router.restoreTierModels();
+      this.router.setRunSignal(undefined);
 
       // Record model performance for future auto-selection
       if (this.taskAnalyzer) {

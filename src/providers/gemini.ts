@@ -54,6 +54,7 @@ export class GeminiProvider extends BaseProvider {
         tools: options.tools?.length
           ? [{ functionDeclarations: options.tools.map(this.convertTool) }]
           : undefined,
+        abortSignal: options.signal,
       },
     });
 

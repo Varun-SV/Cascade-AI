@@ -28,7 +28,7 @@ import { LocalRequestQueue } from './local-queue.js';
 import type { TaskAnalyzer } from './task-analyzer.js';
 import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
 import { calculateCost } from '../../utils/cost.js';
-import { withTimeout } from '../../utils/retry.js';
+import { withTimeout, CascadeCancelledError } from '../../utils/retry.js';
 import { ModelProfiler } from './model-profiler.js';
 import type { MemoryStore } from '../../memory/store.js';
 import { computeDelegationSavings, type DelegationSavings } from './savings.js';
@@ -85,6 +85,10 @@ export class CascadeRouter extends EventEmitter {
   private localQueue!: LocalRequestQueue;
   private taskAnalyzer?: TaskAnalyzer;
   private liveData?: LiveDataProvider;
+  /** Snapshot of configured/default tier models, taken before Cascade Auto overrides them. */
+  private originalTierModels?: Map<TierRole, ModelInfo>;
+  /** The current run's abort signal — injected into every provider call so a cancel aborts in-flight requests. */
+  private runSignal?: AbortSignal;
 
   /** Thrown when the configured budget is exceeded. */
   static BudgetExceededError = class extends Error {
@@ -261,6 +265,11 @@ export class CascadeRouter extends EventEmitter {
     if (tierMaxTokens && (!options.maxTokens || options.maxTokens > tierMaxTokens)) {
       options = { ...options, maxTokens: tierMaxTokens };
     }
+    // Inject the run's abort signal so the provider can abort the in-flight
+    // request the moment a cancel fires (instant cancellation).
+    if (this.runSignal && !options.signal) {
+      options = { ...options, signal: this.runSignal };
+    }
     // Per-call override (Cascade Auto per-subtask routing) wins over the shared
     // tier model, except when a vision model is explicitly required.
     if (options.model && !requireVision) {
@@ -327,7 +336,11 @@ export class CascadeRouter extends EventEmitter {
             cloudTimeoutMs,
             `Model ${model.id} stream timed out after ${cloudTimeoutMs}ms`,
           );
-        } catch {
+        } catch (streamErr) {
+          // Cancelled mid-stream — propagate the abort, don't retry.
+          if ((streamErr instanceof Error && streamErr.name === 'AbortError') || this.runSignal?.aborted || options.signal?.aborted) {
+            throw streamErr;
+          }
           // Stream stalled or errored — fall back to a (also time-boxed)
           // non-streaming call rather than letting a hung stream freeze the run.
           result = await withTimeout(
@@ -370,6 +383,12 @@ export class CascadeRouter extends EventEmitter {
       this.failover.recordSuccess(model.provider);
       return result;
     } catch (err) {
+      // A cancelled run aborts the in-flight provider request. Surface it as a
+      // cancellation so it propagates like the checkpoint-based cancel (graceful
+      // stop + partial output upstream) rather than being retried/failed-over.
+      if ((err instanceof Error && err.name === 'AbortError') || this.runSignal?.aborted || options.signal?.aborted) {
+        throw new CascadeCancelledError('Run cancelled');
+      }
       const errMsg = err instanceof Error ? err.message : String(err);
       if (this.isRateLimitError(errMsg)) {
         this.failover.recordFailure(model.provider, 'rate_limit');
@@ -454,8 +473,30 @@ export class CascadeRouter extends EventEmitter {
    * The override is valid for the current task only — restored by restoreTierModels().
    */
   overrideTierModel(tier: TierRole, model: ModelInfo): void {
+    // Snapshot the configured/default tier models once so they can be restored
+    // after the run — Cascade Auto's per-task picks must not leak across runs.
+    if (!this.originalTierModels) {
+      this.originalTierModels = new Map(this.tierModels);
+    }
     this.tierModels.set(tier, model);
     this.ensureProvider(model, this.config.providers);
+  }
+
+  /**
+   * Restore tier models to the configured/default baseline captured before the
+   * first Cascade Auto override. Called at the end of each run so `/why`, the
+   * status bar, and the next run reflect the configured models, not stale picks.
+   */
+  restoreTierModels(): void {
+    if (this.originalTierModels) {
+      this.tierModels = new Map(this.originalTierModels);
+      this.originalTierModels = undefined;
+    }
+  }
+
+  /** Set (or clear) the current run's abort signal for instant cancellation. */
+  setRunSignal(signal: AbortSignal | undefined): void {
+    this.runSignal = signal;
   }
 
   getSelector(): import('./selector.js').ModelSelector {

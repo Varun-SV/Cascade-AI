@@ -5,6 +5,24 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4] - 2026-06-16
+
+### Fixed
+- **Cancellation is now near-instant.** The run's abort signal is threaded into the provider
+  calls themselves (anthropic / openai / azure / gemini / ollama), so Ctrl+C/ESC aborts the
+  **in-flight** request instead of only stopping between LLM calls — a real run cancelled in
+  **~31 ms** vs. ~38 s before. Provider `AbortError` is converted to a graceful cancel (partial
+  output preserved, no error surfaced), and a rapid double-press can no longer be dropped (the
+  cancel-armed flag is read from a ref, not stale React state). A `⊘ Cancelling…` indicator shows
+  immediately.
+- **Cascade Auto no longer overrides an explicitly-configured model.** Auto only routes tiers
+  left on `auto`, and its per-task picks are restored after each run — so `/why`, the status bar,
+  and the next run reflect your configured models (the missing `restoreTierModels`).
+- **Slash commands show immediate feedback.** A command is echoed the moment you press Enter, and
+  a `⠋ Running command…` indicator shows while async ones (e.g. `/plan`) work.
+- **Slash commands are excluded from up-arrow history** — recalling prompts no longer gets stuck
+  on the last `/command` or triggers scroll.
+
 ## [0.9.3] - 2026-06-16
 
 ### Security
