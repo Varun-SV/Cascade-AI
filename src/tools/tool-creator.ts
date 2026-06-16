@@ -14,7 +14,7 @@
 //  - Tools are session-scoped and not persisted
 //
 
-import { createContext, runInContext } from 'node:vm';
+import { Worker } from 'node:worker_threads';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { BaseTool } from './base.js';
@@ -34,6 +34,12 @@ export interface GeneratedToolSpec {
   /** Raw JS function body — receives `input`, `fetch`, and `callTool`. Returns string | Promise<string> */
   executeCode: string;
   isDangerous: boolean;
+  /**
+   * Whether this tool's source is trusted (generated in THIS session) vs untrusted
+   * (loaded from disk or received from a peer). Untrusted tools always re-escalate
+   * their dangerous actions. Never persisted as trusted — forced false on reload.
+   */
+  trusted?: boolean;
 }
 
 /** File (under .cascade/) where created tools persist between runs. */
@@ -65,6 +71,106 @@ function capabilityKey(text: string): string {
   ).sort().join(' ');
 }
 
+// ── Worker sandbox ─────────────────────────────
+//
+//  Generated (LLM-authored, hence UNTRUSTED) code runs in a node:worker_threads
+//  Worker, not in the main process. node:vm was never a security boundary — its
+//  `timeout` can't stop async runaway, the code shares the main heap, and a throw
+//  can take down the Ink TUI. The worker gives an enforceable kill timeout
+//  (worker.terminate()), a memory cap (resourceLimits), and crash containment,
+//  and — crucially — keeps Cascade's privileged objects (registry, router, the
+//  PermissionEscalator) on the MAIN thread. The worker reaches them ONLY through a
+//  message bridge whose callTool path is gated by the escalator and whose fetch
+//  path is SSRF-guarded by safeFetch. (A hard V8 isolate would need isolated-vm;
+//  worker + gating is the chosen dependency-free boundary.)
+
+const DYNAMIC_TOOL_TIMEOUT_MS = 15_000;
+const DYNAMIC_FETCH_MAX = 1_000_000;
+
+// Fixed harness run inside the worker. The generated `executeCode` arrives as DATA
+// via workerData (never imported as a module); `callTool`/`fetch` are bridged to
+// the main thread. No `require`/`process` is in the generated code's scope.
+const HARNESS_SRC = `
+const { parentPort, workerData } = require('node:worker_threads');
+const { executeCode, input } = workerData;
+let nextId = 0;
+const pending = new Map();
+function bridge(kind, payload) {
+  return new Promise((resolve, reject) => {
+    const id = nextId++;
+    pending.set(id, { resolve, reject });
+    parentPort.postMessage(Object.assign({ kind, id }, payload));
+  });
+}
+parentPort.on('message', (msg) => {
+  const p = pending.get(msg.id);
+  if (!p) return;
+  pending.delete(msg.id);
+  if (msg.error !== undefined) p.reject(new Error(msg.error));
+  else p.resolve(msg.value);
+});
+const callTool = (name, toolInput) => bridge('callTool', { name: name, input: toolInput });
+const fetch = async (url, init) => {
+  const safeInit = init && typeof init === 'object'
+    ? { method: init.method, headers: init.headers, body: typeof init.body === 'string' ? init.body : undefined }
+    : undefined;
+  const r = await bridge('fetch', { url: url, init: safeInit });
+  return {
+    ok: r.ok, status: r.status, statusText: r.statusText,
+    headers: { get: (k) => (String(k).toLowerCase() === 'content-type' ? r.contentType : null) },
+    text: async () => r.body,
+    json: async () => JSON.parse(r.body),
+  };
+};
+(async () => {
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const fn = new AsyncFunction('input', 'callTool', 'fetch', 'console', executeCode);
+  return await fn(input, callTool, fetch, { log() {}, error() {} });
+})()
+  .then((r) => parentPort.postMessage({ kind: 'result', value: String(r == null ? '' : r) }))
+  .catch((e) => parentPort.postMessage({ kind: 'result', value: 'Tool error: ' + (e && e.message ? e.message : String(e)) }));
+`;
+
+/**
+ * Validate that generated code compiles with the SAME async signature the worker
+ * uses to run it, so `await callTool(...)` / `await fetch(...)` are valid (a plain
+ * sync `new Function` wrongly rejects every I/O tool). Reused on creation AND when
+ * re-validating untrusted persisted/peer specs before re-registering them.
+ */
+export function isExecutableToolCode(code: string): boolean {
+  try {
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as FunctionConstructor;
+    new AsyncFunction('input', 'callTool', 'fetch', 'console', code);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Run an agent-supplied fetch on the MAIN thread through the SSRF guard, marshaling
+ *  a minimal Response for the worker (a real Response can't cross the thread). */
+async function bridgeFetch(
+  url: string,
+  init: unknown,
+): Promise<{ ok: boolean; status: number; statusText: string; contentType: string; body: string } | { __error: string }> {
+  try {
+    const i = (init && typeof init === 'object') ? (init as Record<string, unknown>) : {};
+    const resp = await safeFetch(url, {
+      method: typeof i['method'] === 'string' ? (i['method'] as string) : undefined,
+      headers: i['headers'] as Record<string, string> | undefined,
+      body: typeof i['body'] === 'string' ? (i['body'] as string) : undefined,
+    });
+    const contentType = resp.headers.get('content-type') ?? '';
+    let body = '';
+    try { body = await resp.text(); } catch { body = ''; }
+    if (body.length > DYNAMIC_FETCH_MAX) body = body.slice(0, DYNAMIC_FETCH_MAX);
+    return { ok: resp.ok, status: resp.status, statusText: resp.statusText, contentType, body };
+  } catch (err) {
+    // SSRF block / network error → reject the worker's fetch (like a real failure).
+    return { __error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 // ── Dynamic tool class factory ─────────────────
 
 class DynamicTool extends BaseTool {
@@ -74,9 +180,18 @@ class DynamicTool extends BaseTool {
   private executeCode: string;
   private _isDangerous: boolean;
   private registry: ToolRegistry;
-  private escalator?: PermissionEscalator;
+  /** Resolve the CURRENT escalator at call time — covers tools registered before
+   *  the per-run escalator was wired (persisted at init, received from a peer). */
+  private getEscalator: () => PermissionEscalator | undefined;
+  /** Untrusted = loaded from disk / a peer; its dangerous calls always re-prompt. */
+  private trusted: boolean;
 
-  constructor(spec: GeneratedToolSpec, registry: ToolRegistry, escalator?: PermissionEscalator) {
+  constructor(
+    spec: GeneratedToolSpec,
+    registry: ToolRegistry,
+    getEscalator: () => PermissionEscalator | undefined,
+    trusted: boolean,
+  ) {
     super();
     this.name = spec.name;
     this.description = spec.description;
@@ -84,7 +199,8 @@ class DynamicTool extends BaseTool {
     this.executeCode = spec.executeCode;
     this._isDangerous = spec.isDangerous;
     this.registry = registry;
-    this.escalator = escalator;
+    this.getEscalator = getEscalator;
+    this.trusted = trusted;
   }
 
   isDangerous(): boolean {
@@ -93,31 +209,33 @@ class DynamicTool extends BaseTool {
 
   async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const registry = this.registry;
-    const escalator = this.escalator;
 
-    // callTool gives generated tools access to the full registered cascade tool set.
-    // Dangerous tools require escalation approval before running.
+    // callTool runs on the MAIN thread (the worker bridges to it). Dangerous tools
+    // require escalation; when NO approver is available we DEFAULT-DENY rather than
+    // execute. Untrusted tools always re-prompt (forceReprompt bypasses the cache).
     const callTool = async (toolName: string, toolInput: Record<string, unknown>): Promise<string> => {
       if (!registry.hasTool(toolName)) return `Tool not found: ${toolName}`;
 
       if (registry.isDangerous(toolName)) {
-        if (escalator) {
-          const req: PermissionRequest = {
-            id: `dynamic-${this.name}-${toolName}-${Date.now()}`,
-            requestedBy: `dynamic_tool:${this.name}`,
-            parentT2Id: options.tierId,
-            toolName,
-            input: toolInput,
-            isDangerous: true,
-            subtaskContext: `Dynamic tool "${this.name}" requesting access to "${toolName}"`,
-            sectionContext: `Dynamic tool "${this.name}"`,
-          };
-          const decision = await escalator.requestPermission(req);
-          if (!decision.approved) {
-            return `Permission denied for ${toolName} (decided by ${decision.decidedBy}).`;
-          }
+        const escalator = this.getEscalator();
+        if (!escalator) {
+          return `Permission denied for "${toolName}": dynamic tool "${this.name}" has no approver available (default-deny).`;
         }
-        // No escalator: fall through and let tool's own approval gate handle it
+        const req: PermissionRequest = {
+          id: `dynamic-${this.name}-${toolName}-${Date.now()}`,
+          requestedBy: `dynamic_tool:${this.name}`,
+          parentT2Id: options.tierId,
+          toolName,
+          input: toolInput,
+          isDangerous: true,
+          subtaskContext: `Dynamic tool "${this.name}" (${this.trusted ? 'trusted' : 'UNTRUSTED'}) requesting access to "${toolName}"`,
+          sectionContext: `Dynamic tool "${this.name}"`,
+          forceReprompt: !this.trusted,
+        };
+        const decision = await escalator.requestPermission(req);
+        if (!decision.approved) {
+          return `Permission denied for ${toolName} (decided by ${decision.decidedBy}).`;
+        }
       }
 
       try {
@@ -128,51 +246,58 @@ class DynamicTool extends BaseTool {
       }
     };
 
-    // The sandboxed fetch is SSRF-guarded: a generated tool (whose source is
-    // produced by an LLM that may have ingested prompt-injected web content)
-    // must not be able to reach loopback / cloud-metadata / private hosts.
-    // NOTE: node:vm is NOT a security boundary against deliberately hostile
-    // code (Object/Function reachability allows escape); it bounds accidental
-    // misbehaviour and resource use. The real control is that dangerous
-    // registered tools are still gated through the PermissionEscalator above.
-    const guardedFetch = (url: string, init?: RequestInit) => safeFetch(url, init);
+    return this.runInWorker(input, callTool);
+  }
 
-    // Sandbox: fetch, JSON, Math, Date, and callTool for cascade tool access
-    const sandbox: Record<string, unknown> = {
-      input,
-      fetch: guardedFetch,
-      callTool,
-      JSON,
-      Math,
-      Date,
-      console: { log: () => {}, error: () => {} },
-      setTimeout,
-      clearTimeout,
-      Promise,
-      Error,
-      String,
-      Number,
-      Boolean,
-      Array,
-      Object,
-      result: undefined as string | undefined,
-    };
-
-    const context = createContext(sandbox);
-    const wrapped = `(async () => { ${this.executeCode} })().then(r => { result = String(r ?? ''); }).catch(e => { result = 'Tool error: ' + e.message; });`;
-
-    try {
-      const promise = runInContext(wrapped, context, {
-        timeout: 15_000,
-        breakOnSigint: true,
-        filename: `dynamic_tool_${this.name}.js`,
-        displayErrors: true,
+  /** Spawn the worker, service its callTool/fetch bridge, enforce the kill timeout. */
+  private runInWorker(
+    input: Record<string, unknown>,
+    callTool: (name: string, input: Record<string, unknown>) => Promise<string>,
+  ): Promise<string> {
+    // Tunable kill timeout (ops may shorten/lengthen; min 200ms).
+    const timeoutMs = Math.max(200, Number(process.env['CASCADE_DYNAMIC_TOOL_TIMEOUT_MS']) || DYNAMIC_TOOL_TIMEOUT_MS);
+    return new Promise<string>((resolve) => {
+      let settled = false;
+      const worker = new Worker(HARNESS_SRC, {
+        eval: true,
+        workerData: { executeCode: this.executeCode, input },
+        resourceLimits: { maxOldGenerationSizeMb: 128 },
       });
-      await promise;
-      return (sandbox['result'] as string | undefined) ?? '';
-    } catch (err) {
-      return `Dynamic tool error: ${err instanceof Error ? err.message : String(err)}`;
-    }
+
+      const finish = (value: string) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        void worker.terminate();
+        resolve(value);
+      };
+
+      const timer = setTimeout(
+        () => finish(`Dynamic tool "${this.name}" timed out after ${timeoutMs}ms and was terminated.`),
+        timeoutMs,
+      );
+      timer.unref?.();
+
+      worker.on('message', (msg: { kind?: string; id?: number; name?: string; input?: unknown; url?: string; init?: unknown; value?: unknown }) => {
+        if (msg?.kind === 'result') {
+          finish(typeof msg.value === 'string' ? msg.value : String(msg.value ?? ''));
+        } else if (msg?.kind === 'callTool') {
+          void (async () => {
+            const value = await callTool(String(msg.name), (msg.input ?? {}) as Record<string, unknown>);
+            if (!settled) worker.postMessage({ id: msg.id, value });
+          })();
+        } else if (msg?.kind === 'fetch') {
+          void (async () => {
+            const r = await bridgeFetch(String(msg.url), msg.init);
+            if (settled) return;
+            if ('__error' in r) worker.postMessage({ id: msg.id, error: r.__error });
+            else worker.postMessage({ id: msg.id, value: r });
+          })();
+        }
+      });
+      worker.on('error', (err) => finish(`Dynamic tool error: ${err instanceof Error ? err.message : String(err)}`));
+      worker.on('exit', (code) => { if (code !== 0) finish(`Dynamic tool "${this.name}" exited unexpectedly (code ${code}).`); });
+    });
   }
 }
 
@@ -210,16 +335,19 @@ export class ToolCreator {
   private registry: ToolRegistry;
   private escalator?: PermissionEscalator;
   private workspacePath?: string;
+  /** When false, persisted tools are neither loaded nor written. */
+  private persistEnabled: boolean;
   private logger?: (msg: string) => void;
   /** name → spec, for persistence, broadcast, and re-registration. */
   private specs = new Map<string, GeneratedToolSpec>();
   /** capability fingerprint → tool name, so the same need isn't re-generated. */
   private capabilityIndex = new Map<string, string>();
 
-  constructor(router: CascadeRouter, registry: ToolRegistry, workspacePath?: string) {
+  constructor(router: CascadeRouter, registry: ToolRegistry, workspacePath?: string, persistEnabled = true) {
     this.router = router;
     this.registry = registry;
     this.workspacePath = workspacePath;
+    this.persistEnabled = persistEnabled;
   }
 
   setPermissionEscalator(escalator: PermissionEscalator): void {
@@ -298,21 +426,15 @@ Required capability: ${description.slice(0, 300)}`;
       spec.name = `${spec.name}_${Date.now() % 10000}`;
     }
 
-    // Syntax check only — don't execute. Validate with ASYNC semantics: the
-    // runtime wraps executeCode in an `async () => { ... }` IIFE, so generated
-    // code uses `await callTool(...)` / `await fetch(...)` (the prompt explicitly
-    // asks for this). Compiling it as a plain sync `new Function` rejected every
-    // I/O tool with "await is only valid in async functions" — i.e. nearly all
-    // useful tools. Use the AsyncFunction constructor so `await` is valid here.
-    try {
-      const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as FunctionConstructor;
-      new AsyncFunction('input', 'fetch', 'callTool', spec.executeCode);
-    } catch (err) {
-      this.log(`[tool-creator] Generated code for "${spec.name}" has a syntax error: ${err instanceof Error ? err.message : String(err)}`);
+    // Validate the code compiles with the worker's async signature before
+    // registering (the v0.9.5 fix — a sync check wrongly rejected every I/O tool).
+    if (!isExecutableToolCode(spec.executeCode)) {
+      this.log(`[tool-creator] Generated code for "${spec.name}" has a syntax error — discarded.`);
       return null;
     }
 
-    this.registerSpec(spec);
+    // Generated in THIS session → trusted.
+    this.registerSpec(spec, true);
     this.capabilityIndex.set(key, spec.name);
     this.log(`[tool-creator] Created tool "${spec.name}".`);
 
@@ -325,43 +447,57 @@ Required capability: ${description.slice(0, 300)}`;
 
   /**
    * Register a spec (from createTool, disk, or a peer) into the registry.
-   * Idempotent — a name already present is skipped.
+   * Idempotent — a name already present is skipped. `trusted` is set by the
+   * caller and never inherited from disk: createTool passes true; persisted and
+   * peer-broadcast specs pass false, so their dangerous actions always re-escalate.
+   * The DynamicTool resolves the escalator lazily (`() => this.escalator`) so a
+   * later setPermissionEscalator covers tools registered before the run wired it.
    */
-  registerSpec(spec: GeneratedToolSpec): void {
+  registerSpec(spec: GeneratedToolSpec, trusted = false): void {
+    spec.trusted = trusted;
     if (this.registry.hasTool(spec.name)) {
       this.specs.set(spec.name, spec);
       return;
     }
-    const tool = new DynamicTool(spec, this.registry, this.escalator);
+    const tool = new DynamicTool(spec, this.registry, () => this.escalator, trusted);
     this.registry.register(tool);
     this.specs.set(spec.name, spec);
     this.capabilityIndex.set(capabilityKey(`${spec.description}`), spec.name);
   }
 
-  /** Load tools persisted by previous runs and register them. */
+  /** Load tools persisted by previous runs and register them — as UNTRUSTED, and
+   *  only after re-validating each spec (its source could have been tampered with
+   *  or authored during a prior prompt-injected run). Untrusted tools re-escalate
+   *  any dangerous action, so a silently-reloaded tool can't act without approval. */
   async loadPersistedTools(): Promise<void> {
-    if (!this.workspacePath) return;
+    if (!this.workspacePath || !this.persistEnabled) return;
     const file = path.join(this.workspacePath, '.cascade', DYNAMIC_TOOLS_FILE);
     try {
       const raw = await fs.readFile(file, 'utf-8');
       const specs = JSON.parse(raw) as GeneratedToolSpec[];
       if (!Array.isArray(specs)) return;
       let loaded = 0;
+      let skipped = 0;
       for (const spec of specs) {
-        if (spec?.name && spec.description && spec.executeCode && spec.inputSchema) {
-          spec.inputSchema = normalizeToolSchema(spec.inputSchema);
-          this.registerSpec(spec);
-          loaded++;
+        if (!(spec?.name && spec.description && spec.executeCode && spec.inputSchema)
+            || !isExecutableToolCode(spec.executeCode)) {
+          skipped++;
+          continue;
         }
+        spec.inputSchema = normalizeToolSchema(spec.inputSchema);
+        this.registerSpec(spec, false); // persisted → untrusted
+        loaded++;
       }
-      if (loaded) this.log(`[tool-creator] Loaded ${loaded} persisted tool(s).`);
+      if (loaded || skipped) {
+        this.log(`[tool-creator] Loaded ${loaded} persisted tool(s) as untrusted${skipped ? `, skipped ${skipped} invalid` : ''}.`);
+      }
     } catch {
       // No persisted file yet, or unreadable — start fresh.
     }
   }
 
   private async persist(): Promise<void> {
-    if (!this.workspacePath) return;
+    if (!this.workspacePath || !this.persistEnabled) return;
     const dir = path.join(this.workspacePath, '.cascade');
     const file = path.join(dir, DYNAMIC_TOOLS_FILE);
     try {

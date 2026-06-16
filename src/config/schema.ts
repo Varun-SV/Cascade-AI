@@ -176,6 +176,13 @@ export const CascadeConfigSchema = z.object({
    */
   enableToolCreation: z.boolean().default(true),
   /**
+   * Persist runtime-generated tools to .cascade/dynamic-tools.json and reload them
+   * on startup for cross-run dedup. Reloaded (and peer-received) tools are always
+   * treated as UNTRUSTED — their dangerous actions re-escalate. Set false to disable
+   * persistence entirely.
+   */
+  persistDynamicTools: z.boolean().default(true),
+  /**
    * External plugin paths or npm package names to load at startup.
    * Each entry must export a default ToolPlugin object.
    * Example: ["./plugins/my-tool.js", "cascade-plugin-slack"]

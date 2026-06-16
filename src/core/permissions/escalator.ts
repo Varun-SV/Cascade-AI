@@ -79,7 +79,9 @@ export class PermissionEscalator extends EventEmitter {
     const cacheKey = `${req.parentT2Id}:${req.toolName}`;
 
     // ── 1. Check session cache ────────────────
-    if (this.sessionCache.has(cacheKey)) {
+    // Untrusted callers (forceReprompt) skip the cache so a prior `always`
+    // decision can't silently auto-approve their dangerous actions.
+    if (!req.forceReprompt && this.sessionCache.has(cacheKey)) {
       return {
         requestId: req.id,
         approved: this.sessionCache.get(cacheKey)!,
