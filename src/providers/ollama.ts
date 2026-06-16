@@ -104,6 +104,7 @@ export class OllamaProvider extends BaseProvider {
           temperature: options.temperature ?? 0.7,
         },
       }),
+      signal: options.signal,
     });
     if (!response.ok || !response.body) {
       throw new Error(`Ollama chat request failed: ${response.status} ${response.statusText}`);

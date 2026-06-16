@@ -69,6 +69,8 @@ export interface GenerateOptions {
   tools?: ToolDefinition[];
   images?: ImageAttachment[];
   stream?: boolean;
+  /** Abort signal — when it fires, the provider aborts the in-flight request (instant cancel). */
+  signal?: AbortSignal;
   /**
    * Per-call model override. When set, this exact model is used for the call
    * instead of the tier's default — lets Cascade Auto route each subtask to the

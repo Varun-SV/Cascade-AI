@@ -61,7 +61,7 @@ export class AnthropicProvider extends BaseProvider {
       system: options.systemPrompt,
       messages,
       tools: tools?.length ? tools : undefined,
-    });
+    }, { signal: options.signal });
 
     let isThinking = false;
 

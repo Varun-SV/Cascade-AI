@@ -62,7 +62,7 @@ export class OpenAIProvider extends BaseProvider {
 
     let stream: any;
     try {
-      stream = await this.client.chat.completions.create(params);
+      stream = await this.client.chat.completions.create(params, { signal: options.signal });
     } catch (err: any) {
       // Retry with max_completion_tokens instead if the model demands it (e.g., o1/o3 or custom proxy models)
       if (err.message && err.message.includes('max_completion_tokens')) {
@@ -75,7 +75,7 @@ export class OpenAIProvider extends BaseProvider {
           fallbackParams.temperature = 1;
         }
         
-        stream = await this.client.chat.completions.create(fallbackParams as any);
+        stream = await this.client.chat.completions.create(fallbackParams as any, { signal: options.signal });
       } else {
         throw err;
       }
