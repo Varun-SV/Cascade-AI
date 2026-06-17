@@ -464,6 +464,8 @@ export interface CascadeConfig {
   /** Public-benchmark data source settings for Cascade Auto. */
   benchmarks?: BenchmarksConfig;
   enableToolCreation?: boolean;
+  /** Persist runtime-generated tools and reload them on startup (untrusted). Default: true. */
+  persistDynamicTools?: boolean;
   plugins?: string[];
   localConcurrency?: number;
   localInferenceTimeoutMs?: number;
@@ -696,6 +698,13 @@ export interface PermissionRequest {
   sectionContext: string;
   /** What T1's overall task goal is (injected when escalated to T1) */
   taskContext?: string;
+  /**
+   * When true, bypass the session approval cache so this request always reaches
+   * a fresh decision. Set for UNTRUSTED runtime tools (loaded from disk or
+   * received from a peer) so a prior `always` approval cannot silently
+   * auto-approve a later dangerous action.
+   */
+  forceReprompt?: boolean;
 }
 
 /**

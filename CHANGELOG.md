@@ -5,6 +5,36 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.6] - 2026-06-16
+
+Tool-sandbox hardening for runtime tool generation. LLM-authored tool code is now treated as
+untrusted end-to-end: isolated execution, mandatory approval, and re-validated persistence.
+
+### Security
+- **Generated tools now run in a worker thread, not `node:vm`.** `node:vm` was never a security
+  boundary (its `timeout` can't stop async runaway, code shared the main heap, and a throw could take
+  down the TUI). Execution moved to `node:worker_threads` (built-in — no native dependency), giving an
+  **enforceable kill timeout** (`worker.terminate()`, verified terminating an infinite loop in ~600 ms),
+  a memory cap (`resourceLimits`), and crash containment. Cascade's privileged objects (registry,
+  router, the permission escalator) stay on the main thread; the worker reaches them only through a
+  message bridge whose `callTool` path is escalator-gated and whose `fetch` path stays SSRF-guarded by
+  `safeFetch`. Timeout is tunable via `CASCADE_DYNAMIC_TOOL_TIMEOUT_MS`.
+- **Dangerous tool calls now default-deny.** A generated tool that calls a dangerous tool (`shell`,
+  `file_write`, `file_delete`, …) when no approver is wired is now **denied** instead of executing
+  unguarded. The escalator is resolved **lazily at call time**, so tools registered before the per-run
+  escalator exists (persisted at init, received from a peer) are still gated.
+- **Persisted/peer tools load as untrusted and re-validated.** `.cascade/dynamic-tools.json` entries
+  (and peer-broadcast specs) are re-checked on load and marked **untrusted**, so any dangerous action
+  always **re-escalates** to you (`forceReprompt` bypasses the session approval cache) — a tool authored
+  in a prior, possibly prompt-injected, run can no longer silently re-arm. New `persistDynamicTools`
+  config (default `true`) disables persistence entirely when set to `false`.
+
+### Tests
+- `src/tools/tool-creator.test.ts` grows to 16 cases — worker compute, infinite-loop kill, default-deny
+  with the dangerous op confirmed not to run, lazy-escalator gating, trusted vs untrusted `forceReprompt`,
+  persisted re-validation + untrusted marking, the disable flag, and the escalator cache-bypass. Suite
+  236 → 244.
+
 ## [0.9.5] - 2026-06-16
 
 Dependency-hardening pass (safe + tested bumps only) plus a tool-generation correctness fix
