@@ -22,8 +22,11 @@ CASCADE.md
 .cascadeignore
 .claude/
 
-# Release / CI helper scripts (local use only)
-scripts/
+# Local-only helper scripts; CI-required ones are explicitly tracked below.
+scripts/*
+!scripts/refresh-benchmarks.mjs
+!scripts/publish-release.sh
+!scripts/publish-release.ps1
 
 # AI tools & generated analysis artefacts
 Cascade-AI TUI Standalone.html
