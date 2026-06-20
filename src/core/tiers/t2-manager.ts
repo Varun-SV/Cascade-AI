@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   ConversationMessage,
   EscalationPayload,
+  ModelInfo,
   PeerMessageEvent,
   PermissionRequest,
   PermissionDecision,
@@ -33,6 +34,7 @@ export class T2Manager extends BaseTier {
   private router: CascadeRouter;
   private toolRegistry: ToolRegistry;
   private assignment?: T1ToT2Assignment;
+  private sectionModel?: ModelInfo;
   private t3Workers: Map<string, T3Worker> = new Map();
   private escalations: EscalationPayload[] = [];
   private peerSyncBuffer: Array<{ fromId: string; content: unknown; timestamp: string }> = [];
@@ -165,6 +167,16 @@ export class T2Manager extends BaseTier {
 
     this.log(`T2 managing section: ${assignment.sectionTitle}`);
 
+    // Cascade Auto: route this section to the benchmark-best model for its type
+    this.sectionModel = undefined;
+    try {
+      const sectionText = `${assignment.sectionTitle} ${assignment.description} ${assignment.expectedOutput}`;
+      this.sectionModel = (await this.router.selectModelForSubtask('T2', sectionText)) ?? undefined;
+      if (this.sectionModel) {
+        this.log(`Cascade Auto: routing this section to ${this.sectionModel.provider}:${this.sectionModel.id}`);
+      }
+    } catch { /* fall back to the tier model */ }
+
     try {
       // ── Cancellation checkpoint: before section decomposition ──
       this.throwIfCancelled();
@@ -288,6 +300,7 @@ Return ONLY the JSON array.`;
       messages,
       systemPrompt: this.systemPromptOverride + T2_SYSTEM_PROMPT + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
       maxTokens: 2000,
+      ...(this.sectionModel ? { model: this.sectionModel } : {}),
     });
 
     try {
@@ -768,7 +781,8 @@ Return ONLY the JSON array.`;
         const result = await this.router.generate('T2', {
           messages,
           systemPrompt: this.systemPromptOverride + 'You are a T2 Manager. Summarize the work of your T3 workers succinctly.' + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
-          maxTokens: 500
+          maxTokens: 500,
+          ...(this.sectionModel ? { model: this.sectionModel } : {}),
         });
         currentSummary = result.content;
       } catch (err) {
@@ -823,6 +837,7 @@ Reply with exactly one word: YES, NO, or UNSURE.`;
         systemPrompt: this.systemPromptOverride + 'You are a T2 Manager evaluating permissions.' + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
         maxTokens: 10,
         temperature: 0,
+        ...(this.sectionModel ? { model: this.sectionModel } : {}),
       });
       const answer = result.content.trim().toUpperCase();
       if (answer.includes('YES')) {

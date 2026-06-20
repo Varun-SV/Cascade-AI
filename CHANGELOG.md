@@ -5,6 +5,14 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.7] - 2026-06-20
+
+### Added
+- **Cascade Auto per-T2-manager model routing.** When `cascadeAuto` is enabled, each T2 manager
+  now independently selects the benchmark-best model for its section type (coding, writing,
+  analysis, …) — matching the per-subtask routing T3 workers already had. Concurrent T2 managers
+  handling different section types will automatically use different models.
+
 ## [0.9.6] - 2026-06-16
 
 Tool-sandbox hardening for runtime tool generation. LLM-authored tool code is now treated as
