@@ -31,17 +31,20 @@ export function BottomPanel() {
       flexShrink: 0,
     }}>
       <div style={{
-        height: 28, padding: '0 12px',
+        height: 30, padding: '0 12px',
         display: 'flex', alignItems: 'center',
         borderBottom: '1px solid var(--border)',
-        gap: 8,
+        gap: 10,
       }}>
-        <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', letterSpacing: 1, textTransform: 'uppercase' }}>Terminal</span>
-        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{workspacePath || '~'}</span>
+        <span style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--text)', letterSpacing: 1, textTransform: 'uppercase' }}>Terminal</span>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{workspacePath || '~'}</span>
         <div style={{ flex: 1 }} />
         <button
           onClick={() => dispatch(toggleTerminal())}
-          style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 16, lineHeight: 1 }}
+          title="Close terminal"
+          style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: '2px 6px', borderRadius: 4, transition: 'color var(--dur), background var(--dur)' }}
+          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text)'; (e.currentTarget as HTMLElement).style.background = 'var(--bg-hover)'; }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text-muted)'; (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
         >×</button>
       </div>
       <div style={{ flex: 1, overflow: 'hidden' }}>

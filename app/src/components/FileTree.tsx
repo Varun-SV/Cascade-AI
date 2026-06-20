@@ -28,10 +28,11 @@ function TreeNode({ entry, onFileClick, depth }: { entry: FsEntry; onFileClick: 
       <div
         onClick={toggle}
         style={{
-          display: 'flex', alignItems: 'center', gap: 4,
-          padding: `2px 8px 2px ${8 + depth * 12}px`,
+          display: 'flex', alignItems: 'center', gap: 5,
+          padding: `3px 8px 3px ${8 + depth * 12}px`,
           cursor: 'pointer', fontSize: 12, color: 'var(--text)',
           whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+          borderRadius: 4, transition: 'background var(--dur)',
         }}
         onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-hover)'; }}
         onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
@@ -39,7 +40,7 @@ function TreeNode({ entry, onFileClick, depth }: { entry: FsEntry; onFileClick: 
         {entry.isDirectory
           ? <Chevron size={10} style={{ flexShrink: 0, color: 'var(--text-muted)' }} />
           : <span style={{ width: 10, flexShrink: 0 }} />}
-        <Icon size={12} style={{ flexShrink: 0, color: entry.isDirectory ? '#f5a623' : 'var(--text-muted)' }} />
+        <Icon size={12} style={{ flexShrink: 0, color: entry.isDirectory ? 'var(--warn)' : 'var(--text-muted)' }} />
         <span>{entry.name}</span>
       </div>
       {expanded && children.map((child) => (

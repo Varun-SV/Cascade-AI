@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import type { Socket } from 'socket.io-client';
-import { Send, Bot, User } from 'lucide-react';
+import { Send, Bot, User, MessageSquare } from 'lucide-react';
 import { ModelPicker } from '../components/ModelPicker.js';
 import { HelpButton } from '../help/HelpButton.js';
 import { SessionRating } from '../components/SessionRating.js';
@@ -12,6 +12,7 @@ export function ChatView({ socket }: { socket: Socket | null }) {
   const sessionId = useAppSelector((s) => s.app.sessionId);
   const { activeModel } = useAppSelector((s) => s.app);
   const [input, setInput] = useState('');
+  const [focused, setFocused] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [sessionDone, setSessionDone] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -47,25 +48,35 @@ export function ChatView({ socket }: { socket: Socket | null }) {
     setSessionDone(false);
   };
 
+  const canSend = !!input.trim() && !!socket && !streaming;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       {/* Header */}
       <div style={{
-        padding: '10px 16px', borderBottom: '1px solid var(--border)',
-        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '11px 16px', borderBottom: '1px solid var(--border)',
+        display: 'flex', alignItems: 'center', gap: 10,
       }}>
-        <span style={{ fontWeight: 600 }}>Chat</span>
+        <MessageSquare size={15} style={{ color: 'var(--accent)' }} />
+        <span style={{ fontWeight: 700, fontSize: 13, letterSpacing: '-0.2px' }}>Chat</span>
         <ModelPicker tier="t1" />
         <div style={{ flex: 1 }} />
         <HelpButton context="chat" />
       </div>
 
       {/* Messages */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: 18, display: 'flex', flexDirection: 'column', gap: 18 }}>
         {messages.length === 0 && (
-          <div style={{ textAlign: 'center', color: 'var(--text-muted)', marginTop: 60 }}>
-            <div style={{ fontSize: 36, marginBottom: 12 }}>🌊</div>
-            <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>Cascade AI</div>
+          <div style={{ textAlign: 'center', color: 'var(--text-muted)', marginTop: 64, animation: 'fadeIn 0.3s var(--ease)' }}>
+            <div style={{
+              width: 56, height: 56, borderRadius: 'var(--radius-lg)', margin: '0 auto 16px',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: 'linear-gradient(135deg, var(--accent), var(--accent-2))',
+              color: '#fff', boxShadow: 'var(--glow-accent)',
+            }}>
+              <Bot size={26} />
+            </div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--text)', marginBottom: 5, letterSpacing: '-0.2px' }}>Cascade AI</div>
             <div style={{ fontSize: 13 }}>Multi-tier AI orchestration. Ask anything.</div>
           </div>
         )}
@@ -83,35 +94,44 @@ export function ChatView({ socket }: { socket: Socket | null }) {
       {/* Input */}
       <div style={{
         padding: 12, borderTop: '1px solid var(--border)',
-        background: 'var(--bg-surface)', display: 'flex', gap: 8, alignItems: 'flex-end',
+        background: 'var(--bg-surface)', display: 'flex', gap: 10, alignItems: 'flex-end',
       }}>
         <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
-          placeholder="Message Cascade… (Enter to send)"
+          placeholder="Message Cascade…  (Enter to send)"
           rows={2}
           style={{
             flex: 1, resize: 'none', background: 'var(--bg-raised)',
-            border: '1px solid var(--border)', borderRadius: 'var(--radius)',
-            color: 'var(--text)', padding: '8px 12px', fontSize: 13,
-            fontFamily: 'inherit', outline: 'none',
+            border: `1px solid ${focused ? 'var(--accent)' : 'var(--border)'}`,
+            borderRadius: 'var(--radius-md)',
+            color: 'var(--text)', padding: '9px 12px', fontSize: 13,
+            fontFamily: 'inherit', outline: 'none', lineHeight: 1.5,
+            boxShadow: focused ? 'var(--glow-accent)' : 'none',
+            transition: 'border-color var(--dur), box-shadow var(--dur)',
           }}
         />
         <button
           onClick={send}
-          disabled={!input.trim() || streaming || !socket}
+          disabled={!canSend}
+          title="Send"
           style={{
-            width: 40, height: 40,
-            background: input.trim() && socket ? 'var(--accent)' : 'var(--bg-raised)',
-            color: input.trim() && socket ? '#fff' : 'var(--text-muted)',
-            border: '1px solid var(--border)', borderRadius: 'var(--radius)',
-            cursor: input.trim() && socket && !streaming ? 'pointer' : 'default',
+            width: 42, height: 42,
+            background: canSend ? 'linear-gradient(135deg, var(--accent), var(--accent-2))' : 'var(--bg-raised)',
+            color: canSend ? '#fff' : 'var(--text-dim)',
+            border: canSend ? 'none' : '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+            cursor: canSend ? 'pointer' : 'default',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            transition: 'background 0.15s',
+            boxShadow: canSend ? 'var(--shadow-1)' : 'none',
+            transition: 'background var(--dur), transform var(--dur)',
           }}
+          onMouseEnter={(e) => { if (canSend) (e.currentTarget as HTMLElement).style.transform = 'translateY(-1px)'; }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.transform = 'none'; }}
         >
-          <Send size={15} />
+          <Send size={16} />
         </button>
       </div>
     </div>
@@ -121,22 +141,28 @@ export function ChatView({ socket }: { socket: Socket | null }) {
 function MessageBubble({ message }: { message: { role: string; content: string; streaming?: boolean } }) {
   const isUser = message.role === 'user';
   return (
-    <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', flexDirection: isUser ? 'row-reverse' : 'row' }}>
+    <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', flexDirection: isUser ? 'row-reverse' : 'row', animation: 'fadeIn 0.25s var(--ease)' }}>
       <div style={{
-        width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
-        background: isUser ? 'var(--accent)' : 'var(--bg-raised)',
-        border: '1px solid var(--border)',
+        width: 30, height: 30, borderRadius: '50%', flexShrink: 0,
+        background: isUser ? 'linear-gradient(135deg, var(--accent), var(--accent-2))' : 'var(--bg-raised)',
+        border: isUser ? 'none' : '1px solid var(--border)',
+        color: isUser ? '#fff' : 'var(--accent)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}>
         {isUser ? <User size={14} /> : <Bot size={14} />}
       </div>
       <div style={{
-        maxWidth: '70%', background: isUser ? 'var(--accent-dim)' : 'var(--bg-raised)',
-        border: `1px solid ${isUser ? 'var(--accent)' : 'var(--border)'}`,
-        borderRadius: 'var(--radius)', padding: '8px 12px',
-        fontSize: 13, lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+        maxWidth: '74%', background: isUser ? 'var(--accent-soft)' : 'var(--bg-raised)',
+        border: `1px solid ${isUser ? 'var(--accent-dim)' : 'var(--border)'}`,
+        borderRadius: isUser ? '12px 12px 4px 12px' : '12px 12px 12px 4px',
+        padding: '9px 13px',
+        fontSize: 13, lineHeight: 1.65, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+        color: 'var(--text)',
       }}>
-        {message.content || (message.streaming ? <span style={{ color: 'var(--text-muted)' }}>▋</span> : null)}
+        {message.content || (message.streaming ? <span style={{ display: 'inline-block', width: 7, height: 14, background: 'var(--accent)', borderRadius: 1, animation: 'blink 1s step-end infinite', verticalAlign: 'middle' }} /> : null)}
+        {message.content && message.streaming && (
+          <span style={{ display: 'inline-block', width: 7, height: 14, marginLeft: 2, background: 'var(--accent)', borderRadius: 1, animation: 'blink 1s step-end infinite', verticalAlign: 'middle' }} />
+        )}
       </div>
     </div>
   );

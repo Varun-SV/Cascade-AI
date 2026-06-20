@@ -16,10 +16,11 @@ export function TerminalPanel({ cwd }: Props) {
 
     const term = new Terminal({
       theme: {
-        background: '#0d0d0f',
-        foreground: '#e8e8ec',
-        cursor: '#7c6af7',
-        selectionBackground: '#3d358066',
+        background: '#0a0a0d',
+        foreground: '#ececf2',
+        cursor: '#8b7cf9',
+        cursorAccent: '#0a0a0d',
+        selectionBackground: '#8b7cf944',
       },
       fontFamily: '"JetBrains Mono", "Cascadia Code", monospace',
       fontSize: 13,

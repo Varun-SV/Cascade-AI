@@ -61,19 +61,23 @@ export function SettingsView({ socket }: Props) {
   return (
     <div style={{
       position: 'fixed', inset: 0, zIndex: 200,
-      background: 'rgba(0,0,0,0.65)',
+      background: 'rgba(0,0,0,0.6)',
+      backdropFilter: 'blur(3px)',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
+      animation: 'fadeIn 0.2s var(--ease)',
     }} onClick={() => dispatch(setShowSettings(false))}>
       <div style={{
         width: 480, background: 'var(--bg-surface)',
-        border: '1px solid var(--border)', borderRadius: 10,
-        boxShadow: '0 24px 64px rgba(0,0,0,0.5)',
+        border: '1px solid var(--border-strong)', borderRadius: 'var(--radius-lg)',
+        boxShadow: 'var(--shadow-3)',
         overflow: 'hidden',
       }} onClick={(e) => e.stopPropagation()}>
         {/* Header */}
-        <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center' }}>
-          <span style={{ fontWeight: 600, flex: 1 }}>Settings</span>
-          <button onClick={() => dispatch(setShowSettings(false))} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex' }}>
+        <div style={{ padding: '15px 18px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center' }}>
+          <span style={{ fontWeight: 700, fontSize: 14, flex: 1, letterSpacing: '-0.2px' }}>Settings</span>
+          <button onClick={() => dispatch(setShowSettings(false))} title="Close (Esc)" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex', padding: 4, borderRadius: 5, transition: 'color var(--dur), background var(--dur)' }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text)'; (e.currentTarget as HTMLElement).style.background = 'var(--bg-hover)'; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text-muted)'; (e.currentTarget as HTMLElement).style.background = 'transparent'; }}>
             <X size={16} />
           </button>
         </div>
@@ -164,10 +168,11 @@ export function SettingsView({ socket }: Props) {
             color: 'var(--text-muted)', padding: '7px 16px', fontSize: 12, cursor: 'pointer',
           }}>Cancel</button>
           <button onClick={save} style={{
-            background: saved ? 'var(--accent-dim)' : 'var(--accent)',
-            border: 'none', borderRadius: 6, color: '#fff',
-            padding: '7px 20px', fontSize: 12, cursor: 'pointer', transition: 'background 0.15s',
-          }}>{saved ? '✔ Saved' : 'Save'}</button>
+            background: saved ? 'var(--success)' : 'linear-gradient(135deg, var(--accent), var(--accent-2))',
+            border: 'none', borderRadius: 6, color: '#fff', fontWeight: 600,
+            padding: '7px 22px', fontSize: 12, cursor: 'pointer', transition: 'background 0.15s',
+            boxShadow: 'var(--shadow-1)',
+          }}>{saved ? '✓ Saved' : 'Save'}</button>
         </div>
       </div>
     </div>
