@@ -3,20 +3,27 @@ import { ChevronDown } from 'lucide-react';
 
 export interface ModelOption { provider: string; id: string; label: string }
 
-const MODELS: ModelOption[] = [
-  { provider: 'anthropic', id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
-  { provider: 'anthropic', id: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
+export const MODELS: ModelOption[] = [
+  { provider: 'auto',      id: 'auto',                    label: 'Auto (best model)' },
+  { provider: 'anthropic', id: 'claude-sonnet-4-6',        label: 'Claude Sonnet 4.6' },
+  { provider: 'anthropic', id: 'claude-opus-4-8',          label: 'Claude Opus 4.8' },
   { provider: 'anthropic', id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5' },
-  { provider: 'openai', id: 'gpt-4o', label: 'GPT-4o' },
-  { provider: 'openai', id: 'gpt-4o-mini', label: 'GPT-4o Mini' },
-  { provider: 'google', id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
-  { provider: 'google', id: 'gemini-2.0-pro', label: 'Gemini 2.0 Pro' },
+  { provider: 'openai',    id: 'gpt-4o',                  label: 'GPT-4o' },
+  { provider: 'openai',    id: 'gpt-4o-mini',             label: 'GPT-4o Mini' },
+  { provider: 'openai',    id: 'o1',                      label: 'o1' },
+  { provider: 'openai',    id: 'o3-mini',                 label: 'o3-mini' },
+  { provider: 'google',    id: 'gemini-2.0-flash',        label: 'Gemini 2.0 Flash' },
+  { provider: 'google',    id: 'gemini-2.0-pro',          label: 'Gemini 2.0 Pro' },
+  { provider: 'groq',      id: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B (Groq)' },
+  { provider: 'groq',      id: 'mixtral-8x7b-32768',      label: 'Mixtral 8×7B (Groq)' },
 ];
 
 const PROVIDER_COLORS: Record<string, string> = {
+  auto:      '#7c6af7',
   anthropic: '#e8784b',
-  openai: '#74aa9c',
-  google: '#4285f4',
+  openai:    '#74aa9c',
+  google:    '#4285f4',
+  groq:      '#f55036',
 };
 
 interface Props {
@@ -58,10 +65,11 @@ export function ModelPicker({ value, onChange }: Props) {
 
       {open && (
         <div style={{
-          position: 'absolute', bottom: '100%', left: 0, marginBottom: 4,
+          position: 'absolute', top: '100%', left: 0, marginTop: 4,
           background: 'var(--bg-raised)', border: '1px solid var(--border)',
-          borderRadius: 8, padding: 4, minWidth: 200, zIndex: 100,
+          borderRadius: 8, padding: 4, minWidth: 220, zIndex: 200,
           boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+          maxHeight: 280, overflowY: 'auto',
         }}>
           {Object.entries(
             MODELS.reduce<Record<string, ModelOption[]>>((acc, m) => {

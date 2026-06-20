@@ -151,6 +151,9 @@ const appSlice = createSlice({
     setActiveModel(state, action: PayloadAction<Partial<{ t1: string; t2: string; t3: string }>>) {
       state.activeModel = { ...state.activeModel, ...action.payload };
     },
+    setActiveModelT1(state, action: PayloadAction<string>) {
+      state.activeModel.t1 = action.payload;
+    },
     // Session sidebar
     setSessions(state, action: PayloadAction<RuntimeSession[]>) {
       state.sessions = action.payload;
@@ -193,7 +196,7 @@ const appSlice = createSlice({
 export const {
   setView, setConnected, setReconnecting, setShowSettings, setMeta, setSessionId, updateCost,
   setAgents, upsertAgent, appendMessage, updateLastMessage,
-  setWorkspacePath, toggleTerminal, setHelpContext, setActiveModel,
+  setWorkspacePath, toggleTerminal, setHelpContext, setActiveModel, setActiveModelT1,
   setSessions, setActiveSessionId, removeSession,
   openTab, closeTab, setActiveTab, setTabDirty,
   setOnboardingDone,

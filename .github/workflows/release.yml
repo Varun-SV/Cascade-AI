@@ -132,6 +132,10 @@ jobs:
       - name: Build desktop renderer + main
         run: npm run build -w app
 
+      - name: Rebuild native modules for Electron
+        working-directory: app
+        run: npx @electron/rebuild -f -w node-pty
+
       - name: Package & publish installer
         working-directory: app
         env:

@@ -79,6 +79,48 @@ export class DashboardServer {
         }
       }
     });
+
+    this.socket.onCascadeRun(async (prompt, model, socketId) => {
+      const sessionId = randomUUID();
+      const cfg = model !== 'auto'
+        ? { ...this.config, models: { ...this.config.models, t1: model } }
+        : this.config;
+      const cascade = new Cascade(cfg, this.workspacePath, this.store);
+      this.activeSessions.set(sessionId, cascade);
+
+      cascade.on('stream:token', (e: { text: string; tierId: string }) => {
+        this.socket.emitToSocket(socketId, 'stream:token', { sessionId, tierId: e.tierId, text: e.text });
+        this.socket.broadcast('stream:token', { sessionId, tierId: e.tierId, text: e.text });
+      });
+      cascade.on('tier:status', (e: unknown) => {
+        this.socket.emitToSocket(socketId, 'tier:status', { sessionId, ...(e as object) });
+        this.socket.broadcast('tier:status', { sessionId, ...(e as object) });
+      });
+      cascade.on('permission:user-required', (e: unknown) => {
+        this.socket.emitToSocket(socketId, 'permission:user-required', { sessionId, ...(e as object) });
+      });
+      cascade.on('peer:message', (e: unknown) => {
+        this.socket.emitPeerMessage(e as import('../types.js').PeerMessageEvent);
+      });
+
+      try {
+        const result = await cascade.run({ prompt });
+        this.socket.emitToSocket(socketId, 'session:complete', { sessionId, result });
+        this.socket.broadcast('cost:update', {
+          sessionId,
+          totalTokens: result.usage.totalTokens,
+          totalCostUsd: result.usage.estimatedCostUsd,
+        });
+        this.throttledBroadcast('workspace');
+      } catch (err) {
+        this.socket.emitToSocket(socketId, 'session:error', {
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        this.activeSessions.delete(sessionId);
+      }
+    });
   }
 
   async start(): Promise<void> {

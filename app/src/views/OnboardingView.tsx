@@ -9,14 +9,56 @@ interface Provider {
   name: string;
   description: string;
   keyPlaceholder: string;
+  needsBaseUrl?: boolean;
+  noKey?: boolean;
 }
 
 const PROVIDERS: Provider[] = [
-  { id: 'openai',    name: 'OpenAI',     description: 'GPT-4o, o1, o3 models',          keyPlaceholder: 'sk-...' },
-  { id: 'anthropic', name: 'Anthropic',  description: 'Claude 3.5/4 models',             keyPlaceholder: 'sk-ant-...' },
-  { id: 'google',    name: 'Google',     description: 'Gemini 2.0 Flash, Pro models',    keyPlaceholder: 'AIza...' },
-  { id: 'groq',      name: 'Groq',       description: 'Ultra-fast inference',             keyPlaceholder: 'gsk_...' },
-  { id: 'ollama',    name: 'Ollama',     description: 'Local models, no key needed',     keyPlaceholder: '(local)' },
+  {
+    id: 'auto',
+    name: 'Auto (Smart Routing)',
+    description: 'Cascade benchmarks your configured keys and auto-selects the best model per tier',
+    keyPlaceholder: '',
+    noKey: true,
+  },
+  {
+    id: 'openai',
+    name: 'OpenAI',
+    description: 'GPT-4o, o1, o3-mini',
+    keyPlaceholder: 'sk-...',
+  },
+  {
+    id: 'anthropic',
+    name: 'Anthropic',
+    description: 'Claude Sonnet 4, Opus 4, Haiku 4',
+    keyPlaceholder: 'sk-ant-...',
+  },
+  {
+    id: 'google',
+    name: 'Google Gemini',
+    description: 'Gemini 2.0 Flash & Pro',
+    keyPlaceholder: 'AIza...',
+  },
+  {
+    id: 'groq',
+    name: 'Groq',
+    description: 'Llama 3.3, Mixtral — ultra-fast inference',
+    keyPlaceholder: 'gsk_...',
+  },
+  {
+    id: 'openai-compatible',
+    name: 'OpenAI-Compatible',
+    description: 'Azure, Mistral, Together, Perplexity, LM Studio…',
+    keyPlaceholder: 'Bearer ...',
+    needsBaseUrl: true,
+  },
+  {
+    id: 'ollama',
+    name: 'Ollama',
+    description: 'Local models — no API key needed',
+    keyPlaceholder: '(local)',
+    noKey: true,
+  },
 ];
 
 export function OnboardingView() {
@@ -24,14 +66,25 @@ export function OnboardingView() {
   const [step, setStep] = useState<Step>('welcome');
   const [selectedProvider, setSelectedProvider] = useState<Provider | null>(null);
   const [apiKey, setApiKey] = useState('');
+  const [baseUrl, setBaseUrl] = useState('');
   const [showKey, setShowKey] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [verifyError, setVerifyError] = useState('');
   const [workspace, setWorkspace] = useState('');
   const [saving, setSaving] = useState(false);
 
+  const handleProviderContinue = () => {
+    if (!selectedProvider) return;
+    if (selectedProvider.noKey) {
+      setStep('workspace');
+    } else {
+      setStep('apikey');
+    }
+  };
+
   const handleVerify = async () => {
-    if (!selectedProvider || (!apiKey && selectedProvider.id !== 'ollama')) return;
+    if (!selectedProvider) return;
+    if (!selectedProvider.noKey && !apiKey) return;
     setVerifying(true);
     setVerifyError('');
     try {
@@ -60,12 +113,14 @@ export function OnboardingView() {
   };
 
   const browseWorkspace = async () => {
-    // Use Electron dialog via preload if available; otherwise use a typed input
-    if ((window as unknown as { cascade?: { selectDirectory?: () => Promise<string> } }).cascade?.selectDirectory) {
-      const dir = await (window as unknown as { cascade: { selectDirectory: () => Promise<string> } }).cascade.selectDirectory();
+    if (window.cascade?.selectDirectory) {
+      const dir = await window.cascade.selectDirectory();
       if (dir) setWorkspace(dir);
     }
   };
+
+  const canContinueFromProvider = !!selectedProvider;
+  const canSaveKey = selectedProvider?.noKey || !!apiKey;
 
   return (
     <div style={{
@@ -90,11 +145,11 @@ export function OnboardingView() {
           {step === 'provider'  && 'Choose your AI provider'}
           {step === 'apikey'    && `Set up ${selectedProvider?.name ?? 'provider'}`}
           {step === 'workspace' && 'Choose your workspace'}
-          {step === 'done'      && 'You\'re all set!'}
+          {step === 'done'      && "You're all set!"}
         </div>
         <div style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 6 }}>
           {step === 'welcome'   && 'Multi-tier AI orchestration for complex tasks'}
-          {step === 'provider'  && 'Cascade uses T1/T2/T3 agents from any provider'}
+          {step === 'provider'  && 'Supports all major LLM providers + local models'}
           {step === 'apikey'    && 'Your key is stored securely in the system keychain'}
           {step === 'workspace' && 'The default directory for new tasks'}
           {step === 'done'      && 'Cascade is ready — launching your workspace…'}
@@ -103,7 +158,7 @@ export function OnboardingView() {
 
       {/* Card */}
       <div style={{
-        width: 480, background: 'var(--bg-surface)',
+        width: 500, background: 'var(--bg-surface)',
         border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)',
         padding: 28, boxShadow: 'var(--shadow-2)',
       }}>
@@ -142,36 +197,38 @@ export function OnboardingView() {
         {/* Step: provider select */}
         {step === 'provider' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {PROVIDERS.map((p) => (
-              <div
-                key={p.id}
-                onClick={() => setSelectedProvider(p)}
-                style={{
-                  padding: '10px 14px', borderRadius: 'var(--radius-md)',
-                  border: `1px solid ${selectedProvider?.id === p.id ? 'var(--accent)' : 'var(--border)'}`,
-                  background: selectedProvider?.id === p.id ? 'var(--accent-soft)' : 'var(--bg-raised)',
-                  cursor: 'pointer',
-                  display: 'flex', alignItems: 'center', gap: 12,
-                  transition: 'border-color var(--dur), background var(--dur)',
-                }}
-              >
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', marginBottom: 2 }}>{p.name}</div>
-                  <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>{p.description}</div>
+            <div style={{ maxHeight: 340, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8, paddingRight: 2 }}>
+              {PROVIDERS.map((p) => (
+                <div
+                  key={p.id}
+                  onClick={() => setSelectedProvider(p)}
+                  style={{
+                    padding: '10px 14px', borderRadius: 'var(--radius-md)',
+                    border: `1px solid ${selectedProvider?.id === p.id ? 'var(--accent)' : 'var(--border)'}`,
+                    background: selectedProvider?.id === p.id ? 'var(--accent-soft)' : 'var(--bg-raised)',
+                    cursor: 'pointer',
+                    display: 'flex', alignItems: 'center', gap: 12,
+                    transition: 'border-color var(--dur), background var(--dur)',
+                  }}
+                >
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', marginBottom: 2 }}>{p.name}</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>{p.description}</div>
+                  </div>
+                  {selectedProvider?.id === p.id && <Check size={14} style={{ color: 'var(--accent)', flexShrink: 0 }} />}
                 </div>
-                {selectedProvider?.id === p.id && <Check size={14} style={{ color: 'var(--accent)', flexShrink: 0 }} />}
-              </div>
-            ))}
+              ))}
+            </div>
             <button
-              onClick={() => selectedProvider && setStep('apikey')}
-              disabled={!selectedProvider}
+              onClick={handleProviderContinue}
+              disabled={!canContinueFromProvider}
               style={{
-                marginTop: 8, padding: '10px 0', width: '100%',
-                background: selectedProvider ? 'linear-gradient(135deg, var(--accent), var(--accent-2))' : 'var(--bg-raised)',
-                border: selectedProvider ? 'none' : '1px solid var(--border)',
+                marginTop: 4, padding: '10px 0', width: '100%',
+                background: canContinueFromProvider ? 'linear-gradient(135deg, var(--accent), var(--accent-2))' : 'var(--bg-raised)',
+                border: canContinueFromProvider ? 'none' : '1px solid var(--border)',
                 borderRadius: 'var(--radius-md)',
-                color: selectedProvider ? '#fff' : 'var(--text-dim)',
-                fontSize: 13, fontWeight: 600, cursor: selectedProvider ? 'pointer' : 'default',
+                color: canContinueFromProvider ? '#fff' : 'var(--text-dim)',
+                fontSize: 13, fontWeight: 600, cursor: canContinueFromProvider ? 'pointer' : 'default',
                 display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
               }}
             >
@@ -183,45 +240,63 @@ export function OnboardingView() {
         {/* Step: API key */}
         {step === 'apikey' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            {selectedProvider?.id !== 'ollama' && (
+            <div>
+              <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'block', marginBottom: 8 }}>
+                API Key for {selectedProvider?.name}
+              </label>
+              <div style={{ position: 'relative' }}>
+                <input
+                  type={showKey ? 'text' : 'password'}
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  placeholder={selectedProvider?.keyPlaceholder}
+                  autoFocus
+                  style={{
+                    width: '100%', padding: '9px 36px 9px 12px',
+                    background: 'var(--bg-raised)', border: '1px solid var(--border)',
+                    borderRadius: 'var(--radius-md)', color: 'var(--text)',
+                    fontSize: 13, fontFamily: 'var(--font-mono)', outline: 'none',
+                    boxSizing: 'border-box',
+                  }}
+                  onFocus={(e) => { (e.currentTarget as HTMLInputElement).style.borderColor = 'var(--accent)'; }}
+                  onBlur={(e) => { (e.currentTarget as HTMLInputElement).style.borderColor = 'var(--border)'; }}
+                />
+                <button
+                  onClick={() => setShowKey((v) => !v)}
+                  style={{
+                    position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    color: 'var(--text-dim)', display: 'flex',
+                  }}
+                >
+                  {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                </button>
+              </div>
+            </div>
+
+            {selectedProvider?.needsBaseUrl && (
               <div>
                 <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'block', marginBottom: 8 }}>
-                  API Key for {selectedProvider?.name}
+                  Base URL (e.g. https://your-azure-endpoint.openai.azure.com)
                 </label>
-                <div style={{ position: 'relative' }}>
-                  <input
-                    type={showKey ? 'text' : 'password'}
-                    value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
-                    placeholder={selectedProvider?.keyPlaceholder}
-                    autoFocus
-                    style={{
-                      width: '100%', padding: '9px 36px 9px 12px',
-                      background: 'var(--bg-raised)', border: '1px solid var(--border)',
-                      borderRadius: 'var(--radius-md)', color: 'var(--text)',
-                      fontSize: 13, fontFamily: 'var(--font-mono)', outline: 'none',
-                    }}
-                    onFocus={(e) => { (e.currentTarget as HTMLInputElement).style.borderColor = 'var(--accent)'; }}
-                    onBlur={(e) => { (e.currentTarget as HTMLInputElement).style.borderColor = 'var(--border)'; }}
-                  />
-                  <button
-                    onClick={() => setShowKey((v) => !v)}
-                    style={{
-                      position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
-                      background: 'none', border: 'none', cursor: 'pointer',
-                      color: 'var(--text-dim)', display: 'flex',
-                    }}
-                  >
-                    {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
-                  </button>
-                </div>
+                <input
+                  type="text"
+                  value={baseUrl}
+                  onChange={(e) => setBaseUrl(e.target.value)}
+                  placeholder="https://..."
+                  style={{
+                    width: '100%', padding: '9px 12px',
+                    background: 'var(--bg-raised)', border: '1px solid var(--border)',
+                    borderRadius: 'var(--radius-md)', color: 'var(--text)',
+                    fontSize: 13, fontFamily: 'var(--font-mono)', outline: 'none',
+                    boxSizing: 'border-box',
+                  }}
+                  onFocus={(e) => { (e.currentTarget as HTMLInputElement).style.borderColor = 'var(--accent)'; }}
+                  onBlur={(e) => { (e.currentTarget as HTMLInputElement).style.borderColor = 'var(--border)'; }}
+                />
               </div>
             )}
-            {selectedProvider?.id === 'ollama' && (
-              <div style={{ padding: '12px 14px', background: 'var(--success-soft)', borderRadius: 'var(--radius-md)', border: '1px solid var(--success)', fontSize: 12.5, color: 'var(--text-muted)' }}>
-                Ollama runs locally — no API key needed. Make sure Ollama is running on port 11434.
-              </div>
-            )}
+
             {verifyError && (
               <div style={{ fontSize: 12, color: 'var(--danger)', background: 'var(--danger-soft)', padding: '8px 12px', borderRadius: 'var(--radius-md)', border: '1px solid var(--danger)' }}>
                 {verifyError}
@@ -240,7 +315,7 @@ export function OnboardingView() {
               </button>
               <button
                 onClick={handleVerify}
-                disabled={verifying || (!apiKey && selectedProvider?.id !== 'ollama')}
+                disabled={verifying || !canSaveKey}
                 style={{
                   flex: 1, padding: '9px 0',
                   background: 'linear-gradient(135deg, var(--accent), var(--accent-2))',
@@ -302,7 +377,7 @@ export function OnboardingView() {
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
               <button
-                onClick={() => setStep('apikey')}
+                onClick={() => setStep(selectedProvider?.noKey ? 'provider' : 'apikey')}
                 style={{
                   padding: '9px 16px', background: 'transparent',
                   border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
