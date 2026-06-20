@@ -11,6 +11,11 @@ files:
   - dist-electron/**
   - assets/**
   - "!node_modules/**"
+  - "node_modules/node-pty/**"
+
+asarUnpack:
+  - "**/*.node"
+  - "node_modules/node-pty/**"
 
 extraResources:
   - from: "../dist"
