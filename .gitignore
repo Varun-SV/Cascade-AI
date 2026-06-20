@@ -40,3 +40,6 @@ dependency_graph.json
 generated-flowcharts.md
 requirements.txt
 src/cli/repl/utils/
+
+# Throwaway design mockup renders
+app/mockups/out/
