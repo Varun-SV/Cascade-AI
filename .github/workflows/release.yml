@@ -92,7 +92,10 @@ jobs:
   build-desktop:
     name: Build desktop app (${{ matrix.os }})
     needs: release
-    if: needs.release.outputs.created == 'true'
+    # Runs after a new release is created, or on a manual dispatch so the
+    # installers can be (re)built and attached to the current release without
+    # bumping the version.
+    if: needs.release.outputs.created == 'true' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
