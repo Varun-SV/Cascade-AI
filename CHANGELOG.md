@@ -5,6 +5,11 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.4] - 2026-06-20
+
+### Fixed
+- **Desktop installers now attach to the GitHub Release.** The `build-desktop` job built the DMG/EXE/AppImage correctly on every runner, but each upload was skipped with `existing type not compatible with publishing type (existingType=release publishingType=draft)`. The release job publishes a non-draft GitHub Release, while `electron-builder` defaults to `releaseType: draft` and refuses to publish into a mismatched existing release. Setting `releaseType: release` in `app/electron-builder.yml` makes the installers and `latest*.yml` auto-update metadata attach to the release as intended.
+
 ## [0.10.3] - 2026-06-20
 
 ### Fixed

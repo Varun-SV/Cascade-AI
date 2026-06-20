@@ -39,3 +39,9 @@ publish:
   provider: github
   owner: varun-sv
   repo: cascade-ai
+  # The release job publishes a non-draft GitHub Release before this build runs.
+  # electron-builder defaults to releaseType: draft, which it considers
+  # incompatible with an existing published release and skips every upload
+  # ("existing type not compatible with publishing type"). Match the published
+  # release so the installers + latest*.yml actually attach.
+  releaseType: release
