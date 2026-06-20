@@ -579,6 +579,19 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           : `✔ Copied ${which} (${msg.content.length} chars) to clipboard.`;
       },
       onWhy: () => formatDecisionTrail(decisionLogRef.current),
+      onRate: (args) => {
+        const cascade = cascadeRef.current;
+        if (!cascade) return 'Not ready yet.';
+        const rating = (args[0] ?? '').toLowerCase();
+        if (rating !== 'good' && rating !== 'bad') {
+          return 'Usage: /rate good | bad';
+        }
+        const recorded = cascade.rateLastRun(rating as 'good' | 'bad');
+        if (!recorded) return 'Nothing to rate — run a task first, or auto-routing is not enabled.';
+        return rating === 'good'
+          ? '✔ Rated good — models used for this task type got a boost.'
+          : '✔ Rated bad — models used for this task type were penalised. Auto-routing will try alternatives next time.';
+      },
       onComms: () => {
         dispatch({ type: 'TOGGLE_COMMS' });
         return state.showComms

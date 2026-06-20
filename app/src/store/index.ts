@@ -27,6 +27,8 @@ export interface ChatMessage {
 export interface AppState {
   view: ViewMode;
   connected: boolean;
+  reconnecting: boolean;
+  showSettings: boolean;
   backendPort: number;
   authToken: string;
   sessionId: string | null;
@@ -44,6 +46,8 @@ export interface AppState {
 const initialState: AppState = {
   view: 'cockpit',
   connected: false,
+  reconnecting: false,
+  showSettings: false,
   backendPort: 0,
   authToken: '',
   sessionId: null,
@@ -68,6 +72,12 @@ const appSlice = createSlice({
     },
     setConnected(state, action: PayloadAction<boolean>) {
       state.connected = action.payload;
+    },
+    setReconnecting(state, action: PayloadAction<boolean>) {
+      state.reconnecting = action.payload;
+    },
+    setShowSettings(state, action: PayloadAction<boolean>) {
+      state.showSettings = action.payload;
     },
     setMeta(state, action: PayloadAction<{ port: number; token: string }>) {
       state.backendPort = action.payload.port;
@@ -114,7 +124,7 @@ const appSlice = createSlice({
 });
 
 export const {
-  setView, setConnected, setMeta, setSessionId, updateCost,
+  setView, setConnected, setReconnecting, setShowSettings, setMeta, setSessionId, updateCost,
   setAgents, upsertAgent, appendMessage, updateLastMessage,
   setWorkspacePath, toggleTerminal, setHelpContext, setActiveModel,
 } = appSlice.actions;

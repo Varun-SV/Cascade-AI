@@ -215,6 +215,20 @@ export class TaskAnalyzer {
     void this.tracker.save();
   }
 
+  /**
+   * Record an explicit user rating (good/bad) for the last run's selected models.
+   * Explicit ratings carry 3× the weight of auto-detected outcomes.
+   * Does NOT clear lastSelectedModels — the auto record already did that.
+   */
+  recordExplicitRating(rating: 'good' | 'bad'): boolean {
+    if (!this.tracker || !this.lastProfile) return false;
+    const taskType = this.lastProfile.type;
+    for (const [, model] of this.lastSelectedModels) {
+      this.tracker.recordExplicit(model.id, taskType, rating, 0);
+    }
+    return this.lastSelectedModels.size > 0;
+  }
+
   private scoreModel(model: ModelInfo, profile: TaskProfile): number {
     const perf = this.tracker?.performanceScore(model.id, profile.type) ?? 0.5;
     const costEff = this.costEfficiency(model, profile.complexity);

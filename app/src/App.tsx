@@ -7,8 +7,9 @@ import { StatusBar } from './layout/StatusBar.js';
 import { HelpPanel } from './help/HelpPanel.js';
 import {
   useAppDispatch, useAppSelector,
-  setConnected, setMeta, updateCost, upsertAgent, updateLastMessage, appendMessage,
+  setConnected, setReconnecting, setMeta, updateCost, upsertAgent, updateLastMessage, appendMessage,
 } from './store/index.js';
+import { SettingsView } from './views/SettingsView.js';
 
 // Extend window for the Electron preload bridge
 declare global {
@@ -33,7 +34,7 @@ declare global {
 
 export function App() {
   const dispatch = useAppDispatch();
-  const { backendPort, authToken, helpContext } = useAppSelector((s) => s.app);
+  const { backendPort, authToken, helpContext, showSettings } = useAppSelector((s) => s.app);
   const socketRef = useRef<Socket | null>(null);
 
   // Fetch Electron meta (port + token) from preload bridge
@@ -57,8 +58,10 @@ export function App() {
     });
     socketRef.current = socket;
 
-    socket.on('connect', () => dispatch(setConnected(true)));
+    socket.on('connect', () => { dispatch(setConnected(true)); dispatch(setReconnecting(false)); });
     socket.on('disconnect', () => dispatch(setConnected(false)));
+    socket.on('connect_error', () => dispatch(setReconnecting(true)));
+    socket.on('reconnect', () => { dispatch(setConnected(true)); dispatch(setReconnecting(false)); });
 
     socket.on('cost:update', (data: { totalCostUsd: number; totalTokens: number }) => {
       dispatch(updateCost(data));
@@ -98,6 +101,7 @@ export function App() {
         {helpContext && <HelpPanel />}
       </div>
       <StatusBar />
+      {showSettings && <SettingsView socket={socketRef.current} />}
     </div>
   );
 }

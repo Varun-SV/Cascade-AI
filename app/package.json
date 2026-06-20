@@ -1,6 +1,6 @@
 {
   "name": "cascade-ai-desktop",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "description": "Cascade AI — purpose-built desktop application",
   "author": "Varun SV",
   "private": true,
@@ -28,7 +28,8 @@
     "react-syntax-highlighter": "^15.5.0",
     "fuse.js": "^7.0.0",
     "lucide-react": "^0.460.0",
-    "socket.io-client": "^4.8.0"
+    "socket.io-client": "^4.8.0",
+    "electron-updater": "^6.3.0"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",

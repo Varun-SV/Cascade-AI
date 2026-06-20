@@ -23,6 +23,7 @@ import { modelsCommand } from './commands/models.js';
 import { exportCommand } from './commands/export.js';
 import { linkCommand } from './commands/link.js';
 import { telemetryCommand } from './commands/telemetry.js';
+import { statsCommand } from './commands/stats.js';
 import { runSetupWizard } from './setup/index.js';
 import { McpClient } from '../mcp/client.js';
 
@@ -197,6 +198,13 @@ program
       format: opts.format as 'markdown' | 'json',
       output: opts.output,
     });
+  });
+
+program
+  .command('stats')
+  .description('Show auto-routing history: which models work best per task type')
+  .action(async () => {
+    await statsCommand();
   });
 
 // ── Start REPL ────────────────────────────────

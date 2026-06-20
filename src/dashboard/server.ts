@@ -32,6 +32,7 @@ export class DashboardServer {
   private store: MemoryStore;
   private globalStore: MemoryStore | null = null;
   private broadcastTimer: NodeJS.Timeout | null = null;
+  private activeSessions = new Map<string, import('../core/cascade.js').Cascade>();
   private port: number;
   private host: string;
   private workspacePath: string;
@@ -54,6 +55,30 @@ export class DashboardServer {
     });
     this.setupMiddleware();
     this.setupRoutes();
+    this.socket.onSessionRate((sessionId, rating) => {
+      this.activeSessions.get(sessionId)?.rateLastRun(rating);
+    });
+    this.socket.onConfigUpdate((data) => {
+      if (data.keys) {
+        for (const [type, apiKey] of Object.entries(data.keys)) {
+          if (!apiKey) continue;
+          const provider = this.config.providers.find((p) => p.type === (type as import('../types.js').ProviderType));
+          if (provider) provider.apiKey = apiKey;
+          else this.config.providers.push({ type: type as import('../types.js').ProviderType, apiKey });
+        }
+      }
+      if (data.models) {
+        this.config.models = { ...this.config.models, ...data.models };
+      }
+      if (data.budget) {
+        if (typeof data.budget.maxCostPerRun === 'number') {
+          this.config.budget.maxCostPerRunUsd = data.budget.maxCostPerRun;
+        }
+        if (data.budget.autoBias === 'balanced' || data.budget.autoBias === 'quality' || data.budget.autoBias === 'cost') {
+          this.config.autoBias = data.budget.autoBias;
+        }
+      }
+    });
   }
 
   async start(): Promise<void> {
@@ -577,6 +602,7 @@ export class DashboardServer {
 
       void (async () => {
         const cascade = new Cascade(this.config, this.workspacePath, this.store);
+        this.activeSessions.set(sessionId, cascade);
 
         cascade.on('stream:token', (e: { text: string; tierId: string }) => {
           this.socket.broadcast('stream:token', { sessionId, tierId: e.tierId, text: e.text });
@@ -607,6 +633,8 @@ export class DashboardServer {
             sessionId,
             error: err instanceof Error ? err.message : String(err),
           });
+        } finally {
+          this.activeSessions.delete(sessionId);
         }
       })();
     });
