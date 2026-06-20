@@ -8,6 +8,7 @@
   "type": "commonjs",
   "scripts": {
     "dev": "concurrently -k \"vite\" \"electron .\"",
+    "gen:icon": "node build-icon.cjs",
     "build": "vite build && tsc -p electron/tsconfig.json",
     "build:mac": "npm run build && electron-builder --mac",
     "build:win": "npm run build && electron-builder --win",

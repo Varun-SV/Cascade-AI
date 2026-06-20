@@ -19,11 +19,13 @@ extraResources:
 
 mac:
   category: public.app-category.developer-tools
+  icon: assets/icon.png
   target:
     - target: dmg
       arch: [x64, arm64]
 
 win:
+  icon: assets/icon.png
   target:
     - target: nsis
       arch: [x64]
