@@ -69,7 +69,11 @@ async function startBackend(): Promise<void> {
       }).show();
     });
   } catch (err) {
-    console.warn('[main] Backend start failed (expected in dev without build):', err);
+    console.warn('[main] Backend start failed:', err);
+    // Reset so the renderer's `if (!backendPort) return` guard skips Socket.IO
+    // entirely instead of connecting to an unused port and showing "Reconnecting".
+    backendPort = 0;
+    authToken = '';
   }
 }
 
