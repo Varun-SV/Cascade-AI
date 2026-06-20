@@ -22,16 +22,21 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
         background: 'var(--bg-base)', color: 'var(--text)',
         fontFamily: 'var(--font-mono, monospace)',
       }}>
-        <div style={{ fontSize: 32 }}>⚠</div>
-        <div style={{ fontWeight: 600 }}>Something went wrong</div>
-        <div style={{ fontSize: 12, color: 'var(--text-muted)', maxWidth: 400, textAlign: 'center' }}>
+        <div style={{
+          width: 60, height: 60, borderRadius: 'var(--radius-lg, 12px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'var(--danger-soft, rgba(240,80,110,0.14))', color: 'var(--danger, #f0506e)', fontSize: 30,
+        }}>⚠</div>
+        <div style={{ fontWeight: 700, fontSize: 15 }}>Something went wrong</div>
+        <div style={{ fontSize: 12, color: 'var(--text-muted)', maxWidth: 420, textAlign: 'center', lineHeight: 1.6 }}>
           {this.state.message || 'An unexpected error occurred in the renderer.'}
         </div>
         <button
           onClick={() => window.location.reload()}
           style={{
-            background: 'var(--accent)', border: 'none', borderRadius: 6,
-            color: '#fff', padding: '8px 20px', fontSize: 13, cursor: 'pointer',
+            background: 'linear-gradient(135deg, var(--accent, #8b7cf9), var(--accent-2, #3ec9d6))', border: 'none', borderRadius: 8,
+            color: '#fff', padding: '9px 22px', fontSize: 13, fontWeight: 600, cursor: 'pointer',
+            boxShadow: 'var(--shadow-1)',
           }}
         >
           Reload

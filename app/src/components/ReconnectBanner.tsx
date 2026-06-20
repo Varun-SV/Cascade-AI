@@ -6,11 +6,12 @@ export function ReconnectBanner() {
 
   return (
     <div style={{
-      background: 'rgba(245,166,35,0.15)',
-      borderBottom: '1px solid rgba(245,166,35,0.4)',
-      color: '#f5a623',
+      background: 'var(--warn-soft)',
+      borderBottom: '1px solid var(--warn)',
+      color: 'var(--warn)',
       fontSize: 11,
-      padding: '5px 12px',
+      fontWeight: 600,
+      padding: '6px 12px',
       display: 'flex',
       alignItems: 'center',
       gap: 8,
@@ -19,11 +20,10 @@ export function ReconnectBanner() {
       <span style={{
         display: 'inline-block',
         width: 8, height: 8, borderRadius: '50%',
-        background: '#f5a623',
+        background: 'var(--warn)',
         animation: 'pulse 1.2s ease-in-out infinite',
       }} />
       Reconnecting to Cascade backend…
-      <style>{`@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }`}</style>
     </div>
   );
 }

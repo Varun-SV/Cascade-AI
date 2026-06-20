@@ -5,6 +5,15 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-06-20
+
+### Changed
+- **Desktop app deep redesign.** Reworked the Electron app's visual identity around an evolved, dark-mode-first design-token system in `app/index.html` — a cooler layered neutral ramp, a primary violet + secondary cyan accent, per-tier identity colors (T1 amber · T2 violet · T3 cyan), semantic success/warn/danger/info tokens, an elevation + radius scale, and refined focus, selection, and scrollbar styling. Every view reads these tokens, so the new palette propagates consistently across Cockpit, Chat, Code, Settings, and the help panel.
+- **View-by-view polish.** Tier-colored agent graph nodes with live status dots and progress bars, a tier legend and richer empty states in the Cockpit, refined chat message bubbles with a streaming cursor, gradient send/save actions with hover affordances, an explorer header in the Code view, a blurred settings modal, and lucide-icon thumbs for session rating. No orchestration, socket, IPC, or routing logic changed — presentation only.
+
+### Fixed
+- **Landing page now scales on mobile.** The marketing `index.html` no longer overflows on phones: the 4-column complexity table scrolls horizontally inside a wrapper instead of crushing, a new sub-480px breakpoint stacks the hero/CTA/download buttons full-width, reduces hero padding and headline sizes, reflows the T3 worker grid to two columns, and tightens card and table padding. Hero eyebrow version string refreshed to the current release.
+
 ## [0.10.4] - 2026-06-20
 
 ### Fixed

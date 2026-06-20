@@ -13,22 +13,24 @@ export function ActivityBar() {
 
   return (
     <aside style={{
-      width: 48,
+      width: 52,
       background: 'var(--bg-surface)',
       borderRight: '1px solid var(--border)',
       display: 'flex',
       flexDirection: 'column',
       alignItems: 'center',
-      paddingTop: 12,
-      gap: 4,
+      paddingTop: 14,
+      gap: 6,
       flexShrink: 0,
     }}>
       {/* Logo mark */}
       <div style={{
-        width: 28, height: 28, borderRadius: 6,
-        background: 'var(--accent)', marginBottom: 16,
+        width: 30, height: 30, borderRadius: 8,
+        background: 'linear-gradient(135deg, var(--accent), var(--accent-2))',
+        marginBottom: 18,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
-        fontSize: 14, fontWeight: 700, color: '#fff', letterSpacing: '-0.5px',
+        fontSize: 15, fontWeight: 800, color: '#fff', letterSpacing: '-0.5px',
+        boxShadow: 'var(--glow-accent)',
       }}>C</div>
 
       {NAV_ITEMS.map(({ icon: Icon, label, view }) => (
@@ -49,6 +51,7 @@ export function ActivityBar() {
         active={false}
         onClick={() => dispatch(setShowSettings(true))}
       />
+      <div style={{ height: 8 }} />
     </aside>
   );
 }
@@ -66,20 +69,28 @@ function NavButton({
       onClick={onClick}
       title={label}
       style={{
-        width: 36, height: 36, borderRadius: 'var(--radius)',
-        background: active ? 'var(--accent-dim)' : 'transparent',
+        position: 'relative',
+        width: 40, height: 40, borderRadius: 'var(--radius-md)',
+        background: active ? 'var(--accent-soft)' : 'transparent',
         color: active ? 'var(--accent)' : 'var(--text-muted)',
         border: 'none', cursor: 'pointer',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
-        transition: 'background 0.15s, color 0.15s',
+        transition: 'background var(--dur) var(--ease), color var(--dur) var(--ease)',
       }}
       onMouseEnter={(e) => {
-        if (!active) (e.currentTarget as HTMLElement).style.background = 'var(--bg-hover)';
+        if (!active) { (e.currentTarget as HTMLElement).style.background = 'var(--bg-hover)'; (e.currentTarget as HTMLElement).style.color = 'var(--text)'; }
       }}
       onMouseLeave={(e) => {
-        if (!active) (e.currentTarget as HTMLElement).style.background = 'transparent';
+        if (!active) { (e.currentTarget as HTMLElement).style.background = 'transparent'; (e.currentTarget as HTMLElement).style.color = 'var(--text-muted)'; }
       }}
     >
+      {/* Active indicator rail */}
+      <span style={{
+        position: 'absolute', left: -10, top: '50%', transform: 'translateY(-50%)',
+        width: 3, height: active ? 18 : 0, borderRadius: 2,
+        background: 'var(--accent)',
+        transition: 'height var(--dur) var(--ease)',
+      }} />
       {icon}
     </button>
   );
