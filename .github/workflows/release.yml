@@ -2,6 +2,8 @@
 # release yet. Idempotent: every push to main checks the current version and
 # creates a release only if one doesn't already exist, so merging a version bump
 # (or this workflow itself) publishes the release automatically.
+# After creating the release, builds native desktop installers (macOS/Windows/Linux)
+# and attaches them to the release alongside the auto-generated source archives.
 name: Release on version change
 
 on:
@@ -19,6 +21,9 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      created: ${{ steps.check.outputs.exists == 'false' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -83,3 +88,52 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_ACCESS_TOKEN }}
         run: npm publish
+
+  build-desktop:
+    name: Build desktop app (${{ matrix.os }})
+    needs: release
+    if: needs.release.outputs.created == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact_pattern: "app/dist-app/*.dmg"
+            platform_flag: "--mac"
+          - os: windows-latest
+            artifact_pattern: "app/dist-app/*.exe"
+            platform_flag: "--win"
+          - os: ubuntu-latest
+            artifact_pattern: "app/dist-app/*.AppImage"
+            platform_flag: "--linux"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build desktop app
+        run: npm run build:app -- ${{ matrix.platform_flag }}
+
+      - name: Upload installer to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(${{ matrix.artifact_pattern }})
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No installer artifacts found matching ${{ matrix.artifact_pattern }}"
+            exit 1
+          fi
+          gh release upload "v${{ needs.release.outputs.version }}" \
+            "${files[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber

@@ -1,0 +1,188 @@
+import {
+  app,
+  BrowserWindow,
+  Tray,
+  Menu,
+  Notification,
+  ipcMain,
+  nativeImage,
+  protocol,
+  net as electronNet,
+} from 'electron';
+import { join, pathToFileURL } from 'node:path';
+import { createServer } from 'node:net';
+
+const isDev = process.env.ELECTRON_DEV === '1';
+
+// ─── Port helper ─────────────────────────────────────────────────────────────
+function findFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.listen(0, '127.0.0.1', () => {
+      const { port } = srv.address() as { port: number };
+      srv.close((err) => (err ? reject(err) : resolve(port)));
+    });
+  });
+}
+
+// ─── Globals ─────────────────────────────────────────────────────────────────
+let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
+let backendPort = 0;
+let authToken = '';
+
+// ─── Backend ─────────────────────────────────────────────────────────────────
+async function startBackend(): Promise<void> {
+  backendPort = await findFreePort();
+  // Generate a random session token for auto-login
+  authToken = require('node:crypto').randomBytes(24).toString('hex');
+
+  try {
+    // Import the cascade-ai core package (built CommonJS output lives at ../dist)
+    const corePath = isDev
+      ? join(__dirname, '../../dist/index.cjs')
+      : join(process.resourcesPath, 'cascade-core/index.cjs');
+    const { DashboardServer } = require(corePath);
+
+    const server = new DashboardServer({
+      port: backendPort,
+      token: authToken,
+    });
+    await server.start();
+    console.log(`[main] Cascade backend started on port ${backendPort}`);
+
+    // Forward escalation events to desktop notifications
+    server.on?.('permission:user-required', (payload: Record<string, unknown>) => {
+      if (mainWindow?.isFocused()) return;
+      new Notification({
+        title: 'Cascade AI — Approval Required',
+        body: `Tool: ${payload.tool ?? 'unknown'} — click to review`,
+      }).show();
+    });
+
+    server.on?.('session:complete', (payload: Record<string, unknown>) => {
+      if (mainWindow?.isFocused()) return;
+      new Notification({
+        title: 'Cascade AI — Task Complete',
+        body: String(payload.title ?? 'Session finished'),
+      }).show();
+    });
+  } catch (err) {
+    console.warn('[main] Backend start failed (expected in dev without build):', err);
+  }
+}
+
+// ─── IPC handlers ─────────────────────────────────────────────────────────────
+function registerIPC(): void {
+  ipcMain.handle('cascade:meta', () => ({
+    port: backendPort,
+    token: authToken,
+    platform: process.platform,
+    version: app.getVersion(),
+  }));
+
+  // PTY (terminal) — node-pty runs in main process, data ferried via IPC
+  let pty: import('node-pty').IPty | null = null;
+  ipcMain.handle('pty:spawn', (_e, cwd: string) => {
+    try {
+      const nodePty = require('node-pty');
+      const shell = process.platform === 'win32' ? 'cmd.exe' : (process.env.SHELL ?? '/bin/bash');
+      pty = nodePty.spawn(shell, [], { cwd, env: process.env, cols: 80, rows: 24 });
+      pty.onData((data: string) => mainWindow?.webContents.send('pty:data', data));
+      pty.onExit(() => mainWindow?.webContents.send('pty:exit'));
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    }
+  });
+  ipcMain.on('pty:write', (_e, data: string) => pty?.write(data));
+  ipcMain.on('pty:resize', (_e, cols: number, rows: number) => pty?.resize(cols, rows));
+  ipcMain.on('pty:kill', () => { pty?.kill(); pty = null; });
+
+  // File system
+  ipcMain.handle('fs:readDir', async (_e, dirPath: string) => {
+    const { readdir, stat } = require('node:fs/promises');
+    const entries = await readdir(dirPath);
+    return Promise.all(entries.map(async (name: string) => {
+      const fullPath = join(dirPath, name);
+      const s = await stat(fullPath);
+      return { name, fullPath, isDirectory: s.isDirectory() };
+    }));
+  });
+  ipcMain.handle('fs:readFile', async (_e, filePath: string) => {
+    const { readFile } = require('node:fs/promises');
+    return readFile(filePath, 'utf8');
+  });
+}
+
+// ─── Window ───────────────────────────────────────────────────────────────────
+function createWindow(): void {
+  mainWindow = new BrowserWindow({
+    width: 1440,
+    height: 900,
+    minWidth: 900,
+    minHeight: 600,
+    backgroundColor: '#0d0d0f',
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+    webPreferences: {
+      preload: join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false, // node-pty in preload needs this off
+    },
+  });
+
+  if (isDev) {
+    mainWindow.loadURL('http://localhost:5173');
+    mainWindow.webContents.openDevTools();
+  } else {
+    // Register app:// protocol to serve renderer files securely
+    const rendererPath = join(__dirname, '../dist-renderer');
+    mainWindow.loadURL('app://./index.html');
+  }
+
+  mainWindow.on('closed', () => { mainWindow = null; });
+}
+
+// ─── Tray ─────────────────────────────────────────────────────────────────────
+function createTray(): void {
+  const iconPath = join(__dirname, '../assets/tray.png');
+  const icon = nativeImage.createFromPath(iconPath);
+  tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon);
+  tray.setToolTip('Cascade AI');
+  const menu = Menu.buildFromTemplate([
+    { label: 'Show', click: () => mainWindow?.show() },
+    { label: 'Hide', click: () => mainWindow?.hide() },
+    { type: 'separator' },
+    { label: 'Quit', click: () => app.quit() },
+  ]);
+  tray.setContextMenu(menu);
+  tray.on('double-click', () => mainWindow?.show());
+}
+
+// ─── App lifecycle ─────────────────────────────────────────────────────────────
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'app', privileges: { secure: true, standard: true, supportFetchAPI: true } },
+]);
+
+app.whenReady().then(async () => {
+  // Serve renderer files via app:// scheme
+  protocol.handle('app', (request) => {
+    const url = request.url.replace('app://.', '');
+    const filePath = join(__dirname, '../dist-renderer', url === '/' ? '/index.html' : url);
+    return electronNet.fetch(pathToFileURL(filePath).toString());
+  });
+
+  registerIPC();
+  await startBackend();
+  createWindow();
+  createTray();
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+});
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
