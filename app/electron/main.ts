@@ -119,6 +119,62 @@ function registerIPC(): void {
     const { readFile } = require('node:fs/promises');
     return readFile(filePath, 'utf8');
   });
+
+  // Config — read/write provider API key + workspace for onboarding
+  ipcMain.handle('cascade:getConfig', async () => {
+    try {
+      const store = getConfigStore();
+      const provider = store.get('provider', '') as string;
+      const workspace = store.get('workspace', '') as string;
+      const onboardingDone = store.get('onboarding_done', false) as boolean;
+      let apiKey = '';
+      try {
+        const keytar = require('keytar');
+        apiKey = (await keytar.getPassword('cascade-ai', provider)) ?? '';
+      } catch { /* keytar unavailable */ }
+      return { provider, apiKey, workspace, onboardingDone };
+    } catch {
+      return { provider: '', apiKey: '', workspace: '', onboardingDone: false };
+    }
+  });
+
+  ipcMain.handle('cascade:setConfig', async (_e, cfg: { provider: string; apiKey: string; workspace: string }) => {
+    try {
+      const store = getConfigStore();
+      store.set('provider', cfg.provider);
+      store.set('workspace', cfg.workspace);
+      store.set('onboarding_done', true);
+      if (cfg.apiKey && cfg.provider) {
+        try {
+          const keytar = require('keytar');
+          await keytar.setPassword('cascade-ai', cfg.provider, cfg.apiKey);
+        } catch { /* keytar unavailable */ }
+      }
+    } catch (err) {
+      console.warn('[main] setConfig failed:', err);
+    }
+  });
+
+  // Directory picker dialog
+  ipcMain.handle('dialog:selectDirectory', async () => {
+    const { dialog } = require('electron');
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    return result.canceled ? null : result.filePaths[0];
+  });
+}
+
+// ─── Config store (electron-store or simple JSON fallback) ────────────────────
+function getConfigStore() {
+  try {
+    const ElectronStore = require('electron-store');
+    return new ElectronStore({ name: 'cascade-config' });
+  } catch {
+    // Minimal in-memory fallback for dev
+    const m = new Map<string, unknown>();
+    return { get: (k: string, d: unknown) => m.get(k) ?? d, set: (k: string, v: unknown) => m.set(k, v) };
+  }
 }
 
 // ─── Window ───────────────────────────────────────────────────────────────────
@@ -129,7 +185,7 @@ function createWindow(): void {
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    backgroundColor: '#0a0a0d',
+    backgroundColor: '#06080f',
     // Frameless-style chrome on every platform: macOS keeps inset traffic
     // lights, Windows/Linux get themed window controls via titleBarOverlay.
     // The app draws its own draggable title strip (see TitleBar.tsx).
@@ -138,9 +194,9 @@ function createWindow(): void {
       ? {}
       : {
           titleBarOverlay: {
-            color: '#0a0a0d',
-            symbolColor: '#b8b8c8',
-            height: 40,
+            color: '#0f1117',
+            symbolColor: '#6e738d',
+            height: 38,
           },
         }),
     autoHideMenuBar: true, // no in-window menu bar; shortcuts stay via roles

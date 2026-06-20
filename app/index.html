@@ -13,45 +13,45 @@
          Type scale (px):           10 · 11 · 12 · 13 · 15 · 18 · 24
          ─────────────────────────────────────────────────────────────── */
       :root {
-        /* Neutral ramp — cooler, deeper, layered */
-        --bg-base:        #0a0a0d;
-        --bg-surface:     #111116;
-        --bg-raised:      #18181f;
-        --bg-overlay:     #1f1f28;
-        --bg-hover:       #26262f;
-        --bg-active:      #2e2e3a;
+        /* Neutral ramp — Catppuccin Macchiato-inspired, deep navy-black */
+        --bg-base:        #06080f;
+        --bg-surface:     #0f1117;
+        --bg-raised:      #131520;
+        --bg-overlay:     #1a1d2e;
+        --bg-hover:       #222536;
+        --bg-active:      #2a2d3e;
 
-        --border:         #26262f;
-        --border-strong:  #383844;
+        --border:         #1a1d2e;
+        --border-strong:  #2a2d3e;
 
-        --text:           #ececf2;
-        --text-muted:     #8888a0;
-        --text-dim:       #5a5a6e;
+        --text:           #cdd6f4;
+        --text-muted:     #6e738d;
+        --text-dim:       #3d4455;
 
         /* Primary accent (violet) + secondary (cyan) */
-        --accent:         #8b7cf9;
-        --accent-hover:   #9d90fa;
-        --accent-dim:     #2a2358;
-        --accent-soft:    rgba(139, 124, 249, 0.14);
-        --accent-2:       #3ec9d6;
-        --accent-2-soft:  rgba(62, 201, 214, 0.14);
+        --accent:         #7c6af7;
+        --accent-hover:   #9080f9;
+        --accent-dim:     #221d55;
+        --accent-soft:    rgba(124, 106, 247, 0.14);
+        --accent-2:       #00d4e8;
+        --accent-2-soft:  rgba(0, 212, 232, 0.14);
 
-        /* Per-tier identity (matches marketing site: T1 amber · T2 violet · T3 cyan) */
+        /* Per-tier identity (T1 amber · T2 violet light · T3 deep cyan) */
         --t1:             #f5a623;
         --t1-soft:        rgba(245, 166, 35, 0.14);
-        --t2:             #8b7cf9;
-        --t2-soft:        rgba(139, 124, 249, 0.14);
-        --t3:             #3ec9d6;
-        --t3-soft:        rgba(62, 201, 214, 0.14);
+        --t2:             #b87fff;
+        --t2-soft:        rgba(184, 127, 255, 0.14);
+        --t3:             #00d4e8;
+        --t3-soft:        rgba(0, 212, 232, 0.14);
 
         /* Semantic */
-        --success:        #3ecf8e;
-        --success-soft:   rgba(62, 207, 142, 0.14);
+        --success:        #22d47a;
+        --success-soft:   rgba(34, 212, 122, 0.14);
         --warn:           #f5a623;
         --warn-soft:      rgba(245, 166, 35, 0.14);
         --danger:         #f0506e;
         --danger-soft:    rgba(240, 80, 110, 0.14);
-        --info:           #3ec9d6;
+        --info:           #00d4e8;
 
         /* Back-compat aliases (existing components read these) */
         --green:          var(--success);
@@ -69,7 +69,7 @@
         --shadow-1:       0 1px 2px rgba(0,0,0,0.30), 0 1px 3px rgba(0,0,0,0.18);
         --shadow-2:       0 8px 28px rgba(0,0,0,0.38);
         --shadow-3:       0 24px 64px rgba(0,0,0,0.52);
-        --glow-accent:    0 0 0 1px var(--accent-soft), 0 4px 20px rgba(139,124,249,0.22);
+        --glow-accent:    0 0 0 1px var(--accent-soft), 0 4px 20px rgba(124,106,247,0.22);
 
         /* Typography */
         --font-ui:        -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
@@ -83,8 +83,8 @@
       html, body, #root { height: 100%; overflow: hidden; }
       body {
         background:
-          radial-gradient(1200px 600px at 80% -10%, rgba(139,124,249,0.06), transparent 60%),
-          radial-gradient(900px 500px at -10% 110%, rgba(62,201,214,0.05), transparent 55%),
+          radial-gradient(1200px 600px at 80% -10%, rgba(124,106,247,0.06), transparent 60%),
+          radial-gradient(900px 500px at -10% 110%, rgba(0,212,232,0.05), transparent 55%),
           var(--bg-base);
         color: var(--text);
         font-family: var(--font-ui);

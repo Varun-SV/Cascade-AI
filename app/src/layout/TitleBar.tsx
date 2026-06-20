@@ -1,27 +1,17 @@
 import { useAppSelector } from '../store/index.js';
 
-/**
- * Custom draggable title strip that replaces the native OS title bar / menu.
- * The window is created frameless (titleBarStyle: 'hidden' / 'hiddenInset'),
- * so this bar provides the drag region and brand chrome. Native window controls
- * sit on top — traffic lights inset on macOS, themed min/max/close overlay on
- * Windows/Linux — so we reserve padding on the matching side.
- */
 export function TitleBar() {
   const isMac = (window.cascade?.platform ?? 'darwin') === 'darwin';
   const connected = useAppSelector((s) => s.app.connected);
 
   return (
     <div
-      // The whole bar is draggable; interactive children opt out via no-drag.
       style={{
-        height: 40,
+        height: 38,
         flexShrink: 0,
         display: 'flex',
         alignItems: 'center',
-        gap: 9,
-        // macOS: leave room for traffic lights on the left.
-        // Windows/Linux: leave room for the window-controls overlay on the right.
+        gap: 8,
         paddingLeft: isMac ? 78 : 12,
         paddingRight: isMac ? 12 : 138,
         background: 'var(--bg-surface)',
@@ -30,29 +20,28 @@ export function TitleBar() {
         WebkitAppRegion: 'drag',
       } as React.CSSProperties}
     >
-      {/* Brand mark */}
       <div style={{
-        width: 22, height: 22, borderRadius: 6,
+        width: 20, height: 20, borderRadius: 5,
         background: 'linear-gradient(135deg, var(--accent), var(--accent-2))',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
-        fontSize: 12, fontWeight: 800, color: '#fff', letterSpacing: '-0.5px',
+        fontSize: 11, color: '#fff',
         boxShadow: '0 0 0 1px var(--accent-soft)',
-      }}>C</div>
+        flexShrink: 0,
+      }}>◈</div>
 
       <span style={{
-        fontSize: 12.5, fontWeight: 700, letterSpacing: '-0.2px', color: 'var(--text)',
+        fontSize: 12, fontWeight: 600, letterSpacing: '-0.1px', color: 'var(--text)',
       }}>
         Cascade AI
       </span>
 
-      {/* Connection dot */}
       <span
         title={connected ? 'Connected' : 'Offline'}
         style={{
-          width: 6, height: 6, borderRadius: '50%',
+          width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
           background: connected ? 'var(--success)' : 'var(--text-dim)',
           boxShadow: connected ? '0 0 6px var(--success)' : 'none',
-          marginLeft: 2,
+          marginLeft: 1,
         }}
       />
 

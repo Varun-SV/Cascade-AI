@@ -28,17 +28,17 @@ export function CockpitView({ socket }: { socket: Socket | null }) {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       {/* Header */}
       <div style={{
-        padding: '11px 16px', borderBottom: '1px solid var(--border)',
-        display: 'flex', alignItems: 'center', gap: 10,
+        height: 35, padding: '0 16px', borderBottom: '1px solid var(--border)',
+        background: 'var(--bg-surface)',
+        display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
       }}>
-        <Network size={15} style={{ color: 'var(--accent)' }} />
-        <span style={{ fontWeight: 700, fontSize: 13, letterSpacing: '-0.2px' }}>Mission Control</span>
+        <Network size={14} style={{ color: 'var(--accent)' }} />
+        <span style={{ fontWeight: 700, fontSize: 12, letterSpacing: '-0.1px' }}>Mission Control</span>
         <div style={{ flex: 1 }} />
-        {/* Tier legend */}
         <div style={{ display: 'flex', gap: 12, marginRight: 4 }}>
           {TIERS.map((t) => (
-            <span key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10.5, color: 'var(--text-muted)' }}>
-              <span style={{ width: 7, height: 7, borderRadius: '50%', background: t.color }} />
+            <span key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: 'var(--text-muted)' }}>
+              <span style={{ width: 6, height: 6, borderRadius: '50%', background: t.color }} />
               <b style={{ color: t.color, fontWeight: 700 }}>{t.id}</b> {t.label}
             </span>
           ))}
@@ -46,8 +46,13 @@ export function CockpitView({ socket }: { socket: Socket | null }) {
         <HelpButton context="cockpit" />
       </div>
 
-      {/* Agent graph */}
-      <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
+      {/* Agent graph area with dot-grid background */}
+      <div style={{
+        flex: 1, overflow: 'hidden', position: 'relative',
+        backgroundImage: 'radial-gradient(circle, rgba(255,255,255,.06) 1px, transparent 1px)',
+        backgroundSize: '22px 22px',
+        backgroundColor: 'var(--bg-base)',
+      }}>
         {agents.length === 0 ? (
           <div style={{
             position: 'absolute', inset: 0,
@@ -61,11 +66,11 @@ export function CockpitView({ socket }: { socket: Socket | null }) {
               background: 'var(--accent-soft)', color: 'var(--accent)',
               boxShadow: 'var(--glow-accent)',
             }}>
-              <Network size={30} />
+              <Network size={28} />
             </div>
             <div style={{ textAlign: 'center' }}>
-              <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>No agents running</div>
-              <div style={{ fontSize: 12.5 }}>Describe a task below to watch the tier hierarchy spawn.</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>No agents running</div>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Describe a task below to watch the tier hierarchy spawn.</div>
             </div>
           </div>
         ) : (
@@ -73,11 +78,12 @@ export function CockpitView({ socket }: { socket: Socket | null }) {
         )}
       </div>
 
-      {/* Task input */}
+      {/* Task input bar */}
       <div style={{
-        padding: 12, borderTop: '1px solid var(--border)',
-        background: 'var(--bg-surface)',
-        display: 'flex', gap: 10,
+        height: 50, padding: '0 12px',
+        borderTop: '1px solid var(--border)',
+        background: '#0f1117',
+        display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
       }}>
         <textarea
           value={prompt}
@@ -85,13 +91,13 @@ export function CockpitView({ socket }: { socket: Socket | null }) {
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); } }}
-          placeholder="Describe the task for Cascade…  (Enter to submit · Shift+Enter for newline)"
-          rows={2}
+          placeholder="Describe the task for Cascade…  (Enter · Shift+Enter for newline)"
+          rows={1}
           style={{
-            flex: 1, resize: 'none', background: 'var(--bg-raised)',
+            flex: 1, resize: 'none', background: 'var(--bg-overlay)',
             border: `1px solid ${focused ? 'var(--accent)' : 'var(--border)'}`,
-            borderRadius: 'var(--radius-md)',
-            color: 'var(--text)', padding: '9px 12px', fontSize: 13,
+            borderRadius: 'var(--radius-sm)',
+            color: 'var(--text)', padding: '6px 10px', fontSize: 12.5,
             fontFamily: 'inherit', outline: 'none', lineHeight: 1.5,
             boxShadow: focused ? 'var(--glow-accent)' : 'none',
             transition: 'border-color var(--dur), box-shadow var(--dur)',
@@ -102,19 +108,19 @@ export function CockpitView({ socket }: { socket: Socket | null }) {
           disabled={!canSend}
           title="Submit task"
           style={{
-            width: 42, height: 42, alignSelf: 'flex-end',
+            width: 30, height: 30,
             background: canSend ? 'linear-gradient(135deg, var(--accent), var(--accent-2))' : 'var(--bg-raised)',
             color: canSend ? '#fff' : 'var(--text-dim)',
-            border: canSend ? 'none' : '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+            border: canSend ? 'none' : '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
             cursor: canSend ? 'pointer' : 'default',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            boxShadow: canSend ? 'var(--shadow-1)' : 'none',
+            flexShrink: 0,
             transition: 'background var(--dur), transform var(--dur)',
           }}
           onMouseEnter={(e) => { if (canSend) (e.currentTarget as HTMLElement).style.transform = 'translateY(-1px)'; }}
           onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.transform = 'none'; }}
         >
-          <Send size={16} />
+          <Send size={13} />
         </button>
       </div>
     </div>

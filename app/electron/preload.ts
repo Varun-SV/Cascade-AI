@@ -12,6 +12,19 @@ contextBridge.exposeInMainWorld('cascade', {
     version: string;
   }>,
 
+  // Config: read/write provider key + workspace for onboarding
+  getConfig: () => ipcRenderer.invoke('cascade:getConfig') as Promise<{
+    provider: string;
+    apiKey: string;
+    workspace: string;
+    onboardingDone: boolean;
+  }>,
+  setConfig: (cfg: { provider: string; apiKey: string; workspace: string }) =>
+    ipcRenderer.invoke('cascade:setConfig', cfg) as Promise<void>,
+
+  // Directory picker dialog
+  selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory') as Promise<string | null>,
+
   // PTY (terminal)
   pty: {
     spawn: (cwd: string) => ipcRenderer.invoke('pty:spawn', cwd),
