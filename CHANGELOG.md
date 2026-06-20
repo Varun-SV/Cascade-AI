@@ -5,6 +5,22 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-06-20
+
+### Added
+- **Session sidebar.** A 240px panel between the activity bar and main content shows the live session history pulled from the backend via the `runtime:update` Socket.IO event. Each row displays a status dot (green for ACTIVE), session title, latest prompt preview, and a relative timestamp. Clicking a row emits `leave:session` + `join:session` to switch context; hovering reveals a delete button that calls `DELETE /api/sessions/:id`.
+- **Tab bar.** A 35px strip above the main content tracks open files (Code view) and active sessions as typed tabs. Tabs have type-specific icons (`FileCode` for files, `Cpu` for sessions), a dirty-state indicator (•), and a close button (×). Clicking switches the active tab; the view routes accordingly.
+- **First-run onboarding.** When no provider API key is configured (`cascade:getConfig` returns `onboardingDone: false`), the app renders a full-screen onboarding flow: welcome / provider selection (OpenAI · Anthropic · Google · Groq · Ollama) / API key entry with visibility toggle / workspace directory picker / done animation. Keys are written to the system keychain via `keytar`; the workspace is persisted in `electron-store`. A new `cascade:setConfig` IPC handler + `selectDirectory` dialog are added to `main.ts` and `preload.ts`.
+- **◈ logo mark.** The title bar brand mark changed from a solid "C" square to the ◈ (U+25C8) symbol, matching the Claude Design reference.
+
+### Changed
+- **Catppuccin Macchiato-inspired palette.** All design tokens shifted to a deeper, bluer palette: `--bg-base #06080f`, `--bg-surface #0f1117`, `--bg-raised #131520`, borders `#1a1d2e`, text `#cdd6f4` (lavender), accent violet `#7c6af7`, T2 lightened to `#b87fff`, T3 deepened to `#00d4e8`, success green `#22d47a`. All 31 components read `var(--…)`, so the palette propagates automatically.
+- **Title bar** height 40px → 38px; background updated to `--bg-surface`; Windows titleBarOverlay updated to match.
+- **Activity bar** width 52px → 48px; active indicator rail 3px → 2px; button chip 40×40px → 32×28px; inactive icon color dimmed to `--text-dim`.
+- **Status bar** height 24px → 22px; background `#0b0d15`; connection dot uses new `--success` color.
+- **Cockpit.** Agent graph background replaced with a CSS dot-grid (`radial-gradient` at 22px spacing); header shrunk to 35px; task input bar height set to 50px with `#0f1117` background.
+- **Agent graph** tier colors updated: T2 `#b87fff`, T3 `#00d4e8`; node fill `#131520`; edge and progress bar colors updated accordingly.
+
 ## [0.11.1] - 2026-06-20
 
 ### Added

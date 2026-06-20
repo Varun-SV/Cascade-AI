@@ -2,7 +2,7 @@ import { configureStore, createSlice, PayloadAction } from '@reduxjs/toolkit';
 import { useDispatch, useSelector } from 'react-redux';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-export type ViewMode = 'cockpit' | 'chat' | 'code';
+export type ViewMode = 'onboarding' | 'cockpit' | 'chat' | 'code';
 
 export interface AgentNode {
   id: string;
@@ -24,6 +24,26 @@ export interface ChatMessage {
   streaming?: boolean;
 }
 
+export interface RuntimeSession {
+  sessionId: string;
+  title: string;
+  workspacePath: string;
+  status: 'ACTIVE' | 'COMPLETED' | 'FAILED';
+  startedAt: string;
+  updatedAt: string;
+  latestPrompt?: string;
+  isGlobal?: boolean;
+}
+
+export interface AppTab {
+  id: string;
+  type: 'file' | 'session';
+  title: string;
+  path?: string;
+  sessionId?: string;
+  isDirty?: boolean;
+}
+
 export interface AppState {
   view: ViewMode;
   connected: boolean;
@@ -41,6 +61,12 @@ export interface AppState {
   workspacePath: string;
   terminalVisible: boolean;
   helpContext: string | null;
+  // v0.12.0 additions
+  sessions: RuntimeSession[];
+  activeSessionId: string | null;
+  openTabs: AppTab[];
+  activeTabId: string | null;
+  onboardingDone: boolean;
 }
 
 const initialState: AppState = {
@@ -60,6 +86,11 @@ const initialState: AppState = {
   workspacePath: '',
   terminalVisible: false,
   helpContext: null,
+  sessions: [],
+  activeSessionId: null,
+  openTabs: [],
+  activeTabId: null,
+  onboardingDone: true, // assume done until we check IPC; avoids onboarding flash
 };
 
 // ─── Slice ────────────────────────────────────────────────────────────────────
@@ -120,6 +151,42 @@ const appSlice = createSlice({
     setActiveModel(state, action: PayloadAction<Partial<{ t1: string; t2: string; t3: string }>>) {
       state.activeModel = { ...state.activeModel, ...action.payload };
     },
+    // Session sidebar
+    setSessions(state, action: PayloadAction<RuntimeSession[]>) {
+      state.sessions = action.payload;
+    },
+    setActiveSessionId(state, action: PayloadAction<string | null>) {
+      state.activeSessionId = action.payload;
+    },
+    removeSession(state, action: PayloadAction<string>) {
+      state.sessions = state.sessions.filter((s) => s.sessionId !== action.payload);
+      if (state.activeSessionId === action.payload) state.activeSessionId = null;
+    },
+    // Tab bar
+    openTab(state, action: PayloadAction<AppTab>) {
+      const existing = state.openTabs.findIndex((t) => t.id === action.payload.id);
+      if (existing < 0) state.openTabs.push(action.payload);
+      state.activeTabId = action.payload.id;
+    },
+    closeTab(state, action: PayloadAction<string>) {
+      const idx = state.openTabs.findIndex((t) => t.id === action.payload);
+      state.openTabs = state.openTabs.filter((t) => t.id !== action.payload);
+      if (state.activeTabId === action.payload) {
+        state.activeTabId = state.openTabs[Math.max(0, idx - 1)]?.id ?? null;
+      }
+    },
+    setActiveTab(state, action: PayloadAction<string>) {
+      state.activeTabId = action.payload;
+    },
+    setTabDirty(state, action: PayloadAction<{ id: string; dirty: boolean }>) {
+      const tab = state.openTabs.find((t) => t.id === action.payload.id);
+      if (tab) tab.isDirty = action.payload.dirty;
+    },
+    // Onboarding
+    setOnboardingDone(state, action: PayloadAction<boolean>) {
+      state.onboardingDone = action.payload;
+      if (action.payload && state.view === 'onboarding') state.view = 'cockpit';
+    },
   },
 });
 
@@ -127,6 +194,9 @@ export const {
   setView, setConnected, setReconnecting, setShowSettings, setMeta, setSessionId, updateCost,
   setAgents, upsertAgent, appendMessage, updateLastMessage,
   setWorkspacePath, toggleTerminal, setHelpContext, setActiveModel,
+  setSessions, setActiveSessionId, removeSession,
+  openTab, closeTab, setActiveTab, setTabDirty,
+  setOnboardingDone,
 } = appSlice.actions;
 
 // ─── Store ────────────────────────────────────────────────────────────────────

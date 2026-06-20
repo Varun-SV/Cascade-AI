@@ -2,22 +2,29 @@ import { useEffect, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { ActivityBar } from './layout/ActivityBar.js';
 import { TitleBar } from './layout/TitleBar.js';
+import { SessionSidebar } from './layout/SessionSidebar.js';
+import { TabBar } from './layout/TabBar.js';
 import { MainContent } from './layout/MainContent.js';
 import { BottomPanel } from './layout/BottomPanel.js';
 import { StatusBar } from './layout/StatusBar.js';
 import { HelpPanel } from './help/HelpPanel.js';
+import { OnboardingView } from './views/OnboardingView.js';
 import {
   useAppDispatch, useAppSelector,
-  setConnected, setReconnecting, setMeta, updateCost, upsertAgent, updateLastMessage, appendMessage,
+  setConnected, setReconnecting, setMeta, updateCost, upsertAgent, updateLastMessage,
+  setSessions, removeSession, setOnboardingDone,
+  type RuntimeSession,
 } from './store/index.js';
 import { SettingsView } from './views/SettingsView.js';
 
-// Extend window for the Electron preload bridge
 declare global {
   interface Window {
     cascade?: {
       platform: string;
       getMeta(): Promise<{ port: number; token: string; platform: string; version: string }>;
+      getConfig(): Promise<{ provider: string; apiKey: string; workspace: string; onboardingDone: boolean }>;
+      setConfig(cfg: { provider: string; apiKey: string; workspace: string }): Promise<void>;
+      selectDirectory(): Promise<string | null>;
       pty: {
         spawn(cwd: string): Promise<{ ok: boolean; error?: string }>;
         write(data: string): void;
@@ -36,8 +43,19 @@ declare global {
 
 export function App() {
   const dispatch = useAppDispatch();
-  const { backendPort, authToken, helpContext, showSettings } = useAppSelector((s) => s.app);
+  const { backendPort, authToken, helpContext, showSettings, onboardingDone } = useAppSelector((s) => s.app);
   const socketRef = useRef<Socket | null>(null);
+
+  // Check onboarding status from Electron config on startup
+  useEffect(() => {
+    if (window.cascade?.getConfig) {
+      window.cascade.getConfig().then((cfg) => {
+        dispatch(setOnboardingDone(cfg.onboardingDone));
+      }).catch(() => {
+        dispatch(setOnboardingDone(true)); // fail-open in dev
+      });
+    }
+  }, [dispatch]);
 
   // Fetch Electron meta (port + token) from preload bridge
   useEffect(() => {
@@ -46,7 +64,6 @@ export function App() {
         dispatch(setMeta({ port: meta.port, token: meta.token }));
       });
     } else {
-      // Dev fallback: connect to the Vite-proxied backend
       dispatch(setMeta({ port: 3000, token: '' }));
     }
   }, [dispatch]);
@@ -88,17 +105,31 @@ export function App() {
       dispatch(updateLastMessage({ content: data.text, streaming: true }));
     });
 
+    // Session list updates
+    socket.on('runtime:update', (data: { sessions?: RuntimeSession[] }) => {
+      if (data.sessions) dispatch(setSessions(data.sessions));
+    });
+
+    socket.on('session:deleted', (data: { sessionId: string }) => {
+      dispatch(removeSession(data.sessionId));
+    });
+
     return () => { socket.disconnect(); };
   }, [backendPort, authToken, dispatch]);
 
+  // Show onboarding full-screen on first run
+  if (!onboardingDone) {
+    return <OnboardingView />;
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
-      {/* Custom draggable title bar (replaces native OS chrome/menu) */}
       <TitleBar />
-      {/* Main area: activity bar + content */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         <ActivityBar />
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <SessionSidebar socket={socketRef.current} />
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
+          <TabBar />
           <MainContent socket={socketRef.current} />
           <BottomPanel />
         </div>

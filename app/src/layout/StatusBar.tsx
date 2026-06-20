@@ -10,10 +10,10 @@ export function StatusBar() {
 
   return (
     <footer style={{
-      height: 24,
-      background: 'var(--bg-surface)',
+      height: 22,
+      background: '#0b0d15',
       display: 'flex', alignItems: 'center',
-      padding: '0 10px', gap: 14,
+      padding: '0 10px', gap: 12,
       fontSize: 11, color: 'var(--text-muted)',
       borderTop: '1px solid var(--border)',
       flexShrink: 0,
@@ -21,17 +21,17 @@ export function StatusBar() {
     }}>
       {/* Connection */}
       <span style={{
-        display: 'flex', alignItems: 'center', gap: 5,
+        display: 'flex', alignItems: 'center', gap: 4,
         color: connected ? 'var(--success)' : 'var(--text-dim)',
         fontWeight: 600,
       }}>
         <span style={{
-          width: 7, height: 7, borderRadius: '50%',
+          width: 6, height: 6, borderRadius: '50%',
           background: connected ? 'var(--success)' : 'var(--text-dim)',
-          boxShadow: connected ? '0 0 6px var(--success)' : 'none',
+          boxShadow: connected ? '0 0 5px var(--success)' : 'none',
         }} />
-        {connected ? <Wifi size={11} /> : <WifiOff size={11} />}
-        {connected ? 'connected' : 'offline'}
+        {connected ? <Wifi size={10} /> : <WifiOff size={10} />}
+        {connected ? 'cascade' : 'offline'}
       </span>
 
       <Divider />
@@ -44,12 +44,12 @@ export function StatusBar() {
       <div style={{ flex: 1 }} />
 
       {/* Cost & tokens */}
-      <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-        <Coins size={11} style={{ color: 'var(--text-dim)' }} />
+      <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+        <Coins size={10} style={{ color: 'var(--text-dim)' }} />
         {fmtTokens(totalTokens)} tok
       </span>
       <span style={{
-        color: totalCostUsd > 1 ? 'var(--warn)' : 'var(--text)',
+        color: totalCostUsd > 1 ? 'var(--warn)' : 'var(--text-muted)',
         fontVariantNumeric: 'tabular-nums', fontWeight: 600,
       }}>
         {fmtCost(totalCostUsd)}
@@ -61,11 +61,11 @@ export function StatusBar() {
       <button
         onClick={() => dispatch(toggleTerminal())}
         title="Toggle terminal (Ctrl+`)"
-        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 5, transition: 'color var(--dur) var(--ease)' }}
-        onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text)'; }}
-        onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text-muted)'; }}
+        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 4, transition: 'color var(--dur) var(--ease)' }}
+        onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text-muted)'; }}
+        onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text-dim)'; }}
       >
-        <Terminal size={11} /> terminal
+        <Terminal size={10} /> terminal
       </button>
     </footer>
   );
@@ -73,17 +73,17 @@ export function StatusBar() {
 
 function TierChip({ tier, color, model }: { tier: string; color: string; model: string }) {
   return (
-    <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+    <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
       <span style={{
         fontSize: 9, fontWeight: 800, letterSpacing: 0.5,
         color, padding: '1px 4px', borderRadius: 3,
         background: `color-mix(in srgb, ${color} 14%, transparent)`,
       }}>{tier}</span>
-      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5 }}>{model}</span>
+      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10 }}>{model}</span>
     </span>
   );
 }
 
 function Divider() {
-  return <span style={{ width: 1, height: 12, background: 'var(--border-strong)', opacity: 0.6 }} />;
+  return <span style={{ width: 1, height: 10, background: 'var(--border-strong)', opacity: 0.5 }} />;
 }

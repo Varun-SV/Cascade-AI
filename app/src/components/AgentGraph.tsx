@@ -7,16 +7,15 @@ import ReactFlow, {
 import 'reactflow/dist/style.css';
 import type { AgentNode } from '../store/index.js';
 
-// Per-tier identity colors (match marketing site + StatusBar)
 const TIER_COLORS: Record<string, string> = {
   T1: '#f5a623',
-  T2: '#8b7cf9',
-  T3: '#3ec9d6',
+  T2: '#b87fff',
+  T3: '#00d4e8',
 };
 
 const STATUS_COLORS: Record<string, string> = {
-  ACTIVE: '#8b7cf9',
-  COMPLETED: '#3ecf8e',
+  ACTIVE: '#b87fff',
+  COMPLETED: '#22d47a',
   FAILED: '#f0506e',
   ESCALATED: '#f5a623',
   IDLE: '#3a3a46',
@@ -31,34 +30,34 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 function AgentNodeCard({ data }: { data: AgentNode }) {
-  const tierColor = TIER_COLORS[data.tier] ?? '#8b7cf9';
+  const tierColor = TIER_COLORS[data.tier] ?? '#b87fff';
   const statusColor = STATUS_COLORS[data.status] ?? STATUS_COLORS.IDLE;
   const isActive = data.status === 'ACTIVE';
   return (
     <div style={{
-      background: 'var(--bg-raised)',
+      background: '#131520',
       border: `1.5px solid ${tierColor}`,
-      borderRadius: 10, padding: '9px 12px',
-      minWidth: 168, maxWidth: 224,
-      boxShadow: isActive ? `0 0 16px ${tierColor}55` : 'var(--shadow-1)',
+      borderRadius: 8, padding: '8px 11px',
+      minWidth: 155, maxWidth: 210,
+      boxShadow: isActive ? `0 0 16px ${tierColor}44` : '0 2px 8px rgba(0,0,0,0.4)',
     }}>
       <Handle type="target" position={Position.Top} style={{ background: tierColor, width: 7, height: 7, border: 'none' }} />
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
         <span style={{
           fontSize: 9, fontWeight: 800, letterSpacing: 0.8, textTransform: 'uppercase',
-          padding: '2px 6px', borderRadius: 4, background: tierColor + '22', color: tierColor,
+          padding: '2px 5px', borderRadius: 3, background: tierColor + '22', color: tierColor,
         }}>{data.tier}</span>
-        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+        <span style={{ fontSize: 11.5, fontWeight: 600, color: '#cdd6f4', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
           {data.label}
         </span>
         <span title={data.status} style={{
-          width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+          width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
           background: statusColor,
-          boxShadow: isActive ? `0 0 8px ${statusColor}` : 'none',
+          boxShadow: isActive ? `0 0 6px ${statusColor}` : 'none',
           animation: isActive ? 'pulse 1.4s var(--ease) infinite' : 'none',
         }} />
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: 'var(--text-muted)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: '#6e738d' }}>
         <span style={{ color: statusColor, fontWeight: 600 }}>{STATUS_LABEL[data.status] ?? 'idle'}</span>
         {data.currentAction && (
           <>
@@ -68,7 +67,7 @@ function AgentNodeCard({ data }: { data: AgentNode }) {
         )}
       </div>
       {data.progressPct !== undefined && (
-        <div style={{ marginTop: 7, height: 3, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
+        <div style={{ marginTop: 6, height: 2, background: '#1a1d2e', borderRadius: 2, overflow: 'hidden' }}>
           <div style={{ height: '100%', width: `${data.progressPct}%`, background: tierColor, borderRadius: 2, transition: 'width 0.3s var(--ease)' }} />
         </div>
       )}
@@ -80,7 +79,7 @@ function AgentNodeCard({ data }: { data: AgentNode }) {
 const NODE_TYPES: NodeTypes = { agent: AgentNodeCard };
 
 const TIER_Y: Record<string, number> = { T1: 40, T2: 200, T3: 360 };
-const H_GAP = 250;
+const H_GAP = 240;
 const CENTER_X = 600;
 
 export function AgentGraph({ agents }: { agents: AgentNode[] }) {
@@ -103,7 +102,7 @@ export function AgentGraph({ agents }: { agents: AgentNode[] }) {
         id: `${a.parentId}-${a.id}`,
         source: a.parentId!,
         target: a.id,
-        style: { stroke: TIER_COLORS[a.tier] ?? '#8b7cf9', strokeWidth: 1.5, opacity: 0.7 },
+        style: { stroke: TIER_COLORS[a.tier] ?? '#b87fff', strokeWidth: 1.5, opacity: 0.6 },
         animated: a.status === 'ACTIVE',
       })),
     [agents],
@@ -118,12 +117,12 @@ export function AgentGraph({ agents }: { agents: AgentNode[] }) {
       minZoom={0.25}
       maxZoom={2}
       proOptions={{ hideAttribution: true }}
+      style={{ background: 'transparent' }}
     >
-      <Background color="#26262f" gap={22} size={1} />
-      <Controls style={{ background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 8 }} />
+      <Controls style={{ background: '#131520', border: '1px solid #1a1d2e', borderRadius: 8 }} />
       <MiniMap
-        style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 8 }}
-        maskColor="rgba(10,10,13,0.6)"
+        style={{ background: '#0f1117', border: '1px solid #1a1d2e', borderRadius: 8 }}
+        maskColor="rgba(6,8,15,0.7)"
         nodeColor={(n) => TIER_COLORS[(n.data as AgentNode).tier] ?? '#3a3a46'}
       />
     </ReactFlow>
