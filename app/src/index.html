@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cascade AI</title>
+    <style>
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+      :root {
+        --bg-base:    #0d0d0f;
+        --bg-surface: #141416;
+        --bg-raised:  #1c1c1f;
+        --bg-hover:   #242428;
+        --border:     #2a2a2f;
+        --text:       #e8e8ec;
+        --text-muted: #7a7a8c;
+        --accent:     #7c6af7;
+        --accent-dim: #3d3580;
+        --green:      #3ecf8e;
+        --yellow:     #f5a623;
+        --red:        #e74c3c;
+        --radius:     8px;
+        --font-mono:  'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+      }
+      html, body, #root { height: 100%; overflow: hidden; }
+      body {
+        background: var(--bg-base);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+        font-size: 13px;
+        -webkit-font-smoothing: antialiased;
+      }
+      ::-webkit-scrollbar { width: 6px; height: 6px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

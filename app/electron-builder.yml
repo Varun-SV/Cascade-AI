@@ -1,0 +1,43 @@
+appId: com.varunsv.cascade-ai
+productName: Cascade AI
+copyright: Copyright © 2026 Varun SV
+
+directories:
+  output: dist-app
+  buildResources: assets
+
+files:
+  - dist-renderer/**
+  - dist-electron/**
+  - assets/**
+  - "!node_modules/**"
+
+extraResources:
+  - from: "../dist"
+    to: "cascade-core"
+    filter: ["**/*.js", "**/*.cjs", "**/*.mjs"]
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+  icon: assets/icon.icns
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: assets/icon.ico
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+  icon: assets/icon.png
+  category: Development
+
+publish:
+  provider: github
+  owner: varun-sv
+  repo: cascade-ai

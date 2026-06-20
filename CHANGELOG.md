@@ -5,6 +5,20 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-06-20
+
+### Added
+- **Cascade AI Desktop App.** Purpose-built Electron application with three switchable
+  view modes: Cockpit (live agent orchestration graph + task input), Chat (conversational
+  multi-agent interface with streaming), and Code (file tree + Monaco editor + agent diffs).
+  Includes a built-in terminal (xterm.js + node-pty), system tray, desktop notifications
+  for escalations and completions, and auto-updater via GitHub Releases.
+- **Contextual help system.** Every UI surface has a `?` button that opens a slide-in panel
+  with three tabs: Watch (HyperFrames video tutorials), Tour (react-joyride interactive
+  walkthrough), and Docs (searchable markdown reference with syntax highlighting).
+- **Desktop installer CI.** Release workflow now builds and attaches macOS (.dmg),
+  Windows (.exe), and Linux (.AppImage) installers to every GitHub Release automatically.
+
 ## [0.9.7] - 2026-06-20
 
 ### Added
