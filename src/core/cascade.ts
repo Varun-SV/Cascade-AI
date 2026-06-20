@@ -274,6 +274,19 @@ export class Cascade extends EventEmitter {
   }
 
   /**
+   * Record an explicit user rating for the last completed run.
+   * Explicit ratings carry 3× the weight of auto-detected outcomes so user
+   * feedback meaningfully shifts future routing decisions.
+   * Returns false when called before any task has run in this session.
+   */
+  rateLastRun(rating: 'good' | 'bad'): boolean {
+    if (!this.taskAnalyzer) return false;
+    const recorded = this.taskAnalyzer.recordExplicitRating(rating);
+    if (recorded) void this.perfTracker?.save();
+    return recorded;
+  }
+
+  /**
    * Rough pre-execution cost estimate for a plan: ~3 T2 calls per section
    * plus ~4 T3 calls per subtask at typical token volumes. A ballpark for
    * the approval dialog, not an invoice — always label it "est."

@@ -5,6 +5,16 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.2] - 2026-06-20
+
+### Added
+- **Adaptive learned routing.** Cascade Auto now tracks which models perform best per task type in `~/.cascade/model-perf.json` — a file that survives updates and grows over time. Explicit user ratings via `/rate good|bad` CLI command (or thumbs-up/down in the desktop app) carry 3× weight vs. auto-detected outcomes, letting the routing graph learn fast from real feedback.
+- **`cascade stats` command.** Prints a per-task-type model ranking table from accumulated routing history. Shows success rate, sample count, and average cost so you can see exactly what the router has learned.
+- **Desktop auto-updater.** The Electron app now checks for new GitHub releases on startup via `electron-updater` and shows a system notification when an update is available or downloaded.
+- **Settings panel.** Gear icon in the activity bar opens a modal with three tabs: API Keys (Anthropic / OpenAI / Google), Model Defaults (T1/T2/T3 per-tier dropdowns), and Budget & Bias (max cost per run, routing bias radio).
+- **Reconnection status banner.** An amber strip appears at the top of the main area when the desktop app loses its backend connection, replacing silent failures with a clear visual cue.
+- **React error boundary.** Uncaught render errors now show a recovery screen with the error message and a Reload button instead of a blank white page.
+
 ## [0.10.1] - 2026-06-20
 
 ### Fixed

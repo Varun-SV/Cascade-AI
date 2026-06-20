@@ -3,14 +3,17 @@ import type { Socket } from 'socket.io-client';
 import { Send, Bot, User } from 'lucide-react';
 import { ModelPicker } from '../components/ModelPicker.js';
 import { HelpButton } from '../help/HelpButton.js';
+import { SessionRating } from '../components/SessionRating.js';
 import { useAppDispatch, useAppSelector, appendMessage, updateLastMessage } from '../store/index.js';
 
 export function ChatView({ socket }: { socket: Socket | null }) {
   const dispatch = useAppDispatch();
   const messages = useAppSelector((s) => s.app.messages);
+  const sessionId = useAppSelector((s) => s.app.sessionId);
   const { activeModel } = useAppSelector((s) => s.app);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
+  const [sessionDone, setSessionDone] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -25,6 +28,7 @@ export function ChatView({ socket }: { socket: Socket | null }) {
     const onComplete = () => {
       dispatch(updateLastMessage({ content: '', streaming: false }));
       setStreaming(false);
+      setSessionDone(true);
     };
     socket.on('stream:token', onStream);
     socket.on('session:complete', onComplete);
@@ -40,6 +44,7 @@ export function ChatView({ socket }: { socket: Socket | null }) {
     socket.emit('cascade:run', { prompt: input.trim(), model: activeModel.t1 });
     setInput('');
     setStreaming(true);
+    setSessionDone(false);
   };
 
   return (
@@ -67,6 +72,11 @@ export function ChatView({ socket }: { socket: Socket | null }) {
         {messages.map((msg) => (
           <MessageBubble key={msg.id} message={msg} />
         ))}
+        {sessionDone && messages.length > 0 && (
+          <div style={{ padding: '0 4px' }}>
+            <SessionRating socket={socket} sessionId={sessionId} />
+          </div>
+        )}
         <div ref={bottomRef} />
       </div>
 

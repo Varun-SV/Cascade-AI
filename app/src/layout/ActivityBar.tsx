@@ -1,5 +1,5 @@
 import { Network, MessageSquare, Code2, Settings } from 'lucide-react';
-import { useAppDispatch, useAppSelector, setView, type ViewMode } from '../store/index.js';
+import { useAppDispatch, useAppSelector, setView, setShowSettings, type ViewMode } from '../store/index.js';
 
 const NAV_ITEMS: { icon: typeof Network; label: string; view: ViewMode }[] = [
   { icon: Network,        label: 'Cockpit', view: 'cockpit' },
@@ -47,7 +47,7 @@ export function ActivityBar() {
         icon={<Settings size={18} />}
         label="Settings"
         active={false}
-        onClick={() => {/* TODO: open settings modal */}}
+        onClick={() => dispatch(setShowSettings(true))}
       />
     </aside>
   );

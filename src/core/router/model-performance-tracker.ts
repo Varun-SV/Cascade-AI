@@ -75,6 +75,23 @@ export class ModelPerformanceTracker {
   }
 
   /**
+   * Record an explicit user rating (good/bad). Counts as 3 automatic samples
+   * so user feedback carries significantly more weight than auto-detected outcomes.
+   */
+  recordExplicit(modelId: string, taskType: TaskType, rating: 'good' | 'bad', costUsd = 0): void {
+    const outcome = rating === 'good' ? 'success' : 'failure';
+    // 3× weight: call record three times
+    this.record(modelId, taskType, outcome, 0, costUsd);
+    this.record(modelId, taskType, outcome, 0, 0);
+    this.record(modelId, taskType, outcome, 0, 0);
+  }
+
+  /** Returns all stats keyed by "modelId:taskType" — used by `cascade stats`. */
+  getAll(): Map<string, ModelStat> {
+    return new Map(this.stats);
+  }
+
+  /**
    * Returns 0.05–1.0; defaults to 0.5 (neutral prior) when no history exists.
    * High retry counts penalise the score.
    */

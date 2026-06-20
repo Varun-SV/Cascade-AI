@@ -179,6 +179,17 @@ app.whenReady().then(async () => {
   createWindow();
   createTray();
 
+  try {
+    const { autoUpdater } = require('electron-updater');
+    autoUpdater.checkForUpdatesAndNotify();
+    autoUpdater.on('update-available', () => {
+      new Notification({ title: 'Cascade AI — Update Available', body: 'Downloading in the background.' }).show();
+    });
+    autoUpdater.on('update-downloaded', () => {
+      new Notification({ title: 'Cascade AI — Restart to Update', body: 'A new version is ready. Relaunch to install.' }).show();
+    });
+  } catch { /* no-op in dev or when electron-updater is unavailable */ }
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

@@ -46,6 +46,8 @@ export interface SlashCommandContext {
   onComms: () => string;
   /** Explains the routing & delegation decisions of the last run. */
   onWhy: () => string;
+  /** Records an explicit good/bad rating for the last run to improve auto-routing. */
+  onRate: (args: string[]) => string;
   /** Toggles autonomous (hands-off) mode: /auto [on|off|status]. */
   onAuto: (args: string[]) => string;
   /** Previews T1's plan/decomposition for a prompt WITHOUT executing it: /plan <prompt>. */
@@ -300,6 +302,13 @@ export class SlashCommandRegistry {
       command: '/why',
       description: 'Explain how the last run was routed (complexity, models, failovers)',
       handler: (_args, ctx) => ({ output: ctx.onWhy(), handled: true }),
+    });
+
+    this.register({
+      command: '/rate',
+      description: 'Rate the last task to improve auto-routing  /rate good | bad',
+      args: ['good', 'bad'],
+      handler: (args, ctx) => ({ output: ctx.onRate(args), handled: true }),
     });
 
     this.register({

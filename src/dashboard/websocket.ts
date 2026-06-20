@@ -117,6 +117,37 @@ export class DashboardSocket {
         const { sessionId } = normalizeSessionSubscriptionPayload(payload);
         socket.leave(`session:${sessionId}`);
       });
+      socket.on('session:rate', (payload: { sessionId?: string; rating?: string }) => {
+        const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId : '';
+        const rating = payload?.rating === 'good' || payload?.rating === 'bad' ? payload.rating : null;
+        if (sessionId && rating) {
+          this.io.emit('session:rate', { sessionId, rating });
+        }
+      });
+    });
+  }
+
+  onSessionRate(callback: (sessionId: string, rating: 'good' | 'bad') => void): void {
+    this.io.on('connection', (socket) => {
+      socket.on('session:rate', (payload: { sessionId?: string; rating?: string }) => {
+        const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId : '';
+        const rating = payload?.rating === 'good' || payload?.rating === 'bad' ? payload.rating as 'good' | 'bad' : null;
+        if (sessionId && rating) callback(sessionId, rating);
+      });
+    });
+  }
+
+  onConfigUpdate(callback: (data: {
+    keys?: Record<string, string>;
+    models?: Record<string, string>;
+    budget?: { maxCostPerRun?: number; autoBias?: string };
+  }) => void): void {
+    this.io.on('connection', (socket) => {
+      socket.on('config:update', (payload: unknown) => {
+        if (typeof payload === 'object' && payload !== null) {
+          callback(payload as { keys?: Record<string, string>; models?: Record<string, string>; budget?: { maxCostPerRun?: number; autoBias?: string } });
+        }
+      });
     });
   }
 
