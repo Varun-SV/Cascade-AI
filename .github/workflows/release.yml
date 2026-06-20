@@ -92,7 +92,10 @@ jobs:
   build-desktop:
     name: Build desktop app (${{ matrix.os }})
     needs: release
-    if: needs.release.outputs.created == 'true'
+    # Runs after a new release is created, or on a manual dispatch so the
+    # installers can be (re)built and attached to the current release without
+    # bumping the version.
+    if: needs.release.outputs.created == 'true' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -111,7 +114,14 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
+
+      # Python 3.11 still ships distutils, which node-gyp needs to compile the
+      # core's native better-sqlite3 dependency (Python 3.12 removed it).
+      - name: Setup Python (node-gyp toolchain)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
       - name: Install dependencies
         run: npm ci
