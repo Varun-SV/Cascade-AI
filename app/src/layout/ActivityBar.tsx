@@ -19,20 +19,10 @@ export function ActivityBar() {
       display: 'flex',
       flexDirection: 'column',
       alignItems: 'center',
-      paddingTop: 14,
+      paddingTop: 10,
       gap: 6,
       flexShrink: 0,
     }}>
-      {/* Logo mark */}
-      <div style={{
-        width: 30, height: 30, borderRadius: 8,
-        background: 'linear-gradient(135deg, var(--accent), var(--accent-2))',
-        marginBottom: 18,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        fontSize: 15, fontWeight: 800, color: '#fff', letterSpacing: '-0.5px',
-        boxShadow: 'var(--glow-accent)',
-      }}>C</div>
-
       {NAV_ITEMS.map(({ icon: Icon, label, view }) => (
         <NavButton
           key={view}

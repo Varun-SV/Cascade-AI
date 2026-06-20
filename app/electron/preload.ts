@@ -1,6 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('cascade', {
+  // Synchronous platform string for first-paint layout (e.g. title-bar insets)
+  platform: process.platform,
+
   // App metadata: backend port, auth token, platform
   getMeta: () => ipcRenderer.invoke('cascade:meta') as Promise<{
     port: number;
