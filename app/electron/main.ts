@@ -9,7 +9,8 @@ import {
   protocol,
   net as electronNet,
 } from 'electron';
-import { join, pathToFileURL } from 'node:path';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
 
 const isDev = process.env.ELECTRON_DEV === '1';
@@ -87,9 +88,10 @@ function registerIPC(): void {
     try {
       const nodePty = require('node-pty');
       const shell = process.platform === 'win32' ? 'cmd.exe' : (process.env.SHELL ?? '/bin/bash');
-      pty = nodePty.spawn(shell, [], { cwd, env: process.env, cols: 80, rows: 24 });
-      pty.onData((data: string) => mainWindow?.webContents.send('pty:data', data));
-      pty.onExit(() => mainWindow?.webContents.send('pty:exit'));
+      const term: import('node-pty').IPty = nodePty.spawn(shell, [], { cwd, env: process.env, cols: 80, rows: 24 });
+      pty = term;
+      term.onData((data: string) => mainWindow?.webContents.send('pty:data', data));
+      term.onExit(() => mainWindow?.webContents.send('pty:exit'));
       return { ok: true };
     } catch (err) {
       return { ok: false, error: String(err) };
@@ -136,8 +138,7 @@ function createWindow(): void {
     mainWindow.loadURL('http://localhost:5173');
     mainWindow.webContents.openDevTools();
   } else {
-    // Register app:// protocol to serve renderer files securely
-    const rendererPath = join(__dirname, '../dist-renderer');
+    // Renderer files are served via the registered app:// protocol handler.
     mainWindow.loadURL('app://./index.html');
   }
 

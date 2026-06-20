@@ -1,0 +1,5 @@
+# Build output
+dist-renderer/
+dist-electron/
+dist-app/
+node_modules/

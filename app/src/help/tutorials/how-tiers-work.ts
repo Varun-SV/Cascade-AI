@@ -1,13 +1,12 @@
-import type { Step } from 'react-joyride';
+import type { TourStep } from '../types.js';
 
 export const VIDEO_ID = ''; // populate after HyperFrames render
 
-export const steps: Step[] = [
+export const steps: TourStep[] = [
   {
     target: '.agent-graph',
     content: 'The Agent Graph shows your three-tier hierarchy in real time. T1 is the Administrator at the top, T2 are section Managers in the middle, T3 are Worker agents at the bottom.',
     placement: 'left',
-    disableBeacon: true,
   },
   {
     target: '.agent-graph',

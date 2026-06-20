@@ -1,13 +1,12 @@
-import type { Step } from 'react-joyride';
+import type { TourStep } from '../types.js';
 
 export const VIDEO_ID = ''; // populate after HyperFrames render
 
-export const steps: Step[] = [
+export const steps: TourStep[] = [
   {
     target: '.task-input-bar',
     content: 'Type your goal here. Be specific — "Build a REST API with Express that manages a to-do list" works better than "Make an app".',
     placement: 'top',
-    disableBeacon: true,
   },
   {
     target: '.task-input-bar',

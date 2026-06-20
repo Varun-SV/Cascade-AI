@@ -98,13 +98,10 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            artifact_pattern: "app/dist-app/*.dmg"
             platform_flag: "--mac"
           - os: windows-latest
-            artifact_pattern: "app/dist-app/*.exe"
             platform_flag: "--win"
           - os: ubuntu-latest
-            artifact_pattern: "app/dist-app/*.AppImage"
             platform_flag: "--linux"
     runs-on: ${{ matrix.os }}
     steps:
@@ -119,21 +116,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build desktop app
-        run: npm run build:app -- ${{ matrix.platform_flag }}
+      - name: Build Cascade core (electron-builder extraResources)
+        run: npm run build:cli
 
-      - name: Upload installer to release
+      - name: Build desktop renderer + main
+        run: npm run build -w app
+
+      - name: Package & publish installer
+        working-directory: app
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          shopt -s nullglob
-          files=(${{ matrix.artifact_pattern }})
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "No installer artifacts found matching ${{ matrix.artifact_pattern }}"
-            exit 1
-          fi
-          gh release upload "v${{ needs.release.outputs.version }}" \
-            "${files[@]}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --clobber
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npx electron-builder ${{ matrix.platform_flag }} --publish always

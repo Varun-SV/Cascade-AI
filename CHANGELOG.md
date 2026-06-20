@@ -5,6 +5,17 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - 2026-06-20
+
+### Fixed
+- **Desktop-app release pipeline.** The 0.10.0 release workflow failed at `npm ci` because the
+  new `app` workspace pulled in `react-joyride`, whose React 15–18 peer range conflicts with
+  React 19. Replaced `react-joyride` with a built-in, dependency-free walkthrough overlay
+  (removing the React 19 `findDOMNode` runtime risk at the same time), regenerated the lockfile
+  to include the `app` workspace, and wired `electron-builder` into the `build-desktop` job with
+  auto-generated app icons so the macOS/Windows/Linux installers (and auto-update metadata) attach
+  to the GitHub Release correctly.
+
 ## [0.10.0] - 2026-06-20
 
 ### Added
@@ -14,8 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Includes a built-in terminal (xterm.js + node-pty), system tray, desktop notifications
   for escalations and completions, and auto-updater via GitHub Releases.
 - **Contextual help system.** Every UI surface has a `?` button that opens a slide-in panel
-  with three tabs: Watch (HyperFrames video tutorials), Tour (react-joyride interactive
-  walkthrough), and Docs (searchable markdown reference with syntax highlighting).
+  with three tabs: Watch (HyperFrames video tutorials), Tour (interactive walkthrough),
+  and Docs (searchable markdown reference with syntax highlighting).
 - **Desktop installer CI.** Release workflow now builds and attaches macOS (.dmg),
   Windows (.exe), and Linux (.AppImage) installers to every GitHub Release automatically.
 

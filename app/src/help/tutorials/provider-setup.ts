@@ -1,13 +1,12 @@
-import type { Step } from 'react-joyride';
+import type { TourStep } from '../types.js';
 
 export const VIDEO_ID = ''; // populate after HyperFrames render
 
-export const steps: Step[] = [
+export const steps: TourStep[] = [
   {
     target: '.activity-bar',
     content: 'Open Settings from the bottom of the Activity Bar to manage your API keys.',
     placement: 'right',
-    disableBeacon: true,
   },
   {
     target: '.status-bar',

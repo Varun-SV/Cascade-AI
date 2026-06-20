@@ -1,13 +1,12 @@
-import type { Step } from 'react-joyride';
+import type { TourStep } from '../types.js';
 
 export const VIDEO_ID = ''; // populate after HyperFrames render
 
-export const steps: Step[] = [
+export const steps: TourStep[] = [
   {
     target: '.status-bar',
     content: 'Session cost and total tokens update in real time here. Cost resets each session.',
     placement: 'top',
-    disableBeacon: true,
   },
   {
     target: '.status-bar',
