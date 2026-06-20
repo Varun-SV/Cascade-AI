@@ -123,13 +123,27 @@ function registerIPC(): void {
 
 // ─── Window ───────────────────────────────────────────────────────────────────
 function createWindow(): void {
+  const isMac = process.platform === 'darwin';
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    backgroundColor: '#0d0d0f',
-    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+    backgroundColor: '#0a0a0d',
+    // Frameless-style chrome on every platform: macOS keeps inset traffic
+    // lights, Windows/Linux get themed window controls via titleBarOverlay.
+    // The app draws its own draggable title strip (see TitleBar.tsx).
+    titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
+    ...(isMac
+      ? {}
+      : {
+          titleBarOverlay: {
+            color: '#0a0a0d',
+            symbolColor: '#b8b8c8',
+            height: 40,
+          },
+        }),
+    autoHideMenuBar: true, // no in-window menu bar; shortcuts stay via roles
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -147,6 +161,22 @@ function createWindow(): void {
   }
 
   mainWindow.on('closed', () => { mainWindow = null; });
+}
+
+// ─── Application menu ───────────────────────────────────────────────────────
+// The window has no visible menu bar (autoHideMenuBar + hidden title bar), but
+// a role-based menu is still installed so standard keyboard shortcuts
+// (copy/paste/undo, reload, devtools, zoom, quit) keep working.
+function buildAppMenu(): void {
+  const isMac = process.platform === 'darwin';
+  const template: Electron.MenuItemConstructorOptions[] = [
+    ...(isMac ? [{ role: 'appMenu' as const }] : []),
+    { role: 'fileMenu' },
+    { role: 'editMenu' },
+    { role: 'viewMenu' },
+    { role: 'windowMenu' },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 // ─── Tray ─────────────────────────────────────────────────────────────────────
@@ -178,6 +208,7 @@ app.whenReady().then(async () => {
     return electronNet.fetch(pathToFileURL(filePath).toString());
   });
 
+  buildAppMenu();
   registerIPC();
   await startBackend();
   createWindow();

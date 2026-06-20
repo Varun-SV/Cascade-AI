@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { ActivityBar } from './layout/ActivityBar.js';
+import { TitleBar } from './layout/TitleBar.js';
 import { MainContent } from './layout/MainContent.js';
 import { BottomPanel } from './layout/BottomPanel.js';
 import { StatusBar } from './layout/StatusBar.js';
@@ -15,6 +16,7 @@ import { SettingsView } from './views/SettingsView.js';
 declare global {
   interface Window {
     cascade?: {
+      platform: string;
       getMeta(): Promise<{ port: number; token: string; platform: string; version: string }>;
       pty: {
         spawn(cwd: string): Promise<{ ok: boolean; error?: string }>;
@@ -91,6 +93,8 @@ export function App() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
+      {/* Custom draggable title bar (replaces native OS chrome/menu) */}
+      <TitleBar />
       {/* Main area: activity bar + content */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         <ActivityBar />

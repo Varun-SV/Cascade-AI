@@ -5,6 +5,16 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-06-20
+
+### Added
+- **Branded app icon.** Replaced the placeholder with a 1024×1024 "cascade-C" monogram — five stacked bars cascading violet (`#8b7cf9`) → cyan (`#3ec9d6`) on a deep charcoal (`#0a0a0d`) background, matching the app's design tokens. The icon is generated deterministically by `app/build-icon.cjs` (pure Node, no deps) via `npm run gen:icon -w app`, and `electron-builder.yml` now sets explicit `mac.icon` / `win.icon` (alongside `linux.icon`) so every platform installer carries the mark.
+- **Custom title bar.** The window is now frameless (`titleBarStyle: hidden` / `hiddenInset`) with a themed, draggable title strip drawn in the renderer (`TitleBar.tsx`) carrying the Cascade brand mark, name, and a live connection dot. Native window controls are themed to the dark palette via `titleBarOverlay` on Windows/Linux and inset traffic lights on macOS.
+
+### Fixed
+- **Removed the unstyled native menu bar.** The default OS `File / Edit / View / Window / Help` menu bar clashed with the dark UI. It's now hidden (`autoHideMenuBar`), with a role-based application menu kept only so standard keyboard shortcuts (copy/paste/undo, reload, devtools, zoom, quit) keep working.
+- **No more endless "Reconnecting to Cascade backend…" banner.** When the embedded backend fails to start in a packaged build, `main.ts` left `backendPort` set, so the renderer retried a dead port forever. It now resets `backendPort`/`authToken` so the app shows a clean offline state. The `extraResources` filter also now includes `**/*.node`, so the bundled `keytar` native addon ships in the installer — a likely cause of the backend failing to load.
+
 ## [0.11.0] - 2026-06-20
 
 ### Changed
