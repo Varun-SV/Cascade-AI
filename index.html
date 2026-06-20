@@ -400,6 +400,93 @@
     }
 
     /* ════════════════════════════════════════
+       DESKTOP DOWNLOAD STRIP
+    ════════════════════════════════════════ */
+    .download-wrap {
+      margin-top: 28px;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 10px;
+    }
+
+    .download-label {
+      font-size: 11px;
+      color: var(--text-2);
+      letter-spacing: 0.05em;
+    }
+
+    .download-btns {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .download-loading {
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    .dl-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 14px;
+      border-radius: 7px;
+      border: 1px solid var(--border-2);
+      background: var(--bg-3);
+      color: var(--text-1);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      text-decoration: none;
+      transition: border-color 0.14s, background 0.14s;
+      white-space: nowrap;
+    }
+
+    .dl-btn:hover {
+      border-color: var(--violet);
+      background: rgba(167, 139, 255, 0.08);
+    }
+
+    .dl-btn.dl-recommended {
+      border-color: rgba(167, 139, 255, 0.5);
+      background: rgba(167, 139, 255, 0.07);
+    }
+
+    .dl-btn-sub {
+      font-size: 10px;
+      color: var(--text-2);
+      border-left: 1px solid var(--border);
+      padding-left: 8px;
+      margin-left: 2px;
+    }
+
+    .dl-badge {
+      font-size: 9px;
+      color: var(--violet);
+      background: rgba(167, 139, 255, 0.15);
+      border-radius: 4px;
+      padding: 1px 6px;
+      margin-left: 4px;
+    }
+
+    .download-meta {
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    .download-meta a {
+      color: var(--text-2);
+      text-decoration: none;
+      transition: color 0.12s;
+    }
+
+    .download-meta a:hover {
+      color: var(--text-1);
+    }
+
+    /* ════════════════════════════════════════
        STATS BAND
     ════════════════════════════════════════ */
     .stats-section {
@@ -1335,7 +1422,7 @@
     <div class="container">
       <div class="hero-eyebrow">
         <span class="hero-eyebrow-dot"></span>
-        Open-source · MIT · v0.9.1 — Autonomous Mode is here
+        Open-source · MIT · v0.10.1 — Desktop App is here
       </div>
 
       <h1 class="reveal">
@@ -1366,6 +1453,14 @@
         <span class="cmd">npm install -g cascade-ai</span>
         <span class="copy-hint">click to copy</span>
         <span class="copied">✓ copied</span>
+      </div>
+
+      <div class="download-wrap reveal" id="downloadWrap">
+        <div class="download-label">or download the desktop app</div>
+        <div class="download-btns" id="downloadBtns">
+          <span class="download-loading">fetching latest release…</span>
+        </div>
+        <div class="download-meta" id="downloadMeta"></div>
       </div>
     </div>
   </section>
@@ -1632,7 +1727,7 @@
           <p>Hit the budget cap on a big task? <code>/continue</code> resumes with a raised budget — files already created persist on disk, so only the remaining work runs. No redo.</p>
         </div>
         <div class="feature-cell">
-          <span class="feature-new">New · v0.9.1</span>
+          <span class="feature-new">New · v0.10.1</span>
           <div class="feature-icon cyan">👥</div>
           <h3>Workers Recruit Help</h3>
           <p>A worker that discovers its task should fan out asks its manager to spawn bounded sibling workers on the fly — dynamic parallelism, no rigid up-front plan, no runaway recursion.</p>
@@ -1870,6 +1965,108 @@
     document.querySelectorAll('.hero .reveal').forEach((el, i) => {
       setTimeout(() => el.classList.add('visible'), 80 + i * 110);
     });
+
+    /* ── Desktop App Downloads ── */
+    (async function () {
+      const REPO = 'Varun-SV/Cascade-AI';
+      const RELEASES_PAGE = 'https://github.com/' + REPO + '/releases';
+      const API_URL = 'https://api.github.com/repos/' + REPO + '/releases/latest';
+
+      const btnContainer = document.getElementById('downloadBtns');
+      const metaEl = document.getElementById('downloadMeta');
+      if (!btnContainer) return;
+
+      function detectOS() {
+        const ua = navigator.userAgent;
+        const p = navigator.platform || '';
+        if (/iPhone|iPad|iPod/i.test(ua)) return null;
+        if (/Android/i.test(ua)) return null;
+        if (/Win/i.test(p)) return 'win';
+        if (/Mac/i.test(p)) return 'mac';
+        if (/Linux/i.test(p)) return 'linux';
+        if (/Windows/i.test(ua)) return 'win';
+        if (/Macintosh|Mac OS X/i.test(ua)) return 'mac';
+        if (/Linux/i.test(ua)) return 'linux';
+        return null;
+      }
+
+      async function detectArm() {
+        try {
+          if (navigator.userAgentData && navigator.userAgentData.getHighEntropyValues) {
+            const d = await navigator.userAgentData.getHighEntropyValues(['architecture']);
+            if (d.architecture === 'arm') return true;
+            if (d.architecture === 'x86') return false;
+          }
+        } catch (_) {}
+        return null;
+      }
+
+      function makeBtn(href, osLabel, sub, recommended) {
+        const badge = recommended ? '<span class="dl-badge">recommended</span>' : '';
+        const subHtml = sub ? '<span class="dl-btn-sub">' + sub + '</span>' : '';
+        return '<a class="dl-btn' + (recommended ? ' dl-recommended' : '') + '" href="' + href + '" target="_blank" rel="noopener noreferrer">'
+          + '&#8595; ' + osLabel + subHtml + badge + '</a>';
+      }
+
+      let release;
+      try {
+        const res = await fetch(API_URL, { headers: { Accept: 'application/vnd.github+json' } });
+        if (!res.ok) throw 0;
+        release = await res.json();
+      } catch (_) {
+        btnContainer.innerHTML = makeBtn(RELEASES_PAGE, 'View all releases →', '', false);
+        return;
+      }
+
+      const assets = release.assets || [];
+      const version = release.tag_name || '';
+
+      const dmgArm = assets.find(function(a) { return /arm64\.dmg$/i.test(a.name); });
+      const dmgX64 = assets.find(function(a) { return /x64\.dmg$/i.test(a.name) || (/\.dmg$/i.test(a.name) && !/arm/i.test(a.name)); });
+      const exeFile = assets.find(function(a) { return /\.exe$/i.test(a.name); });
+      const appImg  = assets.find(function(a) { return /\.AppImage$/i.test(a.name); });
+
+      const os = detectOS();
+      const isArm = (os === 'mac') ? await detectArm() : null;
+
+      const macEntries = [];
+      if (dmgArm || dmgX64) {
+        if (dmgArm && dmgX64) {
+          const primaryDmg = (isArm !== false) ? dmgArm : dmgX64;
+          const secondaryDmg = (isArm !== false) ? dmgX64 : dmgArm;
+          const primarySub = (isArm !== false) ? 'Apple Silicon' : 'Intel';
+          const secondarySub = (isArm !== false) ? 'Intel' : 'Apple Silicon';
+          macEntries.push({ href: primaryDmg.browser_download_url, label: 'macOS', sub: primarySub });
+          macEntries.push({ href: secondaryDmg.browser_download_url, label: 'macOS', sub: secondarySub });
+        } else {
+          var dmg = dmgArm || dmgX64;
+          macEntries.push({ href: dmg.browser_download_url, label: 'macOS', sub: dmgArm ? 'Apple Silicon' : 'Intel' });
+        }
+      }
+
+      const winEntry  = exeFile ? { href: exeFile.browser_download_url, label: 'Windows', sub: 'x64 installer' } : null;
+      const linuxEntry = appImg  ? { href: appImg.browser_download_url,  label: 'Linux',   sub: '.AppImage'     } : null;
+
+      const ordered = [];
+      function addMac(rec) { macEntries.forEach(function(e, i) { ordered.push({ href: e.href, label: e.label, sub: e.sub, recommended: rec && i === 0 }); }); }
+      function addWin(rec) { if (winEntry)   ordered.push({ href: winEntry.href,   label: winEntry.label,   sub: winEntry.sub,   recommended: rec }); }
+      function addLinux(rec) { if (linuxEntry) ordered.push({ href: linuxEntry.href, label: linuxEntry.label, sub: linuxEntry.sub, recommended: rec }); }
+
+      if (os === 'mac')        { addMac(true);   addWin(false);  addLinux(false); }
+      else if (os === 'win')   { addWin(true);   addMac(false);  addLinux(false); }
+      else if (os === 'linux') { addLinux(true); addMac(false);  addWin(false);   }
+      else                     { addMac(false);  addWin(false);  addLinux(false); }
+
+      if (ordered.length === 0) {
+        btnContainer.innerHTML = makeBtn(RELEASES_PAGE, 'View releases →', '', false);
+      } else {
+        btnContainer.innerHTML = ordered.map(function(e) { return makeBtn(e.href, e.label, e.sub, e.recommended); }).join('');
+      }
+
+      if (metaEl && version) {
+        metaEl.innerHTML = version + ' &middot; <a href="' + RELEASES_PAGE + '" target="_blank" rel="noopener noreferrer">all releases →</a>';
+      }
+    })();
   </script>
 </body>
 
