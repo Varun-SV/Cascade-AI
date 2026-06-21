@@ -3,6 +3,7 @@ import { X } from 'lucide-react';
 import { useAppDispatch, useAppSelector } from '../store/index.js';
 import { setHelpContext } from '../store/index.js';
 import { VideoPlayer } from './VideoPlayer.js';
+import { AnimatedTour } from './AnimatedTour.js';
 import { WalkthroughEngine } from './WalkthroughEngine.js';
 import { DocsViewer } from './DocsViewer.js';
 import * as providerSetup from './tutorials/provider-setup.js';
@@ -90,10 +91,15 @@ export function HelpPanel() {
       <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
         {tab === 'watch' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <VideoPlayer projectId={module.VIDEO_ID} title={title} />
+            {/* A rendered video takes precedence once a VIDEO_ID is populated;
+                until then, play the in-app animated walkthrough of the steps. */}
+            {module.VIDEO_ID
+              ? <VideoPlayer projectId={module.VIDEO_ID} title={title} />
+              : <AnimatedTour steps={module.steps} title={title} />}
             <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: 0, lineHeight: 1.6 }}>
-              Watch this short walkthrough to understand the key concepts. Then
-              switch to the Tour tab for an interactive guide, or Docs for the full reference.
+              This animated walkthrough covers the key concepts. Switch to the
+              Tour tab for an interactive, click-through guide on the live UI, or
+              Docs for the full reference.
             </p>
           </div>
         )}

@@ -58,6 +58,21 @@ export class DashboardServer {
     this.socket.onSessionRate((sessionId, rating) => {
       this.activeSessions.get(sessionId)?.rateLastRun(rating);
     });
+    // Settings panel: reply with a redacted snapshot so the UI can pre-fill the
+    // current per-tier models, budget, and which providers already have a key
+    // (the keys themselves are never sent back to the renderer).
+    this.socket.onConfigGet((socketId) => {
+      this.socket.emitToSocket(socketId, 'config:current', {
+        models: this.config.models ?? {},
+        budget: {
+          maxCostPerRun: this.config.budget?.maxCostPerRunUsd,
+          autoBias: this.config.autoBias,
+        },
+        providersWithKey: (this.config.providers ?? [])
+          .filter((p) => typeof p.apiKey === 'string' && p.apiKey.length > 0)
+          .map((p) => p.type),
+      });
+    });
     this.socket.onConfigUpdate((data) => {
       if (data.keys) {
         for (const [type, apiKey] of Object.entries(data.keys)) {
@@ -68,7 +83,16 @@ export class DashboardServer {
         }
       }
       if (data.models) {
-        this.config.models = { ...this.config.models, ...data.models };
+        // A tier value may be a bare model id, a `provider:model` binding, or
+        // 'auto' / '' meaning "no override — let routing pick". Store explicit
+        // bindings; clear the override entirely for auto so the router falls
+        // back to its priority defaults instead of hunting for a model named
+        // "auto".
+        const models = this.config.models as Record<string, string | undefined>;
+        for (const [tier, val] of Object.entries(data.models)) {
+          if (val && val !== 'auto') models[tier] = val;
+          else delete models[tier];
+        }
       }
       if (data.budget) {
         if (typeof data.budget.maxCostPerRun === 'number') {
@@ -78,6 +102,9 @@ export class DashboardServer {
           this.config.autoBias = data.budget.autoBias;
         }
       }
+      // Persist so Settings changes survive a restart and are visible to the CLI
+      // (the desktop app and `cascade` share the same workspace config file).
+      this.persistConfig();
     });
 
     this.socket.onCascadeRun(async (prompt, model, socketId) => {
@@ -165,6 +192,21 @@ export class DashboardServer {
 
   getSocket(): DashboardSocket {
     return this.socket;
+  }
+
+  /**
+   * Write the in-memory config back to the workspace config file so mutations
+   * made over the socket (Settings → Save) persist across restarts. Best-effort:
+   * a write failure is logged but never crashes the running dashboard.
+   */
+  private persistConfig(): void {
+    try {
+      const configPath = path.join(this.workspacePath, CASCADE_CONFIG_FILE);
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify(this.config, null, 2), 'utf-8');
+    } catch (err) {
+      console.warn(`[dashboard] Failed to persist config: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /**

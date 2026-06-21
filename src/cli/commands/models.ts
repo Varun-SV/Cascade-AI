@@ -108,6 +108,43 @@ export async function modelsCommand(options: { verbose?: boolean } = {}): Promis
   }
 }
 
+/**
+ * `cascade models set <tier> <provider:model|auto>` / `cascade models unset <tier>`.
+ * Persists a per-tier provider+model binding to the workspace config so the CLI
+ * and desktop app share the same routing choices. 'auto' (or `unset`) clears the
+ * override and lets routing pick the best model for that tier.
+ */
+export async function setModelCommand(
+  action: 'set' | 'unset',
+  tierArg?: string,
+  value?: string,
+): Promise<void> {
+  const tier = (tierArg ?? '').toLowerCase();
+  if (!['t1', 't2', 't3'].includes(tier)) {
+    console.error(chalk.red(`  Invalid tier "${tierArg ?? ''}". Use t1, t2, or t3.`));
+    console.log(chalk.gray('  e.g. cascade models set t1 anthropic:claude-opus-4-8'));
+    process.exit(1);
+  }
+  const override = action === 'unset' ? 'auto' : (value ?? '').trim();
+  if (action === 'set' && !override) {
+    console.error(chalk.red('  Missing value. e.g. cascade models set t3 openai:gpt-4o-mini  (or "auto")'));
+    process.exit(1);
+  }
+
+  const cm = new ConfigManager(process.cwd());
+  await cm.load();
+  const config = cm.getConfig();
+  const models = { ...config.models } as Record<string, string | undefined>;
+
+  if (override === 'auto') delete models[tier];
+  else models[tier] = override;
+
+  await cm.updateConfig({ models });
+
+  const label = override === 'auto' ? chalk.gray('auto (routing decides)') : chalk.white(override);
+  console.log(chalk.green(`\n  ✓ ${tier.toUpperCase()} model set to ${label}\n`));
+}
+
 /** Pad a column to `width`, but always leave a 2-space gap if the value is too long. */
 function col(s: string, width: number): string {
   return s.length < width ? s.padEnd(width) : `${s}  `;

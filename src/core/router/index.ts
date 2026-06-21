@@ -122,7 +122,9 @@ export class CascadeRouter extends EventEmitter {
         tier === 'T1' ? config.models.t1
         : tier === 'T2' ? config.models.t2
         : config.models.t3;
-      if (!override) continue;
+      // 'auto' is the UI/CLI sentinel for "no explicit override — let routing
+      // pick the best model for this tier". Treat it like an unset override.
+      if (!override || override === 'auto') continue;
 
       const model = this.selector.selectForTier(tier, override);
       if (!model) {

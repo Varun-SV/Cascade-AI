@@ -155,6 +155,12 @@ export class DashboardSocket {
     this.io.sockets.sockets.get(socketId)?.emit(event, data);
   }
 
+  onConfigGet(callback: (socketId: string) => void): void {
+    this.io.on('connection', (socket) => {
+      socket.on('config:get', () => callback(socket.id));
+    });
+  }
+
   onCascadeRun(callback: (prompt: string, model: string, socketId: string) => void): void {
     this.io.on('connection', (socket) => {
       socket.on('cascade:run', (payload: { prompt?: string; model?: string }) => {
