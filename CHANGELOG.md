@@ -5,6 +5,16 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.6] - 2026-06-21
+
+### Fixed
+- **Cost & savings always showed $0.00.** Configured per-tier model overrides (and any current model id missing from the bundled catalogue, e.g. `claude-sonnet-4-6` / `claude-opus-4-8`) resolved to zero pricing, so total cost and "saved vs all-T1" both read $0. The catalogue now includes the current Claude model ids, and cost calculation falls back to catalogue pricing by model id whenever a `ModelInfo` arrives without it. Local models stay $0 as intended.
+- **Workers ran sequentially even when independent.** T1 flagged two sections as "overlapping" if they shared even one keyword and then chained *all* flagged sections into a single sequential line — collapsing parallelism for tasks where most sections mention common words ("code", "test"). Overlap now only injects a duplication warning for soft overlap; it serializes a *single pair* only on strong overlap (≥3 shared keywords and ≥60% of the smaller set).
+- **Dependency deadlocks.** When a worker's dependency failed or timed out it returned ESCALATED without publishing a terminal status, so each dependent then waited out the full 120s peer timeout — stacking into an apparent deadlock. Workers now publish a terminal status on dependency-wait early returns (dependents unblock immediately), and the dependency wait is bounded to 60s.
+
+### Changed
+- Added regression tests for catalogue-pricing fallback and the section-overlap heuristic.
+
 ## [0.12.5] - 2026-06-21
 
 ### Fixed

@@ -8,7 +8,7 @@ import type { ModelInfo, ProviderType, ThemeName } from './types.js';
 // so the compiled bundle's version can never drift from the published package again.
 // The fallback applies only when running the un-bundled source directly (tests, tsx),
 // and is kept in step with package.json.
-export const CASCADE_VERSION = process.env.CASCADE_BUILD_VERSION ?? '0.12.5';
+export const CASCADE_VERSION = process.env.CASCADE_BUILD_VERSION ?? '0.12.6';
 export const CASCADE_CONFIG_DIR = '.cascade';
 export const CASCADE_MD_FILE = 'CASCADE.md';
 export const CASCADE_IGNORE_FILE = '.cascadeignore';
@@ -79,6 +79,30 @@ export const MODELS: Record<string, ModelInfo> = {
     inputCostPer1kTokens: 0.0008,
     outputCostPer1kTokens: 0.004,
     maxOutputTokens: 8_000,
+    supportsStreaming: true,
+    isLocal: false,
+  },
+  'claude-opus-4-8': {
+    id: 'claude-opus-4-8',
+    name: 'Claude Opus 4.8',
+    provider: 'anthropic',
+    contextWindow: 200_000,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.015,
+    outputCostPer1kTokens: 0.075,
+    maxOutputTokens: 32_000,
+    supportsStreaming: true,
+    isLocal: false,
+  },
+  'claude-sonnet-4-6': {
+    id: 'claude-sonnet-4-6',
+    name: 'Claude Sonnet 4.6',
+    provider: 'anthropic',
+    contextWindow: 200_000,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.003,
+    outputCostPer1kTokens: 0.015,
+    maxOutputTokens: 16_000,
     supportsStreaming: true,
     isLocal: false,
   },
