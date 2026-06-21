@@ -26,6 +26,25 @@ import type { PermissionEscalator } from '../permissions/escalator.js';
 import type { ToolCreator } from '../../tools/tool-creator.js';
 import { parseFirstJsonObject } from '../../utils/json-extract.js';
 
+/** Case-insensitive shared keywords between two keyword lists. */
+export function sharedKeywords(a: string[] = [], b: string[] = []): string[] {
+  const setB = new Set(b.map((k) => k.toLowerCase().trim()).filter(Boolean));
+  return [...new Set(a.map((k) => k.toLowerCase().trim()).filter(Boolean))].filter((k) => setB.has(k));
+}
+
+/**
+ * Whether two sections overlap strongly enough to warrant serializing them.
+ * Soft overlap (a single common word like "code"/"test") must NOT serialize —
+ * that collapsed all parallelism. We require a substantial shared set: ≥3 shared
+ * keywords AND ≥60% of the smaller section's keywords in common.
+ */
+export function isStrongKeywordOverlap(a: string[] = [], b: string[] = []): boolean {
+  if (!a.length || !b.length) return false;
+  const shared = sharedKeywords(a, b);
+  const ratio = shared.length / Math.min(a.length, b.length);
+  return shared.length >= 3 && ratio >= 0.6;
+}
+
 const T1_SYSTEM_PROMPT = `You are T1, the Administrator in the Cascade AI orchestration system.
 
 Your responsibilities:
@@ -574,18 +593,39 @@ Leave dependsOn empty for sections that can run immediately in parallel.`;
       }
     }
 
-    // Detect shared keywords → mark overlapping sections as sequential
-    const overlapSections = new Set<string>();
-    for (let i = 0; i < announcements.length; i++) {
-      for (let j = i + 1; j < announcements.length; j++) {
-        const a = announcements[i]!.payload as { keywords?: string[]; sectionId?: string };
-        const b = announcements[j]!.payload as { keywords?: string[]; sectionId?: string };
-        if (!a.keywords || !b.keywords || !a.sectionId || !b.sectionId) continue;
-        const shared = a.keywords.filter(k => b.keywords!.includes(k));
-        if (shared.length > 0) {
-          overlapSections.add(a.sectionId);
-          overlapSections.add(b.sectionId);
-          this.log(`T2 overlap detected between sections: ${a.sectionId} ↔ ${b.sectionId} (shared: ${shared.join(', ')})`);
+    // Detect keyword overlap between sibling sections.
+    //   • soft overlap (any shared keyword) → only inject a "watch for
+    //     duplication" note; does NOT serialize, so independent sections keep
+    //     running in parallel.
+    //   • strong overlap (isStrongKeywordOverlap) → add a SINGLE pairwise
+    //     dependency so the later section waits for the earlier one.
+    // The previous logic serialized any pair sharing even one keyword AND chained
+    // every flagged section into one sequential line — which collapsed parallelism
+    // for tasks where most sections mention common words ("code", "test", …),
+    // making all workers run sequentially.
+    const payloads = announcements
+      .map((ann) => ann.payload as { type?: string; keywords?: string[]; sectionId?: string })
+      .filter((p) => p?.type === 'T2_PLAN_ANNOUNCEMENT' && !!p.sectionId);
+    const softOverlap = new Set<string>();
+    const orderOf = new Map(sections.map((s, i) => [s.sectionId, i] as const));
+    for (let i = 0; i < payloads.length; i++) {
+      for (let j = i + 1; j < payloads.length; j++) {
+        const a = payloads[i]!;
+        const b = payloads[j]!;
+        const shared = sharedKeywords(a.keywords ?? [], b.keywords ?? []);
+        if (shared.length === 0) continue;
+        softOverlap.add(a.sectionId!);
+        softOverlap.add(b.sectionId!);
+        if (isStrongKeywordOverlap(a.keywords ?? [], b.keywords ?? [])) {
+          const ai = orderOf.get(a.sectionId!) ?? 0;
+          const bi = orderOf.get(b.sectionId!) ?? 0;
+          const earlier = ai <= bi ? a.sectionId! : b.sectionId!;
+          const later = ai <= bi ? b.sectionId! : a.sectionId!;
+          const laterSection = sections.find((s) => s.sectionId === later);
+          if (laterSection && earlier !== later && !(laterSection.dependsOn ?? []).includes(earlier)) {
+            laterSection.dependsOn = [...(laterSection.dependsOn || []), earlier];
+            this.log(`Strong overlap ${earlier} ↔ ${later} (shared: ${shared.slice(0, 5).join(', ')}) — serializing ${later} after ${earlier}`);
+          }
         }
       }
     }
@@ -599,22 +639,10 @@ Leave dependsOn empty for sections that can run immediately in parallel.`;
         `You are T2 Manager for section: "${section.sectionTitle}".`,
         `Sibling sections being worked on in parallel: ${otherTitles.join(', ') || 'none'}.`,
         myKeywords.length > 0 ? `Watch for overlap with: ${[...new Set(myKeywords)].slice(0, 10).join(', ')}.` : '',
-        overlapSections.has(section.sectionId) ? 'NOTE: Potential overlap detected with a sibling section — be careful not to duplicate work.' : '',
+        softOverlap.has(section.sectionId) ? 'NOTE: Potential overlap detected with a sibling section — be careful not to duplicate work.' : '',
       ].filter(Boolean).join(' ');
       m.setHierarchyContext(context);
     });
-
-    // If overlaps detected globally, add sequential dependencies for safety
-    if (overlapSections.size > 0) {
-      this.log('Overlap detected — adding sequential dependencies for conflicting sections to prevent race conditions');
-      const overlapArray = Array.from(overlapSections);
-      for (let i = 1; i < overlapArray.length; i++) {
-        const section = sections.find(s => s.sectionId === overlapArray[i]);
-        if (section) {
-          section.dependsOn = [...(section.dependsOn || []), overlapArray[i - 1]!];
-        }
-      }
-    }
 
     const t2Results: T2Result[] = [];
 

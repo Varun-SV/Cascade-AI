@@ -10,6 +10,7 @@ import type {
   StreamChunk,
   TokenUsage,
 } from '../types.js';
+import { calculateCost } from '../utils/cost.js';
 
 export abstract class BaseProvider {
   protected config: ProviderConfig;
@@ -42,10 +43,10 @@ export abstract class BaseProvider {
   }
 
   estimateCost(inputTokens: number, outputTokens: number): number {
-    return (
-      (inputTokens / 1000) * this.model.inputCostPer1kTokens +
-      (outputTokens / 1000) * this.model.outputCostPer1kTokens
-    );
+    // Delegate to the shared calculator, which falls back to the bundled
+    // catalogue pricing by model id when this.model has none (the cause of the
+    // $0.00 cost readout for configured per-tier overrides).
+    return calculateCost(inputTokens, outputTokens, this.model);
   }
 
   protected makeUsage(inputTokens: number, outputTokens: number): TokenUsage {

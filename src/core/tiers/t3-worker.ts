@@ -180,8 +180,15 @@ export class T3Worker extends BaseTier {
       const depOutputs: string[] = [];
       for (const depId of assignment.dependsOn) {
         try {
-          const dep = await this.peerBus.waitFor(depId);
+          // Bounded wait: the wave scheduler only starts us after our deps have
+          // completed, so this normally resolves immediately. The 60s cap is a
+          // safety net for genuinely-missing/cross-bus deps.
+          const dep = await this.peerBus.waitFor(depId, 60_000);
           if (dep.status === 'FAILED' || dep.status === 'ESCALATED') {
+            // Publish a terminal status for OUR subtask before bailing, so our
+            // own dependents unblock at once instead of each waiting out the full
+            // peer timeout — that per-link stacking was the apparent "deadlock".
+            this.peerBus.publish(this.id, assignment.subtaskId, `Blocked by failed dependency: ${depId}`, 'FAILED');
             return this.buildResult(
               'ESCALATED',
               `Dependency ${depId} failed — cannot proceed`,
@@ -192,6 +199,7 @@ export class T3Worker extends BaseTier {
           }
           depOutputs.push(`[From ${dep.fromId} - ${dep.subtaskId}]:\n${dep.output}`);
         } catch (err) {
+          this.peerBus.publish(this.id, assignment.subtaskId, `Dependency timeout: ${depId}`, 'FAILED');
           return this.buildResult(
             'ESCALATED',
             `Dependency timeout: ${depId}`,
