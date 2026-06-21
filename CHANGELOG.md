@@ -5,6 +5,16 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.5] - 2026-06-21
+
+### Fixed
+- **Desktop: API keys could not be saved from Settings.** The Settings panel saved only over the Socket.IO backend and silently no-op'd whenever that backend was offline. Saving now goes through a backend-independent Electron IPC path (`cascade:updateSettings` / `cascade:getSettings`), surfaces errors instead of failing silently, and refreshes the per-provider "key set" indicators after saving.
+- **Desktop: onboarding dropped the OpenAI-compatible / Azure Base URL.** It was collected during onboarding but never persisted; it is now threaded through `setConfig`.
+- **CLI: wrong `--version` and a spurious "Stale build" warning on every run.** `CASCADE_VERSION` was a hardcoded literal that had drifted from `package.json`; it is now injected from `package.json` at build time, so the compiled bundle's version can no longer drift.
+
+### Changed
+- **Build: externalize optional native modules.** `tsup` now marks `keytar` and `node-notifier` as `external`, so the bundle (also shipped as the desktop `cascade-core`) builds even when those optional native binaries are absent.
+
 ## [0.12.4] - 2026-06-21
 
 ### Added
