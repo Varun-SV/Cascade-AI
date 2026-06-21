@@ -5,6 +5,11 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.3] - 2026-06-21
+
+### Fixed
+- **Windows desktop build failure (VS 18 / 2026).** The `windows-latest` GitHub Actions runner now resolves to the `win25-vs2026` image which ships Visual Studio 18 (2026). Both `node-gyp` and `@electron/node-gyp` only recognise VS major versions 15–17 (2017–2022); VS 18 returns `versionYear: undefined` and the build aborts with "could not find VS 2017 or newer". Pinned the Windows matrix entry to `windows-2022` which ships VS 17 (2022) and is fully supported by all current node-gyp/node-pty toolchains.
+
 ## [0.12.2] - 2026-06-21
 
 ### Fixed

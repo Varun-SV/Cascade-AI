@@ -102,7 +102,7 @@ jobs:
         include:
           - os: macos-latest
             platform_flag: "--mac"
-          - os: windows-latest
+          - os: windows-2022
             platform_flag: "--win"
           - os: ubuntu-latest
             platform_flag: "--linux"
