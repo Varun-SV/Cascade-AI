@@ -23,7 +23,9 @@ declare global {
       platform: string;
       getMeta(): Promise<{ port: number; token: string; platform: string; version: string }>;
       getConfig(): Promise<{ provider: string; apiKey: string; workspace: string; onboardingDone: boolean }>;
-      setConfig(cfg: { provider: string; apiKey: string; workspace: string }): Promise<void>;
+      setConfig(cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string }): Promise<void>;
+      getSettings(): Promise<{ models: Record<string, string>; budget: { maxCostPerRun?: number; autoBias?: string }; providersWithKey: string[] }>;
+      updateSettings(data: { keys?: Record<string, string | undefined>; models?: Record<string, string | undefined>; budget?: { maxCostPerRun?: number; autoBias?: string } }): Promise<{ ok: boolean; error?: string; models?: Record<string, string>; budget?: { maxCostPerRun?: number; autoBias?: string }; providersWithKey?: string[] }>;
       selectDirectory(): Promise<string | null>;
       pty: {
         spawn(cwd: string): Promise<{ ok: boolean; error?: string }>;

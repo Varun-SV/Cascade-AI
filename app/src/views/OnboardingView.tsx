@@ -89,7 +89,7 @@ export function OnboardingView() {
     setVerifyError('');
     try {
       if (window.cascade?.setConfig) {
-        await window.cascade.setConfig({ provider: selectedProvider.id, apiKey, workspace: workspace || '' });
+        await window.cascade.setConfig({ provider: selectedProvider.id, apiKey, workspace: workspace || '', baseUrl: baseUrl || undefined });
       }
       setStep('workspace');
     } catch (err) {
@@ -103,7 +103,7 @@ export function OnboardingView() {
     setSaving(true);
     try {
       if (window.cascade?.setConfig) {
-        await window.cascade.setConfig({ provider: selectedProvider?.id ?? '', apiKey, workspace });
+        await window.cascade.setConfig({ provider: selectedProvider?.id ?? '', apiKey, workspace, baseUrl: baseUrl || undefined });
       }
     } catch { /* ignore */ }
     dispatch(setWorkspacePath(workspace));
