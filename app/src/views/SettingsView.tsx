@@ -7,16 +7,41 @@ import { setShowSettings } from '../store/index.js';
 type Tab = 'keys' | 'models' | 'budget';
 type Bias = 'balanced' | 'quality' | 'cost';
 
-const MODEL_OPTIONS = [
-  'auto',
-  'claude-sonnet-4-6',
-  'claude-opus-4-8',
-  'claude-haiku-4-5-20251001',
-  'gpt-4o',
-  'gpt-4o-mini',
-  'gemini-2.0-flash',
-  'gemini-2.0-pro',
+// Provider → ProviderType key used by the Cascade core + the curated models
+// each one exposes in the tier pickers. 'auto' means "let routing decide".
+interface ProviderDef { id: string; label: string; models: string[]; freeText?: boolean }
+const TIER_PROVIDERS: ProviderDef[] = [
+  { id: 'auto', label: 'Auto (best model)', models: [] },
+  { id: 'anthropic', label: 'Anthropic', models: ['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'] },
+  { id: 'openai', label: 'OpenAI', models: ['gpt-4o', 'gpt-4o-mini', 'o1', 'o3-mini'] },
+  { id: 'gemini', label: 'Google Gemini', models: ['gemini-2.0-flash', 'gemini-2.0-pro'] },
+  { id: 'openai-compatible', label: 'OpenAI-Compatible', models: [], freeText: true },
+  { id: 'ollama', label: 'Ollama (local)', models: [], freeText: true },
 ];
+
+interface TierSel { provider: string; model: string }
+
+// Parse a stored override ('auto' | 'provider:model' | bare model id) into a
+// { provider, model } selection for the two dropdowns.
+function parseOverride(val: string | undefined): TierSel {
+  if (!val || val === 'auto') return { provider: 'auto', model: '' };
+  if (val.includes(':')) {
+    const [provider, ...rest] = val.split(':');
+    if (TIER_PROVIDERS.some((p) => p.id === provider)) return { provider, model: rest.join(':') };
+  }
+  const lower = val.toLowerCase();
+  if (lower.includes('claude')) return { provider: 'anthropic', model: val };
+  if (lower.startsWith('gpt') || lower.startsWith('o1') || lower.startsWith('o3')) return { provider: 'openai', model: val };
+  if (lower.includes('gemini')) return { provider: 'gemini', model: val };
+  return { provider: 'openai-compatible', model: val };
+}
+
+// Compose a { provider, model } selection back into a stored override string.
+function composeOverride(sel: TierSel): string {
+  if (sel.provider === 'auto') return 'auto';
+  if (!sel.model) return 'auto';
+  return `${sel.provider}:${sel.model}`;
+}
 
 interface Props { socket: Socket | null }
 
@@ -24,21 +49,43 @@ export function SettingsView({ socket }: Props) {
   const dispatch = useAppDispatch();
   const [tab, setTab] = useState<Tab>('keys');
 
-  // API keys
+  // API keys (sent under the Cascade ProviderType used by the core)
   const [anthropicKey, setAnthropicKey] = useState('');
   const [openaiKey, setOpenaiKey] = useState('');
-  const [googleKey, setGoogleKey] = useState('');
+  const [geminiKey, setGeminiKey] = useState('');
+  const [providersWithKey, setProvidersWithKey] = useState<string[]>([]);
 
-  // Model defaults
-  const [t1Model, setT1Model] = useState('auto');
-  const [t2Model, setT2Model] = useState('auto');
-  const [t3Model, setT3Model] = useState('auto');
+  // Per-tier provider + model
+  const [t1, setT1] = useState<TierSel>({ provider: 'auto', model: '' });
+  const [t2, setT2] = useState<TierSel>({ provider: 'auto', model: '' });
+  const [t3, setT3] = useState<TierSel>({ provider: 'auto', model: '' });
 
   // Budget
   const [maxCost, setMaxCost] = useState('');
   const [bias, setBias] = useState<Bias>('balanced');
 
   const [saved, setSaved] = useState(false);
+
+  // Pre-load the current saved config so the panel reflects reality (the keys
+  // themselves are never sent back — only which providers already have one).
+  useEffect(() => {
+    if (!socket) return;
+    const onCurrent = (cfg: {
+      models?: Record<string, string>;
+      budget?: { maxCostPerRun?: number; autoBias?: Bias };
+      providersWithKey?: string[];
+    }) => {
+      setT1(parseOverride(cfg.models?.t1));
+      setT2(parseOverride(cfg.models?.t2));
+      setT3(parseOverride(cfg.models?.t3));
+      if (typeof cfg.budget?.maxCostPerRun === 'number') setMaxCost(String(cfg.budget.maxCostPerRun));
+      if (cfg.budget?.autoBias) setBias(cfg.budget.autoBias);
+      setProvidersWithKey(cfg.providersWithKey ?? []);
+    };
+    socket.on('config:current', onCurrent);
+    socket.emit('config:get');
+    return () => { socket.off('config:current', onCurrent); };
+  }, [socket]);
 
   // Close on Escape
   useEffect(() => {
@@ -50,8 +97,8 @@ export function SettingsView({ socket }: Props) {
   const save = () => {
     if (!socket) return;
     socket.emit('config:update', {
-      keys: { anthropic: anthropicKey || undefined, openai: openaiKey || undefined, google: googleKey || undefined },
-      models: { t1: t1Model, t2: t2Model, t3: t3Model },
+      keys: { anthropic: anthropicKey || undefined, openai: openaiKey || undefined, gemini: geminiKey || undefined },
+      models: { t1: composeOverride(t1), t2: composeOverride(t2), t3: composeOverride(t3) },
       budget: { maxCostPerRun: maxCost ? parseFloat(maxCost) : undefined, autoBias: bias },
     });
     setSaved(true);
@@ -105,13 +152,19 @@ export function SettingsView({ socket }: Props) {
                 Keys are stored in your local Cascade config and never sent to any server other than the model provider.
               </p>
               {[
-                { label: 'Anthropic', val: anthropicKey, set: setAnthropicKey, placeholder: 'sk-ant-…' },
-                { label: 'OpenAI', val: openaiKey, set: setOpenaiKey, placeholder: 'sk-…' },
-                { label: 'Google', val: googleKey, set: setGoogleKey, placeholder: 'AIza…' },
-              ].map(({ label, val, set, placeholder }) => (
+                { id: 'anthropic', label: 'Anthropic', val: anthropicKey, set: setAnthropicKey, placeholder: 'sk-ant-…' },
+                { id: 'openai', label: 'OpenAI', val: openaiKey, set: setOpenaiKey, placeholder: 'sk-…' },
+                { id: 'gemini', label: 'Google', val: geminiKey, set: setGeminiKey, placeholder: 'AIza…' },
+              ].map(({ id, label, val, set, placeholder }) => (
                 <div key={label}>
-                  <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>{label}</label>
-                  <input type="password" value={val} onChange={(e) => set(e.target.value)} placeholder={placeholder}
+                  <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>
+                    {label}
+                    {providersWithKey.includes(id) && (
+                      <span style={{ color: 'var(--success)', marginLeft: 6 }}>• key set</span>
+                    )}
+                  </label>
+                  <input type="password" value={val} onChange={(e) => set(e.target.value)}
+                    placeholder={providersWithKey.includes(id) ? '•••••••• (leave blank to keep)' : placeholder}
                     style={{ width: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
                 </div>
               ))}
@@ -121,17 +174,36 @@ export function SettingsView({ socket }: Props) {
           {tab === 'models' && (
             <>
               <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: 0 }}>
-                Set a default model per tier. <code>auto</code> lets Cascade Auto pick the best model dynamically.
+                Choose a provider and model per tier. <code>Auto</code> lets Cascade pick the best model dynamically.
               </p>
-              {([['T1 (Planner)', t1Model, setT1Model], ['T2 (Manager)', t2Model, setT2Model], ['T3 (Worker)', t3Model, setT3Model]] as const).map(([label, val, set]) => (
-                <div key={label}>
-                  <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>{label}</label>
-                  <select value={val} onChange={(e) => set(e.target.value)}
-                    style={{ width: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none' }}>
-                    {MODEL_OPTIONS.map((m) => <option key={m} value={m}>{m}</option>)}
-                  </select>
-                </div>
-              ))}
+              {([['T1 (Planner)', t1, setT1], ['T2 (Manager)', t2, setT2], ['T3 (Worker)', t3, setT3]] as const).map(([label, sel, setSel]) => {
+                const def = TIER_PROVIDERS.find((p) => p.id === sel.provider) ?? TIER_PROVIDERS[0];
+                return (
+                  <div key={label}>
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>{label}</label>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <select value={sel.provider}
+                        onChange={(e) => {
+                          const next = TIER_PROVIDERS.find((p) => p.id === e.target.value)!;
+                          setSel({ provider: next.id, model: next.models[0] ?? '' });
+                        }}
+                        style={{ flex: 1, background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none' }}>
+                        {TIER_PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+                      </select>
+                      {sel.provider !== 'auto' && (
+                        def.freeText
+                          ? <input value={sel.model} onChange={(e) => setSel({ ...sel, model: e.target.value })}
+                              placeholder="model id"
+                              style={{ flex: 1, background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
+                          : <select value={sel.model} onChange={(e) => setSel({ ...sel, model: e.target.value })}
+                              style={{ flex: 1, background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none' }}>
+                              {def.models.map((m) => <option key={m} value={m}>{m}</option>)}
+                            </select>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </>
           )}
 

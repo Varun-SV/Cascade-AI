@@ -5,6 +5,19 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.4] - 2026-06-21
+
+### Added
+- **Per-tier provider + model selection (CLI & desktop).** Each tier (T1/T2/T3) can now bind to a specific provider *and* model, with `Auto` letting routing pick. The desktop Settings → Models tab gained a provider dropdown beside each tier's model picker, and the CLI gained `cascade models set <tier> <provider:model|auto>` / `cascade models unset <tier>`. Both write to the same workspace config, so the choices are shared. Routing already understood the `provider:model` override syntax; `auto` is now treated as "no override" everywhere.
+- **In-app animated tour.** The Help panel's *Watch* tab no longer shows a "Tutorial video coming soon" placeholder — it plays a self-contained, auto-advancing animated walkthrough (`AnimatedTour`) driven by each context's existing tour steps, with play/pause, prev/next, restart, and a progress bar. A rendered HyperFrames video still takes precedence once a `VIDEO_ID` is populated.
+
+### Fixed
+- **Chat could not send in the packaged app.** The desktop `main.ts` constructed `DashboardServer` with the wrong arguments (`{ port, token }` instead of `(config, store, workspacePath)`), so the backend threw on startup, the Socket.IO connection was never established, and the send button stayed permanently disabled. The backend is now wired correctly through `ConfigManager`/`MemoryStore` on a private loopback port.
+- **Packaged backend missing its database engine.** `better-sqlite3` (kept external by tsup, as native modules can't be bundled) was never shipped, so the backend crashed on launch. It's now copied into the core's resource `node_modules` (with `bindings`/`file-uri-to-path`) and rebuilt for the Electron ABI in CI.
+- **Onboarding re-appeared on every launch.** `electron-store` was never installed/bundled, so `require('electron-store')` always threw and fell back to an in-memory map wiped on each launch — `onboarding_done` never persisted. Replaced it with a dependency-free JSON file in `userData`.
+- **Settings → Save did nothing.** The backend mutated config only in memory and never wrote it back; the modal also never pre-loaded existing values. `config:update` now persists to the workspace config file, and the panel pre-fills current per-tier models, budget, and which providers already have a key (keys are never echoed back).
+- **Provider keys never reached the backend.** Onboarding/Settings keys were written to the system keychain (also unbundled) while the backend read the Cascade config — a dead end. Keys now flow into the shared workspace config the backend actually uses, with `google → gemini` and `groq → openai-compatible` mapped correctly.
+
 ## [0.12.3] - 2026-06-21
 
 ### Fixed

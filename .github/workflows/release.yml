@@ -134,7 +134,14 @@ jobs:
 
       - name: Rebuild native modules for Electron
         working-directory: app
-        run: npx @electron/rebuild -f -w node-pty
+        # node-pty lives in app/node_modules; better-sqlite3 (the embedded
+        # backend's DB engine) is hoisted to the repo-root node_modules, so it's
+        # rebuilt with an explicit --module-dir against the same Electron version.
+        run: |
+          npx @electron/rebuild -f -w node-pty
+          ELECTRON_VERSION=$(node -p "require('./node_modules/electron/package.json').version")
+          npx @electron/rebuild -f -m .. -w better-sqlite3 --version "$ELECTRON_VERSION"
+        shell: bash
 
       - name: Package & publish installer
         working-directory: app

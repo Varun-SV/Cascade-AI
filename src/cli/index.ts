@@ -19,7 +19,7 @@ import { doctorCommand } from './commands/doctor.js';
 import { updateCommand } from './commands/update.js';
 import { dashboardCommand } from './commands/dashboard.js';
 import { makeIdentityCommand } from './commands/identity.js';
-import { modelsCommand } from './commands/models.js';
+import { modelsCommand, setModelCommand } from './commands/models.js';
 import { exportCommand } from './commands/export.js';
 import { linkCommand } from './commands/link.js';
 import { telemetryCommand } from './commands/telemetry.js';
@@ -167,11 +167,15 @@ program
   });
 
 program
-  .command('models')
-  .description('List available AI models for each tier')
+  .command('models [action] [tier] [value]')
+  .description('List AI models per tier, or set/unset a tier provider+model (e.g. models set t1 anthropic:claude-opus-4-8)')
   .option('-v, --verbose', 'Show all models per provider with pricing')
-  .action(async (opts) => {
-    await modelsCommand({ verbose: opts.verbose });
+  .action(async (action, tier, value, opts) => {
+    if (action === 'set' || action === 'unset') {
+      await setModelCommand(action, tier, value);
+    } else {
+      await modelsCommand({ verbose: opts.verbose });
+    }
   });
 
 program

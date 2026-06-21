@@ -32,6 +32,28 @@ let tray: Tray | null = null;
 let backendPort = 0;
 let authToken = '';
 
+// Live references to the running Cascade backend so the config IPC handlers can
+// mutate the SAME config object the DashboardServer holds (no restart needed):
+// writing a provider key here makes the next chat run pick it up immediately.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let configManager: any = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let cascadeConfig: any = null;
+
+// Onboarding provider ids → Cascade core ProviderType (+ default base URL).
+// 'auto' has no single provider; keys are configured per concrete provider.
+function mapProvider(id: string): { type: string | null; baseUrl?: string } {
+  switch (id) {
+    case 'openai': return { type: 'openai' };
+    case 'anthropic': return { type: 'anthropic' };
+    case 'google': case 'gemini': return { type: 'gemini' };
+    case 'groq': return { type: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1' };
+    case 'openai-compatible': return { type: 'openai-compatible' };
+    case 'ollama': return { type: 'ollama' };
+    default: return { type: null };
+  }
+}
+
 // ─── Backend ─────────────────────────────────────────────────────────────────
 async function startBackend(): Promise<void> {
   backendPort = await findFreePort();
@@ -43,31 +65,30 @@ async function startBackend(): Promise<void> {
     const corePath = isDev
       ? join(__dirname, '../../dist/index.cjs')
       : join(process.resourcesPath, 'cascade-core/index.cjs');
-    const { DashboardServer } = require(corePath);
+    const { DashboardServer, ConfigManager } = require(corePath);
 
-    const server = new DashboardServer({
+    // Load the shared Cascade workspace config (same .cascade/config.json the
+    // `cascade` CLI uses) so API keys, per-tier models, and budget settings are
+    // unified across the desktop app and the CLI.
+    const workspace = getWorkspacePath();
+    configManager = new ConfigManager(workspace);
+    await configManager.load();
+    cascadeConfig = configManager.getConfig();
+
+    // Embed the dashboard on a private loopback port with auth disabled — this
+    // is a single-user local backend reachable only from 127.0.0.1 on an
+    // ephemeral port, so the JWT handshake (which the renderer can't mint) is
+    // unnecessary. The CORS '*' that auth-off implies is harmless on loopback.
+    cascadeConfig.dashboard = {
+      ...cascadeConfig.dashboard,
       port: backendPort,
-      token: authToken,
-    });
+      host: '127.0.0.1',
+      auth: false,
+    };
+
+    const server = new DashboardServer(cascadeConfig, configManager.getStore(), workspace);
     await server.start();
-    console.log(`[main] Cascade backend started on port ${backendPort}`);
-
-    // Forward escalation events to desktop notifications
-    server.on?.('permission:user-required', (payload: Record<string, unknown>) => {
-      if (mainWindow?.isFocused()) return;
-      new Notification({
-        title: 'Cascade AI — Approval Required',
-        body: `Tool: ${payload.tool ?? 'unknown'} — click to review`,
-      }).show();
-    });
-
-    server.on?.('session:complete', (payload: Record<string, unknown>) => {
-      if (mainWindow?.isFocused()) return;
-      new Notification({
-        title: 'Cascade AI — Task Complete',
-        body: String(payload.title ?? 'Session finished'),
-      }).show();
-    });
+    console.log(`[main] Cascade backend started on port ${backendPort} (workspace: ${workspace})`);
   } catch (err) {
     console.warn('[main] Backend start failed:', err);
     // Reset so the renderer's `if (!backendPort) return` guard skips Socket.IO
@@ -120,18 +141,21 @@ function registerIPC(): void {
     return readFile(filePath, 'utf8');
   });
 
-  // Config — read/write provider API key + workspace for onboarding
+  // Config — read/write provider API key + workspace for onboarding.
+  // Desktop-only meta (provider, workspace, onboarding flag) lives in a JSON file
+  // under userData; the actual API keys live in the shared Cascade workspace
+  // config so the embedded backend (and the CLI) can use them.
   ipcMain.handle('cascade:getConfig', async () => {
     try {
-      const store = getConfigStore();
-      const provider = store.get('provider', '') as string;
-      const workspace = store.get('workspace', '') as string;
-      const onboardingDone = store.get('onboarding_done', false) as boolean;
+      const meta = loadDesktopMeta();
+      const provider = (meta.provider as string) ?? '';
+      const workspace = (meta.workspace as string) ?? '';
+      const onboardingDone = Boolean(meta.onboarding_done);
       let apiKey = '';
-      try {
-        const keytar = require('keytar');
-        apiKey = (await keytar.getPassword('cascade-ai', provider)) ?? '';
-      } catch { /* keytar unavailable */ }
+      const { type } = mapProvider(provider);
+      if (type && cascadeConfig?.providers) {
+        apiKey = cascadeConfig.providers.find((p: { type: string; apiKey?: string }) => p.type === type)?.apiKey ?? '';
+      }
       return { provider, apiKey, workspace, onboardingDone };
     } catch {
       return { provider: '', apiKey: '', workspace: '', onboardingDone: false };
@@ -140,15 +164,20 @@ function registerIPC(): void {
 
   ipcMain.handle('cascade:setConfig', async (_e, cfg: { provider: string; apiKey: string; workspace: string }) => {
     try {
-      const store = getConfigStore();
-      store.set('provider', cfg.provider);
-      store.set('workspace', cfg.workspace);
-      store.set('onboarding_done', true);
-      if (cfg.apiKey && cfg.provider) {
-        try {
-          const keytar = require('keytar');
-          await keytar.setPassword('cascade-ai', cfg.provider, cfg.apiKey);
-        } catch { /* keytar unavailable */ }
+      saveDesktopMeta({ provider: cfg.provider, workspace: cfg.workspace, onboarding_done: true });
+      // Write the key into the live Cascade config (same object the running
+      // DashboardServer holds), then persist it — the next chat run picks it up
+      // immediately with no backend restart.
+      const { type, baseUrl } = mapProvider(cfg.provider);
+      if (type && cfg.apiKey && cascadeConfig && configManager) {
+        const existing = cascadeConfig.providers.find((p: { type: string }) => p.type === type);
+        if (existing) {
+          existing.apiKey = cfg.apiKey;
+          if (baseUrl && !existing.baseUrl) existing.baseUrl = baseUrl;
+        } else {
+          cascadeConfig.providers.push({ type, apiKey: cfg.apiKey, ...(baseUrl ? { baseUrl } : {}) });
+        }
+        await configManager.save();
       }
     } catch (err) {
       console.warn('[main] setConfig failed:', err);
@@ -165,16 +194,40 @@ function registerIPC(): void {
   });
 }
 
-// ─── Config store (electron-store or simple JSON fallback) ────────────────────
-function getConfigStore() {
+// ─── Desktop meta store (persistent JSON in userData) ─────────────────────────
+// Replaces the previous electron-store path — that package was never bundled, so
+// `require('electron-store')` always threw and fell back to an in-memory Map that
+// was wiped on every launch (the cause of onboarding re-appearing every time).
+// A plain JSON file has no native deps and persists reliably across launches.
+function desktopMetaPath(): string {
+  return join(app.getPath('userData'), 'cascade-desktop.json');
+}
+
+function loadDesktopMeta(): Record<string, unknown> {
   try {
-    const ElectronStore = require('electron-store');
-    return new ElectronStore({ name: 'cascade-config' });
+    const { readFileSync } = require('node:fs');
+    return JSON.parse(readFileSync(desktopMetaPath(), 'utf8')) as Record<string, unknown>;
   } catch {
-    // Minimal in-memory fallback for dev
-    const m = new Map<string, unknown>();
-    return { get: (k: string, d: unknown) => m.get(k) ?? d, set: (k: string, v: unknown) => m.set(k, v) };
+    return {};
   }
+}
+
+function saveDesktopMeta(patch: Record<string, unknown>): void {
+  try {
+    const { writeFileSync, mkdirSync } = require('node:fs');
+    const next = { ...loadDesktopMeta(), ...patch };
+    mkdirSync(app.getPath('userData'), { recursive: true });
+    writeFileSync(desktopMetaPath(), JSON.stringify(next, null, 2), 'utf8');
+  } catch (err) {
+    console.warn('[main] saveDesktopMeta failed:', err);
+  }
+}
+
+// The Cascade workspace for the embedded backend: the directory chosen during
+// onboarding, or the user's home directory as a sensible default.
+function getWorkspacePath(): string {
+  const ws = loadDesktopMeta().workspace;
+  return typeof ws === 'string' && ws.trim() ? ws : app.getPath('home');
 }
 
 // ─── Window ───────────────────────────────────────────────────────────────────

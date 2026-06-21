@@ -27,6 +27,18 @@ extraResources:
   - from: "../dist"
     to: "cascade-core"
     filter: ["**/*.js", "**/*.cjs", "**/*.mjs", "**/*.node"]
+  # The embedded backend (DashboardServer) needs better-sqlite3 at runtime, but
+  # tsup keeps it external (native modules can't be bundled). Ship it — plus its
+  # runtime deps `bindings` / `file-uri-to-path` — into the core's node_modules
+  # so `require('better-sqlite3')` resolves from cascade-core/index.cjs. The
+  # binary is rebuilt for the Electron ABI by the @electron/rebuild CI step.
+  - from: "../node_modules/better-sqlite3"
+    to: "cascade-core/node_modules/better-sqlite3"
+    filter: ["**/*", "!**/*.o", "!**/*.obj", "!deps/**", "!src/**"]
+  - from: "../node_modules/bindings"
+    to: "cascade-core/node_modules/bindings"
+  - from: "../node_modules/file-uri-to-path"
+    to: "cascade-core/node_modules/file-uri-to-path"
 
 mac:
   category: public.app-category.developer-tools
