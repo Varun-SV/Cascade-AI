@@ -5,6 +5,14 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] - 2026-06-21
+
+### Fixed
+- **node-pty crash in packaged app.** Moved `node-pty` from `devDependencies` to `dependencies`, added `asarUnpack` for `**/*.node` and `node_modules/node-pty/**` in `electron-builder.yml`, and added an `@electron/rebuild` step in the `build-desktop` CI job so the native binary is compiled for the target Electron ABI before packaging.
+- **Chat view gets no response.** The frontend emitted `cascade:run` over Socket.IO but the backend had no listener. Added `onCascadeRun` + `emitToSocket` to `DashboardSocket` and wired a full Cascade run in `DashboardServer` that streams tokens back to the originating socket and emits `session:complete`.
+- **ModelPicker dropdown clips above the window.** Changed `bottom: '100%'` → `top: '100%'` so the list opens downward from the header. Added `maxHeight: 280` + `overflow-y: auto` so all models are reachable. Fixed `ChatView` which was passing `tier="t1"` (non-existent prop) instead of the correct `value` / `onChange` pair; added `setActiveModelT1` Redux action so model selection persists to the store.
+- **Expanded provider + model lists.** Onboarding now shows 7 providers: Auto (Smart Routing), OpenAI, Anthropic, Google Gemini, Groq, OpenAI-Compatible (Azure / Mistral / LM Studio / Together…), and Ollama. Auto and Ollama skip the API key step; OpenAI-Compatible shows a Base URL field; the provider list is scrollable so the card never overflows. `ModelPicker` gained Auto, GPT o1/o3-mini, Llama 3.3 70B (Groq), and Mixtral 8×7B (Groq) entries.
+
 ## [0.12.0] - 2026-06-20
 
 ### Added
