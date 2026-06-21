@@ -19,8 +19,26 @@ contextBridge.exposeInMainWorld('cascade', {
     workspace: string;
     onboardingDone: boolean;
   }>,
-  setConfig: (cfg: { provider: string; apiKey: string; workspace: string }) =>
+  setConfig: (cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string }) =>
     ipcRenderer.invoke('cascade:setConfig', cfg) as Promise<void>,
+
+  // Settings panel: backend-independent read/write of keys, per-tier models, budget
+  getSettings: () => ipcRenderer.invoke('cascade:getSettings') as Promise<{
+    models: Record<string, string>;
+    budget: { maxCostPerRun?: number; autoBias?: string };
+    providersWithKey: string[];
+  }>,
+  updateSettings: (data: {
+    keys?: Record<string, string | undefined>;
+    models?: Record<string, string | undefined>;
+    budget?: { maxCostPerRun?: number; autoBias?: string };
+  }) => ipcRenderer.invoke('cascade:updateSettings', data) as Promise<{
+    ok: boolean;
+    error?: string;
+    models?: Record<string, string>;
+    budget?: { maxCostPerRun?: number; autoBias?: string };
+    providersWithKey?: string[];
+  }>,
 
   // Directory picker dialog
   selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory') as Promise<string | null>,

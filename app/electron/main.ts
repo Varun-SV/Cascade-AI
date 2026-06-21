@@ -162,18 +162,23 @@ function registerIPC(): void {
     }
   });
 
-  ipcMain.handle('cascade:setConfig', async (_e, cfg: { provider: string; apiKey: string; workspace: string }) => {
+  ipcMain.handle('cascade:setConfig', async (_e, cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string }) => {
     try {
       saveDesktopMeta({ provider: cfg.provider, workspace: cfg.workspace, onboarding_done: true });
       // Write the key into the live Cascade config (same object the running
       // DashboardServer holds), then persist it — the next chat run picks it up
       // immediately with no backend restart.
-      const { type, baseUrl } = mapProvider(cfg.provider);
+      const mapped = mapProvider(cfg.provider);
+      const type = mapped.type;
+      // Prefer a user-supplied base URL (Azure / OpenAI-compatible endpoint) over
+      // the provider's built-in default — onboarding used to drop it entirely.
+      const baseUrl = cfg.baseUrl?.trim() || mapped.baseUrl;
       if (type && cfg.apiKey && cascadeConfig && configManager) {
+        if (!Array.isArray(cascadeConfig.providers)) cascadeConfig.providers = [];
         const existing = cascadeConfig.providers.find((p: { type: string }) => p.type === type);
         if (existing) {
           existing.apiKey = cfg.apiKey;
-          if (baseUrl && !existing.baseUrl) existing.baseUrl = baseUrl;
+          if (baseUrl) existing.baseUrl = baseUrl;
         } else {
           cascadeConfig.providers.push({ type, apiKey: cfg.apiKey, ...(baseUrl ? { baseUrl } : {}) });
         }
@@ -181,6 +186,68 @@ function registerIPC(): void {
       }
     } catch (err) {
       console.warn('[main] setConfig failed:', err);
+    }
+  });
+
+  // Settings panel — a backend-independent path to read/write keys, per-tier
+  // models, and budget. The renderer previously saved ONLY via the Socket.IO
+  // backend; if that backend failed to start (e.g. a missing native binding or a
+  // failed cascade-core build), the Save button silently no-op'd. Routing through
+  // the same ConfigManager the backend uses guarantees Settings can always
+  // persist, even when there is no socket.
+  function settingsSnapshot(): {
+    models: Record<string, string>;
+    budget: { maxCostPerRun?: number; autoBias?: string };
+    providersWithKey: string[];
+  } {
+    const models = (cascadeConfig?.models ?? {}) as Record<string, string>;
+    const budget = {
+      maxCostPerRun: cascadeConfig?.budget?.maxCostPerRunUsd as number | undefined,
+      autoBias: cascadeConfig?.autoBias as string | undefined,
+    };
+    const providersWithKey = ((cascadeConfig?.providers ?? []) as Array<{ type: string; apiKey?: string }>)
+      .filter((p) => typeof p.apiKey === 'string' && p.apiKey.length > 0)
+      .map((p) => p.type);
+    return { models, budget, providersWithKey };
+  }
+
+  ipcMain.handle('cascade:getSettings', async () => settingsSnapshot());
+
+  ipcMain.handle('cascade:updateSettings', async (_e, data: {
+    keys?: Record<string, string | undefined>;
+    models?: Record<string, string | undefined>;
+    budget?: { maxCostPerRun?: number; autoBias?: string };
+  }) => {
+    try {
+      if (!cascadeConfig || !configManager) return { ok: false, error: 'backend-unavailable' };
+      if (!Array.isArray(cascadeConfig.providers)) cascadeConfig.providers = [];
+      if (data.keys) {
+        for (const [type, apiKey] of Object.entries(data.keys)) {
+          if (!apiKey) continue; // blank means "keep the existing key"
+          const existing = cascadeConfig.providers.find((p: { type: string }) => p.type === type);
+          if (existing) existing.apiKey = apiKey;
+          else cascadeConfig.providers.push({ type, apiKey });
+        }
+      }
+      if (data.models) {
+        cascadeConfig.models = cascadeConfig.models ?? {};
+        for (const [tier, val] of Object.entries(data.models)) {
+          if (val && val !== 'auto') cascadeConfig.models[tier] = val;
+          else delete cascadeConfig.models[tier];
+        }
+      }
+      if (data.budget) {
+        cascadeConfig.budget = cascadeConfig.budget ?? {};
+        if (typeof data.budget.maxCostPerRun === 'number') cascadeConfig.budget.maxCostPerRunUsd = data.budget.maxCostPerRun;
+        if (data.budget.autoBias === 'balanced' || data.budget.autoBias === 'quality' || data.budget.autoBias === 'cost') {
+          cascadeConfig.autoBias = data.budget.autoBias;
+        }
+      }
+      await configManager.save();
+      return { ok: true, ...settingsSnapshot() };
+    } catch (err) {
+      console.warn('[main] updateSettings failed:', err);
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
   });
 

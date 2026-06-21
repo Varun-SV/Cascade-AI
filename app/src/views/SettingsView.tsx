@@ -65,23 +65,39 @@ export function SettingsView({ socket }: Props) {
   const [bias, setBias] = useState<Bias>('balanced');
 
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState('');
 
-  // Pre-load the current saved config so the panel reflects reality (the keys
-  // themselves are never sent back — only which providers already have one).
+  // Apply a redacted config snapshot to the panel (the keys themselves are never
+  // sent back — only which providers already have one).
+  const applyConfig = (cfg: {
+    models?: Record<string, string>;
+    budget?: { maxCostPerRun?: number; autoBias?: string };
+    providersWithKey?: string[];
+  }) => {
+    setT1(parseOverride(cfg.models?.t1));
+    setT2(parseOverride(cfg.models?.t2));
+    setT3(parseOverride(cfg.models?.t3));
+    if (typeof cfg.budget?.maxCostPerRun === 'number') setMaxCost(String(cfg.budget.maxCostPerRun));
+    if (cfg.budget?.autoBias === 'balanced' || cfg.budget?.autoBias === 'quality' || cfg.budget?.autoBias === 'cost') {
+      setBias(cfg.budget.autoBias);
+    }
+    if (cfg.providersWithKey) setProvidersWithKey(cfg.providersWithKey);
+  };
+
+  // Pre-load via the Electron IPC bridge first — this works even when the
+  // Socket.IO backend never started, so the panel always reflects reality.
+  useEffect(() => {
+    window.cascade?.getSettings?.().then(applyConfig).catch(() => { /* no backend yet */ });
+  }, []);
+
+  // Also listen to the live backend snapshot when a socket is connected.
   useEffect(() => {
     if (!socket) return;
     const onCurrent = (cfg: {
       models?: Record<string, string>;
       budget?: { maxCostPerRun?: number; autoBias?: Bias };
       providersWithKey?: string[];
-    }) => {
-      setT1(parseOverride(cfg.models?.t1));
-      setT2(parseOverride(cfg.models?.t2));
-      setT3(parseOverride(cfg.models?.t3));
-      if (typeof cfg.budget?.maxCostPerRun === 'number') setMaxCost(String(cfg.budget.maxCostPerRun));
-      if (cfg.budget?.autoBias) setBias(cfg.budget.autoBias);
-      setProvidersWithKey(cfg.providersWithKey ?? []);
-    };
+    }) => applyConfig(cfg);
     socket.on('config:current', onCurrent);
     socket.emit('config:get');
     return () => { socket.off('config:current', onCurrent); };
@@ -94,13 +110,39 @@ export function SettingsView({ socket }: Props) {
     return () => window.removeEventListener('keydown', onKey);
   }, [dispatch]);
 
-  const save = () => {
-    if (!socket) return;
-    socket.emit('config:update', {
+  const save = async () => {
+    setSaveError('');
+    const payload = {
       keys: { anthropic: anthropicKey || undefined, openai: openaiKey || undefined, gemini: geminiKey || undefined },
       models: { t1: composeOverride(t1), t2: composeOverride(t2), t3: composeOverride(t3) },
       budget: { maxCostPerRun: maxCost ? parseFloat(maxCost) : undefined, autoBias: bias },
-    });
+    };
+
+    // Primary path: persist via the Electron IPC bridge. This works even when the
+    // Socket.IO backend never started — the old code emitted only on the socket
+    // and silently did nothing when it was null (the "can't save keys" bug).
+    let persisted = false;
+    try {
+      if (window.cascade?.updateSettings) {
+        const res = await window.cascade.updateSettings(payload);
+        if (res?.ok) { persisted = true; applyConfig(res); }
+        else if (res?.error && res.error !== 'backend-unavailable') setSaveError(res.error);
+      }
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : String(err));
+    }
+
+    // Also notify the live backend (when connected) so the running session picks
+    // up the new keys/models immediately, with no restart.
+    if (socket) { socket.emit('config:update', payload); persisted = true; }
+
+    if (!persisted) {
+      setSaveError('Could not save — the Cascade backend is unavailable. Try restarting the app.');
+      return;
+    }
+
+    // Keys are now stored; clear the inputs so placeholders show "key set".
+    setAnthropicKey(''); setOpenaiKey(''); setGeminiKey('');
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -234,7 +276,10 @@ export function SettingsView({ socket }: Props) {
         </div>
 
         {/* Footer */}
-        <div style={{ padding: '12px 18px', borderTop: '1px solid var(--border)', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+        <div style={{ padding: '12px 18px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8 }}>
+          {saveError && (
+            <span style={{ flex: 1, fontSize: 11, color: 'var(--danger)', lineHeight: 1.3 }}>{saveError}</span>
+          )}
           <button onClick={() => dispatch(setShowSettings(false))} style={{
             background: 'none', border: '1px solid var(--border)', borderRadius: 6,
             color: 'var(--text-muted)', padding: '7px 16px', fontSize: 12, cursor: 'pointer',
