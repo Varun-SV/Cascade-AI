@@ -1,6 +1,6 @@
 {
   "name": "cascade-ai-desktop",
-  "version": "0.12.1",
+  "version": "0.12.2",
   "description": "Cascade AI — purpose-built desktop application",
   "author": "Varun SV",
   "private": true,
@@ -34,7 +34,7 @@
     "node-pty": "^1.0.0"
   },
   "devDependencies": {
-    "@electron/rebuild": "^3.6.0",
+    "@electron/rebuild": "^3.7.2",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@types/react-syntax-highlighter": "^15.5.13",

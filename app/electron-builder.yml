@@ -6,6 +6,12 @@ directories:
   output: dist-app
   buildResources: assets
 
+# node-pty is rebuilt for the Electron ABI by the explicit `@electron/rebuild`
+# step in CI (which uses @electron/node-gyp with current VS 2022 detection).
+# Disable electron-builder's own npmRebuild so it doesn't recompile node-pty
+# with app-builder-lib's pinned, older node-gyp (which fails to find VS 2022).
+npmRebuild: false
+
 files:
   - dist-renderer/**
   - dist-electron/**

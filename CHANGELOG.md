@@ -5,6 +5,11 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.2] - 2026-06-21
+
+### Fixed
+- **Windows desktop build failure.** The `node-pty` rebuild failed because `@electron/rebuild@3.6.x` (and electron-builder's bundled copy) depend on `node-gyp@9.4.1`, which can no longer detect Visual Studio 2022 on the CI runner ("Could not find any Visual Studio installation to use"). Upgraded `@electron/rebuild` to `^3.7.2`, which uses the Electron-maintained `@electron/node-gyp` fork with current VS 2022 detection, and set `npmRebuild: false` in `electron-builder.yml` so packaging reuses the binary from the explicit rebuild step instead of recompiling it with electron-builder's older bundled `node-gyp`.
+
 ## [0.12.1] - 2026-06-21
 
 ### Fixed
