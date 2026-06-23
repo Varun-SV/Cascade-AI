@@ -35,11 +35,11 @@ function AgentNodeCard({ data }: { data: AgentNode }) {
   const isActive = data.status === 'ACTIVE';
   return (
     <div style={{
-      background: '#131520',
+      background: 'var(--bg-surface)',
       border: `1.5px solid ${tierColor}`,
       borderRadius: 8, padding: '8px 11px',
       minWidth: 155, maxWidth: 210,
-      boxShadow: isActive ? `0 0 16px ${tierColor}44` : '0 2px 8px rgba(0,0,0,0.4)',
+      boxShadow: isActive ? `0 0 16px ${tierColor}44` : 'var(--shadow-1)',
     }}>
       <Handle type="target" position={Position.Top} style={{ background: tierColor, width: 7, height: 7, border: 'none' }} />
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
@@ -47,7 +47,7 @@ function AgentNodeCard({ data }: { data: AgentNode }) {
           fontSize: 9, fontWeight: 800, letterSpacing: 0.8, textTransform: 'uppercase',
           padding: '2px 5px', borderRadius: 3, background: tierColor + '22', color: tierColor,
         }}>{data.tier}</span>
-        <span style={{ fontSize: 11.5, fontWeight: 600, color: '#cdd6f4', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+        <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
           {data.label}
         </span>
         <span title={data.status} style={{
@@ -57,7 +57,7 @@ function AgentNodeCard({ data }: { data: AgentNode }) {
           animation: isActive ? 'pulse 1.4s var(--ease) infinite' : 'none',
         }} />
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: '#6e738d' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: 'var(--text-muted)' }}>
         <span style={{ color: statusColor, fontWeight: 600 }}>{STATUS_LABEL[data.status] ?? 'idle'}</span>
         {data.currentAction && (
           <>
@@ -67,7 +67,7 @@ function AgentNodeCard({ data }: { data: AgentNode }) {
         )}
       </div>
       {data.progressPct !== undefined && (
-        <div style={{ marginTop: 6, height: 2, background: '#1a1d2e', borderRadius: 2, overflow: 'hidden' }}>
+        <div style={{ marginTop: 6, height: 2, background: 'var(--bg-active)', borderRadius: 2, overflow: 'hidden' }}>
           <div style={{ height: '100%', width: `${data.progressPct}%`, background: tierColor, borderRadius: 2, transition: 'width 0.3s var(--ease)' }} />
         </div>
       )}
@@ -119,10 +119,10 @@ export function AgentGraph({ agents }: { agents: AgentNode[] }) {
       proOptions={{ hideAttribution: true }}
       style={{ background: 'transparent' }}
     >
-      <Controls style={{ background: '#131520', border: '1px solid #1a1d2e', borderRadius: 8 }} />
+      <Controls style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 8 }} />
       <MiniMap
-        style={{ background: '#0f1117', border: '1px solid #1a1d2e', borderRadius: 8 }}
-        maskColor="rgba(6,8,15,0.7)"
+        style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 8 }}
+        maskColor="rgba(127,127,127,0.18)"
         nodeColor={(n) => TIER_COLORS[(n.data as AgentNode).tier] ?? '#3a3a46'}
       />
     </ReactFlow>

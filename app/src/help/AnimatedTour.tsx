@@ -67,7 +67,7 @@ export function AnimatedTour({ steps, title }: Props) {
       {/* Stage */}
       <div style={{
         position: 'relative', aspectRatio: '16/9', borderRadius: 10, overflow: 'hidden',
-        background: 'radial-gradient(120% 120% at 50% 0%, #131a2e 0%, var(--bg-base) 70%)',
+        background: 'radial-gradient(120% 120% at 50% 0%, var(--bg-raised) 0%, var(--bg-base) 70%)',
         border: '1px solid var(--border)',
         display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 18,
       }}>

@@ -3,6 +3,7 @@ import { useDispatch, useSelector } from 'react-redux';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 export type ViewMode = 'onboarding' | 'cockpit' | 'chat' | 'code';
+export type ThemePref = 'system' | 'light' | 'dark';
 
 export interface AgentNode {
   id: string;
@@ -48,6 +49,7 @@ export interface AppState {
   view: ViewMode;
   connected: boolean;
   reconnecting: boolean;
+  backendError: string | null;
   showSettings: boolean;
   backendPort: number;
   authToken: string;
@@ -61,6 +63,8 @@ export interface AppState {
   workspacePath: string;
   terminalVisible: boolean;
   helpContext: string | null;
+  themePref: ThemePref;
+  themeDark: boolean;
   // v0.12.0 additions
   sessions: RuntimeSession[];
   activeSessionId: string | null;
@@ -73,6 +77,7 @@ const initialState: AppState = {
   view: 'cockpit',
   connected: false,
   reconnecting: false,
+  backendError: null,
   showSettings: false,
   backendPort: 0,
   authToken: '',
@@ -86,6 +91,8 @@ const initialState: AppState = {
   workspacePath: '',
   terminalVisible: false,
   helpContext: null,
+  themePref: 'system',
+  themeDark: true,
   sessions: [],
   activeSessionId: null,
   openTabs: [],
@@ -106,6 +113,9 @@ const appSlice = createSlice({
     },
     setReconnecting(state, action: PayloadAction<boolean>) {
       state.reconnecting = action.payload;
+    },
+    setBackendError(state, action: PayloadAction<string | null>) {
+      state.backendError = action.payload;
     },
     setShowSettings(state, action: PayloadAction<boolean>) {
       state.showSettings = action.payload;
@@ -147,6 +157,10 @@ const appSlice = createSlice({
     },
     setHelpContext(state, action: PayloadAction<string | null>) {
       state.helpContext = action.payload;
+    },
+    setTheme(state, action: PayloadAction<{ preference: ThemePref; dark: boolean }>) {
+      state.themePref = action.payload.preference;
+      state.themeDark = action.payload.dark;
     },
     setActiveModel(state, action: PayloadAction<Partial<{ t1: string; t2: string; t3: string }>>) {
       state.activeModel = { ...state.activeModel, ...action.payload };
@@ -194,9 +208,9 @@ const appSlice = createSlice({
 });
 
 export const {
-  setView, setConnected, setReconnecting, setShowSettings, setMeta, setSessionId, updateCost,
+  setView, setConnected, setReconnecting, setBackendError, setShowSettings, setMeta, setSessionId, updateCost,
   setAgents, upsertAgent, appendMessage, updateLastMessage,
-  setWorkspacePath, toggleTerminal, setHelpContext, setActiveModel, setActiveModelT1,
+  setWorkspacePath, toggleTerminal, setHelpContext, setTheme, setActiveModel, setActiveModelT1,
   setSessions, setActiveSessionId, removeSession,
   openTab, closeTab, setActiveTab, setTabDirty,
   setOnboardingDone,

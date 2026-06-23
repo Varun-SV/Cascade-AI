@@ -6,6 +6,7 @@ import {
   Notification,
   ipcMain,
   nativeImage,
+  nativeTheme,
   protocol,
   net as electronNet,
 } from 'electron';
@@ -31,6 +32,10 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let backendPort = 0;
 let authToken = '';
+// Human-readable reason the dashboard socket backend isn't reachable, surfaced to
+// the renderer (status bar) so "offline" can explain itself and offer a retry.
+// null = healthy/connected-capable; a string = the dashboard failed to start.
+let backendError: string | null = null;
 
 // Live references to the running Cascade backend so the config IPC handlers can
 // mutate the SAME config object the DashboardServer holds (no restart needed):
@@ -55,57 +60,182 @@ function mapProvider(id: string): { type: string | null; baseUrl?: string } {
 }
 
 // ─── Backend ─────────────────────────────────────────────────────────────────
+// Resolve the cascade-ai core package (built CommonJS output). In dev it lives at
+// the repo's ../dist; in a packaged app it's bundled under resources/cascade-core.
+function loadCore(): { DashboardServer: any; ConfigManager: any } {
+  const corePath = isDev
+    ? join(__dirname, '../../dist/index.cjs')
+    : join(process.resourcesPath, 'cascade-core/index.cjs');
+  return require(corePath);
+}
+
 async function startBackend(): Promise<void> {
   backendPort = await findFreePort();
   // Generate a random session token for auto-login
   authToken = require('node:crypto').randomBytes(24).toString('hex');
+  backendError = null;
 
+  const workspace = getWorkspacePath();
+
+  // STEP 1 — Load the shared Cascade config FIRST, in its own guard. This is the
+  // same .cascade/config.json the `cascade` CLI uses, so API keys, per-tier
+  // models, and budget settings are unified across desktop + CLI. Keeping this
+  // independent of the dashboard server means Settings can ALWAYS persist (the
+  // `cascade:updateSettings` IPC only needs configManager/cascadeConfig), even
+  // when the socket backend itself fails to come up.
   try {
-    // Import the cascade-ai core package (built CommonJS output lives at ../dist)
-    const corePath = isDev
-      ? join(__dirname, '../../dist/index.cjs')
-      : join(process.resourcesPath, 'cascade-core/index.cjs');
-    const { DashboardServer, ConfigManager } = require(corePath);
-
-    // Load the shared Cascade workspace config (same .cascade/config.json the
-    // `cascade` CLI uses) so API keys, per-tier models, and budget settings are
-    // unified across the desktop app and the CLI.
-    const workspace = getWorkspacePath();
+    const { ConfigManager } = loadCore();
     configManager = new ConfigManager(workspace);
     await configManager.load();
     cascadeConfig = configManager.getConfig();
+  } catch (err) {
+    console.warn('[main] Config load failed:', err);
+    configManager = null;
+    cascadeConfig = null;
+    backendError = `Could not load Cascade config: ${err instanceof Error ? err.message : String(err)}`;
+    backendPort = 0;
+    authToken = '';
+    notifyBackendStatus();
+    return; // nothing else can work without config
+  }
 
-    // Embed the dashboard on a private loopback port with auth disabled — this
-    // is a single-user local backend reachable only from 127.0.0.1 on an
-    // ephemeral port, so the JWT handshake (which the renderer can't mint) is
-    // unnecessary. The CORS '*' that auth-off implies is harmless on loopback.
+  // STEP 2 — Start the embedded dashboard socket server on a private loopback
+  // port with auth disabled (single-user local backend on 127.0.0.1, ephemeral
+  // port; the renderer can't mint a JWT so the handshake is unnecessary). If this
+  // fails, config still works — only live chat/connectivity is unavailable.
+  try {
+    const { DashboardServer } = loadCore();
     cascadeConfig.dashboard = {
       ...cascadeConfig.dashboard,
       port: backendPort,
       host: '127.0.0.1',
       auth: false,
     };
-
     const server = new DashboardServer(cascadeConfig, configManager.getStore(), workspace);
     await server.start();
     console.log(`[main] Cascade backend started on port ${backendPort} (workspace: ${workspace})`);
   } catch (err) {
-    console.warn('[main] Backend start failed:', err);
-    // Reset so the renderer's `if (!backendPort) return` guard skips Socket.IO
-    // entirely instead of connecting to an unused port and showing "Reconnecting".
+    console.warn('[main] Dashboard server start failed:', err);
+    // Reset the port so the renderer's `if (!backendPort) return` guard skips
+    // Socket.IO instead of dialing a dead port and looping on "Reconnecting".
     backendPort = 0;
     authToken = '';
+    backendError = `Cascade backend unavailable: ${err instanceof Error ? err.message : String(err)}`;
   }
+  notifyBackendStatus();
+}
+
+// Push the current backend health to the renderer so the status bar can update
+// live after an on-demand restart (the initial value is read via cascade:meta).
+function notifyBackendStatus(): void {
+  mainWindow?.webContents.send('cascade:backendStatus', {
+    port: backendPort,
+    token: authToken,
+    error: backendError,
+  });
+}
+
+// ─── Theme ───────────────────────────────────────────────────────────────────
+// The user's appearance preference: 'system' follows the OS, 'light'/'dark'
+// force a mode. Persisted in cascade-desktop.json so it survives launches and is
+// applied to `nativeTheme.themeSource` (which also themes native chrome:
+// menus, scrollbars, the title-bar overlay, and form controls via color-scheme).
+type ThemePref = 'system' | 'light' | 'dark';
+
+function getThemePref(): ThemePref {
+  const v = loadDesktopMeta().theme;
+  return v === 'light' || v === 'dark' ? v : 'system';
+}
+
+function applyThemePref(pref: ThemePref): void {
+  nativeTheme.themeSource = pref;
+}
+
+// ─── Auto-update ─────────────────────────────────────────────────────────────
+// electron-updater pulls latest*.yml from the GitHub Release (see
+// electron-builder.yml `publish`). We keep background download on so a freshly
+// published version installs on next launch, AND expose IPC so the Settings →
+// Updates panel can trigger a check, show progress, and install on demand.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let autoUpdater: any = null;
+
+function sendUpdateStatus(status: string, data: Record<string, unknown> = {}): void {
+  mainWindow?.webContents.send('update:status', { status, ...data });
+}
+
+function setupAutoUpdate(): void {
+  try {
+    autoUpdater = require('electron-updater').autoUpdater;
+  } catch {
+    autoUpdater = null; // dev, or electron-updater unavailable
+    return;
+  }
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on('checking-for-update', () => sendUpdateStatus('checking'));
+  autoUpdater.on('update-available', (info: { version?: string }) => {
+    sendUpdateStatus('available', { version: info?.version });
+    new Notification({ title: 'Cascade AI — Update Available', body: `Version ${info?.version ?? ''} is downloading in the background.` }).show();
+  });
+  autoUpdater.on('update-not-available', () => sendUpdateStatus('not-available'));
+  autoUpdater.on('download-progress', (p: { percent?: number }) => sendUpdateStatus('downloading', { percent: Math.round(p?.percent ?? 0) }));
+  autoUpdater.on('update-downloaded', (info: { version?: string }) => {
+    sendUpdateStatus('downloaded', { version: info?.version });
+    new Notification({ title: 'Cascade AI — Restart to Update', body: 'A new version is ready. Relaunch to install.' }).show();
+  });
+  autoUpdater.on('error', (err: unknown) => sendUpdateStatus('error', { message: err instanceof Error ? err.message : String(err) }));
+
+  // Silent check on launch; failures (e.g. dev without app-update.yml) are ignored.
+  autoUpdater.checkForUpdatesAndNotify?.().catch(() => { /* offline or dev */ });
 }
 
 // ─── IPC handlers ─────────────────────────────────────────────────────────────
 function registerIPC(): void {
+  // Appearance: read/write the System/Light/Dark preference. The renderer's
+  // useTheme hook resolves this into a concrete `data-theme` on <html>.
+  ipcMain.handle('theme:get', () => ({
+    preference: getThemePref(),
+    shouldUseDark: nativeTheme.shouldUseDarkColors,
+  }));
+  ipcMain.handle('theme:set', (_e, preference: ThemePref) => {
+    const pref: ThemePref = preference === 'light' || preference === 'dark' ? preference : 'system';
+    saveDesktopMeta({ theme: pref });
+    applyThemePref(pref);
+    return { preference: pref, shouldUseDark: nativeTheme.shouldUseDarkColors };
+  });
+
+  // Updates: current version + manual check/install for the Settings panel.
+  ipcMain.handle('update:getVersion', () => app.getVersion());
+  ipcMain.handle('update:check', async () => {
+    if (!autoUpdater) return { ok: false, error: 'updater-unavailable' };
+    try {
+      const r = await autoUpdater.checkForUpdates();
+      return { ok: true, version: r?.updateInfo?.version, current: app.getVersion() };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  ipcMain.handle('update:install', () => {
+    // Restart and apply the downloaded update. No-op if nothing is downloaded.
+    try { autoUpdater?.quitAndInstall(); } catch { /* nothing downloaded */ }
+  });
+
   ipcMain.handle('cascade:meta', () => ({
     port: backendPort,
     token: authToken,
     platform: process.platform,
     version: app.getVersion(),
+    error: backendError,
   }));
+
+  // Retry the embedded backend on demand (the status bar exposes this when the
+  // dashboard failed to start). Returns the fresh meta so the renderer can
+  // reconnect Socket.IO with the new port/token without a full app restart.
+  ipcMain.handle('cascade:restartBackend', async () => {
+    await startBackend();
+    return { port: backendPort, token: authToken, error: backendError };
+  });
 
   // PTY (terminal) — node-pty runs in main process, data ferried via IPC
   let pty: import('node-pty').IPty | null = null;
@@ -300,25 +430,20 @@ function getWorkspacePath(): string {
 // ─── Window ───────────────────────────────────────────────────────────────────
 function createWindow(): void {
   const isMac = process.platform === 'darwin';
+  const dark = nativeTheme.shouldUseDarkColors;
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    backgroundColor: '#06080f',
+    backgroundColor: dark ? '#1b1c1e' : '#f4f5f7',
     // Frameless-style chrome on every platform: macOS keeps inset traffic
     // lights, Windows/Linux get themed window controls via titleBarOverlay.
     // The app draws its own draggable title strip (see TitleBar.tsx).
     titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
     ...(isMac
       ? {}
-      : {
-          titleBarOverlay: {
-            color: '#0f1117',
-            symbolColor: '#6e738d',
-            height: 38,
-          },
-        }),
+      : { titleBarOverlay: titleBarOverlayColors() }),
     autoHideMenuBar: true, // no in-window menu bar; shortcuts stay via roles
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
@@ -337,6 +462,22 @@ function createWindow(): void {
   }
 
   mainWindow.on('closed', () => { mainWindow = null; });
+}
+
+// Title-bar overlay (Windows/Linux native window controls) colors for the
+// current theme, kept in sync when the OS or preference flips.
+function titleBarOverlayColors(): Electron.TitleBarOverlay {
+  const dark = nativeTheme.shouldUseDarkColors;
+  return {
+    color: dark ? '#202123' : '#ffffff',
+    symbolColor: dark ? '#9ba0a8' : '#5b616b',
+    height: 38,
+  };
+}
+
+function updateTitleBarOverlay(): void {
+  if (process.platform === 'darwin' || !mainWindow) return;
+  try { mainWindow.setTitleBarOverlay(titleBarOverlayColors()); } catch { /* overlay may be unavailable */ }
 }
 
 // ─── Application menu ───────────────────────────────────────────────────────
@@ -384,22 +525,25 @@ app.whenReady().then(async () => {
     return electronNet.fetch(pathToFileURL(filePath).toString());
   });
 
+  // Apply the saved appearance preference before the first paint so native
+  // chrome (title-bar overlay, scrollbars) opens in the right mode.
+  applyThemePref(getThemePref());
+  // Forward OS light/dark changes to the renderer so 'System' mode tracks live.
+  nativeTheme.on('updated', () => {
+    mainWindow?.webContents.send('theme:changed', {
+      preference: getThemePref(),
+      shouldUseDark: nativeTheme.shouldUseDarkColors,
+    });
+    updateTitleBarOverlay();
+  });
+
   buildAppMenu();
   registerIPC();
   await startBackend();
   createWindow();
   createTray();
 
-  try {
-    const { autoUpdater } = require('electron-updater');
-    autoUpdater.checkForUpdatesAndNotify();
-    autoUpdater.on('update-available', () => {
-      new Notification({ title: 'Cascade AI — Update Available', body: 'Downloading in the background.' }).show();
-    });
-    autoUpdater.on('update-downloaded', () => {
-      new Notification({ title: 'Cascade AI — Restart to Update', body: 'A new version is ready. Relaunch to install.' }).show();
-    });
-  } catch { /* no-op in dev or when electron-updater is unavailable */ }
+  setupAutoUpdate();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

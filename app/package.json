@@ -7,7 +7,8 @@
   "main": "dist-electron/main.js",
   "type": "commonjs",
   "scripts": {
-    "dev": "concurrently -k \"vite\" \"electron .\"",
+    "predev": "npm --prefix .. run build:cli",
+    "dev": "cross-env ELECTRON_DEV=1 concurrently -k \"vite\" \"electron .\"",
     "gen:icon": "node build-icon.cjs",
     "build": "vite build && tsc -p electron/tsconfig.json",
     "build:mac": "npm run build && electron-builder --mac",
@@ -30,6 +31,7 @@
     "fuse.js": "^7.0.0",
     "lucide-react": "^0.460.0",
     "socket.io-client": "^4.8.0",
+    "socket.io-msgpack-parser": "^3.0.2",
     "electron-updater": "^6.3.0",
     "node-pty": "^1.0.0",
     "better-sqlite3": "^12.9.0"
@@ -41,6 +43,7 @@
     "@types/react-syntax-highlighter": "^15.5.13",
     "@vitejs/plugin-react": "^4.3.0",
     "concurrently": "^9.0.0",
+    "cross-env": "^7.0.3",
     "electron": "33.0.0",
     "electron-builder": "^25.0.0",
     "typescript": "^5.6.0",

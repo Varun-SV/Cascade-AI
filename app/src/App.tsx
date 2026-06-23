@@ -1,5 +1,9 @@
 import { useEffect, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
+// The embedded backend's Socket.IO server encodes packets with the msgpack
+// parser (see src/dashboard/websocket.ts). The client MUST use the same parser
+// or the handshake never completes and the app is stuck "offline" forever.
+import parser from 'socket.io-msgpack-parser';
 import { ActivityBar } from './layout/ActivityBar.js';
 import { TitleBar } from './layout/TitleBar.js';
 import { SessionSidebar } from './layout/SessionSidebar.js';
@@ -11,22 +15,36 @@ import { HelpPanel } from './help/HelpPanel.js';
 import { OnboardingView } from './views/OnboardingView.js';
 import {
   useAppDispatch, useAppSelector,
-  setConnected, setReconnecting, setMeta, updateCost, upsertAgent, updateLastMessage,
+  setConnected, setReconnecting, setBackendError, setMeta, updateCost, upsertAgent, updateLastMessage,
   setSessions, removeSession, setOnboardingDone,
   type RuntimeSession,
 } from './store/index.js';
 import { SettingsView } from './views/SettingsView.js';
+import { useThemeSync } from './theme/useTheme.js';
 
 declare global {
   interface Window {
     cascade?: {
       platform: string;
-      getMeta(): Promise<{ port: number; token: string; platform: string; version: string }>;
+      getMeta(): Promise<{ port: number; token: string; platform: string; version: string; error: string | null }>;
+      restartBackend(): Promise<{ port: number; token: string; error: string | null }>;
+      onBackendStatus(cb: (s: { port: number; token: string; error: string | null }) => void): void;
       getConfig(): Promise<{ provider: string; apiKey: string; workspace: string; onboardingDone: boolean }>;
       setConfig(cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string }): Promise<void>;
       getSettings(): Promise<{ models: Record<string, string>; budget: { maxCostPerRun?: number; autoBias?: string }; providersWithKey: string[] }>;
       updateSettings(data: { keys?: Record<string, string | undefined>; models?: Record<string, string | undefined>; budget?: { maxCostPerRun?: number; autoBias?: string } }): Promise<{ ok: boolean; error?: string; models?: Record<string, string>; budget?: { maxCostPerRun?: number; autoBias?: string }; providersWithKey?: string[] }>;
       selectDirectory(): Promise<string | null>;
+      theme: {
+        get(): Promise<{ preference: 'system' | 'light' | 'dark'; shouldUseDark: boolean }>;
+        set(preference: 'system' | 'light' | 'dark'): Promise<{ preference: 'system' | 'light' | 'dark'; shouldUseDark: boolean }>;
+        onChanged(cb: (s: { preference: 'system' | 'light' | 'dark'; shouldUseDark: boolean }) => void): void;
+      };
+      updates: {
+        getVersion(): Promise<string>;
+        check(): Promise<{ ok: boolean; error?: string; version?: string; current?: string }>;
+        install(): Promise<void>;
+        onStatus(cb: (s: { status: string; version?: string; percent?: number; message?: string }) => void): void;
+      };
       pty: {
         spawn(cwd: string): Promise<{ ok: boolean; error?: string }>;
         write(data: string): void;
@@ -48,6 +66,9 @@ export function App() {
   const { backendPort, authToken, helpContext, showSettings, onboardingDone } = useAppSelector((s) => s.app);
   const socketRef = useRef<Socket | null>(null);
 
+  // Resolve + apply the System/Light/Dark appearance preference.
+  useThemeSync();
+
   // Check onboarding status from Electron config on startup
   useEffect(() => {
     if (window.cascade?.getConfig) {
@@ -59,11 +80,17 @@ export function App() {
     }
   }, [dispatch]);
 
-  // Fetch Electron meta (port + token) from preload bridge
+  // Fetch Electron meta (port + token) from preload bridge, and subscribe to
+  // live backend-health pushes so an on-demand restart reconnects automatically.
   useEffect(() => {
     if (window.cascade) {
       window.cascade.getMeta().then((meta) => {
         dispatch(setMeta({ port: meta.port, token: meta.token }));
+        dispatch(setBackendError(meta.error));
+      });
+      window.cascade.onBackendStatus?.((s) => {
+        dispatch(setMeta({ port: s.port, token: s.token }));
+        dispatch(setBackendError(s.error));
       });
     } else {
       dispatch(setMeta({ port: 3000, token: '' }));
@@ -76,6 +103,7 @@ export function App() {
     const socket = io(`http://localhost:${backendPort}`, {
       auth: { token: authToken },
       transports: ['websocket'],
+      parser,
     });
     socketRef.current = socket;
 
@@ -127,7 +155,10 @@ export function App() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
       <TitleBar />
-      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+      {/* position: relative anchors the absolutely-positioned HelpPanel to the
+          content area (below the title bar) so its close button is never hidden
+          under the draggable title strip / native window controls. */}
+      <div style={{ display: 'flex', flex: 1, overflow: 'hidden', position: 'relative' }}>
         <ActivityBar />
         <SessionSidebar socket={socketRef.current} />
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>

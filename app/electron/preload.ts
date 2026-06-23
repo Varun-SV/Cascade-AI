@@ -4,13 +4,26 @@ contextBridge.exposeInMainWorld('cascade', {
   // Synchronous platform string for first-paint layout (e.g. title-bar insets)
   platform: process.platform,
 
-  // App metadata: backend port, auth token, platform
+  // App metadata: backend port, auth token, platform, backend health
   getMeta: () => ipcRenderer.invoke('cascade:meta') as Promise<{
     port: number;
     token: string;
     platform: string;
     version: string;
+    error: string | null;
   }>,
+
+  // Retry the embedded backend; resolves with the fresh port/token/error.
+  restartBackend: () => ipcRenderer.invoke('cascade:restartBackend') as Promise<{
+    port: number;
+    token: string;
+    error: string | null;
+  }>,
+
+  // Live backend health pushes (after an on-demand restart).
+  onBackendStatus: (cb: (s: { port: number; token: string; error: string | null }) => void) => {
+    ipcRenderer.on('cascade:backendStatus', (_e, s) => cb(s));
+  },
 
   // Config: read/write provider key + workspace for onboarding
   getConfig: () => ipcRenderer.invoke('cascade:getConfig') as Promise<{
@@ -42,6 +55,26 @@ contextBridge.exposeInMainWorld('cascade', {
 
   // Directory picker dialog
   selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory') as Promise<string | null>,
+
+  // Appearance: System/Light/Dark preference + resolved dark flag
+  theme: {
+    get: () => ipcRenderer.invoke('theme:get') as Promise<{ preference: 'system' | 'light' | 'dark'; shouldUseDark: boolean }>,
+    set: (preference: 'system' | 'light' | 'dark') =>
+      ipcRenderer.invoke('theme:set', preference) as Promise<{ preference: 'system' | 'light' | 'dark'; shouldUseDark: boolean }>,
+    onChanged: (cb: (s: { preference: 'system' | 'light' | 'dark'; shouldUseDark: boolean }) => void) => {
+      ipcRenderer.on('theme:changed', (_e, s) => cb(s));
+    },
+  },
+
+  // Self-update: current version, manual check, install, and live status events
+  updates: {
+    getVersion: () => ipcRenderer.invoke('update:getVersion') as Promise<string>,
+    check: () => ipcRenderer.invoke('update:check') as Promise<{ ok: boolean; error?: string; version?: string; current?: string }>,
+    install: () => ipcRenderer.invoke('update:install') as Promise<void>,
+    onStatus: (cb: (s: { status: string; version?: string; percent?: number; message?: string }) => void) => {
+      ipcRenderer.on('update:status', (_e, s) => cb(s));
+    },
+  },
 
   // PTY (terminal)
   pty: {

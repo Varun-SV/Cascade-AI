@@ -126,6 +126,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # electron-builder's deb/rpm/pacman targets shell out to fpm, which needs
+      # rpmbuild for .rpm and bsdtar (libarchive-tools) + zstd for the Arch
+      # .pkg.tar.zst. AppImage needs no extra tooling.
+      - name: Install Linux packaging tools
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y rpm libarchive-tools zstd
+
       - name: Build Cascade core (electron-builder extraResources)
         run: npm run build:cli
 

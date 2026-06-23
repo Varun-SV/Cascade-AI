@@ -52,7 +52,7 @@ function SessionRow({
         padding: '5px 12px 5px 16px',
         cursor: 'pointer',
         borderLeft: `2px solid ${active ? 'var(--accent)' : 'transparent'}`,
-        background: active ? 'rgba(124,106,247,.08)' : hovered ? 'rgba(255,255,255,.03)' : 'transparent',
+        background: active ? 'var(--accent-soft)' : hovered ? 'var(--bg-hover)' : 'transparent',
         transition: 'background var(--dur) var(--ease)',
       }}
     >
@@ -128,7 +128,7 @@ export function SessionSidebar({ socket }: { socket: Socket | null }) {
   return (
     <aside style={{
       width: 240,
-      background: '#131520',
+      background: 'var(--bg-surface)',
       borderRight: '1px solid var(--border)',
       display: 'flex',
       flexDirection: 'column',
