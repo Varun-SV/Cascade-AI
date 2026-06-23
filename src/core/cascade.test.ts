@@ -92,6 +92,51 @@ describe('Cascade routing complexity', () => {
     expect(generate).not.toHaveBeenCalled();
     expect(cascade.getDecisionLog()[0]!.detail).toContain('heuristic: casual greeting');
   });
+
+  it('routes self-identity questions to Simple via heuristic, no classifier call', async () => {
+    const cascade = new Cascade(baseConfig, process.cwd());
+    const generate = vi.fn();
+    (cascade as any).router = { generate };
+
+    for (const q of ['who are you', 'who are you?', 'what can you do', 'who made you']) {
+      const complexity = await (cascade as any).determineComplexity(q, '/dummy');
+      expect(complexity, q).toBe('Simple');
+    }
+    expect(generate).not.toHaveBeenCalled();
+  });
+
+  it('parses a verdict embedded in preamble/markdown instead of defaulting to Complex', async () => {
+    const cascade = new Cascade(baseConfig, process.cwd());
+    // A chatty local model prepends text before the verdict — must still be Simple.
+    const generate = vi.fn().mockResolvedValue({
+      content: 'Sure! This is a **Simple** request — just a direct answer.',
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimatedCostUsd: 0 },
+      finishReason: 'stop',
+    });
+    (cascade as any).router = { generate };
+
+    // An artifact verb ("implement") avoids the read-only/conversational
+    // short-circuits, so the classifier (and its parser) actually runs.
+    const complexity = await (cascade as any).determineComplexity(
+      'implement the new caching layer for the parser module with thorough coverage', '/dummy');
+    expect(complexity).toBe('Simple');
+    expect(generate).toHaveBeenCalled();
+  });
+
+  it('defaults an unparseable classifier reply to a cheap route, never Complex', async () => {
+    const cascade = new Cascade(baseConfig, process.cwd());
+    const generate = vi.fn().mockResolvedValue({
+      content: 'I think we should consider several factors here before deciding.',
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimatedCostUsd: 0 },
+      finishReason: 'stop',
+    });
+    (cascade as any).router = { generate };
+
+    const complexity = await (cascade as any).determineComplexity(
+      'refactor and migrate the build pipeline to a new system with full validation', '/dummy');
+    expect(complexity).toBe('Moderate'); // >12 words → Moderate, not Complex
+    expect(generate).toHaveBeenCalled();
+  });
 });
 
 describe('Boardroom plan approval gate', () => {

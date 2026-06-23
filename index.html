@@ -2104,7 +2104,12 @@
 
       const dmgArm = assets.find(function(a) { return /arm64\.dmg$/i.test(a.name); });
       const dmgX64 = assets.find(function(a) { return /x64\.dmg$/i.test(a.name) || (/\.dmg$/i.test(a.name) && !/arm/i.test(a.name)); });
-      const exeFile = assets.find(function(a) { return /\.exe$/i.test(a.name); });
+      // Windows ships two .exe files: the NSIS installer (…Setup….exe) and a
+      // portable direct-run .exe. Surface BOTH, distinctly — a bare `.find(.exe)`
+      // grabbed whichever came first (usually the portable), so the "Windows"
+      // button silently linked to the portable app instead of the installer.
+      const exeSetup    = assets.find(function(a) { return /\.exe$/i.test(a.name) && /setup/i.test(a.name); });
+      const exePortable = assets.find(function(a) { return /\.exe$/i.test(a.name) && !/setup/i.test(a.name); });
       const appImg  = assets.find(function(a) { return /\.AppImage$/i.test(a.name); });
 
       const os = detectOS();
@@ -2125,12 +2130,20 @@
         }
       }
 
-      const winEntry  = exeFile ? { href: exeFile.browser_download_url, label: 'Windows', sub: 'x64 installer' } : null;
+      // Installer first (recommended + auto-updates), portable second. Fall back
+      // to any .exe if the naming scheme ever changes.
+      const winEntries = [];
+      if (exeSetup)    winEntries.push({ href: exeSetup.browser_download_url,    label: 'Windows', sub: 'installer' });
+      if (exePortable) winEntries.push({ href: exePortable.browser_download_url, label: 'Windows', sub: 'portable' });
+      if (winEntries.length === 0) {
+        const anyExe = assets.find(function(a) { return /\.exe$/i.test(a.name); });
+        if (anyExe) winEntries.push({ href: anyExe.browser_download_url, label: 'Windows', sub: 'x64' });
+      }
       const linuxEntry = appImg  ? { href: appImg.browser_download_url,  label: 'Linux',   sub: '.AppImage'     } : null;
 
       const ordered = [];
       function addMac(rec) { macEntries.forEach(function(e, i) { ordered.push({ href: e.href, label: e.label, sub: e.sub, recommended: rec && i === 0 }); }); }
-      function addWin(rec) { if (winEntry)   ordered.push({ href: winEntry.href,   label: winEntry.label,   sub: winEntry.sub,   recommended: rec }); }
+      function addWin(rec) { winEntries.forEach(function(e, i) { ordered.push({ href: e.href, label: e.label, sub: e.sub, recommended: rec && i === 0 }); }); }
       function addLinux(rec) { if (linuxEntry) ordered.push({ href: linuxEntry.href, label: linuxEntry.label, sub: linuxEntry.sub, recommended: rec }); }
 
       if (os === 'mac')        { addMac(true);   addWin(false);  addLinux(false); }

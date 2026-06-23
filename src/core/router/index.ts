@@ -116,6 +116,18 @@ export class CascadeRouter extends EventEmitter {
       await this.discoverOllamaModels(ollamaCfg);
     }
 
+    // Discover OpenAI-compatible (e.g. llama.cpp) models too, so a configured
+    // local model id (like a `.gguf`) resolves to the provider that actually
+    // serves it — exact-id match below wins over the heuristic in the selector,
+    // which would otherwise mis-attribute it to Ollama when both are configured.
+    if (availableProviders.has('openai-compatible')) {
+      await Promise.all(
+        config.providers
+          .filter((p) => p.type === 'openai-compatible')
+          .map((cfg) => this.discoverOpenAICompatibleModels(cfg)),
+      );
+    }
+
     // Apply explicit tier overrides first.
     for (const tier of ['T1', 'T2', 'T3'] as TierRole[]) {
       const override =
@@ -652,6 +664,15 @@ export class CascadeRouter extends EventEmitter {
     return this.selector.getAvailableModelsForProvider(provider);
   }
 
+  /**
+   * Every model available across the configured + reachable providers, after
+   * discovery (Ollama tags, OpenAI-compatible/llama.cpp models, cloud catalog).
+   * Used to populate the desktop model pickers with the user's real models.
+   */
+  getAvailableModels(): ModelInfo[] {
+    return this.selector?.getAllAvailableModels() ?? [];
+  }
+
   // ── Private ──────────────────────────────────
 
   private async detectAvailableProviders(
@@ -687,6 +708,24 @@ export class CascadeRouter extends EventEmitter {
     } catch { /* Ollama not running */ }
   }
 
+  private async discoverOpenAICompatibleModels(cfg: ProviderConfig): Promise<void> {
+    try {
+      // Minimal seed ModelInfo just to construct the provider client; listModels
+      // returns the endpoint's real models tagged provider: 'openai-compatible'.
+      const seed: ModelInfo = {
+        id: 'openai-compatible', name: 'openai-compatible', provider: 'openai-compatible',
+        contextWindow: 32_000, isVisionCapable: false,
+        inputCostPer1kTokens: 0, outputCostPer1kTokens: 0,
+        maxOutputTokens: 4_000, supportsStreaming: true, isLocal: false,
+      };
+      const provider = new OpenAICompatibleProvider(cfg, seed);
+      const models = await provider.listModels();
+      for (const m of models) {
+        this.selector.addDynamicModel(m);
+      }
+    } catch { /* endpoint not reachable */ }
+  }
+
   private ensureProvider(model: ModelInfo, configs: ProviderConfig[]): void {
     const key = `${model.provider}:${model.id}`;
     if (this.providers.has(key)) return;
@@ -716,7 +755,23 @@ export class CascadeRouter extends EventEmitter {
   }
 
   private getAnyModelForProvider(type: ProviderType): ModelInfo | undefined {
-    return Object.values(MODELS).find((m) => m.provider === type);
+    const fromCatalog = Object.values(MODELS).find((m) => m.provider === type);
+    if (fromCatalog) return fromCatalog;
+    // openai-compatible and azure are configured per-endpoint and have NO fixed
+    // catalog entry. Without a seed model `detectAvailableProviders` skipped them
+    // entirely — so an OpenAI-compatible (e.g. llama.cpp) provider was never
+    // marked available and its models could not be selected. Synthesize a minimal
+    // seed so the client can be built for the availability check and model
+    // listing; the real models are discovered from the endpoint.
+    if (type === 'openai-compatible' || type === 'azure') {
+      return {
+        id: type, name: type, provider: type,
+        contextWindow: 32_000, isVisionCapable: false,
+        inputCostPer1kTokens: 0, outputCostPer1kTokens: 0,
+        maxOutputTokens: 4_000, supportsStreaming: true, isLocal: false,
+      };
+    }
+    return undefined;
   }
 
   private recordStats(tier: TierRole, model: ModelInfo, usage: TokenUsage): void {

@@ -537,8 +537,13 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
       isAzure && fieldStage === 'apiVersion' ? `Azure API version (e.g. 2024-08-01-preview)` :
       isCompat && fieldStage === 'label' ? `Name for this endpoint (e.g. Groq)` :
       isCompat && fieldStage === 'baseUrl' ? `Base URL (e.g. https://api.groq.com/openai/v1)` :
+      isCompat && fieldStage === 'apiKey' ? `${currentEntry.label} API Key (optional)` :
       isOllama ? `Ollama URL` :
       `${currentEntry.label} API Key`;
+
+    // The OpenAI-compatible key is optional — local servers (llama.cpp, LM
+    // Studio, vLLM without auth) need no key, so don't label it 'required'.
+    const keyOptional = isCompat && fieldStage === 'apiKey';
 
     // apiVersion is not a secret — only mask the apiKey stage
     const isMasked = fieldStage === 'apiKey' && !isOllama;
@@ -561,8 +566,8 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
         <FieldBox
           theme={theme}
           label={prompt}
-          tag={isOllama ? 'optional — Enter for default' : 'required'}
-          tagColor={isOllama ? theme.colors.muted : theme.colors.error}
+          tag={isOllama ? 'optional — Enter for default' : keyOptional ? 'optional — Enter to skip' : 'required'}
+          tagColor={(isOllama || keyOptional) ? theme.colors.muted : theme.colors.error}
           active
         >
           <SafeTextInput

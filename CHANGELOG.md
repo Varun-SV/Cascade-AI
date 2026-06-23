@@ -5,6 +5,20 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.8] - 2026-06-23
+
+### Fixed
+- **Packaged desktop app was permanently "offline" (and Settings/save/model lists all failed).** The embedded backend kept every dependency external but only `better-sqlite3` was shipped, so it crashed at the first `require('glob')` during config load and never started. The desktop now embeds a self-contained `desktop-core` bundle (all JS deps inlined; only native/optional modules stay external), so the backend actually starts. The npm CLI build is unchanged.
+- **OpenAI-compatible (llama.cpp / LM Studio / vLLM) endpoints were never usable.** They have no fixed model catalog, so the provider was never detected as "available", its models couldn't be selected, and a configured local model couldn't resolve to it. The router now synthesizes a seed so these endpoint-configured providers are detected and their models discovered.
+- **Local `.gguf` model mislabeled as Ollama.** With both `ollama` and `openai-compatible` configured, a configured model id with no provider prefix (e.g. `gemma-4-12b-it-Q4_K_M.gguf`, including a full `C:\…\model.gguf` path) was attributed to Ollama. Now the OpenAI-compatible endpoint's models are discovered at init for exact-id resolution, and the heuristic recognizes a `.gguf` / filesystem-path id (POSIX or Windows) as OpenAI-compatible. Ollama `family:tag` ids still resolve to Ollama. Added regression tests.
+- **Trivial prompts (e.g. "who are you") triggered the full multi-agent build.** Self-identity/capability questions weren't treated as conversational, and the complexity classifier parsed only the first token of the reply — so a chatty local model's preamble fell through to `Complex`. Now such prompts short-circuit to Simple, and an unparseable classifier reply defaults to the cheap route, never `Complex`.
+- **OpenAI-compatible API key was labeled "required".** Local servers need no key; the CLI setup now marks it optional (empty was already accepted).
+- **Download page linked the wrong Windows file.** It surfaced whichever `.exe` came first (the portable app); it now lists the installer (recommended) and the portable separately.
+- **Linux `deb`/`rpm`/`pacman` packaging failed** with "Please specify project homepage". Added the `homepage` + `license` metadata fpm requires, so the release now builds all Linux installers (and Arch `pacman`) alongside the AppImage.
+
+### Added
+- **Desktop chat model picker shows your real models.** It now lists the actual discovered models (Ollama tags, OpenAI-compatible/llama.cpp models, cloud catalog) grouped by provider, with a free-text entry to type any model id or `.gguf` path — works even when the live backend is unavailable.
+
 ## [0.12.7] - 2026-06-23
 
 ### Fixed

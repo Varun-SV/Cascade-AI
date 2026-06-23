@@ -62,10 +62,14 @@ function mapProvider(id: string): { type: string | null; baseUrl?: string } {
 // ─── Backend ─────────────────────────────────────────────────────────────────
 // Resolve the cascade-ai core package (built CommonJS output). In dev it lives at
 // the repo's ../dist; in a packaged app it's bundled under resources/cascade-core.
-function loadCore(): { DashboardServer: any; ConfigManager: any } {
+function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any } {
+  // Dev: the repo's external-deps build (node_modules resolves the requires).
+  // Packaged: the self-contained `desktop-core.cjs` bundle (no node_modules to
+  // resolve from — every JS dep is bundled in; only native modules like
+  // better-sqlite3 are shipped alongside in cascade-core/node_modules).
   const corePath = isDev
     ? join(__dirname, '../../dist/index.cjs')
-    : join(process.resourcesPath, 'cascade-core/index.cjs');
+    : join(process.resourcesPath, 'cascade-core/desktop-core.cjs');
   return require(corePath);
 }
 
@@ -342,6 +346,26 @@ function registerIPC(): void {
   }
 
   ipcMain.handle('cascade:getSettings', async () => settingsSnapshot());
+
+  // List the user's REAL available models (Ollama tags, OpenAI-compatible /
+  // llama.cpp models, cloud catalog) so the desktop pickers aren't limited to a
+  // hardcoded cloud list. Runs a fresh router init over the loaded config — this
+  // works independently of the dashboard socket, so it's available even when the
+  // live backend isn't. Defensive: any failure returns an empty list and the UI
+  // falls back to its built-in options + free-text entry.
+  ipcMain.handle('cascade:listModels', async () => {
+    try {
+      if (!cascadeConfig) return { ok: false, error: 'config-unavailable', models: [] };
+      const { CascadeRouter } = loadCore();
+      const router = new CascadeRouter();
+      await router.init(cascadeConfig);
+      const models = (router.getAvailableModels() as Array<{ id: string; provider: string; isLocal?: boolean }>)
+        .map((m) => ({ id: m.id, provider: m.provider, isLocal: Boolean(m.isLocal) }));
+      return { ok: true, models };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err), models: [] };
+    }
+  });
 
   ipcMain.handle('cascade:updateSettings', async (_e, data: {
     keys?: Record<string, string | undefined>;

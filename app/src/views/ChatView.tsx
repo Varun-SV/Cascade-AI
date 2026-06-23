@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import type { Socket } from 'socket.io-client';
 import { Send, Bot, User, MessageSquare } from 'lucide-react';
-import { ModelPicker, MODELS } from '../components/ModelPicker.js';
+import { ModelPicker } from '../components/ModelPicker.js';
 import { HelpButton } from '../help/HelpButton.js';
 import { SessionRating } from '../components/SessionRating.js';
 import { useAppDispatch, useAppSelector, appendMessage, updateLastMessage, setActiveModelT1 } from '../store/index.js';
@@ -60,8 +60,8 @@ export function ChatView({ socket }: { socket: Socket | null }) {
         <MessageSquare size={15} style={{ color: 'var(--accent)' }} />
         <span style={{ fontWeight: 700, fontSize: 13, letterSpacing: '-0.2px' }}>Chat</span>
         <ModelPicker
-          value={MODELS.find((m) => m.id === activeModel.t1) ?? MODELS[0]}
-          onChange={(m) => dispatch(setActiveModelT1(m.id))}
+          value={activeModel.t1}
+          onChange={(id) => dispatch(setActiveModelT1(id))}
         />
         <div style={{ flex: 1 }} />
         <HelpButton context="chat" />
