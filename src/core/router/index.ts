@@ -746,7 +746,23 @@ export class CascadeRouter extends EventEmitter {
   }
 
   private getAnyModelForProvider(type: ProviderType): ModelInfo | undefined {
-    return Object.values(MODELS).find((m) => m.provider === type);
+    const fromCatalog = Object.values(MODELS).find((m) => m.provider === type);
+    if (fromCatalog) return fromCatalog;
+    // openai-compatible and azure are configured per-endpoint and have NO fixed
+    // catalog entry. Without a seed model `detectAvailableProviders` skipped them
+    // entirely — so an OpenAI-compatible (e.g. llama.cpp) provider was never
+    // marked available and its models could not be selected. Synthesize a minimal
+    // seed so the client can be built for the availability check and model
+    // listing; the real models are discovered from the endpoint.
+    if (type === 'openai-compatible' || type === 'azure') {
+      return {
+        id: type, name: type, provider: type,
+        contextWindow: 32_000, isVisionCapable: false,
+        inputCostPer1kTokens: 0, outputCostPer1kTokens: 0,
+        maxOutputTokens: 4_000, supportsStreaming: true, isLocal: false,
+      };
+    }
+    return undefined;
   }
 
   private recordStats(tier: TierRole, model: ModelInfo, usage: TokenUsage): void {
