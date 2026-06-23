@@ -185,6 +185,11 @@ export class ModelSelector {
       if (lower.includes('claude')) providerStr = 'anthropic';
       else if (lower.startsWith('gpt') || lower.startsWith('o1') || lower.startsWith('o3')) providerStr = 'openai';
       else if (lower.includes('gemini')) providerStr = 'gemini';
+      // A `.gguf` filename (or a filesystem path) is an OpenAI-compatible /
+      // llama.cpp model id — never an Ollama tag, which is always `family:tag`.
+      // Prefer the OpenAI-compatible endpoint so a local .gguf isn't mislabeled
+      // as Ollama when both providers are configured.
+      else if ((lower.endsWith('.gguf') || actualId.includes('/')) && this.availableProviders.has('openai-compatible')) providerStr = 'openai-compatible';
       else if (this.availableProviders.has('ollama')) providerStr = 'ollama';
       else if (this.availableProviders.has('openai-compatible')) providerStr = 'openai-compatible';
       else if (this.availableProviders.size === 1) providerStr = Array.from(this.availableProviders)[0]!;

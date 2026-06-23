@@ -116,6 +116,18 @@ export class CascadeRouter extends EventEmitter {
       await this.discoverOllamaModels(ollamaCfg);
     }
 
+    // Discover OpenAI-compatible (e.g. llama.cpp) models too, so a configured
+    // local model id (like a `.gguf`) resolves to the provider that actually
+    // serves it — exact-id match below wins over the heuristic in the selector,
+    // which would otherwise mis-attribute it to Ollama when both are configured.
+    if (availableProviders.has('openai-compatible')) {
+      await Promise.all(
+        config.providers
+          .filter((p) => p.type === 'openai-compatible')
+          .map((cfg) => this.discoverOpenAICompatibleModels(cfg)),
+      );
+    }
+
     // Apply explicit tier overrides first.
     for (const tier of ['T1', 'T2', 'T3'] as TierRole[]) {
       const override =
@@ -685,6 +697,24 @@ export class CascadeRouter extends EventEmitter {
         this.selector.addDynamicModel(m);
       }
     } catch { /* Ollama not running */ }
+  }
+
+  private async discoverOpenAICompatibleModels(cfg: ProviderConfig): Promise<void> {
+    try {
+      // Minimal seed ModelInfo just to construct the provider client; listModels
+      // returns the endpoint's real models tagged provider: 'openai-compatible'.
+      const seed: ModelInfo = {
+        id: 'openai-compatible', name: 'openai-compatible', provider: 'openai-compatible',
+        contextWindow: 32_000, isVisionCapable: false,
+        inputCostPer1kTokens: 0, outputCostPer1kTokens: 0,
+        maxOutputTokens: 4_000, supportsStreaming: true, isLocal: false,
+      };
+      const provider = new OpenAICompatibleProvider(cfg, seed);
+      const models = await provider.listModels();
+      for (const m of models) {
+        this.selector.addDynamicModel(m);
+      }
+    } catch { /* endpoint not reachable */ }
   }
 
   private ensureProvider(model: ModelInfo, configs: ProviderConfig[]): void {
