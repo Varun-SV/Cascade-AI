@@ -31,6 +31,10 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let backendPort = 0;
 let authToken = '';
+// Human-readable reason the dashboard socket backend isn't reachable, surfaced to
+// the renderer (status bar) so "offline" can explain itself and offer a retry.
+// null = healthy/connected-capable; a string = the dashboard failed to start.
+let backendError: string | null = null;
 
 // Live references to the running Cascade backend so the config IPC handlers can
 // mutate the SAME config object the DashboardServer holds (no restart needed):
@@ -55,47 +59,79 @@ function mapProvider(id: string): { type: string | null; baseUrl?: string } {
 }
 
 // ─── Backend ─────────────────────────────────────────────────────────────────
+// Resolve the cascade-ai core package (built CommonJS output). In dev it lives at
+// the repo's ../dist; in a packaged app it's bundled under resources/cascade-core.
+function loadCore(): { DashboardServer: any; ConfigManager: any } {
+  const corePath = isDev
+    ? join(__dirname, '../../dist/index.cjs')
+    : join(process.resourcesPath, 'cascade-core/index.cjs');
+  return require(corePath);
+}
+
 async function startBackend(): Promise<void> {
   backendPort = await findFreePort();
   // Generate a random session token for auto-login
   authToken = require('node:crypto').randomBytes(24).toString('hex');
+  backendError = null;
 
+  const workspace = getWorkspacePath();
+
+  // STEP 1 — Load the shared Cascade config FIRST, in its own guard. This is the
+  // same .cascade/config.json the `cascade` CLI uses, so API keys, per-tier
+  // models, and budget settings are unified across desktop + CLI. Keeping this
+  // independent of the dashboard server means Settings can ALWAYS persist (the
+  // `cascade:updateSettings` IPC only needs configManager/cascadeConfig), even
+  // when the socket backend itself fails to come up.
   try {
-    // Import the cascade-ai core package (built CommonJS output lives at ../dist)
-    const corePath = isDev
-      ? join(__dirname, '../../dist/index.cjs')
-      : join(process.resourcesPath, 'cascade-core/index.cjs');
-    const { DashboardServer, ConfigManager } = require(corePath);
-
-    // Load the shared Cascade workspace config (same .cascade/config.json the
-    // `cascade` CLI uses) so API keys, per-tier models, and budget settings are
-    // unified across the desktop app and the CLI.
-    const workspace = getWorkspacePath();
+    const { ConfigManager } = loadCore();
     configManager = new ConfigManager(workspace);
     await configManager.load();
     cascadeConfig = configManager.getConfig();
+  } catch (err) {
+    console.warn('[main] Config load failed:', err);
+    configManager = null;
+    cascadeConfig = null;
+    backendError = `Could not load Cascade config: ${err instanceof Error ? err.message : String(err)}`;
+    backendPort = 0;
+    authToken = '';
+    notifyBackendStatus();
+    return; // nothing else can work without config
+  }
 
-    // Embed the dashboard on a private loopback port with auth disabled — this
-    // is a single-user local backend reachable only from 127.0.0.1 on an
-    // ephemeral port, so the JWT handshake (which the renderer can't mint) is
-    // unnecessary. The CORS '*' that auth-off implies is harmless on loopback.
+  // STEP 2 — Start the embedded dashboard socket server on a private loopback
+  // port with auth disabled (single-user local backend on 127.0.0.1, ephemeral
+  // port; the renderer can't mint a JWT so the handshake is unnecessary). If this
+  // fails, config still works — only live chat/connectivity is unavailable.
+  try {
+    const { DashboardServer } = loadCore();
     cascadeConfig.dashboard = {
       ...cascadeConfig.dashboard,
       port: backendPort,
       host: '127.0.0.1',
       auth: false,
     };
-
     const server = new DashboardServer(cascadeConfig, configManager.getStore(), workspace);
     await server.start();
     console.log(`[main] Cascade backend started on port ${backendPort} (workspace: ${workspace})`);
   } catch (err) {
-    console.warn('[main] Backend start failed:', err);
-    // Reset so the renderer's `if (!backendPort) return` guard skips Socket.IO
-    // entirely instead of connecting to an unused port and showing "Reconnecting".
+    console.warn('[main] Dashboard server start failed:', err);
+    // Reset the port so the renderer's `if (!backendPort) return` guard skips
+    // Socket.IO instead of dialing a dead port and looping on "Reconnecting".
     backendPort = 0;
     authToken = '';
+    backendError = `Cascade backend unavailable: ${err instanceof Error ? err.message : String(err)}`;
   }
+  notifyBackendStatus();
+}
+
+// Push the current backend health to the renderer so the status bar can update
+// live after an on-demand restart (the initial value is read via cascade:meta).
+function notifyBackendStatus(): void {
+  mainWindow?.webContents.send('cascade:backendStatus', {
+    port: backendPort,
+    token: authToken,
+    error: backendError,
+  });
 }
 
 // ─── IPC handlers ─────────────────────────────────────────────────────────────
@@ -105,7 +141,16 @@ function registerIPC(): void {
     token: authToken,
     platform: process.platform,
     version: app.getVersion(),
+    error: backendError,
   }));
+
+  // Retry the embedded backend on demand (the status bar exposes this when the
+  // dashboard failed to start). Returns the fresh meta so the renderer can
+  // reconnect Socket.IO with the new port/token without a full app restart.
+  ipcMain.handle('cascade:restartBackend', async () => {
+    await startBackend();
+    return { port: backendPort, token: authToken, error: backendError };
+  });
 
   // PTY (terminal) — node-pty runs in main process, data ferried via IPC
   let pty: import('node-pty').IPty | null = null;

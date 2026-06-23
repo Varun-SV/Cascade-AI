@@ -4,13 +4,26 @@ contextBridge.exposeInMainWorld('cascade', {
   // Synchronous platform string for first-paint layout (e.g. title-bar insets)
   platform: process.platform,
 
-  // App metadata: backend port, auth token, platform
+  // App metadata: backend port, auth token, platform, backend health
   getMeta: () => ipcRenderer.invoke('cascade:meta') as Promise<{
     port: number;
     token: string;
     platform: string;
     version: string;
+    error: string | null;
   }>,
+
+  // Retry the embedded backend; resolves with the fresh port/token/error.
+  restartBackend: () => ipcRenderer.invoke('cascade:restartBackend') as Promise<{
+    port: number;
+    token: string;
+    error: string | null;
+  }>,
+
+  // Live backend health pushes (after an on-demand restart).
+  onBackendStatus: (cb: (s: { port: number; token: string; error: string | null }) => void) => {
+    ipcRenderer.on('cascade:backendStatus', (_e, s) => cb(s));
+  },
 
   // Config: read/write provider key + workspace for onboarding
   getConfig: () => ipcRenderer.invoke('cascade:getConfig') as Promise<{

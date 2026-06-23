@@ -1,5 +1,9 @@
 import { useEffect, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
+// The embedded backend's Socket.IO server encodes packets with the msgpack
+// parser (see src/dashboard/websocket.ts). The client MUST use the same parser
+// or the handshake never completes and the app is stuck "offline" forever.
+import parser from 'socket.io-msgpack-parser';
 import { ActivityBar } from './layout/ActivityBar.js';
 import { TitleBar } from './layout/TitleBar.js';
 import { SessionSidebar } from './layout/SessionSidebar.js';
@@ -11,7 +15,7 @@ import { HelpPanel } from './help/HelpPanel.js';
 import { OnboardingView } from './views/OnboardingView.js';
 import {
   useAppDispatch, useAppSelector,
-  setConnected, setReconnecting, setMeta, updateCost, upsertAgent, updateLastMessage,
+  setConnected, setReconnecting, setBackendError, setMeta, updateCost, upsertAgent, updateLastMessage,
   setSessions, removeSession, setOnboardingDone,
   type RuntimeSession,
 } from './store/index.js';
@@ -21,7 +25,9 @@ declare global {
   interface Window {
     cascade?: {
       platform: string;
-      getMeta(): Promise<{ port: number; token: string; platform: string; version: string }>;
+      getMeta(): Promise<{ port: number; token: string; platform: string; version: string; error: string | null }>;
+      restartBackend(): Promise<{ port: number; token: string; error: string | null }>;
+      onBackendStatus(cb: (s: { port: number; token: string; error: string | null }) => void): void;
       getConfig(): Promise<{ provider: string; apiKey: string; workspace: string; onboardingDone: boolean }>;
       setConfig(cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string }): Promise<void>;
       getSettings(): Promise<{ models: Record<string, string>; budget: { maxCostPerRun?: number; autoBias?: string }; providersWithKey: string[] }>;
@@ -59,11 +65,17 @@ export function App() {
     }
   }, [dispatch]);
 
-  // Fetch Electron meta (port + token) from preload bridge
+  // Fetch Electron meta (port + token) from preload bridge, and subscribe to
+  // live backend-health pushes so an on-demand restart reconnects automatically.
   useEffect(() => {
     if (window.cascade) {
       window.cascade.getMeta().then((meta) => {
         dispatch(setMeta({ port: meta.port, token: meta.token }));
+        dispatch(setBackendError(meta.error));
+      });
+      window.cascade.onBackendStatus?.((s) => {
+        dispatch(setMeta({ port: s.port, token: s.token }));
+        dispatch(setBackendError(s.error));
       });
     } else {
       dispatch(setMeta({ port: 3000, token: '' }));
@@ -76,6 +88,7 @@ export function App() {
     const socket = io(`http://localhost:${backendPort}`, {
       auth: { token: authToken },
       transports: ['websocket'],
+      parser,
     });
     socketRef.current = socket;
 

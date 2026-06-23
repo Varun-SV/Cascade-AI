@@ -48,6 +48,7 @@ export interface AppState {
   view: ViewMode;
   connected: boolean;
   reconnecting: boolean;
+  backendError: string | null;
   showSettings: boolean;
   backendPort: number;
   authToken: string;
@@ -73,6 +74,7 @@ const initialState: AppState = {
   view: 'cockpit',
   connected: false,
   reconnecting: false,
+  backendError: null,
   showSettings: false,
   backendPort: 0,
   authToken: '',
@@ -106,6 +108,9 @@ const appSlice = createSlice({
     },
     setReconnecting(state, action: PayloadAction<boolean>) {
       state.reconnecting = action.payload;
+    },
+    setBackendError(state, action: PayloadAction<string | null>) {
+      state.backendError = action.payload;
     },
     setShowSettings(state, action: PayloadAction<boolean>) {
       state.showSettings = action.payload;
@@ -194,7 +199,7 @@ const appSlice = createSlice({
 });
 
 export const {
-  setView, setConnected, setReconnecting, setShowSettings, setMeta, setSessionId, updateCost,
+  setView, setConnected, setReconnecting, setBackendError, setShowSettings, setMeta, setSessionId, updateCost,
   setAgents, upsertAgent, appendMessage, updateLastMessage,
   setWorkspacePath, toggleTerminal, setHelpContext, setActiveModel, setActiveModelT1,
   setSessions, setActiveSessionId, removeSession,

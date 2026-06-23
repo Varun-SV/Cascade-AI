@@ -3,10 +3,15 @@ import { useAppDispatch, useAppSelector, toggleTerminal } from '../store/index.j
 
 export function StatusBar() {
   const dispatch = useAppDispatch();
-  const { connected, totalCostUsd, totalTokens, activeModel } = useAppSelector((s) => s.app);
+  const { connected, reconnecting, backendError, totalCostUsd, totalTokens, activeModel } = useAppSelector((s) => s.app);
 
   const fmtCost = (c: number) => c < 0.001 ? '<$0.001' : `$${c.toFixed(4)}`;
   const fmtTokens = (t: number) => t >= 1000 ? `${(t / 1000).toFixed(1)}k` : String(t);
+
+  // Tri-state connection: connected → reconnecting → offline. When the embedded
+  // backend failed to start, offer a one-click retry that restarts it and lets
+  // App.tsx's onBackendStatus listener reconnect the socket with the new port.
+  const retry = () => { window.cascade?.restartBackend?.(); };
 
   return (
     <footer style={{
@@ -19,20 +24,33 @@ export function StatusBar() {
       flexShrink: 0,
       userSelect: 'none',
     }}>
-      {/* Connection */}
-      <span style={{
-        display: 'flex', alignItems: 'center', gap: 4,
-        color: connected ? 'var(--success)' : 'var(--text-dim)',
-        fontWeight: 600,
-      }}>
-        <span style={{
-          width: 6, height: 6, borderRadius: '50%',
-          background: connected ? 'var(--success)' : 'var(--text-dim)',
-          boxShadow: connected ? '0 0 5px var(--success)' : 'none',
-        }} />
-        {connected ? <Wifi size={10} /> : <WifiOff size={10} />}
-        {connected ? 'cascade' : 'offline'}
-      </span>
+      {/* Connection — tri-state with click-to-retry when offline */}
+      {(() => {
+        const state = connected ? 'connected' : reconnecting ? 'reconnecting' : 'offline';
+        const color = state === 'connected' ? 'var(--success)' : state === 'reconnecting' ? 'var(--warn)' : 'var(--text-dim)';
+        const label = state === 'connected' ? 'cascade' : state === 'reconnecting' ? 'reconnecting…' : 'offline · retry';
+        const title = backendError ?? (state === 'connected' ? 'Connected to the Cascade backend' : 'Backend not connected — click to retry');
+        return (
+          <button
+            onClick={state === 'connected' ? undefined : retry}
+            title={title}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 4,
+              color, fontWeight: 600, fontSize: 11,
+              background: 'none', border: 'none', padding: 0,
+              cursor: state === 'connected' ? 'default' : 'pointer',
+            }}
+          >
+            <span style={{
+              width: 6, height: 6, borderRadius: '50%',
+              background: color,
+              boxShadow: state === 'connected' ? '0 0 5px var(--success)' : 'none',
+            }} />
+            {state === 'connected' ? <Wifi size={10} /> : <WifiOff size={10} />}
+            {label}
+          </button>
+        );
+      })()}
 
       <Divider />
 
