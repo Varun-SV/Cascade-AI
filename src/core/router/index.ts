@@ -664,6 +664,15 @@ export class CascadeRouter extends EventEmitter {
     return this.selector.getAvailableModelsForProvider(provider);
   }
 
+  /**
+   * Every model available across the configured + reachable providers, after
+   * discovery (Ollama tags, OpenAI-compatible/llama.cpp models, cloud catalog).
+   * Used to populate the desktop model pickers with the user's real models.
+   */
+  getAvailableModels(): ModelInfo[] {
+    return this.selector?.getAllAvailableModels() ?? [];
+  }
+
   // ── Private ──────────────────────────────────
 
   private async detectAvailableProviders(

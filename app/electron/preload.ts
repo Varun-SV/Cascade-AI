@@ -53,6 +53,13 @@ contextBridge.exposeInMainWorld('cascade', {
     providersWithKey?: string[];
   }>,
 
+  // Real available models across configured providers (for the model pickers)
+  listModels: () => ipcRenderer.invoke('cascade:listModels') as Promise<{
+    ok: boolean;
+    error?: string;
+    models: Array<{ id: string; provider: string; isLocal: boolean }>;
+  }>,
+
   // Directory picker dialog
   selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory') as Promise<string | null>,
 
