@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { X } from 'lucide-react';
 import { useAppDispatch, useAppSelector } from '../store/index.js';
 import { setHelpContext } from '../store/index.js';
+import type { TourStep } from './types.js';
 import { VideoPlayer } from './VideoPlayer.js';
 import { AnimatedTour } from './AnimatedTour.js';
 import { WalkthroughEngine } from './WalkthroughEngine.js';
@@ -13,7 +14,12 @@ import * as costAnalytics from './tutorials/cost-analytics.js';
 
 type Tab = 'watch' | 'tour' | 'docs';
 
-const CONTEXT_MAP: Record<string, { title: string; module: typeof providerSetup }> = {
+// Shared shape of every tutorial module. Typing the map against this (rather than
+// `typeof providerSetup`) avoids a structural mismatch on the literal `docs`
+// string type between modules.
+interface TutorialModule { VIDEO_ID: string; steps: TourStep[]; docs: string }
+
+const CONTEXT_MAP: Record<string, { title: string; module: TutorialModule }> = {
   'provider-setup': { title: 'Provider Setup', module: providerSetup },
   'how-tiers-work': { title: 'How Tiers Work', module: howTiersWork },
   cockpit: { title: 'Running Your First Task', module: firstTask },
@@ -27,11 +33,19 @@ export function HelpPanel() {
   const dispatch = useAppDispatch();
   const context = useAppSelector((s) => s.app.helpContext);
   const [tab, setTab] = useState<Tab>('watch');
+  const close = () => dispatch(setHelpContext(null));
+
+  // Dismiss path #2: Escape closes the panel from anywhere.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   if (!context) return null;
 
   const { title, module } = CONTEXT_MAP[context] ?? CONTEXT_MAP.default;
-  const close = () => dispatch(setHelpContext(null));
 
   const TABS: { id: Tab; label: string }[] = [
     { id: 'watch', label: 'Watch' },
@@ -40,11 +54,15 @@ export function HelpPanel() {
   ];
 
   return (
+    <>
+      {/* Dismiss path #3: click anywhere outside the panel. Transparent (no dim)
+          so the docked tool-window feel is preserved. */}
+      <div onClick={close} style={{ position: 'absolute', inset: 0, zIndex: 499 }} />
     <div style={{
-      position: 'absolute', top: 0, right: 0, bottom: 22, width: 360,
+      position: 'absolute', top: 0, right: 0, bottom: 0, width: 360,
       background: 'var(--bg-surface)', borderLeft: '1px solid var(--border)',
       display: 'flex', flexDirection: 'column', zIndex: 500,
-      boxShadow: '-8px 0 32px rgba(0,0,0,0.3)',
+      boxShadow: 'var(--shadow-2)',
     }}>
       {/* Header */}
       <div style={{
@@ -134,5 +152,6 @@ export function HelpPanel() {
         ))}
       </div>
     </div>
+    </>
   );
 }

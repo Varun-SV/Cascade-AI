@@ -155,7 +155,10 @@ export function App() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
       <TitleBar />
-      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+      {/* position: relative anchors the absolutely-positioned HelpPanel to the
+          content area (below the title bar) so its close button is never hidden
+          under the draggable title strip / native window controls. */}
+      <div style={{ display: 'flex', flex: 1, overflow: 'hidden', position: 'relative' }}>
         <ActivityBar />
         <SessionSidebar socket={socketRef.current} />
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>

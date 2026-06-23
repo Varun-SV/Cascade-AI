@@ -14,9 +14,9 @@ export function StatusBar() {
   const retry = () => { window.cascade?.restartBackend?.(); };
 
   return (
-    <footer style={{
+    <footer className="status-bar" style={{
       height: 22,
-      background: '#0b0d15',
+      background: 'var(--bg-surface)',
       display: 'flex', alignItems: 'center',
       padding: '0 10px', gap: 12,
       fontSize: 11, color: 'var(--text-muted)',

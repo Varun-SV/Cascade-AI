@@ -12,7 +12,7 @@ export function ActivityBar() {
   const currentView = useAppSelector((s) => s.app.view);
 
   return (
-    <aside style={{
+    <aside className="activity-bar" style={{
       width: 48,
       background: 'var(--bg-surface)',
       borderRight: '1px solid var(--border)',
