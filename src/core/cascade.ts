@@ -416,7 +416,11 @@ export class Cascade extends EventEmitter {
   private looksLikeConversational(prompt: string): boolean {
     const LOW_COMPLEXITY = [
       /^(?:hi|hello|hey|thanks|thank you|ok|okay|yes|no|sure|got it|sounds good)\b/i,
-      /^(?:what is|what are|list|show me|tell me|who is|where is|when is|how do i)\b/i,
+      /^(?:what is|what are|what'?s|list|show me|tell me|who is|who are|who'?re|where is|when is|how do i)\b/i,
+      // Self-identity / capability questions ("who are you", "what can you do",
+      // "who made you") are pure conversation — never a multi-agent build.
+      /^(?:who|what)\b.*\byou\b/i,
+      /^what can you\b/i,
       /\b(?:simple|quick|brief|small|single|one-line|typo|rename)\b/i,
     ];
     const wordCount = prompt.trim().split(/\s+/).length;
@@ -530,14 +534,26 @@ ${prompt}`
         temperature: 0,
       });
       const content = result.content.trim();
-      // Verdict is the FIRST word only — the reason text after the dash may
-      // legitimately mention other levels ("not complex enough for ...").
-      const firstWord = (content.split(/[\s—–-]+/)[0] ?? '').toLowerCase();
+      // Take the FIRST verdict word that appears anywhere in the reply, not just
+      // the very first token. Local models often prepend a preamble or markdown
+      // ("**Simple** — …", "This is a simple request"), and the old "first token
+      // only" parse fell through to Complex for anything unexpected — routing a
+      // trivial prompt into the full T1→T2→T3 build. First-occurrence ordering
+      // still ignores a reason that merely *mentions* a higher level later
+      // ("Moderate — not complex enough …" → Moderate).
+      const match = content.toLowerCase().match(/\b(simple|moderate|complex)\b/);
       const reason = content.replace(/^\S+\s*[—–-]*\s*/, '').trim();
-      const verdict: TaskComplexity = firstWord.includes('simple')
-        ? 'Simple'
-        : firstWord.includes('moderate') ? 'Moderate' : 'Complex';
-      this.recordDecision('complexity', `${verdict} — classifier: ${reason || 'no reason given'}`);
+      let verdict: TaskComplexity;
+      if (match) {
+        verdict = match[1] === 'simple' ? 'Simple' : match[1] === 'moderate' ? 'Moderate' : 'Complex';
+        this.recordDecision('complexity', `${verdict} — classifier: ${reason || 'no reason given'}`);
+      } else {
+        // Unparseable verdict (common with chatty local models). Bias to the
+        // CHEAP route, not the expensive one: short prompts are Simple, longer
+        // ones Moderate — never silently escalate to a full multi-agent build.
+        verdict = prompt.trim().split(/\s+/).length <= 12 ? 'Simple' : 'Moderate';
+        this.recordDecision('complexity', `${verdict} — classifier output unparseable; defaulted by length`);
+      }
       return verdict;
     } catch {
       const followUpPrompt = /^(proceed|continue|go ahead|do it|yes|yep|ok|okay|carry on)$/i.test(prompt.trim());
