@@ -47,9 +47,9 @@ export function CockpitView({ socket }: { socket: Socket | null }) {
       </div>
 
       {/* Agent graph area with dot-grid background */}
-      <div style={{
+      <div className="agent-graph" style={{
         flex: 1, overflow: 'hidden', position: 'relative',
-        backgroundImage: 'radial-gradient(circle, rgba(255,255,255,.06) 1px, transparent 1px)',
+        backgroundImage: 'radial-gradient(circle, var(--border-strong) 1px, transparent 1px)',
         backgroundSize: '22px 22px',
         backgroundColor: 'var(--bg-base)',
       }}>
@@ -79,10 +79,10 @@ export function CockpitView({ socket }: { socket: Socket | null }) {
       </div>
 
       {/* Task input bar */}
-      <div style={{
+      <div className="task-input-bar" style={{
         height: 50, padding: '0 12px',
         borderTop: '1px solid var(--border)',
-        background: '#0f1117',
+        background: 'var(--bg-surface)',
         display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
       }}>
         <textarea

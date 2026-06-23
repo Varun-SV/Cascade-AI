@@ -61,7 +61,7 @@ function NavButton({
       style={{
         position: 'relative',
         width: 32, height: 28, borderRadius: 5,
-        background: active ? 'rgba(124,106,247,.1)' : 'transparent',
+        background: active ? 'var(--accent-soft)' : 'transparent',
         color: active ? 'var(--accent)' : 'var(--text-dim)',
         border: 'none', cursor: 'pointer',
         display: 'flex', alignItems: 'center', justifyContent: 'center',

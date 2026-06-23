@@ -45,7 +45,7 @@ export function ModelPicker({ value, onChange }: Props) {
   }, []);
 
   return (
-    <div ref={ref} style={{ position: 'relative' }}>
+    <div ref={ref} className="model-picker" style={{ position: 'relative' }}>
       <button
         onClick={() => setOpen((v) => !v)}
         style={{

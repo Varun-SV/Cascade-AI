@@ -96,8 +96,8 @@ function Overlay({ steps, onClose }: { steps: TourStep[]; onClose: () => void })
           position: 'absolute',
           top: rect.top - PAD, left: rect.left - PAD,
           width: rect.width + PAD * 2, height: rect.height + PAD * 2,
-          border: '2px solid #7c6af7', borderRadius: 8,
-          boxShadow: '0 0 0 9999px rgba(0,0,0,0.6), 0 0 16px #7c6af7aa',
+          border: '2px solid var(--accent)', borderRadius: 8,
+          boxShadow: '0 0 0 9999px rgba(0,0,0,0.6), 0 0 16px rgba(0,0,0,0)',
           pointerEvents: 'none', transition: 'all 0.2s ease',
         }} />
       )}
@@ -105,16 +105,16 @@ function Overlay({ steps, onClose }: { steps: TourStep[]; onClose: () => void })
       {/* Tooltip */}
       <div style={{
         position: 'absolute', top: tip.top, left: tip.left, width: TIP_W,
-        background: '#1a1a22', border: '1px solid #2a2a32', borderRadius: 10,
-        padding: 14, boxShadow: '0 12px 40px rgba(0,0,0,0.5)', color: '#e8e8ec',
+        background: 'var(--bg-overlay)', border: '1px solid var(--border-strong)', borderRadius: 10,
+        padding: 14, boxShadow: 'var(--shadow-3)', color: 'var(--text)',
       }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-          <span style={{ fontSize: 10, color: '#a0a0b0', fontWeight: 600, letterSpacing: 0.5 }}>
+          <span style={{ fontSize: 10, color: 'var(--text-muted)', fontWeight: 600, letterSpacing: 0.5 }}>
             STEP {index + 1} / {steps.length}
           </span>
           <button
             onClick={onClose}
-            style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: '#a0a0b0', display: 'flex', padding: 2 }}
+            style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex', padding: 2 }}
           >
             <X size={14} />
           </button>
@@ -125,7 +125,7 @@ function Overlay({ steps, onClose }: { steps: TourStep[]; onClose: () => void })
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <button
             onClick={onClose}
-            style={{ fontSize: 11, color: '#a0a0b0', background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}
+            style={{ fontSize: 11, color: 'var(--text-muted)', background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}
           >
             Skip tour
           </button>
@@ -133,14 +133,14 @@ function Overlay({ steps, onClose }: { steps: TourStep[]; onClose: () => void })
           {index > 0 && (
             <button
               onClick={() => setIndex((i) => i - 1)}
-              style={{ fontSize: 12, color: '#a0a0b0', background: 'transparent', border: '1px solid #2a2a32', borderRadius: 6, cursor: 'pointer', padding: '5px 12px' }}
+              style={{ fontSize: 12, color: 'var(--text-muted)', background: 'transparent', border: '1px solid var(--border-strong)', borderRadius: 6, cursor: 'pointer', padding: '5px 12px' }}
             >
               Back
             </button>
           )}
           <button
             onClick={() => (isLast ? onClose() : setIndex((i) => i + 1))}
-            style={{ fontSize: 12, fontWeight: 600, color: '#fff', background: '#7c6af7', border: 'none', borderRadius: 6, cursor: 'pointer', padding: '5px 14px' }}
+            style={{ fontSize: 12, fontWeight: 600, color: '#fff', background: 'var(--accent)', border: 'none', borderRadius: 6, cursor: 'pointer', padding: '5px 14px' }}
           >
             {isLast ? 'Done' : 'Next'}
           </button>
@@ -167,7 +167,7 @@ export function WalkthroughEngine({ steps, context }: Props) {
         </p>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: 'var(--text-muted)' }}>
-          <div style={{ width: 18, height: 18, borderRadius: '50%', background: '#7c6af7', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+          <div style={{ width: 18, height: 18, borderRadius: '50%', background: 'var(--accent)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
             <span style={{ color: '#fff', fontSize: 9, fontWeight: 700 }}>{steps.length}</span>
           </div>
           steps in this tour
@@ -179,7 +179,7 @@ export function WalkthroughEngine({ steps, context }: Props) {
           style={{
             display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
             padding: '8px 16px', borderRadius: 8,
-            background: '#7c6af7', border: 'none', cursor: steps.length === 0 ? 'default' : 'pointer',
+            background: 'var(--accent)', border: 'none', cursor: steps.length === 0 ? 'default' : 'pointer',
             color: '#fff', fontSize: 13, fontWeight: 600, opacity: steps.length === 0 ? 0.5 : 1,
           }}
         >

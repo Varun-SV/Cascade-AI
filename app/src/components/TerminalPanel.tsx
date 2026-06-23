@@ -6,6 +6,23 @@ import '@xterm/xterm/css/xterm.css';
 
 interface Props { cwd?: string }
 
+// Read a design token from the document so the terminal follows the app theme.
+function cssVar(name: string, fallback: string): string {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+
+function buildTermTheme() {
+  const bg = cssVar('--bg-base', '#1b1c1e');
+  return {
+    background: bg,
+    foreground: cssVar('--text', '#e7e8ea'),
+    cursor: cssVar('--accent', '#4f8cff'),
+    cursorAccent: bg,
+    selectionBackground: cssVar('--accent-soft', 'rgba(79,140,255,0.16)'),
+  };
+}
+
 export function TerminalPanel({ cwd }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -15,17 +32,15 @@ export function TerminalPanel({ cwd }: Props) {
     if (!containerRef.current) return;
 
     const term = new Terminal({
-      theme: {
-        background: '#0a0a0d',
-        foreground: '#ececf2',
-        cursor: '#8b7cf9',
-        cursorAccent: '#0a0a0d',
-        selectionBackground: '#8b7cf944',
-      },
+      theme: buildTermTheme(),
       fontFamily: '"JetBrains Mono", "Cascadia Code", monospace',
       fontSize: 13,
       cursorBlink: true,
     });
+
+    // Re-theme the terminal live when the app switches light/dark.
+    const themeObserver = new MutationObserver(() => { term.options.theme = buildTermTheme(); });
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.loadAddon(new WebLinksAddon());
@@ -59,6 +74,7 @@ export function TerminalPanel({ cwd }: Props) {
 
     return () => {
       observer.disconnect();
+      themeObserver.disconnect();
       term.dispose();
       window.cascade?.pty.kill();
     };
