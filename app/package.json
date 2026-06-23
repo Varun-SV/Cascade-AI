@@ -3,6 +3,8 @@
   "version": "0.12.8",
   "description": "Cascade AI — purpose-built desktop application",
   "author": "Varun SV",
+  "homepage": "https://github.com/Varun-SV/Cascade-AI",
+  "license": "MIT",
   "private": true,
   "main": "dist-electron/main.js",
   "type": "commonjs",

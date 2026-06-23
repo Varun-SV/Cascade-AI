@@ -8,7 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.12.8] - 2026-06-23
 
 ### Fixed
-- **Local `.gguf` model on an OpenAI-compatible (llama.cpp) endpoint was mislabeled as Ollama.** When both an `ollama` and an `openai-compatible` provider were configured, a configured model id with no provider prefix (e.g. `gemma-4-12b-it-Q4_K_M.gguf`) was attributed to Ollama because the resolver checked Ollama first. Now: (1) the router discovers the OpenAI-compatible endpoint's models at init (mirroring Ollama discovery) so an exact model id resolves to the provider that actually serves it; and (2) the selector heuristic recognizes a `.gguf` / path-style id as OpenAI-compatible (never an Ollama `family:tag`). Ollama `family:tag` models still resolve to Ollama. Added regression tests.
+- **Local `.gguf` model on an OpenAI-compatible (llama.cpp) endpoint was mislabeled as Ollama.** When both an `ollama` and an `openai-compatible` provider were configured, a configured model id with no provider prefix (e.g. `gemma-4-12b-it-Q4_K_M.gguf`, including a full `C:\…\model.gguf` path) was attributed to Ollama because the resolver checked Ollama first. Now: (1) the router discovers the OpenAI-compatible endpoint's models at init (mirroring Ollama discovery) so an exact model id resolves to the provider that actually serves it; and (2) the selector heuristic recognizes a `.gguf` / filesystem-path id (POSIX or Windows) as OpenAI-compatible (never an Ollama `family:tag`). Ollama `family:tag` models still resolve to Ollama. Added regression tests.
+- **Linux `deb`/`rpm`/`pacman` packaging failed** with "Please specify project homepage". Added the `homepage` + `license` metadata fpm requires, so the desktop release now builds all Linux installers (and Arch `pacman`) alongside the AppImage.
 
 ## [0.12.7] - 2026-06-23
 

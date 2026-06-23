@@ -35,6 +35,17 @@ describe('ModelSelector — provider attribution for local models', () => {
     expect(selector.selectForTier('T2', 'mistral-7b-instruct')!.provider).toBe('openai-compatible');
   });
 
+  it('attributes a full Windows .gguf path to openai-compatible', () => {
+    // llama.cpp models are often configured by absolute path, e.g.
+    // `C:\models\gemma4.gguf`. The drive-letter colon must not be mistaken for a
+    // provider prefix, and the path must resolve to openai-compatible.
+    const selector = new ModelSelector(new Set(['ollama', 'openai-compatible']));
+    const m = selector.selectForTier('T3', 'C:\\models\\gemma-4-12b-it-Q4_K_M.gguf');
+    expect(m).not.toBeNull();
+    expect(m!.provider).toBe('openai-compatible');
+    expect(m!.id).toBe('C:\\models\\gemma-4-12b-it-Q4_K_M.gguf');
+  });
+
   it('honors an explicit provider prefix', () => {
     const selector = new ModelSelector(new Set(['ollama', 'openai-compatible']));
     expect(selector.selectForTier('T3', 'openai-compatible:some-model')!.provider).toBe('openai-compatible');
