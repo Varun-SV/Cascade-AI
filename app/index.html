@@ -8,83 +8,138 @@
       *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
       /* ───────────────────────────────────────────────────────────────
-         Cascade AI — design tokens (dark-mode-first, evolved palette)
+         Cascade AI — design tokens (JetBrains Fleet / Xcode inspired)
+         Shared variable NAMES across light + dark so the (mostly inline)
+         component styles adapt with zero per-component changes — only the
+         token VALUES differ between themes.
+
+         Theme is selected by a `data-theme="light|dark"` attribute on <html>
+         (set by useTheme from the user's System/Light/Dark preference).
+         `:root` holds the LIGHT palette; `:root[data-theme="dark"]` overrides.
+
          Spacing scale (4px base):  4 · 8 · 12 · 16 · 24 · 32
          Type scale (px):           10 · 11 · 12 · 13 · 15 · 18 · 24
          ─────────────────────────────────────────────────────────────── */
       :root {
-        /* Neutral ramp — Catppuccin Macchiato-inspired, deep navy-black */
-        --bg-base:        #06080f;
-        --bg-surface:     #0f1117;
-        --bg-raised:      #131520;
-        --bg-overlay:     #1a1d2e;
-        --bg-hover:       #222536;
-        --bg-active:      #2a2d3e;
+        color-scheme: light;
 
-        --border:         #1a1d2e;
-        --border-strong:  #2a2d3e;
+        /* Neutral ramp — soft, paper-like */
+        --bg-base:        #f4f5f7;
+        --bg-surface:     #ffffff;
+        --bg-raised:      #eef0f3;
+        --bg-overlay:     #ffffff;
+        --bg-hover:       #e8eaee;
+        --bg-active:      #dfe2e7;
 
-        --text:           #cdd6f4;
-        --text-muted:     #6e738d;
-        --text-dim:       #3d4455;
+        --border:         #e3e5ea;
+        --border-strong:  #cfd3da;
 
-        /* Primary accent (violet) + secondary (cyan) */
-        --accent:         #7c6af7;
-        --accent-hover:   #9080f9;
-        --accent-dim:     #221d55;
-        --accent-soft:    rgba(124, 106, 247, 0.14);
-        --accent-2:       #00d4e8;
-        --accent-2-soft:  rgba(0, 212, 232, 0.14);
+        --text:           #1b1d21;
+        --text-muted:     #5b616b;
+        --text-dim:       #9aa0aa;
 
-        /* Per-tier identity (T1 amber · T2 violet light · T3 deep cyan) */
-        --t1:             #f5a623;
-        --t1-soft:        rgba(245, 166, 35, 0.14);
-        --t2:             #b87fff;
-        --t2-soft:        rgba(184, 127, 255, 0.14);
-        --t3:             #00d4e8;
-        --t3-soft:        rgba(0, 212, 232, 0.14);
+        /* Primary accent — Fleet/Xcode blue, single restrained hue */
+        --accent:         #2f6fed;
+        --accent-hover:   #295fd0;
+        --accent-dim:     #d6e2fb;
+        --accent-soft:    rgba(47, 111, 237, 0.12);
+        --accent-2:       #6a5cff;          /* soft indigo — calm gradient pair */
+        --accent-2-soft:  rgba(106, 92, 255, 0.12);
+
+        /* Per-tier identity (kept distinct but desaturated) */
+        --t1:             #c0801c;
+        --t1-soft:        rgba(192, 128, 28, 0.13);
+        --t2:             #7a4fd0;
+        --t2-soft:        rgba(122, 79, 208, 0.13);
+        --t3:             #1f8fa0;
+        --t3-soft:        rgba(31, 143, 160, 0.13);
 
         /* Semantic */
-        --success:        #22d47a;
-        --success-soft:   rgba(34, 212, 122, 0.14);
-        --warn:           #f5a623;
-        --warn-soft:      rgba(245, 166, 35, 0.14);
-        --danger:         #f0506e;
-        --danger-soft:    rgba(240, 80, 110, 0.14);
-        --info:           #00d4e8;
+        --success:        #1f9d57;
+        --success-soft:   rgba(31, 157, 87, 0.13);
+        --warn:           #c6881f;
+        --warn-soft:      rgba(198, 136, 31, 0.13);
+        --danger:         #d23b34;
+        --danger-soft:    rgba(210, 59, 52, 0.13);
+        --info:           #2f6fed;
 
         /* Back-compat aliases (existing components read these) */
         --green:          var(--success);
         --yellow:         var(--warn);
         --red:            var(--danger);
 
-        /* Radii scale */
-        --radius-sm:      5px;
-        --radius-md:      8px;
-        --radius-lg:      12px;
-        --radius-xl:      16px;
+        /* Radii scale — slightly rounded, Fleet-like */
+        --radius-sm:      6px;
+        --radius-md:      9px;
+        --radius-lg:      13px;
+        --radius-xl:      18px;
         --radius:         var(--radius-md); /* back-compat */
 
-        /* Elevation */
-        --shadow-1:       0 1px 2px rgba(0,0,0,0.30), 0 1px 3px rgba(0,0,0,0.18);
-        --shadow-2:       0 8px 28px rgba(0,0,0,0.38);
-        --shadow-3:       0 24px 64px rgba(0,0,0,0.52);
-        --glow-accent:    0 0 0 1px var(--accent-soft), 0 4px 20px rgba(124,106,247,0.22);
+        /* Elevation — soft, low-contrast */
+        --shadow-1:       0 1px 2px rgba(20,24,33,0.08), 0 1px 3px rgba(20,24,33,0.05);
+        --shadow-2:       0 6px 22px rgba(20,24,33,0.10);
+        --shadow-3:       0 20px 56px rgba(20,24,33,0.16);
+        --glow-accent:    0 0 0 1px var(--accent-soft), 0 4px 18px rgba(47,111,237,0.14);
 
         /* Typography */
         --font-ui:        -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
-        --font-mono:      'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
+        --font-mono:      'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
 
         /* Motion */
         --ease:           cubic-bezier(0.4, 0, 0.2, 1);
         --dur:            0.15s;
       }
 
+      :root[data-theme="dark"] {
+        color-scheme: dark;
+
+        /* Neutral ramp — warm-neutral charcoal (not pure black) */
+        --bg-base:        #1b1c1e;
+        --bg-surface:     #202123;
+        --bg-raised:      #26282b;
+        --bg-overlay:     #2b2d30;
+        --bg-hover:       #2f3236;
+        --bg-active:      #383b40;
+
+        --border:         #2c2e32;
+        --border-strong:  #3b3e44;
+
+        --text:           #e7e8ea;
+        --text-muted:     #9ba0a8;
+        --text-dim:       #686d75;
+
+        --accent:         #4f8cff;
+        --accent-hover:   #6a9dff;
+        --accent-dim:     #20304f;
+        --accent-soft:    rgba(79, 140, 255, 0.16);
+        --accent-2:       #8a7bff;
+        --accent-2-soft:  rgba(138, 123, 255, 0.16);
+
+        --t1:             #e0a458;
+        --t1-soft:        rgba(224, 164, 88, 0.15);
+        --t2:             #b08cff;
+        --t2-soft:        rgba(176, 140, 255, 0.15);
+        --t3:             #56b6c2;
+        --t3-soft:        rgba(86, 182, 194, 0.15);
+
+        --success:        #4caf72;
+        --success-soft:   rgba(76, 175, 114, 0.16);
+        --warn:           #d9a441;
+        --warn-soft:      rgba(217, 164, 65, 0.16);
+        --danger:         #e5534b;
+        --danger-soft:    rgba(229, 83, 75, 0.16);
+        --info:           #4f8cff;
+
+        --shadow-1:       0 1px 2px rgba(0,0,0,0.40), 0 1px 3px rgba(0,0,0,0.28);
+        --shadow-2:       0 8px 28px rgba(0,0,0,0.46);
+        --shadow-3:       0 24px 64px rgba(0,0,0,0.60);
+        --glow-accent:    0 0 0 1px var(--accent-soft), 0 4px 20px rgba(79,140,255,0.22);
+      }
+
       html, body, #root { height: 100%; overflow: hidden; }
       body {
         background:
-          radial-gradient(1200px 600px at 80% -10%, rgba(124,106,247,0.06), transparent 60%),
-          radial-gradient(900px 500px at -10% 110%, rgba(0,212,232,0.05), transparent 55%),
+          radial-gradient(1100px 560px at 82% -12%, var(--accent-soft), transparent 60%),
           var(--bg-base);
         color: var(--text);
         font-family: var(--font-ui);
@@ -93,6 +148,7 @@
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
         text-rendering: optimizeLegibility;
+        transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
       }
 
       /* Selection + focus polish */
@@ -114,7 +170,7 @@
         border: 2px solid transparent;
         background-clip: padding-box;
       }
-      ::-webkit-scrollbar-thumb:hover { background: #46465a; background-clip: padding-box; }
+      ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); background-clip: padding-box; }
 
       /* Shared keyframes */
       @keyframes pulse   { 0%,100% { opacity: 1 } 50% { opacity: 0.3 } }

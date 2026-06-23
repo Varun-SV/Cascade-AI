@@ -20,6 +20,7 @@ import {
   type RuntimeSession,
 } from './store/index.js';
 import { SettingsView } from './views/SettingsView.js';
+import { useThemeSync } from './theme/useTheme.js';
 
 declare global {
   interface Window {
@@ -33,6 +34,11 @@ declare global {
       getSettings(): Promise<{ models: Record<string, string>; budget: { maxCostPerRun?: number; autoBias?: string }; providersWithKey: string[] }>;
       updateSettings(data: { keys?: Record<string, string | undefined>; models?: Record<string, string | undefined>; budget?: { maxCostPerRun?: number; autoBias?: string } }): Promise<{ ok: boolean; error?: string; models?: Record<string, string>; budget?: { maxCostPerRun?: number; autoBias?: string }; providersWithKey?: string[] }>;
       selectDirectory(): Promise<string | null>;
+      theme: {
+        get(): Promise<{ preference: 'system' | 'light' | 'dark'; shouldUseDark: boolean }>;
+        set(preference: 'system' | 'light' | 'dark'): Promise<{ preference: 'system' | 'light' | 'dark'; shouldUseDark: boolean }>;
+        onChanged(cb: (s: { preference: 'system' | 'light' | 'dark'; shouldUseDark: boolean }) => void): void;
+      };
       pty: {
         spawn(cwd: string): Promise<{ ok: boolean; error?: string }>;
         write(data: string): void;
@@ -53,6 +59,9 @@ export function App() {
   const dispatch = useAppDispatch();
   const { backendPort, authToken, helpContext, showSettings, onboardingDone } = useAppSelector((s) => s.app);
   const socketRef = useRef<Socket | null>(null);
+
+  // Resolve + apply the System/Light/Dark appearance preference.
+  useThemeSync();
 
   // Check onboarding status from Electron config on startup
   useEffect(() => {

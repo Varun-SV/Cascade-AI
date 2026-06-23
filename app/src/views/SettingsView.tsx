@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
 import type { Socket } from 'socket.io-client';
-import { X } from 'lucide-react';
-import { useAppDispatch } from '../store/index.js';
+import { X, Monitor, Sun, Moon } from 'lucide-react';
+import { useAppDispatch, useAppSelector, type ThemePref } from '../store/index.js';
 import { setShowSettings } from '../store/index.js';
+import { setThemePreference } from '../theme/useTheme.js';
 
-type Tab = 'keys' | 'models' | 'budget';
+type Tab = 'keys' | 'models' | 'budget' | 'appearance';
 type Bias = 'balanced' | 'quality' | 'cost';
 
 // Provider → ProviderType key used by the Cascade core + the curated models
@@ -48,6 +49,7 @@ interface Props { socket: Socket | null }
 export function SettingsView({ socket }: Props) {
   const dispatch = useAppDispatch();
   const [tab, setTab] = useState<Tab>('keys');
+  const themePref = useAppSelector((s) => s.app.themePref);
 
   // API keys (sent under the Cascade ProviderType used by the core)
   const [anthropicKey, setAnthropicKey] = useState('');
@@ -173,7 +175,7 @@ export function SettingsView({ socket }: Props) {
 
         {/* Tabs */}
         <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', padding: '0 18px' }}>
-          {(['keys', 'models', 'budget'] as Tab[]).map((t) => (
+          {(['keys', 'models', 'budget', 'appearance'] as Tab[]).map((t) => (
             <button key={t} onClick={() => setTab(t)} style={{
               background: 'none', border: 'none', cursor: 'pointer', padding: '10px 14px',
               fontSize: 12, fontWeight: tab === t ? 600 : 400,
@@ -181,7 +183,7 @@ export function SettingsView({ socket }: Props) {
               borderBottom: tab === t ? '2px solid var(--accent)' : '2px solid transparent',
               marginBottom: -1, transition: 'color 0.12s',
             }}>
-              {t === 'keys' ? 'API Keys' : t === 'models' ? 'Models' : 'Budget & Bias'}
+              {t === 'keys' ? 'API Keys' : t === 'models' ? 'Models' : t === 'budget' ? 'Budget & Bias' : 'Appearance'}
             </button>
           ))}
         </div>
@@ -246,6 +248,39 @@ export function SettingsView({ socket }: Props) {
                   </div>
                 );
               })}
+            </>
+          )}
+
+          {tab === 'appearance' && (
+            <>
+              <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: 0 }}>
+                Choose how Cascade looks. <code>System</code> follows your OS light/dark setting automatically.
+              </p>
+              <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block' }}>Theme</label>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {([
+                  { id: 'system', label: 'System', Icon: Monitor },
+                  { id: 'light', label: 'Light', Icon: Sun },
+                  { id: 'dark', label: 'Dark', Icon: Moon },
+                ] as { id: ThemePref; label: string; Icon: typeof Monitor }[]).map(({ id, label, Icon }) => {
+                  const active = themePref === id;
+                  return (
+                    <button key={id} onClick={() => setThemePreference(dispatch, id)} style={{
+                      flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
+                      padding: '14px 10px', cursor: 'pointer',
+                      background: active ? 'var(--accent-soft)' : 'var(--bg-raised)',
+                      border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
+                      borderRadius: 'var(--radius-md)',
+                      color: active ? 'var(--accent)' : 'var(--text-muted)',
+                      fontSize: 12, fontWeight: active ? 600 : 400,
+                      transition: 'all var(--dur) var(--ease)',
+                    }}>
+                      <Icon size={18} />
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
             </>
           )}
 

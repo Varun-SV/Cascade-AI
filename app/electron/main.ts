@@ -6,6 +6,7 @@ import {
   Notification,
   ipcMain,
   nativeImage,
+  nativeTheme,
   protocol,
   net as electronNet,
 } from 'electron';
@@ -134,8 +135,37 @@ function notifyBackendStatus(): void {
   });
 }
 
+// ─── Theme ───────────────────────────────────────────────────────────────────
+// The user's appearance preference: 'system' follows the OS, 'light'/'dark'
+// force a mode. Persisted in cascade-desktop.json so it survives launches and is
+// applied to `nativeTheme.themeSource` (which also themes native chrome:
+// menus, scrollbars, the title-bar overlay, and form controls via color-scheme).
+type ThemePref = 'system' | 'light' | 'dark';
+
+function getThemePref(): ThemePref {
+  const v = loadDesktopMeta().theme;
+  return v === 'light' || v === 'dark' ? v : 'system';
+}
+
+function applyThemePref(pref: ThemePref): void {
+  nativeTheme.themeSource = pref;
+}
+
 // ─── IPC handlers ─────────────────────────────────────────────────────────────
 function registerIPC(): void {
+  // Appearance: read/write the System/Light/Dark preference. The renderer's
+  // useTheme hook resolves this into a concrete `data-theme` on <html>.
+  ipcMain.handle('theme:get', () => ({
+    preference: getThemePref(),
+    shouldUseDark: nativeTheme.shouldUseDarkColors,
+  }));
+  ipcMain.handle('theme:set', (_e, preference: ThemePref) => {
+    const pref: ThemePref = preference === 'light' || preference === 'dark' ? preference : 'system';
+    saveDesktopMeta({ theme: pref });
+    applyThemePref(pref);
+    return { preference: pref, shouldUseDark: nativeTheme.shouldUseDarkColors };
+  });
+
   ipcMain.handle('cascade:meta', () => ({
     port: backendPort,
     token: authToken,
@@ -345,25 +375,20 @@ function getWorkspacePath(): string {
 // ─── Window ───────────────────────────────────────────────────────────────────
 function createWindow(): void {
   const isMac = process.platform === 'darwin';
+  const dark = nativeTheme.shouldUseDarkColors;
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    backgroundColor: '#06080f',
+    backgroundColor: dark ? '#1b1c1e' : '#f4f5f7',
     // Frameless-style chrome on every platform: macOS keeps inset traffic
     // lights, Windows/Linux get themed window controls via titleBarOverlay.
     // The app draws its own draggable title strip (see TitleBar.tsx).
     titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
     ...(isMac
       ? {}
-      : {
-          titleBarOverlay: {
-            color: '#0f1117',
-            symbolColor: '#6e738d',
-            height: 38,
-          },
-        }),
+      : { titleBarOverlay: titleBarOverlayColors() }),
     autoHideMenuBar: true, // no in-window menu bar; shortcuts stay via roles
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
@@ -382,6 +407,22 @@ function createWindow(): void {
   }
 
   mainWindow.on('closed', () => { mainWindow = null; });
+}
+
+// Title-bar overlay (Windows/Linux native window controls) colors for the
+// current theme, kept in sync when the OS or preference flips.
+function titleBarOverlayColors(): Electron.TitleBarOverlay {
+  const dark = nativeTheme.shouldUseDarkColors;
+  return {
+    color: dark ? '#202123' : '#ffffff',
+    symbolColor: dark ? '#9ba0a8' : '#5b616b',
+    height: 38,
+  };
+}
+
+function updateTitleBarOverlay(): void {
+  if (process.platform === 'darwin' || !mainWindow) return;
+  try { mainWindow.setTitleBarOverlay(titleBarOverlayColors()); } catch { /* overlay may be unavailable */ }
 }
 
 // ─── Application menu ───────────────────────────────────────────────────────
@@ -427,6 +468,18 @@ app.whenReady().then(async () => {
     const url = request.url.replace('app://.', '');
     const filePath = join(__dirname, '../dist-renderer', url === '/' ? '/index.html' : url);
     return electronNet.fetch(pathToFileURL(filePath).toString());
+  });
+
+  // Apply the saved appearance preference before the first paint so native
+  // chrome (title-bar overlay, scrollbars) opens in the right mode.
+  applyThemePref(getThemePref());
+  // Forward OS light/dark changes to the renderer so 'System' mode tracks live.
+  nativeTheme.on('updated', () => {
+    mainWindow?.webContents.send('theme:changed', {
+      preference: getThemePref(),
+      shouldUseDark: nativeTheme.shouldUseDarkColors,
+    });
+    updateTitleBarOverlay();
   });
 
   buildAppMenu();

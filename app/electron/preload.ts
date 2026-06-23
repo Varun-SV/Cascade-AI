@@ -56,6 +56,16 @@ contextBridge.exposeInMainWorld('cascade', {
   // Directory picker dialog
   selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory') as Promise<string | null>,
 
+  // Appearance: System/Light/Dark preference + resolved dark flag
+  theme: {
+    get: () => ipcRenderer.invoke('theme:get') as Promise<{ preference: 'system' | 'light' | 'dark'; shouldUseDark: boolean }>,
+    set: (preference: 'system' | 'light' | 'dark') =>
+      ipcRenderer.invoke('theme:set', preference) as Promise<{ preference: 'system' | 'light' | 'dark'; shouldUseDark: boolean }>,
+    onChanged: (cb: (s: { preference: 'system' | 'light' | 'dark'; shouldUseDark: boolean }) => void) => {
+      ipcRenderer.on('theme:changed', (_e, s) => cb(s));
+    },
+  },
+
   // PTY (terminal)
   pty: {
     spawn: (cwd: string) => ipcRenderer.invoke('pty:spawn', cwd),
