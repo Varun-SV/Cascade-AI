@@ -5,6 +5,20 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.7] - 2026-06-23
+
+### Fixed
+- **Desktop app stuck "offline" / could not chat.** The desktop Socket.IO client used the default parser while the embedded dashboard server encodes packets with `socket.io-msgpack-parser`, so the handshake never completed. The client now uses the matching parser (as the web dashboard already did).
+- **Desktop Settings "Save" did nothing when the backend failed to start.** The shared Cascade config now loads independently of (and before) the dashboard server, so API keys, per-tier models, and budget always persist — even when the socket backend is unavailable. The status bar shows a tri-state (connected / reconnecting / offline · retry) with one-click backend restart.
+- **Help/tour panel could not be closed.** It was anchored to the viewport and overlapped the draggable title bar, which swallowed the close click. It is now anchored to the content area and also closes via Escape or click-outside.
+
+### Added
+- **System-aware light/dark theming (desktop).** A JetBrains Fleet / Xcode-inspired palette with `System` / `Light` / `Dark` preference (follows the OS by default), persisted and applied across the app, Monaco editor, and terminal. Choose it in Settings → Appearance.
+- **In-app self-update (desktop).** Settings → Updates shows the current version, a Check for Updates button, live download progress, and Restart & Install. Background auto-update on launch is retained.
+
+### Changed
+- **Cross-platform desktop installers.** The release now builds macOS `dmg` + `zip` (x64/arm64), Windows `nsis` + `portable`, Linux `AppImage` + `deb` + `rpm`, and Arch Linux `pacman`, with auto-update manifests.
+
 ## [0.12.6] - 2026-06-21
 
 ### Fixed
