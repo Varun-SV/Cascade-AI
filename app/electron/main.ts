@@ -63,9 +63,13 @@ function mapProvider(id: string): { type: string | null; baseUrl?: string } {
 // Resolve the cascade-ai core package (built CommonJS output). In dev it lives at
 // the repo's ../dist; in a packaged app it's bundled under resources/cascade-core.
 function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any } {
+  // Dev: the repo's external-deps build (node_modules resolves the requires).
+  // Packaged: the self-contained `desktop-core.cjs` bundle (no node_modules to
+  // resolve from — every JS dep is bundled in; only native modules like
+  // better-sqlite3 are shipped alongside in cascade-core/node_modules).
   const corePath = isDev
     ? join(__dirname, '../../dist/index.cjs')
-    : join(process.resourcesPath, 'cascade-core/index.cjs');
+    : join(process.resourcesPath, 'cascade-core/desktop-core.cjs');
   return require(corePath);
 }
 
