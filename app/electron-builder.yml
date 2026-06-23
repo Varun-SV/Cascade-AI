@@ -44,21 +44,40 @@ mac:
   category: public.app-category.developer-tools
   icon: assets/icon.png
   target:
+    # dmg is the user-facing installer; zip is required by electron-updater to
+    # deliver macOS auto-updates (it can't update from a .dmg).
     - target: dmg
+      arch: [x64, arm64]
+    - target: zip
       arch: [x64, arm64]
 
 win:
   icon: assets/icon.png
   target:
-    - target: nsis
+    - target: nsis      # standard installer (+ auto-update)
+      arch: [x64]
+    - target: portable  # single self-contained .exe, no install
       arch: [x64]
 
 linux:
-  target:
-    - target: AppImage
-      arch: [x64]
   icon: assets/icon.png
   category: Development
+  # Metadata required by the deb/rpm/pacman packagers.
+  maintainer: Varun SV <varunsv29102001@gmail.com>
+  vendor: Varun SV
+  synopsis: Multi-tier AI orchestration desktop app
+  description: >-
+    Cascade AI — a purpose-built desktop application for multi-tier (T1/T2/T3)
+    AI agent orchestration.
+  target:
+    - target: AppImage  # portable, distro-agnostic (+ auto-update)
+      arch: [x64]
+    - target: deb       # Debian / Ubuntu
+      arch: [x64]
+    - target: rpm       # Fedora / RHEL / openSUSE
+      arch: [x64]
+    - target: pacman    # Arch Linux (.pkg.tar.zst)
+      arch: [x64]
 
 publish:
   provider: github
