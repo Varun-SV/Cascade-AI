@@ -39,6 +39,12 @@ declare global {
         set(preference: 'system' | 'light' | 'dark'): Promise<{ preference: 'system' | 'light' | 'dark'; shouldUseDark: boolean }>;
         onChanged(cb: (s: { preference: 'system' | 'light' | 'dark'; shouldUseDark: boolean }) => void): void;
       };
+      updates: {
+        getVersion(): Promise<string>;
+        check(): Promise<{ ok: boolean; error?: string; version?: string; current?: string }>;
+        install(): Promise<void>;
+        onStatus(cb: (s: { status: string; version?: string; percent?: number; message?: string }) => void): void;
+      };
       pty: {
         spawn(cwd: string): Promise<{ ok: boolean; error?: string }>;
         write(data: string): void;

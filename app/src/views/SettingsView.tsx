@@ -4,8 +4,9 @@ import { X, Monitor, Sun, Moon } from 'lucide-react';
 import { useAppDispatch, useAppSelector, type ThemePref } from '../store/index.js';
 import { setShowSettings } from '../store/index.js';
 import { setThemePreference } from '../theme/useTheme.js';
+import { UpdatesPanel } from './UpdatesPanel.js';
 
-type Tab = 'keys' | 'models' | 'budget' | 'appearance';
+type Tab = 'keys' | 'models' | 'budget' | 'appearance' | 'updates';
 type Bias = 'balanced' | 'quality' | 'cost';
 
 // Provider → ProviderType key used by the Cascade core + the curated models
@@ -175,15 +176,15 @@ export function SettingsView({ socket }: Props) {
 
         {/* Tabs */}
         <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', padding: '0 18px' }}>
-          {(['keys', 'models', 'budget', 'appearance'] as Tab[]).map((t) => (
+          {(['keys', 'models', 'budget', 'appearance', 'updates'] as Tab[]).map((t) => (
             <button key={t} onClick={() => setTab(t)} style={{
               background: 'none', border: 'none', cursor: 'pointer', padding: '10px 14px',
               fontSize: 12, fontWeight: tab === t ? 600 : 400,
               color: tab === t ? 'var(--accent)' : 'var(--text-muted)',
               borderBottom: tab === t ? '2px solid var(--accent)' : '2px solid transparent',
-              marginBottom: -1, transition: 'color 0.12s',
+              marginBottom: -1, transition: 'color 0.12s', whiteSpace: 'nowrap',
             }}>
-              {t === 'keys' ? 'API Keys' : t === 'models' ? 'Models' : t === 'budget' ? 'Budget & Bias' : 'Appearance'}
+              {t === 'keys' ? 'API Keys' : t === 'models' ? 'Models' : t === 'budget' ? 'Budget & Bias' : t === 'appearance' ? 'Appearance' : 'Updates'}
             </button>
           ))}
         </div>
@@ -250,6 +251,8 @@ export function SettingsView({ socket }: Props) {
               })}
             </>
           )}
+
+          {tab === 'updates' && <UpdatesPanel />}
 
           {tab === 'appearance' && (
             <>

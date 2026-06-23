@@ -66,6 +66,16 @@ contextBridge.exposeInMainWorld('cascade', {
     },
   },
 
+  // Self-update: current version, manual check, install, and live status events
+  updates: {
+    getVersion: () => ipcRenderer.invoke('update:getVersion') as Promise<string>,
+    check: () => ipcRenderer.invoke('update:check') as Promise<{ ok: boolean; error?: string; version?: string; current?: string }>,
+    install: () => ipcRenderer.invoke('update:install') as Promise<void>,
+    onStatus: (cb: (s: { status: string; version?: string; percent?: number; message?: string }) => void) => {
+      ipcRenderer.on('update:status', (_e, s) => cb(s));
+    },
+  },
+
   // PTY (terminal)
   pty: {
     spawn: (cwd: string) => ipcRenderer.invoke('pty:spawn', cwd),

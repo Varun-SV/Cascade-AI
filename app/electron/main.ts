@@ -151,6 +151,45 @@ function applyThemePref(pref: ThemePref): void {
   nativeTheme.themeSource = pref;
 }
 
+// ─── Auto-update ─────────────────────────────────────────────────────────────
+// electron-updater pulls latest*.yml from the GitHub Release (see
+// electron-builder.yml `publish`). We keep background download on so a freshly
+// published version installs on next launch, AND expose IPC so the Settings →
+// Updates panel can trigger a check, show progress, and install on demand.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let autoUpdater: any = null;
+
+function sendUpdateStatus(status: string, data: Record<string, unknown> = {}): void {
+  mainWindow?.webContents.send('update:status', { status, ...data });
+}
+
+function setupAutoUpdate(): void {
+  try {
+    autoUpdater = require('electron-updater').autoUpdater;
+  } catch {
+    autoUpdater = null; // dev, or electron-updater unavailable
+    return;
+  }
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on('checking-for-update', () => sendUpdateStatus('checking'));
+  autoUpdater.on('update-available', (info: { version?: string }) => {
+    sendUpdateStatus('available', { version: info?.version });
+    new Notification({ title: 'Cascade AI — Update Available', body: `Version ${info?.version ?? ''} is downloading in the background.` }).show();
+  });
+  autoUpdater.on('update-not-available', () => sendUpdateStatus('not-available'));
+  autoUpdater.on('download-progress', (p: { percent?: number }) => sendUpdateStatus('downloading', { percent: Math.round(p?.percent ?? 0) }));
+  autoUpdater.on('update-downloaded', (info: { version?: string }) => {
+    sendUpdateStatus('downloaded', { version: info?.version });
+    new Notification({ title: 'Cascade AI — Restart to Update', body: 'A new version is ready. Relaunch to install.' }).show();
+  });
+  autoUpdater.on('error', (err: unknown) => sendUpdateStatus('error', { message: err instanceof Error ? err.message : String(err) }));
+
+  // Silent check on launch; failures (e.g. dev without app-update.yml) are ignored.
+  autoUpdater.checkForUpdatesAndNotify?.().catch(() => { /* offline or dev */ });
+}
+
 // ─── IPC handlers ─────────────────────────────────────────────────────────────
 function registerIPC(): void {
   // Appearance: read/write the System/Light/Dark preference. The renderer's
@@ -164,6 +203,22 @@ function registerIPC(): void {
     saveDesktopMeta({ theme: pref });
     applyThemePref(pref);
     return { preference: pref, shouldUseDark: nativeTheme.shouldUseDarkColors };
+  });
+
+  // Updates: current version + manual check/install for the Settings panel.
+  ipcMain.handle('update:getVersion', () => app.getVersion());
+  ipcMain.handle('update:check', async () => {
+    if (!autoUpdater) return { ok: false, error: 'updater-unavailable' };
+    try {
+      const r = await autoUpdater.checkForUpdates();
+      return { ok: true, version: r?.updateInfo?.version, current: app.getVersion() };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  ipcMain.handle('update:install', () => {
+    // Restart and apply the downloaded update. No-op if nothing is downloaded.
+    try { autoUpdater?.quitAndInstall(); } catch { /* nothing downloaded */ }
   });
 
   ipcMain.handle('cascade:meta', () => ({
@@ -488,16 +543,7 @@ app.whenReady().then(async () => {
   createWindow();
   createTray();
 
-  try {
-    const { autoUpdater } = require('electron-updater');
-    autoUpdater.checkForUpdatesAndNotify();
-    autoUpdater.on('update-available', () => {
-      new Notification({ title: 'Cascade AI — Update Available', body: 'Downloading in the background.' }).show();
-    });
-    autoUpdater.on('update-downloaded', () => {
-      new Notification({ title: 'Cascade AI — Restart to Update', body: 'A new version is ready. Relaunch to install.' }).show();
-    });
-  } catch { /* no-op in dev or when electron-updater is unavailable */ }
+  setupAutoUpdate();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
