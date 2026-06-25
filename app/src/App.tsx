@@ -64,7 +64,7 @@ declare global {
 
 export function App() {
   const dispatch = useAppDispatch();
-  const { backendPort, authToken, helpContext, showSettings, onboardingDone } = useAppSelector((s) => s.app);
+  const { backendPort, authToken, helpContext, showSettings, onboardingDone, backendError } = useAppSelector((s) => s.app);
   const socketRef = useRef<Socket | null>(null);
 
   // Resolve + apply the System/Light/Dark appearance preference.
@@ -145,6 +145,14 @@ export function App() {
       dispatch(removeSession(data.sessionId));
     });
 
+    // Surface run failures. The cockpit/chat only render agents from socket
+    // events, so a run that errors before any tier spawns used to vanish with
+    // no feedback. Show the error instead, and clear it when a run completes.
+    socket.on('session:error', (data: { error?: string }) => {
+      dispatch(setBackendError(data?.error ? `Run failed: ${data.error}` : 'Run failed — check your model/key and try again.'));
+    });
+    socket.on('session:complete', () => { dispatch(setBackendError(null)); });
+
     return () => { socket.disconnect(); };
   }, [backendPort, authToken, dispatch]);
 
@@ -156,6 +164,17 @@ export function App() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
       <TitleBar />
+      {backendError && (
+        <div role="alert" style={{
+          display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px',
+          background: 'var(--danger-soft, #2a1015)', color: 'var(--danger, #ff6b81)',
+          borderBottom: '1px solid var(--danger, #ff6b81)', fontSize: 12.5, flexShrink: 0,
+        }}>
+          <span style={{ flex: 1 }}>{backendError}</span>
+          <button onClick={() => dispatch(setBackendError(null))} title="Dismiss"
+            style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: 15, lineHeight: 1, padding: 0 }}>×</button>
+        </div>
+      )}
       {/* position: relative anchors the absolutely-positioned HelpPanel to the
           content area (below the title bar) so its close button is never hidden
           under the draggable title strip / native window controls. */}
