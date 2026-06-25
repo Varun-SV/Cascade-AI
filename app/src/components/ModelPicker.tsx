@@ -14,6 +14,9 @@ export const MODELS: ModelOption[] = [
   { provider: 'openai',    id: 'gpt-4o',                   label: 'GPT-4o' },
   { provider: 'openai',    id: 'gpt-4o-mini',              label: 'GPT-4o Mini' },
   { provider: 'google',    id: 'gemini-2.0-flash',         label: 'Gemini 2.0 Flash' },
+  { provider: 'ollama',    id: 'llama3.2',                 label: 'Llama 3.2 (Ollama)' },
+  { provider: 'ollama',    id: 'qwen2.5',                  label: 'Qwen 2.5 (Ollama)' },
+  { provider: 'ollama',    id: 'mistral',                  label: 'Mistral (Ollama)' },
 ];
 
 const PROVIDER_COLORS: Record<string, string> = {

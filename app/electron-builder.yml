@@ -16,8 +16,13 @@ files:
   - dist-renderer/**
   - dist-electron/**
   - assets/**
-  - "!node_modules/**"
-  - "node_modules/node-pty/**"
+  # Ship every PRODUCTION dependency the main process requires at runtime
+  # (electron-updater, node-pty, …). Previously this excluded ALL of node_modules
+  # and re-included only node-pty, leaving electron-updater out of the package —
+  # so require('electron-updater') threw and "Check for Updates" reported the
+  # updater as unavailable. Exclude only the workspace package (shipped
+  # separately as cascade-core via extraResources).
+  - "!node_modules/cascade-ai/**"
 
 asarUnpack:
   - "**/*.node"

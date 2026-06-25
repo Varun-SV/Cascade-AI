@@ -5,6 +5,14 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.9] - 2026-06-26
+
+### Fixed
+- **Cockpit/chat prompts vanished silently on failure.** A run that errored before any tier spawned disappeared with no feedback because the app handled `tier:status` but not `session:error`. The app now surfaces run failures in a dismissible banner (and clears it on success), so you see *why* a run failed instead of the prompt just clearing.
+- **"Check for Updates" reported the updater as unavailable in the installed app.** `electron-builder` excluded all of `node_modules` except `node-pty`, so `electron-updater` was never packaged and `require('electron-updater')` threw. The packaging now includes every production dependency (excluding only the `cascade-ai` workspace package, shipped separately as `cascade-core`).
+- **Ollama was absent from the model picker** when no local models were discovered. The picker now always offers Ollama quick-picks (plus the existing free-text model id / `.gguf` field), and still prefers the live-discovered list when Ollama is running.
+- **CLI/desktop didn't show model "thinking".** The Anthropic provider rendered `<think>…</think>` from `thinking_delta` events but never requested extended thinking. It now enables extended thinking for the 4.x reasoning models (Opus 4 / Sonnet 4) with the required `temperature = 1` and a safe `budget_tokens`; other models are unchanged.
+
 ## [0.12.8] - 2026-06-23
 
 ### Fixed
