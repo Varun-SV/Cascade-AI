@@ -5,6 +5,16 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.10] - 2026-06-26
+
+### Fixed
+- **Terminal crashed the view with "process is not defined."** `TerminalPanel` called `process.cwd()` in the renderer, where `process` doesn't exist. It now passes a safe default cwd to the PTY.
+- **Chat responses showed only the latest word.** Streamed tokens are deltas, but the store *replaced* the message on each token (and both App and Chat listened, which would double an append). The store now appends, and only the global handler streams — so replies accumulate correctly.
+
+### Changed
+- **Chat model is decoupled from the tiers.** The Chat model picker now uses its own selection (`activeModel.chat`) instead of overwriting the T1 tier, so picking a chat model no longer changes your T1/T2/T3 configuration or the status bar.
+- **Cockpit prompts are no longer invisible.** Sending from the cockpit now records the prompt in the shared transcript — shown inline in the cockpit and mirrored into the Chat view (with the streamed reply) — instead of clearing with no trace.
+
 ## [0.12.9] - 2026-06-26
 
 ### Fixed

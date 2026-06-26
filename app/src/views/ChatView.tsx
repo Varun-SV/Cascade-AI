@@ -4,7 +4,7 @@ import { Send, Bot, User, MessageSquare } from 'lucide-react';
 import { ModelPicker } from '../components/ModelPicker.js';
 import { HelpButton } from '../help/HelpButton.js';
 import { SessionRating } from '../components/SessionRating.js';
-import { useAppDispatch, useAppSelector, appendMessage, updateLastMessage, setActiveModelT1 } from '../store/index.js';
+import { useAppDispatch, useAppSelector, appendMessage, updateLastMessage, setActiveModelChat } from '../store/index.js';
 
 export function ChatView({ socket }: { socket: Socket | null }) {
   const dispatch = useAppDispatch();
@@ -23,17 +23,16 @@ export function ChatView({ socket }: { socket: Socket | null }) {
 
   useEffect(() => {
     if (!socket) return;
-    const onStream = (data: { text: string }) => {
-      dispatch(updateLastMessage({ content: data.text, streaming: true }));
-    };
+    // Streaming tokens are appended by the global handler in App.tsx (so they
+    // also update when you're on the cockpit view). Here we only react to
+    // completion to stop the cursor and offer rating.
     const onComplete = () => {
       dispatch(updateLastMessage({ content: '', streaming: false }));
       setStreaming(false);
       setSessionDone(true);
     };
-    socket.on('stream:token', onStream);
     socket.on('session:complete', onComplete);
-    return () => { socket.off('stream:token', onStream); socket.off('session:complete', onComplete); };
+    return () => { socket.off('session:complete', onComplete); };
   }, [socket, dispatch]);
 
   const send = () => {
@@ -42,7 +41,7 @@ export function ChatView({ socket }: { socket: Socket | null }) {
     const assistantMsg = { id: crypto.randomUUID(), role: 'assistant' as const, content: '', timestamp: Date.now(), streaming: true };
     dispatch(appendMessage(userMsg));
     dispatch(appendMessage(assistantMsg));
-    socket.emit('cascade:run', { prompt: input.trim(), model: activeModel.t1 });
+    socket.emit('cascade:run', { prompt: input.trim(), model: activeModel.chat });
     setInput('');
     setStreaming(true);
     setSessionDone(false);
@@ -60,8 +59,8 @@ export function ChatView({ socket }: { socket: Socket | null }) {
         <MessageSquare size={15} style={{ color: 'var(--accent)' }} />
         <span style={{ fontWeight: 700, fontSize: 13, letterSpacing: '-0.2px' }}>Chat</span>
         <ModelPicker
-          value={activeModel.t1}
-          onChange={(id) => dispatch(setActiveModelT1(id))}
+          value={activeModel.chat}
+          onChange={(id) => dispatch(setActiveModelChat(id))}
         />
         <div style={{ flex: 1 }} />
         <HelpButton context="chat" />

@@ -3,7 +3,7 @@ import type { Socket } from 'socket.io-client';
 import { Send, Network } from 'lucide-react';
 import { AgentGraph } from '../components/AgentGraph.js';
 import { HelpButton } from '../help/HelpButton.js';
-import { useAppSelector } from '../store/index.js';
+import { useAppDispatch, useAppSelector, appendMessage } from '../store/index.js';
 
 const TIERS: { id: string; label: string; color: string }[] = [
   { id: 'T1', label: 'Planner', color: 'var(--t1)' },
@@ -12,13 +12,21 @@ const TIERS: { id: string; label: string; color: string }[] = [
 ];
 
 export function CockpitView({ socket }: { socket: Socket | null }) {
+  const dispatch = useAppDispatch();
   const [prompt, setPrompt] = useState('');
   const [focused, setFocused] = useState(false);
   const agents = useAppSelector((s) => s.app.agents);
+  const messages = useAppSelector((s) => s.app.messages);
+  const lastUser = [...messages].reverse().find((m) => m.role === 'user');
 
   const submit = () => {
     if (!prompt.trim() || !socket) return;
-    socket.emit('cascade:run', { prompt });
+    const text = prompt.trim();
+    // Mirror the prompt into the shared transcript so it's visible here (inline
+    // below) AND in the Chat view, instead of vanishing after send.
+    dispatch(appendMessage({ id: crypto.randomUUID(), role: 'user', content: text, timestamp: Date.now() }));
+    dispatch(appendMessage({ id: crypto.randomUUID(), role: 'assistant', content: '', timestamp: Date.now(), streaming: true }));
+    socket.emit('cascade:run', { prompt: text });
     setPrompt('');
   };
 
@@ -45,6 +53,15 @@ export function CockpitView({ socket }: { socket: Socket | null }) {
         </div>
         <HelpButton context="cockpit" />
       </div>
+
+      {/* Inline echo of the latest prompt so cockpit sends are never invisible. */}
+      {lastUser && (
+        <div style={{ padding: '6px 16px', borderBottom: '1px solid var(--border)', background: 'var(--bg-base)', display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          <span style={{ color: 'var(--accent)', fontWeight: 700, fontSize: 11 }}>You</span>
+          <span style={{ flex: 1, fontSize: 11.5, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{lastUser.content}</span>
+          <span style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>· full reply in Chat</span>
+        </div>
+      )}
 
       {/* Agent graph area with dot-grid background */}
       <div className="agent-graph" style={{
