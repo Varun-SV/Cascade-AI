@@ -40,11 +40,13 @@ contextBridge.exposeInMainWorld('cascade', {
     models: Record<string, string>;
     budget: { maxCostPerRun?: number; autoBias?: string };
     providersWithKey: string[];
+    endpoints: Record<string, string>;
   }>,
   updateSettings: (data: {
     keys?: Record<string, string | undefined>;
     models?: Record<string, string | undefined>;
     budget?: { maxCostPerRun?: number; autoBias?: string };
+    endpoints?: Record<string, string | undefined>;
   }) => ipcRenderer.invoke('cascade:updateSettings', data) as Promise<{
     ok: boolean;
     error?: string;

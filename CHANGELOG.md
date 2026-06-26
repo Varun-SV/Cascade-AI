@@ -5,6 +5,11 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.11] - 2026-06-26
+
+### Added
+- **Providers settings tab with editable endpoints.** The Settings → Providers tab now exposes an **OpenAI-Compatible** entry (API key + **Base URL**, e.g. `http://localhost:8000/v1`) so you can point Cascade at vLLM / llama.cpp / LM Studio / any OpenAI-compatible server, and an editable **Ollama endpoint** (default `http://localhost:11434`). Endpoints persist to the provider config via the `getSettings`/`updateSettings` IPC and are picked up live by the backend.
+
 ## [0.12.10] - 2026-06-26
 
 ### Fixed
