@@ -51,7 +51,7 @@ export function TerminalPanel({ cwd }: Props) {
 
     // Spawn PTY in main process
     if (window.cascade) {
-      window.cascade.pty.spawn(cwd ?? process.cwd?.() ?? '/').then((res) => {
+      window.cascade.pty.spawn(cwd ?? '.').then((res) => {
         if (!res.ok) {
           term.writeln(`\x1b[31mTerminal error: ${res.error}\x1b[0m`);
           return;

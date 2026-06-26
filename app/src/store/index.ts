@@ -57,7 +57,7 @@ export interface AppState {
   sessionTitle: string;
   totalCostUsd: number;
   totalTokens: number;
-  activeModel: { t1: string; t2: string; t3: string };
+  activeModel: { t1: string; t2: string; t3: string; chat: string };
   agents: AgentNode[];
   messages: ChatMessage[];
   workspacePath: string;
@@ -85,7 +85,7 @@ const initialState: AppState = {
   sessionTitle: 'Cascade AI',
   totalCostUsd: 0,
   totalTokens: 0,
-  activeModel: { t1: 'auto', t2: 'auto', t3: 'auto' },
+  activeModel: { t1: 'auto', t2: 'auto', t3: 'auto', chat: 'auto' },
   agents: [],
   messages: [],
   workspacePath: '',
@@ -145,7 +145,9 @@ const appSlice = createSlice({
     updateLastMessage(state, action: PayloadAction<{ content: string; streaming: boolean }>) {
       const last = state.messages[state.messages.length - 1];
       if (last?.role === 'assistant') {
-        last.content = action.payload.content;
+        // Append streamed deltas (the backend emits token-by-token); an empty
+        // content with streaming:false is the completion signal (no-op append).
+        last.content += action.payload.content;
         last.streaming = action.payload.streaming;
       }
     },
@@ -167,6 +169,9 @@ const appSlice = createSlice({
     },
     setActiveModelT1(state, action: PayloadAction<string>) {
       state.activeModel.t1 = action.payload;
+    },
+    setActiveModelChat(state, action: PayloadAction<string>) {
+      state.activeModel.chat = action.payload;
     },
     // Session sidebar
     setSessions(state, action: PayloadAction<RuntimeSession[]>) {
@@ -210,7 +215,7 @@ const appSlice = createSlice({
 export const {
   setView, setConnected, setReconnecting, setBackendError, setShowSettings, setMeta, setSessionId, updateCost,
   setAgents, upsertAgent, appendMessage, updateLastMessage,
-  setWorkspacePath, toggleTerminal, setHelpContext, setTheme, setActiveModel, setActiveModelT1,
+  setWorkspacePath, toggleTerminal, setHelpContext, setTheme, setActiveModel, setActiveModelT1, setActiveModelChat,
   setSessions, setActiveSessionId, removeSession,
   openTab, closeTab, setActiveTab, setTabDirty,
   setOnboardingDone,
