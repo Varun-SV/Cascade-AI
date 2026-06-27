@@ -5,6 +5,11 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.14] - 2026-06-27
+
+### Fixed
+- **OpenAI-Compatible / Ollama model picker now lists the endpoint’s real models.** In Settings → Models, choosing an OpenAI-Compatible (vLLM / llama.cpp / LM Studio) or Ollama tier auto-fetches the endpoint’s `/v1/models` and offers them as a dropdown instead of requiring a hand-typed id. Picking the exact id the server reports fixes the “could not connect” caused by a typed id (e.g. a `.gguf` filename) not matching what the endpoint serves. A refresh button re-discovers on demand, a “Custom…” option keeps manual entry, and the list refreshes after Save — no backend restart needed (discovery already runs per run).
+
 ## [0.12.13] - 2026-06-27
 
 ### Added

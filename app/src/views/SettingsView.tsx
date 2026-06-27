@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import type { Socket } from 'socket.io-client';
-import { X, Monitor, Sun, Moon, Sparkles } from 'lucide-react';
+import { X, Monitor, Sun, Moon, Sparkles, RefreshCw, List } from 'lucide-react';
 import { useAppDispatch, useAppSelector, type ThemePref } from '../store/index.js';
 import { setShowSettings } from '../store/index.js';
 import { setThemePreference } from '../theme/useTheme.js';
@@ -74,6 +74,14 @@ export function SettingsView({ socket }: Props) {
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState('');
 
+  // Real models discovered from the user's endpoints (Ollama tags +
+  // OpenAI-compatible / llama.cpp /v1/models), used to populate the per-tier
+  // pickers so a local model id never has to be typed by hand (and matches
+  // exactly what the server reports, which is what routing needs).
+  const [dynModels, setDynModels] = useState<Array<{ id: string; provider: string }>>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [customTiers, setCustomTiers] = useState<Record<string, boolean>>({});
+
   // Apply a redacted config snapshot to the panel (the keys themselves are never
   // sent back — only which providers already have one).
   const applyConfig = (cfg: {
@@ -99,6 +107,18 @@ export function SettingsView({ socket }: Props) {
   useEffect(() => {
     window.cascade?.getSettings?.().then(applyConfig).catch(() => { /* no backend yet */ });
   }, []);
+
+  // Pull the user's REAL available models from their configured endpoints. This
+  // runs a fresh discovery over the saved config (no backend restart needed), so
+  // an OpenAI-compatible / Ollama endpoint's models appear as soon as it's saved.
+  const fetchModels = async () => {
+    if (!window.cascade?.listModels) return;
+    setModelsLoading(true);
+    try { const res = await window.cascade.listModels(); setDynModels(res?.models ?? []); }
+    catch { setDynModels([]); }
+    finally { setModelsLoading(false); }
+  };
+  useEffect(() => { fetchModels(); }, []);
 
   // Also listen to the live backend snapshot when a socket is connected.
   useEffect(() => {
@@ -146,6 +166,7 @@ export function SettingsView({ socket }: Props) {
     // Also notify the live backend (when connected) so the running session picks
     // up the new keys/models immediately, with no restart.
     if (socket) { socket.emit('config:update', payload); persisted = true; }
+    void fetchModels(); // re-discover endpoint models after saving (no restart)
 
     if (!persisted) {
       setSaveError('Could not save — the Cascade backend is unavailable. Try restarting the app.');
@@ -257,20 +278,50 @@ export function SettingsView({ socket }: Props) {
                         onChange={(e) => {
                           const next = TIER_PROVIDERS.find((p) => p.id === e.target.value)!;
                           setSel({ provider: next.id, model: next.models[0] ?? '' });
+                          if (next.freeText) fetchModels();
                         }}
                         style={{ flex: 1, background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none' }}>
                         {TIER_PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
                       </select>
-                      {sel.provider !== 'auto' && (
-                        def.freeText
-                          ? <input value={sel.model} onChange={(e) => setSel({ ...sel, model: e.target.value })}
-                              placeholder="model id"
-                              style={{ flex: 1, background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
-                          : <select value={sel.model} onChange={(e) => setSel({ ...sel, model: e.target.value })}
-                              style={{ flex: 1, background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none' }}>
+                      {sel.provider !== 'auto' && (() => {
+                        const fieldStyle = { flex: 1, background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' as const };
+                        const btnStyle = { flexShrink: 0, width: 32, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-muted)', cursor: 'pointer' };
+                        if (!def.freeText) {
+                          return (
+                            <select value={sel.model} onChange={(e) => setSel({ ...sel, model: e.target.value })} style={fieldStyle}>
                               {def.models.map((m) => <option key={m} value={m}>{m}</option>)}
                             </select>
-                      )}
+                          );
+                        }
+                        // OpenAI-compatible / Ollama: offer the endpoint's real model ids.
+                        const opts = dynModels.filter((m) => m.provider === sel.provider).map((m) => m.id);
+                        const showInput = (customTiers[label] ?? false) || opts.length === 0;
+                        return (
+                          <div style={{ flex: 1, display: 'flex', gap: 6 }}>
+                            {showInput ? (
+                              <input value={sel.model} onChange={(e) => setSel({ ...sel, model: e.target.value })}
+                                placeholder={modelsLoading ? 'Loading from endpoint…' : 'model id (endpoint unreachable?)'}
+                                style={fieldStyle} />
+                            ) : (
+                              <select value={opts.includes(sel.model) ? sel.model : '__custom__'}
+                                onChange={(e) => { if (e.target.value === '__custom__') setCustomTiers((c) => ({ ...c, [label]: true })); else setSel({ ...sel, model: e.target.value }); }}
+                                style={fieldStyle}>
+                                {sel.model && !opts.includes(sel.model) && <option value={sel.model}>{sel.model}</option>}
+                                {opts.map((m) => <option key={m} value={m}>{m}</option>)}
+                                <option value="__custom__">Custom…</option>
+                              </select>
+                            )}
+                            <button type="button" title="Refresh models from endpoint" onClick={fetchModels} style={btnStyle}>
+                              <RefreshCw size={13} />
+                            </button>
+                            {showInput && opts.length > 0 && (
+                              <button type="button" title="Pick from discovered list" onClick={() => setCustomTiers((c) => ({ ...c, [label]: false }))} style={btnStyle}>
+                                <List size={13} />
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </div>
                   </div>
                 );
