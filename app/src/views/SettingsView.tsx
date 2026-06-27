@@ -57,6 +57,10 @@ export function SettingsView({ socket }: Props) {
   const [openaiKey, setOpenaiKey] = useState('');
   const [geminiKey, setGeminiKey] = useState('');
   const [providersWithKey, setProvidersWithKey] = useState<string[]>([]);
+  // OpenAI-compatible (vLLM / llama.cpp / LM Studio …) key + endpoint, and Ollama endpoint.
+  const [ocKey, setOcKey] = useState('');
+  const [ocUrl, setOcUrl] = useState('');
+  const [ollamaUrl, setOllamaUrl] = useState('');
 
   // Per-tier provider + model
   const [t1, setT1] = useState<TierSel>({ provider: 'auto', model: '' });
@@ -76,6 +80,7 @@ export function SettingsView({ socket }: Props) {
     models?: Record<string, string>;
     budget?: { maxCostPerRun?: number; autoBias?: string };
     providersWithKey?: string[];
+    endpoints?: Record<string, string>;
   }) => {
     setT1(parseOverride(cfg.models?.t1));
     setT2(parseOverride(cfg.models?.t2));
@@ -85,6 +90,8 @@ export function SettingsView({ socket }: Props) {
       setBias(cfg.budget.autoBias);
     }
     if (cfg.providersWithKey) setProvidersWithKey(cfg.providersWithKey);
+    if (cfg.endpoints?.['openai-compatible']) setOcUrl(cfg.endpoints['openai-compatible']);
+    if (cfg.endpoints?.['ollama']) setOllamaUrl(cfg.endpoints['ollama']);
   };
 
   // Pre-load via the Electron IPC bridge first — this works even when the
@@ -116,9 +123,10 @@ export function SettingsView({ socket }: Props) {
   const save = async () => {
     setSaveError('');
     const payload = {
-      keys: { anthropic: anthropicKey || undefined, openai: openaiKey || undefined, gemini: geminiKey || undefined },
+      keys: { anthropic: anthropicKey || undefined, openai: openaiKey || undefined, gemini: geminiKey || undefined, 'openai-compatible': ocKey || undefined },
       models: { t1: composeOverride(t1), t2: composeOverride(t2), t3: composeOverride(t3) },
       budget: { maxCostPerRun: maxCost ? parseFloat(maxCost) : undefined, autoBias: bias },
+      endpoints: { 'openai-compatible': ocUrl.trim() || undefined, ollama: ollamaUrl.trim() || undefined },
     };
 
     // Primary path: persist via the Electron IPC bridge. This works even when the
@@ -145,7 +153,7 @@ export function SettingsView({ socket }: Props) {
     }
 
     // Keys are now stored; clear the inputs so placeholders show "key set".
-    setAnthropicKey(''); setOpenaiKey(''); setGeminiKey('');
+    setAnthropicKey(''); setOpenaiKey(''); setGeminiKey(''); setOcKey('');
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -184,7 +192,7 @@ export function SettingsView({ socket }: Props) {
               borderBottom: tab === t ? '2px solid var(--accent)' : '2px solid transparent',
               marginBottom: -1, transition: 'color 0.12s', whiteSpace: 'nowrap',
             }}>
-              {t === 'keys' ? 'API Keys' : t === 'models' ? 'Models' : t === 'budget' ? 'Budget & Bias' : t === 'appearance' ? 'Appearance' : 'Updates'}
+              {t === 'keys' ? 'Providers' : t === 'models' ? 'Models' : t === 'budget' ? 'Budget & Bias' : t === 'appearance' ? 'Appearance' : 'Updates'}
             </button>
           ))}
         </div>
@@ -213,6 +221,24 @@ export function SettingsView({ socket }: Props) {
                     style={{ width: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
                 </div>
               ))}
+              <div>
+                <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>
+                  OpenAI-Compatible (vLLM / llama.cpp / LM Studio …)
+                  {providersWithKey.includes('openai-compatible') && (<span style={{ color: 'var(--success)', marginLeft: 6 }}>• key set</span>)}
+                </label>
+                <input type="password" value={ocKey} onChange={(e) => setOcKey(e.target.value)}
+                  placeholder={providersWithKey.includes('openai-compatible') ? '•••••••• (leave blank to keep)' : 'API key (optional for local servers)'}
+                  style={{ width: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
+                <input type="text" value={ocUrl} onChange={(e) => setOcUrl(e.target.value)}
+                  placeholder="Base URL — e.g. http://localhost:8000/v1"
+                  style={{ width: '100%', marginTop: 6, background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>Ollama endpoint</label>
+                <input type="text" value={ollamaUrl} onChange={(e) => setOllamaUrl(e.target.value)}
+                  placeholder="http://localhost:11434"
+                  style={{ width: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
+              </div>
             </>
           )}
 

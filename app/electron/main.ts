@@ -333,16 +333,20 @@ function registerIPC(): void {
     models: Record<string, string>;
     budget: { maxCostPerRun?: number; autoBias?: string };
     providersWithKey: string[];
+    endpoints: Record<string, string>;
   } {
     const models = (cascadeConfig?.models ?? {}) as Record<string, string>;
     const budget = {
       maxCostPerRun: cascadeConfig?.budget?.maxCostPerRunUsd as number | undefined,
       autoBias: cascadeConfig?.autoBias as string | undefined,
     };
-    const providersWithKey = ((cascadeConfig?.providers ?? []) as Array<{ type: string; apiKey?: string }>)
+    const providers = (cascadeConfig?.providers ?? []) as Array<{ type: string; apiKey?: string; baseUrl?: string }>;
+    const providersWithKey = providers
       .filter((p) => typeof p.apiKey === 'string' && p.apiKey.length > 0)
       .map((p) => p.type);
-    return { models, budget, providersWithKey };
+    const endpoints: Record<string, string> = {};
+    for (const p of providers) { if (p?.type && p?.baseUrl) endpoints[p.type] = p.baseUrl; }
+    return { models, budget, providersWithKey, endpoints };
   }
 
   ipcMain.handle('cascade:getSettings', async () => settingsSnapshot());
@@ -371,6 +375,7 @@ function registerIPC(): void {
     keys?: Record<string, string | undefined>;
     models?: Record<string, string | undefined>;
     budget?: { maxCostPerRun?: number; autoBias?: string };
+    endpoints?: Record<string, string | undefined>;
   }) => {
     try {
       if (!cascadeConfig || !configManager) return { ok: false, error: 'backend-unavailable' };
@@ -381,6 +386,14 @@ function registerIPC(): void {
           const existing = cascadeConfig.providers.find((p: { type: string }) => p.type === type);
           if (existing) existing.apiKey = apiKey;
           else cascadeConfig.providers.push({ type, apiKey });
+        }
+      }
+      if (data.endpoints) {
+        for (const [type, baseUrl] of Object.entries(data.endpoints)) {
+          if (baseUrl === undefined) continue;
+          const existing = cascadeConfig.providers.find((pr: { type: string }) => pr.type === type);
+          if (existing) existing.baseUrl = baseUrl || undefined;
+          else if (baseUrl) cascadeConfig.providers.push({ type, baseUrl });
         }
       }
       if (data.models) {
