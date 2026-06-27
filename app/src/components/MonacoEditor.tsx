@@ -1,4 +1,4 @@
-import Editor, { type Monaco } from '@monaco-editor/react';
+import Editor, { type Monaco, type OnMount } from '@monaco-editor/react';
 import { useAppSelector } from '../store/index.js';
 
 interface Props {
@@ -6,6 +6,7 @@ interface Props {
   value: string;
   language: string;
   onChange?: (value: string | undefined) => void;
+  onMount?: OnMount;
   readOnly?: boolean;
 }
 
@@ -39,7 +40,7 @@ function defineThemes(monaco: Monaco): void {
   });
 }
 
-export function MonacoEditor({ path, value, language, onChange, readOnly = false }: Props) {
+export function MonacoEditor({ path, value, language, onChange, onMount, readOnly = false }: Props) {
   const dark = useAppSelector((s) => s.app.themeDark);
   return (
     <Editor
@@ -48,6 +49,7 @@ export function MonacoEditor({ path, value, language, onChange, readOnly = false
       language={language}
       theme={dark ? 'cascade-dark' : 'cascade-light'}
       beforeMount={defineThemes}
+      onMount={onMount}
       onChange={onChange}
       options={{
         readOnly,
