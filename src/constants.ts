@@ -8,7 +8,7 @@ import type { ModelInfo, ProviderType, ThemeName } from './types.js';
 // so the compiled bundle's version can never drift from the published package again.
 // The fallback applies only when running the un-bundled source directly (tests, tsx),
 // and is kept in step with package.json.
-export const CASCADE_VERSION = process.env.CASCADE_BUILD_VERSION ?? '0.12.13';
+export const CASCADE_VERSION = process.env.CASCADE_BUILD_VERSION ?? '0.12.14';
 export const CASCADE_CONFIG_DIR = '.cascade';
 export const CASCADE_MD_FILE = 'CASCADE.md';
 export const CASCADE_IGNORE_FILE = '.cascadeignore';
