@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import type { Socket } from 'socket.io-client';
-import { X, Monitor, Sun, Moon } from 'lucide-react';
+import { X, Monitor, Sun, Moon, Sparkles } from 'lucide-react';
 import { useAppDispatch, useAppSelector, type ThemePref } from '../store/index.js';
 import { setShowSettings } from '../store/index.js';
 import { setThemePreference } from '../theme/useTheme.js';
@@ -291,6 +291,7 @@ export function SettingsView({ socket }: Props) {
                   { id: 'system', label: 'System', Icon: Monitor },
                   { id: 'light', label: 'Light', Icon: Sun },
                   { id: 'dark', label: 'Dark', Icon: Moon },
+                  { id: 'midnight', label: 'Midnight', Icon: Sparkles },
                 ] as { id: ThemePref; label: string; Icon: typeof Monitor }[]).map(({ id, label, Icon }) => {
                   const active = themePref === id;
                   return (

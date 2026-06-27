@@ -144,15 +144,16 @@ function notifyBackendStatus(): void {
 // force a mode. Persisted in cascade-desktop.json so it survives launches and is
 // applied to `nativeTheme.themeSource` (which also themes native chrome:
 // menus, scrollbars, the title-bar overlay, and form controls via color-scheme).
-type ThemePref = 'system' | 'light' | 'dark';
+type ThemePref = 'system' | 'light' | 'dark' | 'midnight';
 
 function getThemePref(): ThemePref {
   const v = loadDesktopMeta().theme;
-  return v === 'light' || v === 'dark' ? v : 'system';
+  return v === 'light' || v === 'dark' || v === 'midnight' ? v : 'system';
 }
 
 function applyThemePref(pref: ThemePref): void {
-  nativeTheme.themeSource = pref;
+  // 'midnight' is a renderer-only palette; native chrome follows dark.
+  nativeTheme.themeSource = pref === 'midnight' ? 'dark' : pref;
 }
 
 // ─── Auto-update ─────────────────────────────────────────────────────────────
@@ -203,7 +204,7 @@ function registerIPC(): void {
     shouldUseDark: nativeTheme.shouldUseDarkColors,
   }));
   ipcMain.handle('theme:set', (_e, preference: ThemePref) => {
-    const pref: ThemePref = preference === 'light' || preference === 'dark' ? preference : 'system';
+    const pref: ThemePref = preference === 'light' || preference === 'dark' || preference === 'midnight' ? preference : 'system';
     saveDesktopMeta({ theme: pref });
     applyThemePref(pref);
     return { preference: pref, shouldUseDark: nativeTheme.shouldUseDarkColors };

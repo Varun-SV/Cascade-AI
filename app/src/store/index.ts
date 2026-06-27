@@ -3,7 +3,7 @@ import { useDispatch, useSelector } from 'react-redux';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 export type ViewMode = 'onboarding' | 'cockpit' | 'chat' | 'code';
-export type ThemePref = 'system' | 'light' | 'dark';
+export type ThemePref = 'system' | 'light' | 'dark' | 'midnight';
 
 export interface AgentNode {
   id: string;

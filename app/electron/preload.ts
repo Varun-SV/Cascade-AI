@@ -67,10 +67,10 @@ contextBridge.exposeInMainWorld('cascade', {
 
   // Appearance: System/Light/Dark preference + resolved dark flag
   theme: {
-    get: () => ipcRenderer.invoke('theme:get') as Promise<{ preference: 'system' | 'light' | 'dark'; shouldUseDark: boolean }>,
-    set: (preference: 'system' | 'light' | 'dark') =>
-      ipcRenderer.invoke('theme:set', preference) as Promise<{ preference: 'system' | 'light' | 'dark'; shouldUseDark: boolean }>,
-    onChanged: (cb: (s: { preference: 'system' | 'light' | 'dark'; shouldUseDark: boolean }) => void) => {
+    get: () => ipcRenderer.invoke('theme:get') as Promise<{ preference: 'system' | 'light' | 'dark' | 'midnight'; shouldUseDark: boolean }>,
+    set: (preference: 'system' | 'light' | 'dark' | 'midnight') =>
+      ipcRenderer.invoke('theme:set', preference) as Promise<{ preference: 'system' | 'light' | 'dark' | 'midnight'; shouldUseDark: boolean }>,
+    onChanged: (cb: (s: { preference: 'system' | 'light' | 'dark' | 'midnight'; shouldUseDark: boolean }) => void) => {
       ipcRenderer.on('theme:changed', (_e, s) => cb(s));
     },
   },
