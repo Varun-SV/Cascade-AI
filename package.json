@@ -1,7 +1,7 @@
 {
   "name": "cascade-ai",
-  "version": "0.12.11",
-  "description": "Multi-tier AI orchestration CLI — T1/T2/T3 hierarchical agent system",
+  "version": "0.12.12",
+  "description": "Multi-tier AI orchestration CLI \u2014 T1/T2/T3 hierarchical agent system",
   "type": "module",
   "main": "dist/index.cjs",
   "module": "dist/index.js",

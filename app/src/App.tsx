@@ -36,9 +36,9 @@ declare global {
       selectDirectory(): Promise<string | null>;
       listModels(): Promise<{ ok: boolean; error?: string; models: Array<{ id: string; provider: string; isLocal: boolean }> }>;
       theme: {
-        get(): Promise<{ preference: 'system' | 'light' | 'dark'; shouldUseDark: boolean }>;
-        set(preference: 'system' | 'light' | 'dark'): Promise<{ preference: 'system' | 'light' | 'dark'; shouldUseDark: boolean }>;
-        onChanged(cb: (s: { preference: 'system' | 'light' | 'dark'; shouldUseDark: boolean }) => void): void;
+        get(): Promise<{ preference: 'system' | 'light' | 'dark' | 'midnight'; shouldUseDark: boolean }>;
+        set(preference: 'system' | 'light' | 'dark' | 'midnight'): Promise<{ preference: 'system' | 'light' | 'dark' | 'midnight'; shouldUseDark: boolean }>;
+        onChanged(cb: (s: { preference: 'system' | 'light' | 'dark' | 'midnight'; shouldUseDark: boolean }) => void): void;
       };
       updates: {
         getVersion(): Promise<string>;

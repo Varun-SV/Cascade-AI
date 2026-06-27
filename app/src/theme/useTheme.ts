@@ -3,8 +3,8 @@ import { useAppDispatch, useAppSelector, setTheme, type ThemePref } from '../sto
 
 // Apply the resolved theme to <html data-theme="…"> so the CSS token blocks in
 // index.html (`:root` = light, `:root[data-theme="dark"]` = dark) take effect.
-function applyDocumentTheme(dark: boolean): void {
-  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+function applyDocumentTheme(pref: ThemePref, dark: boolean): void {
+  document.documentElement.dataset.theme = pref === 'midnight' ? 'midnight' : dark ? 'dark' : 'light';
 }
 
 /**
@@ -16,6 +16,7 @@ function applyDocumentTheme(dark: boolean): void {
 export function useThemeSync(): void {
   const dispatch = useAppDispatch();
   const dark = useAppSelector((s) => s.app.themeDark);
+  const pref = useAppSelector((s) => s.app.themePref);
 
   useEffect(() => {
     const bridge = window.cascade?.theme;
@@ -32,7 +33,7 @@ export function useThemeSync(): void {
   }, [dispatch]);
 
   // Keep the document attribute in sync with the resolved dark flag.
-  useEffect(() => { applyDocumentTheme(dark); }, [dark]);
+  useEffect(() => { applyDocumentTheme(pref, dark); }, [pref, dark]);
 }
 
 /** Change the appearance preference; persists in the main process and updates state. */
