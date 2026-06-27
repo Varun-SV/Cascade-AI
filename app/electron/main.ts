@@ -275,6 +275,64 @@ function registerIPC(): void {
     const { readFile } = require('node:fs/promises');
     return readFile(filePath, 'utf8');
   });
+  ipcMain.handle('fs:writeFile', async (_e, filePath: string, content: string) => {
+    const { writeFile } = require('node:fs/promises');
+    await writeFile(filePath, content, 'utf8');
+    return { ok: true };
+  });
+  ipcMain.handle('fs:mkdir', async (_e, dirPath: string) => {
+    const { mkdir } = require('node:fs/promises');
+    await mkdir(dirPath, { recursive: true });
+    return { ok: true };
+  });
+  ipcMain.handle('fs:createFile', async (_e, filePath: string) => {
+    const { writeFile, access } = require('node:fs/promises');
+    try { await access(filePath); } catch { await writeFile(filePath, '', 'utf8'); }
+    return { ok: true };
+  });
+  ipcMain.handle('fs:rename', async (_e, oldPath: string, newPath: string) => {
+    const { rename } = require('node:fs/promises');
+    await rename(oldPath, newPath);
+    return { ok: true };
+  });
+  ipcMain.handle('fs:delete', async (_e, targetPath: string) => {
+    const { shell } = require('electron');
+    await shell.trashItem(targetPath); // OS trash (recoverable)
+    return { ok: true };
+  });
+  // Bounded recursive text search across the workspace.
+  ipcMain.handle('fs:search', async (_e, root: string, query: string) => {
+    if (!query || !query.trim() || !root) return [];
+    const { readdir, stat, readFile } = require('node:fs/promises');
+    const IGNORE = new Set(['node_modules', '.git', 'dist', 'dist-electron', 'build', '.next', 'out', 'coverage', '.cache']);
+    const results: Array<{ file: string; line: number; text: string }> = [];
+    const MAX = 500, MAX_BYTES = 512 * 1024;
+    const q = query.toLowerCase();
+    async function walk(dir: string): Promise<void> {
+      if (results.length >= MAX) return;
+      let names: string[];
+      try { names = await readdir(dir); } catch { return; }
+      for (const name of names) {
+        if (results.length >= MAX) return;
+        if (IGNORE.has(name)) continue;
+        const full = join(dir, name);
+        let s; try { s = await stat(full); } catch { continue; }
+        if (s.isDirectory()) { await walk(full); }
+        else if (s.size <= MAX_BYTES) {
+          let text: string; try { text = await readFile(full, 'utf8'); } catch { continue; }
+          const lines = text.split(/\r?\n/);
+          for (let i = 0; i < lines.length; i++) {
+            if (lines[i].toLowerCase().includes(q)) {
+              results.push({ file: full, line: i + 1, text: lines[i].slice(0, 200).trim() });
+              if (results.length >= MAX) break;
+            }
+          }
+        }
+      }
+    }
+    await walk(root);
+    return results;
+  });
 
   // Config — read/write provider API key + workspace for onboarding.
   // Desktop-only meta (provider, workspace, onboarding flag) lives in a JSON file

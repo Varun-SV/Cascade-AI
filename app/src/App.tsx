@@ -57,6 +57,12 @@ declare global {
       fs: {
         readDir(path: string): Promise<Array<{ name: string; fullPath: string; isDirectory: boolean }>>;
         readFile(path: string): Promise<string>;
+        writeFile(path: string, content: string): Promise<{ ok: boolean }>;
+        mkdir(path: string): Promise<{ ok: boolean }>;
+        createFile(path: string): Promise<{ ok: boolean }>;
+        rename(oldPath: string, newPath: string): Promise<{ ok: boolean }>;
+        delete(path: string): Promise<{ ok: boolean }>;
+        search(root: string, query: string): Promise<Array<{ file: string; line: number; text: string }>>;
       };
     };
   }

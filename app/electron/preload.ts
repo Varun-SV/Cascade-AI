@@ -105,5 +105,11 @@ contextBridge.exposeInMainWorld('cascade', {
       Array<{ name: string; fullPath: string; isDirectory: boolean }>
     >,
     readFile: (filePath: string) => ipcRenderer.invoke('fs:readFile', filePath) as Promise<string>,
+    writeFile: (filePath: string, content: string) => ipcRenderer.invoke('fs:writeFile', filePath, content) as Promise<{ ok: boolean }>,
+    mkdir: (dirPath: string) => ipcRenderer.invoke('fs:mkdir', dirPath) as Promise<{ ok: boolean }>,
+    createFile: (filePath: string) => ipcRenderer.invoke('fs:createFile', filePath) as Promise<{ ok: boolean }>,
+    rename: (oldPath: string, newPath: string) => ipcRenderer.invoke('fs:rename', oldPath, newPath) as Promise<{ ok: boolean }>,
+    delete: (targetPath: string) => ipcRenderer.invoke('fs:delete', targetPath) as Promise<{ ok: boolean }>,
+    search: (root: string, query: string) => ipcRenderer.invoke('fs:search', root, query) as Promise<Array<{ file: string; line: number; text: string }>>,
   },
 });

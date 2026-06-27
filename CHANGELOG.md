@@ -5,6 +5,11 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.13] - 2026-06-27
+
+### Added
+- **Usable code editor.** The Code tab is now a working editor: **Open Folder** (browse any folder, not only a Cascade run), **Save** with `Ctrl`/`Cmd`+`S` (writes to disk, with a dirty-dot indicator), **tabs** for multiple open files, a right-click **context menu** in the file tree (new file, new folder, rename, delete-to-trash), and **search across files** (a workspace-wide text search whose results jump to the matching line). Backed by an expanded file bridge (`writeFile`, `mkdir`, `createFile`, `rename`, `delete` via OS trash, `search`).
+
 ## [0.12.12] - 2026-06-27
 
 ### Added
