@@ -723,7 +723,9 @@ export class CascadeRouter extends EventEmitter {
       for (const m of models) {
         this.selector.addDynamicModel(m);
       }
-    } catch { /* endpoint not reachable */ }
+    } catch (err) {
+      console.warn('[router] OpenAI-compatible model discovery failed:', err instanceof Error ? err.message : err);
+    }
   }
 
   private ensureProvider(model: ModelInfo, configs: ProviderConfig[]): void {
