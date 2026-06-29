@@ -12,6 +12,7 @@ import type {
   ToolCall,
 } from '../types.js';
 import { OLLAMA_BASE_URL } from '../constants.js';
+import { preferIpv4Host } from '../utils/net.js';
 import { BaseProvider } from './base.js';
 
 // ── Ollama API types ───────────────────────────
@@ -67,7 +68,7 @@ export class OllamaProvider extends BaseProvider {
 
   constructor(config: ProviderConfig, model: ModelInfo) {
     super(config, model);
-    this.baseUrl = config.baseUrl ?? OLLAMA_BASE_URL;
+    this.baseUrl = preferIpv4Host(config.baseUrl ?? OLLAMA_BASE_URL)!;
   }
 
   async generate(options: GenerateOptions): Promise<GenerateResult> {

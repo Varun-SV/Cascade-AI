@@ -33,6 +33,9 @@ export function CodeView() {
   const [results, setResults] = useState<SearchHit[]>([]);
   const [searching, setSearching] = useState(false);
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
+  const [recent, setRecent] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem('cascade.recentFolders') ?? '[]') as string[]; } catch { return []; }
+  });
 
   const active = activeIdx >= 0 ? openFiles[activeIdx] : null;
 
@@ -77,9 +80,17 @@ export function CodeView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openFiles, activeIdx]);
 
+  const pushRecent = (p: string) => setRecent((prev) => {
+    const next = [p, ...prev.filter((x) => x !== p)].slice(0, 6);
+    try { localStorage.setItem('cascade.recentFolders', JSON.stringify(next)); } catch { /* ignore */ }
+    return next;
+  });
+  const openWorkspace = (dir: string) => {
+    dispatch(setWorkspacePath(dir)); setReloadToken((t) => t + 1); setMode('files'); pushRecent(dir);
+  };
   const openFolder = async () => {
     const dir = await window.cascade?.selectDirectory();
-    if (dir) { dispatch(setWorkspacePath(dir)); setReloadToken((t) => t + 1); setMode('files'); }
+    if (dir) openWorkspace(dir);
   };
 
   const runSearch = async () => {
@@ -206,6 +217,36 @@ export function CodeView() {
                 onMount={(editor) => { editorRef.current = editor; }}
                 onChange={onChange}
               />
+            ) : !workspacePath ? (
+              <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 16, color: 'var(--text-muted)', padding: 24, animation: 'fadeIn 0.3s var(--ease)' }}>
+                <div style={{ width: 72, height: 72, borderRadius: 'var(--radius-lg)', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--accent-soft)', color: 'var(--accent)', boxShadow: 'var(--glow-accent)' }}>
+                  <FolderOpen size={34} />
+                </div>
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: 16, fontWeight: 600, color: 'var(--text)', marginBottom: 6 }}>No folder open</div>
+                  <div style={{ fontSize: 12.5, maxWidth: 360, lineHeight: 1.6 }}>Open a folder to browse and edit its files — or run Cascade on a project to load its workspace automatically.</div>
+                </div>
+                <button onClick={openFolder} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 18px', background: 'linear-gradient(135deg, var(--accent), var(--accent-2))', color: '#fff', border: 'none', borderRadius: 'var(--radius-md)', fontSize: 13, fontWeight: 600, cursor: 'pointer', boxShadow: 'var(--glow-accent)' }}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.transform = 'translateY(-1px)'; }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.transform = 'none'; }}>
+                  <FolderOpen size={15} /> Open Folder
+                </button>
+                {recent.length > 0 && (
+                  <div style={{ marginTop: 8, width: '100%', maxWidth: 360 }}>
+                    <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--text-dim)', marginBottom: 8, textAlign: 'center' }}>Recent</div>
+                    {recent.map((p) => (
+                      <div key={p} onClick={() => openWorkspace(p)} title={p}
+                        style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 12px', borderRadius: 'var(--radius-sm)', cursor: 'pointer', fontSize: 12, color: 'var(--text-muted)', border: '1px solid var(--border)', marginBottom: 6, background: 'var(--bg-surface)' }}
+                        onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-hover)'; }}
+                        onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-surface)'; }}>
+                        <FolderOpen size={13} style={{ color: 'var(--warn)', flexShrink: 0 }} />
+                        <span style={{ flexShrink: 0 }}>{baseName(p)}</span>
+                        <span style={{ marginLeft: 'auto', color: 'var(--text-dim)', fontSize: 10.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 200 }}>{p}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             ) : (
               <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', flexDirection: 'column', gap: 14, animation: 'fadeIn 0.3s var(--ease)' }}>
                 <div style={{ width: 56, height: 56, borderRadius: 'var(--radius-lg)', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg-raised)', border: '1px solid var(--border)', color: 'var(--text-dim)' }}>
