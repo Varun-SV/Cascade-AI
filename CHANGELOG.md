@@ -5,6 +5,14 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.15] - 2026-06-27
+
+### Fixed
+- **Local endpoints over `localhost` no longer read as “unreachable.”** Node prefers IPv6 (`::1`) for `localhost`, but local model servers (llama.cpp / Ollama / vLLM / LM Studio) bind IPv4 (`127.0.0.1`) by default — so an endpoint your browser and curl reach appeared offline from the app (empty model dropdown, “endpoint unreachable”). Cascade now forces IPv4 resolution process-wide and rewrites a literal `localhost` host to `127.0.0.1` for the OpenAI-Compatible and Ollama providers.
+
+### Changed
+- **Richer Code empty state.** With no folder open, the Code tab shows an illustrated prompt with a prominent **Open Folder** button and a **Recent folders** list instead of a single line of text.
+
 ## [0.12.14] - 2026-06-27
 
 ### Fixed

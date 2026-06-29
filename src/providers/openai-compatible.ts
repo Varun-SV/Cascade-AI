@@ -5,6 +5,7 @@
 import OpenAI from 'openai';
 import type { ModelInfo, ProviderConfig } from '../types.js';
 import { OpenAIProvider } from './openai.js';
+import { preferIpv4Host } from '../utils/net.js';
 
 export class OpenAICompatibleProvider extends OpenAIProvider {
   constructor(config: ProviderConfig, model: ModelInfo) {
@@ -12,7 +13,7 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
     // Override client to use custom base URL
     this.client = new OpenAI({
       apiKey: config.apiKey ?? 'not-required',
-      baseURL: config.baseUrl,
+      baseURL: preferIpv4Host(config.baseUrl),
     });
   }
 
