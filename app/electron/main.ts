@@ -36,6 +36,7 @@ let authToken = '';
 // the renderer (status bar) so "offline" can explain itself and offer a retry.
 // null = healthy/connected-capable; a string = the dashboard failed to start.
 let backendError: string | null = null;
+let fetchPatched = false;
 
 // Live references to the running Cascade backend so the config IPC handlers can
 // mutate the SAME config object the DashboardServer holds (no restart needed):
@@ -621,6 +622,22 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 app.whenReady().then(async () => {
+  // Route plain-HTTP (loopback / LAN) requests through Chromium's network stack.
+  // Node's fetch (undici) in the main process can fail to reach local model
+  // servers (llama.cpp / Ollama / vLLM / LM Studio) on localhost when a system
+  // proxy or VPN is present — Chromium auto-bypasses localhost, Node does not.
+  // electronNet.fetch uses the same stack the renderer uses, which reaches them.
+  // HTTPS (cloud APIs) is left on Node's fetch, unchanged.
+  if (!fetchPatched && typeof electronNet?.fetch === 'function') {
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (/^http:\/\//i.test(url)) return electronNet.fetch(url, init as never);
+      return origFetch(input, init);
+    }) as typeof fetch;
+    fetchPatched = true;
+  }
+
   // Serve renderer files via app:// scheme
   protocol.handle('app', (request) => {
     const url = request.url.replace('app://.', '');
