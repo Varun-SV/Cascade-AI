@@ -421,9 +421,16 @@ function registerIPC(): void {
       if (!cascadeConfig) return { ok: false, error: 'config-unavailable', models: [] };
       const { CascadeRouter } = loadCore();
       const router = new CascadeRouter();
-      await router.init(cascadeConfig);
-      const models = (router.getAvailableModels() as Array<{ id: string; provider: string; isLocal?: boolean }>)
-        .map((m) => ({ id: m.id, provider: m.provider, isLocal: Boolean(m.isLocal) }));
+      // A pinned tier model whose provider is momentarily unreachable makes
+      // init() throw — but discovery (which populates the model list) runs first,
+      // so swallow that and still return whatever was discovered. Otherwise the
+      // Models dropdown can never fill the very models needed to fix the pin.
+      try { await router.init(cascadeConfig); } catch { /* keep discovered models */ }
+      let models: Array<{ id: string; provider: string; isLocal: boolean }> = [];
+      try {
+        models = (router.getAvailableModels() as Array<{ id: string; provider: string; isLocal?: boolean }>)
+          .map((m) => ({ id: m.id, provider: m.provider, isLocal: Boolean(m.isLocal) }));
+      } catch { /* selector unavailable */ }
       return { ok: true, models };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err), models: [] };

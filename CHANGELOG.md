@@ -5,6 +5,12 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.16] - 2026-06-30
+
+### Fixed
+- **OpenAI-Compatible endpoints a browser could reach but the app couldn'''t.** Discovery now probes `/v1/models` with a tolerant direct fetch instead of the OpenAI SDK'''s typed `models.list()`, which threw on non-standard local-server payloads (llama.cpp / LM Studio return an extra `models` array and filesystem-path model ids) and surfaced as a misleading “endpoint unreachable.” The model dropdown now populates from these servers.
+- **Models dropdown could never fill when a tier was pinned to a not-yet-discovered model.** `listModels` no longer aborts when a pinned tier override can'''t resolve — it returns the discovered models anyway. The real discovery error is now logged instead of swallowed.
+
 ## [0.12.15] - 2026-06-27
 
 ### Fixed
