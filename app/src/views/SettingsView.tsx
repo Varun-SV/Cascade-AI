@@ -80,6 +80,7 @@ export function SettingsView({ socket }: Props) {
   // exactly what the server reports, which is what routing needs).
   const [dynModels, setDynModels] = useState<Array<{ id: string; provider: string }>>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
+  const [ocProbe, setOcProbe] = useState<{ status?: number; count?: number; error?: string } | undefined>();
   const [customTiers, setCustomTiers] = useState<Record<string, boolean>>({});
 
   // Apply a redacted config snapshot to the panel (the keys themselves are never
@@ -114,8 +115,8 @@ export function SettingsView({ socket }: Props) {
   const fetchModels = async () => {
     if (!window.cascade?.listModels) return;
     setModelsLoading(true);
-    try { const res = await window.cascade.listModels(); setDynModels(res?.models ?? []); }
-    catch { setDynModels([]); }
+    try { const res = await window.cascade.listModels(); setDynModels(res?.models ?? []); setOcProbe(res?.ocProbe); }
+    catch { setDynModels([]); setOcProbe(undefined); }
     finally { setModelsLoading(false); }
   };
   useEffect(() => { fetchModels(); }, []);
@@ -323,6 +324,22 @@ export function SettingsView({ socket }: Props) {
                         );
                       })()}
                     </div>
+                    {def.freeText && sel.provider === 'openai-compatible' && !modelsLoading
+                      && dynModels.filter((m) => m.provider === 'openai-compatible').length === 0
+                      && ocProbe && (() => {
+                        const reason = ocProbe.error
+                          ? `couldn't reach endpoint — ${ocProbe.error}`
+                          : (ocProbe.status != null && (ocProbe.status < 200 || ocProbe.status >= 300))
+                            ? `endpoint returned HTTP ${ocProbe.status}`
+                            : ocProbe.count === 0
+                              ? 'endpoint reachable, but it returned 0 models'
+                              : undefined;
+                        return reason ? (
+                          <span style={{ fontSize: 10, color: 'var(--text-muted)', display: 'block', marginTop: 4 }}>
+                            {reason}. Check the OpenAI-Compatible Base URL in the Providers tab.
+                          </span>
+                        ) : null;
+                      })()}
                   </div>
                 );
               })}

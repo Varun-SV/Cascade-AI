@@ -60,6 +60,7 @@ contextBridge.exposeInMainWorld('cascade', {
     ok: boolean;
     error?: string;
     models: Array<{ id: string; provider: string; isLocal: boolean }>;
+    ocProbe?: { status?: number; count?: number; error?: string };
   }>,
 
   // Directory picker dialog
