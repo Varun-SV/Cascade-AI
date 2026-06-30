@@ -5,6 +5,11 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.19] - 2026-06-30
+
+### Fixed
+- **OpenAI-compatible endpoints no longer read as “unreachable” when they redirect or compress `/v1/models`.** Discovery reaches local endpoints through a Node `http`/`https` fetch shim that issued a single raw request — it did not follow redirects or decompress responses. So a healthy endpoint (e.g. `http://localhost:8900/v1`) whose `/v1/models` answered with a `307`/`308` redirect (trailing-slash canonicalisation, reverse proxy, http→https) made the availability check see a non-2xx status and skip discovery entirely, and a gzip/deflate/br response body made the JSON parse throw — either way the model dropdown stayed empty and showed “endpoint unreachable?”, even though a browser/curl reached the same URL fine. The fetch shim now follows redirects (IPv4-preferring, method/body preserved for 307/308) and transparently decompresses gzip/deflate/br (SSE chat completions still stream). The Settings → Models picker now surfaces the concrete probe reason (HTTP status / 0 models / error) instead of a generic “unreachable?” when discovery comes up empty.
+
 ## [0.12.18] - 2026-06-30
 
 ### Fixed
