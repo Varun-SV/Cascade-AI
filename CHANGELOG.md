@@ -5,6 +5,11 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.17] - 2026-06-30
+
+### Fixed
+- **Local model endpoints unreachable from the app despite working in a browser.** With a system proxy or VPN present, Chromium auto-bypasses `localhost`/`127.0.0.1` but the Electron backend'''s Node `fetch` does not — so llama.cpp / Ollama / vLLM / LM Studio endpoints read as “unreachable” (empty model dropdown) even though the same URL returns 200 in a browser. The backend now routes plain-HTTP (loopback / LAN) requests through Chromium'''s network stack (`net.fetch`) — the same path the renderer uses; HTTPS cloud APIs are unchanged. (Confirmed live: `listModels` returned cloud models but no OpenAI-compatible ones, while a renderer fetch to `/v1/models` returned 200.)
+
 ## [0.12.16] - 2026-06-30
 
 ### Fixed
