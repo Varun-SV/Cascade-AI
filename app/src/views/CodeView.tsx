@@ -218,19 +218,40 @@ export function CodeView() {
                 onChange={onChange}
               />
             ) : !workspacePath ? (
-              <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 16, color: 'var(--text-muted)', padding: 24, animation: 'fadeIn 0.3s var(--ease)' }}>
-                <div style={{ width: 72, height: 72, borderRadius: 'var(--radius-lg)', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--accent-soft)', color: 'var(--accent)', boxShadow: 'var(--glow-accent)' }}>
-                  <FolderOpen size={34} />
+              <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', padding: 24, animation: 'fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1)' }}>
+                <div style={{ 
+                  width: '100%', maxWidth: 420, padding: 32,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 16,
+                  background: 'linear-gradient(145deg, rgba(var(--accent-rgb), 0.03), rgba(var(--accent-rgb), 0.08))',
+                  border: '2px dashed rgba(var(--accent-rgb), 0.3)', borderRadius: 'var(--radius-lg)',
+                  boxShadow: '0 8px 32px rgba(var(--accent-rgb), 0.05), inset 0 0 0 1px rgba(255,255,255,0.05)',
+                  backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)',
+                  transition: 'all 0.3s ease', cursor: 'pointer'
+                }} onClick={openFolder}
+                onMouseEnter={(e) => { 
+                  (e.currentTarget as HTMLElement).style.borderColor = 'rgba(var(--accent-rgb), 0.7)';
+                  (e.currentTarget as HTMLElement).style.background = 'linear-gradient(145deg, rgba(var(--accent-rgb), 0.05), rgba(var(--accent-rgb), 0.12))';
+                  (e.currentTarget as HTMLElement).style.transform = 'translateY(-2px)';
+                }}
+                onMouseLeave={(e) => { 
+                  (e.currentTarget as HTMLElement).style.borderColor = 'rgba(var(--accent-rgb), 0.3)';
+                  (e.currentTarget as HTMLElement).style.background = 'linear-gradient(145deg, rgba(var(--accent-rgb), 0.03), rgba(var(--accent-rgb), 0.08))';
+                  (e.currentTarget as HTMLElement).style.transform = 'none';
+                }}>
+                  <div style={{ width: 72, height: 72, borderRadius: '24px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, var(--accent), var(--accent-2))', color: '#fff', boxShadow: '0 12px 24px rgba(var(--accent-rgb), 0.3), inset 0 2px 4px rgba(255,255,255,0.2)', marginBottom: 8 }}>
+                    <FolderOpen size={34} style={{ filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.2))' }} />
+                  </div>
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--text)', marginBottom: 8, letterSpacing: '-0.3px' }}>Open a folder to start coding</div>
+                    <div style={{ fontSize: 13, color: 'var(--text-muted)', maxWidth: 340, lineHeight: 1.5, margin: '0 auto' }}>Select a project directory to explore its contents, edit files, and run tasks in the workspace.</div>
+                  </div>
+                  <button style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8, padding: '10px 20px', background: 'var(--bg-surface)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', fontSize: 13, fontWeight: 600, cursor: 'pointer', boxShadow: '0 2px 8px rgba(0,0,0,0.04)', transition: 'all 0.2s ease' }}
+                    onClick={(e) => { e.stopPropagation(); openFolder(); }}
+                    onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--accent)'; (e.currentTarget as HTMLElement).style.color = 'var(--accent)'; }}
+                    onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--border)'; (e.currentTarget as HTMLElement).style.color = 'var(--text)'; }}>
+                    <FolderOpen size={15} /> Browse Files
+                  </button>
                 </div>
-                <div style={{ textAlign: 'center' }}>
-                  <div style={{ fontSize: 16, fontWeight: 600, color: 'var(--text)', marginBottom: 6 }}>No folder open</div>
-                  <div style={{ fontSize: 12.5, maxWidth: 360, lineHeight: 1.6 }}>Open a folder to browse and edit its files — or run Cascade on a project to load its workspace automatically.</div>
-                </div>
-                <button onClick={openFolder} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 18px', background: 'linear-gradient(135deg, var(--accent), var(--accent-2))', color: '#fff', border: 'none', borderRadius: 'var(--radius-md)', fontSize: 13, fontWeight: 600, cursor: 'pointer', boxShadow: 'var(--glow-accent)' }}
-                  onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.transform = 'translateY(-1px)'; }}
-                  onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.transform = 'none'; }}>
-                  <FolderOpen size={15} /> Open Folder
-                </button>
                 {recent.length > 0 && (
                   <div style={{ marginTop: 8, width: '100%', maxWidth: 360 }}>
                     <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--text-dim)', marginBottom: 8, textAlign: 'center' }}>Recent</div>

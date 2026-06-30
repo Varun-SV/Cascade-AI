@@ -79,8 +79,8 @@ describe('nodeHttpFetch', () => {
 });
 
 describe('preferIpv4Host', () => {
-  it('rewrites localhost to 127.0.0.1', () => {
-    expect(preferIpv4Host('http://localhost:8900/v1')).toBe('http://127.0.0.1:8900/v1');
+  it('leaves localhost untouched to prevent IPv6 breakage', () => {
+    expect(preferIpv4Host('http://localhost:8900/v1')).toBe('http://localhost:8900/v1');
   });
 
   it('leaves other hosts untouched', () => {

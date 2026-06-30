@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { Socket } from 'socket.io-client';
-import { Trash2 } from 'lucide-react';
+import { Trash2, MessageSquare } from 'lucide-react';
 import {
   useAppDispatch, useAppSelector,
   setActiveSessionId, removeSession,
@@ -160,10 +160,20 @@ export function SessionSidebar({ socket }: { socket: Socket | null }) {
       <div style={{ flex: 1, overflowY: 'auto', paddingTop: 2, paddingBottom: 8 }}>
         {sorted.length === 0 ? (
           <div style={{
-            padding: '24px 16px', textAlign: 'center',
-            fontSize: 11, color: 'var(--text-dim)',
+            padding: '32px 16px', display: 'flex', flexDirection: 'column', alignItems: 'center',
+            textAlign: 'center', animation: 'fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
           }}>
-            No sessions yet.<br />Run a task to get started.
+            <div style={{
+              width: 48, height: 48, borderRadius: '16px', marginBottom: 16,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: 'linear-gradient(135deg, rgba(var(--accent-rgb), 0.1), rgba(var(--accent-rgb), 0.02))',
+              border: '1px solid rgba(var(--accent-rgb), 0.15)', color: 'var(--accent)',
+              boxShadow: '0 4px 12px rgba(0,0,0,0.02)',
+            }}>
+              <MessageSquare size={22} style={{ filter: 'drop-shadow(0 1px 2px rgba(var(--accent-rgb), 0.2))' }} />
+            </div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', marginBottom: 6, letterSpacing: '-0.2px' }}>No Sessions</div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>Run a task in Mission Control to begin orchestration.</div>
           </div>
         ) : (
           sorted.map((s) => (

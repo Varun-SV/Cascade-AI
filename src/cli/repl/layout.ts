@@ -43,6 +43,17 @@ export interface LiveAreaOptions {
   showComms: boolean;
 }
 
+export type AdaptiveLayoutMode = 'narrow' | 'medium' | 'wide';
+
+/** Stable terminal breakpoints used by the REPL and its tests. */
+export function computeAdaptiveLayoutMode(columns: number, rows: number): AdaptiveLayoutMode {
+  const safeColumns = Number.isFinite(columns) && columns > 0 ? columns : 100;
+  const safeRows = Number.isFinite(rows) && rows > 0 ? rows : 40;
+  if (safeColumns < 80 || safeRows < 24) return 'narrow';
+  if (safeColumns < 120 || safeRows < 32) return 'medium';
+  return 'wide';
+}
+
 const TREE_ROWS_FULL = 10;
 const TREE_ROWS_COMPACT = 4;
 const TIMELINE_ROWS = 4;

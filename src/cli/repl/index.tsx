@@ -35,7 +35,7 @@ import { OpenAICompatibleProvider } from '../../providers/openai-compatible.js';
 import type { BaseProvider } from '../../providers/base.js';
 import { getTheme } from '../themes/index.js';
 import { SlashCommandRegistry } from '../slash/index.js';
-import { computeLiveAreaBudget, computeTranscriptRows, flattenTranscript, windowTranscript } from './layout.js';
+import { computeAdaptiveLayoutMode, computeLiveAreaBudget, computeTranscriptRows, flattenTranscript, windowTranscript } from './layout.js';
 import { disableMouseReporting } from '../utils/terminal-input.js';
 import { writeClipboardSync } from '../utils/clipboard.js';
 import { AgentTree, type TierNode } from './components/AgentTree.js';
@@ -60,6 +60,20 @@ const PEER_EVENT_BUFFER = 50;
 function tailLines(text: string, n: number): string[] {
   const lines = text.split('\n');
   return lines.slice(-n);
+}
+
+function activeTierSummary(root: TierNode | null): { t2: number; t3: number; action?: string } {
+  const summary: { t2: number; t3: number; action?: string } = { t2: 0, t3: 0 };
+  const visit = (node: TierNode) => {
+    if (node.status === 'ACTIVE') {
+      if (node.role === 'T2') summary.t2 += 1;
+      if (node.role === 'T3') summary.t3 += 1;
+      summary.action ??= node.currentAction;
+    }
+    node.children?.forEach(visit);
+  };
+  if (root) visit(root);
+  return summary;
 }
 
 interface WelcomeBannerProps {
@@ -1047,17 +1061,19 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     return () => { stdout.off('resize', onResize); };
   }, [stdout]);
   const width = termSize.columns;
+  const adaptiveMode = computeAdaptiveLayoutMode(termSize.columns, termSize.rows);
 
   // Row budget for live panels — shrinks panels before the live area can
   // outgrow the viewport, which would force Ink into full-screen redraws
   // (the flicker users see on small/busy terminals).
   const budgetOpts = {
     isTypingCommand,
-    showCost: state.showCost,
-    showDetails: state.showDetails,
-    showComms: state.showComms && state.peerEvents.length > 0,
+    showCost: state.showCost && adaptiveMode !== 'narrow',
+    showDetails: state.showDetails && adaptiveMode === 'wide',
+    showComms: state.showComms && state.peerEvents.length > 0 && adaptiveMode === 'wide',
   };
   const liveBudget = computeLiveAreaBudget(termSize.rows, budgetOpts);
+  const tierSummary = activeTierSummary(state.agentTree);
 
   // Alt-screen transcript: history renders as a line-windowed view
   // (PgUp/PgDn) because the alternate screen has no native scrollback.
@@ -1197,17 +1213,33 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       )}
 
       {/* Compact agent tree — collapses on the next keystroke after completion */}
-      <AgentTree root={state.agentTree} theme={theme} scrollOffset={treeScrollOffset} maxRows={liveBudget.treeMaxRows} />
+      {adaptiveMode === 'narrow' && state.agentTree ? (
+        <CompactStatus
+          theme={theme}
+          activeT2Count={tierSummary.t2}
+          activeT3Count={tierSummary.t3}
+          currentAction={tierSummary.action ?? state.agentTree.currentAction}
+          activeTool={state.activeTool}
+          isStreaming={state.isStreaming}
+        />
+      ) : (
+        <AgentTree
+          root={state.agentTree}
+          theme={theme}
+          scrollOffset={treeScrollOffset}
+          maxRows={adaptiveMode === 'medium' ? Math.min(4, liveBudget.treeMaxRows) : liveBudget.treeMaxRows}
+        />
+      )}
 
       {/* Agent-to-agent comms feed — the radio chatter between workers */}
-      {state.showComms && liveBudget.commsMaxEvents > 0 && (
+      {adaptiveMode === 'wide' && state.showComms && liveBudget.commsMaxEvents > 0 && (
         <PeerFeed events={state.peerEvents} theme={theme} maxRows={liveBudget.commsMaxEvents} />
       )}
 
-      {state.showDetails && liveBudget.showTimeline && (
+      {adaptiveMode === 'wide' && state.showDetails && liveBudget.showTimeline && (
         <TimelinePanel nodes={[...treeNodesRef.current.values()]} theme={theme} currentIndex={timelineIndex} onChangeIndex={setTimelineIndex} />
       )}
-      {state.showCost && <CostTracker theme={theme} totalTokens={state.totalTokens} totalCostUsd={state.totalCostUsd} callsByProvider={state.callsByProvider} callsByTier={state.callsByTier} costByTier={state.costByTier} tokensByTier={state.tokensByTier} compact={liveBudget.costCompact} savedUsd={state.savedUsd} savedPct={state.savedPct} />}
+      {adaptiveMode !== 'narrow' && state.showCost && <CostTracker theme={theme} totalTokens={state.totalTokens} totalCostUsd={state.totalCostUsd} callsByProvider={state.callsByProvider} callsByTier={state.callsByTier} costByTier={state.costByTier} tokensByTier={state.tokensByTier} compact={liveBudget.costCompact} savedUsd={state.savedUsd} savedPct={state.savedPct} />}
       {liveBudget.collapsed && (state.showCost || state.showDetails || state.agentTree != null) && (
         <Text color={theme.colors.muted} dimColor>  ▸ panels collapsed (small terminal)</Text>
       )}

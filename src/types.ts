@@ -596,7 +596,9 @@ export interface WorkspaceConfig {
 
 // ── CLI / UI ──────────────────────────────────
 
-export type ThemeName = 'cascade' | 'dark' | 'light' | 'dracula' | 'nord' | 'solarized';
+export type CascadeThemeName = 'midnight' | 'aurora' | 'ember' | 'tide' | 'bloom' | 'daybreak';
+export type LegacyThemeName = 'cascade' | 'dark' | 'light' | 'dracula' | 'nord' | 'solarized';
+export type ThemeName = CascadeThemeName | LegacyThemeName;
 
 export interface Theme {
   name: ThemeName;

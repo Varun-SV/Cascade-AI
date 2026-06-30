@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeLiveAreaBudget, computeTranscriptRows, flattenTranscript, windowTranscript } from './layout.js';
+import { computeAdaptiveLayoutMode, computeLiveAreaBudget, computeTranscriptRows, flattenTranscript, windowTranscript } from './layout.js';
 
 const allPanels = { isTypingCommand: false, showCost: true, showDetails: true, showComms: true };
 
@@ -60,6 +60,23 @@ describe('computeLiveAreaBudget', () => {
         expect(panels + 25, `rows=${rows}`).toBeLessThanOrEqual(rows);
       }
     }
+  });
+});
+
+describe('computeAdaptiveLayoutMode', () => {
+  it('uses the full orchestration layout only on wide, tall terminals', () => {
+    expect(computeAdaptiveLayoutMode(120, 32)).toBe('wide');
+    expect(computeAdaptiveLayoutMode(160, 50)).toBe('wide');
+  });
+
+  it('uses the compact tree layout for medium terminals', () => {
+    expect(computeAdaptiveLayoutMode(100, 40)).toBe('medium');
+    expect(computeAdaptiveLayoutMode(140, 28)).toBe('medium');
+  });
+
+  it('uses a single execution summary on narrow or short terminals', () => {
+    expect(computeAdaptiveLayoutMode(79, 40)).toBe('narrow');
+    expect(computeAdaptiveLayoutMode(120, 23)).toBe('narrow');
   });
 });
 
