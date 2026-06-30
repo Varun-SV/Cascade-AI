@@ -74,20 +74,35 @@ export function CockpitView({ socket }: { socket: Socket | null }) {
           <div style={{
             position: 'absolute', inset: 0,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            flexDirection: 'column', gap: 14, color: 'var(--text-muted)',
-            animation: 'fadeIn 0.3s var(--ease)',
+            flexDirection: 'column', padding: 24,
+            animation: 'fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
           }}>
             <div style={{
-              width: 64, height: 64, borderRadius: 'var(--radius-lg)',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              background: 'var(--accent-soft)', color: 'var(--accent)',
-              boxShadow: 'var(--glow-accent)',
+              flexDirection: 'column', gap: 16, padding: '32px 40px',
+              background: 'linear-gradient(145deg, rgba(var(--accent-rgb), 0.02), rgba(var(--accent-rgb), 0.08))',
+              border: '1px solid rgba(var(--accent-rgb), 0.2)',
+              borderRadius: 'var(--radius-lg)',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.05), inset 0 1px 1px rgba(255,255,255,0.05)',
+              backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)',
             }}>
-              <Network size={28} />
-            </div>
-            <div style={{ textAlign: 'center' }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>No agents running</div>
-              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Describe a task below to watch the tier hierarchy spawn.</div>
+              <div style={{
+                position: 'relative', width: 72, height: 72, borderRadius: '24px',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                background: 'linear-gradient(135deg, var(--accent), var(--accent-2))', color: '#fff',
+                boxShadow: '0 12px 24px rgba(var(--accent-rgb), 0.3), inset 0 2px 4px rgba(255,255,255,0.2)',
+              }}>
+                <div style={{
+                  position: 'absolute', inset: -10, borderRadius: 'inherit',
+                  background: 'var(--accent)', opacity: 0.2, filter: 'blur(16px)',
+                  animation: 'pulse 3s ease-in-out infinite'
+                }} />
+                <Network size={34} style={{ filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.2))' }} />
+              </div>
+              <div style={{ textAlign: 'center', marginTop: 4 }}>
+                <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--text)', marginBottom: 8, letterSpacing: '-0.3px' }}>Awaiting Assignment</div>
+                <div style={{ fontSize: 13, color: 'var(--text-muted)', maxWidth: 280, lineHeight: 1.5 }}>Describe a task below to orchestrate the AI agent hierarchy and watch them work.</div>
+              </div>
             </div>
           </div>
         ) : (

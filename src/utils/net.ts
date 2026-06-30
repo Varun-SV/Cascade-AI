@@ -11,10 +11,12 @@ import { Readable } from 'node:stream';
 // IPv4 `127.0.0.1` by default. Prefer IPv4 resolution process-wide.
 try { dns.setDefaultResultOrder('ipv4first'); } catch { /* older Node — ignore */ }
 
-/** Rewrite a literal `localhost` host to `127.0.0.1` (force IPv4). */
+/** 
+ * Keep localhost intact. Node's `dns.setDefaultResultOrder('ipv4first')` handles IPv4 priority process-wide.
+ * We no longer forcefully rewrite `localhost` to `127.0.0.1` as it breaks IPv6-only environments (e.g. ::1).
+ */
 export function preferIpv4Host(url: string | undefined): string | undefined {
-  if (!url) return url;
-  return url.replace(/^(https?:\/\/)localhost(?=[:/]|$)/i, '$1127.0.0.1');
+  return url;
 }
 
 /** Max redirect hops before nodeHttpFetch gives up (matches browser/curl-ish defaults). */
