@@ -5,6 +5,11 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.18] - 2026-06-30
+
+### Fixed
+- **OpenAI-compatible endpoints now reached via Node'''s http stack.** Live debugging showed the endpoint returns 200 to the renderer and to a child Node process (no proxy set), yet the Electron main process could not discover it through global fetch (undici) or Chromium'''s net.fetch. The OpenAI-compatible provider now performs discovery and generation over Node'''s lower-level http/https modules (a streaming-capable fetch shim), which reaches loopback servers reliably from the main process. Reverted the earlier net.fetch routing. `listModels` also returns a direct endpoint probe (status + model count) so any remaining failure is concrete.
+
 ## [0.12.17] - 2026-06-30
 
 ### Fixed

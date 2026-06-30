@@ -36,7 +36,6 @@ let authToken = '';
 // the renderer (status bar) so "offline" can explain itself and offer a retry.
 // null = healthy/connected-capable; a string = the dashboard failed to start.
 let backendError: string | null = null;
-let fetchPatched = false;
 
 // Live references to the running Cascade backend so the config IPC handlers can
 // mutate the SAME config object the DashboardServer holds (no restart needed):
@@ -432,7 +431,16 @@ function registerIPC(): void {
         models = (router.getAvailableModels() as Array<{ id: string; provider: string; isLocal?: boolean }>)
           .map((m) => ({ id: m.id, provider: m.provider, isLocal: Boolean(m.isLocal) }));
       } catch { /* selector unavailable */ }
-      return { ok: true, models };
+      // If an OpenAI-compatible endpoint is configured but produced no models,
+      // probe it directly so the real reason is visible (status / count / error).
+      let ocProbe: { status?: number; count?: number; error?: string } | undefined;
+      try {
+        const ocp = (cascadeConfig.providers ?? []).find((p: { type: string; baseUrl?: string }) => p.type === 'openai-compatible' && p.baseUrl);
+        if (ocp?.baseUrl && !models.some((m) => m.provider === 'openai-compatible')) {
+          ocProbe = await probeModelsEndpoint(ocp.baseUrl);
+        }
+      } catch (e) { ocProbe = { error: e instanceof Error ? e.message : String(e) }; }
+      return { ok: true, models, ocProbe };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err), models: [] };
     }
@@ -621,23 +629,32 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'app', privileges: { secure: true, standard: true, supportFetchAPI: true } },
 ]);
 
-app.whenReady().then(async () => {
-  // Route plain-HTTP (loopback / LAN) requests through Chromium's network stack.
-  // Node's fetch (undici) in the main process can fail to reach local model
-  // servers (llama.cpp / Ollama / vLLM / LM Studio) on localhost when a system
-  // proxy or VPN is present — Chromium auto-bypasses localhost, Node does not.
-  // electronNet.fetch uses the same stack the renderer uses, which reaches them.
-  // HTTPS (cloud APIs) is left on Node's fetch, unchanged.
-  if (!fetchPatched && typeof electronNet?.fetch === 'function') {
-    const origFetch = globalThis.fetch;
-    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-      if (/^http:\/\//i.test(url)) return electronNet.fetch(url, init as never);
-      return origFetch(input, init);
-    }) as typeof fetch;
-    fetchPatched = true;
-  }
+// Diagnostic: GET {baseUrl}/models with Node's raw http stack (the one that
+// actually reaches loopback servers from the main process) and report status +
+// model count, so a discovery failure shows a concrete reason in the UI/console.
+function probeModelsEndpoint(baseUrl: string): Promise<{ status?: number; count?: number; error?: string }> {
+  return new Promise((resolve) => {
+    try {
+      const target = baseUrl.replace(/\/+$/, '') + '/models';
+      const u = new URL(target);
+      const lib = u.protocol === 'https:' ? require('node:https') : require('node:http');
+      const req = lib.get({ hostname: u.hostname, port: u.port, path: u.pathname + u.search }, (res: { statusCode?: number; setEncoding: (e: string) => void; on: (ev: string, cb: (c?: string) => void) => void }) => {
+        let data = '';
+        res.setEncoding('utf8');
+        res.on('data', (c?: string) => { data += c ?? ''; });
+        res.on('end', () => {
+          let count = -1;
+          try { const j = JSON.parse(data); count = Array.isArray(j.data) ? j.data.length : Array.isArray(j.models) ? j.models.length : -1; } catch { /* non-JSON */ }
+          resolve({ status: res.statusCode, count });
+        });
+      });
+      req.on('error', (e: Error) => resolve({ error: e.message }));
+      req.setTimeout(8000, () => { req.destroy(); resolve({ error: 'timeout' }); });
+    } catch (e) { resolve({ error: e instanceof Error ? e.message : String(e) }); }
+  });
+}
 
+app.whenReady().then(async () => {
   // Serve renderer files via app:// scheme
   protocol.handle('app', (request) => {
     const url = request.url.replace('app://.', '');
