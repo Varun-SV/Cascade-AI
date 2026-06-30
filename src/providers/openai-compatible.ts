@@ -5,15 +5,17 @@
 import OpenAI from 'openai';
 import type { ModelInfo, ProviderConfig } from '../types.js';
 import { OpenAIProvider } from './openai.js';
-import { preferIpv4Host } from '../utils/net.js';
+import { preferIpv4Host, nodeHttpFetch } from '../utils/net.js';
 
 export class OpenAICompatibleProvider extends OpenAIProvider {
   constructor(config: ProviderConfig, model: ModelInfo) {
     super(config, model);
-    // Override client to use the custom base URL (forced to IPv4 — see net.ts).
+    // Talk to the endpoint via Node's http stack (see net.ts) — the Electron
+    // main process can't always reach loopback servers through global fetch.
     this.client = new OpenAI({
       apiKey: config.apiKey ?? 'not-required',
       baseURL: preferIpv4Host(config.baseUrl),
+      fetch: nodeHttpFetch as unknown as NonNullable<ConstructorParameters<typeof OpenAI>[0]>['fetch'],
     });
   }
 
@@ -28,14 +30,8 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
     return h;
   }
 
-  // Discover models with a tolerant direct GET instead of the OpenAI SDK's typed
-  // `models.list()`. Local servers (llama.cpp / LM Studio / vLLM) return
-  // non-standard `/v1/models` payloads — an extra `models` array, filesystem
-  // path ids (`C:\…\model.gguf`) — that can make the SDK's typed pagination
-  // throw, which previously surfaced as a misleading "endpoint unreachable".
-  // A plain fetch + lenient parse is robust and reports the real HTTP error.
   async listModels(): Promise<ModelInfo[]> {
-    const res = await fetch(this.modelsUrl(), { headers: this.authHeaders() });
+    const res = await nodeHttpFetch(this.modelsUrl(), { headers: this.authHeaders() });
     if (!res.ok) throw new Error(`models endpoint ${this.modelsUrl()} returned HTTP ${res.status}`);
     const body = (await res.json()) as { data?: unknown[]; models?: unknown[] };
     const raw = Array.isArray(body?.data) ? body.data
@@ -67,7 +63,7 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
 
   async isAvailable(): Promise<boolean> {
     try {
-      const res = await fetch(this.modelsUrl(), { headers: this.authHeaders() });
+      const res = await nodeHttpFetch(this.modelsUrl(), { headers: this.authHeaders() });
       return res.ok;
     } catch {
       return false;
