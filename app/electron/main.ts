@@ -62,7 +62,7 @@ function mapProvider(id: string): { type: string | null; baseUrl?: string } {
 // ─── Backend ─────────────────────────────────────────────────────────────────
 // Resolve the cascade-ai core package (built CommonJS output). In dev it lives at
 // the repo's ../dist; in a packaged app it's bundled under resources/cascade-core.
-function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any } {
+function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response> } {
   // Dev: the repo's external-deps build (node_modules resolves the requires).
   // Packaged: the self-contained `desktop-core.cjs` bundle (no node_modules to
   // resolve from — every JS dep is bundled in; only native modules like
@@ -629,29 +629,25 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'app', privileges: { secure: true, standard: true, supportFetchAPI: true } },
 ]);
 
-// Diagnostic: GET {baseUrl}/models with Node's raw http stack (the one that
-// actually reaches loopback servers from the main process) and report status +
-// model count, so a discovery failure shows a concrete reason in the UI/console.
-function probeModelsEndpoint(baseUrl: string): Promise<{ status?: number; count?: number; error?: string }> {
-  return new Promise((resolve) => {
+// Diagnostic: GET {baseUrl}/models via the core's nodeHttpFetch — the SAME path
+// discovery uses (Node http stack, IPv4-preferring, redirect-following, gzip/br
+// decoding), so the probe's status/count/error reflect the real request rather
+// than a divergent raw http.get that would mis-report redirected/compressed
+// endpoints. Surfaces a concrete reason for a discovery failure in the UI.
+async function probeModelsEndpoint(baseUrl: string): Promise<{ status?: number; count?: number; error?: string }> {
+  try {
+    const { nodeHttpFetch } = loadCore();
+    const target = baseUrl.replace(/\/+$/, '') + '/models';
+    const res = await nodeHttpFetch(target, { headers: { Accept: 'application/json' } });
+    let count = -1;
     try {
-      const target = baseUrl.replace(/\/+$/, '') + '/models';
-      const u = new URL(target);
-      const lib = u.protocol === 'https:' ? require('node:https') : require('node:http');
-      const req = lib.get({ hostname: u.hostname, port: u.port, path: u.pathname + u.search }, (res: { statusCode?: number; setEncoding: (e: string) => void; on: (ev: string, cb: (c?: string) => void) => void }) => {
-        let data = '';
-        res.setEncoding('utf8');
-        res.on('data', (c?: string) => { data += c ?? ''; });
-        res.on('end', () => {
-          let count = -1;
-          try { const j = JSON.parse(data); count = Array.isArray(j.data) ? j.data.length : Array.isArray(j.models) ? j.models.length : -1; } catch { /* non-JSON */ }
-          resolve({ status: res.statusCode, count });
-        });
-      });
-      req.on('error', (e: Error) => resolve({ error: e.message }));
-      req.setTimeout(8000, () => { req.destroy(); resolve({ error: 'timeout' }); });
-    } catch (e) { resolve({ error: e instanceof Error ? e.message : String(e) }); }
-  });
+      const j = (await res.json()) as { data?: unknown[]; models?: unknown[] };
+      count = Array.isArray(j.data) ? j.data.length : Array.isArray(j.models) ? j.models.length : -1;
+    } catch { /* non-JSON body */ }
+    return { status: res.status, count };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 app.whenReady().then(async () => {

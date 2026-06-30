@@ -34,7 +34,7 @@ declare global {
       getSettings(): Promise<{ models: Record<string, string>; budget: { maxCostPerRun?: number; autoBias?: string }; providersWithKey: string[]; endpoints: Record<string, string> }>;
       updateSettings(data: { keys?: Record<string, string | undefined>; models?: Record<string, string | undefined>; budget?: { maxCostPerRun?: number; autoBias?: string }; endpoints?: Record<string, string | undefined> }): Promise<{ ok: boolean; error?: string; models?: Record<string, string>; budget?: { maxCostPerRun?: number; autoBias?: string }; providersWithKey?: string[] }>;
       selectDirectory(): Promise<string | null>;
-      listModels(): Promise<{ ok: boolean; error?: string; models: Array<{ id: string; provider: string; isLocal: boolean }> }>;
+      listModels(): Promise<{ ok: boolean; error?: string; models: Array<{ id: string; provider: string; isLocal: boolean }>; ocProbe?: { status?: number; count?: number; error?: string } }>;
       theme: {
         get(): Promise<{ preference: 'system' | 'light' | 'dark' | 'midnight'; shouldUseDark: boolean }>;
         set(preference: 'system' | 'light' | 'dark' | 'midnight'): Promise<{ preference: 'system' | 'light' | 'dark' | 'midnight'; shouldUseDark: boolean }>;
