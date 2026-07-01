@@ -120,12 +120,17 @@ export class CascadeRouter extends EventEmitter {
     // local model id (like a `.gguf`) resolves to the provider that actually
     // serves it — exact-id match below wins over the heuristic in the selector,
     // which would otherwise mis-attribute it to Ollama when both are configured.
-    if (availableProviders.has('openai-compatible')) {
-      await Promise.all(
-        config.providers
-          .filter((p) => p.type === 'openai-compatible')
-          .map((cfg) => this.discoverOpenAICompatibleModels(cfg)),
-      );
+    //
+    // Run discovery directly off the configured baseUrl rather than gating it
+    // behind detectAvailableProviders()'s separate isAvailable() probe — that
+    // was a second, independent request to the same endpoint, and a flaky or
+    // slow first connection there could mark the provider unavailable for the
+    // whole session even though this very discovery call succeeds moments
+    // later. Availability is now derived from discovery's own result instead.
+    const ocConfigs = config.providers.filter((p) => p.type === 'openai-compatible' && p.baseUrl);
+    if (ocConfigs.length > 0) {
+      const results = await Promise.all(ocConfigs.map((cfg) => this.discoverOpenAICompatibleModels(cfg)));
+      if (results.some(Boolean)) this.selector.markProviderAvailable('openai-compatible');
     }
 
     // Apply explicit tier overrides first.
@@ -708,7 +713,8 @@ export class CascadeRouter extends EventEmitter {
     } catch { /* Ollama not running */ }
   }
 
-  private async discoverOpenAICompatibleModels(cfg: ProviderConfig): Promise<void> {
+  /** Returns true when at least one real model was discovered from the endpoint. */
+  private async discoverOpenAICompatibleModels(cfg: ProviderConfig): Promise<boolean> {
     try {
       // Minimal seed ModelInfo just to construct the provider client; listModels
       // returns the endpoint's real models tagged provider: 'openai-compatible'.
@@ -723,8 +729,10 @@ export class CascadeRouter extends EventEmitter {
       for (const m of models) {
         this.selector.addDynamicModel(m);
       }
+      return models.length > 0;
     } catch (err) {
       console.warn('[router] OpenAI-compatible model discovery failed:', err instanceof Error ? err.message : err);
+      return false;
     }
   }
 

@@ -9,7 +9,15 @@ import { preferIpv4Host, nodeHttpFetch } from '../utils/net.js';
 
 export class OpenAICompatibleProvider extends OpenAIProvider {
   constructor(config: ProviderConfig, model: ModelInfo) {
-    super(config, model);
+    // super() (OpenAIProvider) constructs its own `OpenAI` client from
+    // `config.apiKey` directly. Most local servers (llama.cpp / LM Studio /
+    // vLLM without --api-key) need no key, so `config.apiKey` is legitimately
+    // undefined — but the `openai` SDK throws in its constructor whenever
+    // `apiKey` is undefined AND `OPENAI_API_KEY` isn't set in the environment
+    // (which it never is for a local endpoint), aborting construction before
+    // this subclass's constructor body ever runs. Pass the same "not-required"
+    // fallback used below so super() never sees an undefined key.
+    super({ ...config, apiKey: config.apiKey ?? 'not-required' }, model);
     // Talk to the endpoint via Node's http stack (see net.ts) — the Electron
     // main process can't always reach loopback servers through global fetch.
     this.client = new OpenAI({
