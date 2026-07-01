@@ -327,13 +327,17 @@ export function SettingsView({ socket }: Props) {
                     {def.freeText && sel.provider === 'openai-compatible' && !modelsLoading
                       && dynModels.filter((m) => m.provider === 'openai-compatible').length === 0
                       && ocProbe && (() => {
+                        // A probe that got a 2xx with a real model count still falls through to
+                        // here when the router's own discovery didn't pick up any models (e.g. a
+                        // transient hiccup on an earlier check) — surface that instead of nothing,
+                        // so a reachable-but-not-yet-listed endpoint is never silently unexplained.
                         const reason = ocProbe.error
                           ? `couldn't reach endpoint — ${ocProbe.error}`
                           : (ocProbe.status != null && (ocProbe.status < 200 || ocProbe.status >= 300))
                             ? `endpoint returned HTTP ${ocProbe.status}`
                             : ocProbe.count === 0
                               ? 'endpoint reachable, but it returned 0 models'
-                              : undefined;
+                              : `endpoint reachable${ocProbe.count && ocProbe.count > 0 ? ` (found ${ocProbe.count} model${ocProbe.count === 1 ? '' : 's'})` : ''} — click Refresh to reload`;
                         return reason ? (
                           <span style={{ fontSize: 10, color: 'var(--text-muted)', display: 'block', marginTop: 4 }}>
                             {reason}. Check the OpenAI-Compatible Base URL in the Providers tab.

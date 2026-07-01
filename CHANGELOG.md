@@ -5,6 +5,11 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.21] - 2026-07-01
+
+### Fixed
+- **OpenAI-compatible endpoints with no API key configured were never discovered, no matter the base URL.** Local servers (llama.cpp / LM Studio / vLLM run without `--api-key`) need no key, so the OpenAI-Compatible provider's `apiKey` is legitimately left unset — but `OpenAICompatibleProvider`'s constructor called `super(config, model)` before applying its "not-required" fallback, and the underlying `openai` SDK throws in its own constructor whenever `apiKey` is undefined and `OPENAI_API_KEY` isn't set in the environment (which it never is on a desktop install). That exception was silently swallowed everywhere the provider gets constructed — the availability check and the real model discovery — so the Models tab showed the bare "endpoint unreachable?" placeholder with no further detail, even while a direct diagnostic probe (and `curl`/a browser) reached the very same endpoint successfully. This reproduced identically for `localhost`, a LAN IP, or a hostname, since the failure had nothing to do with the network target. The constructor now passes the same fallback key into `super()` so construction never throws. Model discovery for a configured OpenAI-compatible endpoint no longer depends on a separate, redundant reachability probe succeeding first, and the Models tab now surfaces a concrete reachable-but-not-yet-listed message instead of staying silent when a probe succeeds but no models were discovered.
+
 ## [0.12.19] - 2026-06-30
 
 ### Fixed
