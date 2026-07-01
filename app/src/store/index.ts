@@ -62,6 +62,7 @@ export interface AppState {
   messages: ChatMessage[];
   workspacePath: string;
   terminalVisible: boolean;
+  codeChatVisible: boolean;
   helpContext: string | null;
   themePref: ThemePref;
   themeDark: boolean;
@@ -90,6 +91,7 @@ const initialState: AppState = {
   messages: [],
   workspacePath: '',
   terminalVisible: false,
+  codeChatVisible: false,
   helpContext: null,
   themePref: 'system',
   themeDark: true,
@@ -157,6 +159,9 @@ const appSlice = createSlice({
     toggleTerminal(state) {
       state.terminalVisible = !state.terminalVisible;
     },
+    toggleCodeChat(state) {
+      state.codeChatVisible = !state.codeChatVisible;
+    },
     setHelpContext(state, action: PayloadAction<string | null>) {
       state.helpContext = action.payload;
     },
@@ -215,7 +220,7 @@ const appSlice = createSlice({
 export const {
   setView, setConnected, setReconnecting, setBackendError, setShowSettings, setMeta, setSessionId, updateCost,
   setAgents, upsertAgent, appendMessage, updateLastMessage,
-  setWorkspacePath, toggleTerminal, setHelpContext, setTheme, setActiveModel, setActiveModelT1, setActiveModelChat,
+  setWorkspacePath, toggleTerminal, toggleCodeChat, setHelpContext, setTheme, setActiveModel, setActiveModelT1, setActiveModelChat,
   setSessions, setActiveSessionId, removeSession,
   openTab, closeTab, setActiveTab, setTabDirty,
   setOnboardingDone,

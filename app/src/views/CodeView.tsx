@@ -1,10 +1,12 @@
 import { useState, useEffect, useRef, type MouseEvent } from 'react';
+import type { Socket } from 'socket.io-client';
 import { type OnMount } from '@monaco-editor/react';
-import { Code2, FileCode, FolderOpen, Search, X } from 'lucide-react';
+import { Code2, FileCode, FolderOpen, Search, X, MessageSquare } from 'lucide-react';
 import { FileTree } from '../components/FileTree.js';
 import { MonacoEditor } from '../components/MonacoEditor.js';
+import { ChatPanel } from '../components/ChatPanel.js';
 import { HelpButton } from '../help/HelpButton.js';
-import { useAppSelector, useAppDispatch, setWorkspacePath } from '../store/index.js';
+import { useAppSelector, useAppDispatch, setWorkspacePath, toggleCodeChat } from '../store/index.js';
 
 interface OpenFile { path: string; content: string; saved: string; language: string }
 interface SearchHit { file: string; line: number; text: string }
@@ -22,8 +24,9 @@ function detectLanguage(filename: string): string {
 }
 const baseName = (p: string) => p.split(/[/\\]/).pop() ?? p;
 
-export function CodeView() {
+export function CodeView({ socket }: { socket: Socket | null }) {
   const workspacePath = useAppSelector((s) => s.app.workspacePath);
+  const codeChatVisible = useAppSelector((s) => s.app.codeChatVisible);
   const dispatch = useAppDispatch();
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
   const [activeIdx, setActiveIdx] = useState(-1);
@@ -33,9 +36,28 @@ export function CodeView() {
   const [results, setResults] = useState<SearchHit[]>([]);
   const [searching, setSearching] = useState(false);
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
+  const splitRef = useRef<HTMLDivElement>(null);
+  const [chatWidth, setChatWidth] = useState(320);
+  const [resizingChat, setResizingChat] = useState(false);
   const [recent, setRecent] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem('cascade.recentFolders') ?? '[]') as string[]; } catch { return []; }
   });
+
+  // Drag-resize the docked chat panel from its left edge, clamped to a sane
+  // width range. Measured against the split container's own rect (not the
+  // window) so it's correct regardless of other chrome to its left.
+  useEffect(() => {
+    if (!resizingChat) return;
+    const onMove = (e: globalThis.MouseEvent) => {
+      const rect = splitRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      setChatWidth(Math.min(560, Math.max(240, rect.right - e.clientX)));
+    };
+    const onUp = () => setResizingChat(false);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+  }, [resizingChat]);
 
   const active = activeIdx >= 0 ? openFiles[activeIdx] : null;
 
@@ -130,11 +152,12 @@ export function CodeView() {
           </span>
         )}
         <div style={{ flex: 1 }} />
+        {iconBtn(MessageSquare, 'Toggle chat panel', () => dispatch(toggleCodeChat()), codeChatVisible)}
         <HelpButton context="code" />
       </div>
 
-      {/* Split: explorer/search + editor */}
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+      {/* Split: explorer/search + editor + chat */}
+      <div ref={splitRef} style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         <div style={{ width: 240, borderRight: '1px solid var(--border)', overflow: 'hidden', flexShrink: 0, background: 'var(--bg-surface)', display: 'flex', flexDirection: 'column' }}>
           <div style={{ padding: '6px 8px 6px 12px', display: 'flex', alignItems: 'center', gap: 6 }}>
             <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--text-dim)', flex: 1 }}>
@@ -278,6 +301,24 @@ export function CodeView() {
             )}
           </div>
         </div>
+
+        {codeChatVisible && (
+          <>
+            <div
+              onMouseDown={() => setResizingChat(true)}
+              title="Drag to resize"
+              style={{ width: 4, flexShrink: 0, cursor: 'col-resize', background: resizingChat ? 'var(--accent)' : 'transparent' }}
+            />
+            <div style={{ width: chatWidth, flexShrink: 0, borderLeft: '1px solid var(--border)', overflow: 'hidden', display: 'flex', flexDirection: 'column', background: 'var(--bg-surface)' }}>
+              <div style={{ padding: '6px 8px 6px 12px', display: 'flex', alignItems: 'center', gap: 6, borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+                <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--text-dim)', flex: 1 }}>Chat</span>
+              </div>
+              <div style={{ flex: 1, overflow: 'hidden' }}>
+                <ChatPanel socket={socket} compact />
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
