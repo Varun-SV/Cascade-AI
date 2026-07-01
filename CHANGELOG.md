@@ -5,6 +5,16 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.22] - 2026-07-01
+
+### Fixed
+- **Chat responses through a local (OpenAI-compatible) endpoint showed every word doubled.** `src/dashboard/server.ts` delivered `stream:token`/`tier:status` to the requesting client through two overlapping paths at once — `emitToSocket(socketId, ...)` *and* `broadcast(...)` (which is `io.emit(...)`, already reaching every connected socket including that one) in the chat-UI path, and `broadcast(...)` *and* `broadcastToRoom(...)` in the REST `/api/run` path. The single client-side listener appended both deliveries, so every streamed token — and therefore every word, and a model's `<think>` tags — appeared twice. Each event is now delivered exactly once, matching the sibling handlers (`session:complete`, `session:error`, `permission:user-required`) that were already correct.
+- **Chat/Code responses were never rendered as markdown.** `ChatView`'s message bubble printed `message.content` as plain text; `react-markdown` and `react-syntax-highlighter` were already installed and used in the docs viewer but never wired into chat. Assistant messages now render through `ReactMarkdown` (bold, lists, tables, syntax-highlighted code fences).
+- **A model's `<think>...</think>` reasoning was shown raw and inline with the answer.** Reasoning-tuned local models (and the synthetic `<think>` wrapping already used for Anthropic/OpenAI thinking deltas) had no frontend handling at all. It's now parsed out of the message and shown in a collapsed "Thinking" toggle, separate from the answer, with a live indicator while still streaming.
+
+### Added
+- **A chat panel in the Code view.** The Code tab had no way to chat at all. A resizable panel (drag its left edge) can now be toggled from the Code view's header, showing the same conversation/session as the Chat tab — reusing a new shared `ChatPanel` component instead of a second, divergent chat implementation.
+
 ## [0.12.21] - 2026-07-01
 
 ### Fixed

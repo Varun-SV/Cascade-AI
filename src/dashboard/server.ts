@@ -117,11 +117,9 @@ export class DashboardServer {
 
       cascade.on('stream:token', (e: { text: string; tierId: string }) => {
         this.socket.emitToSocket(socketId, 'stream:token', { sessionId, tierId: e.tierId, text: e.text });
-        this.socket.broadcast('stream:token', { sessionId, tierId: e.tierId, text: e.text });
       });
       cascade.on('tier:status', (e: unknown) => {
         this.socket.emitToSocket(socketId, 'tier:status', { sessionId, ...(e as object) });
-        this.socket.broadcast('tier:status', { sessionId, ...(e as object) });
       });
       cascade.on('permission:user-required', (e: unknown) => {
         this.socket.emitToSocket(socketId, 'permission:user-required', { sessionId, ...(e as object) });
@@ -689,11 +687,9 @@ export class DashboardServer {
         this.activeSessions.set(sessionId, cascade);
 
         cascade.on('stream:token', (e: { text: string; tierId: string }) => {
-          this.socket.broadcast('stream:token', { sessionId, tierId: e.tierId, text: e.text });
           this.socket.broadcastToRoom(`session:${sessionId}`, 'stream:token', { sessionId, tierId: e.tierId, text: e.text });
         });
         cascade.on('tier:status', (e: unknown) => {
-          this.socket.broadcast('tier:status', { sessionId, ...(e as object) });
           this.socket.broadcastToRoom(`session:${sessionId}`, 'tier:status', { sessionId, ...(e as object) });
         });
         cascade.on('permission:user-required', (e: unknown) => {

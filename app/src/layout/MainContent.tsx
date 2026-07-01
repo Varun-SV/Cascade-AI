@@ -14,7 +14,7 @@ export function MainContent({ socket }: { socket: Socket | null }) {
       <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
         {view === 'cockpit' && <CockpitView socket={socket} />}
         {view === 'chat'    && <ChatView socket={socket} />}
-        {view === 'code'    && <CodeView />}
+        {view === 'code'    && <CodeView socket={socket} />}
       </div>
     </main>
   );
