@@ -212,10 +212,23 @@
     /* ════════════════════════════════════════
        HERO
     ════════════════════════════════════════ */
-    .hero {
-      padding: 160px 0 100px;
+    .hero .container {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 60px;
+      align-items: center;
+    }
+
+    @media (max-width: 992px) {
+      .hero .container {
+        grid-template-columns: 1fr;
+        gap: 40px;
+      }
+    }
+
+    .hero-content {
       position: relative;
-      overflow: hidden;
+      z-index: 2;
     }
 
     /* radial glow background */
@@ -488,6 +501,61 @@
 
     .download-meta a:hover {
       color: var(--text-1);
+    }
+
+    /* ════════════════════════════════════════
+       HERO TERMINAL (ANIMATED)
+    ════════════════════════════════════════ */
+    .hero-terminal {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 24px 48px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.05);
+      position: relative;
+      z-index: 2;
+    }
+
+    .hero-terminal-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 12px 16px;
+      background: rgba(255,255,255,0.02);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .ht-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+    .ht-dot.r { background: #ff5f56; }
+    .ht-dot.y { background: #ffbd2e; }
+    .ht-dot.g { background: #27c93f; }
+
+    .hero-terminal-body {
+      padding: 20px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--text-2);
+      height: 320px;
+      overflow-y: hidden;
+      position: relative;
+    }
+
+    /* Terminal animation classes applied via JS */
+    .term-line { margin-bottom: 8px; opacity: 0; transform: translateY(5px); animation: fadeIn 0.3s forwards; }
+    .term-prompt { color: var(--lime); margin-right: 8px; }
+    .term-cmd { color: var(--text-1); }
+    .term-t1 { color: var(--amber); }
+    .term-t2 { color: var(--violet); }
+    .term-t3 { color: var(--cyan); }
+    .term-dim { color: var(--text-3); }
+
+    @keyframes fadeIn {
+      to { opacity: 1; transform: translateY(0); }
     }
 
     /* ════════════════════════════════════════
@@ -896,22 +964,49 @@
     .features-grid {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
-      gap: 1px;
-      background: var(--border);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      overflow: hidden;
+      gap: 16px;
       margin-top: 56px;
     }
 
     .feature-cell {
-      background: var(--bg-2);
+      position: relative;
+      background: rgba(11, 16, 23, 0.6);
+      border: 1px solid var(--border-2);
+      border-radius: 16px;
       padding: 32px 28px;
-      transition: background 0.14s;
+      backdrop-filter: blur(12px);
+      transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s;
+      overflow: hidden;
+    }
+
+    .feature-cell::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: radial-gradient(circle at top right, rgba(255,255,255,0.03) 0%, transparent 60%);
+      pointer-events: none;
     }
 
     .feature-cell:hover {
-      background: var(--bg-3);
+      transform: translateY(-2px);
+      box-shadow: 0 12px 24px rgba(0,0,0,0.4);
+      border-color: rgba(255,255,255,0.18);
+    }
+    
+    /* Bento Spans */
+    .feature-span-2 {
+      grid-column: span 2;
+    }
+    .feature-span-row-2 {
+      grid-row: span 2;
+    }
+
+    @media (max-width: 1024px) {
+      .feature-span-2,
+      .feature-span-row-2 {
+        grid-column: span 1;
+        grid-row: span 1;
+      }
     }
 
     .feature-icon {
@@ -1244,6 +1339,51 @@
     }
 
     /* ════════════════════════════════════════
+       USE CASES
+    ════════════════════════════════════════ */
+    .usecases-section {
+      padding: 100px 0;
+      background: var(--bg-2);
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .usecases-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+      margin-top: 48px;
+    }
+
+    .usecase-card {
+      background: var(--bg-3);
+      border: 1px solid var(--border-2);
+      border-radius: 12px;
+      padding: 32px;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+
+    .usecase-card:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 16px 32px rgba(0,0,0,0.3);
+      border-color: rgba(255,255,255,0.15);
+    }
+
+    .usecase-card h3 {
+      font-family: var(--font-display);
+      font-weight: 700;
+      font-size: 18px;
+      color: var(--text-1);
+      margin-bottom: 12px;
+    }
+
+    .usecase-card p {
+      color: var(--text-2);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    /* ════════════════════════════════════════
        CTA BAND
     ════════════════════════════════════════ */
     .cta-section {
@@ -1408,6 +1548,10 @@
         flex-direction: column;
         gap: 20px;
       }
+      
+      .usecases-grid {
+        grid-template-columns: 1fr;
+      }
 
       .complexity-table {
         font-size: 11px;
@@ -1511,47 +1655,62 @@
   <!-- ── HERO ─────────────────────────────── -->
   <section class="hero">
     <div class="container">
-      <div class="hero-eyebrow">
-        <span class="hero-eyebrow-dot"></span>
-        Open-source · MIT · <span id="heroVersion">v0.12.15</span> — Desktop App is here
-      </div>
-
-      <h1 class="reveal">
-        Agents that<br />
-        <span class="accent">think in tiers</span><span class="dim">.</span>
-      </h1>
-
-      <p class="hero-sub reveal">
-        One prompt becomes a self-organizing hierarchy of AI agents that plan, delegate, and execute in
-        parallel — auto-routing every step to the cheapest model that's best at it.
-        <strong>Up to 90% cheaper</strong> than running everything on one frontier model.
-      </p>
-
-      <div class="hero-actions reveal">
-        <a href="https://github.com/Varun-SV/Cascade-AI" target="_blank" class="btn-primary">
-          Get Started
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <path d="M7 17L17 7M17 7H7M17 7v10" />
-          </svg>
-        </a>
-        <a href="#architecture" class="btn-ghost">
-          See how it works
-        </a>
-      </div>
-
-      <div class="install-block reveal" onclick="copyInstall(this)">
-        <span class="prompt">$</span>
-        <span class="cmd">npm install -g cascade-ai</span>
-        <span class="copy-hint">click to copy</span>
-        <span class="copied">✓ copied</span>
-      </div>
-
-      <div class="download-wrap reveal" id="downloadWrap">
-        <div class="download-label">or download the desktop app</div>
-        <div class="download-btns" id="downloadBtns">
-          <span class="download-loading">fetching latest release…</span>
+      <div class="hero-content">
+        <div class="hero-eyebrow">
+          <span class="hero-eyebrow-dot"></span>
+          Open-source · MIT · <span id="heroVersion">v0.12.15</span> — Desktop App is here
         </div>
-        <div class="download-meta" id="downloadMeta"></div>
+
+        <h1 class="reveal">
+          Agents that<br />
+          <span class="accent">think in tiers</span><span class="dim">.</span>
+        </h1>
+
+        <p class="hero-sub reveal">
+          One prompt becomes a self-organizing hierarchy of AI agents that plan, delegate, and execute in
+          parallel — auto-routing every step to the cheapest model that's best at it.
+          <strong>Up to 90% cheaper</strong> than running everything on one frontier model.
+        </p>
+
+        <div class="hero-actions reveal">
+          <a href="https://github.com/Varun-SV/Cascade-AI" target="_blank" class="btn-primary">
+            Get Started
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <path d="M7 17L17 7M17 7H7M17 7v10" />
+            </svg>
+          </a>
+          <a href="#architecture" class="btn-ghost">
+            See how it works
+          </a>
+        </div>
+
+        <div class="install-block reveal" onclick="copyInstall(this)">
+          <span class="prompt">$</span>
+          <span class="cmd">npm install -g cascade-ai</span>
+          <span class="copy-hint">click to copy</span>
+          <span class="copied">✓ copied</span>
+        </div>
+
+        <div class="download-wrap reveal" id="downloadWrap">
+          <div class="download-label">or download the desktop app</div>
+          <div class="download-btns" id="downloadBtns">
+            <span class="download-loading">fetching latest release…</span>
+          </div>
+          <div class="download-meta" id="downloadMeta"></div>
+        </div>
+      </div>
+
+      <div class="hero-visual reveal" style="transition-delay: 200ms;">
+        <div class="hero-terminal">
+          <div class="hero-terminal-header">
+            <div class="ht-dot r"></div>
+            <div class="ht-dot y"></div>
+            <div class="ht-dot g"></div>
+          </div>
+          <div class="hero-terminal-body" id="heroTermBody">
+            <!-- Animated via JS -->
+          </div>
+        </div>
       </div>
     </div>
   </section>
@@ -1795,13 +1954,13 @@
       <p class="section-desc reveal">No plugin store to browse. The tools your agents need are already wired in.</p>
 
       <div class="features-grid reveal">
-        <div class="feature-cell">
+        <div class="feature-cell feature-span-2">
           <span class="feature-new">New · v0.6</span>
           <div class="feature-icon green">📊</div>
           <h3>Live Benchmark Auto-Routing</h3>
           <p>Set any tier to <strong>Auto</strong> and Cascade picks the <em>best-value</em> model per task — fusing live public benchmark scores with live OpenRouter pricing. Cheap models win trivial work; frontier models win the hard parts.</p>
         </div>
-        <div class="feature-cell">
+        <div class="feature-cell feature-span-row-2">
           <span class="feature-new">New · v0.8</span>
           <div class="feature-icon lime">🤖</div>
           <h3>Autonomous Mode</h3>
@@ -1843,20 +2002,19 @@
         <div class="feature-cell">
           <div class="feature-icon cyan">🛠️</div>
           <h3>Full Tool Suite</h3>
-          <p>Shell, file CRUD, git, GitHub/GitLab PRs, Playwright browser automation, PDF creation, code interpreter.
-          </p>
+          <p>Shell, file CRUD, git, GitHub/GitLab PRs, Playwright browser automation, PDF creation, code interpreter.</p>
         </div>
         <div class="feature-cell">
           <div class="feature-icon red">🌐</div>
           <h3>Web Dashboard</h3>
           <p>React + ReactFlow live topology graph, session browser, cost tracker, JWT auth, WebSocket updates.</p>
         </div>
-        <div class="feature-cell">
+        <div class="feature-cell feature-span-2">
           <div class="feature-icon green">🔌</div>
           <h3>MCP Support</h3>
           <p>Connect any Model Context Protocol server. Its tools become available to every T3 worker automatically.</p>
         </div>
-        <div class="feature-cell">
+        <div class="feature-cell feature-span-2">
           <div class="feature-icon amber">💰</div>
           <h3>Per-Tier Cost Breakdown &amp; Budget Control</h3>
           <p>Every result exposes <code>costByTier</code>, <code>tokensByTier</code>, and percentage attribution. Set a
@@ -1990,6 +2148,29 @@
     </div>
   </section>
 
+  <!-- ── USE CASES ─────────────────────────── -->
+  <section class="usecases-section" id="usecases">
+    <div class="container">
+      <div class="section-label reveal">Who is it for?</div>
+      <h2 class="reveal">Built for complex engineering.</h2>
+      
+      <div class="usecases-grid reveal">
+        <div class="usecase-card">
+          <h3>Indie Hackers</h3>
+          <p>Instantly scaffold full-stack web apps, configure databases, and wire up APIs without spending hours on boilerplate. Cascade's auto-routing keeps API costs incredibly low while you iterate.</p>
+        </div>
+        <div class="usecase-card">
+          <h3>Enterprise Teams</h3>
+          <p>Safely automate large-scale refactors across sprawling monorepos. With Boardroom Plan Review and Permission Escalation, you retain full control over dangerous actions and architectural decisions.</p>
+        </div>
+        <div class="usecase-card">
+          <h3>AI Researchers</h3>
+          <p>Leverage the interactive Model Picker and Live Benchmark Auto-Routing to test cutting-edge open-weights models locally via Ollama, integrating them seamlessly with frontier API models.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- ── CTA ───────────────────────────────── -->
   <section class="cta-section">
     <div class="container">
@@ -2018,13 +2199,13 @@
       <div class="footer-inner">
         <div class="footer-left">
           <div class="footer-logo">C</div>
-          <span class="footer-copy">Cascade AI · MIT License · Built by Varun SV</span>
+          <span class="footer-copy">Cascade AI &middot; Built by Varun SV</span>
         </div>
         <div class="footer-links">
           <a href="https://github.com/Varun-SV/Cascade-AI" target="_blank" class="footer-link">GitHub</a>
-          <a href="https://github.com/Varun-SV/Cascade-AI/blob/main/CONTRIBUTING.md" target="_blank"
-            class="footer-link">Contributing</a>
+          <a href="https://github.com/Varun-SV/Cascade-AI/blob/main/CONTRIBUTING.md" target="_blank" class="footer-link">Contributing</a>
           <a href="https://github.com/Varun-SV/Cascade-AI/issues" target="_blank" class="footer-link">Issues</a>
+          <a href="https://github.com/Varun-SV/Cascade-AI/blob/main/LICENSE" target="_blank" class="footer-link">MIT License</a>
         </div>
       </div>
     </div>
@@ -2053,6 +2234,40 @@
     }, { threshold: 0.08 });
 
     reveals.forEach(el => observer.observe(el));
+
+    /* ── Terminal Animation ── */
+    (function animateTerminal() {
+      const termBody = document.getElementById('heroTermBody');
+      if (!termBody) return;
+      const lines = [
+        '<span class="term-prompt">❯</span> <span class="term-cmd">cascade "Refactor auth module to use JWT"</span>',
+        '<span class="term-t1">● [T1] Planning...</span>',
+        '<span class="term-dim">  ↳ Breaking down task into 3 sections</span>',
+        '<span class="term-t2">● [T2] Spawning Manager for Section 1 (Auth logic)</span>',
+        '<span class="term-t2">● [T2] Spawning Manager for Section 2 (Tests)</span>',
+        '<span class="term-t3">  ↳ [T3] Worker running: read auth.ts</span>',
+        '<span class="term-t3">  ↳ [T3] Worker running: read package.json</span>',
+        '<span class="term-t3">  ↳ [T3] Worker writing: auth.ts (JWT implemented)</span>',
+        '<span class="term-t3">  ↳ [T3] Worker running: npm test</span>',
+        '<span class="term-dim">✔ Tests passed (12/12)</span>',
+        '<span class="term-t1">✔ [T1] Task complete. 90% cheaper than single model.</span>'
+      ];
+      let i = 0;
+      function showNextLine() {
+        if (i >= lines.length) {
+          setTimeout(() => { termBody.innerHTML = ''; i = 0; showNextLine(); }, 4000);
+          return;
+        }
+        const div = document.createElement('div');
+        div.className = 'term-line';
+        div.innerHTML = lines[i];
+        termBody.appendChild(div);
+        termBody.scrollTop = termBody.scrollHeight;
+        i++;
+        setTimeout(showNextLine, Math.random() * 800 + 400);
+      }
+      setTimeout(showNextLine, 1000);
+    })();
 
     /* ── Trigger hero reveals immediately ── */
     document.querySelectorAll('.hero .reveal').forEach((el, i) => {
