@@ -23,6 +23,7 @@ import { MemoryStore } from '../../memory/store.js';
 import { PeerBus } from '../peer/bus.js';
 import type { PermissionEscalator } from '../permissions/escalator.js';
 import type { ToolCreator } from '../../tools/tool-creator.js';
+import { RedactionLayer } from '../audit/redaction.js';
 
 const T2_SYSTEM_PROMPT = `You are a T2 Manager agent in the Cascade AI system.
 Your role is to analyze a section of a task and decompose it into 2-5 discrete subtasks for T3 Workers.
@@ -306,7 +307,8 @@ Return ONLY the JSON array.`;
     try {
       const jsonMatch = /\[[\s\S]*\]/.exec(result.content);
       if (!jsonMatch) throw new Error('No JSON array found');
-      return JSON.parse(jsonMatch[0]) as T2ToT3Assignment[];
+      const parsed = JSON.parse(jsonMatch[0]) as T2ToT3Assignment[];
+      return parsed.map((a) => ({ ...a, sectionTitle: assignment.sectionTitle }));
     } catch {
       // Fallback: single subtask = the whole section
       return [{
@@ -317,6 +319,8 @@ Return ONLY the JSON array.`;
         constraints: assignment.constraints,
         peerT3Ids: [],
         parentT2: this.id,
+        sectionTitle: assignment.sectionTitle,
+        dependsOn: [],
         executionMode: 'parallel',
       }];
     }
@@ -503,6 +507,8 @@ Return ONLY the JSON array.`;
         const assignment = sanitizedAssignments.find((a) => a.subtaskId === id)!;
         const worker = workerMap.get(id)!;
         const result = await worker.execute(assignment, taskId, waveSignal);
+        if (result.output) result.output = RedactionLayer.redact(result.output);
+        if (result.issues) result.issues = result.issues.map(i => RedactionLayer.redact(i));
         resultMap.set(id, result);
         return result;
       };

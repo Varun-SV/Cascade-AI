@@ -25,6 +25,8 @@ interface CostTrackerProps {
   savedUsd?: number;
   /** Percentage of the all-T1 counterfactual that was saved (0–100). */
   savedPct?: number;
+  /** Optional per-feature tag cost breakdown. */
+  costByFeature?: Record<string, number>;
 }
 
 // Cap the provider list so the panel height stays bounded no matter how
@@ -42,6 +44,7 @@ export function CostTracker({
   compact = false,
   savedUsd = 0,
   savedPct = 0,
+  costByFeature,
 }: CostTrackerProps): React.ReactElement {
   const hasTierCost = costByTier && Object.keys(costByTier).length > 0;
   const savingsLine = savedUsd > 0
@@ -152,6 +155,18 @@ export function CostTracker({
               })}
             </Box>
           )}
+        </Box>
+      )}
+
+      {costByFeature && Object.keys(costByFeature).length > 0 && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color={theme.colors.muted}>By feature/section:</Text>
+          {Object.entries(costByFeature).map(([feature, cost]) => (
+            <Box key={feature} marginLeft={2}>
+              <Box width={30}><Text color={theme.colors.secondary} wrap="truncate-end">{feature}</Text></Box>
+              <Text color={theme.colors.success}>${cost.toFixed(6)}</Text>
+            </Box>
+          ))}
         </Box>
       )}
     </Box>

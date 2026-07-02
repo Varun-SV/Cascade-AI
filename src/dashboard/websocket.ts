@@ -137,6 +137,16 @@ export class DashboardSocket {
     });
   }
 
+  onSessionHalt(callback: (sessionId: string) => void): void {
+    this.io.on('connection', (socket) => {
+      socket.on('session:halt', (payload: { sessionId?: string }) => {
+        if (typeof payload?.sessionId === 'string') {
+          callback(payload.sessionId);
+        }
+      });
+    });
+  }
+
   onConfigUpdate(callback: (data: {
     keys?: Record<string, string>;
     models?: Record<string, string>;

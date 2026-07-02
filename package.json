@@ -1,6 +1,6 @@
 {
   "name": "cascade-ai",
-  "version": "0.12.24",
+  "version": "0.13.0",
   "description": "Multi-tier AI orchestration CLI — T1/T2/T3 hierarchical agent system",
   "type": "module",
   "main": "dist/index.cjs",
@@ -46,7 +46,7 @@
     "@google/genai": "^1.50.1",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "bcryptjs": "^2.4.3",
-    "better-sqlite3": "^12.9.0",
+    "better-sqlite3": "^12.11.1",
     "chalk": "^5.3.0",
     "commander": "^12.1.0",
     "conf": "^13.0.0",

@@ -118,6 +118,7 @@ export const WorkspaceConfigSchema = z.object({
   configPath: z.string().default('.cascade/config.json'),
   keystorePath: z.string().default('.cascade/keystore.enc'),
   auditLogPath: z.string().default('.cascade/audit.log'),
+  debugWorldState: z.boolean().default(false),
 });
 
 export const CascadeConfigSchema = z.object({

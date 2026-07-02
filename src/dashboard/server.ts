@@ -33,6 +33,7 @@ export class DashboardServer {
   private globalStore: MemoryStore | null = null;
   private broadcastTimer: NodeJS.Timeout | null = null;
   private activeSessions = new Map<string, import('../core/cascade.js').Cascade>();
+  private activeControllers = new Map<string, AbortController>();
   private port: number;
   private host: string;
   private workspacePath: string;
@@ -109,6 +110,9 @@ export class DashboardServer {
 
     this.socket.onCascadeRun(async (prompt, model, socketId, requestedSessionId) => {
       const sessionId = requestedSessionId ?? randomUUID();
+      const abortController = new AbortController();
+      this.activeControllers.set(sessionId, abortController);
+      
       // Resuming an existing session: fold its stored history into the prompt
       // (built before persistRunStart so the new prompt isn't self-included).
       const runPrompt = requestedSessionId ? this.buildContinuationPrompt(sessionId, prompt) : prompt;
@@ -133,7 +137,7 @@ export class DashboardServer {
       });
 
       try {
-        const result = await cascade.run({ prompt: runPrompt });
+        const result = await cascade.run({ prompt: runPrompt, signal: abortController.signal });
         this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED');
         this.socket.emitToSocket(socketId, 'session:complete', { sessionId, result });
         this.socket.broadcast('cost:update', {
@@ -150,7 +154,12 @@ export class DashboardServer {
         });
       } finally {
         this.activeSessions.delete(sessionId);
+        this.activeControllers.delete(sessionId);
       }
+    });
+
+    this.socket.onSessionHalt((sessionId) => {
+      this.activeControllers.get(sessionId)?.abort();
     });
   }
 

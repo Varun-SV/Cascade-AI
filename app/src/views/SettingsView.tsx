@@ -16,6 +16,7 @@ const TIER_PROVIDERS: ProviderDef[] = [
   { id: 'auto', label: 'Auto (best model)', models: [] },
   { id: 'anthropic', label: 'Anthropic', models: ['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'] },
   { id: 'openai', label: 'OpenAI', models: ['gpt-4o', 'gpt-4o-mini', 'o1', 'o3-mini'] },
+  { id: 'azure', label: 'Azure OpenAI', models: [], freeText: true },
   { id: 'gemini', label: 'Google Gemini', models: ['gemini-2.0-flash', 'gemini-2.0-pro'] },
   { id: 'openai-compatible', label: 'OpenAI-Compatible', models: [], freeText: true },
   { id: 'ollama', label: 'Ollama (local)', models: [], freeText: true },
@@ -61,6 +62,9 @@ export function SettingsView({ socket }: Props) {
   const [ocKey, setOcKey] = useState('');
   const [ocUrl, setOcUrl] = useState('');
   const [ollamaUrl, setOllamaUrl] = useState('');
+  // Azure configuration
+  const [azureKey, setAzureKey] = useState('');
+  const [azureUrl, setAzureUrl] = useState('');
 
   // Per-tier provider + model
   const [t1, setT1] = useState<TierSel>({ provider: 'auto', model: '' });
@@ -101,6 +105,7 @@ export function SettingsView({ socket }: Props) {
     if (cfg.providersWithKey) setProvidersWithKey(cfg.providersWithKey);
     if (cfg.endpoints?.['openai-compatible']) setOcUrl(cfg.endpoints['openai-compatible']);
     if (cfg.endpoints?.['ollama']) setOllamaUrl(cfg.endpoints['ollama']);
+    if (cfg.endpoints?.['azure']) setAzureUrl(cfg.endpoints['azure']);
   };
 
   // Pre-load via the Electron IPC bridge first — this works even when the
@@ -144,10 +149,10 @@ export function SettingsView({ socket }: Props) {
   const save = async () => {
     setSaveError('');
     const payload = {
-      keys: { anthropic: anthropicKey || undefined, openai: openaiKey || undefined, gemini: geminiKey || undefined, 'openai-compatible': ocKey || undefined },
+      keys: { anthropic: anthropicKey || undefined, openai: openaiKey || undefined, gemini: geminiKey || undefined, 'openai-compatible': ocKey || undefined, azure: azureKey || undefined },
       models: { t1: composeOverride(t1), t2: composeOverride(t2), t3: composeOverride(t3) },
       budget: { maxCostPerRun: maxCost ? parseFloat(maxCost) : undefined, autoBias: bias },
-      endpoints: { 'openai-compatible': ocUrl.trim() || undefined, ollama: ollamaUrl.trim() || undefined },
+      endpoints: { 'openai-compatible': ocUrl.trim() || undefined, ollama: ollamaUrl.trim() || undefined, azure: azureUrl.trim() || undefined },
     };
 
     // Primary path: persist via the Electron IPC bridge. This works even when the
@@ -175,7 +180,7 @@ export function SettingsView({ socket }: Props) {
     }
 
     // Keys are now stored; clear the inputs so placeholders show "key set".
-    setAnthropicKey(''); setOpenaiKey(''); setGeminiKey(''); setOcKey('');
+    setAnthropicKey(''); setOpenaiKey(''); setGeminiKey(''); setOcKey(''); setAzureKey('');
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -243,6 +248,22 @@ export function SettingsView({ socket }: Props) {
                     style={{ width: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
                 </div>
               ))}
+              <div style={{ display: 'flex', gap: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>
+                    Azure OpenAI
+                    {providersWithKey.includes('azure') && (<span style={{ color: 'var(--success)', marginLeft: 6 }}>• key set</span>)}
+                  </label>
+                  <input type="password" value={azureKey} onChange={(e) => setAzureKey(e.target.value)}
+                    placeholder={providersWithKey.includes('azure') ? '•••••••• (leave blank to keep)' : 'Azure API Key'}
+                    style={{ width: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>Azure Endpoint</label>
+                  <input type="text" value={azureUrl} onChange={(e) => setAzureUrl(e.target.value)} placeholder="https://your-resource.openai.azure.com"
+                    style={{ width: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
+                </div>
+              </div>
               <div>
                 <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>
                   OpenAI-Compatible (vLLM / llama.cpp / LM Studio …)

@@ -293,13 +293,20 @@ export class T3Worker extends BaseTier {
       }
 
       // ── Reflection / self-critique (goal-alignment, opt-in) ──
-      // The self-test above only checks the subtask spec. When enabled, reflect
-      // on whether the output truly serves the goal and revise once if it falls
-      // short — distinct from, and on top of, the pass/fail self-test.
       const reflectCfg = this.router.getReflectionConfig?.() ?? { enabled: false, maxRounds: 1 };
       if (reflectCfg.enabled) {
-        this.sendStatusUpdate({ progressPct: 85, currentAction: 'Reflecting on output', status: 'IN_PROGRESS' });
+        this.sendStatusUpdate({ progressPct: 85, currentAction: 'Reflecting on output via T2-Critic', status: 'IN_PROGRESS' });
         output = await this.reflectAndImprove(assignment, output, reflectCfg.maxRounds);
+      }
+
+      // ── Project World State Update ──
+      const db = this.router.getWorldStateDB();
+      if (db) {
+        try {
+          db.addEntry(this.id, `Completed: ${assignment.subtaskTitle}. Output length: ${output.length} chars.`);
+        } catch (e) {
+          this.log('Failed to write to World State DB');
+        }
       }
 
       this.setStatus('COMPLETED', output);
@@ -410,6 +417,7 @@ export class T3Worker extends BaseTier {
         tools: useTextTools ? undefined : (tools.length ? tools : undefined),
         maxTokens: 4096,
         ...(subtaskModel ? { model: subtaskModel } : {}),
+        featureTag: this.assignment?.sectionTitle,
       };
 
       const result = await this.router.generate(
@@ -866,29 +874,58 @@ ${assignment.expectedOutput}`;
     output: string,
     maxRounds: number,
   ): Promise<string> {
-    const sys = this.systemPromptOverride + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : '');
     let current = output;
-    for (let round = 0; round < Math.max(1, maxRounds); round++) {
-      try {
-        const verdict = await this.router.generate('T3', {
-          messages: [{
-            role: 'user',
-            content: `Does this output FULLY achieve the goal — not just the literal task, but the intent behind it?
+    try {
+      const { T2Manager } = await import('./t2-manager.js');
+      
+      for (let round = 0; round < Math.max(1, maxRounds); round++) {
+        const critic = new T2Manager(this.router, this.toolRegistry, this.parentId ?? '');
+        critic.setSystemPromptOverride('You are a T2-Critic peer reviewing a T3 Worker. Use your tools and peer network if needed.');
+        if (this.peerBus) critic.setPeerBus(this.peerBus);
+        if (this.store) critic.setStore(this.store);
 
-Goal / expected: ${assignment.expectedOutput}
+        const prompt = `Review this T3 Worker's output against the goal. 
+Goal: ${assignment.expectedOutput}
 Subtask: ${assignment.description}
-
-Output:
+Current Output:
 ${current}
 
-Reply with ONLY JSON: {"sufficient": true|false, "notes": "what is weak or missing if not sufficient"}`,
-          }],
-          systemPrompt: sys,
-          maxTokens: 400,
-        });
-        const parsed = JSON.parse(/\{[\s\S]*\}/.exec(verdict.content)?.[0] ?? '{}') as { sufficient?: boolean; notes?: string };
-        if (parsed.sufficient !== false) break; // sufficient (or unclear) → stop
+Is this output sufficient and correct? Respond with a JSON object:
+{"sufficient": true|false, "notes": "what is wrong or missing if false"}`;
 
+        // Create a dummy section assignment for the T2-Critic to execute
+        const reviewSection = {
+          sectionId: `critic-${this.taskId}-${round}`,
+          sectionTitle: `Reviewing: ${assignment.subtaskTitle}`,
+          description: prompt,
+          expectedOutput: 'A JSON verdict',
+          constraints: [],
+          t3Subtasks: [{
+            subtaskId: `t3-critic-${this.taskId}-${round}`,
+            subtaskTitle: 'Critique Output',
+            description: prompt,
+            expectedOutput: 'JSON verdict',
+            constraints: [],
+            peerT3Ids: [],
+            executionMode: 'parallel' as const,
+          }],
+          executionMode: 'parallel' as const,
+          peerT2Ids: []
+        };
+
+        const result = await critic.execute(reviewSection, this.taskId, this.signal);
+        const critiqueText = result.sectionSummary;
+        
+        const match = critiqueText.match(/\{[\s\S]*\}/);
+        const parsed = match ? JSON.parse(match[0]) : { sufficient: true };
+        
+        if (parsed.sufficient !== false) {
+          this.log('T2-Critic approved output.');
+          break; // sufficient
+        }
+
+        this.log(`T2-Critic rejected output: ${parsed.notes}`);
+        
         const improved = await this.router.generate('T3', {
           messages: [{
             role: 'user',
@@ -900,16 +937,17 @@ Goal / expected: ${assignment.expectedOutput}
 Current output:
 ${current}`,
           }],
-          systemPrompt: sys,
+          systemPrompt: this.systemPromptOverride + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
           maxTokens: 4096,
+          featureTag: assignment.sectionTitle,
         });
         const next = (improved.content ?? '').trim();
         if (!next) break;
         current = next;
         this.log('Reflection: revised output for better goal alignment.');
-      } catch {
-        break; // reflection is advisory — never fail the worker on it
       }
+    } catch (e) {
+      this.log(`T2-Critic reflection failed: ${e}`);
     }
     return current;
   }
@@ -934,6 +972,7 @@ Reply with JSON: { "completeness": "pass"|"fail", "correctness": "pass"|"fail", 
       messages: testMessages, 
       maxTokens: 500,
       systemPrompt: this.systemPromptOverride + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
+      featureTag: assignment.sectionTitle,
     });
 
     try {
