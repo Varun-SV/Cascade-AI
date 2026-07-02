@@ -6,6 +6,8 @@ export function BottomPanel() {
   const dispatch = useAppDispatch();
   const visible = useAppSelector((s) => s.app.terminalVisible);
   const workspacePath = useAppSelector((s) => s.app.workspacePath);
+  const terminalCwd = useAppSelector((s) => s.app.terminalCwd);
+  const cwd = terminalCwd || workspacePath;
 
   // Ctrl+` to toggle terminal
   useEffect(() => {
@@ -37,7 +39,7 @@ export function BottomPanel() {
         gap: 10,
       }}>
         <span style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--text)', letterSpacing: 1, textTransform: 'uppercase' }}>Terminal</span>
-        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{workspacePath || '~'}</span>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cwd || '~'}</span>
         <div style={{ flex: 1 }} />
         <button
           onClick={() => dispatch(toggleTerminal())}
@@ -48,7 +50,7 @@ export function BottomPanel() {
         >×</button>
       </div>
       <div style={{ flex: 1, overflow: 'hidden' }}>
-        <TerminalPanel cwd={workspacePath || undefined} />
+        <TerminalPanel cwd={cwd || undefined} />
       </div>
     </div>
   );

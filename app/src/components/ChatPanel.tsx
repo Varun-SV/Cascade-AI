@@ -2,10 +2,13 @@ import { useState, useRef, useEffect } from 'react';
 import type { Socket } from 'socket.io-client';
 import { Send, Bot, User, ChevronRight, ChevronDown } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { MermaidBlock } from './MermaidBlock.js';
 import { SessionRating } from './SessionRating.js';
-import { useAppDispatch, useAppSelector, appendMessage, updateLastMessage } from '../store/index.js';
+import { useAppDispatch, useAppSelector, appendMessage, updateLastMessage, setSessionId, loadTranscript } from '../store/index.js';
+import { fetchSessionTranscript } from '../utils/sessionLoad.js';
 
 // Reasoning-tuned models (Anthropic thinking_delta, OpenAI reasoning_content,
 // and local GGUF models that emit it natively) all surface their "thinking"
@@ -65,20 +68,27 @@ function ThinkingBlock({ text, open }: { text: string; open: boolean }) {
 const markdownComponents = {
   code({ className, children, ...rest }: { className?: string; children?: React.ReactNode }) {
     const match = /language-(\w+)/.exec(className ?? '');
-    return match ? (
+    if (!match) {
+      return (
+        <code {...rest} style={{ background: 'var(--bg-base)', padding: '1px 5px', borderRadius: 3, fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+          {children}
+        </code>
+      );
+    }
+    const source = String(children).replace(/\n$/, '');
+    const highlighted = (
       <SyntaxHighlighter
         style={vscDarkPlus as Record<string, React.CSSProperties>}
         language={match[1]}
         PreTag="div"
         customStyle={{ borderRadius: 6, fontSize: 12 }}
       >
-        {String(children).replace(/\n$/, '')}
+        {source}
       </SyntaxHighlighter>
-    ) : (
-      <code {...rest} style={{ background: 'var(--bg-base)', padding: '1px 5px', borderRadius: 3, fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-        {children}
-      </code>
     );
+    // ```mermaid fences render as live diagrams; anything unparseable
+    // (including a fence still streaming in) falls back to the code block.
+    return match[1] === 'mermaid' ? <MermaidBlock code={source} fallback={highlighted} /> : highlighted;
   },
   p: ({ children }: { children?: React.ReactNode }) => <p style={{ margin: '0 0 8px', color: 'var(--text)' }}>{children}</p>,
   ul: ({ children }: { children?: React.ReactNode }) => <ul style={{ margin: '0 0 8px', paddingLeft: 20, color: 'var(--text)' }}>{children}</ul>,
@@ -124,7 +134,7 @@ function MessageBubble({ message, compact }: { message: { role: string; content:
         {hasAnswer ? (
           isUser
             ? <span style={{ whiteSpace: 'pre-wrap' }}>{message.content}</span>
-            : <ReactMarkdown components={markdownComponents}>{answer}</ReactMarkdown>
+            : <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{answer}</ReactMarkdown>
         ) : (
           !hasThinking && message.streaming ? <BlinkCursor /> : null
         )}
@@ -149,12 +159,28 @@ export function ChatPanel({ socket, compact }: Props) {
   const dispatch = useAppDispatch();
   const messages = useAppSelector((s) => s.app.messages);
   const sessionId = useAppSelector((s) => s.app.sessionId);
-  const { activeModel } = useAppSelector((s) => s.app);
+  const { activeModel, sessions, activeSessionId, backendPort, authToken } = useAppSelector((s) => s.app);
   const [input, setInput] = useState('');
   const [focused, setFocused] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [sessionDone, setSessionDone] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  // Compact mode (Code view's docked panel): a small picker replaces the full
+  // session sidebar — select a past session to load and continue it in place.
+  const pickSession = async (id: string) => {
+    const current = activeSessionId ?? sessionId;
+    if (!id) {
+      // "New chat": fresh id now so the first send persists under it.
+      dispatch(loadTranscript({ sessionId: crypto.randomUUID(), messages: [] }));
+      return;
+    }
+    if (id === current) return;
+    if (current && socket) socket.emit('leave:session', { sessionId: current });
+    if (socket) socket.emit('join:session', { sessionId: id });
+    const history = await fetchSessionTranscript(backendPort, authToken, id);
+    dispatch(loadTranscript({ sessionId: id, messages: history ?? [] }));
+  };
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -176,11 +202,16 @@ export function ChatPanel({ socket, compact }: Props) {
 
   const send = () => {
     if (!input.trim() || !socket || streaming) return;
+    // The client owns the session id: generate one on the first send of a
+    // fresh chat so the backend persists under it and the session appears in
+    // the list immediately; subsequent sends continue the same session.
+    let sid = sessionId;
+    if (!sid) { sid = crypto.randomUUID(); dispatch(setSessionId(sid)); }
     const userMsg = { id: crypto.randomUUID(), role: 'user' as const, content: input.trim(), timestamp: Date.now() };
     const assistantMsg = { id: crypto.randomUUID(), role: 'assistant' as const, content: '', timestamp: Date.now(), streaming: true };
     dispatch(appendMessage(userMsg));
     dispatch(appendMessage(assistantMsg));
-    socket.emit('cascade:run', { prompt: input.trim(), model: activeModel.chat });
+    socket.emit('cascade:run', { prompt: input.trim(), model: activeModel.chat, sessionId: sid });
     setInput('');
     setStreaming(true);
     setSessionDone(false);
@@ -188,8 +219,28 @@ export function ChatPanel({ socket, compact }: Props) {
 
   const canSend = !!input.trim() && !!socket && !streaming;
 
+  const sortedSessions = [...sessions].sort(
+    (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+  );
+  const currentSessionId = activeSessionId ?? sessionId ?? '';
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* Session picker (compact mode only — the full views have the sidebar) */}
+      {compact && (
+        <div style={{ padding: '6px 8px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+          <select
+            value={sortedSessions.some((s) => s.sessionId === currentSessionId) ? currentSessionId : ''}
+            onChange={(e) => { void pickSession(e.target.value); }}
+            style={{ width: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '5px 8px', fontSize: 11.5, outline: 'none' }}
+          >
+            <option value="">New chat…</option>
+            {sortedSessions.map((s) => (
+              <option key={s.sessionId} value={s.sessionId}>{s.title || 'Untitled session'}</option>
+            ))}
+          </select>
+        </div>
+      )}
       {/* Messages */}
       <div style={{ flex: 1, overflowY: 'auto', padding: compact ? 12 : 18, display: 'flex', flexDirection: 'column', gap: compact ? 12 : 18 }}>
         {messages.length === 0 && (

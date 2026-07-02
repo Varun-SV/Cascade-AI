@@ -107,8 +107,12 @@ export class DashboardServer {
       this.persistConfig();
     });
 
-    this.socket.onCascadeRun(async (prompt, model, socketId) => {
-      const sessionId = randomUUID();
+    this.socket.onCascadeRun(async (prompt, model, socketId, requestedSessionId) => {
+      const sessionId = requestedSessionId ?? randomUUID();
+      // Resuming an existing session: fold its stored history into the prompt
+      // (built before persistRunStart so the new prompt isn't self-included).
+      const runPrompt = requestedSessionId ? this.buildContinuationPrompt(sessionId, prompt) : prompt;
+      const title = this.persistRunStart(sessionId, prompt);
       const cfg = model !== 'auto'
         ? { ...this.config, models: { ...this.config.models, t1: model } }
         : this.config;
@@ -129,7 +133,8 @@ export class DashboardServer {
       });
 
       try {
-        const result = await cascade.run({ prompt });
+        const result = await cascade.run({ prompt: runPrompt });
+        this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED');
         this.socket.emitToSocket(socketId, 'session:complete', { sessionId, result });
         this.socket.broadcast('cost:update', {
           sessionId,
@@ -138,6 +143,7 @@ export class DashboardServer {
         });
         this.throttledBroadcast('workspace');
       } catch (err) {
+        this.persistRunEnd(sessionId, title, prompt, undefined, 'FAILED');
         this.socket.emitToSocket(socketId, 'session:error', {
           sessionId,
           error: err instanceof Error ? err.message : String(err),
@@ -262,6 +268,78 @@ export class DashboardServer {
       this.globalStore = new MemoryStore(globalDbPath);
     }
     return this.globalStore;
+  }
+
+  // ── Desktop-run session persistence ─────────
+  // Only the CLI REPL used to persist sessions; runs started from the desktop
+  // (socket `cascade:run` and REST /api/run) wrote nothing to the store, so
+  // they never appeared in the session list and couldn't be resumed. These
+  // helpers give both run paths the same persistence the CLI has.
+
+  /** Record run start: session row (if new), the user message, and an ACTIVE runtime row. Returns the session title. */
+  private persistRunStart(sessionId: string, prompt: string): string {
+    const now = new Date().toISOString();
+    let title = prompt.replace(/\s+/g, ' ').trim().slice(0, 40);
+    try {
+      const existing = this.store.getSession(sessionId);
+      if (existing) {
+        title = existing.title;
+      } else {
+        this.store.createSession({
+          id: sessionId, title, createdAt: now, updatedAt: now,
+          identityId: this.config.defaultIdentityId ?? 'default',
+          workspacePath: this.workspacePath, messages: [],
+          metadata: { totalTokens: 0, totalCostUsd: 0, modelsUsed: [], toolsUsed: [], taskCount: 0 },
+        });
+      }
+      this.store.addMessage({ id: randomUUID(), sessionId, role: 'user', content: prompt, timestamp: now });
+    } catch (err) {
+      console.warn('[dashboard] failed to persist run start:', err);
+    }
+    this.persistRuntimeRow(sessionId, title, 'ACTIVE', prompt);
+    return title;
+  }
+
+  /** Record run end: the assistant reply (when there is one) and the runtime row's final status. */
+  private persistRunEnd(sessionId: string, title: string, latestPrompt: string, reply: string | undefined, status: 'COMPLETED' | 'FAILED'): void {
+    try {
+      if (reply && reply.trim()) {
+        this.store.addMessage({ id: randomUUID(), sessionId, role: 'assistant', content: reply, timestamp: new Date().toISOString() });
+      }
+    } catch (err) {
+      console.warn('[dashboard] failed to persist run end:', err);
+    }
+    // Keep latestPrompt — the upsert overwrites every column, and losing it
+    // would blank the session's preview line in the sidebar on completion.
+    this.persistRuntimeRow(sessionId, title, status, latestPrompt);
+  }
+
+  private persistRuntimeRow(sessionId: string, title: string, status: 'ACTIVE' | 'COMPLETED' | 'FAILED', latestPrompt?: string): void {
+    const now = new Date().toISOString();
+    const row: RuntimeSession = { sessionId, title, workspacePath: this.workspacePath, status, startedAt: now, updatedAt: now, latestPrompt, isGlobal: false };
+    try { this.store.upsertRuntimeSession(row); } catch (err) { console.warn('[dashboard] runtime upsert failed:', err); }
+    try { this.getGlobalStore().upsertRuntimeSession({ ...row, isGlobal: true }); } catch { /* global store unavailable */ }
+    this.throttledBroadcast('workspace');
+  }
+
+  /**
+   * Continuing an existing session: the Cascade orchestrator is per-run and
+   * stateless across runs, so prepend a compact transcript of the stored
+   * conversation to the new prompt. Called BEFORE persistRunStart so the new
+   * prompt isn't duplicated into its own context.
+   */
+  private buildContinuationPrompt(sessionId: string, prompt: string): string {
+    try {
+      const history = this.store.getSessionMessages(sessionId);
+      if (history.length === 0) return prompt;
+      const lines = history.slice(-10).map((m) => {
+        const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+        return `${m.role === 'user' ? 'User' : 'Assistant'}: ${text.slice(0, 2000)}`;
+      });
+      return `Conversation so far (for context):\n${lines.join('\n')}\n\nUser's new message:\n${prompt}`;
+    } catch {
+      return prompt;
+    }
   }
 
   private throttledBroadcast(scope: 'workspace' | 'global'): void {
@@ -673,14 +751,19 @@ export class DashboardServer {
 
     // ── Remote Run ──────────────────────────────
     this.app.post('/api/run', auth, mutationLimiter, (req: Request, res: Response) => {
-      const body = req.body as { prompt?: string; identityId?: string };
+      const body = req.body as { prompt?: string; identityId?: string; sessionId?: string };
       if (!body.prompt || typeof body.prompt !== 'string') {
         res.status(400).json({ error: 'prompt is required' });
         return;
       }
 
-      const sessionId = randomUUID();
+      const requestedSessionId = typeof body.sessionId === 'string' && body.sessionId.trim() ? body.sessionId.trim() : undefined;
+      const sessionId = requestedSessionId ?? randomUUID();
       res.json({ sessionId, status: 'ACTIVE' });
+
+      const prompt = body.prompt;
+      const runPrompt = requestedSessionId ? this.buildContinuationPrompt(sessionId, prompt) : prompt;
+      const title = this.persistRunStart(sessionId, prompt);
 
       void (async () => {
         const cascade = new Cascade(this.config, this.workspacePath, this.store);
@@ -700,7 +783,8 @@ export class DashboardServer {
         });
 
         try {
-          const result = await cascade.run({ prompt: body.prompt!, identityId: body.identityId });
+          const result = await cascade.run({ prompt: runPrompt, identityId: body.identityId });
+          this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED');
           this.socket.broadcast('cost:update', {
             sessionId,
             totalTokens: result.usage.totalTokens,
@@ -709,6 +793,7 @@ export class DashboardServer {
           this.socket.broadcastToRoom(`session:${sessionId}`, 'session:complete', { sessionId, result });
           this.throttledBroadcast('workspace');
         } catch (err) {
+          this.persistRunEnd(sessionId, title, prompt, undefined, 'FAILED');
           this.socket.broadcastToRoom(`session:${sessionId}`, 'session:error', {
             sessionId,
             error: err instanceof Error ? err.message : String(err),

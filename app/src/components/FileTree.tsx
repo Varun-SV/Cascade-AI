@@ -1,8 +1,10 @@
 import { useState, useEffect, type MouseEvent } from 'react';
 import {
   ChevronRight, ChevronDown, File, Folder, FolderOpen,
-  FilePlus, FolderPlus, Pencil, Trash2,
+  FilePlus, FolderPlus, Pencil, Trash2, Terminal,
 } from 'lucide-react';
+import { PromptDialog } from './PromptDialog.js';
+import { useAppDispatch, openTerminalAt } from '../store/index.js';
 
 interface FsEntry { name: string; fullPath: string; isDirectory: boolean }
 interface Props {
@@ -11,7 +13,16 @@ interface Props {
   reloadToken: number;
   onChanged: () => void;
 }
-interface MenuState { x: number; y: number; entry: FsEntry }
+// entry === null means the menu targets the workspace root (right-click on
+// empty explorer space — previously that showed nothing at all).
+interface MenuState { x: number; y: number; entry: FsEntry | null }
+interface DialogState {
+  title: string;
+  defaultValue?: string;
+  confirmOnly?: boolean;
+  confirmLabel?: string;
+  action: (value: string) => Promise<void>;
+}
 
 const sepOf = (p: string) => (p.includes('\\') ? '\\' : '/');
 const dirnameOf = (p: string) => p.replace(/[/\\][^/\\]*$/, '') || p;
@@ -85,8 +96,10 @@ function TreeNode({ entry, onFileClick, onContext, depth, reloadToken }: {
 }
 
 export function FileTree({ root, onFileClick, reloadToken, onChanged }: Props) {
+  const dispatch = useAppDispatch();
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const [menu, setMenu] = useState<MenuState | null>(null);
+  const [dialog, setDialog] = useState<DialogState | null>(null);
 
   useEffect(() => {
     if (!window.cascade || !root) return;
@@ -100,34 +113,40 @@ export function FileTree({ root, onFileClick, reloadToken, onChanged }: Props) {
     return () => window.removeEventListener('click', close);
   }, [menu]);
 
-  const openContext = (e: MouseEvent, entry: FsEntry) => {
+  const openContext = (e: MouseEvent, entry: FsEntry | null) => {
     e.preventDefault(); e.stopPropagation();
     setMenu({ x: e.clientX, y: e.clientY, entry });
   };
 
-  const targetDir = (entry: FsEntry) => (entry.isDirectory ? entry.fullPath : dirnameOf(entry.fullPath));
+  // Directory an action applies to: the entry's own folder for directories,
+  // the containing folder for files, the workspace root for empty space.
+  const targetDir = (entry: FsEntry | null) =>
+    entry === null ? root : entry.isDirectory ? entry.fullPath : dirnameOf(entry.fullPath);
 
+  // window.prompt()/confirm() are not supported in Electron (prompt silently
+  // no-ops), so all inputs go through the in-app PromptDialog instead.
   const act = {
-    newFile: async (entry: FsEntry) => {
-      const name = window.prompt('New file name'); if (!name) return;
-      await window.cascade!.fs.createFile(joinPath(targetDir(entry), name));
-      onChanged();
-    },
-    newFolder: async (entry: FsEntry) => {
-      const name = window.prompt('New folder name'); if (!name) return;
-      await window.cascade!.fs.mkdir(joinPath(targetDir(entry), name));
-      onChanged();
-    },
-    rename: async (entry: FsEntry) => {
-      const name = window.prompt('Rename to', entry.name); if (!name || name === entry.name) return;
-      await window.cascade!.fs.rename(entry.fullPath, joinPath(dirnameOf(entry.fullPath), name));
-      onChanged();
-    },
-    del: async (entry: FsEntry) => {
-      if (!window.confirm(`Move "${entry.name}" to trash?`)) return;
-      await window.cascade!.fs.delete(entry.fullPath);
-      onChanged();
-    },
+    newFile: (entry: FsEntry | null) => setDialog({
+      title: 'New file name',
+      action: async (name) => { await window.cascade!.fs.createFile(joinPath(targetDir(entry), name)); onChanged(); },
+    }),
+    newFolder: (entry: FsEntry | null) => setDialog({
+      title: 'New folder name',
+      action: async (name) => { await window.cascade!.fs.mkdir(joinPath(targetDir(entry), name)); onChanged(); },
+    }),
+    rename: (entry: FsEntry) => setDialog({
+      title: `Rename "${entry.name}"`, defaultValue: entry.name,
+      action: async (name) => {
+        if (name === entry.name) return;
+        await window.cascade!.fs.rename(entry.fullPath, joinPath(dirnameOf(entry.fullPath), name));
+        onChanged();
+      },
+    }),
+    del: (entry: FsEntry) => setDialog({
+      title: `Move "${entry.name}" to trash?`, confirmOnly: true, confirmLabel: 'Delete',
+      action: async () => { await window.cascade!.fs.delete(entry.fullPath); onChanged(); },
+    }),
+    terminalHere: (entry: FsEntry | null) => { dispatch(openTerminalAt(targetDir(entry))); },
   };
 
   const menuItem = (Icon: typeof FilePlus, label: string, onClick: () => void) => (
@@ -142,7 +161,10 @@ export function FileTree({ root, onFileClick, reloadToken, onChanged }: Props) {
   );
 
   return (
-    <div style={{ paddingTop: 4 }}>
+    <div
+      style={{ paddingTop: 4, minHeight: '100%' }}
+      onContextMenu={(e) => openContext(e, null)}
+    >
       {entries.map((entry) => (
         <TreeNode key={entry.fullPath} entry={entry} onFileClick={onFileClick}
           onContext={openContext} depth={0} reloadToken={reloadToken} />
@@ -152,14 +174,25 @@ export function FileTree({ root, onFileClick, reloadToken, onChanged }: Props) {
         <div style={{
           position: 'fixed', top: menu.y, left: menu.x, zIndex: 1000,
           background: 'var(--bg-overlay)', border: '1px solid var(--border-strong)',
-          borderRadius: 8, boxShadow: 'var(--shadow-2)', padding: '4px 0', minWidth: 160,
+          borderRadius: 8, boxShadow: 'var(--shadow-2)', padding: '4px 0', minWidth: 170,
         }}>
-          {menu.entry.isDirectory && menuItem(FilePlus, 'New File', () => act.newFile(menu.entry))}
-          {menu.entry.isDirectory && menuItem(FolderPlus, 'New Folder', () => act.newFolder(menu.entry))}
-          {!menu.entry.isDirectory && menuItem(FilePlus, 'New File here', () => act.newFile(menu.entry))}
-          {menuItem(Pencil, 'Rename', () => act.rename(menu.entry))}
-          {menuItem(Trash2, 'Delete', () => act.del(menu.entry))}
+          {menuItem(FilePlus, menu.entry && !menu.entry.isDirectory ? 'New File here' : 'New File', () => act.newFile(menu.entry))}
+          {menuItem(FolderPlus, 'New Folder', () => act.newFolder(menu.entry))}
+          {menuItem(Terminal, 'Open Terminal Here', () => act.terminalHere(menu.entry))}
+          {menu.entry && menuItem(Pencil, 'Rename', () => act.rename(menu.entry!))}
+          {menu.entry && menuItem(Trash2, 'Delete', () => act.del(menu.entry!))}
         </div>
+      )}
+
+      {dialog && (
+        <PromptDialog
+          title={dialog.title}
+          defaultValue={dialog.defaultValue}
+          confirmOnly={dialog.confirmOnly}
+          confirmLabel={dialog.confirmLabel}
+          onSubmit={async (value) => { setDialog(null); try { await dialog.action(value); } catch { /* fs op failed — tree unchanged */ } }}
+          onCancel={() => setDialog(null)}
+        />
       )}
     </div>
   );

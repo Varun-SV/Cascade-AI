@@ -161,11 +161,14 @@ export class DashboardSocket {
     });
   }
 
-  onCascadeRun(callback: (prompt: string, model: string, socketId: string) => void): void {
+  onCascadeRun(callback: (prompt: string, model: string, socketId: string, sessionId?: string) => void): void {
     this.io.on('connection', (socket) => {
-      socket.on('cascade:run', (payload: { prompt?: string; model?: string }) => {
+      socket.on('cascade:run', (payload: { prompt?: string; model?: string; sessionId?: string }) => {
         if (typeof payload?.prompt === 'string' && payload.prompt.trim()) {
-          callback(payload.prompt.trim(), payload.model ?? 'auto', socket.id);
+          const sessionId = typeof payload.sessionId === 'string' && payload.sessionId.trim()
+            ? payload.sessionId.trim()
+            : undefined;
+          callback(payload.prompt.trim(), payload.model ?? 'auto', socket.id, sessionId);
         }
       });
     });
