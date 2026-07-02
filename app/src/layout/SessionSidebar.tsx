@@ -1,11 +1,13 @@
 import { useState } from 'react';
 import type { Socket } from 'socket.io-client';
-import { Trash2, MessageSquare } from 'lucide-react';
+import { Trash2, MessageSquare, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import {
   useAppDispatch, useAppSelector,
-  setActiveSessionId, removeSession,
+  setActiveSessionId, removeSession, loadTranscript,
+  toggleSessionSidebar, setSessionSidebarCollapsed,
   type RuntimeSession,
 } from '../store/index.js';
+import { fetchSessionTranscript } from '../utils/sessionLoad.js';
 
 function relativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
@@ -106,15 +108,21 @@ function SessionRow({
 
 export function SessionSidebar({ socket }: { socket: Socket | null }) {
   const dispatch = useAppDispatch();
-  const { sessions, activeSessionId, sessionId, authToken, backendPort } = useAppSelector((s) => s.app);
+  const { sessions, activeSessionId, sessionId, authToken, backendPort, sessionSidebarCollapsed } = useAppSelector((s) => s.app);
 
   const currentActiveId = activeSessionId ?? sessionId;
 
-  const handleSelect = (session: RuntimeSession) => {
+  const handleSelect = async (session: RuntimeSession) => {
+    // Picking a session tucks the list away so it stops taking real estate.
+    dispatch(setSessionSidebarCollapsed(true));
     if (session.sessionId === currentActiveId) return;
     if (currentActiveId && socket) socket.emit('leave:session', { sessionId: currentActiveId });
     if (socket) socket.emit('join:session', { sessionId: session.sessionId });
     dispatch(setActiveSessionId(session.sessionId));
+    // Load the stored transcript so the Chat/Code panels show the session's
+    // history and the next send continues it (instead of starting fresh).
+    const messages = await fetchSessionTranscript(backendPort, authToken, session.sessionId);
+    if (messages) dispatch(loadTranscript({ sessionId: session.sessionId, messages }));
   };
 
   const handleDelete = (sessionId: string) => {
@@ -124,6 +132,26 @@ export function SessionSidebar({ socket }: { socket: Socket | null }) {
   const sorted = [...sessions].sort(
     (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
   );
+
+  const railBtnStyle: React.CSSProperties = {
+    background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)',
+    display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 4, borderRadius: 5,
+  };
+
+  // Collapsed: a slim rail that keeps the list reachable without the width.
+  if (sessionSidebarCollapsed) {
+    return (
+      <aside style={{
+        width: 36, background: 'var(--bg-surface)', borderRight: '1px solid var(--border)',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', paddingTop: 8, gap: 6, flexShrink: 0,
+      }}>
+        <button title="Show sessions" onClick={() => dispatch(toggleSessionSidebar())} style={railBtnStyle}>
+          <PanelLeftOpen size={15} />
+        </button>
+        <span title={`${sorted.length} sessions`} style={{ fontSize: 9, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>{sorted.length}</span>
+      </aside>
+    );
+  }
 
   return (
     <aside style={{
@@ -137,14 +165,14 @@ export function SessionSidebar({ socket }: { socket: Socket | null }) {
     }}>
       {/* Header */}
       <div style={{
-        padding: '10px 16px 8px',
+        padding: '10px 12px 8px 16px',
         borderBottom: '1px solid var(--border)',
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        display: 'flex', alignItems: 'center', gap: 8,
       }}>
         <span style={{
           fontSize: 9, fontWeight: 700, letterSpacing: '2px',
           color: 'var(--text-dim)', fontFamily: 'var(--font-mono)',
-          textTransform: 'uppercase',
+          textTransform: 'uppercase', flex: 1,
         }}>
           CASCADE
         </span>
@@ -154,6 +182,9 @@ export function SessionSidebar({ socket }: { socket: Socket | null }) {
         }}>
           {sorted.length}
         </span>
+        <button title="Hide sessions" onClick={() => dispatch(toggleSessionSidebar())} style={railBtnStyle}>
+          <PanelLeftClose size={13} />
+        </button>
       </div>
 
       {/* Session list */}

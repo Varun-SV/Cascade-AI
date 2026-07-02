@@ -5,6 +5,20 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.23] - 2026-07-02
+
+### Fixed
+- **Multi-tier runs no longer garble the chat reply.** Every tier streams tokens (T1's final answer, plus each T2/T3 worker's raw output — `<think>` blocks included), and the app appended them all into the one visible assistant message, interleaving parallel tiers into nested/duplicated thinking tags and scrambled text. The transcript now only renders T1's stream; T2/T3 models still reason internally (nothing is disabled), and their progress stays visible through the AgentGraph's live action labels.
+- **Markdown tables now render.** `react-markdown` v9 needs the `remark-gfm` plugin for pipe-tables; it was never installed, so `| a | b |` showed as plain text — in chat *and* in the docs viewer, which already had table styling that could never trigger. Both now parse GFM.
+- **New chats become sessions again (and desktop sessions survive restarts).** Runs started from the desktop app were never written to the store — only the CLI persisted sessions — so the sidebar only ever showed CLI runs, and deleting those left it empty forever. Both desktop run paths (socket and REST) now persist the session, its messages, and its runtime status, broadcasting the update live.
+- **File-explorer New File / New Folder / Rename actually work.** They used `window.prompt()`, which Electron silently no-ops — the dialog never appeared and the action died with it. All explorer inputs now use an in-app dialog, and Delete's confirm matches. Right-clicking *empty* explorer space (previously dead) now opens a root-scoped menu.
+
+### Added
+- **Mermaid diagrams.** ```mermaid fences in chat render as live diagrams (theme-aware, lazy-loaded), falling back to a highlighted code block while streaming or on a parse error.
+- **Resume a past session.** Selecting a session (sidebar, or the new picker in the Code view's chat panel) loads its stored transcript and continues the conversation — the backend folds recent history into the next run's context.
+- **Open Terminal Here.** Right-click a folder (or empty explorer space) to open the integrated terminal in that directory.
+- **Collapsible session list.** The sidebar collapses to a slim rail (and auto-collapses when you pick a session); the Code view drops the full sidebar entirely in favor of the chat panel's session picker.
+
 ## [0.12.22] - 2026-07-01
 
 ### Fixed

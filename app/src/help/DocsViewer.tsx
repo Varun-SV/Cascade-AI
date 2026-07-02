@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import Fuse from 'fuse.js';
@@ -66,6 +67,7 @@ export function DocsViewer({ content }: Props) {
           <p style={{ color: 'var(--text-muted)' }}>No results for "{query}"</p>
         ) : (
           <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
             components={{
               code({ className, children, ...rest }) {
                 const match = /language-(\w+)/.exec(className ?? '');

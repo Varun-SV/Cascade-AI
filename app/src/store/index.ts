@@ -62,6 +62,8 @@ export interface AppState {
   messages: ChatMessage[];
   workspacePath: string;
   terminalVisible: boolean;
+  /** Directory the integrated terminal should open in (falls back to workspacePath). */
+  terminalCwd: string | null;
   codeChatVisible: boolean;
   helpContext: string | null;
   themePref: ThemePref;
@@ -69,6 +71,7 @@ export interface AppState {
   // v0.12.0 additions
   sessions: RuntimeSession[];
   activeSessionId: string | null;
+  sessionSidebarCollapsed: boolean;
   openTabs: AppTab[];
   activeTabId: string | null;
   onboardingDone: boolean;
@@ -91,12 +94,14 @@ const initialState: AppState = {
   messages: [],
   workspacePath: '',
   terminalVisible: false,
+  terminalCwd: null,
   codeChatVisible: false,
   helpContext: null,
   themePref: 'system',
   themeDark: true,
   sessions: [],
   activeSessionId: null,
+  sessionSidebarCollapsed: false,
   openTabs: [],
   activeTabId: null,
   onboardingDone: true, // assume done until we check IPC; avoids onboarding flash
@@ -144,6 +149,13 @@ const appSlice = createSlice({
     appendMessage(state, action: PayloadAction<ChatMessage>) {
       state.messages.push(action.payload);
     },
+    // Resume a stored session: replace the live transcript wholesale and make
+    // the session current, so the next send continues it server-side.
+    loadTranscript(state, action: PayloadAction<{ sessionId: string; messages: ChatMessage[] }>) {
+      state.messages = action.payload.messages;
+      state.sessionId = action.payload.sessionId;
+      state.activeSessionId = action.payload.sessionId;
+    },
     updateLastMessage(state, action: PayloadAction<{ content: string; streaming: boolean }>) {
       const last = state.messages[state.messages.length - 1];
       if (last?.role === 'assistant') {
@@ -158,6 +170,12 @@ const appSlice = createSlice({
     },
     toggleTerminal(state) {
       state.terminalVisible = !state.terminalVisible;
+    },
+    // "Open Terminal Here" from the file explorer: point the PTY at the
+    // folder and make sure the bottom panel is showing.
+    openTerminalAt(state, action: PayloadAction<string>) {
+      state.terminalCwd = action.payload;
+      state.terminalVisible = true;
     },
     toggleCodeChat(state) {
       state.codeChatVisible = !state.codeChatVisible;
@@ -189,6 +207,12 @@ const appSlice = createSlice({
       state.sessions = state.sessions.filter((s) => s.sessionId !== action.payload);
       if (state.activeSessionId === action.payload) state.activeSessionId = null;
     },
+    toggleSessionSidebar(state) {
+      state.sessionSidebarCollapsed = !state.sessionSidebarCollapsed;
+    },
+    setSessionSidebarCollapsed(state, action: PayloadAction<boolean>) {
+      state.sessionSidebarCollapsed = action.payload;
+    },
     // Tab bar
     openTab(state, action: PayloadAction<AppTab>) {
       const existing = state.openTabs.findIndex((t) => t.id === action.payload.id);
@@ -219,9 +243,9 @@ const appSlice = createSlice({
 
 export const {
   setView, setConnected, setReconnecting, setBackendError, setShowSettings, setMeta, setSessionId, updateCost,
-  setAgents, upsertAgent, appendMessage, updateLastMessage,
-  setWorkspacePath, toggleTerminal, toggleCodeChat, setHelpContext, setTheme, setActiveModel, setActiveModelT1, setActiveModelChat,
-  setSessions, setActiveSessionId, removeSession,
+  setAgents, upsertAgent, appendMessage, updateLastMessage, loadTranscript,
+  setWorkspacePath, toggleTerminal, openTerminalAt, toggleCodeChat, setHelpContext, setTheme, setActiveModel, setActiveModelT1, setActiveModelChat,
+  setSessions, setActiveSessionId, removeSession, toggleSessionSidebar, setSessionSidebarCollapsed,
   openTab, closeTab, setActiveTab, setTabDirty,
   setOnboardingDone,
 } = appSlice.actions;

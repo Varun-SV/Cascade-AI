@@ -70,7 +70,7 @@ declare global {
 
 export function App() {
   const dispatch = useAppDispatch();
-  const { backendPort, authToken, helpContext, showSettings, onboardingDone, backendError } = useAppSelector((s) => s.app);
+  const { backendPort, authToken, helpContext, showSettings, onboardingDone, backendError, view } = useAppSelector((s) => s.app);
   const socketRef = useRef<Socket | null>(null);
 
   // Resolve + apply the System/Light/Dark appearance preference.
@@ -138,7 +138,13 @@ export function App() {
       }));
     });
 
-    socket.on('stream:token', (data: { text: string }) => {
+    socket.on('stream:token', (data: { text: string; tierId?: string }) => {
+      // Only T1's stream is the user-facing reply. T2/T3 stream too (ids are
+      // `T2_…`/`T3_…`, see BaseTier), and appending them here interleaved
+      // parallel tiers' text — and their `<think>` blocks — into one garbled
+      // message. Their progress stays visible via tier:status → AgentGraph
+      // action labels; their models still think internally.
+      if (data.tierId && !data.tierId.startsWith('T1')) return;
       dispatch(updateLastMessage({ content: data.text, streaming: true }));
     });
 
@@ -186,7 +192,9 @@ export function App() {
           under the draggable title strip / native window controls. */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden', position: 'relative' }}>
         <ActivityBar />
-        <SessionSidebar socket={socketRef.current} />
+        {/* The Code view has its own session picker in the docked chat panel —
+            a full-width always-on session list there just eats editor space. */}
+        {view !== 'code' && <SessionSidebar socket={socketRef.current} />}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
           <TabBar />
           <MainContent socket={socketRef.current} />
