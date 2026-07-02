@@ -165,6 +165,15 @@ const appSlice = createSlice({
         last.streaming = action.payload.streaming;
       }
     },
+    finalizeLastMessage(state, action: PayloadAction<{ finalOutput?: string }>) {
+      const last = state.messages[state.messages.length - 1];
+      if (last?.role === 'assistant') {
+        if (!last.content && action.payload.finalOutput) {
+          last.content = action.payload.finalOutput;
+        }
+        last.streaming = false;
+      }
+    },
     setWorkspacePath(state, action: PayloadAction<string>) {
       state.workspacePath = action.payload;
     },
@@ -243,7 +252,7 @@ const appSlice = createSlice({
 
 export const {
   setView, setConnected, setReconnecting, setBackendError, setShowSettings, setMeta, setSessionId, updateCost,
-  setAgents, upsertAgent, appendMessage, updateLastMessage, loadTranscript,
+  setAgents, upsertAgent, appendMessage, updateLastMessage, finalizeLastMessage, loadTranscript,
   setWorkspacePath, toggleTerminal, openTerminalAt, toggleCodeChat, setHelpContext, setTheme, setActiveModel, setActiveModelT1, setActiveModelChat,
   setSessions, setActiveSessionId, removeSession, toggleSessionSidebar, setSessionSidebarCollapsed,
   openTab, closeTab, setActiveTab, setTabDirty,

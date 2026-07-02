@@ -7,7 +7,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { MermaidBlock } from './MermaidBlock.js';
 import { SessionRating } from './SessionRating.js';
-import { useAppDispatch, useAppSelector, appendMessage, updateLastMessage, setSessionId, loadTranscript } from '../store/index.js';
+import { useAppDispatch, useAppSelector, appendMessage, updateLastMessage, finalizeLastMessage, setSessionId, loadTranscript } from '../store/index.js';
 import { fetchSessionTranscript } from '../utils/sessionLoad.js';
 
 // Reasoning-tuned models (Anthropic thinking_delta, OpenAI reasoning_content,
@@ -191,8 +191,8 @@ export function ChatPanel({ socket, compact }: Props) {
     // Streaming tokens are appended by the global handler in App.tsx (so they
     // also update when you're on another view). Here we only react to
     // completion to stop the cursor and offer rating.
-    const onComplete = () => {
-      dispatch(updateLastMessage({ content: '', streaming: false }));
+    const onComplete = (data?: any) => {
+      dispatch(finalizeLastMessage({ finalOutput: data?.result?.output }));
       setStreaming(false);
       setSessionDone(true);
     };
