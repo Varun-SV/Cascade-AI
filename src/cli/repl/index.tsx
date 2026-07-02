@@ -521,6 +521,14 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         }
         return `Restored ${snapshots.length} files to their initial session state.`;
       },
+      onSteer: (args: string[]) => {
+        const text = args.join(' ').trim();
+        if (!text) return 'Usage: /steer <correction for the active workers>';
+        const cascade = cascadeRef.current;
+        if (!cascade) return 'No active Cascade instance.';
+        cascade.injectGuidance(text);
+        return 'Guidance queued — active workers apply it on their next step. (No task running? It applies to the next run\'s workers.)';
+      },
       onBranch: async () => {
         const store = storeRef.current;
         if (!store) return;

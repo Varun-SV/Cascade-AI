@@ -38,17 +38,18 @@ function simulateCall(
   inputTokens: number,
   outputTokens: number,
   costUsd: number,
+  featureTag?: string,
 ): void {
   // Reach into recordStats directly via casting
   const r = router as unknown as {
-    recordStats: (tier: string, model: { provider: string }, usage: { inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number }) => void;
+    recordStats: (tier: string, model: { provider: string }, usage: { inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number }, featureTag?: string) => void;
   };
   r.recordStats(tier, { provider: 'anthropic' }, {
     inputTokens,
     outputTokens,
     totalTokens: inputTokens + outputTokens,
     estimatedCostUsd: costUsd,
-  });
+  }, featureTag);
 }
 
 // ── Tests ──────────────────────────────────────
@@ -152,5 +153,23 @@ describe('RouterStats — per-tier cost tracking', () => {
 
     const snap2 = router.getStats();
     expect(snap2.costByTier['T2']).toBeCloseTo(0.0015, 8); // internal state unchanged
+  });
+
+  it('accumulates cost per feature tag across tiers, untagged calls excluded', () => {
+    simulateCall(router, 'T3', 500, 200, 0.0003, 'Auth: JWT support');
+    simulateCall(router, 'T3', 400, 150, 0.0002, 'Auth: JWT support');
+    simulateCall(router, 'T2', 300, 100, 0.0010, 'UI refactor');
+    simulateCall(router, 'T1', 1000, 400, 0.0200); // untagged (planning)
+
+    const stats = router.getStats();
+    expect(stats.costByFeature['Auth: JWT support']).toBeCloseTo(0.0005, 8);
+    expect(stats.costByFeature['UI refactor']).toBeCloseTo(0.0010, 8);
+    expect(Object.keys(stats.costByFeature)).toHaveLength(2);
+  });
+
+  it('resetStats clears per-feature data too', () => {
+    simulateCall(router, 'T3', 500, 200, 0.0003, 'Some feature');
+    router.resetStats();
+    expect(router.getStats().costByFeature).toEqual({});
   });
 });

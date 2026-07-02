@@ -418,7 +418,9 @@ In 3-5 terse bullets, flag the most important RISKS, GAPS, or over-/under-decomp
   }
 
   private async decomposeTask(prompt: string, systemContext?: string): Promise<TaskPlan> {
-    const db = this.router.getWorldStateDB();
+    // Optional call: routers constructed without a WorldStateDB (tests, SDK
+    // embedders) simply skip the world-state context instead of crashing.
+    const db = this.router.getWorldStateDB?.();
     const worldStateContext = db ? `\n\nPROJECT WORLD STATE (Current architecture and recent changes):\n${db.getFormattedState()}` : '';
     const contextSection = systemContext ? `\nProject context:\n${systemContext}` : '';
     const decompositionPrompt = `Analyze this task and create an execution plan.${contextSection}${worldStateContext}

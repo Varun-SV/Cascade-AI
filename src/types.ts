@@ -78,6 +78,14 @@ export interface GenerateOptions {
    * concurrent workers rely on. Ignored when a vision model is required.
    */
   model?: ModelInfo;
+  /** Name/tag of the current sub-feature (e.g. T2 section title) for cost accounting. */
+  featureTag?: string;
+  /**
+   * Privacy-tier constraint: when set, the call must resolve to a LOCAL model
+   * (never a cloud provider). The router errors if no local model is available
+   * rather than silently falling back to cloud.
+   */
+  forceLocal?: boolean;
 }
 
 export interface GenerateResult {
@@ -276,6 +284,8 @@ export interface T3ResultPayload {
   issues: string[];
   peerSyncsUsed: string[];
   correctionAttempts: number;
+  /** True when the subtask matched a privacy.paths local-only pattern — its raw output must be withheld from upper tiers. */
+  localOnly?: boolean;
   /** Sibling workers this T3 asked its T2 to spawn (T3→T2 reinforcement request). */
   reinforcements?: T2ToT3Assignment[];
 }
@@ -491,6 +501,13 @@ export interface CascadeConfig {
   t3Execution?: 'auto' | 'parallel' | 'sequential';
   /** T3→T2 reinforcement: let a worker ask its manager to spawn sibling workers. Off by default. */
   reinforcements?: { enabled?: boolean; maxPerSection?: number };
+  /**
+   * Per-path privacy tiers. Paths matching a `local-only` pattern force the
+   * subtask onto LOCAL models and withhold raw output from the tiers above
+   * (T1/T2 see only success/fail). Patterns use .gitignore syntax, like
+   * .cascadeignore.
+   */
+  privacy?: { paths?: Array<{ pattern: string; policy: 'local-only' }> };
   /** Render the TUI in the alternate screen buffer (vim-style). Default: false. */
   altScreen?: boolean;
 }
@@ -802,6 +819,8 @@ export interface CascadeRunResult {
   costByTier?: Record<string, number>;
   /** Per-tier total token counts. Available when the router tracked stats. */
   tokensByTier?: Record<string, number>;
+  /** Per-feature (T2 section) cost breakdown (USD) — "what did this feature cost?". */
+  costByFeature?: Record<string, number>;
   /** Per-tier cost as a percentage of total spend (0–100). */
   costPercentByTier?: Record<string, number>;
 }

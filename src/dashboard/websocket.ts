@@ -147,6 +147,16 @@ export class DashboardSocket {
     });
   }
 
+  onSessionSteer(callback: (message: string, sessionId?: string, nodeId?: string) => void): void {
+    this.io.on('connection', (socket) => {
+      socket.on('session:steer', (payload: { message?: string; sessionId?: string; nodeId?: string }) => {
+        if (typeof payload?.message === 'string' && payload.message.trim()) {
+          callback(payload.message.trim(), payload.sessionId, payload.nodeId);
+        }
+      });
+    });
+  }
+
   onConfigUpdate(callback: (data: {
     keys?: Record<string, string>;
     models?: Record<string, string>;

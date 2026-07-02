@@ -124,6 +124,46 @@ describe('T3Worker', () => {
     expect(execute).toHaveBeenCalledOnce();
   });
 
+  it('runs one independent T2-critic round: rejected output is revised, then accepted', async () => {
+    const criticTiers: string[] = [];
+    let verdicts = 0;
+
+    const generate = vi.fn(async (tier: string, options: { messages: Array<{ content: unknown }> }) => {
+      const latest = options.messages[options.messages.length - 1];
+      const content = typeof latest?.content === 'string' ? latest.content : '';
+
+      if (content.startsWith('Self-test this output')) {
+        return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+      }
+      if (content.includes('independent critic')) {
+        criticTiers.push(tier);
+        verdicts += 1;
+        // First (and only, maxRounds=1) verdict: reject so the revision path runs.
+        return makeResult('{"sufficient": false, "notes": "misses the conclusion"}');
+      }
+      if (content.startsWith('Improve the following')) {
+        return makeResult('Improved output');
+      }
+      return makeResult('Draft output');
+    });
+
+    const router = {
+      generate,
+      getModelForTier: () => undefined,
+      getReflectionConfig: () => ({ enabled: true, maxRounds: 1 }),
+    } as unknown as CascadeRouter;
+
+    const worker = new T3Worker(router, makeToolRegistry(), 't2-parent');
+    const result = await worker.execute(makeAssignment(), 'task-critic');
+
+    expect(result.status).toBe('COMPLETED');
+    expect(result.output).toBe('Improved output');
+    expect(verdicts).toBe(1);
+    // The critic must run on the T2 tier — a different model than the T3 that
+    // produced the output — and must NOT spawn a manager hierarchy.
+    expect(criticTiers).toEqual(['T2']);
+  });
+
   it('delivers peer sync messages through the shared PeerBus', async () => {
     const router = makeRouter(vi.fn());
     const toolRegistry = makeToolRegistry();

@@ -507,8 +507,19 @@ Return ONLY the JSON array.`;
         const assignment = sanitizedAssignments.find((a) => a.subtaskId === id)!;
         const worker = workerMap.get(id)!;
         const result = await worker.execute(assignment, taskId, waveSignal);
-        if (result.output) result.output = RedactionLayer.redact(result.output);
-        if (result.issues) result.issues = result.issues.map(i => RedactionLayer.redact(i));
+        // Per-path privacy tier: a local-only subtask's raw output never
+        // travels above T3 — the tiers above see only a success/fail signal.
+        if (result.localOnly) {
+          result.output = `[local-only path — output withheld by privacy policy; status: ${result.status}; ` +
+            `checks passed: ${result.testResults.passed.length}/${result.testResults.checksRun.length || 0}]`;
+        } else {
+          // Redact secrets/PII at the T3→T2 boundary so only logic travels up
+          // the chain. output may be a structured object — redact strings only.
+          if (typeof result.output === 'string' && result.output) {
+            result.output = RedactionLayer.redact(result.output);
+          }
+        }
+        if (result.issues) result.issues = result.issues.map((i) => RedactionLayer.redact(i));
         resultMap.set(id, result);
         return result;
       };

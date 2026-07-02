@@ -15,9 +15,23 @@ export function CockpitView({ socket }: { socket: Socket | null }) {
   const dispatch = useAppDispatch();
   const [prompt, setPrompt] = useState('');
   const [focused, setFocused] = useState(false);
+  const [steerText, setSteerText] = useState('');
+  const [steerAck, setSteerAck] = useState(false);
   const agents = useAppSelector((s) => s.app.agents);
   const messages = useAppSelector((s) => s.app.messages);
+  const { activeSessionId, sessionId } = useAppSelector((s) => s.app);
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
+  const runActive = agents.some((a) => a.status === 'ACTIVE');
+
+  const steer = () => {
+    if (!steerText.trim() || !socket) return;
+    // Server routes this into the running Cascade's guidance queue; workers
+    // apply it at their next agent-loop step ("hijack a stuck worker").
+    socket.emit('session:steer', { message: steerText.trim(), sessionId: activeSessionId ?? sessionId ?? undefined });
+    setSteerText('');
+    setSteerAck(true);
+    setTimeout(() => setSteerAck(false), 3000);
+  };
 
   const submit = () => {
     if (!prompt.trim() || !socket) return;
@@ -109,6 +123,29 @@ export function CockpitView({ socket }: { socket: Socket | null }) {
           <AgentGraph agents={agents} />
         )}
       </div>
+
+      {/* Live steering: visible while a run is active — inject a correction
+          into the running workers without stopping the task. */}
+      {runActive && (
+        <div style={{
+          padding: '6px 12px', borderTop: '1px solid var(--border)',
+          background: 'var(--bg-base)', display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0,
+        }}>
+          <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--warn)', flexShrink: 0 }}>Steer</span>
+          <input
+            value={steerText}
+            onChange={(e) => setSteerText(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); steer(); } }}
+            placeholder="Correct the running workers…  (Enter to inject)"
+            style={{
+              flex: 1, background: 'var(--bg-overlay)', border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-sm)', color: 'var(--text)', padding: '4px 9px',
+              fontSize: 11.5, outline: 'none',
+            }}
+          />
+          {steerAck && <span style={{ fontSize: 10.5, color: 'var(--success)', flexShrink: 0 }}>✔ queued</span>}
+        </div>
+      )}
 
       {/* Task input bar */}
       <div className="task-input-bar" style={{

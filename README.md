@@ -764,8 +764,19 @@ web/
 | ✓ | T3 text-tool fallback (Ollama support) |
 | ✓ | Peer communication visualization in dashboard |
 | ✓ | Conversational fast-path (bypass T1 for simple prompts) |
-| 🔜 | VSCode extension (`cascade-vscode`) |
-| 🔜 | JetBrains extension (`cascade-jetbrains`) |
+| ✓ | Redaction layer — secrets/PII stripped from T3 output before it travels upstream |
+| ✓ | Per-path privacy tiers (`privacy.paths` — force local models + withhold output for sensitive folders) |
+| ✓ | Tamper-evident audit log (encrypted + hash-chained; `/audit`, `GET /api/audit/verify`) |
+| ✓ | Independent T2-critic reflection loop (`reflection.enabled`) |
+| ✓ | Live steering — `/steer` / desktop Steer bar injects corrections into running workers |
+| ✓ | Session rollback button (desktop) + `/rollback` (CLI) |
+| ✓ | Cost-per-feature attribution (`costByFeature` in results, CLI cost panel, desktop chat) |
+| ✓ | Project world state (encrypted local log feeding T1 planning) |
+| 🔜 | VSCode extension (`cascade-vscode`) — see [docs/ROADMAP.md](docs/ROADMAP.md) |
+| 🔜 | JetBrains extension (`cascade-jetbrains`) — see [docs/ROADMAP.md](docs/ROADMAP.md) |
+| 🔜 | WASM/isolate sandboxing for tool execution — see [docs/ROADMAP.md](docs/ROADMAP.md) |
+| 🔜 | Project knowledge graph (world-state v2) — see [docs/ROADMAP.md](docs/ROADMAP.md) |
+| 🔜 | Multi-plan branching (T1 proposes N plans) — see [docs/ROADMAP.md](docs/ROADMAP.md) |
 | 🔜 | Cascade Cloud (hosted dashboard) |
 | 🔜 | Plugin marketplace |
 | 🔜 | Voice input (STT) |

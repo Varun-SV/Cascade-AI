@@ -114,7 +114,7 @@ export class WorldStateDB {
     const entries = this.getAllEntries();
     if (entries.length === 0) return 'World State is currently empty.';
     
-    return entries.map((e, idx) => `[${e.timestamp}] Step ${idx + 1} (${e.workerId}): ${e.summary}`).join('\\n');
+    return entries.map((e, idx) => `[${e.timestamp}] Step ${idx + 1} (${e.workerId}): ${e.summary}`).join('\n');
   }
 
   private dumpDebugIfNeeded(): void {

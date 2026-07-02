@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { Socket } from 'socket.io-client';
-import { Trash2, MessageSquare, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { Trash2, MessageSquare, PanelLeftClose, PanelLeftOpen, RotateCcw } from 'lucide-react';
 import {
   useAppDispatch, useAppSelector,
   setActiveSessionId, removeSession, loadTranscript,
@@ -8,6 +8,7 @@ import {
   type RuntimeSession,
 } from '../store/index.js';
 import { fetchSessionTranscript } from '../utils/sessionLoad.js';
+import { PromptDialog } from '../components/PromptDialog.js';
 
 function relativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
@@ -20,7 +21,7 @@ function relativeTime(iso: string): string {
 }
 
 function SessionRow({
-  session, active, authToken, backendPort, socket, onSelect, onDelete,
+  session, active, authToken, backendPort, socket, onSelect, onDelete, onRollback,
 }: {
   session: RuntimeSession;
   active: boolean;
@@ -29,6 +30,7 @@ function SessionRow({
   socket: Socket | null;
   onSelect: () => void;
   onDelete: () => void;
+  onRollback: () => void;
 }) {
   const [hovered, setHovered] = useState(false);
   const statusColor = session.status === 'ACTIVE' ? 'var(--success)' : 'var(--text-dim)';
@@ -72,20 +74,36 @@ function SessionRow({
           {session.title || 'Untitled session'}
         </span>
         {hovered && (
-          <button
-            onClick={handleDelete}
-            title="Delete session"
-            style={{
-              background: 'none', border: 'none', cursor: 'pointer',
-              color: 'var(--text-dim)', padding: 2, borderRadius: 3,
-              display: 'flex', alignItems: 'center',
-              transition: 'color var(--dur) var(--ease)',
-            }}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--danger)'; }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text-dim)'; }}
-          >
-            <Trash2 size={10} />
-          </button>
+          <>
+            <button
+              onClick={(e) => { e.stopPropagation(); onRollback(); }}
+              title="Roll back file changes from this session"
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer',
+                color: 'var(--text-dim)', padding: 2, borderRadius: 3,
+                display: 'flex', alignItems: 'center',
+                transition: 'color var(--dur) var(--ease)',
+              }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--warn)'; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text-dim)'; }}
+            >
+              <RotateCcw size={10} />
+            </button>
+            <button
+              onClick={handleDelete}
+              title="Delete session"
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer',
+                color: 'var(--text-dim)', padding: 2, borderRadius: 3,
+                display: 'flex', alignItems: 'center',
+                transition: 'color var(--dur) var(--ease)',
+              }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--danger)'; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text-dim)'; }}
+            >
+              <Trash2 size={10} />
+            </button>
+          </>
         )}
         {!hovered && (
           <span style={{ fontSize: 9, color: 'var(--text-dim)', flexShrink: 0 }}>
@@ -127,6 +145,25 @@ export function SessionSidebar({ socket }: { socket: Socket | null }) {
 
   const handleDelete = (sessionId: string) => {
     dispatch(removeSession(sessionId));
+  };
+
+  // Rollback: confirm first, then POST; the result note shows briefly below the list.
+  const [rollbackTarget, setRollbackTarget] = useState<RuntimeSession | null>(null);
+  const [rollbackNote, setRollbackNote] = useState('');
+
+  const doRollback = async (session: RuntimeSession) => {
+    setRollbackTarget(null);
+    try {
+      const res = await fetch(`http://localhost:${backendPort}/api/sessions/${session.sessionId}/rollback`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      const body = (await res.json()) as { restored?: number; message?: string };
+      setRollbackNote(body.message ?? `Restored ${body.restored ?? 0} file${body.restored === 1 ? '' : 's'}.`);
+    } catch {
+      setRollbackNote('Rollback failed — backend unavailable.');
+    }
+    setTimeout(() => setRollbackNote(''), 5000);
   };
 
   const sorted = [...sessions].sort(
@@ -217,10 +254,27 @@ export function SessionSidebar({ socket }: { socket: Socket | null }) {
               socket={socket}
               onSelect={() => handleSelect(s)}
               onDelete={() => handleDelete(s.sessionId)}
+              onRollback={() => setRollbackTarget(s)}
             />
           ))
         )}
       </div>
+
+      {rollbackNote && (
+        <div style={{ padding: '6px 12px', borderTop: '1px solid var(--border)', fontSize: 10.5, color: 'var(--text-muted)' }}>
+          {rollbackNote}
+        </div>
+      )}
+
+      {rollbackTarget && (
+        <PromptDialog
+          title={`Roll back file changes from "${rollbackTarget.title || 'Untitled session'}"? Files return to their pre-run state.`}
+          confirmOnly
+          confirmLabel="Roll back"
+          onSubmit={() => { void doRollback(rollbackTarget); }}
+          onCancel={() => setRollbackTarget(null)}
+        />
+      )}
     </aside>
   );
 }

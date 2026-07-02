@@ -35,17 +35,8 @@ import { computeDelegationSavings, type DelegationSavings } from './savings.js';
 import { LiveDataProvider } from './live-data.js';
 import { setBenchmarkLiveProvider } from './benchmarks.js';
 import type { WorldStateDB } from '../knowledge/world-state.js';
-
-export interface GenerateOptions {
-  prompt: string;
-  systemPrompt?: string;
-  model?: ModelInfo; // overrides tier default
-  maxTokens?: number;
-  temperature?: number;
-  signal?: AbortSignal;
-  /** Name/tag of the current sub-feature (e.g. T2 section name) for cost accounting. */
-  featureTag?: string;
-}
+import type { PrivacyPaths } from '../privacy/paths.js';
+import type { GuidanceQueue } from '../steering/guidance.js';
 
 export interface RouterStats {
   totalTokens: number;
@@ -100,6 +91,8 @@ export class CascadeRouter extends EventEmitter {
   private localQueue!: LocalRequestQueue;
   private taskAnalyzer?: TaskAnalyzer;
   private worldStateDB?: WorldStateDB;
+  private privacyPaths?: PrivacyPaths;
+  private guidanceQueue?: GuidanceQueue;
   private liveData?: LiveDataProvider;
   /** Snapshot of configured/default tier models, taken before Cascade Auto overrides them. */
   private originalTierModels?: Map<TierRole, ModelInfo>;
@@ -310,9 +303,24 @@ export class CascadeRouter extends EventEmitter {
     if (options.model && !requireVision) {
       this.ensureProvider(options.model, this.config.providers);
     }
-    const model = requireVision
+    let model = requireVision
       ? this.selector.selectVisionModel()
       : (options.model ?? this.tierModels.get(tier));
+
+    // Privacy tier: a local-only subtask must NEVER reach a cloud provider.
+    // Swap to a private model when the resolved one isn't; hard-error rather
+    // than silently falling back to cloud when no private model exists.
+    if (options.forceLocal && model && !this.isPrivateModel(model)) {
+      const localModel = this.selector.getAllAvailableModels().find((m) => this.isPrivateModel(m));
+      if (!localModel) {
+        throw new Error(
+          'privacy.paths: this subtask touches a local-only path but no LOCAL model is available. ' +
+          'Configure Ollama or an OpenAI-compatible endpoint on a loopback/private host, or remove the privacy policy.',
+        );
+      }
+      this.ensureProvider(localModel, this.config.providers);
+      model = localModel;
+    }
 
     if (!model) throw new Error(`No model available for tier ${tier}`);
 
@@ -552,6 +560,43 @@ export class CascadeRouter extends EventEmitter {
     return this.worldStateDB;
   }
 
+  setPrivacyPaths(paths: PrivacyPaths | undefined): void {
+    this.privacyPaths = paths;
+  }
+
+  getPrivacyPaths(): PrivacyPaths | undefined {
+    return this.privacyPaths;
+  }
+
+  setGuidanceQueue(queue: GuidanceQueue | undefined): void {
+    this.guidanceQueue = queue;
+  }
+
+  getGuidanceQueue(): GuidanceQueue | undefined {
+    return this.guidanceQueue;
+  }
+
+  /**
+   * "Private" = inference never leaves the user's machine/network: Ollama
+   * models (isLocal), or an OpenAI-compatible endpoint (e.g. llama.cpp, vLLM,
+   * LM Studio) whose configured host is loopback or a private range. A cloud
+   * OpenAI-compatible endpoint (public host) does NOT qualify.
+   */
+  private isPrivateModel(model: ModelInfo): boolean {
+    if (model.isLocal) return true;
+    if (model.provider !== 'openai-compatible') return false;
+    const baseUrl = this.config?.providers?.find((p) => p.type === 'openai-compatible')?.baseUrl;
+    if (!baseUrl) return false;
+    try {
+      const host = new URL(baseUrl).hostname.toLowerCase();
+      return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]'
+        || /^10\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+        || host.endsWith('.local');
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Cascade Auto per-subtask routing: pick the benchmark-best model for a
    * specific subtask's text, scoped to the tier's eligible candidates. Returns
@@ -578,6 +623,7 @@ export class CascadeRouter extends EventEmitter {
       tokensByTier: { ...this.stats.tokensByTier },
       inputTokensByTier: { ...this.stats.inputTokensByTier },
       outputTokensByTier: { ...this.stats.outputTokensByTier },
+      costByFeature: { ...this.stats.costByFeature },
     };
   }
 
@@ -632,6 +678,7 @@ export class CascadeRouter extends EventEmitter {
       tokensByTier: {},
       inputTokensByTier: {},
       outputTokensByTier: {},
+      costByFeature: {},
     };
     this.sessionCostUsd = 0;
     this.budgetState = 'ok';
