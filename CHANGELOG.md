@@ -5,6 +5,25 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1] - 2026-07-02
+
+### Fixed
+- **v0.13.0 now compiles and its tests pass.** The architecture drop landed with 9 TypeScript errors (a duplicate `GenerateOptions` declared in the router while also imported from types; `featureTag` missing from the real `GenerateOptions`; `costByFeature` missing from `getStats()`/`resetStats()`; an invalid cast in the model-performance tracker; a `string | Record` passed to `RedactionLayer.redact`) and 4 failing tier tests (tiers called `router.getWorldStateDB()` unconditionally, crashing any router built without one — now optional calls). Also fixed `WorldStateDB.getFormattedState()` joining entries with a literal `\n` instead of newlines.
+- **The T2-critic no longer spawns an entire manager hierarchy per critique.** Reflection previously created a full `T2Manager` (which decomposed the critique into its own T3 subtasks — costing more than the work under review), and those critic-spawned workers hit the reflection step themselves: unbounded recursion whenever `reflection.enabled` was on. The critic is now a single independent call routed to the T2-tier model — a different model than the worker it grades — keeping the verdict→revise loop, capped by `maxRounds`.
+
+### Added
+- **Per-path privacy tiers.** `privacy.paths` config (gitignore syntax): a subtask touching a `local-only` pattern is forced onto private models — Ollama, or an OpenAI-compatible endpoint on a loopback/private host — with a hard error rather than a silent cloud fallback, and its raw output is withheld from T2/T1 (they see only a success/fail status line).
+- **Tamper-evident audit log.** The encrypted audit DB now hash-chains every entry to its predecessor; any edited, deleted, or reordered row breaks the chain. Verify with the new `/audit` CLI command or `GET /api/audit/verify`.
+- **Live steering.** `/steer <text>` (CLI), a Steer bar in the desktop Cockpit during active runs, and `POST /api/inject` (previously a dead-end broadcast nothing consumed) now deliver corrections into running T3 workers, applied at their next agent-loop step and recorded in the audit log.
+- **Session rollback in the desktop.** A rollback button on each session row (with confirmation) restores every file the session's runs touched to its pre-run snapshot via the new `POST /api/sessions/:id/rollback` — desktop parity with the CLI's `/rollback`.
+- **Cost-per-feature surfaced end-to-end.** `CascadeRunResult.costByFeature` is now populated and shown in the desktop chat after each run (top features by spend), alongside the CLI cost panel wiring from v0.13.0.
+- **Roadmap.** `docs/ROADMAP.md` captures the deferred designs: WASM/isolate sandboxing, knowledge-graph world state, IDE extensions, multi-plan branching.
+
+## [0.13.0] - 2026-07-02
+
+### Added
+- **v0.13 architecture drop** (merged via #103): encrypted `AuditLogger` and `WorldStateDB` (`.cascade/audit_log.db`, `.cascade/world_state.db`), `RedactionLayer` applied at the T3→T2 boundary, feature-tag cost tracking in the router + CLI cost panel, T1 planning fed by the project world state, and a desktop Stop button (`session:halt`). Stabilized in 0.13.1.
+
 ## [0.12.23] - 2026-07-02
 
 ### Fixed

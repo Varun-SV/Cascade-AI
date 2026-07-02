@@ -42,13 +42,15 @@ export class ModelPerformanceTracker {
     this.loaded = true;
     try {
       const raw = await fs.readFile(this.statsFile, 'utf-8');
-      const parsed = JSON.parse(raw) as { models?: Record<string, ModelStat>; features?: Record<string, FeatureStat> };
+      const parsed = JSON.parse(raw) as Record<string, unknown> & { models?: Record<string, ModelStat>; features?: Record<string, FeatureStat> };
       if (parsed.models) {
         for (const [key, stat] of Object.entries(parsed.models)) this.stats.set(key, stat);
       } else {
-        // Fallback for old format
+        // Fallback for the old flat format: { "modelId:taskType": ModelStat }.
         for (const [key, stat] of Object.entries(parsed)) {
-          if (typeof stat.successCount === 'number') this.stats.set(key, stat as ModelStat);
+          if (stat && typeof stat === 'object' && typeof (stat as ModelStat).successCount === 'number') {
+            this.stats.set(key, stat as ModelStat);
+          }
         }
       }
       if (parsed.features) {

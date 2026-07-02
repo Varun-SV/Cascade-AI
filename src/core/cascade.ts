@@ -35,6 +35,8 @@ import { benchmarkScore01 } from './router/benchmarks.js';
 import { ToolCreator } from '../tools/tool-creator.js';
 import { CascadeCancelledError } from '../utils/retry.js';
 import { WorldStateDB } from './knowledge/world-state.js';
+import { PrivacyPaths } from './privacy/paths.js';
+import { GuidanceQueue } from './steering/guidance.js';
 
 /** One entry in the per-run orchestration decision trail (see /why). */
 export interface DecisionLogEntry {
@@ -62,6 +64,7 @@ export class Cascade extends EventEmitter {
   private toolCreator?: ToolCreator;
   private worldStateDB?: WorldStateDB;
   private encryptedAuditLogger?: EncryptedAuditLogger;
+  private guidanceQueue!: GuidanceQueue;
   private workspacePath: string;
 
   constructor(config: CascadeConfig, workspacePath: string, store?: MemoryStore) {
@@ -96,6 +99,27 @@ export class Cascade extends EventEmitter {
 
     // Phase 3: Privacy & Governance - AuditLogger
     this.encryptedAuditLogger = new EncryptedAuditLogger(this.workspacePath, this.config.workspace?.debugWorldState ?? false);
+
+    // Per-path privacy tiers: subtasks touching local-only paths are forced
+    // onto private models and their raw output is withheld from upper tiers.
+    const privacyPolicies = this.config.privacy?.paths ?? [];
+    if (privacyPolicies.length) this.router.setPrivacyPaths(new PrivacyPaths(privacyPolicies));
+
+    // Live steering: user guidance injected mid-run reaches T3 agent loops
+    // through this queue (carried on the router like the world-state DB).
+    this.guidanceQueue = new GuidanceQueue();
+    this.router.setGuidanceQueue(this.guidanceQueue);
+  }
+
+  /**
+   * Live intervention: inject a user correction into the running hierarchy.
+   * Every active T3 worker (or only the one matching `nodeId`) picks it up at
+   * the top of its next agent-loop iteration as a USER INTERVENTION message.
+   */
+  injectGuidance(text: string, nodeId?: string): void {
+    const entry = this.guidanceQueue.push(text, nodeId);
+    this.encryptedAuditLogger?.logEvent('user_guidance', nodeId ?? '*', { text });
+    this.emit('guidance:injected', entry);
   }
 
   private initOptionalFeatures(): void {
@@ -955,6 +979,7 @@ ${prompt}`
       durationMs,
       costByTier: stats.costByTier,
       tokensByTier: stats.tokensByTier,
+      costByFeature: stats.costByFeature,
       costPercentByTier: this.router.getTierCostPercentages(),
     };
   }

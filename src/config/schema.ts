@@ -271,6 +271,18 @@ export const CascadeConfigSchema = z.object({
    */
   t3Execution: z.enum(['auto', 'parallel', 'sequential']).default('auto'),
   /**
+   * Per-path privacy tiers. A subtask touching a `local-only` path is forced
+   * onto LOCAL models (never cloud) and its raw output is withheld from the
+   * tiers above. Patterns use .gitignore syntax, like .cascadeignore.
+   */
+  privacy: z
+    .object({
+      paths: z
+        .array(z.object({ pattern: z.string().min(1), policy: z.enum(['local-only']) }))
+        .default([]),
+    })
+    .optional(),
+  /**
    * T3→T2 reinforcement: when enabled, a worker that discovers its subtask should
    * fan out can call the `request_workers` tool to have its T2 manager spawn
    * sibling workers for the new pieces (no 4th tier; bounded). Off by default.

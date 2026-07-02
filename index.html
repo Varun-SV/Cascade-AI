@@ -2051,6 +2051,40 @@
             interruptions, no orphaned agents. A <code>run:cancelled</code> event fires with partial output so you can
             still surface what was produced. Prevents runaway token spend on long tasks.</p>
         </div>
+        <div class="feature-cell">
+          <span class="feature-new">New · v0.13</span>
+          <div class="feature-icon violet">🛡️</div>
+          <h3>Redaction Layer &amp; Per-Path Privacy Tiers</h3>
+          <p>Secrets, keys, emails, and IPs are stripped from worker output before it travels up the chain — only the
+            logic reaches T2/T1. Declare <code>privacy.paths</code> policies (gitignore syntax) to force subtasks
+            touching sensitive folders onto <em>local</em> models and withhold their raw output entirely: upper tiers
+            see only success/fail.</p>
+        </div>
+        <div class="feature-cell">
+          <span class="feature-new">New · v0.13</span>
+          <div class="feature-icon amber">🔏</div>
+          <h3>Tamper-Evident Audit Log</h3>
+          <p>Every tool call, tier status, and steering intervention lands in an encrypted, hash-chained local audit
+            database. Any edited or deleted entry breaks the chain — verify anytime with <code>/audit</code> or
+            <code>GET /api/audit/verify</code>.</p>
+        </div>
+        <div class="feature-cell">
+          <span class="feature-new">New · v0.13</span>
+          <div class="feature-icon blue">🕹️</div>
+          <h3>Live Steering &amp; One-Click Rollback</h3>
+          <p>Hijack a running worker: <code>/steer</code> (or the desktop Steer bar) injects your correction into its
+            very next step — no restart. Changed your mind after the run? A Rollback button restores every touched
+            file to its pre-run snapshot.</p>
+        </div>
+        <div class="feature-cell">
+          <span class="feature-new">New · v0.13</span>
+          <div class="feature-icon green">📊</div>
+          <h3>Cost-per-Feature Attribution</h3>
+          <p>Beyond per-tier totals, every run now reports <code>costByFeature</code> — "Auth section: $0.45, UI
+            refactor: $1.20" — in the CLI cost panel and the desktop chat, so you can see the ROI of each piece of
+            work, plus an independent T2-critic pass that reviews worker output against its instruction before it
+            reaches you.</p>
+        </div>
       </div>
     </div>
   </section>

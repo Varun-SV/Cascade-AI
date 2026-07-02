@@ -73,6 +73,8 @@ export class T3Worker extends BaseTier {
   private toolRegistry: ToolRegistry;
   private context: ContextManager;
   private assignment?: T2ToT3Assignment;
+  /** True when this subtask matched a privacy.paths local-only pattern. */
+  private localOnlyMatch = false;
   private peerSyncBuffer: Array<{ fromId: string; content: unknown; timestamp: string }> = [];
   private store?: MemoryStore;
   private audit?: AuditLogger;
@@ -140,6 +142,15 @@ export class T3Worker extends BaseTier {
     this.taskId = taskId;
     this.setLabel(assignment.subtaskTitle);
     this.setStatus('ACTIVE');
+
+    // ── Per-path privacy tier ──────────────────
+    // A subtask touching a local-only path runs on private models only and
+    // its raw output is withheld from the tiers above (see privacy/paths.ts).
+    const privacy = this.router.getPrivacyPaths?.();
+    this.localOnlyMatch = !!privacy?.hasPolicies() && privacy.anyLocalOnly(this.extractArtifactPaths(assignment));
+    if (this.localOnlyMatch) {
+      this.log('Privacy: subtask touches a local-only path — forcing a private model; raw output will be withheld upstream.');
+    }
 
     this.tools = this.toolRegistry.getToolDefinitions();
     // T3→T2 reinforcement: surface request_workers to top-level workers only, when enabled.
@@ -300,7 +311,9 @@ export class T3Worker extends BaseTier {
       }
 
       // ── Project World State Update ──
-      const db = this.router.getWorldStateDB();
+      // Optional call: routers without a WorldStateDB (tests, SDK embedders)
+      // skip the write instead of crashing the whole subtask.
+      const db = this.router.getWorldStateDB?.();
       if (db) {
         try {
           db.addEntry(this.id, `Completed: ${assignment.subtaskTitle}. Output length: ${output.length} chars.`);
@@ -408,6 +421,17 @@ export class T3Worker extends BaseTier {
       // ── Cancellation checkpoint (before every LLM call) ──────────────
       this.throwIfCancelled();
 
+      // ── Live steering: pick up user interventions before the next call ──
+      const guidance = this.router.getGuidanceQueue?.()?.drain(this.id) ?? [];
+      for (const g of guidance) {
+        this.log(`User intervention received: ${g.text}`);
+        this.sendStatusUpdate({ progressPct: 50, currentAction: 'Applying user intervention', status: 'IN_PROGRESS' });
+        await this.context.addMessage({
+          role: 'user',
+          content: `USER INTERVENTION (mid-run steering — follow this over prior instructions where they conflict):\n${g.text}`,
+        });
+      }
+
       const options: GenerateOptions = {
         messages: this.context.getMessages(),
         systemPrompt: this.systemPromptOverride + systemPrompt
@@ -418,6 +442,7 @@ export class T3Worker extends BaseTier {
         maxTokens: 4096,
         ...(subtaskModel ? { model: subtaskModel } : {}),
         featureTag: this.assignment?.sectionTitle,
+        ...(this.localOnlyMatch ? { forceLocal: true } : {}),
       };
 
       const result = await this.router.generate(
@@ -876,49 +901,36 @@ ${assignment.expectedOutput}`;
   ): Promise<string> {
     let current = output;
     try {
-      const { T2Manager } = await import('./t2-manager.js');
-      
       for (let round = 0; round < Math.max(1, maxRounds); round++) {
-        const critic = new T2Manager(this.router, this.toolRegistry, this.parentId ?? '');
-        critic.setSystemPromptOverride('You are a T2-Critic peer reviewing a T3 Worker. Use your tools and peer network if needed.');
-        if (this.peerBus) critic.setPeerBus(this.peerBus);
-        if (this.store) critic.setStore(this.store);
+        // Independent critic: one direct call routed to the T2-tier model — a
+        // DIFFERENT model than the T3 that produced the output, so it isn't
+        // grading its own work. Deliberately not a spawned T2Manager: a full
+        // manager decomposes the critique into its own T3 subtasks (costing
+        // more than the work under review), and those critic-spawned workers
+        // would hit this very reflection step again — unbounded recursion.
+        const verdictResult = await this.router.generate('T2', {
+          messages: [{
+            role: 'user',
+            content: `You are an independent critic reviewing another worker's output against its assignment.
 
-        const prompt = `Review this T3 Worker's output against the goal. 
 Goal: ${assignment.expectedOutput}
 Subtask: ${assignment.description}
 Current Output:
 ${current}
 
-Is this output sufficient and correct? Respond with a JSON object:
-{"sufficient": true|false, "notes": "what is wrong or missing if false"}`;
-
-        // Create a dummy section assignment for the T2-Critic to execute
-        const reviewSection = {
-          sectionId: `critic-${this.taskId}-${round}`,
-          sectionTitle: `Reviewing: ${assignment.subtaskTitle}`,
-          description: prompt,
-          expectedOutput: 'A JSON verdict',
-          constraints: [],
-          t3Subtasks: [{
-            subtaskId: `t3-critic-${this.taskId}-${round}`,
-            subtaskTitle: 'Critique Output',
-            description: prompt,
-            expectedOutput: 'JSON verdict',
-            constraints: [],
-            peerT3Ids: [],
-            executionMode: 'parallel' as const,
+Is this output sufficient and correct? Respond with ONLY a JSON object:
+{"sufficient": true|false, "notes": "what is wrong or missing if false"}`,
           }],
-          executionMode: 'parallel' as const,
-          peerT2Ids: []
-        };
+          systemPrompt: 'You are a T2-Critic reviewing a T3 Worker\'s output. Judge strictly against the stated goal.',
+          maxTokens: 400,
+          signal: this.signal,
+          featureTag: assignment.sectionTitle,
+          ...(this.localOnlyMatch ? { forceLocal: true } : {}),
+        });
 
-        const result = await critic.execute(reviewSection, this.taskId, this.signal);
-        const critiqueText = result.sectionSummary;
-        
-        const match = critiqueText.match(/\{[\s\S]*\}/);
-        const parsed = match ? JSON.parse(match[0]) : { sufficient: true };
-        
+        const match = /\{[\s\S]*\}/.exec(verdictResult.content);
+        const parsed = (match ? JSON.parse(match[0]) : { sufficient: true }) as { sufficient?: boolean; notes?: string };
+
         if (parsed.sufficient !== false) {
           this.log('T2-Critic approved output.');
           break; // sufficient
@@ -940,6 +952,7 @@ ${current}`,
           systemPrompt: this.systemPromptOverride + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
           maxTokens: 4096,
           featureTag: assignment.sectionTitle,
+          ...(this.localOnlyMatch ? { forceLocal: true } : {}),
         });
         const next = (improved.content ?? '').trim();
         if (!next) break;
@@ -968,11 +981,12 @@ ${output}
 Reply with JSON: { "completeness": "pass"|"fail", "correctness": "pass"|"fail", "compliance": "pass"|"fail", "notes": "string" }`;
 
     const testMessages: ConversationMessage[] = [{ role: 'user', content: prompt }];
-    const testResult = await this.router.generate('T3', { 
-      messages: testMessages, 
+    const testResult = await this.router.generate('T3', {
+      messages: testMessages,
       maxTokens: 500,
       systemPrompt: this.systemPromptOverride + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
       featureTag: assignment.sectionTitle,
+      ...(this.localOnlyMatch ? { forceLocal: true } : {}),
     });
 
     try {
@@ -1090,6 +1104,7 @@ Begin execution now.`;
       issues,
       peerSyncsUsed: this.peerSyncBuffer.map(m => m.fromId),
       correctionAttempts,
+      localOnly: this.localOnlyMatch || undefined,
       reinforcements: this.pendingReinforcements.length ? this.pendingReinforcements : undefined,
     };
   }

@@ -34,6 +34,12 @@ export class DashboardServer {
   private broadcastTimer: NodeJS.Timeout | null = null;
   private activeSessions = new Map<string, import('../core/cascade.js').Cascade>();
   private activeControllers = new Map<string, AbortController>();
+  /**
+   * Run taskIds per chat session — file snapshots are keyed by the run's
+   * taskId (see t3-worker saveSnapshot), so session rollback needs the list
+   * of runs the session performed in this server's lifetime.
+   */
+  private sessionTaskIds = new Map<string, string[]>();
   private port: number;
   private host: string;
   private workspacePath: string;
@@ -138,6 +144,7 @@ export class DashboardServer {
 
       try {
         const result = await cascade.run({ prompt: runPrompt, signal: abortController.signal });
+        this.recordSessionTask(sessionId, result.taskId);
         this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED');
         this.socket.emitToSocket(socketId, 'session:complete', { sessionId, result });
         this.socket.broadcast('cost:update', {
@@ -160,6 +167,13 @@ export class DashboardServer {
 
     this.socket.onSessionHalt((sessionId) => {
       this.activeControllers.get(sessionId)?.abort();
+    });
+
+    this.socket.onSessionSteer((message, sessionId, nodeId) => {
+      const steered = this.steerSessions(message, sessionId, nodeId);
+      if (steered > 0) {
+        this.socket.broadcast('session:message-injected', { sessionId, nodeId, message, steered, requestedAt: new Date().toISOString() });
+      }
     });
   }
 
@@ -321,6 +335,25 @@ export class DashboardServer {
     // Keep latestPrompt — the upsert overwrites every column, and losing it
     // would blank the session's preview line in the sidebar on completion.
     this.persistRuntimeRow(sessionId, title, status, latestPrompt);
+  }
+
+  /**
+   * Route steering text into running Cascade instances. Targets the given
+   * session, or every active session when none is specified (the desktop
+   * usually has exactly one run in flight). Returns how many were reached.
+   */
+  private steerSessions(message: string, sessionId?: string, nodeId?: string): number {
+    const targets = sessionId
+      ? [this.activeSessions.get(sessionId)].filter((c): c is NonNullable<typeof c> => !!c)
+      : [...this.activeSessions.values()];
+    for (const cascade of targets) cascade.injectGuidance(message, nodeId);
+    return targets.length;
+  }
+
+  private recordSessionTask(sessionId: string, taskId: string): void {
+    const list = this.sessionTaskIds.get(sessionId) ?? [];
+    list.push(taskId);
+    this.sessionTaskIds.set(sessionId, list);
   }
 
   private persistRuntimeRow(sessionId: string, title: string, status: 'ACTIVE' | 'COMPLETED' | 'FAILED', latestPrompt?: string): void {
@@ -548,7 +581,11 @@ export class DashboardServer {
         res.status(400).json({ error: 'message is required and must be a string' });
         return;
       }
-      const payload = { sessionId, nodeId, message, requestedAt: new Date().toISOString() };
+      // Deliver the guidance to the live run: the target session's Cascade
+      // (or every active one when no sessionId is given) queues it for its T3
+      // workers' next agent-loop iteration.
+      const steered = this.steerSessions(message, sessionId, nodeId);
+      const payload = { sessionId, nodeId, message, steered, requestedAt: new Date().toISOString() };
       this.socket.broadcast('session:message-injected', payload);
       if (sessionId) this.socket.broadcastToRoom(`session:${sessionId}`, 'session:message-injected', payload);
       res.json({ success: true, ...payload });
@@ -584,6 +621,33 @@ export class DashboardServer {
       this.socket.broadcast('runtime:refresh', { scope: 'workspace' });
       this.socket.broadcast('runtime:refresh', { scope: 'global' });
       res.json({ ok: true });
+    });
+
+    // Restore every file this session's runs touched to its pre-run state
+    // (the same snapshots the CLI's /rollback uses). Snapshots are keyed by
+    // run taskId, tracked per session in sessionTaskIds for this app run.
+    this.app.post('/api/sessions/:id/rollback', auth, mutationLimiter, async (req: Request, res: Response) => {
+      const sessionId = req.params.id as string;
+      const taskIds = this.sessionTaskIds.get(sessionId) ?? [];
+      if (!taskIds.length) {
+        res.json({ ok: true, restored: 0, message: 'No file snapshots recorded for this session in the current app run.' });
+        return;
+      }
+      // Runs in chronological order; the FIRST snapshot seen per file is the
+      // oldest "before" state, which is what a session-wide rollback restores.
+      const toRestore = new Map<string, string>();
+      for (const taskId of taskIds) {
+        for (const { filePath, content } of this.store.getLatestFileSnapshots(taskId)) {
+          if (!toRestore.has(filePath)) toRestore.set(filePath, content);
+        }
+      }
+      const { writeFile } = await import('node:fs/promises');
+      let restored = 0;
+      for (const [filePath, content] of toRestore) {
+        try { await writeFile(filePath, content, 'utf-8'); restored++; }
+        catch (err) { console.warn(`[dashboard] rollback restore failed: ${filePath}`, err); }
+      }
+      res.json({ ok: true, restored });
     });
 
     this.app.delete('/api/sessions', auth, (req: Request, res: Response) => {
@@ -670,6 +734,22 @@ export class DashboardServer {
     });
 
     // ── Audit log ───────────────────────────────
+    // NOTE: registered before /api/audit/:sessionId so "verify" isn't
+    // swallowed by the param route.
+    this.app.get('/api/audit/verify', auth, async (_req, res) => {
+      try {
+        const { AuditLogger } = await import('../core/audit/audit-logger.js');
+        const logger = new AuditLogger(this.workspacePath);
+        try {
+          res.json(logger.verifyChain());
+        } finally {
+          logger.close();
+        }
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
     this.app.get('/api/audit/:sessionId', auth, (req, res) => {
       const log = this.store.getAuditLog(req.params.sessionId as string);
       res.json(log);
@@ -793,6 +873,7 @@ export class DashboardServer {
 
         try {
           const result = await cascade.run({ prompt: runPrompt, identityId: body.identityId });
+          this.recordSessionTask(sessionId, result.taskId);
           this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED');
           this.socket.broadcast('cost:update', {
             sessionId,

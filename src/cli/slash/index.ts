@@ -20,6 +20,8 @@ export interface SlashCommandContext {
   onThemeChange: (theme: string) => void;
   onExport: (format: 'markdown' | 'json') => Promise<void>;
   onRollback: () => Promise<string | void>;
+  /** Injects live steering guidance into the currently running task's workers. */
+  onSteer: (args: string[]) => string | Promise<string>;
   onBranch: () => Promise<void>;
   onModelInfo: () => string | Promise<string>;
   /** Opens the interactive provider → tier → model picker (Claude-Code-style). */
@@ -168,6 +170,35 @@ export class SlashCommandRegistry {
       handler: async (_args, ctx) => {
         const out = await ctx.onRollback();
         return { output: out || 'File changes rolled back.', handled: true };
+      },
+    });
+
+    this.register({
+      command: '/steer',
+      description: 'Steer a running task: /steer <correction for the active workers>',
+      args: ['<guidance>'],
+      handler: async (args, ctx) => {
+        const output = await ctx.onSteer(args);
+        return { output, handled: true };
+      },
+    });
+
+    this.register({
+      command: '/audit',
+      description: 'Verify the tamper-evident audit log (hash chain integrity)',
+      handler: async (_args, ctx) => {
+        // Lazy import: only touch the sqlite-backed audit DB when asked.
+        const { AuditLogger } = await import('../../core/audit/audit-logger.js');
+        const logger = new AuditLogger(ctx.workspacePath);
+        try {
+          const v = logger.verifyChain();
+          const output = v.ok
+            ? `✔ Audit log intact — ${v.entries} entr${v.entries === 1 ? 'y' : 'ies'}, hash chain verified.`
+            : `✘ Audit log FAILED verification at row ${v.firstBadRow} of ${v.entries} — entries at or after that row were modified, removed, or predate the hash chain.`;
+          return { output, handled: true };
+        } finally {
+          logger.close();
+        }
       },
     });
 

@@ -164,6 +164,7 @@ export function ChatPanel({ socket, compact }: Props) {
   const [focused, setFocused] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [sessionDone, setSessionDone] = useState(false);
+  const [costByFeature, setCostByFeature] = useState<Record<string, number> | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // Compact mode (Code view's docked panel): a small picker replaces the full
@@ -191,8 +192,9 @@ export function ChatPanel({ socket, compact }: Props) {
     // Streaming tokens are appended by the global handler in App.tsx (so they
     // also update when you're on another view). Here we only react to
     // completion to stop the cursor and offer rating.
-    const onComplete = (data?: any) => {
+    const onComplete = (data?: { result?: { output?: string; costByFeature?: Record<string, number> } }) => {
       dispatch(finalizeLastMessage({ finalOutput: data?.result?.output }));
+      setCostByFeature(data?.result?.costByFeature ?? null);
       setStreaming(false);
       setSessionDone(true);
     };
@@ -264,6 +266,20 @@ export function ChatPanel({ socket, compact }: Props) {
         ))}
         {sessionDone && messages.length > 0 && (
           <div style={{ padding: '0 4px' }}>
+            {costByFeature && Object.keys(costByFeature).length > 0 && (
+              <div style={{ marginBottom: 8, padding: '7px 10px', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 11 }}>
+                <div style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--text-dim)', marginBottom: 4 }}>Cost by feature</div>
+                {Object.entries(costByFeature)
+                  .sort(([, a], [, b]) => b - a)
+                  .slice(0, 5)
+                  .map(([feature, cost]) => (
+                    <div key={feature} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, color: 'var(--text-muted)' }}>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{feature}</span>
+                      <span style={{ color: 'var(--success)', flexShrink: 0, fontFamily: 'var(--font-mono)' }}>${cost.toFixed(4)}</span>
+                    </div>
+                  ))}
+              </div>
+            )}
             <SessionRating socket={socket} sessionId={sessionId} />
           </div>
         )}
