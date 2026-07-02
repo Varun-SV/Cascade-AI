@@ -20,10 +20,16 @@ interface ModelStat {
   sampleCount: number;
 }
 
+interface FeatureStat {
+  totalCostUsd: number;
+  runCount: number;
+}
+
 const DEFAULT_STATS_FILE = path.join(os.homedir(), '.cascade', 'model-perf.json');
 
 export class ModelPerformanceTracker {
   private stats = new Map<string, ModelStat>();
+  private featureStats = new Map<string, FeatureStat>();
   private readonly statsFile: string;
   private loaded = false;
 
@@ -36,9 +42,17 @@ export class ModelPerformanceTracker {
     this.loaded = true;
     try {
       const raw = await fs.readFile(this.statsFile, 'utf-8');
-      const parsed = JSON.parse(raw) as Record<string, ModelStat>;
-      for (const [key, stat] of Object.entries(parsed)) {
-        this.stats.set(key, stat);
+      const parsed = JSON.parse(raw) as { models?: Record<string, ModelStat>; features?: Record<string, FeatureStat> };
+      if (parsed.models) {
+        for (const [key, stat] of Object.entries(parsed.models)) this.stats.set(key, stat);
+      } else {
+        // Fallback for old format
+        for (const [key, stat] of Object.entries(parsed)) {
+          if (typeof stat.successCount === 'number') this.stats.set(key, stat as ModelStat);
+        }
+      }
+      if (parsed.features) {
+        for (const [key, stat] of Object.entries(parsed.features)) this.featureStats.set(key, stat);
       }
     } catch {
       // File doesn't exist yet — start fresh
@@ -48,9 +62,11 @@ export class ModelPerformanceTracker {
   async save(): Promise<void> {
     try {
       await fs.mkdir(path.dirname(this.statsFile), { recursive: true });
-      const obj: Record<string, ModelStat> = {};
-      for (const [key, stat] of this.stats) obj[key] = stat;
-      await fs.writeFile(this.statsFile, JSON.stringify(obj, null, 2), 'utf-8');
+      const modelsObj: Record<string, ModelStat> = {};
+      const featuresObj: Record<string, FeatureStat> = {};
+      for (const [key, stat] of this.stats) modelsObj[key] = stat;
+      for (const [key, stat] of this.featureStats) featuresObj[key] = stat;
+      await fs.writeFile(this.statsFile, JSON.stringify({ models: modelsObj, features: featuresObj }, null, 2), 'utf-8');
     } catch { /* non-critical */ }
   }
 
@@ -74,6 +90,14 @@ export class ModelPerformanceTracker {
     });
   }
 
+  recordFeatureCost(featureTag: string, costUsd: number): void {
+    const s = this.featureStats.get(featureTag) ?? { totalCostUsd: 0, runCount: 0 };
+    this.featureStats.set(featureTag, {
+      totalCostUsd: s.totalCostUsd + costUsd,
+      runCount: s.runCount + 1,
+    });
+  }
+
   /**
    * Record an explicit user rating (good/bad). Counts as 3 automatic samples
    * so user feedback carries significantly more weight than auto-detected outcomes.
@@ -89,6 +113,10 @@ export class ModelPerformanceTracker {
   /** Returns all stats keyed by "modelId:taskType" — used by `cascade stats`. */
   getAll(): Map<string, ModelStat> {
     return new Map(this.stats);
+  }
+
+  getAllFeatures(): Map<string, FeatureStat> {
+    return new Map(this.featureStats);
   }
 
   /**

@@ -34,6 +34,18 @@ import type { MemoryStore } from '../../memory/store.js';
 import { computeDelegationSavings, type DelegationSavings } from './savings.js';
 import { LiveDataProvider } from './live-data.js';
 import { setBenchmarkLiveProvider } from './benchmarks.js';
+import type { WorldStateDB } from '../knowledge/world-state.js';
+
+export interface GenerateOptions {
+  prompt: string;
+  systemPrompt?: string;
+  model?: ModelInfo; // overrides tier default
+  maxTokens?: number;
+  temperature?: number;
+  signal?: AbortSignal;
+  /** Name/tag of the current sub-feature (e.g. T2 section name) for cost accounting. */
+  featureTag?: string;
+}
 
 export interface RouterStats {
   totalTokens: number;
@@ -47,6 +59,8 @@ export interface RouterStats {
   /** Input and output token counts per tier for granular cost analysis. */
   inputTokensByTier: Record<string, number>;
   outputTokensByTier: Record<string, number>;
+  /** Accumulated cost (USD) broken down by feature tag (e.g. T2 section names). */
+  costByFeature: Record<string, number>;
 }
 
 export class CascadeRouter extends EventEmitter {
@@ -62,6 +76,7 @@ export class CascadeRouter extends EventEmitter {
     tokensByTier: {},
     inputTokensByTier: {},
     outputTokensByTier: {},
+    costByFeature: {},
   };
 
   private tierModels: Map<TierRole, ModelInfo> = new Map();
@@ -84,6 +99,7 @@ export class CascadeRouter extends EventEmitter {
   private tpmLimiter!: TpmLimiter;
   private localQueue!: LocalRequestQueue;
   private taskAnalyzer?: TaskAnalyzer;
+  private worldStateDB?: WorldStateDB;
   private liveData?: LiveDataProvider;
   /** Snapshot of configured/default tier models, taken before Cascade Auto overrides them. */
   private originalTierModels?: Map<TierRole, ModelInfo>;
@@ -395,7 +411,8 @@ export class CascadeRouter extends EventEmitter {
         throw new Error(`Provider ${model.provider}:${model.id} returned an invalid generation result.`);
       }
 
-      this.recordStats(tier, model, result.usage);
+      // Add to tracking
+      this.recordStats(tier, model, result.usage, options.featureTag);
       // On success, signal the failover manager so that a provider which
       // previously tripped a rate-limit can be immediately re-enabled rather
       // than waiting the full backoff window to expire.
@@ -525,6 +542,14 @@ export class CascadeRouter extends EventEmitter {
   /** Wire the Cascade Auto task analyzer used for per-subtask model routing. */
   setTaskAnalyzer(analyzer: TaskAnalyzer): void {
     this.taskAnalyzer = analyzer;
+  }
+
+  setWorldStateDB(db: WorldStateDB | undefined): void {
+    this.worldStateDB = db;
+  }
+
+  getWorldStateDB(): WorldStateDB | undefined {
+    return this.worldStateDB;
   }
 
   /**
@@ -784,7 +809,7 @@ export class CascadeRouter extends EventEmitter {
     return undefined;
   }
 
-  private recordStats(tier: TierRole, model: ModelInfo, usage: TokenUsage): void {
+  private recordStats(tier: TierRole, model: ModelInfo, usage: TokenUsage, featureTag?: string): void {
     this.stats.totalTokens += usage.totalTokens;
     this.stats.totalCostUsd += usage.estimatedCostUsd;
     this.sessionCostUsd += usage.estimatedCostUsd;
@@ -796,6 +821,10 @@ export class CascadeRouter extends EventEmitter {
     this.stats.tokensByTier[tier] = (this.stats.tokensByTier[tier] ?? 0) + usage.totalTokens;
     this.stats.inputTokensByTier[tier] = (this.stats.inputTokensByTier[tier] ?? 0) + usage.inputTokens;
     this.stats.outputTokensByTier[tier] = (this.stats.outputTokensByTier[tier] ?? 0) + usage.outputTokens;
+
+    if (featureTag) {
+      this.stats.costByFeature[featureTag] = (this.stats.costByFeature[featureTag] ?? 0) + usage.estimatedCostUsd;
+    }
 
     // ── Per-run accounting (hard per-task ceiling) ──
     this.runTokens += usage.totalTokens;

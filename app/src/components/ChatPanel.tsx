@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import type { Socket } from 'socket.io-client';
-import { Send, Bot, User, ChevronRight, ChevronDown } from 'lucide-react';
+import { Send, Bot, User, ChevronRight, ChevronDown, Square } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -293,25 +293,49 @@ export function ChatPanel({ socket, compact }: Props) {
             transition: 'border-color var(--dur), box-shadow var(--dur)',
           }}
         />
-        <button
-          onClick={send}
-          disabled={!canSend}
-          title="Send"
-          style={{
-            width: compact ? 34 : 42, height: compact ? 34 : 42,
-            background: canSend ? 'linear-gradient(135deg, var(--accent), var(--accent-2))' : 'var(--bg-raised)',
-            color: canSend ? '#fff' : 'var(--text-dim)',
-            border: canSend ? 'none' : '1px solid var(--border)', borderRadius: 'var(--radius-md)',
-            cursor: canSend ? 'pointer' : 'default',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            boxShadow: canSend ? 'var(--shadow-1)' : 'none',
-            transition: 'background var(--dur), transform var(--dur)',
-          }}
-          onMouseEnter={(e) => { if (canSend) (e.currentTarget as HTMLElement).style.transform = 'translateY(-1px)'; }}
-          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.transform = 'none'; }}
-        >
-          <Send size={compact ? 14 : 16} />
-        </button>
+        {streaming ? (
+          <button
+            onClick={() => {
+              socket?.emit('session:halt', { sessionId: currentSessionId });
+              // We do not setStreaming(false) here immediately, waiting for the session:complete or error to cleanly finalize.
+            }}
+            title="Stop generating"
+            style={{
+              width: compact ? 34 : 42, height: compact ? 34 : 42,
+              background: 'var(--bg-raised)',
+              color: '#ff4444',
+              border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+              cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              boxShadow: 'var(--shadow-1)',
+              transition: 'background var(--dur), transform var(--dur)',
+            }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.transform = 'translateY(-1px)'; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.transform = 'none'; }}
+          >
+            <Square size={compact ? 12 : 14} fill="currentColor" />
+          </button>
+        ) : (
+          <button
+            onClick={send}
+            disabled={!canSend}
+            title="Send"
+            style={{
+              width: compact ? 34 : 42, height: compact ? 34 : 42,
+              background: canSend ? 'linear-gradient(135deg, var(--accent), var(--accent-2))' : 'var(--bg-raised)',
+              color: canSend ? '#fff' : 'var(--text-dim)',
+              border: canSend ? 'none' : '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+              cursor: canSend ? 'pointer' : 'default',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              boxShadow: canSend ? 'var(--shadow-1)' : 'none',
+              transition: 'background var(--dur), transform var(--dur)',
+            }}
+            onMouseEnter={(e) => { if (canSend) (e.currentTarget as HTMLElement).style.transform = 'translateY(-1px)'; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.transform = 'none'; }}
+          >
+            <Send size={compact ? 14 : 16} />
+          </button>
+        )}
       </div>
     </div>
   );

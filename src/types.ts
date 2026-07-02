@@ -243,6 +243,7 @@ export interface T2ToT3Assignment {
   constraints: string[];
   peerT3Ids: string[];
   parentT2: string;
+  sectionTitle?: string;
   dependsOn?: string[];
   executionMode?: 'parallel' | 'sequential';
 }
@@ -592,6 +593,7 @@ export interface WorkspaceConfig {
   configPath: string;
   keystorePath: string;
   auditLogPath: string;
+  debugWorldState?: boolean;
 }
 
 // ── CLI / UI ──────────────────────────────────

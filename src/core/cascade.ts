@@ -24,6 +24,7 @@ import { T3Worker } from './tiers/t3-worker.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { McpClient } from '../mcp/client.js';
 import { AuditLogger } from '../audit/log.js';
+import { AuditLogger as EncryptedAuditLogger } from './audit/audit-logger.js';
 import { MemoryStore } from '../memory/store.js';
 import { PermissionEscalator } from './permissions/escalator.js';
 import { validateConfig } from '../config/validate.js';
@@ -33,6 +34,7 @@ import { ModelPerformanceTracker } from './router/model-performance-tracker.js';
 import { benchmarkScore01 } from './router/benchmarks.js';
 import { ToolCreator } from '../tools/tool-creator.js';
 import { CascadeCancelledError } from '../utils/retry.js';
+import { WorldStateDB } from './knowledge/world-state.js';
 
 /** One entry in the per-run orchestration decision trail (see /why). */
 export interface DecisionLogEntry {
@@ -58,6 +60,8 @@ export class Cascade extends EventEmitter {
   private taskAnalyzer?: TaskAnalyzer;
   private perfTracker?: ModelPerformanceTracker;
   private toolCreator?: ToolCreator;
+  private worldStateDB?: WorldStateDB;
+  private encryptedAuditLogger?: EncryptedAuditLogger;
   private workspacePath: string;
 
   constructor(config: CascadeConfig, workspacePath: string, store?: MemoryStore) {
@@ -85,6 +89,13 @@ export class Cascade extends EventEmitter {
     this.telemetry = config.telemetry?.enabled
       ? new Telemetry(config.telemetry, config.telemetry.distinctId ?? 'anonymous')
       : noopTelemetry;
+    
+    // Phase 4: Project World State
+    this.worldStateDB = new WorldStateDB(this.workspacePath, this.config.workspace?.debugWorldState ?? false);
+    this.router.setWorldStateDB(this.worldStateDB);
+
+    // Phase 3: Privacy & Governance - AuditLogger
+    this.encryptedAuditLogger = new EncryptedAuditLogger(this.workspacePath, this.config.workspace?.debugWorldState ?? false);
   }
 
   private initOptionalFeatures(): void {
@@ -273,6 +284,14 @@ export class Cascade extends EventEmitter {
     return this.run({ prompt });
   }
 
+  public getWorkspacePath(): string {
+    return this.workspacePath;
+  }
+  
+  public getWorldStateDB(): WorldStateDB | undefined {
+    return this.worldStateDB;
+  }
+
   /**
    * Record an explicit user rating for the last completed run.
    * Explicit ratings carry 3× the weight of auto-detected outcomes so user
@@ -391,6 +410,14 @@ export class Cascade extends EventEmitter {
       // Re-register tools created in previous runs so identical capabilities
       // aren't generated again from scratch.
       if (this.toolCreator) await this.toolCreator.loadPersistedTools();
+
+      // Phase 3: Wire encrypted audit logger to capture global events
+      if (this.encryptedAuditLogger) {
+        this.on('tool:call', (e) => this.encryptedAuditLogger!.logEvent('tool_call', e.tierId || 'unknown', e));
+        this.on('tool:result', (e) => this.encryptedAuditLogger!.logEvent('tool_result', e.tierId || 'unknown', e));
+        this.on('tier:status', (e) => this.encryptedAuditLogger!.logEvent('tier_status', e.tierId || 'unknown', e));
+      }
+
       this.initialized = true;
     })();
 
