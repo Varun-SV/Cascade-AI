@@ -184,31 +184,76 @@ export class OllamaProvider extends BaseProvider {
     return Math.ceil(text.length / 4);
   }
 
+  /**
+   * Ask the Ollama server what a model can actually do. Modern Ollama returns a
+   * `capabilities` array ("completion", "tools", "vision", …) and the model's
+   * real context length in `model_info` — authoritative, unlike the hardcoded
+   * family-name allowlist, which silently misclassifies any unlisted family.
+   * Best-effort: null on old servers / errors, callers fall back to heuristics.
+   */
+  private async showModel(name: string): Promise<{ tools?: boolean; vision?: boolean; contextWindow?: number } | null> {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 2_500);
+    try {
+      const resp = await fetch(`${this.baseUrl}/api/show`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: name }),
+        signal: ac.signal,
+      });
+      if (!resp.ok) return null;
+      const data = await resp.json() as { capabilities?: string[]; model_info?: Record<string, unknown> };
+      const out: { tools?: boolean; vision?: boolean; contextWindow?: number } = {};
+      if (Array.isArray(data.capabilities)) {
+        out.tools = data.capabilities.includes('tools');
+        out.vision = data.capabilities.includes('vision');
+      }
+      // The context-length key is architecture-prefixed ("llama.context_length",
+      // "qwen2.context_length", …) — match by suffix.
+      for (const [k, v] of Object.entries(data.model_info ?? {})) {
+        if (k.endsWith('.context_length') && typeof v === 'number' && v > 0) {
+          out.contextWindow = v;
+          break;
+        }
+      }
+      return out.tools !== undefined || out.contextWindow ? out : null;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async listModels(): Promise<ModelInfo[]> {
     try {
       const response = await fetch(`${this.baseUrl}/api/tags`);
       if (!response.ok) return [];
       const data = await response.json() as { models: OllamaModelEntry[] };
       const supportedKeywords = ['llama3', 'llama2', 'gemma', 'mistral', 'mixtral', 'qwen', 'phi3', 'codellama', 'deepseek', 'llava', 'starcoder', 'stable-code', 'nomic-embed'];
-      return data.models
-        .filter((m) => {
-          const name = m.name.toLowerCase();
-          return supportedKeywords.some((k) => name.includes(k));
-        })
-        .map((m) => ({
+      const entries = data.models.filter((m) => {
+        const name = m.name.toLowerCase();
+        return supportedKeywords.some((k) => name.includes(k));
+      });
+      // Capability lookups run concurrently against the local server (cheap);
+      // any that fail fall back to the family-name heuristics.
+      const shows = await Promise.all(entries.map((m) => this.showModel(m.name)));
+      return entries.map((m, i) => {
+        const show = shows[i];
+        return {
           id: m.name,
           name: m.name,
           provider: 'ollama' as const,
-          contextWindow: 128_000,
-          isVisionCapable: m.name.includes('llava') || m.name.includes('vision'),
+          contextWindow: show?.contextWindow ?? 128_000,
+          isVisionCapable: show?.vision ?? (m.name.includes('llava') || m.name.includes('vision')),
           inputCostPer1kTokens: 0,
           outputCostPer1kTokens: 0,
           maxOutputTokens: 4_000,
           supportsStreaming: true,
           isLocal: true,
-          supportsToolUse: isToolCapable(m.name),
+          supportsToolUse: show?.tools ?? isToolCapable(m.name),
           minSizeB: this.parseSizeB(m.details?.parameter_size),
-        }));
+        };
+      });
     } catch {
       return [];
     }

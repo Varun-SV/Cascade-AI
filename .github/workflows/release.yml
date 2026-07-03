@@ -76,7 +76,11 @@ jobs:
         if: steps.check.outputs.exists == 'false'
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # 22, not 20: optional native deps (isolated-vm) ship prebuilds for the
+          # Node 22/24 ABIs only — on 20 the source compile fails and npm silently
+          # skips the optional dep. The build itself no longer needs the module,
+          # but installing it here keeps the published-package smoke path honest.
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies

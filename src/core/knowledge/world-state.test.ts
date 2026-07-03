@@ -85,6 +85,45 @@ describe('WorldStateDB v2 — facts', () => {
   });
 });
 
+describe('WorldStateDB export / import (v0.15.0)', () => {
+  it('exportKnowledge returns decrypted facts + log; import re-encrypts into a fresh DB', async () => {
+    db.upsertFact('auth module', 'uses', 'JWT', 't3-a');
+    db.addEntry('t3-a', 'Completed: built auth');
+    const bundle = db.exportKnowledge();
+    expect(bundle.facts[0]!.value).toBe('JWT'); // plaintext in the bundle
+
+    const dir2 = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-ws-imp-'));
+    const db2 = new WorldStateDB(dir2); // its own fresh encryption key
+    try {
+      const counts = db2.importKnowledge(bundle);
+      expect(counts).toEqual({ facts: 1, logEntries: 1 });
+      expect(db2.getAllFacts()[0]).toMatchObject({ entity: 'auth module', value: 'JWT' });
+      expect(db2.getAllEntries()[0]!.summary).toBe('Completed: built auth');
+    } finally {
+      db2.close();
+      await fs.rm(dir2, { recursive: true, force: true });
+    }
+  });
+
+  it('imported facts obey newer-timestamp-wins against local facts', () => {
+    db.upsertFact('auth', 'uses', 'sessions', 't3-local', '2026-07-02T00:00:00.000Z');
+    // Older import → ignored; newer import → supersedes.
+    let counts = db.importKnowledge({ facts: [{ entity: 'auth', relation: 'uses', value: 'OLD', timestamp: '2026-07-01T00:00:00.000Z' }] });
+    expect(counts.facts).toBe(0);
+    expect(db.getAllFacts()[0]!.value).toBe('sessions');
+    counts = db.importKnowledge({ facts: [{ entity: 'auth', relation: 'uses', value: 'JWT', timestamp: '2026-07-03T00:00:00.000Z' }] });
+    expect(counts.facts).toBe(1);
+    expect(db.getAllFacts()[0]!.value).toBe('JWT');
+  });
+
+  it('re-importing the same log entries is a no-op (exact-duplicate skip)', () => {
+    const entries = [{ workerId: 't3-a', summary: 'did X', timestamp: '2026-07-03T00:00:00.000Z' }];
+    expect(db.importKnowledge({ worldLog: entries }).logEntries).toBe(1);
+    expect(db.importKnowledge({ worldLog: entries }).logEntries).toBe(0);
+    expect(db.getAllEntries()).toHaveLength(1);
+  });
+});
+
 // ── T1 consumes facts during decomposition ──
 function makeResult(content: string): GenerateResult {
   return { content, finishReason: 'stop', usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimatedCostUsd: 0 } };

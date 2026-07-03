@@ -20,6 +20,7 @@ import { DEFAULT_DASHBOARD_PORT } from '../constants.js';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Identity, TierLimits, BudgetConfig } from '../types.js';
 import { Cascade } from '../core/cascade.js';
+import { WorldStateDB } from '../core/knowledge/world-state.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -666,6 +667,78 @@ export class DashboardServer {
       this.socket.broadcast('runtime:refresh', { scope: 'workspace' });
       this.socket.broadcast('runtime:refresh', { scope: 'global' });
       res.json({ ok: true });
+    });
+
+    // ── Export / Import ─────────────────────────
+    // Chats (sessions + messages) as a portable plaintext-JSON bundle, with
+    // optional "memories" (world-state knowledge + identities). Import never
+    // overwrites: sessions get fresh ids, facts merge newer-wins, identities
+    // dedupe by name. API keys/config are never part of a bundle.
+    this.app.get('/api/export', auth, (req: Request, res: Response) => {
+      try {
+        const sessionsParam = typeof req.query['sessions'] === 'string' ? req.query['sessions'] : 'all';
+        const includeMemories = req.query['memories'] === '1' || req.query['memories'] === 'true';
+        const ids = sessionsParam === 'all' ? undefined : sessionsParam.split(',').map((s) => s.trim()).filter(Boolean);
+        const bundle: Record<string, unknown> = {
+          format: 'cascade-export@1',
+          exportedAt: new Date().toISOString(),
+          sessions: this.store.exportSessions(ids),
+        };
+        if (includeMemories) {
+          const ws = new WorldStateDB(this.workspacePath);
+          try {
+            bundle['memories'] = { ...ws.exportKnowledge(), identities: this.store.listIdentities() };
+          } finally {
+            ws.close();
+          }
+        }
+        res.json(bundle);
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    // Body size is capped by the app-wide express.json limit (10mb).
+    this.app.post('/api/import', auth, mutationLimiter, (req: Request, res: Response) => {
+      try {
+        const bundle = req.body as {
+          format?: string;
+          sessions?: Parameters<MemoryStore['importSessions']>[0];
+          memories?: {
+            facts?: Array<{ entity?: string; relation?: string; value?: string; sourceWorker?: string; timestamp?: string }>;
+            worldLog?: Array<{ workerId?: string; summary?: string; timestamp?: string }>;
+            identities?: Parameters<MemoryStore['importIdentities']>[0];
+          };
+        };
+        if (!bundle || bundle.format !== 'cascade-export@1') {
+          res.status(400).json({ error: 'Not a cascade-export@1 bundle.' });
+          return;
+        }
+        const importedSessions = Array.isArray(bundle.sessions) ? this.store.importSessions(bundle.sessions) : [];
+        // Mirror into the runtime list so the sidebar shows them immediately.
+        for (const s of importedSessions) this.persistRuntimeRow(s.id, s.title, 'COMPLETED');
+
+        let facts = 0;
+        let logEntries = 0;
+        let identities = 0;
+        if (bundle.memories) {
+          const ws = new WorldStateDB(this.workspacePath);
+          try {
+            const counts = ws.importKnowledge(bundle.memories);
+            facts = counts.facts;
+            logEntries = counts.logEntries;
+          } finally {
+            ws.close();
+          }
+          if (Array.isArray(bundle.memories.identities)) {
+            identities = this.store.importIdentities(bundle.memories.identities);
+          }
+        }
+        this.socket.broadcast('runtime:refresh', { scope: 'workspace' });
+        res.json({ ok: true, imported: { sessions: importedSessions.length, facts, logEntries, identities } });
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
     });
 
     // Restore every file this session's runs touched to its pre-run state

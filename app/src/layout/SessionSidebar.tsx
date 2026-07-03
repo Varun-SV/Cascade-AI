@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { Socket } from 'socket.io-client';
-import { Trash2, MessageSquare, PanelLeftClose, PanelLeftOpen, RotateCcw } from 'lucide-react';
+import { Trash2, MessageSquare, PanelLeftClose, PanelLeftOpen, RotateCcw, Download } from 'lucide-react';
 import {
   useAppDispatch, useAppSelector,
   setActiveSessionId, removeSession, loadTranscript,
@@ -46,6 +46,19 @@ function SessionRow({
     onDelete();
   };
 
+  const handleExport = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      const res = await fetch(`http://localhost:${backendPort}/api/export?sessions=${session.sessionId}`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      if (!res.ok) return;
+      const bundle = await res.text();
+      const safeTitle = (session.title || 'chat').replace(/[^a-z0-9-_ ]/gi, '').trim().slice(0, 40) || 'chat';
+      await window.cascade?.saveJson?.(`cascade-${safeTitle}.json`, bundle);
+    } catch { /* backend unavailable */ }
+  };
+
   return (
     <div
       onClick={onSelect}
@@ -75,6 +88,20 @@ function SessionRow({
         </span>
         {hovered && (
           <>
+            <button
+              onClick={handleExport}
+              title="Export this chat as a JSON bundle"
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer',
+                color: 'var(--text-dim)', padding: 2, borderRadius: 3,
+                display: 'flex', alignItems: 'center',
+                transition: 'color var(--dur) var(--ease)',
+              }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--accent)'; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text-dim)'; }}
+            >
+              <Download size={10} />
+            </button>
             <button
               onClick={(e) => { e.stopPropagation(); onRollback(); }}
               title="Roll back file changes from this session"

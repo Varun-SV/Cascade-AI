@@ -4,7 +4,7 @@ import { Send, Network } from 'lucide-react';
 import { AgentGraph } from '../components/AgentGraph.js';
 import { NodeDetailPanel } from '../components/NodeDetailPanel.js';
 import { HelpButton } from '../help/HelpButton.js';
-import { useAppDispatch, useAppSelector, appendMessage, setForceTier } from '../store/index.js';
+import { useAppDispatch, useAppSelector, appendMessage, setForceTier, setSessionId, runStarted } from '../store/index.js';
 
 const TIERS: { id: string; label: string; color: string }[] = [
   { id: 'T1', label: 'Planner', color: 'var(--t1)' },
@@ -41,7 +41,12 @@ export function CockpitView({ socket }: { socket: Socket | null }) {
     // below) AND in the Chat view, instead of vanishing after send.
     dispatch(appendMessage({ id: crypto.randomUUID(), role: 'user', content: text, timestamp: Date.now() }));
     dispatch(appendMessage({ id: crypto.randomUUID(), role: 'assistant', content: '', timestamp: Date.now(), streaming: true }));
-    socket.emit('cascade:run', { prompt: text, ...(forceTier !== 'auto' ? { forceTier } : {}) });
+    // Own a sessionId like ChatPanel.send() does — without one the run can't be
+    // halted (session:halt needs it) and it never persists into the session list.
+    let sid = sessionId;
+    if (!sid) { sid = crypto.randomUUID(); dispatch(setSessionId(sid)); }
+    socket.emit('cascade:run', { prompt: text, model: 'auto', sessionId: sid, ...(forceTier !== 'auto' ? { forceTier } : {}) });
+    dispatch(runStarted({ sessionId: sid }));
     setPrompt('');
   };
 

@@ -28,6 +28,7 @@ import {
   parseTextToolCalls,
   toToolCall,
   buildTextToolSystemPrompt,
+  buildTextToolReminder,
 } from '../../tools/text-tool-parser.js';
 
 /**
@@ -409,7 +410,9 @@ export class T3Worker extends BaseTier {
     let subtaskModel: ModelInfo | undefined;
     try {
       const subtaskText = `${this.assignment?.subtaskTitle ?? ''} ${this.assignment?.description ?? ''} ${this.assignment?.expectedOutput ?? ''}`;
-      subtaskModel = (await this.router.selectModelForSubtask('T3', subtaskText)) ?? undefined;
+      // Tool-equipped subtasks prefer models with native tool support (the
+      // text fallback still works when none is available).
+      subtaskModel = (await this.router.selectModelForSubtask('T3', subtaskText, { requiresToolUse: tools.length > 0 })) ?? undefined;
       if (subtaskModel) {
         this.log(`Cascade Auto: routing this subtask to ${subtaskModel.provider}:${subtaskModel.id}`);
       }
@@ -419,7 +422,14 @@ export class T3Worker extends BaseTier {
     // any, else the tier default).
     const effectiveModel = subtaskModel ?? this.router.getModelForTier('T3');
     const useTextTools = effectiveModel?.supportsToolUse === false && tools.length > 0;
-    const textToolSuffix = useTextTools ? buildTextToolSystemPrompt(tools) : '';
+    // Token economy for text-tool models: the FULL per-parameter contract goes
+    // out only on the first call (and again whenever the tool list changes,
+    // e.g. a dynamic tool was created mid-run — the system prompt is rebuilt
+    // per call, so a new tool the model has never seen needs its contract).
+    // Later iterations get a terse reminder; by then the history contains the
+    // model's own well-formed <tool_call> examples.
+    let sentFullTextContract = false;
+    let textContractSignature = '';
 
     while (iterations < MAX_ITERATIONS) {
       iterations++;
@@ -436,6 +446,18 @@ export class T3Worker extends BaseTier {
           role: 'user',
           content: `USER INTERVENTION (mid-run steering — follow this over prior instructions where they conflict):\n${g.text}`,
         });
+      }
+
+      let textToolSuffix = '';
+      if (useTextTools) {
+        const signature = tools.map((t) => t.name).join(',');
+        if (!sentFullTextContract || signature !== textContractSignature) {
+          textToolSuffix = buildTextToolSystemPrompt(tools);
+          sentFullTextContract = true;
+          textContractSignature = signature;
+        } else {
+          textToolSuffix = buildTextToolReminder(tools);
+        }
       }
 
       const options: GenerateOptions = {

@@ -178,6 +178,7 @@ export class TaskAnalyzer {
     prompt: string,
     tier: TierRole,
     selector: ModelSelector,
+    opts?: { requiresToolUse?: boolean },
   ): Promise<ModelInfo | null> {
     const profile = await this.analyze(prompt);
 
@@ -186,8 +187,16 @@ export class TaskAnalyzer {
       return selector.selectVisionModel();
     }
 
-    const candidates = selector.getCandidatesForTier(tier);
+    let candidates = selector.getCandidatesForTier(tier);
     if (candidates.length === 0) return selector.selectForTier(tier);
+
+    // Tool-heavy subtasks prefer models with NATIVE tool support — the text
+    // fallback works but is slower and flakier. Soft gate: if every candidate
+    // is tool-less, keep them all rather than starving the tier.
+    if (opts?.requiresToolUse) {
+      const toolCapable = candidates.filter((m) => m.supportsToolUse !== false);
+      if (toolCapable.length > 0) candidates = toolCapable;
+    }
 
     const scored = candidates.map(m => ({
       model: m,

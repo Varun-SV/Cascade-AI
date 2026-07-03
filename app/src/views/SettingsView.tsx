@@ -6,8 +6,47 @@ import { setShowSettings } from '../store/index.js';
 import { setThemePreference } from '../theme/useTheme.js';
 import { UpdatesPanel } from './UpdatesPanel.js';
 
-type Tab = 'keys' | 'models' | 'budget' | 'appearance' | 'updates';
+type Tab = 'keys' | 'models' | 'budget' | 'advanced' | 'data' | 'appearance' | 'updates';
 type Bias = 'balanced' | 'quality' | 'cost';
+
+/** Advanced config knobs surfaced 1:1 from the core schema. */
+interface AdvancedSettings {
+  autonomy: 'manual' | 'auto';
+  planApproval: 'never' | 'complex' | 'all' | 'always';
+  approvalTimeoutMs: number;
+  t3Execution: 'auto' | 'parallel' | 'sequential';
+  localConcurrency: number;
+  localInferenceTimeoutMs: number;
+  cloudInferenceTimeoutMs: number;
+  reflectionEnabled: boolean;
+  cascadeAuto: boolean;
+  forceTier: 'auto' | 'T1' | 'T2' | 'T3';
+  benchmarksLive: boolean;
+  dynamicToolSandbox: 'isolate' | 'worker' | 'auto';
+  factsExtraction: boolean;
+  enableToolCreation: boolean;
+  persistDynamicTools: boolean;
+  telemetryEnabled: boolean;
+}
+
+const ADVANCED_DEFAULTS: AdvancedSettings = {
+  autonomy: 'manual',
+  planApproval: 'complex',
+  approvalTimeoutMs: 600_000,
+  t3Execution: 'auto',
+  localConcurrency: 1,
+  localInferenceTimeoutMs: 300_000,
+  cloudInferenceTimeoutMs: 120_000,
+  reflectionEnabled: false,
+  cascadeAuto: false,
+  forceTier: 'auto',
+  benchmarksLive: true,
+  dynamicToolSandbox: 'auto',
+  factsExtraction: true,
+  enableToolCreation: true,
+  persistDynamicTools: true,
+  telemetryEnabled: false,
+};
 
 // Provider → ProviderType key used by the Cascade core + the curated models
 // each one exposes in the tier pickers. 'auto' means "let routing decide".
@@ -74,6 +113,20 @@ export function SettingsView({ socket }: Props) {
   // Budget
   const [maxCost, setMaxCost] = useState('');
   const [bias, setBias] = useState<Bias>('balanced');
+  const [dailyBudget, setDailyBudget] = useState('');
+  const [sessionBudget, setSessionBudget] = useState('');
+  const [maxTokens, setMaxTokens] = useState('');
+  const [warnAt, setWarnAt] = useState('');
+
+  // Advanced (1:1 with core config fields; see ADVANCED_DEFAULTS)
+  const [adv, setAdv] = useState<AdvancedSettings>(ADVANCED_DEFAULTS);
+  const setAdvField = <K extends keyof AdvancedSettings>(key: K, value: AdvancedSettings[K]) =>
+    setAdv((prev) => ({ ...prev, [key]: value }));
+
+  // Data (export/import)
+  const { backendPort, authToken } = useAppSelector((s) => s.app);
+  const [includeMemories, setIncludeMemories] = useState(true);
+  const [dataStatus, setDataStatus] = useState('');
 
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState('');
@@ -91,9 +144,10 @@ export function SettingsView({ socket }: Props) {
   // sent back — only which providers already have one).
   const applyConfig = (cfg: {
     models?: Record<string, string>;
-    budget?: { maxCostPerRun?: number; autoBias?: string };
+    budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number };
     providersWithKey?: string[];
     endpoints?: Record<string, string>;
+    advanced?: Record<string, unknown>;
   }) => {
     setT1(parseOverride(cfg.models?.t1));
     setT2(parseOverride(cfg.models?.t2));
@@ -102,10 +156,24 @@ export function SettingsView({ socket }: Props) {
     if (cfg.budget?.autoBias === 'balanced' || cfg.budget?.autoBias === 'quality' || cfg.budget?.autoBias === 'cost') {
       setBias(cfg.budget.autoBias);
     }
+    if (typeof cfg.budget?.dailyBudgetUsd === 'number') setDailyBudget(String(cfg.budget.dailyBudgetUsd));
+    if (typeof cfg.budget?.sessionBudgetUsd === 'number') setSessionBudget(String(cfg.budget.sessionBudgetUsd));
+    if (typeof cfg.budget?.maxTokensPerRun === 'number') setMaxTokens(String(cfg.budget.maxTokensPerRun));
+    if (typeof cfg.budget?.warnAtPct === 'number') setWarnAt(String(cfg.budget.warnAtPct));
     if (cfg.providersWithKey) setProvidersWithKey(cfg.providersWithKey);
     if (cfg.endpoints?.['openai-compatible']) setOcUrl(cfg.endpoints['openai-compatible']);
     if (cfg.endpoints?.['ollama']) setOllamaUrl(cfg.endpoints['ollama']);
     if (cfg.endpoints?.['azure']) setAzureUrl(cfg.endpoints['azure']);
+    if (cfg.advanced && typeof cfg.advanced === 'object') {
+      setAdv((prev) => {
+        const next = { ...prev };
+        for (const key of Object.keys(ADVANCED_DEFAULTS) as Array<keyof AdvancedSettings>) {
+          const v = cfg.advanced![key];
+          if (v !== undefined && v !== null) (next as Record<string, unknown>)[key] = v;
+        }
+        return next;
+      });
+    }
   };
 
   // Pre-load via the Electron IPC bridge first — this works even when the
@@ -151,8 +219,16 @@ export function SettingsView({ socket }: Props) {
     const payload = {
       keys: { anthropic: anthropicKey || undefined, openai: openaiKey || undefined, gemini: geminiKey || undefined, 'openai-compatible': ocKey || undefined, azure: azureKey || undefined },
       models: { t1: composeOverride(t1), t2: composeOverride(t2), t3: composeOverride(t3) },
-      budget: { maxCostPerRun: maxCost ? parseFloat(maxCost) : undefined, autoBias: bias },
+      budget: {
+        maxCostPerRun: maxCost ? parseFloat(maxCost) : undefined,
+        autoBias: bias,
+        dailyBudgetUsd: dailyBudget ? parseFloat(dailyBudget) : undefined,
+        sessionBudgetUsd: sessionBudget ? parseFloat(sessionBudget) : undefined,
+        maxTokensPerRun: maxTokens ? parseInt(maxTokens, 10) : undefined,
+        warnAtPct: warnAt ? parseFloat(warnAt) : undefined,
+      },
       endpoints: { 'openai-compatible': ocUrl.trim() || undefined, ollama: ollamaUrl.trim() || undefined, azure: azureUrl.trim() || undefined },
+      advanced: { ...adv },
     };
 
     // Primary path: persist via the Electron IPC bridge. This works even when the
@@ -210,16 +286,16 @@ export function SettingsView({ socket }: Props) {
         </div>
 
         {/* Tabs */}
-        <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', padding: '0 18px' }}>
-          {(['keys', 'models', 'budget', 'appearance', 'updates'] as Tab[]).map((t) => (
+        <div style={{ display: 'flex', flexWrap: 'wrap', borderBottom: '1px solid var(--border)', padding: '0 18px' }}>
+          {(['keys', 'models', 'budget', 'advanced', 'data', 'appearance', 'updates'] as Tab[]).map((t) => (
             <button key={t} onClick={() => setTab(t)} style={{
-              background: 'none', border: 'none', cursor: 'pointer', padding: '10px 14px',
+              background: 'none', border: 'none', cursor: 'pointer', padding: '10px 10px',
               fontSize: 12, fontWeight: tab === t ? 600 : 400,
               color: tab === t ? 'var(--accent)' : 'var(--text-muted)',
               borderBottom: tab === t ? '2px solid var(--accent)' : '2px solid transparent',
               marginBottom: -1, transition: 'color 0.12s', whiteSpace: 'nowrap',
             }}>
-              {t === 'keys' ? 'Providers' : t === 'models' ? 'Models' : t === 'budget' ? 'Budget & Bias' : t === 'appearance' ? 'Appearance' : 'Updates'}
+              {t === 'keys' ? 'Providers' : t === 'models' ? 'Models' : t === 'budget' ? 'Budget' : t === 'advanced' ? 'Advanced' : t === 'data' ? 'Data' : t === 'appearance' ? 'Appearance' : 'Updates'}
             </button>
           ))}
         </div>
@@ -429,6 +505,109 @@ export function SettingsView({ socket }: Props) {
                   </label>
                 ))}
               </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                {[
+                  { label: 'Daily budget (USD)', val: dailyBudget, set: setDailyBudget, ph: 'no cap', step: '0.5' },
+                  { label: 'Per-session budget (USD)', val: sessionBudget, set: setSessionBudget, ph: 'no cap', step: '0.5' },
+                  { label: 'Max tokens per run', val: maxTokens, set: setMaxTokens, ph: '200000', step: '1000' },
+                  { label: 'Warn at % of budget', val: warnAt, set: setWarnAt, ph: '80', step: '5' },
+                ].map(({ label, val, set, ph, step }) => (
+                  <div key={label}>
+                    <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>{label}</label>
+                    <input type="number" min="0" step={step} value={val} onChange={(e) => set(e.target.value)} placeholder={ph}
+                      style={{ width: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
+          {tab === 'advanced' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxHeight: 340, overflowY: 'auto', paddingRight: 4 }}>
+              <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: 0 }}>
+                Power knobs, written to the same .cascade/config.json the CLI uses. Hover a label for what it does.
+              </p>
+              <AdvGroup title="Autonomy & approvals">
+                <AdvSelect label="Autonomy" hint="auto = hands-off: plan gate and non-dangerous tools auto-approve; dangerous tools still ask" value={adv.autonomy} options={['manual', 'auto']} onChange={(v) => setAdvField('autonomy', v as AdvancedSettings['autonomy'])} />
+                <AdvSelect label="Plan approval" hint="When to pause for the boardroom plan review before workers spawn" value={adv.planApproval} options={['never', 'complex', 'all', 'always']} onChange={(v) => setAdvField('planApproval', v as AdvancedSettings['planApproval'])} />
+                <AdvNumber label="Approval timeout (s)" hint="Seconds to wait on a tool-approval decision before DENYING for safety" value={adv.approvalTimeoutMs / 1000} onChange={(n) => setAdvField('approvalTimeoutMs', Math.round(n * 1000))} />
+              </AdvGroup>
+              <AdvGroup title="Execution">
+                <AdvSelect label="T3 execution" hint="Run workers within a wave in parallel or sequentially (auto = sequential on local models)" value={adv.t3Execution} options={['auto', 'parallel', 'sequential']} onChange={(v) => setAdvField('t3Execution', v as AdvancedSettings['t3Execution'])} />
+                <AdvNumber label="Local concurrency" hint="Max concurrent local-model inferences (1 for a single GPU)" value={adv.localConcurrency} onChange={(n) => setAdvField('localConcurrency', Math.max(1, Math.round(n)))} />
+                <AdvNumber label="Local timeout (s)" hint="Timeout for one local-model call" value={adv.localInferenceTimeoutMs / 1000} onChange={(n) => setAdvField('localInferenceTimeoutMs', Math.round(n * 1000))} />
+                <AdvNumber label="Cloud timeout (s)" hint="Timeout for one cloud-model call" value={adv.cloudInferenceTimeoutMs / 1000} onChange={(n) => setAdvField('cloudInferenceTimeoutMs', Math.round(n * 1000))} />
+                <AdvToggle label="Reflection" hint="Self-critique pass revising a worker's output against the goal (extra calls)" value={adv.reflectionEnabled} onChange={(v) => setAdvField('reflectionEnabled', v)} />
+              </AdvGroup>
+              <AdvGroup title="Routing">
+                <AdvToggle label="Cascade Auto" hint="Pick the best-value model per task from live benchmarks + pricing" value={adv.cascadeAuto} onChange={(v) => setAdvField('cascadeAuto', v)} />
+                <AdvSelect label="Force tier" hint="Pin every run's root tier, bypassing the complexity classifier" value={adv.forceTier} options={['auto', 'T1', 'T2', 'T3']} onChange={(v) => setAdvField('forceTier', v as AdvancedSettings['forceTier'])} />
+                <AdvToggle label="Live benchmarks" hint="Refresh public benchmark scores + prices from the network" value={adv.benchmarksLive} onChange={(v) => setAdvField('benchmarksLive', v)} />
+              </AdvGroup>
+              <AdvGroup title="Sandbox & knowledge">
+                <AdvSelect label="Dynamic-tool sandbox" hint="isolate = hard V8 isolate (no Node globals); worker = thread sandbox; auto = isolate when available" value={adv.dynamicToolSandbox} options={['auto', 'isolate', 'worker']} onChange={(v) => setAdvField('dynamicToolSandbox', v as AdvancedSettings['dynamicToolSandbox'])} />
+                <AdvToggle label="Facts extraction" hint="Distill worker outputs into the queryable project knowledge graph" value={adv.factsExtraction} onChange={(v) => setAdvField('factsExtraction', v)} />
+                <AdvToggle label="Tool creation" hint="Let workers generate new tools at runtime when none fits" value={adv.enableToolCreation} onChange={(v) => setAdvField('enableToolCreation', v)} />
+                <AdvToggle label="Persist dynamic tools" hint="Reload created tools next run (always as untrusted)" value={adv.persistDynamicTools} onChange={(v) => setAdvField('persistDynamicTools', v)} />
+              </AdvGroup>
+              <AdvGroup title="Telemetry">
+                <AdvToggle label="Telemetry" hint="Anonymous usage analytics (off by default)" value={adv.telemetryEnabled} onChange={(v) => setAdvField('telemetryEnabled', v)} />
+              </AdvGroup>
+            </div>
+          )}
+
+          {tab === 'data' && (
+            <>
+              <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: 0, lineHeight: 1.5 }}>
+                Export your chats — optionally with memories (the project knowledge the AI has learned, plus your identities) — as a portable JSON bundle.
+                Bundles are <b>plaintext</b> (knowledge is decrypted for portability); treat the file like private data. API keys are never included.
+                Importing never overwrites: chats come in as new sessions, newer facts win, existing identities are kept.
+              </p>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, cursor: 'pointer' }}>
+                <input type="checkbox" checked={includeMemories} onChange={(e) => setIncludeMemories(e.target.checked)} />
+                Include memories (knowledge graph + identities)
+              </label>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={async () => {
+                  setDataStatus('Exporting…');
+                  try {
+                    const res = await fetch(`http://localhost:${backendPort}/api/export?sessions=all${includeMemories ? '&memories=1' : ''}`, {
+                      headers: { Authorization: `Bearer ${authToken}` },
+                    });
+                    if (!res.ok) throw new Error(`export failed (HTTP ${res.status})`);
+                    const bundle = await res.text();
+                    const name = `cascade-export-${new Date().toISOString().slice(0, 10)}.json`;
+                    const saveRes = await window.cascade?.saveJson?.(name, bundle);
+                    setDataStatus(saveRes?.ok ? `Exported to ${saveRes.path}` : saveRes?.canceled ? '' : `Save failed: ${saveRes?.error ?? 'unknown'}`);
+                  } catch (err) {
+                    setDataStatus(err instanceof Error ? err.message : String(err));
+                  }
+                }} style={{ flex: 1, background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '9px 12px', fontSize: 12, cursor: 'pointer', fontWeight: 600 }}>
+                  Export all chats…
+                </button>
+                <button onClick={async () => {
+                  setDataStatus('');
+                  try {
+                    const open = await window.cascade?.openJson?.();
+                    if (!open?.ok || !open.content) { if (!open?.canceled) setDataStatus(open?.error ?? 'Could not read the file.'); return; }
+                    setDataStatus('Importing…');
+                    const res = await fetch(`http://localhost:${backendPort}/api/import`, {
+                      method: 'POST',
+                      headers: { Authorization: `Bearer ${authToken}`, 'Content-Type': 'application/json' },
+                      body: open.content,
+                    });
+                    const out = await res.json() as { ok?: boolean; error?: string; imported?: { sessions: number; facts: number; logEntries: number; identities: number } };
+                    if (!res.ok || !out.ok) throw new Error(out.error ?? `import failed (HTTP ${res.status})`);
+                    const i = out.imported!;
+                    setDataStatus(`Imported ${i.sessions} chat${i.sessions === 1 ? '' : 's'}${i.facts || i.logEntries ? `, ${i.facts} facts, ${i.logEntries} log entries` : ''}${i.identities ? `, ${i.identities} identities` : ''}.`);
+                  } catch (err) {
+                    setDataStatus(err instanceof Error ? err.message : String(err));
+                  }
+                }} style={{ flex: 1, background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '9px 12px', fontSize: 12, cursor: 'pointer', fontWeight: 600 }}>
+                  Import…
+                </button>
+              </div>
+              {dataStatus && <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: 0, wordBreak: 'break-all' }}>{dataStatus}</p>}
             </>
           )}
         </div>
@@ -451,5 +630,54 @@ export function SettingsView({ socket }: Props) {
         </div>
       </div>
     </div>
+  );
+}
+
+// ── Advanced-tab building blocks ────────────────────────────────────────────
+
+function AdvGroup({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.8, textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: 6 }}>{title}</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>{children}</div>
+    </div>
+  );
+}
+
+function AdvRow({ label, hint, children }: { label: string; hint: string; children: React.ReactNode }) {
+  return (
+    <div title={hint} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+      <span style={{ fontSize: 12, flex: 1, cursor: 'help' }}>{label}</span>
+      {children}
+    </div>
+  );
+}
+
+function AdvSelect({ label, hint, value, options, onChange }: { label: string; hint: string; value: string; options: string[]; onChange: (v: string) => void }) {
+  return (
+    <AdvRow label={label} hint={hint}>
+      <select value={value} onChange={(e) => onChange(e.target.value)}
+        style={{ background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '4px 8px', fontSize: 12, outline: 'none', minWidth: 110 }}>
+        {options.map((o) => <option key={o} value={o}>{o}</option>)}
+      </select>
+    </AdvRow>
+  );
+}
+
+function AdvNumber({ label, hint, value, onChange }: { label: string; hint: string; value: number; onChange: (n: number) => void }) {
+  return (
+    <AdvRow label={label} hint={hint}>
+      <input type="number" value={Number.isFinite(value) ? value : ''} min={0}
+        onChange={(e) => { const n = parseFloat(e.target.value); if (Number.isFinite(n)) onChange(n); }}
+        style={{ background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '4px 8px', fontSize: 12, outline: 'none', width: 110, boxSizing: 'border-box' }} />
+    </AdvRow>
+  );
+}
+
+function AdvToggle({ label, hint, value, onChange }: { label: string; hint: string; value: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <AdvRow label={label} hint={hint}>
+      <input type="checkbox" checked={value} onChange={(e) => onChange(e.target.checked)} style={{ cursor: 'pointer' }} />
+    </AdvRow>
   );
 }

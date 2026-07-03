@@ -158,7 +158,7 @@ export class WorldStateDB {
    * fragment the key; an existing pair is superseded (value + provenance updated)
    * rather than duplicated. Empty entity/relation/value are ignored.
    */
-  public upsertFact(entity: string, relation: string, value: string, sourceWorker: string): void {
+  public upsertFact(entity: string, relation: string, value: string, sourceWorker: string, timestamp?: string): void {
     const e = normalizeKey(entity);
     const r = normalizeKey(relation);
     const v = value.trim();
@@ -173,7 +173,7 @@ export class WorldStateDB {
         source_worker   = excluded.source_worker,
         timestamp       = excluded.timestamp
     `);
-    stmt.run(e, r, encrypted, sourceWorker, new Date().toISOString());
+    stmt.run(e, r, encrypted, sourceWorker, timestamp ?? new Date().toISOString());
     this.dumpDebugIfNeeded();
   }
 
@@ -237,6 +237,60 @@ export class WorldStateDB {
       }
     }
     return selected.slice(0, limit).map((f) => `- ${f.entity} ${f.relation} ${f.value}`).join('\n');
+  }
+
+  // ── Export / Import ──────────────────────────
+  //
+  //  Knowledge travels DECRYPTED in the export bundle (a portable plaintext
+  //  JSON file — the encryption key never leaves this machine) and re-encrypts
+  //  with the LOCAL key on import.
+
+  public exportKnowledge(): { facts: WorldFact[]; worldLog: WorldStateEntry[] } {
+    return { facts: this.getAllFacts(), worldLog: this.getAllEntries() };
+  }
+
+  /**
+   * Merge imported knowledge. Facts upsert on (entity, relation) with
+   * newer-timestamp-wins (a local fact newer than the imported one is kept);
+   * log entries append with fresh ids, skipping exact duplicates
+   * (worker + timestamp + summary). Returns counts of what actually landed.
+   */
+  public importKnowledge(data: {
+    facts?: Array<{ entity?: string; relation?: string; value?: string; sourceWorker?: string; timestamp?: string }>;
+    worldLog?: Array<{ workerId?: string; summary?: string; timestamp?: string }>;
+  }): { facts: number; logEntries: number } {
+    let facts = 0;
+    let logEntries = 0;
+
+    if (Array.isArray(data.facts)) {
+      const local = new Map(this.getAllFacts().map((f) => [`${f.entity} ${f.relation}`, f.timestamp]));
+      for (const f of data.facts) {
+        if (!f || typeof f.entity !== 'string' || typeof f.relation !== 'string' || typeof f.value !== 'string') continue;
+        const key = `${normalizeKey(f.entity)} ${normalizeKey(f.relation)}`;
+        const localTs = local.get(key);
+        const importTs = f.timestamp ?? new Date().toISOString();
+        if (localTs && localTs >= importTs) continue; // local fact is newer — keep it
+        this.upsertFact(f.entity, f.relation, f.value, f.sourceWorker ?? 'imported', importTs);
+        facts++;
+      }
+    }
+
+    if (Array.isArray(data.worldLog)) {
+      const seen = new Set(this.getAllEntries().map((e) => `${e.workerId} ${e.timestamp} ${e.summary}`));
+      const stmt = this.db.prepare('INSERT INTO world_state (id, timestamp, worker_id, encrypted_payload) VALUES (?, ?, ?, ?)');
+      for (const e of data.worldLog) {
+        if (!e || typeof e.summary !== 'string') continue;
+        const workerId = e.workerId ?? 'imported';
+        const timestamp = e.timestamp ?? new Date().toISOString();
+        const key = `${workerId} ${timestamp} ${e.summary}`;
+        if (seen.has(key)) continue;
+        stmt.run(crypto.randomUUID(), timestamp, workerId, this.encrypt(JSON.stringify({ summary: e.summary })));
+        seen.add(key);
+        logEntries++;
+      }
+    }
+
+    return { facts, logEntries };
   }
 
   private dumpDebugIfNeeded(): void {

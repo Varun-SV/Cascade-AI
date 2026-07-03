@@ -5,6 +5,21 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-07-03
+
+Release-pipeline repair plus a desktop bug round and four features.
+
+### Fixed
+- **The release workflow builds again (and desktop installers with it).** v0.14.0's `import type ... from 'isolated-vm'` made COMPILATION require the optional native module; on the Node 20 publish job it didn't install (no prebuild for that ABI), the DTS build failed with TS2307, and the dependent desktop-build matrix never ran — so v0.14.0 shipped with no npm package and no installers. The addon's surface is now declared locally (structural types + a non-literal dynamic import) so the build never needs the module present — proven by building with `node_modules/isolated-vm` removed — and the publish job runs Node 22. *(Note: the empty v0.14.0 GitHub release can be deleted; v0.15.0 supersedes it.)*
+- **The Stop button survives switching views.** It was gated on component-local state inside the chat panel; views unmount on section switch, so leaving Chat/Code mid-run destroyed the only way to stop the AI. Run state now lives in the store, a persistent **STOP control appears in the status bar** from any view while a run is active, Cockpit-started runs now carry a sessionId (previously they couldn't be halted at all), and a run finishing off-view no longer leaves the transcript stuck "streaming".
+- **Landing page: "View on GitHub" no longer overflows narrow phones.** The nav pill shrinks below 480px and goes icon-only below 380px; `overflow-x: clip` hardens the page against horizontal panning.
+
+### Added
+- **Tool-less models are handled efficiently.** Models without native tool-calling used to get the full per-parameter tool contract re-sent on every one of up to 15 agent-loop turns; now the full contract goes out once (re-sent only if the tool list changes) and later turns get a one-line reminder. Cascade Auto also steers tool-heavy subtasks toward tool-capable models.
+- **Model capability details fetcher.** The OpenRouter catalog the router already downloads for pricing now also yields **context window, native tool support, and modalities** per model; Ollama models are asked directly via `/api/show` (replacing a hardcoded family allowlist); and unknown local models (custom .gguf on llama.cpp / LM Studio) get a **one-time cached tool-call probe**. Capabilities feed the text-tool gate, the ranker, and Cascade Auto — and show as badges (TOOLS/TXT/VIS/context size) in the desktop model picker.
+- **Export / import chats and memories.** Export any chat from the session sidebar, or everything (optionally with *memories* = the project knowledge graph + identities) from **Settings → Data**, as a portable JSON bundle; import merges safely — chats come in as new sessions, newer facts win, existing identities are kept, API keys are never included. Bundles are plaintext; knowledge re-encrypts with the local key on import. REST: `GET /api/export`, `POST /api/import`.
+- **Settings → Advanced.** Autonomy, plan approval, approval timeout, T3 execution mode, local concurrency, inference timeouts, reflection, Cascade Auto master toggle, force-tier, live benchmarks, dynamic-tool sandbox, facts extraction, tool creation/persistence, and telemetry — each written (allowlisted + validated) to the same `.cascade/config.json` the CLI uses. Budget tab gains daily/session caps, max tokens per run, and warn-at-%.
+
 ## [0.14.0] - 2026-07-03
 
 Two deferred v0.13 designs land: a hard sandbox for generated tools, and a

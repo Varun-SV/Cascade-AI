@@ -201,3 +201,20 @@ EXAMPLE — calling the "shell" tool to list files:
 
 When you have enough information, stop calling tools and write your final answer.`;
 }
+
+/**
+ * Terse follow-up appendix for iterations AFTER the first. Re-sending the full
+ * per-parameter contract on every agent-loop turn (up to 15) wastes a large,
+ * repeated block of tokens on models that are typically small/local to begin
+ * with. By turn two the conversation history already contains the model's own
+ * well-formed <tool_call> examples, so a name list + format skeleton suffices.
+ */
+export function buildTextToolReminder(
+  tools: Array<{ name: string }>,
+): string {
+  return `
+TOOL USE REMINDER:
+Call tools with a single <tool_call>{"name": "<tool_name>", "input": { ... }}</tool_call> block (valid JSON, double quotes, one tool per turn), matching the argument shapes of your earlier calls in this conversation.
+Available tools: ${tools.map(t => t.name).join(', ')}.
+When you have enough information, stop calling tools and write your final answer.`;
+}

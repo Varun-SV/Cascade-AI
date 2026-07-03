@@ -1,9 +1,11 @@
-import { Wifi, WifiOff, Terminal, Coins } from 'lucide-react';
+import { Wifi, WifiOff, Terminal, Coins, Square } from 'lucide-react';
+import type { Socket } from 'socket.io-client';
 import { useAppDispatch, useAppSelector, toggleTerminal } from '../store/index.js';
 
-export function StatusBar() {
+export function StatusBar({ socket }: { socket?: Socket | null }) {
   const dispatch = useAppDispatch();
   const { connected, reconnecting, backendError, totalCostUsd, totalTokens, activeModel } = useAppSelector((s) => s.app);
+  const { runActive, runSessionId, activeSessionId, sessionId } = useAppSelector((s) => s.app);
 
   const fmtCost = (c: number) => c < 0.001 ? '<$0.001' : `$${c.toFixed(4)}`;
   const fmtTokens = (t: number) => t >= 1000 ? `${(t / 1000).toFixed(1)}k` : String(t);
@@ -60,6 +62,32 @@ export function StatusBar() {
       <TierChip tier="T3" color="var(--t3)" model={activeModel.t3} />
 
       <div style={{ flex: 1 }} />
+
+      {/* Persistent run indicator + Stop — the StatusBar never unmounts, so a
+          run stays stoppable from ANY view (the in-view Stop buttons die with
+          their view when the user switches sections mid-run). */}
+      {runActive && (
+        <>
+          <button
+            onClick={() => socket?.emit('session:halt', { sessionId: runSessionId ?? activeSessionId ?? sessionId ?? undefined })}
+            title="Stop the running task"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 5,
+              background: 'color-mix(in srgb, #ff4444 12%, transparent)',
+              border: '1px solid color-mix(in srgb, #ff4444 40%, transparent)',
+              borderRadius: 4, padding: '1px 8px', cursor: 'pointer',
+              color: '#ff6b6b', fontWeight: 700, fontSize: 10.5,
+            }}
+          >
+            <span style={{
+              width: 6, height: 6, borderRadius: '50%', background: '#ff4444',
+              animation: 'pulse 1.2s ease-in-out infinite',
+            }} />
+            <Square size={8} fill="currentColor" /> STOP
+          </button>
+          <Divider />
+        </>
+      )}
 
       {/* Cost & tokens */}
       <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>

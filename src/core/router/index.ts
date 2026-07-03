@@ -199,6 +199,62 @@ export class CascadeRouter extends EventEmitter {
   }
 
   /**
+   * One-time native tool-call probe for local/compat models with NO capability
+   * metadata. llama.cpp / LM Studio "/models" endpoints return ids only, so
+   * `supportsToolUse` stays undefined and the T3 tool gate ASSUMES native
+   * support — wrong for many local builds, which then fumble tool-format
+   * output. Each unknown model is probed once with a trivial tool; the verdict
+   * persists in the MemoryStore's model_cache (via the previously-dormant
+   * getModelProfile read-back), so a model is probed once EVER, not per run.
+   * Cloud providers are never probed — their metadata is authoritative.
+   */
+  async probeLocalToolSupport(store: MemoryStore): Promise<void> {
+    const unknown = this.selector.getAllAvailableModels().filter(
+      (m) => m.provider === 'openai-compatible' && m.supportsToolUse === undefined,
+    );
+    for (const model of unknown) {
+      const cached = store.getModelProfile(model.id, model.provider);
+      let verdict = cached?.supportsToolUse;
+      if (verdict === undefined) {
+        const probed = await this.probeNativeToolCall(model);
+        if (probed === null) continue; // transport error — retry next start
+        verdict = probed;
+        store.saveModelCapability(model.id, model.provider, { supportsToolUse: verdict });
+      }
+      this.selector.addDynamicModel({ ...model, supportsToolUse: verdict });
+    }
+    // Refresh resolved tier models so the tool-use gate sees the verdicts.
+    for (const tier of ['T1', 'T2', 'T3'] as TierRole[]) {
+      const cur = this.tierModels.get(tier);
+      if (!cur) continue;
+      const fresh = this.selector.getModelById(cur.id);
+      if (fresh) this.tierModels.set(tier, fresh);
+    }
+  }
+
+  private async probeNativeToolCall(model: ModelInfo): Promise<boolean | null> {
+    try {
+      const cfg = this.config.providers.find((p) => p.type === model.provider) ?? { type: model.provider };
+      // Direct provider call, NOT this.generate(): failover there could silently
+      // answer from a different model and record a wrong verdict.
+      const provider = this.createProvider(cfg as ProviderConfig, model);
+      const result = await withTimeout(provider.generate({
+        messages: [{ role: 'user', content: "Call the echo tool with text set to 'ping'. Use the tool; do not answer in prose." }],
+        tools: [{
+          name: 'echo',
+          description: 'Echo the given text back to the caller.',
+          inputSchema: { type: 'object', properties: { text: { type: 'string', description: 'Text to echo' } }, required: ['text'] },
+        }],
+        maxTokens: 80,
+        temperature: 0,
+      }), 30_000, 'tool-support probe timed out');
+      return (result.toolCalls?.length ?? 0) > 0;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Cascade Auto live data: discover/validate real model ids from each cloud
    * provider, then fetch current public quality scores + per-token prices and
    * apply the prices to the available-model set. Best-effort and safe to run in
@@ -249,12 +305,17 @@ export class CascadeRouter extends EventEmitter {
   }
 
   /**
-   * Replace available models with live-priced copies and refresh the already
-   * resolved tier models so shared-tier cost accounting uses current prices.
+   * Replace available models with live-priced AND capability-corrected copies
+   * (real context windows, native tool support, vision from modalities), then
+   * refresh the already resolved tier models so shared-tier cost accounting and
+   * the tool-use gate both see current data.
    */
   private applyLivePricing(): void {
-    if (!this.liveData?.hasLivePricing()) return;
-    const updated = this.liveData.applyLivePricing(this.selector.getAllAvailableModels());
+    if (!this.liveData) return;
+    if (!this.liveData.hasLivePricing() && !this.liveData.hasCapabilities()) return;
+    let updated = this.selector.getAllAvailableModels();
+    if (this.liveData.hasLivePricing()) updated = this.liveData.applyLivePricing(updated);
+    if (this.liveData.hasCapabilities()) updated = this.liveData.applyLiveCapabilities(updated);
     for (const m of updated) this.selector.addDynamicModel(m);
     for (const tier of ['T1', 'T2', 'T3'] as TierRole[]) {
       const cur = this.tierModels.get(tier);
@@ -608,10 +669,10 @@ export class CascadeRouter extends EventEmitter {
    * null when Cascade Auto is off (callers then use the shared tier model).
    * Pure heuristic — no extra LLM call.
    */
-  async selectModelForSubtask(tier: TierRole, text: string): Promise<ModelInfo | null> {
+  async selectModelForSubtask(tier: TierRole, text: string, opts?: { requiresToolUse?: boolean }): Promise<ModelInfo | null> {
     if (!this.config?.cascadeAuto || !this.taskAnalyzer || !text.trim()) return null;
     try {
-      return await this.taskAnalyzer.selectModel(text, tier, this.selector);
+      return await this.taskAnalyzer.selectModel(text, tier, this.selector, opts);
     } catch {
       return null;
     }

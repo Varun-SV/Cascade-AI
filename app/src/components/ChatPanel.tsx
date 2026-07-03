@@ -7,7 +7,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { MermaidBlock } from './MermaidBlock.js';
 import { SessionRating } from './SessionRating.js';
-import { useAppDispatch, useAppSelector, appendMessage, updateLastMessage, finalizeLastMessage, setSessionId, loadTranscript } from '../store/index.js';
+import { useAppDispatch, useAppSelector, appendMessage, finalizeLastMessage, setSessionId, loadTranscript, runStarted } from '../store/index.js';
 import { fetchSessionTranscript } from '../utils/sessionLoad.js';
 
 // Reasoning-tuned models (Anthropic thinking_delta, OpenAI reasoning_content,
@@ -162,7 +162,11 @@ export function ChatPanel({ socket, compact }: Props) {
   const { activeModel, sessions, activeSessionId, backendPort, authToken, forceTier } = useAppSelector((s) => s.app);
   const [input, setInput] = useState('');
   const [focused, setFocused] = useState(false);
-  const [streaming, setStreaming] = useState(false);
+  // Run-in-flight lives in the STORE (runActive), not component state: views are
+  // conditionally mounted, so local state died on view switch and took the Stop
+  // button with it while the backend kept running.
+  const streaming = useAppSelector((s) => s.app.runActive);
+  const runSessionId = useAppSelector((s) => s.app.runSessionId);
   const [sessionDone, setSessionDone] = useState(false);
   const [costByFeature, setCostByFeature] = useState<Record<string, number> | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -193,9 +197,10 @@ export function ChatPanel({ socket, compact }: Props) {
     // also update when you're on another view). Here we only react to
     // completion to stop the cursor and offer rating.
     const onComplete = (data?: { result?: { output?: string; costByFeature?: Record<string, number> } }) => {
+      // runEnded/finalize are dispatched by the GLOBAL handler in App.tsx (it
+      // survives view switches); here we only handle panel-local concerns.
       dispatch(finalizeLastMessage({ finalOutput: data?.result?.output }));
       setCostByFeature(data?.result?.costByFeature ?? null);
-      setStreaming(false);
       setSessionDone(true);
     };
     socket.on('session:complete', onComplete);
@@ -215,7 +220,7 @@ export function ChatPanel({ socket, compact }: Props) {
     dispatch(appendMessage(assistantMsg));
     socket.emit('cascade:run', { prompt: input.trim(), model: activeModel.chat, sessionId: sid, ...(forceTier !== 'auto' ? { forceTier } : {}) });
     setInput('');
-    setStreaming(true);
+    dispatch(runStarted({ sessionId: sid }));
     setSessionDone(false);
   };
 
@@ -312,8 +317,10 @@ export function ChatPanel({ socket, compact }: Props) {
         {streaming ? (
           <button
             onClick={() => {
-              socket?.emit('session:halt', { sessionId: currentSessionId });
-              // We do not setStreaming(false) here immediately, waiting for the session:complete or error to cleanly finalize.
+              // Target the actual in-flight run; the store's runActive is only
+              // cleared by the global session:complete/error handlers, so the
+              // button state stays honest until the backend confirms the halt.
+              socket?.emit('session:halt', { sessionId: runSessionId ?? currentSessionId });
             }}
             title="Stop generating"
             style={{

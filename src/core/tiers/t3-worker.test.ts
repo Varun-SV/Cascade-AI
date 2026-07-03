@@ -186,3 +186,38 @@ describe('T3Worker', () => {
     });
   });
 });
+
+describe('T3Worker — text-tool lean prompts (v0.15.0)', () => {
+  it('sends the FULL text-tool contract once, then only a terse reminder', async () => {
+    const sysPrompts: string[] = [];
+    let calls = 0;
+    const router = {
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content?: unknown }>; systemPrompt?: string }) => {
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        sysPrompts.push(String(options.systemPrompt ?? ''));
+        calls += 1;
+        if (calls === 1) {
+          // Text-format tool call — no native toolCalls field.
+          return makeResult('<tool_call>{"name":"file_write","input":{"path":"a.md","content":"x"}}</tool_call>');
+        }
+        return makeResult('Final answer');
+      }),
+      // A model WITHOUT native tool support triggers the text-tool path.
+      getModelForTier: () => ({ id: 'local-x', provider: 'ollama', supportsToolUse: false }),
+    } as unknown as CascadeRouter;
+
+    const worker = new T3Worker(router, makeToolRegistry(), 't2-parent');
+    const result = await worker.execute(makeAssignment(), 'task-lean');
+
+    expect(result.status).toBe('COMPLETED');
+    expect(sysPrompts.length).toBeGreaterThanOrEqual(2);
+    expect(sysPrompts[0]).toContain('TOOL USE INSTRUCTIONS');   // full contract, turn 1
+    expect(sysPrompts[1]).toContain('TOOL USE REMINDER');       // terse afterwards
+    expect(sysPrompts[1]).not.toContain('TOOL USE INSTRUCTIONS');
+    expect(sysPrompts[1]).toContain('file_write');              // tool names still listed
+  });
+});

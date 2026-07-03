@@ -116,3 +116,80 @@ describe('MemoryStore runtime persistence', () => {
     store.close();
   });
 });
+
+describe('MemoryStore export / import (v0.15.0)', () => {
+  it.skipIf(!hasSqlite)('round-trips sessions with fresh ids and never overwrites', async () => {
+    const dirA = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-exp-'));
+    const dirB = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-imp-'));
+    tempDirs.push(dirA, dirB);
+
+    const src = new MemoryStore(path.join(dirA, 'memory.db'));
+    const now = new Date().toISOString();
+    src.createSession({
+      id: 'orig-1', title: 'My chat', createdAt: now, updatedAt: now,
+      identityId: 'default', workspacePath: '/w', messages: [],
+      metadata: { totalTokens: 5, totalCostUsd: 0.01, modelsUsed: [], toolsUsed: [], taskCount: 1 },
+    });
+    // Direct insert (addMessage is queued/async) so the export sees it now.
+    src.importSessions([]); // no-op, just proves empty input is safe
+    const bundleSessions = src.exportSessions(['orig-1']);
+    bundleSessions[0]!.messages = [
+      { id: 'm1', sessionId: 'orig-1', role: 'user', content: 'hello', timestamp: now },
+      { id: 'm2', sessionId: 'orig-1', role: 'assistant', content: 'hi!', timestamp: now },
+    ];
+
+    const dst = new MemoryStore(path.join(dirB, 'memory.db'));
+    const imported = dst.importSessions(bundleSessions);
+    expect(imported).toHaveLength(1);
+    expect(imported[0]!.id).not.toBe('orig-1');           // fresh id — never overwrites
+    expect(imported[0]!.title).toContain('(imported)');
+
+    const got = dst.getSession(imported[0]!.id);
+    expect(got?.messages).toHaveLength(2);
+    expect(got?.messages[0]?.content).toBe('hello');
+
+    // Re-importing duplicates under ANOTHER fresh id (still no overwrite).
+    const again = dst.importSessions(bundleSessions);
+    expect(again[0]!.id).not.toBe(imported[0]!.id);
+
+    src.close();
+    dst.close();
+  });
+
+  it.skipIf(!hasSqlite)('imports identities deduped by name, never as default', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-ident-'));
+    tempDirs.push(dir);
+    const store = new MemoryStore(path.join(dir, 'memory.db'));
+    const now = new Date().toISOString();
+    store.createIdentity({ id: 'i1', name: 'Reviewer', createdAt: now, isDefault: true });
+
+    const n = store.importIdentities([
+      { id: 'x', name: 'Reviewer', createdAt: now, isDefault: true },   // dup name → skipped
+      { id: 'y', name: 'Architect', createdAt: now, isDefault: true },  // new → imported, not default
+    ]);
+    expect(n).toBe(1);
+    const all = store.listIdentities();
+    expect(all.filter((i) => i.name === 'Reviewer')).toHaveLength(1);
+    const architect = all.find((i) => i.name === 'Architect');
+    expect(architect).toBeTruthy();
+    expect(architect!.isDefault).toBe(false);
+    store.close();
+  });
+
+  it.skipIf(!hasSqlite)('persists and reads back a probed capability verdict', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-caps-'));
+    tempDirs.push(dir);
+    const store = new MemoryStore(path.join(dir, 'memory.db'));
+
+    expect(store.getModelProfile('my-custom.gguf', 'openai-compatible')).toBeUndefined();
+    store.saveModelCapability('my-custom.gguf', 'openai-compatible', { supportsToolUse: false });
+    expect(store.getModelProfile('my-custom.gguf', 'openai-compatible')?.supportsToolUse).toBe(false);
+
+    // Merges with an existing profile rather than clobbering it.
+    store.saveModelProfile('my-custom.gguf', 'openai-compatible', ['code']);
+    const merged = store.getModelProfile('my-custom.gguf', 'openai-compatible');
+    expect(merged?.supportsToolUse).toBe(false);
+    expect(merged?.specializations).toEqual(['code']);
+    store.close();
+  });
+});
