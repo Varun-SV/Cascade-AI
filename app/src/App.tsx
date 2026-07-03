@@ -17,9 +17,11 @@ import {
   useAppDispatch, useAppSelector,
   setConnected, setReconnecting, setBackendError, setMeta, updateCost, upsertAgent, updateLastMessage,
   setSessions, removeSession, setOnboardingDone,
+  enqueueApproval, clearApprovals, appendAgentStream, addPeerEdge, expirePeerEdges,
   type RuntimeSession,
 } from './store/index.js';
 import { SettingsView } from './views/SettingsView.js';
+import { ApprovalModal } from './components/ApprovalModal.js';
 import { useThemeSync } from './theme/useTheme.js';
 
 declare global {
@@ -114,7 +116,19 @@ export function App() {
     });
     socketRef.current = socket;
 
-    socket.on('connect', () => { dispatch(setConnected(true)); dispatch(setReconnecting(false)); });
+    // Populate the session list immediately on connect (and whenever the
+    // backend signals a refresh) — the server only broadcasts full sessions
+    // after a run ends, so without this the sidebar stayed empty until the
+    // first message was sent.
+    const loadSessions = () => {
+      fetch(`http://localhost:${backendPort}/api/runtime?scope=workspace`, { headers: { Authorization: `Bearer ${authToken}` } })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data: { sessions?: RuntimeSession[] } | null) => { if (data?.sessions) dispatch(setSessions(data.sessions)); })
+        .catch(() => { /* backend not ready */ });
+    };
+
+    socket.on('connect', () => { dispatch(setConnected(true)); dispatch(setReconnecting(false)); loadSessions(); });
+    socket.on('runtime:refresh', loadSessions);
     socket.on('disconnect', () => dispatch(setConnected(false)));
     socket.on('connect_error', () => dispatch(setReconnecting(true)));
     socket.on('reconnect', () => { dispatch(setConnected(true)); dispatch(setReconnecting(false)); });
@@ -138,14 +152,23 @@ export function App() {
       }));
     });
 
-    socket.on('stream:token', (data: { text: string; tierId?: string }) => {
-      // Only T1's stream is the user-facing reply. T2/T3 stream too (ids are
-      // `T2_…`/`T3_…`, see BaseTier), and appending them here interleaved
-      // parallel tiers' text — and their `<think>` blocks — into one garbled
-      // message. Their progress stays visible via tier:status → AgentGraph
-      // action labels; their models still think internally.
-      if (data.tierId && !data.tierId.startsWith('T1')) return;
-      dispatch(updateLastMessage({ content: data.text, streaming: true }));
+    socket.on('stream:token', (data: { text: string; tierId?: string; primary?: boolean }) => {
+      // The transcript shows only the run's PRESENTER stream — the root tier's
+      // synthesis (T3 for Simple, T2 for Moderate, T1 for Complex), tagged
+      // `primary`. Background workers stream too but would interleave into a
+      // garble, so they're excluded here (watch them per-node in the Cockpit).
+      if (data.primary) dispatch(updateLastMessage({ content: data.text, streaming: true }));
+      // Every tier's tokens also accumulate on its node for the detail panel.
+      if (data.tierId) dispatch(appendAgentStream({ id: data.tierId, text: data.text }));
+    });
+
+    // Peer coordination (T3↔T3 / T2↔T2) — draw a transient edge in the graph.
+    socket.on('peer:message', (data: { fromId?: string; toId?: string; syncType?: string }) => {
+      if (!data?.fromId) return;
+      dispatch(addPeerEdge({
+        id: crypto.randomUUID(), fromId: data.fromId, toId: data.toId ?? '*',
+        syncType: data.syncType, at: Date.now(),
+      }));
     });
 
     // Session list updates
@@ -162,11 +185,33 @@ export function App() {
     // no feedback. Show the error instead, and clear it when a run completes.
     socket.on('session:error', (data: { error?: string }) => {
       dispatch(setBackendError(data?.error ? `Run failed: ${data.error}` : 'Run failed — check your model/key and try again.'));
+      dispatch(clearApprovals());
     });
-    socket.on('session:complete', () => { dispatch(setBackendError(null)); });
+    socket.on('session:complete', () => { dispatch(setBackendError(null)); dispatch(clearApprovals()); });
+
+    // A dangerous tool escalated to the user — show the approval modal. The
+    // modal answers with `permission:decision`, resolving the blocked run.
+    socket.on('permission:user-required', (data: {
+      sessionId?: string; id: string; toolName: string; input?: Record<string, unknown>;
+      requestedBy?: string; subtaskContext?: string; sectionContext?: string;
+      trail?: Array<{ tier: 'T2' | 'T1'; verdict: 'approve' | 'deny' | 'unsure'; reason?: string }>;
+    }) => {
+      if (!data?.id || !data?.toolName) return;
+      dispatch(enqueueApproval({
+        id: data.id, sessionId: data.sessionId, toolName: data.toolName, input: data.input,
+        requestedBy: data.requestedBy, subtaskContext: data.subtaskContext,
+        sectionContext: data.sectionContext, trail: data.trail,
+      }));
+    });
 
     return () => { socket.disconnect(); };
   }, [backendPort, authToken, dispatch]);
+
+  // Age out transient peer-communication edges (~2.5s lifetime).
+  useEffect(() => {
+    const t = setInterval(() => dispatch(expirePeerEdges(Date.now() - 2500)), 1000);
+    return () => clearInterval(t);
+  }, [dispatch]);
 
   // Show onboarding full-screen on first run
   if (!onboardingDone) {
@@ -204,6 +249,7 @@ export function App() {
       </div>
       <StatusBar />
       {showSettings && <SettingsView socket={socketRef.current} />}
+      <ApprovalModal socket={socketRef.current} />
     </div>
   );
 }

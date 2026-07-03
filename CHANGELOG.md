@@ -5,6 +5,25 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] - 2026-07-03
+
+Desktop bugfix round — the app is usable again.
+
+### Fixed
+- **The chat reply streams live again.** After v0.12.23 the transcript only rendered tokens tagged `T1`, but a Simple run has no T1 (its root is a T3) and a Moderate run's root is a T2 — so on the common local-model routes nothing streamed and the answer only appeared at the very end. The run's actual root tier is now tagged `primary` and that stream renders, whichever tier it is (T3 for Simple, T2 for Moderate, T1 for Complex). The Moderate root T2 now streams its synthesis too.
+- **Tool approvals actually prompt — and files actually get created.** The dashboard ran tasks with **no approval callback**, so the escalator instantly denied every dangerous tool (file writes, shell) and a "create a file" chat request silently produced nothing. The desktop/web app now shows an **approval modal** for `permission:user-required` (tool, target, and the escalation trail), and the backend parks the blocked run until you answer over the socket. Approve → the tool runs; Deny/timeout → it doesn't, with a clear line instead of silence.
+- **Sessions load on connect.** The sidebar was empty until a run finished; the app now fetches the session list on connect and on `runtime:refresh`.
+- **Genuinely complex tasks reach T1.** A small local classifier that under-rates a big multi-step build (returning Moderate or a garbled verdict) no longer strands it at T2 — an explicit build+scale signal floors the route to Complex so the full T1→T2→T3 hierarchy engages. Conservative on purpose; short/ambiguous prompts stay cheap.
+- **Long model names no longer overflow the dropdown.** The model picker and settings tier selectors clip long ids/`.gguf` paths with an ellipsis and stay inside the viewport/modal instead of blowing the panel out.
+- **"Check for updates" is calm during a release build.** While a new desktop build is still publishing, the Updates tab showed the raw electron-updater error (missing `latest.yml`/404). It now shows a plain "You're on the latest version, or a new release is still being published — check back shortly."
+- **Landing page fits phones.** A decorative hero glow (600px, centred) pushed the page ~113px past a 375px viewport; it's now clamped so there's no horizontal overflow at any phone width.
+
+### Added
+- **Dangerous tools always reach you.** T2 and T1 no longer final-approve a dangerous tool on a small model's say-so — they attach an advisory verdict (approve/deny/unsure + reason) to the request's **escalation trail** and pass it up, so the topmost engaged tier surfaces it to you. Safe/read-only tools still auto-handle; autonomous mode still gates dangerous tools.
+- **Manual tier override.** A tier selector in the Cockpit (Auto / T1 / T2 / T3), backed by `routing.forceTier` in config, pins a run's root tier and skips the classifier when set.
+- **Per-node monitoring.** Click a node in the Cockpit to open a detail panel showing that tier's role, status, current action, live stream, and recent peer messages.
+- **Peer-communication visualization.** When two workers coordinate (`peer:message`), the AgentGraph draws a transient animated edge between them (broadcasts pulse the source outward).
+
 ## [0.13.1] - 2026-07-02
 
 ### Fixed

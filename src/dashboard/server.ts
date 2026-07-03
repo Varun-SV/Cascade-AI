@@ -40,6 +40,13 @@ export class DashboardServer {
    * of runs the session performed in this server's lifetime.
    */
   private sessionTaskIds = new Map<string, string[]>();
+  /**
+   * Tool-approval requests awaiting a user decision from a connected client,
+   * keyed by the request's uuid. The desktop shows a modal on
+   * `permission:user-required` and answers with `permission:decision`; this
+   * map is how that answer reaches the run that's blocked on it.
+   */
+  private pendingApprovals = new Map<string, { resolve: (d: { approved: boolean; always: boolean }) => void; sessionId: string }>();
   private port: number;
   private host: string;
   private workspacePath: string;
@@ -114,23 +121,25 @@ export class DashboardServer {
       this.persistConfig();
     });
 
-    this.socket.onCascadeRun(async (prompt, model, socketId, requestedSessionId) => {
+    this.socket.onCascadeRun(async (prompt, model, socketId, requestedSessionId, forceTier) => {
       const sessionId = requestedSessionId ?? randomUUID();
       const abortController = new AbortController();
       this.activeControllers.set(sessionId, abortController);
-      
+
       // Resuming an existing session: fold its stored history into the prompt
       // (built before persistRunStart so the new prompt isn't self-included).
       const runPrompt = requestedSessionId ? this.buildContinuationPrompt(sessionId, prompt) : prompt;
       const title = this.persistRunStart(sessionId, prompt);
-      const cfg = model !== 'auto'
+      let cfg = model !== 'auto'
         ? { ...this.config, models: { ...this.config.models, t1: model } }
         : this.config;
+      // Per-run manual tier override from the Cockpit selector.
+      if (forceTier) cfg = { ...cfg, routing: { ...cfg.routing, forceTier: forceTier as 'T1' | 'T2' | 'T3' } };
       const cascade = new Cascade(cfg, this.workspacePath, this.store);
       this.activeSessions.set(sessionId, cascade);
 
-      cascade.on('stream:token', (e: { text: string; tierId: string }) => {
-        this.socket.emitToSocket(socketId, 'stream:token', { sessionId, tierId: e.tierId, text: e.text });
+      cascade.on('stream:token', (e: { text: string; tierId: string; primary?: boolean }) => {
+        this.socket.emitToSocket(socketId, 'stream:token', { sessionId, tierId: e.tierId, text: e.text, primary: e.primary });
       });
       cascade.on('tier:status', (e: unknown) => {
         this.socket.emitToSocket(socketId, 'tier:status', { sessionId, ...(e as object) });
@@ -143,7 +152,11 @@ export class DashboardServer {
       });
 
       try {
-        const result = await cascade.run({ prompt: runPrompt, signal: abortController.signal });
+        const result = await cascade.run({
+          prompt: runPrompt,
+          signal: abortController.signal,
+          approvalCallback: this.makeApprovalCallback(sessionId),
+        });
         this.recordSessionTask(sessionId, result.taskId);
         this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED');
         this.socket.emitToSocket(socketId, 'session:complete', { sessionId, result });
@@ -162,11 +175,23 @@ export class DashboardServer {
       } finally {
         this.activeSessions.delete(sessionId);
         this.activeControllers.delete(sessionId);
+        this.denyPendingApprovals(sessionId);
       }
     });
 
     this.socket.onSessionHalt((sessionId) => {
       this.activeControllers.get(sessionId)?.abort();
+      // Unblock any tool waiting on approval so the aborted run can unwind.
+      this.denyPendingApprovals(sessionId);
+    });
+
+    // The desktop/web approval modal answers here. Resolve the run that's
+    // blocked on this exact request id (uuid — not guessable across sessions).
+    this.socket.onApprovalResponse(({ requestId, approved, always }) => {
+      const pending = this.pendingApprovals.get(requestId);
+      if (!pending) return;
+      this.pendingApprovals.delete(requestId);
+      pending.resolve({ approved: !!approved, always: !!always });
     });
 
     this.socket.onSessionSteer((message, sessionId, nodeId) => {
@@ -354,6 +379,31 @@ export class DashboardServer {
     const list = this.sessionTaskIds.get(sessionId) ?? [];
     list.push(taskId);
     this.sessionTaskIds.set(sessionId, list);
+  }
+
+  /**
+   * Approval bridge: cascade calls this when a dangerous tool escalates to the
+   * user. The request itself was already pushed to the client via the
+   * `permission:user-required` forward; here we just park a resolver keyed by
+   * the request id and wait for the client's `permission:decision` (handled in
+   * onApprovalResponse). Never auto-approves — an unanswered request stays
+   * pending until the client answers, the run ends, or the escalator's own
+   * timeout denies it.
+   */
+  private makeApprovalCallback(sessionId: string): (request: import('../types.js').ApprovalRequest) => Promise<{ approved: boolean; always: boolean }> {
+    return (request) => new Promise<{ approved: boolean; always: boolean }>((resolve) => {
+      this.pendingApprovals.set(request.id, { resolve, sessionId });
+    });
+  }
+
+  /** Deny + clear any approvals still pending for a session (run end / abort). */
+  private denyPendingApprovals(sessionId: string): void {
+    for (const [id, pending] of this.pendingApprovals) {
+      if (pending.sessionId === sessionId) {
+        this.pendingApprovals.delete(id);
+        pending.resolve({ approved: false, always: false });
+      }
+    }
   }
 
   private persistRuntimeRow(sessionId: string, title: string, status: 'ACTIVE' | 'COMPLETED' | 'FAILED', latestPrompt?: string): void {
@@ -562,15 +612,10 @@ export class DashboardServer {
       res.json({ success: true, ...payload });
     });
 
-    this.app.post('/api/approve', auth, mutationLimiter, (req: Request, res: Response) => {
-      const body = req.body as Record<string, unknown>;
-      const sessionId = typeof body['sessionId'] === 'string' ? body['sessionId'] : undefined;
-      const nodeId = typeof body['nodeId'] === 'string' ? body['nodeId'] : undefined;
-      const payload = { sessionId, nodeId, requestedAt: new Date().toISOString() };
-      this.socket.broadcast('session:approve', payload);
-      if (sessionId) this.socket.broadcastToRoom(`session:${sessionId}`, 'session:approve', payload);
-      res.json({ success: true, ...payload });
-    });
+    // Tool approval is answered over the socket (`permission:decision` →
+    // onApprovalResponse), which actually resolves the blocked run. The old
+    // POST /api/approve only broadcast a `session:approve` event nothing
+    // consumed, so it was removed to avoid implying a working REST path.
 
     this.app.post('/api/inject', auth, mutationLimiter, (req: Request, res: Response) => {
       const body = req.body as Record<string, unknown>;
@@ -858,8 +903,8 @@ export class DashboardServer {
         const cascade = new Cascade(this.config, this.workspacePath, this.store);
         this.activeSessions.set(sessionId, cascade);
 
-        cascade.on('stream:token', (e: { text: string; tierId: string }) => {
-          this.socket.broadcastToRoom(`session:${sessionId}`, 'stream:token', { sessionId, tierId: e.tierId, text: e.text });
+        cascade.on('stream:token', (e: { text: string; tierId: string; primary?: boolean }) => {
+          this.socket.broadcastToRoom(`session:${sessionId}`, 'stream:token', { sessionId, tierId: e.tierId, text: e.text, primary: e.primary });
         });
         cascade.on('tier:status', (e: unknown) => {
           this.socket.broadcastToRoom(`session:${sessionId}`, 'tier:status', { sessionId, ...(e as object) });
@@ -872,7 +917,11 @@ export class DashboardServer {
         });
 
         try {
-          const result = await cascade.run({ prompt: runPrompt, identityId: body.identityId });
+          const result = await cascade.run({
+            prompt: runPrompt,
+            identityId: body.identityId,
+            approvalCallback: this.makeApprovalCallback(sessionId),
+          });
           this.recordSessionTask(sessionId, result.taskId);
           this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED');
           this.socket.broadcast('cost:update', {
@@ -890,6 +939,7 @@ export class DashboardServer {
           });
         } finally {
           this.activeSessions.delete(sessionId);
+          this.denyPendingApprovals(sessionId);
         }
       })();
     });

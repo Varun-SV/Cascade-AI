@@ -168,6 +168,20 @@ function sendUpdateStatus(status: string, data: Record<string, unknown> = {}): v
   mainWindow?.webContents.send('update:status', { status, ...data });
 }
 
+/**
+ * electron-updater throws noisy internal errors (missing latest.yml, 404, no
+ * published release) when a check runs before a release's assets are live —
+ * e.g. right after merging a PR while the build workflow is still running.
+ * Turn those into a calm message instead of dumping the raw stack in the UI.
+ */
+function friendlyUpdateError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  if (/latest\.yml|404|no published|ENOENT|cannot find|Unable to find|not found|no release/i.test(raw)) {
+    return "You're on the latest version, or a new release is still being published — check back shortly.";
+  }
+  return raw;
+}
+
 function setupAutoUpdate(): void {
   try {
     autoUpdater = require('electron-updater').autoUpdater;
@@ -189,7 +203,7 @@ function setupAutoUpdate(): void {
     sendUpdateStatus('downloaded', { version: info?.version });
     new Notification({ title: 'Cascade AI — Restart to Update', body: 'A new version is ready. Relaunch to install.' }).show();
   });
-  autoUpdater.on('error', (err: unknown) => sendUpdateStatus('error', { message: err instanceof Error ? err.message : String(err) }));
+  autoUpdater.on('error', (err: unknown) => sendUpdateStatus('error', { message: friendlyUpdateError(err) }));
 
   // Silent check on launch; failures (e.g. dev without app-update.yml) are ignored.
   autoUpdater.checkForUpdatesAndNotify?.().catch(() => { /* offline or dev */ });
@@ -218,7 +232,7 @@ function registerIPC(): void {
       const r = await autoUpdater.checkForUpdates();
       return { ok: true, version: r?.updateInfo?.version, current: app.getVersion() };
     } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      return { ok: false, error: friendlyUpdateError(err) };
     }
   });
   ipcMain.handle('update:install', () => {

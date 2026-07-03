@@ -282,6 +282,10 @@ export const CascadeConfigSchema = z.object({
         .default([]),
     })
     .optional(),
+  /** Routing controls — forceTier pins the root tier, bypassing the classifier. */
+  routing: z
+    .object({ forceTier: z.enum(['auto', 'T1', 'T2', 'T3']).default('auto') })
+    .optional(),
   /**
    * T3→T2 reinforcement: when enabled, a worker that discovers its subtask should
    * fan out can call the `request_workers` tool to have its T2 manager spawn

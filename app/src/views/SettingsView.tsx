@@ -295,18 +295,18 @@ export function SettingsView({ socket }: Props) {
                 return (
                   <div key={label}>
                     <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>{label}</label>
-                    <div style={{ display: 'flex', gap: 8 }}>
+                    <div style={{ display: 'flex', gap: 8, minWidth: 0 }}>
                       <select value={sel.provider}
                         onChange={(e) => {
                           const next = TIER_PROVIDERS.find((p) => p.id === e.target.value)!;
                           setSel({ provider: next.id, model: next.models[0] ?? '' });
                           if (next.freeText) fetchModels();
                         }}
-                        style={{ flex: 1, background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none' }}>
+                        style={{ flex: 1, minWidth: 0, maxWidth: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none' }}>
                         {TIER_PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
                       </select>
                       {sel.provider !== 'auto' && (() => {
-                        const fieldStyle = { flex: 1, background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' as const };
+                        const fieldStyle = { flex: 1, minWidth: 0, maxWidth: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' as const };
                         const btnStyle = { flexShrink: 0, width: 32, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-muted)', cursor: 'pointer' };
                         if (!def.freeText) {
                           return (

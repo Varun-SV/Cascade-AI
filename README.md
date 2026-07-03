@@ -63,6 +63,12 @@ Other AI CLIs run a single agent. Cascade runs a visible **organization** — an
 
 ## What's New
 
+### v0.13.2 — desktop bugfix round
+- **Live streaming, tool approvals, and file creation work again in the app.** The chat reply streams token-by-token on every route (not just Complex), a **tool-approval modal** now pops for dangerous actions (showing the escalation trail), and approved file writes actually land. Dangerous tools always escalate to you — T2/T1 advise but never final-approve.
+- **New Cockpit controls.** A manual **tier override** (Auto / T1 / T2 / T3) pins a run's root tier; **click any node** to open a live detail panel (role, status, stream, peer messages); coordinating workers now draw an animated **peer edge** in the graph.
+- **Smarter auto-routing.** Explicit multi-step build prompts floor to Complex so genuinely complex work engages the full T1→T2→T3 hierarchy instead of stalling at T2.
+- Plus: the session list loads on connect, long model names stay inside the dropdown, "Check for updates" stays calm mid-release, and the landing page fits phones.
+
 ### v0.6 → v0.9.1 — the agentic releases
 - **v0.9.1 — Workers recruit help.** A T3 worker that discovers its task should fan out can call `request_workers` to have its T2 spawn bounded sibling workers (no recursive 4th tier; depth-capped + budget-bounded).
 - **v0.9.0 — Resumability, reflection, smarter local exec.** `/continue` resumes a budget-capped task from its partial state; opt-in **reflection** revises a worker's output against the goal; `t3Execution: auto` runs T3 waves sequentially on local/Ollama tiers and parallel on cloud.

@@ -449,7 +449,7 @@ export class T3Worker extends BaseTier {
         'T3',
         options,
         (chunk) => {
-          this.emit('stream:token', { tierId: this.id, text: chunk.text });
+          this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: this.isPresenter });
         },
       );
 

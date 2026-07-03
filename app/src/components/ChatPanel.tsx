@@ -159,7 +159,7 @@ export function ChatPanel({ socket, compact }: Props) {
   const dispatch = useAppDispatch();
   const messages = useAppSelector((s) => s.app.messages);
   const sessionId = useAppSelector((s) => s.app.sessionId);
-  const { activeModel, sessions, activeSessionId, backendPort, authToken } = useAppSelector((s) => s.app);
+  const { activeModel, sessions, activeSessionId, backendPort, authToken, forceTier } = useAppSelector((s) => s.app);
   const [input, setInput] = useState('');
   const [focused, setFocused] = useState(false);
   const [streaming, setStreaming] = useState(false);
@@ -213,7 +213,7 @@ export function ChatPanel({ socket, compact }: Props) {
     const assistantMsg = { id: crypto.randomUUID(), role: 'assistant' as const, content: '', timestamp: Date.now(), streaming: true };
     dispatch(appendMessage(userMsg));
     dispatch(appendMessage(assistantMsg));
-    socket.emit('cascade:run', { prompt: input.trim(), model: activeModel.chat, sessionId: sid });
+    socket.emit('cascade:run', { prompt: input.trim(), model: activeModel.chat, sessionId: sid, ...(forceTier !== 'auto' ? { forceTier } : {}) });
     setInput('');
     setStreaming(true);
     setSessionDone(false);

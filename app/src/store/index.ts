@@ -45,6 +45,19 @@ export interface AppTab {
   isDirty?: boolean;
 }
 
+/** A tool-approval request escalated to the user for a decision. */
+export interface PendingApproval {
+  id: string;
+  sessionId?: string;
+  toolName: string;
+  input?: Record<string, unknown>;
+  requestedBy?: string;
+  subtaskContext?: string;
+  sectionContext?: string;
+  /** Advisory verdicts recorded by T2/T1 as the request escalated. */
+  trail?: Array<{ tier: 'T2' | 'T1'; verdict: 'approve' | 'deny' | 'unsure'; reason?: string }>;
+}
+
 export interface AppState {
   view: ViewMode;
   connected: boolean;
@@ -75,6 +88,23 @@ export interface AppState {
   openTabs: AppTab[];
   activeTabId: string | null;
   onboardingDone: boolean;
+  /** Tool-approval requests awaiting the user's decision (FIFO). */
+  pendingApprovals: PendingApproval[];
+  /** Agent node selected in the Cockpit graph (shows its live detail panel). */
+  selectedNodeId: string | null;
+  /** Transient peer-communication edges, auto-expired shortly after arriving. */
+  peerEdges: PeerEdge[];
+  /** Manual routing override — pins the run's root tier (Auto = classifier decides). */
+  forceTier: 'auto' | 'T1' | 'T2' | 'T3';
+}
+
+/** A live T3↔T3 / T2↔T2 message, drawn as a transient edge in the graph. */
+export interface PeerEdge {
+  id: string;
+  fromId: string;
+  toId: string;
+  syncType?: string;
+  at: number;
 }
 
 const initialState: AppState = {
@@ -105,6 +135,10 @@ const initialState: AppState = {
   openTabs: [],
   activeTabId: null,
   onboardingDone: true, // assume done until we check IPC; avoids onboarding flash
+  pendingApprovals: [],
+  selectedNodeId: null,
+  peerEdges: [],
+  forceTier: 'auto',
 };
 
 // ─── Slice ────────────────────────────────────────────────────────────────────
@@ -143,8 +177,28 @@ const appSlice = createSlice({
     },
     upsertAgent(state, action: PayloadAction<AgentNode>) {
       const idx = state.agents.findIndex((a) => a.id === action.payload.id);
-      if (idx >= 0) state.agents[idx] = action.payload;
+      // Preserve the accumulated per-node stream across status updates (which
+      // arrive without it) so the node-detail panel keeps the worker's output.
+      if (idx >= 0) state.agents[idx] = { ...action.payload, stream: state.agents[idx]!.stream };
       else state.agents.push(action.payload);
+    },
+    // Per-node live output (every tier), shown in the Cockpit node-detail panel.
+    appendAgentStream(state, action: PayloadAction<{ id: string; text: string }>) {
+      const node = state.agents.find((a) => a.id === action.payload.id);
+      if (node) node.stream = (node.stream ?? '') + action.payload.text;
+    },
+    selectNode(state, action: PayloadAction<string | null>) {
+      state.selectedNodeId = action.payload;
+    },
+    addPeerEdge(state, action: PayloadAction<PeerEdge>) {
+      state.peerEdges.push(action.payload);
+      if (state.peerEdges.length > 40) state.peerEdges.splice(0, state.peerEdges.length - 40);
+    },
+    expirePeerEdges(state, action: PayloadAction<number>) {
+      state.peerEdges = state.peerEdges.filter((e) => e.at > action.payload);
+    },
+    setForceTier(state, action: PayloadAction<'auto' | 'T1' | 'T2' | 'T3'>) {
+      state.forceTier = action.payload;
     },
     appendMessage(state, action: PayloadAction<ChatMessage>) {
       state.messages.push(action.payload);
@@ -222,6 +276,18 @@ const appSlice = createSlice({
     setSessionSidebarCollapsed(state, action: PayloadAction<boolean>) {
       state.sessionSidebarCollapsed = action.payload;
     },
+    // Tool approvals
+    enqueueApproval(state, action: PayloadAction<PendingApproval>) {
+      if (!state.pendingApprovals.some((a) => a.id === action.payload.id)) {
+        state.pendingApprovals.push(action.payload);
+      }
+    },
+    dequeueApproval(state, action: PayloadAction<string>) {
+      state.pendingApprovals = state.pendingApprovals.filter((a) => a.id !== action.payload);
+    },
+    clearApprovals(state) {
+      state.pendingApprovals = [];
+    },
     // Tab bar
     openTab(state, action: PayloadAction<AppTab>) {
       const existing = state.openTabs.findIndex((t) => t.id === action.payload.id);
@@ -255,6 +321,8 @@ export const {
   setAgents, upsertAgent, appendMessage, updateLastMessage, finalizeLastMessage, loadTranscript,
   setWorkspacePath, toggleTerminal, openTerminalAt, toggleCodeChat, setHelpContext, setTheme, setActiveModel, setActiveModelT1, setActiveModelChat,
   setSessions, setActiveSessionId, removeSession, toggleSessionSidebar, setSessionSidebarCollapsed,
+  enqueueApproval, dequeueApproval, clearApprovals,
+  appendAgentStream, selectNode, addPeerEdge, expirePeerEdges, setForceTier,
   openTab, closeTab, setActiveTab, setTabDirty,
   setOnboardingDone,
 } = appSlice.actions;

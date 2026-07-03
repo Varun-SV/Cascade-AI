@@ -1,11 +1,11 @@
 import { useMemo } from 'react';
 import ReactFlow, {
   Background, Controls, MiniMap,
-  type Node, type Edge, type NodeTypes,
+  type Node, type Edge, type NodeTypes, type NodeMouseHandler,
   Handle, Position,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
-import type { AgentNode } from '../store/index.js';
+import { useAppDispatch, useAppSelector, selectNode, type AgentNode } from '../store/index.js';
 
 const TIER_COLORS: Record<string, string> = {
   T1: '#f5a623',
@@ -83,6 +83,11 @@ const H_GAP = 240;
 const CENTER_X = 600;
 
 export function AgentGraph({ agents }: { agents: AgentNode[] }) {
+  const dispatch = useAppDispatch();
+  const selectedNodeId = useAppSelector((s) => s.app.selectedNodeId);
+  const peerEdges = useAppSelector((s) => s.app.peerEdges);
+  const onNodeClick: NodeMouseHandler = (_e, node) => dispatch(selectNode(node.id));
+
   const nodes: Node[] = useMemo(() => {
     const byTier = { T1: [] as AgentNode[], T2: [] as AgentNode[], T3: [] as AgentNode[] };
     for (const a of agents) byTier[a.tier]?.push(a);
@@ -91,12 +96,16 @@ export function AgentGraph({ agents }: { agents: AgentNode[] }) {
       const idx = group.indexOf(a);
       const count = group.length;
       const x = CENTER_X - ((count - 1) * H_GAP) / 2 + idx * H_GAP;
-      return { id: a.id, type: 'agent', position: { x, y: TIER_Y[a.tier] ?? 40 }, data: a };
+      return {
+        id: a.id, type: 'agent', position: { x, y: TIER_Y[a.tier] ?? 40 }, data: a,
+        selected: a.id === selectedNodeId,
+        style: a.id === selectedNodeId ? { outline: '2px solid var(--accent)', outlineOffset: 3, borderRadius: 10 } : undefined,
+      };
     });
-  }, [agents]);
+  }, [agents, selectedNodeId]);
 
-  const edges: Edge[] = useMemo(() =>
-    agents
+  const edges: Edge[] = useMemo(() => {
+    const hierarchy: Edge[] = agents
       .filter((a) => a.parentId)
       .map((a) => ({
         id: `${a.parentId}-${a.id}`,
@@ -104,15 +113,28 @@ export function AgentGraph({ agents }: { agents: AgentNode[] }) {
         target: a.id,
         style: { stroke: TIER_COLORS[a.tier] ?? '#b87fff', strokeWidth: 1.5, opacity: 0.6 },
         animated: a.status === 'ACTIVE',
-      })),
-    [agents],
-  );
+      }));
+    // Transient peer edges (T3↔T3 / T2↔T2). Broadcasts (toId '*') are skipped
+    // as edges — they'd have no single target — and just show in node detail.
+    const known = new Set(agents.map((a) => a.id));
+    const peers: Edge[] = peerEdges
+      .filter((e) => e.toId !== '*' && known.has(e.fromId) && known.has(e.toId))
+      .map((e) => ({
+        id: `peer-${e.id}`,
+        source: e.fromId,
+        target: e.toId,
+        animated: true,
+        style: { stroke: 'var(--accent)', strokeWidth: 2, strokeDasharray: '4 3', opacity: 0.9 },
+      }));
+    return [...hierarchy, ...peers];
+  }, [agents, peerEdges]);
 
   return (
     <ReactFlow
       nodes={nodes}
       edges={edges}
       nodeTypes={NODE_TYPES}
+      onNodeClick={onNodeClick}
       fitView
       minZoom={0.25}
       maxZoom={2}

@@ -2,8 +2,9 @@ import { useState } from 'react';
 import type { Socket } from 'socket.io-client';
 import { Send, Network } from 'lucide-react';
 import { AgentGraph } from '../components/AgentGraph.js';
+import { NodeDetailPanel } from '../components/NodeDetailPanel.js';
 import { HelpButton } from '../help/HelpButton.js';
-import { useAppDispatch, useAppSelector, appendMessage } from '../store/index.js';
+import { useAppDispatch, useAppSelector, appendMessage, setForceTier } from '../store/index.js';
 
 const TIERS: { id: string; label: string; color: string }[] = [
   { id: 'T1', label: 'Planner', color: 'var(--t1)' },
@@ -19,7 +20,7 @@ export function CockpitView({ socket }: { socket: Socket | null }) {
   const [steerAck, setSteerAck] = useState(false);
   const agents = useAppSelector((s) => s.app.agents);
   const messages = useAppSelector((s) => s.app.messages);
-  const { activeSessionId, sessionId } = useAppSelector((s) => s.app);
+  const { activeSessionId, sessionId, forceTier } = useAppSelector((s) => s.app);
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
   const runActive = agents.some((a) => a.status === 'ACTIVE');
 
@@ -40,7 +41,7 @@ export function CockpitView({ socket }: { socket: Socket | null }) {
     // below) AND in the Chat view, instead of vanishing after send.
     dispatch(appendMessage({ id: crypto.randomUUID(), role: 'user', content: text, timestamp: Date.now() }));
     dispatch(appendMessage({ id: crypto.randomUUID(), role: 'assistant', content: '', timestamp: Date.now(), streaming: true }));
-    socket.emit('cascade:run', { prompt: text });
+    socket.emit('cascade:run', { prompt: text, ...(forceTier !== 'auto' ? { forceTier } : {}) });
     setPrompt('');
   };
 
@@ -122,6 +123,7 @@ export function CockpitView({ socket }: { socket: Socket | null }) {
         ) : (
           <AgentGraph agents={agents} />
         )}
+        <NodeDetailPanel />
       </div>
 
       {/* Live steering: visible while a run is active — inject a correction
@@ -154,6 +156,20 @@ export function CockpitView({ socket }: { socket: Socket | null }) {
         background: 'var(--bg-surface)',
         display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
       }}>
+        <select
+          value={forceTier}
+          onChange={(e) => dispatch(setForceTier(e.target.value as 'auto' | 'T1' | 'T2' | 'T3'))}
+          title="Routing: Auto lets Cascade pick the tier; force T1 (full hierarchy), T2 (manager+workers), or T3 (single worker)."
+          style={{
+            flexShrink: 0, background: 'var(--bg-overlay)', border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-sm)', color: 'var(--text)', padding: '5px 6px', fontSize: 11.5, outline: 'none',
+          }}
+        >
+          <option value="auto">Auto</option>
+          <option value="T1">T1 · full</option>
+          <option value="T2">T2 · manager</option>
+          <option value="T3">T3 · single</option>
+        </select>
         <textarea
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
