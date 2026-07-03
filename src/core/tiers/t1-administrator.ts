@@ -840,7 +840,7 @@ Instructions:
       systemPrompt: this.systemPromptOverride + 'You are a final output compiler. Summarize and format the task results clearly.',
       maxTokens: 8000
     }, (chunk) => {
-      this.emit('stream:token', { tierId: this.id, text: chunk.text });
+      this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: this.isPresenter });
     });
 
     return result.content;
@@ -872,14 +872,14 @@ Reply with exactly one word: YES, NO, or UNSURE.
         temperature: 0,
       });
       const answer = result.content.trim().toUpperCase();
-      if (answer.includes('YES')) {
-        return { requestId: req.id, approved: true, always: true, decidedBy: 'T1', reasoning: 'T1 evaluated: consistent with overall task goal' };
-      }
-      if (answer.includes('NO')) {
-        return { requestId: req.id, approved: false, always: true, decidedBy: 'T1', reasoning: 'T1 evaluated: not consistent with overall task goal' };
-      }
-      return null; // UNSURE → escalate to user
+      // Like T2, T1 never final-approves a dangerous tool — it advises and the
+      // request escalates to the user, who is the final authority.
+      const verdict: 'approve' | 'deny' | 'unsure' =
+        answer.includes('YES') ? 'approve' : answer.includes('NO') ? 'deny' : 'unsure';
+      (req.trail ??= []).push({ tier: 'T1', verdict, reason: `T1: ${verdict === 'approve' ? 'consistent with overall task goal' : verdict === 'deny' ? 'not consistent with overall task goal' : 'unsure'}` });
+      return null; // Always escalate to user for dangerous tools
     } catch {
+      (req.trail ??= []).push({ tier: 'T1', verdict: 'unsure', reason: 'T1 evaluation failed' });
       return null; // On error, escalate to user
     }
   }

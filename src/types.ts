@@ -508,6 +508,12 @@ export interface CascadeConfig {
    * .cascadeignore.
    */
   privacy?: { paths?: Array<{ pattern: string; policy: 'local-only' }> };
+  /**
+   * Routing controls. `forceTier` pins the run's root tier — 'T1' (full
+   * hierarchy), 'T2' (manager + workers), 'T3' (single worker) — bypassing the
+   * complexity classifier. 'auto' (default) uses classification.
+   */
+  routing?: { forceTier?: 'auto' | 'T1' | 'T2' | 'T3' };
   /** Render the TUI in the alternate screen buffer (vim-style). Default: false. */
   altScreen?: boolean;
 }
@@ -726,6 +732,20 @@ export interface PermissionRequest {
    * auto-approve a later dangerous action.
    */
   forceReprompt?: boolean;
+  /**
+   * Escalation trail — each engaged tier's non-binding recommendation as the
+   * request rose toward the user. Dangerous tools never get a terminal
+   * decision from a tier; the tier records its advice here instead, so the
+   * user sees who asked and what T2/T1 thought.
+   */
+  trail?: PermissionTrailEntry[];
+}
+
+/** One tier's advisory verdict recorded while a request escalated upward. */
+export interface PermissionTrailEntry {
+  tier: 'T2' | 'T1';
+  verdict: 'approve' | 'deny' | 'unsure';
+  reason?: string;
 }
 
 /**

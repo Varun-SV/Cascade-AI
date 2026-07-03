@@ -123,7 +123,7 @@ describe('Cascade routing complexity', () => {
     expect(generate).toHaveBeenCalled();
   });
 
-  it('defaults an unparseable classifier reply to a cheap route, never Complex', async () => {
+  it('defaults an unparseable classifier reply for a mid-size task to Moderate (no strong signals → not Complex)', async () => {
     const cascade = new Cascade(baseConfig, process.cwd());
     const generate = vi.fn().mockResolvedValue({
       content: 'I think we should consider several factors here before deciding.',
@@ -132,10 +132,50 @@ describe('Cascade routing complexity', () => {
     });
     (cascade as any).router = { generate };
 
+    // A single-target refactor with no scale-noun / multi-step signals: the
+    // classifier reply is unparseable, so it defaults by length to Moderate —
+    // the cost guardrail still holds for ambiguous prompts.
+    const complexity = await (cascade as any).determineComplexity(
+      'refactor the parser module so the error handling reads more clearly for future maintainers down the line',
+      '/dummy');
+    expect(complexity).toBe('Moderate');
+    expect(generate).toHaveBeenCalled();
+  });
+
+  it('escalates a clearly-complex prompt to Complex when the classifier reply is unparseable (bug #5)', async () => {
+    const cascade = new Cascade(baseConfig, process.cwd());
+    const generate = vi.fn().mockResolvedValue({
+      content: 'I think we should consider several factors here before deciding.',
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimatedCostUsd: 0 },
+      finishReason: 'stop',
+    });
+    (cascade as any).router = { generate };
+
+    // Explicit build+scale signals: a small classifier's garbled reply must not
+    // strand genuinely complex build work at T2 — it reaches the full hierarchy.
     const complexity = await (cascade as any).determineComplexity(
       'refactor and migrate the build pipeline to a new system with full validation', '/dummy');
-    expect(complexity).toBe('Moderate'); // >12 words → Moderate, not Complex
+    expect(complexity).toBe('Complex');
     expect(generate).toHaveBeenCalled();
+  });
+
+  it('floors a clearly-complex prompt to Complex even when the classifier under-rates it as Moderate (bug #5)', async () => {
+    const cascade = new Cascade(baseConfig, process.cwd());
+    const generate = vi.fn().mockResolvedValue({
+      // A small local model confidently under-rates a big build as Moderate.
+      content: 'Moderate — a manager can coordinate this',
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimatedCostUsd: 0 },
+      finishReason: 'stop',
+    });
+    (cascade as any).router = { generate };
+
+    const complexity = await (cascade as any).determineComplexity(
+      'build a full authentication system with a backend api, a database schema, and end-to-end tests',
+      '/dummy');
+    expect(complexity).toBe('Complex');
+    expect(generate).toHaveBeenCalled();
+    const log = cascade.getDecisionLog();
+    expect(log[0]!.detail).toContain('heuristic floor');
   });
 });
 

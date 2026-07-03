@@ -103,7 +103,7 @@ export function ModelPicker({ value, onChange }: Props) {
         }}
       >
         <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: selectedColor }} />
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{labelFor(value)}</span>
+        <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{labelFor(value)}</span>
         <ChevronDown size={10} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
       </button>
 
@@ -111,7 +111,7 @@ export function ModelPicker({ value, onChange }: Props) {
         <div style={{
           position: 'absolute', top: '100%', left: 0, marginTop: 4,
           background: 'var(--bg-raised)', border: '1px solid var(--border)',
-          borderRadius: 8, padding: 4, minWidth: 240, zIndex: 200,
+          borderRadius: 8, padding: 4, minWidth: 240, maxWidth: 'min(340px, 90vw)', zIndex: 200,
           boxShadow: 'var(--shadow-2)', maxHeight: 320, overflowY: 'auto',
         }}>
           {/* Auto */}
@@ -171,7 +171,7 @@ function Item({ color, label, active, onClick }: { color: string; label: string;
       onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = active ? 'var(--bg-hover)' : 'transparent'; }}
     >
       <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: color }} />
-      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
     </button>
   );
 }

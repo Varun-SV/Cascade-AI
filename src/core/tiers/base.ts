@@ -23,6 +23,13 @@ export abstract class BaseTier extends EventEmitter {
   protected hierarchyContext: string = '';
   /** Propagated AbortSignal — set by the tier's `execute()` before work begins. */
   protected signal?: AbortSignal;
+  /**
+   * True for the run's ROOT tier (T3 for Simple, T2 for Moderate, T1 for
+   * Complex). Its own synthesis stream is the user-facing answer and is
+   * tagged `primary` so the desktop renders it live — background workers,
+   * which would interleave, are not tagged.
+   */
+  protected isPresenter = false;
 
   constructor(role: TierRole, id?: string, parentId?: string) {
     super();
@@ -30,6 +37,11 @@ export abstract class BaseTier extends EventEmitter {
     this.id = id ?? `${role}_${randomUUID().slice(0, 8)}`;
     this.parentId = parentId;
     this.label = this.id;
+  }
+
+  /** Mark this tier as the run's presenter (root tier). */
+  setPresenter(on = true): void {
+    this.isPresenter = on;
   }
 
   getStatus(): TierStatus {

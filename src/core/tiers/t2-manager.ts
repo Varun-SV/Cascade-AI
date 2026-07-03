@@ -789,18 +789,24 @@ Return ONLY the JSON array.`;
       }
 
       i = chunkEnd;
+      const isLastChunk = chunkEnd >= completed.length;
 
       const prompt = `Summarize these T3 worker outputs for section "${assignment.sectionTitle}" in 2-3 sentences.
   ${currentSummary ? `\nPREVIOUS SUMMARY SO FAR:\n${currentSummary}\n\nNEW OUTPUTS TO INTEGRATE:\n` : '\nOUTPUTS:\n'}${chunkText}${peerContext}`;
 
       const messages: ConversationMessage[] = [{ role: 'user', content: prompt }];
       try {
+        // When this T2 is the run's presenter (a Moderate root run), stream the
+        // FINAL synthesis as the primary answer so the desktop shows it live.
+        const streamFinal = isLastChunk && this.isPresenter
+          ? (chunk: { text: string }) => this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: true })
+          : undefined;
         const result = await this.router.generate('T2', {
           messages,
           systemPrompt: this.systemPromptOverride + 'You are a T2 Manager. Summarize the work of your T3 workers succinctly.' + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
           maxTokens: 500,
           ...(this.sectionModel ? { model: this.sectionModel } : {}),
-        });
+        }, streamFinal);
         currentSummary = result.content;
       } catch (err) {
         this.log(`aggregateResults: LLM summarization failed at chunk — returning raw T3 outputs. Error: ${err instanceof Error ? err.message : String(err)}`);
@@ -857,15 +863,16 @@ Reply with exactly one word: YES, NO, or UNSURE.`;
         ...(this.sectionModel ? { model: this.sectionModel } : {}),
       });
       const answer = result.content.trim().toUpperCase();
-      if (answer.includes('YES')) {
-        return { requestId: req.id, approved: true, always: true, decidedBy: 'T2', reasoning: 'T2 LLM evaluated: consistent with section goal' };
-      }
-      if (answer.includes('NO')) {
-        return { requestId: req.id, approved: false, always: true, decidedBy: 'T2', reasoning: 'T2 LLM evaluated: inconsistent with section goal' };
-      }
-      // UNSURE → return null to escalate to T1
+      // Dangerous tools are NEVER final-approved by a tier — a small local
+      // model must not silently greenlight a file_write/shell/delete. T2
+      // records its advice on the escalation trail and returns null so the
+      // request keeps rising to the user (the topmost engaged tier prompts).
+      const verdict: 'approve' | 'deny' | 'unsure' =
+        answer.includes('YES') ? 'approve' : answer.includes('NO') ? 'deny' : 'unsure';
+      (req.trail ??= []).push({ tier: 'T2', verdict, reason: `T2: ${verdict === 'approve' ? 'consistent with section goal' : verdict === 'deny' ? 'inconsistent with section goal' : 'unsure'}` });
       return null;
     } catch {
+      (req.trail ??= []).push({ tier: 'T2', verdict: 'unsure', reason: 'T2 evaluation failed' });
       return null; // On error, escalate rather than block
     }
   }

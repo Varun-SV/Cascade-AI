@@ -215,4 +215,46 @@ describe('T2Manager', () => {
     expect(executed).toContain('Helper A');
     expect(executed).toContain('Helper B');
   });
+
+  // ── Permission evaluation (dangerous tools advise, never final-approve) ──
+
+  it('auto-approves a non-dangerous tool at T2 without escalating', async () => {
+    const router = {
+      generate: vi.fn(async () => makeResult('YES')),
+      getModelForTier: () => undefined,
+    } as unknown as CascadeRouter;
+    const manager = new T2Manager(router, makeToolRegistry(), 'root');
+
+    const req = {
+      id: 'p1', requestedBy: 't3-a', parentT2Id: (manager as any).id,
+      toolName: 'diff_view', input: {}, isDangerous: false,
+      subtaskContext: 's', sectionContext: 'sec',
+    };
+    const decision = await (manager as any).evaluatePermissionAtT2(req);
+
+    expect(decision).not.toBeNull();
+    expect(decision.approved).toBe(true);
+    expect(decision.decidedBy).toBe('T2');
+    expect(router.generate).not.toHaveBeenCalled(); // no LLM call for safe path
+  });
+
+  it('never final-approves a DANGEROUS tool — records advice on the trail and returns null so it reaches the user', async () => {
+    const router = {
+      generate: vi.fn(async () => makeResult('YES')), // even a confident YES must not auto-approve
+      getModelForTier: () => undefined,
+    } as unknown as CascadeRouter;
+    const manager = new T2Manager(router, makeToolRegistry(), 'root');
+
+    const req: any = {
+      id: 'p2', requestedBy: 't3-a', parentT2Id: (manager as any).id,
+      toolName: 'shell_run', input: { command: 'rm -rf build' }, isDangerous: true,
+      subtaskContext: 's', sectionContext: 'sec',
+    };
+    const decision = await (manager as any).evaluatePermissionAtT2(req);
+
+    expect(decision).toBeNull(); // escalates past T2
+    expect(router.generate).toHaveBeenCalledOnce();
+    expect(req.trail).toHaveLength(1);
+    expect(req.trail[0]).toMatchObject({ tier: 'T2', verdict: 'approve' });
+  });
 });

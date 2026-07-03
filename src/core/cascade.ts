@@ -493,6 +493,22 @@ export class Cascade extends EventEmitter {
     return inquiry && !producesArtifact;
   }
 
+  /**
+   * Strong, explicit signals that a task needs the full hierarchy (planning +
+   * multiple sections/workers). Deliberately conservative: requires a
+   * build/implementation verb AND either an app/system-scale noun or an
+   * explicit multi-part structure, so ordinary single-file asks (handled as
+   * Simple/Moderate) don't get over-escalated.
+   */
+  private looksClearlyComplex(prompt: string): boolean {
+    const p = prompt.trim();
+    if (p.length < 24) return false;
+    const buildVerb = /\b(?:build|implement|create|develop|design|scaffold|refactor|migrate|architect|set up|integrate)\b/i.test(p);
+    const scaleNoun = /\b(?:app(?:lication)?|system|platform|service|api|backend|frontend|full[- ]?stack|website|dashboard|pipeline|microservices?|database schema|authentication|end[- ]to[- ]end|codebase|project|multiple files|several (?:files|modules|components)|test suite)\b/i.test(p);
+    const multiPart = /(?:\b(?:and|then|also|plus|as well as)\b.*\b(?:and|then|also)\b)|(?:^|\n)\s*(?:[-*]|\d+[.)])\s+/i.test(p); // 2+ conjunctions or a list
+    return buildVerb && (scaleNoun || multiPart);
+  }
+
   // Cache glob scan results per workspace path to avoid repeated I/O.
   private static globCache = new Map<string, { count: number; expiresAt: number }>();
 
@@ -597,13 +613,27 @@ ${prompt}`
       let verdict: TaskComplexity;
       if (match) {
         verdict = match[1] === 'simple' ? 'Simple' : match[1] === 'moderate' ? 'Moderate' : 'Complex';
-        this.recordDecision('complexity', `${verdict} — classifier: ${reason || 'no reason given'}`);
+        // Complexity floor: a small local classifier that keeps under-rating
+        // clearly multi-step build work (defaulting to Simple/Moderate) can't
+        // strand it at T2 — explicit build+scale signals raise it to the full
+        // T1→T2→T3 hierarchy. Conservative on purpose; the classifier is still
+        // free to go higher, and the manual tier override is the escape hatch.
+        if (verdict !== 'Complex' && this.looksClearlyComplex(prompt)) {
+          this.recordDecision('complexity', `Complex — heuristic floor over classifier "${verdict}": explicit multi-step build/implementation signals (T1 engaged)`);
+          verdict = 'Complex';
+        } else {
+          this.recordDecision('complexity', `${verdict} — classifier: ${reason || 'no reason given'}`);
+        }
       } else {
-        // Unparseable verdict (common with chatty local models). Bias to the
-        // CHEAP route, not the expensive one: short prompts are Simple, longer
-        // ones Moderate — never silently escalate to a full multi-agent build.
-        verdict = prompt.trim().split(/\s+/).length <= 12 ? 'Simple' : 'Moderate';
-        this.recordDecision('complexity', `${verdict} — classifier output unparseable; defaulted by length`);
+        // Unparseable verdict (common with chatty local models). Default by
+        // length, but do NOT cap a clearly-complex-looking long prompt at
+        // Moderate — otherwise a small model's garbled reply strands real build
+        // work at T2 and T1 never runs. Short prompts stay cheap (Simple).
+        const words = prompt.trim().split(/\s+/).length;
+        verdict = words <= 12 ? 'Simple'
+          : (words >= 40 || this.looksClearlyComplex(prompt)) ? 'Complex'
+          : 'Moderate';
+        this.recordDecision('complexity', `${verdict} — classifier output unparseable; defaulted by length/signals`);
       }
       return verdict;
     } catch {
@@ -671,8 +701,18 @@ ${prompt}`
       escalator.resolveUserDecision(req.id, approved, always);
     });
 
-    // 1. Determine complexity
-    const complexity = await this.determineComplexity(options.prompt, options.workspacePath || process.cwd(), options.conversationHistory);
+    // 1. Determine complexity — a manual override (routing.forceTier) skips
+    // the classifier entirely and pins the run's root tier.
+    const forceTier = this.config.routing?.forceTier;
+    const forced: TaskComplexity | undefined =
+      forceTier === 'T1' ? 'Complex' : forceTier === 'T2' ? 'Moderate' : forceTier === 'T3' ? 'Simple' : undefined;
+    let complexity: TaskComplexity;
+    if (forced) {
+      complexity = forced;
+      this.recordDecision('complexity', `${forced} — manually forced via routing.forceTier=${forceTier}`);
+    } else {
+      complexity = await this.determineComplexity(options.prompt, options.workspacePath || process.cwd(), options.conversationHistory);
+    }
 
     this.telemetry.capture('cascade:session_start', {
       complexity,
@@ -788,6 +828,7 @@ ${prompt}`
     try {
     if (complexity === 'Simple') {
       const t3 = new T3Worker(this.router, this.toolRegistry, 'root');
+      t3.setPresenter(true); // Simple run: this T3 IS the answer — stream it live.
       t3.setHierarchyContext('You are the DIRECT worker for this task. There is no T1 Administrator or T2 Manager involved in this run.');
       if (identityPrompt) {
         t3.setSystemPromptOverride(identityPrompt);
@@ -812,6 +853,7 @@ ${prompt}`
       this.emit('tier:status', { tierId: 't3-root', status: 'COMPLETED', role: 'T3' });
     } else if (complexity === 'Moderate') {
       const t2 = new T2Manager(this.router, this.toolRegistry, 'root');
+      t2.setPresenter(true); // Moderate run: T2's aggregated synthesis is the answer — stream it.
       t2.setHierarchyContext('You are the ROOT Manager for this task. There is no T1 Administrator involved in this run. You are responsible for decomposing the task and managing T3 workers directly.');
       if (identityPrompt) {
         t2.setSystemPromptOverride(identityPrompt);
@@ -865,6 +907,7 @@ ${prompt}`
       }
     } else {
       const t1 = new T1Administrator(this.router, this.toolRegistry, this.config);
+      t1.setPresenter(true); // Complex run: T1's final compile is the answer — stream it.
       t1.setHierarchyContext('You are the top-level Administrator. You are responsible for the overall plan and supervising multiple T2 Managers.');
       if (identityPrompt) {
         t1.setSystemPromptOverride(identityPrompt);
