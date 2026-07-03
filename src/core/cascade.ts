@@ -133,7 +133,8 @@ export class Cascade extends EventEmitter {
     }
     const cfg = this.config as unknown as Record<string, unknown>;
     if (cfg['enableToolCreation'] === true) {
-      this.toolCreator = new ToolCreator(this.router, this.toolRegistry, this.workspacePath, cfg['persistDynamicTools'] !== false);
+      const sandboxMode = (this.config.tools?.dynamicToolSandbox ?? 'auto');
+      this.toolCreator = new ToolCreator(this.router, this.toolRegistry, this.workspacePath, cfg['persistDynamicTools'] !== false, sandboxMode);
       this.toolCreator.setLogger((m) => {
         if (this.listenerCount('log') > 0) this.emit('log', { level: 'info', message: m });
       });

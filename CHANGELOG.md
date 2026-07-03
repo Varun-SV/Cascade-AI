@@ -5,6 +5,15 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-07-03
+
+Two deferred v0.13 designs land: a hard sandbox for generated tools, and a
+queryable project knowledge graph.
+
+### Added
+- **Hard V8 isolate sandbox for dynamic tools.** LLM-authored dynamic tools ran in a `node:worker_threads` Worker — a robustness boundary (kill timeout, memory cap) but not a security one: the generated code still saw Node globals (`process`, `require`, `process.binding`). They now run in an `isolated-vm` hard V8 isolate whose global has **no Node built-ins at all**, reaching the host only through the same escalator-gated `callTool` and SSRF-guarded `fetch` bridges. Configurable via `tools.dynamicToolSandbox` (`isolate` | `worker` | `auto`, default `auto`). `isolated-vm` is an **optional** native dependency: if it's absent or can't build on a platform, tools transparently fall back to the worker sandbox — nothing breaks. The desktop app ships it rebuilt for the Electron ABI alongside `better-sqlite3`.
+- **Project knowledge graph (world-state v2).** `WorldStateDB` gains a queryable `facts(entity, relation, value, source, timestamp)` store with **upsert-and-supersede** semantics (a newer observation replaces the old one rather than appending). A cheap, best-effort extraction pass distills each worker's output into facts (gated by `knowledge.factsExtraction`, default on; respects a subtask's local-only privacy tier). T1 now folds **relevant, deduped facts** into its planning prompt instead of replaying the entire linear log — falling back to the log only when no facts have been extracted yet. The existing encrypted linear log and key handling are unchanged.
+
 ## [0.13.2] - 2026-07-03
 
 Desktop bugfix round — the app is usable again.

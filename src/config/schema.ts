@@ -50,6 +50,14 @@ export const ToolsConfigSchema = z.object({
   mcpTrusted: z.array(z.string()).optional(),
   /** Web search backends — at least one should be configured for best results */
   webSearch: WebSearchConfigSchema.optional(),
+  /**
+   * Sandbox runtime for LLM-authored dynamic tools:
+   * - 'isolate': hard V8 isolate (isolated-vm) — no Node globals, true capability
+   *   confinement. Requires the optional native `isolated-vm` dependency.
+   * - 'worker': node:worker_threads (resource/kill limits, but not capability-confined).
+   * - 'auto' (default): use the isolate when `isolated-vm` loads, else fall back to worker.
+   */
+  dynamicToolSandbox: z.enum(['isolate', 'worker', 'auto']).default('auto'),
 });
 
 export const HookDefinitionSchema = z.object({
@@ -172,10 +180,20 @@ export const CascadeConfigSchema = z.object({
   /**
    * Runtime Tool Creation: when true, T3 workers can generate and register new tools
    * at runtime via the ToolCreator when no existing tool can handle a required operation.
-   * Generated tools are session-scoped and sandboxed in node:vm.
+   * Generated tools are session-scoped and sandboxed (see tools.dynamicToolSandbox).
    * HTTP calls from generated tools require approval.
    */
   enableToolCreation: z.boolean().default(true),
+  /**
+   * Project knowledge (world state). `factsExtraction`: after each worker
+   * completes, run a cheap extraction pass that distills its output into
+   * queryable entity/relation/value facts (superseding older facts), which T1
+   * queries during planning instead of replaying the whole linear log. Best-effort
+   * and non-blocking; set false to keep only the raw linear log.
+   */
+  knowledge: z.object({
+    factsExtraction: z.boolean().default(true),
+  }).default({}),
   /**
    * Persist runtime-generated tools to .cascade/dynamic-tools.json and reload them
    * on startup for cross-run dedup. Reloaded (and peer-received) tools are always

@@ -23,6 +23,7 @@ import { MemoryStore } from '../../memory/store.js';
 import type { PeerBus } from '../peer/bus.js';
 import type { PermissionEscalator } from '../permissions/escalator.js';
 import type { ToolCreator, GeneratedToolSpec } from '../../tools/tool-creator.js';
+import type { WorldStateDB } from '../knowledge/world-state.js';
 import {
   parseTextToolCalls,
   toToolCall,
@@ -319,6 +320,11 @@ export class T3Worker extends BaseTier {
           db.addEntry(this.id, `Completed: ${assignment.subtaskTitle}. Output length: ${output.length} chars.`);
         } catch (e) {
           this.log('Failed to write to World State DB');
+        }
+        // world-state v2: distill the output into queryable facts (best-effort,
+        // never blocks or fails the subtask). Skipped when disabled in config.
+        if (this.router.getKnowledgeConfig?.().factsExtraction !== false) {
+          await this.extractAndStoreFacts(db, assignment, output);
         }
       }
 
@@ -1010,6 +1016,43 @@ Reply with JSON: { "completeness": "pass"|"fail", "correctness": "pass"|"fail", 
         passed: ['completeness', 'correctness', 'compliance'],
         failed: [],
       };
+    }
+  }
+
+  /**
+   * world-state v2: distill a completed subtask's output into durable
+   * `(entity, relation, value)` facts and upsert them into the knowledge graph.
+   * A bounded, cheap T3-tier call; entirely best-effort — any failure is swallowed
+   * so it never blocks or fails the subtask. Respects the subtask's privacy tier
+   * (a local-only subtask extracts on a local model too, never leaking to cloud).
+   */
+  private async extractAndStoreFacts(db: WorldStateDB, assignment: T2ToT3Assignment, output: string): Promise<void> {
+    try {
+      const prompt = `Extract durable project facts from this completed subtask.
+Return ONLY a JSON array of {"entity","relation","value"} triples describing lasting
+facts about the codebase/project — e.g. {"entity":"auth module","relation":"uses","value":"JWT"}.
+Ignore transient step-by-step details. At most 6 triples. If nothing durable, return [].
+
+Subtask: ${assignment.subtaskTitle}
+Output:
+${output.slice(0, 4000)}`;
+      const result = await this.router.generate('T3', {
+        messages: [{ role: 'user', content: prompt }],
+        maxTokens: 300,
+        temperature: 0,
+        ...(this.localOnlyMatch ? { forceLocal: true } : {}),
+      });
+      const match = /\[[\s\S]*\]/.exec(result.content);
+      if (!match) return;
+      const facts = JSON.parse(match[0]);
+      if (!Array.isArray(facts)) return;
+      for (const f of facts.slice(0, 8)) {
+        if (f && typeof f.entity === 'string' && typeof f.relation === 'string' && typeof f.value === 'string') {
+          db.upsertFact(f.entity, f.relation, f.value, this.id);
+        }
+      }
+    } catch {
+      // Best-effort — extraction never blocks the run.
     }
   }
 

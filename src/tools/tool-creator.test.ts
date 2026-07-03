@@ -141,7 +141,9 @@ describe('ToolCreator — worker sandbox (v0.9.6 item 1)', () => {
       inputSchema: { a: { type: 'number' }, b: { type: 'number' } },
       executeCode: 'return String(Number(input.a) + Number(input.b));', isDangerous: false,
     };
-    await new ToolCreator(mockRouter(spec), reg, ws).createTool('add in worker', 'math');
+    // Pin to the worker executor so this exercises the fallback path regardless
+    // of whether isolated-vm is installed.
+    await new ToolCreator(mockRouter(spec), reg, ws, true, 'worker').createTool('add in worker', 'math');
     expect(await reg.execute('dynamic_w_add', { a: 3, b: 4 }, opts)).toBe('7');
   });
 
@@ -152,12 +154,84 @@ describe('ToolCreator — worker sandbox (v0.9.6 item 1)', () => {
       inputSchema: { type: 'object', properties: {} },
       executeCode: 'while (true) {} return "never";', isDangerous: false,
     };
-    await new ToolCreator(mockRouter(spec), reg, ws).createTool('spin', 'x');
+    await new ToolCreator(mockRouter(spec), reg, ws, true, 'worker').createTool('spin', 'x');
     const prev = process.env.CASCADE_DYNAMIC_TOOL_TIMEOUT_MS;
     process.env.CASCADE_DYNAMIC_TOOL_TIMEOUT_MS = '600';
     try {
       const t0 = Date.now();
       const out = await reg.execute('dynamic_loop', {}, opts);
+      expect(Date.now() - t0).toBeLessThan(4000);
+      expect(out).toMatch(/timed out|terminated/);
+    } finally {
+      if (prev === undefined) delete process.env.CASCADE_DYNAMIC_TOOL_TIMEOUT_MS;
+      else process.env.CASCADE_DYNAMIC_TOOL_TIMEOUT_MS = prev;
+    }
+  });
+});
+
+// ── Hard isolate (isolated-vm) — v0.14.0 ──
+// Skipped gracefully when the optional native addon isn't installed/built, so CI
+// without it stays green (the 'auto' path there simply falls back to the worker).
+const ivmAvailable: boolean = await (async () => {
+  try { await import('isolated-vm'); return true; } catch { return false; }
+})();
+
+describe.skipIf(!ivmAvailable)('ToolCreator — hard isolate sandbox (isolated-vm)', () => {
+  it('runs a pure-compute tool inside the isolate', async () => {
+    const reg = makeRegistry();
+    const spec: GeneratedToolSpec = {
+      name: 'dynamic_iso_add', description: 'add',
+      inputSchema: { a: { type: 'number' }, b: { type: 'number' } },
+      executeCode: 'return String(Number(input.a) + Number(input.b));', isDangerous: false,
+    };
+    await new ToolCreator(mockRouter(spec), reg, ws, true, 'isolate').createTool('iso add', 'math');
+    expect(await reg.execute('dynamic_iso_add', { a: 8, b: 9 }, opts)).toBe('17');
+  });
+
+  it('CONFINES the code: no process / require / globalThis Node escapes', async () => {
+    const reg = makeRegistry();
+    const spec: GeneratedToolSpec = {
+      name: 'dynamic_iso_confine', description: 'probe host',
+      inputSchema: { type: 'object', properties: {} },
+      executeCode: "return 'process=' + (typeof process) + ' require=' + (typeof require) + ' gt=' + (typeof globalThis.process);",
+      isDangerous: false,
+    };
+    await new ToolCreator(mockRouter(spec), reg, ws, true, 'isolate').createTool('confine', 'x');
+    const out = await reg.execute('dynamic_iso_confine', {}, opts);
+    expect(out).toBe('process=undefined require=undefined gt=undefined');
+  });
+
+  it('still routes a dangerous callTool through the escalator from inside the isolate', async () => {
+    const reg = makeRegistry();
+    let asked = false;
+    const escalator: any = { requestPermission: async () => { asked = true; return { approved: false, decidedBy: 'test' }; } };
+    const spec: GeneratedToolSpec = {
+      name: 'dynamic_iso_danger', description: 'delete',
+      inputSchema: { path: { type: 'string' } },
+      executeCode: "return await callTool('file_delete', { path: input.path });",
+      isDangerous: true,
+    };
+    const creator = new ToolCreator(mockRouter(spec), reg, ws, true, 'isolate');
+    creator.setPermissionEscalator(escalator);
+    await creator.createTool('delete', 'io');
+    const out = await reg.execute('dynamic_iso_danger', { path: 'x.txt' }, opts);
+    expect(asked).toBe(true);
+    expect(out).toMatch(/Permission denied/);
+  });
+
+  it('terminates a runaway isolate at the timeout (does not hang)', async () => {
+    const reg = makeRegistry();
+    const spec: GeneratedToolSpec = {
+      name: 'dynamic_iso_loop', description: 'spin',
+      inputSchema: { type: 'object', properties: {} },
+      executeCode: 'while (true) {} return "never";', isDangerous: false,
+    };
+    await new ToolCreator(mockRouter(spec), reg, ws, true, 'isolate').createTool('iso spin', 'x');
+    const prev = process.env.CASCADE_DYNAMIC_TOOL_TIMEOUT_MS;
+    process.env.CASCADE_DYNAMIC_TOOL_TIMEOUT_MS = '600';
+    try {
+      const t0 = Date.now();
+      const out = await reg.execute('dynamic_iso_loop', {}, opts);
       expect(Date.now() - t0).toBeLessThan(4000);
       expect(out).toMatch(/timed out|terminated/);
     } finally {

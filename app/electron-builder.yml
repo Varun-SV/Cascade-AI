@@ -44,6 +44,17 @@ extraResources:
     to: "cascade-core/node_modules/bindings"
   - from: "../node_modules/file-uri-to-path"
     to: "cascade-core/node_modules/file-uri-to-path"
+  # LLM-authored dynamic tools run in an isolated-vm hard V8 isolate when the
+  # optional native addon is present (tools.dynamicToolSandbox: isolate/auto);
+  # ship it — plus its node-gyp-build loader — so `import('isolated-vm')` resolves
+  # from the embedded core. Native binary rebuilt for the Electron ABI by the
+  # @electron/rebuild CI step; if a platform can't provide it, the core falls back
+  # to the worker sandbox. Drop build intermediates to keep the payload small.
+  - from: "../node_modules/isolated-vm"
+    to: "cascade-core/node_modules/isolated-vm"
+    filter: ["**/*", "!**/*.o", "!**/*.obj", "!out/**", "!src/**", "!deps/**"]
+  - from: "../node_modules/node-gyp-build"
+    to: "cascade-core/node_modules/node-gyp-build"
 
 mac:
   category: public.app-category.developer-tools
