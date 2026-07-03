@@ -30,8 +30,19 @@ function pricingResponse() {
     ok: true,
     json: async () => ({
       data: [
-        { id: 'google/gemini-2.5-flash', pricing: { prompt: '0.0000003', completion: '0.0000025' } },
-        { id: 'openai/gpt-4o', pricing: { prompt: '0.0000025', completion: '0.00001' } },
+        {
+          id: 'google/gemini-2.5-flash',
+          pricing: { prompt: '0.0000003', completion: '0.0000025' },
+          context_length: 1_048_576,
+          supported_parameters: ['tools', 'temperature'],
+          architecture: { input_modalities: ['text', 'image'] },
+        },
+        {
+          id: 'openai/gpt-4o',
+          pricing: { prompt: '0.0000025', completion: '0.00001' },
+          context_length: 128_000,
+          supported_parameters: ['temperature'], // no "tools" → supportsTools false
+        },
       ],
     }),
   };
@@ -124,6 +135,50 @@ describe('LiveDataProvider — live fetch', () => {
     await ld.refresh(); // not forced — cache is fresh
     expect(fetch2.mock.calls.length).toBe(0);
     expect(callsAfterSeed).toBeGreaterThan(0);
+  });
+});
+
+describe('LiveDataProvider — capability facts (v0.15.0)', () => {
+  it('captures context window, tool support, and modalities from the same catalog fetch', async () => {
+    vi.stubGlobal('fetch', routedFetch());
+    const ld = new LiveDataProvider({ cacheFile });
+    await ld.refresh(true);
+
+    expect(ld.hasCapabilities()).toBe(true);
+    expect(ld.getCapability('gemini-2.5-flash')).toEqual({
+      contextWindow: 1_048_576,
+      supportsTools: true,
+      inputModalities: ['text', 'image'],
+    });
+    expect(ld.getCapability('gpt-4o')?.supportsTools).toBe(false);
+  });
+
+  it('applyLiveCapabilities corrects copies without mutating the shared catalog', async () => {
+    vi.stubGlobal('fetch', routedFetch());
+    const ld = new LiveDataProvider({ cacheFile });
+    await ld.refresh(true);
+
+    const original = MODELS['gemini-2.5-flash']!;
+    const beforeCtx = original.contextWindow;
+    const [updated] = ld.applyLiveCapabilities([original]);
+    expect(updated!.contextWindow).toBe(1_048_576);
+    expect(updated!.supportsToolUse).toBe(true);
+    expect(updated!.isVisionCapable).toBe(true);
+    expect(original.contextWindow).toBe(beforeCtx); // untouched
+
+    // Unknown model passes through as the SAME reference.
+    const stranger = { ...original, id: 'totally-unknown-model' };
+    expect(ld.applyLiveCapabilities([stranger])[0]).toBe(stranger);
+  });
+
+  it('capabilities persist in the disk cache and reload', async () => {
+    vi.stubGlobal('fetch', routedFetch());
+    await new LiveDataProvider({ cacheFile }).refresh(true);
+
+    const reloaded = new LiveDataProvider({ cacheFile });
+    await reloaded.load();
+    expect(reloaded.hasCapabilities()).toBe(true);
+    expect(reloaded.getCapability('gemini-2.5-flash')?.supportsTools).toBe(true);
   });
 });
 

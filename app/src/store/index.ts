@@ -96,6 +96,14 @@ export interface AppState {
   peerEdges: PeerEdge[];
   /** Manual routing override — pins the run's root tier (Auto = classifier decides). */
   forceTier: 'auto' | 'T1' | 'T2' | 'T3';
+  /**
+   * A run is in flight. Store-level (NOT component state) so the Stop control
+   * survives view switches — views are conditionally mounted, so any useState
+   * tracking this dies the moment the user leaves the view that started the run.
+   */
+  runActive: boolean;
+  /** The sessionId of the in-flight run — the target for session:halt. */
+  runSessionId: string | null;
 }
 
 /** A live T3↔T3 / T2↔T2 message, drawn as a transient edge in the graph. */
@@ -139,6 +147,8 @@ const initialState: AppState = {
   selectedNodeId: null,
   peerEdges: [],
   forceTier: 'auto',
+  runActive: false,
+  runSessionId: null,
 };
 
 // ─── Slice ────────────────────────────────────────────────────────────────────
@@ -199,6 +209,16 @@ const appSlice = createSlice({
     },
     setForceTier(state, action: PayloadAction<'auto' | 'T1' | 'T2' | 'T3'>) {
       state.forceTier = action.payload;
+    },
+    // Run lifecycle — dispatched wherever a run starts (ChatPanel, Cockpit) and
+    // ended by the GLOBAL session:complete/session:error handlers in App.tsx.
+    runStarted(state, action: PayloadAction<{ sessionId: string }>) {
+      state.runActive = true;
+      state.runSessionId = action.payload.sessionId;
+    },
+    runEnded(state) {
+      state.runActive = false;
+      state.runSessionId = null;
     },
     appendMessage(state, action: PayloadAction<ChatMessage>) {
       state.messages.push(action.payload);
@@ -322,7 +342,7 @@ export const {
   setWorkspacePath, toggleTerminal, openTerminalAt, toggleCodeChat, setHelpContext, setTheme, setActiveModel, setActiveModelT1, setActiveModelChat,
   setSessions, setActiveSessionId, removeSession, toggleSessionSidebar, setSessionSidebarCollapsed,
   enqueueApproval, dequeueApproval, clearApprovals,
-  appendAgentStream, selectNode, addPeerEdge, expirePeerEdges, setForceTier,
+  appendAgentStream, selectNode, addPeerEdge, expirePeerEdges, setForceTier, runStarted, runEnded,
   openTab, closeTab, setActiveTab, setTabDirty,
   setOnboardingDone,
 } = appSlice.actions;

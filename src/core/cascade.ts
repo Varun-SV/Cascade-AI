@@ -424,6 +424,14 @@ export class Cascade extends EventEmitter {
         this.router.profileModels(this.store).catch(() => { /* non-fatal */ });
       }
 
+      // Native tool-support probe for local/compat models with no capability
+      // metadata (custom .gguf on llama.cpp / LM Studio). NOT gated on
+      // cascadeAuto — the T3 tool-use gate needs the verdict either way.
+      // Background, one-time per model (verdict cached in the store).
+      if (this.store) {
+        this.router.probeLocalToolSupport(this.store).catch(() => { /* non-fatal */ });
+      }
+
       // Cascade Auto live data: validate model ids against each provider and
       // fetch current public benchmark scores + prices. Background, non-blocking
       // — the bundled catalog/benchmarks are used until (or unless) it lands.

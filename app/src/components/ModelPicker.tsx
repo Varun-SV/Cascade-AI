@@ -1,7 +1,15 @@
 import { useState, useRef, useEffect } from 'react';
 import { ChevronDown, Plus } from 'lucide-react';
 
-export interface ModelOption { provider: string; id: string; label: string }
+export interface ModelOption {
+  provider: string;
+  id: string;
+  label: string;
+  /** Capability facts from live metadata / probes (absent for built-in quick-picks). */
+  supportsToolUse?: boolean;
+  contextWindow?: number;
+  isVisionCapable?: boolean;
+}
 
 // Built-in cloud quick-picks. Shown as a fallback when no live models are
 // discovered (e.g. the backend can't be reached); the live list from the
@@ -57,7 +65,10 @@ export function ModelPicker({ value, onChange }: Props) {
     window.cascade?.listModels?.()
       .then((res) => {
         if (cancelled) return;
-        const opts = (res?.models ?? []).map((m) => ({ provider: m.provider, id: m.id, label: m.id }));
+        const opts = (res?.models ?? []).map((m) => ({
+          provider: m.provider, id: m.id, label: m.id,
+          supportsToolUse: m.supportsToolUse, contextWindow: m.contextWindow, isVisionCapable: m.isVisionCapable,
+        }));
         setDynamic(opts);
       })
       .catch(() => { if (!cancelled) setDynamic([]); });
@@ -127,7 +138,7 @@ export function ModelPicker({ value, onChange }: Props) {
                 {provider}
               </div>
               {models.map((m) => (
-                <Item key={m.id} color={PROVIDER_COLORS[m.provider] ?? '#888'} label={m.label} active={m.id === value} onClick={() => { onChange(m.id); setOpen(false); }} />
+                <Item key={m.id} color={PROVIDER_COLORS[m.provider] ?? '#888'} label={m.label} active={m.id === value} onClick={() => { onChange(m.id); setOpen(false); }} badges={m} />
               ))}
             </div>
           ))}
@@ -157,7 +168,22 @@ export function ModelPicker({ value, onChange }: Props) {
   );
 }
 
-function Item({ color, label, active, onClick }: { color: string; label: string; active: boolean; onClick: () => void }) {
+/** "128k" / "1M" — compact context-window size for the badge row. */
+function fmtCtx(n: number): string {
+  if (n >= 1_000_000) return `${Math.round(n / 1_000_000)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
+  return String(n);
+}
+
+function Item({ color, label, active, onClick, badges }: {
+  color: string; label: string; active: boolean; onClick: () => void;
+  badges?: { supportsToolUse?: boolean; contextWindow?: number; isVisionCapable?: boolean };
+}) {
+  const badgeStyle: React.CSSProperties = {
+    fontSize: 8.5, fontWeight: 700, letterSpacing: 0.4, flexShrink: 0,
+    padding: '1px 4px', borderRadius: 3, lineHeight: 1.4,
+    background: 'var(--bg-overlay)', color: 'var(--text-muted)',
+  };
   return (
     <button
       onClick={onClick}
@@ -171,7 +197,12 @@ function Item({ color, label, active, onClick }: { color: string; label: string;
       onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = active ? 'var(--bg-hover)' : 'transparent'; }}
     >
       <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: color }} />
-      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{label}</span>
+      {/* Capability badges (only when the fact is actually known) */}
+      {badges?.supportsToolUse === true && <span style={badgeStyle} title="Native tool calling">TOOLS</span>}
+      {badges?.supportsToolUse === false && <span style={{ ...badgeStyle, opacity: 0.6 }} title="No native tool calling — uses the text fallback">TXT</span>}
+      {badges?.isVisionCapable === true && <span style={badgeStyle} title="Vision (image input)">VIS</span>}
+      {!!badges?.contextWindow && <span style={badgeStyle} title={`Context window: ${badges.contextWindow.toLocaleString()} tokens`}>{fmtCtx(badges.contextWindow)}</span>}
     </button>
   );
 }

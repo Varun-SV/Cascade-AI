@@ -24,9 +24,6 @@ import type { ToolRegistry } from './registry.js';
 import type { CascadeRouter } from '../core/router/index.js';
 import type { PermissionEscalator } from '../core/permissions/escalator.js';
 import type { PermissionRequest } from '../types.js';
-// Type-only: the native addon is an OPTIONAL dependency (loaded at runtime via a
-// guarded dynamic import), so this import must never emit a runtime require.
-import type IsolatedVMType from 'isolated-vm';
 
 export type SandboxMode = 'isolate' | 'worker' | 'auto';
 
@@ -39,8 +36,30 @@ export type SandboxMode = 'isolate' | 'worker' | 'auto';
 //  capability confinement — reaching the host ONLY through the same escalator-gated
 //  `callTool` and SSRF-guarded `fetch` bridges. It's an optional native dependency:
 //  if it's absent or failed to build we transparently fall back to the worker.
+//
+//  The addon's surface is declared LOCALLY (structural types below) and loaded via
+//  a non-literal dynamic import: a literal `import type ... from 'isolated-vm'`
+//  makes COMPILATION require the optional module to be installed, which broke the
+//  release build wherever it didn't install (e.g. the Node 20 CI publish job had
+//  no matching prebuild). Nothing here may reference the module's own types.
 
-type IvmModule = typeof IsolatedVMType;
+interface IvmContext {
+  global: { set(name: string, value: unknown): Promise<void> };
+}
+interface IvmScript {
+  run(context: IvmContext, options?: { timeout?: number; promise?: boolean }): Promise<unknown>;
+}
+interface IvmIsolate {
+  createContext(): Promise<IvmContext>;
+  compileScript(code: string): Promise<IvmScript>;
+  dispose(): void;
+}
+interface IvmModule {
+  Isolate: new (options?: { memoryLimit?: number }) => IvmIsolate;
+  Reference: new (value: unknown) => unknown;
+  ExternalCopy: new (value: unknown) => { copyInto(): unknown };
+}
+
 // undefined = not yet attempted; null = unavailable (absent / failed to build).
 let ivmCache: IvmModule | null | undefined;
 let ivmWarned = false;
@@ -48,8 +67,11 @@ let ivmWarned = false;
 async function loadIsolatedVm(): Promise<IvmModule | null> {
   if (ivmCache !== undefined) return ivmCache;
   try {
-    const mod = await import('isolated-vm');
-    ivmCache = ((mod as { default?: IvmModule }).default ?? (mod as unknown as IvmModule));
+    // Non-literal specifier: tsc must not resolve the OPTIONAL module at compile
+    // time, and bundlers keep the import dynamic instead of inlining it.
+    const specifier = 'isolated-vm';
+    const mod = (await import(specifier)) as { default?: IvmModule } & IvmModule;
+    ivmCache = mod.default ?? mod;
   } catch {
     ivmCache = null;
   }

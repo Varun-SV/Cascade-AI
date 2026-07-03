@@ -404,14 +404,19 @@ function registerIPC(): void {
   // persist, even when there is no socket.
   function settingsSnapshot(): {
     models: Record<string, string>;
-    budget: { maxCostPerRun?: number; autoBias?: string };
+    budget: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number };
     providersWithKey: string[];
     endpoints: Record<string, string>;
+    advanced: Record<string, unknown>;
   } {
     const models = (cascadeConfig?.models ?? {}) as Record<string, string>;
     const budget = {
       maxCostPerRun: cascadeConfig?.budget?.maxCostPerRunUsd as number | undefined,
       autoBias: cascadeConfig?.autoBias as string | undefined,
+      dailyBudgetUsd: cascadeConfig?.budget?.dailyBudgetUsd as number | undefined,
+      sessionBudgetUsd: cascadeConfig?.budget?.sessionBudgetUsd as number | undefined,
+      maxTokensPerRun: cascadeConfig?.budget?.maxTokensPerRun as number | undefined,
+      warnAtPct: cascadeConfig?.budget?.warnAtPct as number | undefined,
     };
     const providers = (cascadeConfig?.providers ?? []) as Array<{ type: string; apiKey?: string; baseUrl?: string }>;
     const providersWithKey = providers
@@ -419,7 +424,27 @@ function registerIPC(): void {
       .map((p) => p.type);
     const endpoints: Record<string, string> = {};
     for (const p of providers) { if (p?.type && p?.baseUrl) endpoints[p.type] = p.baseUrl; }
-    return { models, budget, providersWithKey, endpoints };
+    // Advanced knobs surfaced in the Settings "Advanced" tab — read back from
+    // the same config so the panel always reflects what's on disk.
+    const advanced: Record<string, unknown> = {
+      autonomy: cascadeConfig?.autonomy,
+      planApproval: cascadeConfig?.planApproval,
+      approvalTimeoutMs: cascadeConfig?.approvalTimeoutMs,
+      t3Execution: cascadeConfig?.t3Execution,
+      localConcurrency: cascadeConfig?.localConcurrency,
+      localInferenceTimeoutMs: cascadeConfig?.localInferenceTimeoutMs,
+      cloudInferenceTimeoutMs: cascadeConfig?.cloudInferenceTimeoutMs,
+      reflectionEnabled: cascadeConfig?.reflection?.enabled,
+      cascadeAuto: cascadeConfig?.cascadeAuto,
+      forceTier: cascadeConfig?.routing?.forceTier,
+      benchmarksLive: cascadeConfig?.benchmarks?.live,
+      dynamicToolSandbox: cascadeConfig?.tools?.dynamicToolSandbox,
+      factsExtraction: cascadeConfig?.knowledge?.factsExtraction,
+      enableToolCreation: cascadeConfig?.enableToolCreation,
+      persistDynamicTools: cascadeConfig?.persistDynamicTools,
+      telemetryEnabled: cascadeConfig?.telemetry?.enabled,
+    };
+    return { models, budget, providersWithKey, endpoints, advanced };
   }
 
   ipcMain.handle('cascade:getSettings', async () => settingsSnapshot());
@@ -440,10 +465,15 @@ function registerIPC(): void {
       // so swallow that and still return whatever was discovered. Otherwise the
       // Models dropdown can never fill the very models needed to fix the pin.
       try { await router.init(cascadeConfig); } catch { /* keep discovered models */ }
-      let models: Array<{ id: string; provider: string; isLocal: boolean }> = [];
+      let models: Array<{ id: string; provider: string; isLocal: boolean; supportsToolUse?: boolean; contextWindow?: number; isVisionCapable?: boolean }> = [];
       try {
-        models = (router.getAvailableModels() as Array<{ id: string; provider: string; isLocal?: boolean }>)
-          .map((m) => ({ id: m.id, provider: m.provider, isLocal: Boolean(m.isLocal) }));
+        // Pass capability facts through — the picker shows tool/vision/context
+        // badges so users can see WHY a model is/isn't suited to agentic work.
+        models = (router.getAvailableModels() as Array<{ id: string; provider: string; isLocal?: boolean; supportsToolUse?: boolean; contextWindow?: number; isVisionCapable?: boolean }>)
+          .map((m) => ({
+            id: m.id, provider: m.provider, isLocal: Boolean(m.isLocal),
+            supportsToolUse: m.supportsToolUse, contextWindow: m.contextWindow, isVisionCapable: m.isVisionCapable,
+          }));
       } catch { /* selector unavailable */ }
       // If an OpenAI-compatible endpoint is configured but produced no models,
       // probe it directly so the real reason is visible (status / count / error).
@@ -463,8 +493,9 @@ function registerIPC(): void {
   ipcMain.handle('cascade:updateSettings', async (_e, data: {
     keys?: Record<string, string | undefined>;
     models?: Record<string, string | undefined>;
-    budget?: { maxCostPerRun?: number; autoBias?: string };
+    budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number };
     endpoints?: Record<string, string | undefined>;
+    advanced?: Record<string, unknown>;
   }) => {
     try {
       if (!cascadeConfig || !configManager) return { ok: false, error: 'backend-unavailable' };
@@ -498,6 +529,36 @@ function registerIPC(): void {
         if (data.budget.autoBias === 'balanced' || data.budget.autoBias === 'quality' || data.budget.autoBias === 'cost') {
           cascadeConfig.autoBias = data.budget.autoBias;
         }
+        if (typeof data.budget.dailyBudgetUsd === 'number' && data.budget.dailyBudgetUsd >= 0) cascadeConfig.budget.dailyBudgetUsd = data.budget.dailyBudgetUsd;
+        if (typeof data.budget.sessionBudgetUsd === 'number' && data.budget.sessionBudgetUsd >= 0) cascadeConfig.budget.sessionBudgetUsd = data.budget.sessionBudgetUsd;
+        if (typeof data.budget.maxTokensPerRun === 'number' && data.budget.maxTokensPerRun > 0) cascadeConfig.budget.maxTokensPerRun = Math.floor(data.budget.maxTokensPerRun);
+        if (typeof data.budget.warnAtPct === 'number' && data.budget.warnAtPct > 0 && data.budget.warnAtPct <= 100) cascadeConfig.budget.warnAtPct = data.budget.warnAtPct;
+      }
+      // Advanced settings: every field is individually validated against an
+      // explicit allowlist — an unknown or malformed key is IGNORED, never
+      // written, so the renderer can't inject arbitrary config.
+      if (data.advanced && typeof data.advanced === 'object') {
+        const a = data.advanced;
+        const num = (v: unknown, min: number, max: number): number | undefined => {
+          const n = Number(v);
+          return Number.isFinite(n) && n >= min && n <= max ? n : undefined;
+        };
+        if (a['autonomy'] === 'manual' || a['autonomy'] === 'auto') cascadeConfig.autonomy = a['autonomy'];
+        if (['never', 'complex', 'all', 'always'].includes(a['planApproval'] as string)) cascadeConfig.planApproval = a['planApproval'];
+        { const n = num(a['approvalTimeoutMs'], 0, 86_400_000); if (n !== undefined) cascadeConfig.approvalTimeoutMs = n; }
+        if (['auto', 'parallel', 'sequential'].includes(a['t3Execution'] as string)) cascadeConfig.t3Execution = a['t3Execution'];
+        { const n = num(a['localConcurrency'], 1, 16); if (n !== undefined) cascadeConfig.localConcurrency = Math.floor(n); }
+        { const n = num(a['localInferenceTimeoutMs'], 10_000, 3_600_000); if (n !== undefined) cascadeConfig.localInferenceTimeoutMs = n; }
+        { const n = num(a['cloudInferenceTimeoutMs'], 10_000, 3_600_000); if (n !== undefined) cascadeConfig.cloudInferenceTimeoutMs = n; }
+        if (typeof a['reflectionEnabled'] === 'boolean') cascadeConfig.reflection = { ...(cascadeConfig.reflection ?? {}), enabled: a['reflectionEnabled'] };
+        if (typeof a['cascadeAuto'] === 'boolean') cascadeConfig.cascadeAuto = a['cascadeAuto'];
+        if (['auto', 'T1', 'T2', 'T3'].includes(a['forceTier'] as string)) cascadeConfig.routing = { ...(cascadeConfig.routing ?? {}), forceTier: a['forceTier'] };
+        if (typeof a['benchmarksLive'] === 'boolean') cascadeConfig.benchmarks = { ...(cascadeConfig.benchmarks ?? {}), live: a['benchmarksLive'] };
+        if (['isolate', 'worker', 'auto'].includes(a['dynamicToolSandbox'] as string)) cascadeConfig.tools = { ...(cascadeConfig.tools ?? {}), dynamicToolSandbox: a['dynamicToolSandbox'] };
+        if (typeof a['factsExtraction'] === 'boolean') cascadeConfig.knowledge = { ...(cascadeConfig.knowledge ?? {}), factsExtraction: a['factsExtraction'] };
+        if (typeof a['enableToolCreation'] === 'boolean') cascadeConfig.enableToolCreation = a['enableToolCreation'];
+        if (typeof a['persistDynamicTools'] === 'boolean') cascadeConfig.persistDynamicTools = a['persistDynamicTools'];
+        if (typeof a['telemetryEnabled'] === 'boolean') cascadeConfig.telemetry = { ...(cascadeConfig.telemetry ?? {}), enabled: a['telemetryEnabled'] };
       }
       await configManager.save();
       return { ok: true, ...settingsSnapshot() };
@@ -514,6 +575,41 @@ function registerIPC(): void {
       properties: ['openDirectory', 'createDirectory'],
     });
     return result.canceled ? null : result.filePaths[0];
+  });
+
+  // Save/open dialogs for chat/memory export bundles. The renderer fetches or
+  // posts the bundle itself (REST /api/export | /api/import); main only owns
+  // the native dialogs and the disk read/write.
+  ipcMain.handle('dialog:saveJson', async (_e, defaultName: string, content: string) => {
+    try {
+      const { dialog } = require('electron');
+      const result = await dialog.showSaveDialog(mainWindow!, {
+        defaultPath: defaultName,
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+      });
+      if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+      const { writeFile } = require('node:fs/promises');
+      await writeFile(result.filePath, content, 'utf-8');
+      return { ok: true, path: result.filePath };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle('dialog:openJson', async () => {
+    try {
+      const { dialog } = require('electron');
+      const result = await dialog.showOpenDialog(mainWindow!, {
+        properties: ['openFile'],
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+      });
+      if (result.canceled || !result.filePaths[0]) return { ok: false, canceled: true };
+      const { readFile } = require('node:fs/promises');
+      const content = await readFile(result.filePaths[0], 'utf-8');
+      return { ok: true, path: result.filePaths[0], content };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
   });
 }
 

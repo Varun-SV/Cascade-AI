@@ -35,24 +35,28 @@ contextBridge.exposeInMainWorld('cascade', {
   setConfig: (cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string }) =>
     ipcRenderer.invoke('cascade:setConfig', cfg) as Promise<void>,
 
-  // Settings panel: backend-independent read/write of keys, per-tier models, budget
+  // Settings panel: backend-independent read/write of keys, per-tier models,
+  // budget (incl. daily/session caps), and the allowlisted "advanced" knobs.
   getSettings: () => ipcRenderer.invoke('cascade:getSettings') as Promise<{
     models: Record<string, string>;
-    budget: { maxCostPerRun?: number; autoBias?: string };
+    budget: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number };
     providersWithKey: string[];
     endpoints: Record<string, string>;
+    advanced?: Record<string, unknown>;
   }>,
   updateSettings: (data: {
     keys?: Record<string, string | undefined>;
     models?: Record<string, string | undefined>;
-    budget?: { maxCostPerRun?: number; autoBias?: string };
+    budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number };
     endpoints?: Record<string, string | undefined>;
+    advanced?: Record<string, unknown>;
   }) => ipcRenderer.invoke('cascade:updateSettings', data) as Promise<{
     ok: boolean;
     error?: string;
     models?: Record<string, string>;
-    budget?: { maxCostPerRun?: number; autoBias?: string };
+    budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number };
     providersWithKey?: string[];
+    advanced?: Record<string, unknown>;
   }>,
 
   // Real available models across configured providers (for the model pickers)
@@ -65,6 +69,12 @@ contextBridge.exposeInMainWorld('cascade', {
 
   // Directory picker dialog
   selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory') as Promise<string | null>,
+
+  // Export/import bundle dialogs (write/read the JSON on the main process)
+  saveJson: (defaultName: string, content: string) =>
+    ipcRenderer.invoke('dialog:saveJson', defaultName, content) as Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>,
+  openJson: () =>
+    ipcRenderer.invoke('dialog:openJson') as Promise<{ ok: boolean; path?: string; content?: string; canceled?: boolean; error?: string }>,
 
   // Appearance: System/Light/Dark preference + resolved dark flag
   theme: {

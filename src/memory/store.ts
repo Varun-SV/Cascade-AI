@@ -369,6 +369,84 @@ export class MemoryStore {
     return rows.map(this.deserializeMessage);
   }
 
+  // ── Export / Import ──────────────────────────
+  //
+  //  Chats travel as full Session objects (messages included) inside a
+  //  plaintext-JSON bundle. Import NEVER overwrites: every imported session
+  //  gets a fresh id (title suffixed "(imported)") and fresh message ids, so
+  //  re-importing the same bundle can duplicate but can never clobber.
+
+  /** Full sessions (with messages) for the given ids, or ALL sessions. */
+  exportSessions(ids?: string[]): Session[] {
+    const targets = ids && ids.length > 0
+      ? ids
+      : (this.db.prepare('SELECT id FROM sessions ORDER BY updated_at DESC').all() as Array<{ id: string }>).map((r) => r.id);
+    const out: Session[] = [];
+    for (const id of targets) {
+      const s = this.getSession(id);
+      if (s) out.push(s);
+    }
+    return out;
+  }
+
+  /**
+   * Import sessions from a bundle. Returns the created `{id, title}` rows so
+   * the caller can mirror them into the runtime session list (the sidebar
+   * reads runtime_sessions, not sessions). Malformed entries are skipped.
+   */
+  importSessions(sessions: Session[]): Array<{ id: string; title: string }> {
+    const out: Array<{ id: string; title: string }> = [];
+    const msgStmt = this.db.prepare(`
+      INSERT INTO messages (id, session_id, role, content, timestamp, tokens, agent_messages)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const s of sessions) {
+      if (!s || typeof s !== 'object') continue;
+      const newId = randomUUID();
+      const now = new Date().toISOString();
+      const title = `${String(s.title || 'Untitled').slice(0, 200)} (imported)`;
+      const metadata = s.metadata && typeof s.metadata === 'object'
+        ? s.metadata
+        : { totalTokens: 0, totalCostUsd: 0, modelsUsed: [], toolsUsed: [], taskCount: 0 };
+      this.db.prepare(`
+        INSERT INTO sessions (id, title, created_at, updated_at, identity_id, workspace_path, metadata)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(newId, title, s.createdAt ?? now, s.updatedAt ?? now, s.identityId ?? 'default', s.workspacePath ?? '', JSON.stringify(metadata));
+      for (const m of (Array.isArray(s.messages) ? s.messages : [])) {
+        if (!m || (m.role !== 'user' && m.role !== 'assistant' && m.role !== 'system')) continue;
+        msgStmt.run(
+          randomUUID(), newId, m.role,
+          typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+          m.timestamp ?? now,
+          m.tokens ? JSON.stringify(m.tokens) : null,
+          m.agentMessages ? JSON.stringify(m.agentMessages) : null,
+        );
+      }
+      out.push({ id: newId, title });
+    }
+    return out;
+  }
+
+  /** Import identities/personas, deduped by (case-insensitive) name — an
+   *  existing name is skipped, never replaced. Imports are never the default. */
+  importIdentities(identities: Identity[]): number {
+    const existing = new Set(this.listIdentities().map((i) => i.name.toLowerCase()));
+    let imported = 0;
+    for (const ident of identities ?? []) {
+      if (!ident?.name || typeof ident.name !== 'string') continue;
+      if (existing.has(ident.name.toLowerCase())) continue;
+      this.createIdentity({
+        ...ident,
+        id: randomUUID(),
+        isDefault: false,
+        createdAt: ident.createdAt ?? new Date().toISOString(),
+      });
+      existing.add(ident.name.toLowerCase());
+      imported++;
+    }
+    return imported;
+  }
+
   // ── Identities ────────────────────────────────
 
   createIdentity(identity: Identity): void {
@@ -550,6 +628,26 @@ export class MemoryStore {
   getModelProfile(modelId: string, provider: ProviderType): ModelInfo | undefined {
     const row = this.db.prepare('SELECT metadata FROM model_cache WHERE id = ?').get(`${provider}:${modelId}`) as { metadata: string } | undefined;
     return row ? JSON.parse(row.metadata) as ModelInfo : undefined;
+  }
+
+  /**
+   * Persist a probed capability verdict (currently: native tool support) into
+   * the model's cached profile, merging with whatever is already recorded.
+   * Read back via getModelProfile — so a model is probed once ever, not once
+   * per run.
+   */
+  saveModelCapability(modelId: string, provider: ProviderType, caps: { supportsToolUse?: boolean }): void {
+    const cacheKey = `${provider}:${modelId}`;
+    const existing = this.db.prepare('SELECT metadata FROM model_cache WHERE id = ?').get(cacheKey) as { metadata: string } | undefined;
+    const meta: ModelInfo = existing
+      ? JSON.parse(existing.metadata) as ModelInfo
+      : { id: modelId, provider, name: modelId, contextWindow: 0, isVisionCapable: false, inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, maxOutputTokens: 0, supportsStreaming: false, isLocal: false };
+    if (caps.supportsToolUse !== undefined) meta.supportsToolUse = caps.supportsToolUse;
+    this.db.prepare(`
+      INSERT INTO model_cache (id, provider, model_id, name, metadata, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET metadata = excluded.metadata, updated_at = excluded.updated_at
+    `).run(cacheKey, provider, modelId, meta.name ?? modelId, JSON.stringify(meta), new Date().toISOString());
   }
 
   getProfiledModelIds(): string[] {

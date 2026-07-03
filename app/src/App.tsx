@@ -17,7 +17,7 @@ import {
   useAppDispatch, useAppSelector,
   setConnected, setReconnecting, setBackendError, setMeta, updateCost, upsertAgent, updateLastMessage,
   setSessions, removeSession, setOnboardingDone,
-  enqueueApproval, clearApprovals, appendAgentStream, addPeerEdge, expirePeerEdges,
+  enqueueApproval, clearApprovals, appendAgentStream, addPeerEdge, expirePeerEdges, runEnded, finalizeLastMessage,
   type RuntimeSession,
 } from './store/index.js';
 import { SettingsView } from './views/SettingsView.js';
@@ -33,10 +33,12 @@ declare global {
       onBackendStatus(cb: (s: { port: number; token: string; error: string | null }) => void): void;
       getConfig(): Promise<{ provider: string; apiKey: string; workspace: string; onboardingDone: boolean }>;
       setConfig(cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string }): Promise<void>;
-      getSettings(): Promise<{ models: Record<string, string>; budget: { maxCostPerRun?: number; autoBias?: string }; providersWithKey: string[]; endpoints: Record<string, string> }>;
-      updateSettings(data: { keys?: Record<string, string | undefined>; models?: Record<string, string | undefined>; budget?: { maxCostPerRun?: number; autoBias?: string }; endpoints?: Record<string, string | undefined> }): Promise<{ ok: boolean; error?: string; models?: Record<string, string>; budget?: { maxCostPerRun?: number; autoBias?: string }; providersWithKey?: string[] }>;
+      getSettings(): Promise<{ models: Record<string, string>; budget: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; providersWithKey: string[]; endpoints: Record<string, string>; advanced?: Record<string, unknown> }>;
+      updateSettings(data: { keys?: Record<string, string | undefined>; models?: Record<string, string | undefined>; budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; endpoints?: Record<string, string | undefined>; advanced?: Record<string, unknown> }): Promise<{ ok: boolean; error?: string; models?: Record<string, string>; budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; providersWithKey?: string[]; advanced?: Record<string, unknown> }>;
       selectDirectory(): Promise<string | null>;
-      listModels(): Promise<{ ok: boolean; error?: string; models: Array<{ id: string; provider: string; isLocal: boolean }>; ocProbe?: { status?: number; count?: number; error?: string } }>;
+      saveJson(defaultName: string, content: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
+      openJson(): Promise<{ ok: boolean; path?: string; content?: string; canceled?: boolean; error?: string }>;
+      listModels(): Promise<{ ok: boolean; error?: string; models: Array<{ id: string; provider: string; isLocal: boolean; supportsToolUse?: boolean; contextWindow?: number; isVisionCapable?: boolean }>; ocProbe?: { status?: number; count?: number; error?: string } }>;
       theme: {
         get(): Promise<{ preference: 'system' | 'light' | 'dark' | 'midnight'; shouldUseDark: boolean }>;
         set(preference: 'system' | 'light' | 'dark' | 'midnight'): Promise<{ preference: 'system' | 'light' | 'dark' | 'midnight'; shouldUseDark: boolean }>;
@@ -183,11 +185,22 @@ export function App() {
     // Surface run failures. The cockpit/chat only render agents from socket
     // events, so a run that errors before any tier spawns used to vanish with
     // no feedback. Show the error instead, and clear it when a run completes.
+    // These handlers are GLOBAL (unlike the view components, App never
+    // unmounts), so they also own ending the run lifecycle: runEnded keeps the
+    // persistent Stop control honest, and finalizeLastMessage un-sticks the
+    // transcript's streaming flag when a run finishes while another view is open.
     socket.on('session:error', (data: { error?: string }) => {
       dispatch(setBackendError(data?.error ? `Run failed: ${data.error}` : 'Run failed — check your model/key and try again.'));
       dispatch(clearApprovals());
+      dispatch(runEnded());
+      dispatch(finalizeLastMessage({}));
     });
-    socket.on('session:complete', () => { dispatch(setBackendError(null)); dispatch(clearApprovals()); });
+    socket.on('session:complete', (data: { result?: { output?: string } } | undefined) => {
+      dispatch(setBackendError(null));
+      dispatch(clearApprovals());
+      dispatch(runEnded());
+      dispatch(finalizeLastMessage({ finalOutput: data?.result?.output }));
+    });
 
     // A dangerous tool escalated to the user — show the approval modal. The
     // modal answers with `permission:decision`, resolving the blocked run.
@@ -247,7 +260,7 @@ export function App() {
         </div>
         {helpContext && <HelpPanel />}
       </div>
-      <StatusBar />
+      <StatusBar socket={socketRef.current} />
       {showSettings && <SettingsView socket={socketRef.current} />}
       <ApprovalModal socket={socketRef.current} />
     </div>

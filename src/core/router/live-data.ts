@@ -31,10 +31,22 @@ export type DataSource = 'live' | 'cache' | 'bundled';
 
 interface PriceEntry { input: number; output: number }
 
+/**
+ * Per-model capability facts from the same OpenRouter catalog the pricing fetch
+ * already downloads: context window, native tool support, and input modalities.
+ * Previously discarded — provider listModels() stubs guessed/hardcoded these.
+ */
+export interface CapabilityEntry {
+  contextWindow?: number;
+  supportsTools?: boolean;
+  inputModalities?: string[];
+}
+
 interface DiskCache {
   fetchedAt: number;
   snapshot?: BenchmarkSnapshot;
   prices?: Record<string, PriceEntry>;
+  capabilities?: Record<string, CapabilityEntry>;
 }
 
 export interface LiveDataOptions {
@@ -79,6 +91,7 @@ export function normalizeModelId(id: string): string {
 export class LiveDataProvider {
   private snapshot: BenchmarkSnapshot | null = null;
   private prices = new Map<string, PriceEntry>();
+  private capabilities = new Map<string, CapabilityEntry>();
   private source: DataSource = 'bundled';
   private fetchedAt = 0;
   private loaded = false;
@@ -109,6 +122,9 @@ export class LiveDataProvider {
       if (cache.prices) {
         for (const [id, p] of Object.entries(cache.prices)) this.prices.set(id, p);
       }
+      if (cache.capabilities) {
+        for (const [id, c] of Object.entries(cache.capabilities)) this.capabilities.set(id, c);
+      }
       this.fetchedAt = cache.fetchedAt ?? 0;
     } catch {
       // No cache yet — bundled fallbacks remain in effect.
@@ -131,14 +147,15 @@ export class LiveDataProvider {
     const fresh = ttlMs > 0 && Date.now() - this.fetchedAt < ttlMs;
     if (!force && fresh && this.source !== 'bundled') return;
 
-    const [snap, prices] = await Promise.all([
+    const [snap, catalog] = await Promise.all([
       this.opts.live ? this.fetchSnapshot() : Promise.resolve(null),
-      this.opts.pricingLive ? this.fetchPrices() : Promise.resolve(null),
+      this.opts.pricingLive ? this.fetchCatalog() : Promise.resolve(null),
     ]);
 
     let changed = false;
     if (snap) { this.snapshot = snap; this.source = 'live'; changed = true; }
-    if (prices && prices.size > 0) { this.prices = prices; changed = true; }
+    if (catalog && catalog.prices.size > 0) { this.prices = catalog.prices; changed = true; }
+    if (catalog && catalog.capabilities.size > 0) { this.capabilities = catalog.capabilities; changed = true; }
     if (changed) {
       this.fetchedAt = Date.now();
       await this.saveCache();
@@ -160,24 +177,52 @@ export class LiveDataProvider {
     }
   }
 
-  private async fetchPrices(): Promise<Map<string, PriceEntry> | null> {
+  /**
+   * One fetch of the OpenRouter catalog yields BOTH pricing and capability
+   * facts (context window, native tool support, input modalities) — the
+   * capability fields used to be discarded while providers guessed/hardcoded
+   * them in their listModels() stubs.
+   */
+  private async fetchCatalog(): Promise<{ prices: Map<string, PriceEntry>; capabilities: Map<string, CapabilityEntry> } | null> {
     try {
       const resp = await withTimeout(fetch(OPENROUTER_MODELS_URL), FETCH_TIMEOUT_MS, 'pricing fetch timed out');
       if (!resp.ok) return null;
       const data = await resp.json() as {
-        data?: Array<{ id?: string; pricing?: { prompt?: string; completion?: string } }>;
+        data?: Array<{
+          id?: string;
+          pricing?: { prompt?: string; completion?: string };
+          context_length?: number;
+          supported_parameters?: string[];
+          architecture?: { input_modalities?: string[] };
+        }>;
       };
       if (!Array.isArray(data?.data)) return null;
-      const out = new Map<string, PriceEntry>();
+      const prices = new Map<string, PriceEntry>();
+      const capabilities = new Map<string, CapabilityEntry>();
       for (const m of data.data) {
-        if (!m?.id || !m.pricing) continue;
-        // OpenRouter prices are per-token USD strings; convert to per-1k.
-        const input = Number(m.pricing.prompt) * 1000;
-        const output = Number(m.pricing.completion) * 1000;
-        if (!Number.isFinite(input) || !Number.isFinite(output)) continue;
-        out.set(normalizeModelId(m.id), { input, output });
+        if (!m?.id) continue;
+        const key = normalizeModelId(m.id);
+        if (m.pricing) {
+          // OpenRouter prices are per-token USD strings; convert to per-1k.
+          const input = Number(m.pricing.prompt) * 1000;
+          const output = Number(m.pricing.completion) * 1000;
+          if (Number.isFinite(input) && Number.isFinite(output)) {
+            prices.set(key, { input, output });
+          }
+        }
+        const cap: CapabilityEntry = {};
+        if (typeof m.context_length === 'number' && m.context_length > 0) {
+          cap.contextWindow = m.context_length;
+        }
+        if (Array.isArray(m.supported_parameters)) {
+          cap.supportsTools = m.supported_parameters.includes('tools');
+        }
+        if (Array.isArray(m.architecture?.input_modalities)) {
+          cap.inputModalities = m.architecture.input_modalities;
+        }
+        if (Object.keys(cap).length > 0) capabilities.set(key, cap);
       }
-      return out;
+      return { prices, capabilities };
     } catch {
       return null;
     }
@@ -190,6 +235,7 @@ export class LiveDataProvider {
         fetchedAt: this.fetchedAt,
         snapshot: this.snapshot ?? undefined,
         prices: Object.fromEntries(this.prices),
+        capabilities: Object.fromEntries(this.capabilities),
       };
       await fs.writeFile(this.opts.cacheFile, JSON.stringify(cache, null, 2), 'utf-8');
     } catch {
@@ -219,8 +265,32 @@ export class LiveDataProvider {
     });
   }
 
+  /** Current capability facts for a model id, or null when unknown. */
+  getCapability(modelId: string): CapabilityEntry | null {
+    return this.capabilities.get(normalizeModelId(modelId)) ?? null;
+  }
+
+  /**
+   * Returns capability-corrected copies of each model (originals untouched):
+   * real context windows replace the providers' hardcoded guesses, native
+   * tool support replaces the assume-by-provider default, and vision is set
+   * from the declared input modalities.
+   */
+  applyLiveCapabilities(models: ModelInfo[]): ModelInfo[] {
+    return models.map((m) => {
+      const c = this.getCapability(m.id);
+      if (!c) return m;
+      const next = { ...m };
+      if (c.contextWindow) next.contextWindow = c.contextWindow;
+      if (c.supportsTools !== undefined) next.supportsToolUse = c.supportsTools;
+      if (c.inputModalities) next.isVisionCapable = c.inputModalities.includes('image');
+      return next;
+    });
+  }
+
   /** Where the active quality data came from — for /why and `cascade models`. */
   getDataSource(): DataSource { return this.source; }
   getGeneratedAt(): string | null { return this.snapshot?.generatedAt ?? null; }
   hasLivePricing(): boolean { return this.prices.size > 0; }
+  hasCapabilities(): boolean { return this.capabilities.size > 0; }
 }
