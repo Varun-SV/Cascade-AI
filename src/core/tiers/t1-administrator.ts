@@ -420,8 +420,22 @@ In 3-5 terse bullets, flag the most important RISKS, GAPS, or over-/under-decomp
   private async decomposeTask(prompt: string, systemContext?: string): Promise<TaskPlan> {
     // Optional call: routers constructed without a WorldStateDB (tests, SDK
     // embedders) simply skip the world-state context instead of crashing.
+    // world-state v2: prefer the queryable knowledge graph (compact, deduped,
+    // relevance-filtered to this task) over replaying the entire linear log; fall
+    // back to the linear log when no facts have been extracted yet.
     const db = this.router.getWorldStateDB?.();
-    const worldStateContext = db ? `\n\nPROJECT WORLD STATE (Current architecture and recent changes):\n${db.getFormattedState()}` : '';
+    let worldStateContext = '';
+    if (db) {
+      const knowledge = db.getFormattedKnowledge(prompt);
+      if (knowledge) {
+        worldStateContext = `\n\nPROJECT KNOWLEDGE (relevant facts about this codebase):\n${knowledge}`;
+      } else {
+        const log = db.getFormattedState();
+        if (log && log !== 'World State is currently empty.') {
+          worldStateContext = `\n\nPROJECT WORLD STATE (Current architecture and recent changes):\n${log}`;
+        }
+      }
+    }
     const contextSection = systemContext ? `\nProject context:\n${systemContext}` : '';
     const decompositionPrompt = `Analyze this task and create an execution plan.${contextSection}${worldStateContext}
 

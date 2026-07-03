@@ -148,6 +148,11 @@ jobs:
           npx @electron/rebuild -f -w node-pty
           ELECTRON_VERSION=$(node -p "require('./node_modules/electron/package.json').version")
           npx @electron/rebuild -f -m .. -w better-sqlite3 --version "$ELECTRON_VERSION"
+          # isolated-vm powers the hard-isolate dynamic-tool sandbox. It's an
+          # OPTIONAL native addon (the core falls back to the worker sandbox if
+          # it's missing), so its rebuild must never fail the release — and it
+          # ships node-gyp-build prebuilds that may already match the Electron ABI.
+          npx @electron/rebuild -f -m .. -w isolated-vm --version "$ELECTRON_VERSION" || echo "::warning::isolated-vm rebuild failed — dynamic-tool sandbox will fall back to the worker on this platform"
         shell: bash
 
       - name: Package & publish installer

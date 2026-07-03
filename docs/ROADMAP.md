@@ -4,34 +4,34 @@ Deferred designs from the v0.13 feature round. Each item below has a sketched
 approach grounded in the current codebase, so any of them can be picked up
 without re-discovery.
 
-## WASM / isolate sandboxing for tool execution
+## Hard sandbox for LLM-authored dynamic tools — ✅ shipped in v0.14.0
 
-**Today:** `shell` runs via `child_process.exec` guarded by an allowlist,
-blocklist, dangerous-pattern regexes, a timeout, and the approval gate
-(`src/tools/shell.ts`) — but with no process/filesystem/network isolation.
-LLM-authored dynamic tools run in a `node:worker_threads` Worker with resource
-limits and a message-bridge for privileged calls (`src/tools/tool-creator.ts`),
-which is a robustness boundary, not a security boundary.
+Dynamic tools now run in an `isolated-vm` hard V8 isolate (no Node globals),
+reaching the host only through the escalator-gated `callTool` / SSRF-guarded
+`fetch` bridges, with a graceful fall back to the worker sandbox when the
+optional native addon is unavailable (`tools.dynamicToolSandbox`,
+`src/tools/tool-creator.ts`).
 
-**Plan:** introduce an opt-in isolate for untrusted execution — either
-`isolated-vm` (hard V8 isolate) or a WASI runtime for running generated code
-and test suites. Shell stays approval-gated but gains an optional jail
-(container/`bwrap` where available). The Worker bridge in `tool-creator.ts` is
-the natural seam: swap the executor behind the same `callTool`/`fetch`
-messaging without changing tool authorship.
+**Still open — OS-level jail for real-process execution.** `shell`
+(`child_process.exec`) and the `run_code` interpreter (real Python/Node) remain
+approval-gated but unconfined at the OS level. A WASM/V8 isolate can't run those
+(they need real runtimes); the follow-up is an optional container/`bwrap`/sandbox
+jail for shell and the interpreter where available.
 
-## Project knowledge graph (world-state v2)
+## Project knowledge graph (world-state v2) — ✅ shipped in v0.14.0
 
-**Today:** `WorldStateDB` (`src/core/knowledge/world-state.ts`) is an
-encrypted, append-only *linear log* of worker completions; T1 reads the
-formatted log during decomposition.
+`WorldStateDB` now has a queryable `facts(entity, relation, value,
+source_worker, timestamp)` store with upsert/supersede semantics, populated by a
+best-effort extraction pass on each T3 completion; T1 folds relevant deduped
+facts into planning instead of replaying the whole linear log
+(`src/core/knowledge/world-state.ts`). Encryption/key handling carried over
+unchanged.
 
-**Plan:** upgrade to queryable facts — a `facts(entity, relation, value,
-source_worker, timestamp)` table with upsert semantics ("Function X handles
-JWT", "Service Y depends on Z"), populated by a cheap extraction pass on each
-T3 completion. T1/T2 query relevant facts by entity instead of replaying the
-whole log; stale facts get superseded rather than appended. The existing
-encryption/key handling carries over unchanged.
+**Adjacent idea — cross-session history research.** A read-only "history
+researcher" subagent that, before an edit or review, briefs the planner on prior
+decisions/intent around a module — potentially backed by an external session
+index (e.g. `ctx`, https://github.com/ctxrs/ctx). Builds on the queryable
+knowledge store above.
 
 ## VSCode / JetBrains extensions
 

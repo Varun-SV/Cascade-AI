@@ -14,6 +14,7 @@ const pkg = JSON.parse(
 // optional and degrade gracefully when absent.
 const NATIVE_EXTERNAL = [
   'better-sqlite3',
+  'isolated-vm',
   'playwright',
   'fsevents',
   'keytar',
@@ -27,6 +28,7 @@ const NATIVE_EXTERNAL = [
 // blanket noExternal pulled Playwright's unresolvable internals into the bundle.
 const DESKTOP_KEEP_EXTERNAL = [
   'better-sqlite3',
+  'isolated-vm',
   'playwright',
   'playwright-core',
   'chromium-bidi',

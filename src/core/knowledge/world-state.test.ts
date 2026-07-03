@@ -1,0 +1,139 @@
+// world-state v2 — queryable fact store + T1 consumption.
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { WorldStateDB } from './world-state.js';
+import { T1Administrator } from '../tiers/t1-administrator.js';
+import type { CascadeRouter } from '../router/index.js';
+import type { ToolRegistry } from '../../tools/registry.js';
+import type { CascadeConfig, GenerateResult } from '../../types.js';
+
+let ws: string;
+let db: WorldStateDB;
+
+beforeEach(async () => {
+  ws = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-worldstate-'));
+  db = new WorldStateDB(ws);
+});
+afterEach(async () => {
+  db.close();
+  await fs.rm(ws, { recursive: true, force: true });
+});
+
+describe('WorldStateDB v2 — facts', () => {
+  it('upserts and encrypts a fact, round-tripping the value', () => {
+    db.upsertFact('Auth Module', 'uses', 'JWT', 't3-a');
+    const facts = db.getAllFacts();
+    expect(facts).toHaveLength(1);
+    expect(facts[0]).toMatchObject({ entity: 'auth module', relation: 'uses', value: 'JWT', sourceWorker: 't3-a' });
+  });
+
+  it('SUPERSEDES on (entity, relation) instead of appending', () => {
+    db.upsertFact('auth module', 'uses', 'sessions', 't3-a');
+    db.upsertFact('AUTH  module', 'Uses', 'JWT', 't3-b'); // same normalized key
+    const facts = db.getAllFacts();
+    expect(facts).toHaveLength(1);              // not two rows
+    expect(facts[0]!.value).toBe('JWT');        // newer value wins
+    expect(facts[0]!.sourceWorker).toBe('t3-b');
+  });
+
+  it('keeps distinct relations for the same entity as separate facts', () => {
+    db.upsertFact('service Y', 'depends on', 'service Z', 't3-a');
+    db.upsertFact('service Y', 'exposes', 'REST API', 't3-a');
+    expect(db.getAllFacts()).toHaveLength(2);
+  });
+
+  it('ignores empty entity/relation/value', () => {
+    db.upsertFact('', 'uses', 'x', 't3');
+    db.upsertFact('e', '', 'x', 't3');
+    db.upsertFact('e', 'r', '   ', 't3');
+    expect(db.getAllFacts()).toHaveLength(0);
+  });
+
+  it('getFactsForEntities filters by normalized entity', () => {
+    db.upsertFact('auth module', 'uses', 'JWT', 't3');
+    db.upsertFact('billing', 'uses', 'Stripe', 't3');
+    const got = db.getFactsForEntities(['Auth Module']);
+    expect(got).toHaveLength(1);
+    expect(got[0]!.value).toBe('JWT');
+  });
+
+  it('getFormattedKnowledge relevance-filters by prompt tokens, else returns all', () => {
+    db.upsertFact('auth module', 'uses', 'JWT', 't3');
+    db.upsertFact('billing', 'uses', 'Stripe', 't3');
+
+    const relevant = db.getFormattedKnowledge('please refactor the auth module');
+    expect(relevant).toContain('auth module uses JWT');
+    expect(relevant).not.toContain('billing');
+
+    // No token match → fall back to all facts (better than nothing).
+    const all = db.getFormattedKnowledge('completely unrelated xyzzy prompt');
+    expect(all).toContain('auth module');
+    expect(all).toContain('billing');
+  });
+
+  it('getFormattedKnowledge returns "" when there are no facts (caller falls back to the log)', () => {
+    expect(db.getFormattedKnowledge('anything')).toBe('');
+  });
+
+  it('the linear log still works alongside facts', () => {
+    db.addEntry('t3-a', 'Completed: build auth');
+    db.upsertFact('auth', 'uses', 'JWT', 't3-a');
+    expect(db.getAllEntries()).toHaveLength(1);
+    expect(db.getAllFacts()).toHaveLength(1);
+  });
+});
+
+// ── T1 consumes facts during decomposition ──
+function makeResult(content: string): GenerateResult {
+  return { content, finishReason: 'stop', usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimatedCostUsd: 0 } };
+}
+const PLAN_JSON = JSON.stringify({
+  complexity: 'Moderate', reasoning: 'x',
+  sections: [{ sectionId: 's1', sectionTitle: 'S', description: 'd', expectedOutput: 'o', constraints: [], dependsOn: [], t3Subtasks: [{ subtaskId: 't1', subtaskTitle: 'i', description: 'd', expectedOutput: 'o', constraints: [], dependsOn: [] }] }],
+});
+function makeToolRegistry(): ToolRegistry {
+  return { getToolDefinitions: () => [], requiresApproval: () => false, isDangerous: () => false } as unknown as ToolRegistry;
+}
+
+describe('T1 decomposition consumes world-state v2 facts', () => {
+  it('injects relevant PROJECT KNOWLEDGE facts into the decomposition prompt', async () => {
+    db.upsertFact('auth module', 'uses', 'JWT', 't3');
+    const generate = vi.fn(async () => makeResult(PLAN_JSON));
+    const router = { generate, getModelForTier: () => undefined, getWorldStateDB: () => db } as unknown as CascadeRouter;
+    const t1 = new T1Administrator(router, makeToolRegistry(), {} as unknown as CascadeConfig);
+
+    await t1.previewPlan('refactor the auth module');
+
+    const prompt = generate.mock.calls[0]![1]!.messages[0]!.content as string;
+    expect(prompt).toContain('PROJECT KNOWLEDGE');
+    expect(prompt).toContain('auth module uses JWT');
+    expect(prompt).not.toContain('PROJECT WORLD STATE'); // used facts, not the log
+  });
+
+  it('falls back to the linear log when no facts exist yet', async () => {
+    db.addEntry('t3', 'Completed: initial scaffolding');
+    const generate = vi.fn(async () => makeResult(PLAN_JSON));
+    const router = { generate, getModelForTier: () => undefined, getWorldStateDB: () => db } as unknown as CascadeRouter;
+    const t1 = new T1Administrator(router, makeToolRegistry(), {} as unknown as CascadeConfig);
+
+    await t1.previewPlan('add a feature');
+
+    const prompt = generate.mock.calls[0]![1]!.messages[0]!.content as string;
+    expect(prompt).toContain('PROJECT WORLD STATE');
+    expect(prompt).toContain('initial scaffolding');
+  });
+
+  it('injects neither block when the world state is entirely empty', async () => {
+    const generate = vi.fn(async () => makeResult(PLAN_JSON));
+    const router = { generate, getModelForTier: () => undefined, getWorldStateDB: () => db } as unknown as CascadeRouter;
+    const t1 = new T1Administrator(router, makeToolRegistry(), {} as unknown as CascadeConfig);
+
+    await t1.previewPlan('do something');
+
+    const prompt = generate.mock.calls[0]![1]!.messages[0]!.content as string;
+    expect(prompt).not.toContain('PROJECT KNOWLEDGE');
+    expect(prompt).not.toContain('PROJECT WORLD STATE');
+  });
+});

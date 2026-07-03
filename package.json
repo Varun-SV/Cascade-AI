@@ -1,6 +1,6 @@
 {
   "name": "cascade-ai",
-  "version": "0.13.2",
+  "version": "0.14.0",
   "description": "Multi-tier AI orchestration CLI — T1/T2/T3 hierarchical agent system",
   "type": "module",
   "main": "dist/index.cjs",
@@ -82,6 +82,7 @@
     "zod": "^3.23.8"
   },
   "optionalDependencies": {
+    "isolated-vm": "^6.1.2",
     "keytar": "^7.9.0",
     "playwright": "^1.48.0"
   },

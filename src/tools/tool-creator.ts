@@ -24,6 +24,47 @@ import type { ToolRegistry } from './registry.js';
 import type { CascadeRouter } from '../core/router/index.js';
 import type { PermissionEscalator } from '../core/permissions/escalator.js';
 import type { PermissionRequest } from '../types.js';
+// Type-only: the native addon is an OPTIONAL dependency (loaded at runtime via a
+// guarded dynamic import), so this import must never emit a runtime require.
+import type IsolatedVMType from 'isolated-vm';
+
+export type SandboxMode = 'isolate' | 'worker' | 'auto';
+
+// ── Optional hard-isolate runtime (isolated-vm) ────
+//
+//  A `node:worker_threads` Worker is a robustness boundary (kill timeout, memory
+//  cap, crash containment) but NOT a security one: generated code still sees Node
+//  globals (`process`, `process.binding`, …) inside the worker. `isolated-vm` runs
+//  it in a hard V8 isolate whose global has NO Node built-ins at all — real
+//  capability confinement — reaching the host ONLY through the same escalator-gated
+//  `callTool` and SSRF-guarded `fetch` bridges. It's an optional native dependency:
+//  if it's absent or failed to build we transparently fall back to the worker.
+
+type IvmModule = typeof IsolatedVMType;
+// undefined = not yet attempted; null = unavailable (absent / failed to build).
+let ivmCache: IvmModule | null | undefined;
+let ivmWarned = false;
+
+async function loadIsolatedVm(): Promise<IvmModule | null> {
+  if (ivmCache !== undefined) return ivmCache;
+  try {
+    const mod = await import('isolated-vm');
+    ivmCache = ((mod as { default?: IvmModule }).default ?? (mod as unknown as IvmModule));
+  } catch {
+    ivmCache = null;
+  }
+  return ivmCache;
+}
+
+function safeJsonParse(text: unknown): Record<string, unknown> {
+  if (typeof text !== 'string') return {};
+  try {
+    const v = JSON.parse(text);
+    return v && typeof v === 'object' ? (v as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
 
 // ── Generated tool schema ──────────────────────
 
@@ -185,12 +226,18 @@ class DynamicTool extends BaseTool {
   private getEscalator: () => PermissionEscalator | undefined;
   /** Untrusted = loaded from disk / a peer; its dangerous calls always re-prompt. */
   private trusted: boolean;
+  /** Resolve the configured sandbox mode at call time (default 'auto'). */
+  private getSandboxMode: () => SandboxMode;
+  /** Optional diagnostics sink (routed through the host so it survives the Ink TUI). */
+  private log: (msg: string) => void;
 
   constructor(
     spec: GeneratedToolSpec,
     registry: ToolRegistry,
     getEscalator: () => PermissionEscalator | undefined,
     trusted: boolean,
+    getSandboxMode: () => SandboxMode = () => 'auto',
+    log: (msg: string) => void = () => {},
   ) {
     super();
     this.name = spec.name;
@@ -201,6 +248,8 @@ class DynamicTool extends BaseTool {
     this.registry = registry;
     this.getEscalator = getEscalator;
     this.trusted = trusted;
+    this.getSandboxMode = getSandboxMode;
+    this.log = log;
   }
 
   isDangerous(): boolean {
@@ -246,7 +295,101 @@ class DynamicTool extends BaseTool {
       }
     };
 
+    // Choose the executor. 'isolate'/'auto' prefer the hard V8 isolate; both fall
+    // back to the worker if isolated-vm isn't loadable ('isolate' warns once that
+    // the confinement it asked for is unavailable). 'worker' skips the isolate.
+    const mode = this.getSandboxMode();
+    if (mode !== 'worker') {
+      const ivm = await loadIsolatedVm();
+      if (ivm) return this.runInIsolate(ivm, input, callTool);
+      if (mode === 'isolate' && !ivmWarned) {
+        ivmWarned = true;
+        this.log('[tool-creator] isolated-vm is not available (not installed or failed to build) — dynamic tools fall back to the worker sandbox, which is NOT capability-confined. Install isolated-vm for a hard isolate.');
+      }
+    }
     return this.runInWorker(input, callTool);
+  }
+
+  /**
+   * Run the generated code in a hard V8 isolate (isolated-vm). The isolate global
+   * has no Node built-ins, so the code cannot see `process`, `require`, the
+   * filesystem, or the network — it reaches the host ONLY through the injected
+   * `callTool` (escalator-gated on the main thread) and `fetch` (SSRF-guarded via
+   * bridgeFetch). `script.run({ timeout })` bounds synchronous CPU; an outer
+   * wall-clock race + `isolate.dispose()` bounds async runaway (a never-resolving
+   * await), mirroring the worker's terminate().
+   */
+  private async runInIsolate(
+    ivm: IvmModule,
+    input: Record<string, unknown>,
+    callTool: (name: string, input: Record<string, unknown>) => Promise<string>,
+  ): Promise<string> {
+    const timeoutMs = Math.max(200, Number(process.env['CASCADE_DYNAMIC_TOOL_TIMEOUT_MS']) || DYNAMIC_TOOL_TIMEOUT_MS);
+    const isolate = new ivm.Isolate({ memoryLimit: 128 });
+    let disposed = false;
+    const dispose = () => { if (!disposed) { disposed = true; try { isolate.dispose(); } catch { /* already gone */ } } };
+
+    try {
+      const context = await isolate.createContext();
+      const jail = context.global;
+
+      // Host bridges — the ONLY capabilities the isolate has. callTool is already
+      // escalator-gated (dangerous tools) in execute(); fetch is SSRF-guarded.
+      await jail.set('_callTool', new ivm.Reference(async (name: string, inputJson: string) => {
+        const out = await callTool(String(name), safeJsonParse(inputJson));
+        return String(out);
+      }));
+      await jail.set('_fetch', new ivm.Reference(async (url: string, initJson: string) => {
+        const r = await bridgeFetch(String(url), safeJsonParse(initJson));
+        return JSON.stringify(r);
+      }));
+      await jail.set('_input', new ivm.ExternalCopy(input).copyInto());
+      await jail.set('_code', this.executeCode);
+
+      // In-isolate preamble: rebuild the same (input, callTool, fetch, console)
+      // async signature the generated body expects, marshaling across the boundary.
+      const bootstrap = `
+        const callTool = (name, toolInput) => _callTool.apply(undefined,
+          [String(name), JSON.stringify(toolInput || {})],
+          { result: { promise: true }, arguments: { copy: true } });
+        const fetch = async (url, init) => {
+          const raw = await _fetch.apply(undefined,
+            [String(url), JSON.stringify(init || null)],
+            { result: { promise: true }, arguments: { copy: true } });
+          const r = JSON.parse(raw);
+          if (r && r.__error) throw new Error(r.__error);
+          return {
+            ok: r.ok, status: r.status, statusText: r.statusText,
+            headers: { get: (k) => (String(k).toLowerCase() === 'content-type' ? r.contentType : null) },
+            text: async () => r.body,
+            json: async () => JSON.parse(r.body),
+          };
+        };
+        const console = { log() {}, error() {} };
+        const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+        const fn = new AsyncFunction('input', 'callTool', 'fetch', 'console', _code);
+        (async () => { const r = await fn(_input, callTool, fetch, console); return String(r == null ? '' : r); })();
+      `;
+      const script = await isolate.compileScript(bootstrap);
+      const runPromise = (script.run(context, { timeout: timeoutMs, promise: true }) as Promise<unknown>)
+        .then((v) => String(v ?? ''));
+      const timeoutPromise = new Promise<string>((resolve) => {
+        const t = setTimeout(() => {
+          dispose();
+          resolve(`Dynamic tool "${this.name}" timed out after ${timeoutMs}ms and was terminated.`);
+        }, timeoutMs + 500);
+        t.unref?.();
+      });
+      return await Promise.race([runPromise, timeoutPromise]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/timed? out/i.test(msg)) {
+        return `Dynamic tool "${this.name}" timed out after ${timeoutMs}ms and was terminated.`;
+      }
+      return `Tool error: ${msg}`;
+    } finally {
+      dispose();
+    }
   }
 
   /** Spawn the worker, service its callTool/fetch bridge, enforce the kill timeout. */
@@ -337,17 +480,26 @@ export class ToolCreator {
   private workspacePath?: string;
   /** When false, persisted tools are neither loaded nor written. */
   private persistEnabled: boolean;
+  /** Sandbox runtime for generated tools; passed to each DynamicTool. */
+  private sandboxMode: SandboxMode;
   private logger?: (msg: string) => void;
   /** name → spec, for persistence, broadcast, and re-registration. */
   private specs = new Map<string, GeneratedToolSpec>();
   /** capability fingerprint → tool name, so the same need isn't re-generated. */
   private capabilityIndex = new Map<string, string>();
 
-  constructor(router: CascadeRouter, registry: ToolRegistry, workspacePath?: string, persistEnabled = true) {
+  constructor(
+    router: CascadeRouter,
+    registry: ToolRegistry,
+    workspacePath?: string,
+    persistEnabled = true,
+    sandboxMode: SandboxMode = 'auto',
+  ) {
     this.router = router;
     this.registry = registry;
     this.workspacePath = workspacePath;
     this.persistEnabled = persistEnabled;
+    this.sandboxMode = sandboxMode;
   }
 
   setPermissionEscalator(escalator: PermissionEscalator): void {
@@ -459,7 +611,14 @@ Required capability: ${description.slice(0, 300)}`;
       this.specs.set(spec.name, spec);
       return;
     }
-    const tool = new DynamicTool(spec, this.registry, () => this.escalator, trusted);
+    const tool = new DynamicTool(
+      spec,
+      this.registry,
+      () => this.escalator,
+      trusted,
+      () => this.sandboxMode,
+      (msg) => this.log(msg),
+    );
     this.registry.register(tool);
     this.specs.set(spec.name, spec);
     this.capabilityIndex.set(capabilityKey(`${spec.description}`), spec.name);

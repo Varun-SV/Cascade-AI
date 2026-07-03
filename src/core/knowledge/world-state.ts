@@ -11,6 +11,25 @@ export interface WorldStateEntry {
   workerId: string;
 }
 
+/**
+ * A single queryable fact in the project knowledge graph (world-state v2):
+ * an `(entity, relation) → value` triple with provenance. Facts are upserted on
+ * `(entity, relation)`, so a newer observation supersedes an older one instead of
+ * appending — T1/T2 query relevant facts by entity rather than replaying the log.
+ */
+export interface WorldFact {
+  entity: string;
+  relation: string;
+  value: string;
+  sourceWorker: string;
+  timestamp: string;
+}
+
+/** Normalize an entity/relation key so casing/whitespace don't fragment upserts. */
+function normalizeKey(text: string): string {
+  return text.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
 export class WorldStateDB {
   private db: SQLiteDatabase;
   private keyPath: string;
@@ -36,6 +55,21 @@ export class WorldStateDB {
         timestamp TEXT NOT NULL,
         worker_id TEXT NOT NULL,
         encrypted_payload TEXT NOT NULL
+      )
+    `);
+
+    // world-state v2: queryable fact store. `(entity, relation)` is the primary
+    // key so a newer observation upserts (supersedes) the prior value. The value
+    // is encrypted with the same key as the linear log; entity/relation stay
+    // plaintext so they're indexable/queryable.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS facts (
+        entity TEXT NOT NULL,
+        relation TEXT NOT NULL,
+        encrypted_value TEXT NOT NULL,
+        source_worker TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        PRIMARY KEY (entity, relation)
       )
     `);
   }
@@ -115,6 +149,94 @@ export class WorldStateDB {
     if (entries.length === 0) return 'World State is currently empty.';
     
     return entries.map((e, idx) => `[${e.timestamp}] Step ${idx + 1} (${e.workerId}): ${e.summary}`).join('\n');
+  }
+
+  // ── world-state v2: queryable facts ──────────────
+
+  /**
+   * Upsert a fact. `(entity, relation)` is normalized so casing/whitespace don't
+   * fragment the key; an existing pair is superseded (value + provenance updated)
+   * rather than duplicated. Empty entity/relation/value are ignored.
+   */
+  public upsertFact(entity: string, relation: string, value: string, sourceWorker: string): void {
+    const e = normalizeKey(entity);
+    const r = normalizeKey(relation);
+    const v = value.trim();
+    if (!e || !r || !v) return;
+
+    const encrypted = this.encrypt(JSON.stringify({ value: v }));
+    const stmt = this.db.prepare(`
+      INSERT INTO facts (entity, relation, encrypted_value, source_worker, timestamp)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(entity, relation) DO UPDATE SET
+        encrypted_value = excluded.encrypted_value,
+        source_worker   = excluded.source_worker,
+        timestamp       = excluded.timestamp
+    `);
+    stmt.run(e, r, encrypted, sourceWorker, new Date().toISOString());
+    this.dumpDebugIfNeeded();
+  }
+
+  private rowToFact(row: any): WorldFact {
+    let value: string;
+    try {
+      value = JSON.parse(this.decrypt(row.encrypted_value)).value;
+    } catch {
+      value = '[Decryption Failed - Payload Corrupted]';
+    }
+    return { entity: row.entity, relation: row.relation, value, sourceWorker: row.source_worker, timestamp: row.timestamp };
+  }
+
+  /** All facts whose entity matches one of the (normalized) query entities. */
+  public getFactsForEntities(entities: string[]): WorldFact[] {
+    const keys = Array.from(new Set(entities.map(normalizeKey).filter(Boolean)));
+    if (keys.length === 0) return [];
+    const placeholders = keys.map(() => '?').join(', ');
+    const stmt = this.db.prepare(
+      `SELECT entity, relation, encrypted_value, source_worker, timestamp FROM facts WHERE entity IN (${placeholders}) ORDER BY entity ASC, relation ASC`,
+    );
+    return (stmt.all(...keys) as any[]).map((row) => this.rowToFact(row));
+  }
+
+  /** Every fact (used for tests / debug / whole-graph views). */
+  public getAllFacts(): WorldFact[] {
+    const stmt = this.db.prepare('SELECT entity, relation, encrypted_value, source_worker, timestamp FROM facts ORDER BY entity ASC, relation ASC');
+    return (stmt.all() as any[]).map((row) => this.rowToFact(row));
+  }
+
+  /**
+   * A compact, human/LLM-readable fact block for T1/T2 planning. When `entities`
+   * is given, only facts about those entities are included; otherwise all facts.
+   * Returns '' when there are none so callers can fall back to the linear log.
+   */
+  public getFormattedFacts(entities?: string[]): string {
+    const facts = entities && entities.length > 0 ? this.getFactsForEntities(entities) : this.getAllFacts();
+    if (facts.length === 0) return '';
+    return facts.map((f) => `- ${f.entity} ${f.relation} ${f.value}`).join('\n');
+  }
+
+  /**
+   * A compact knowledge block for T1/T2 planning. When `prompt` is given, facts
+   * whose entity/relation/value mention a prompt token are preferred (relevance
+   * filter); otherwise, or when nothing matches, all facts are used (capped at
+   * `limit`). Returns '' when there are no facts, so the caller can fall back to
+   * the raw linear log — this replaces replaying the whole log during planning.
+   */
+  public getFormattedKnowledge(prompt?: string, limit = 40): string {
+    const all = this.getAllFacts();
+    if (all.length === 0) return '';
+    let selected = all;
+    if (prompt && prompt.trim()) {
+      const tokens = Array.from(new Set(prompt.toLowerCase().match(/[a-z0-9_./-]{3,}/g) ?? []));
+      if (tokens.length > 0) {
+        const matched = all.filter((f) => {
+          const hay = `${f.entity} ${f.relation} ${f.value}`.toLowerCase();
+          return tokens.some((t) => hay.includes(t));
+        });
+        if (matched.length > 0) selected = matched;
+      }
+    }
+    return selected.slice(0, limit).map((f) => `- ${f.entity} ${f.relation} ${f.value}`).join('\n');
   }
 
   private dumpDebugIfNeeded(): void {

@@ -500,6 +500,11 @@ export class CascadeRouter extends EventEmitter {
     return { enabled: r?.enabled === true, maxPerSection: r?.maxPerSection ?? 4 };
   }
 
+  /** Project-knowledge settings (config.knowledge). Facts extraction on by default. */
+  getKnowledgeConfig(): { factsExtraction: boolean } {
+    return { factsExtraction: this.config?.knowledge?.factsExtraction !== false };
+  }
+
   /**
    * Resolved T3 wave execution mode. 'auto' becomes 'sequential' when the T3
    * tier resolves to a LOCAL model (the single-GPU queue serializes anyway, so

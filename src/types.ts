@@ -477,6 +477,8 @@ export interface CascadeConfig {
   enableToolCreation?: boolean;
   /** Persist runtime-generated tools and reload them on startup (untrusted). Default: true. */
   persistDynamicTools?: boolean;
+  /** Project knowledge (world state) settings. */
+  knowledge?: { factsExtraction?: boolean };
   plugins?: string[];
   localConcurrency?: number;
   localInferenceTimeoutMs?: number;
@@ -559,6 +561,12 @@ export interface ToolsConfig {
   mcpTrusted?: string[];
   /** Web search backends — at least one should be configured for best results */
   webSearch?: WebSearchConfig;
+  /**
+   * Sandbox runtime for LLM-authored dynamic tools. 'isolate' = hard V8 isolate
+   * (isolated-vm, capability-confined), 'worker' = node:worker_threads,
+   * 'auto' (default) = isolate when available else worker.
+   */
+  dynamicToolSandbox?: 'isolate' | 'worker' | 'auto';
 }
 
 export interface HooksConfig {
