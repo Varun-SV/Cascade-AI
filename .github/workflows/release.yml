@@ -148,16 +148,24 @@ jobs:
         # node-pty lives in app/node_modules; better-sqlite3 (the embedded
         # backend's DB engine) is hoisted to the repo-root node_modules, so it's
         # rebuilt with an explicit --module-dir against the same Electron version.
-        # isolated-vm is deliberately NOT rebuilt here: it cannot link against
-        # Electron's V8 on Windows (LNK2001 unresolved v8:: symbols — broke the
-        # v0.15.0 windows build even behind a `|| echo` guard), and Electron
-        # ABIs never match its Node prebuilds. The desktop app uses the worker
-        # sandbox for dynamic tools by design; the hard isolate is a CLI/npm
-        # (plain Node) feature.
+        #
+        # IMPORTANT: use -o/--only, NOT -w/--which-module. `-w` maps to
+        # @electron/rebuild's `extraModules` — it does NOT restrict what gets
+        # rebuilt; the module walker still scans and rebuilds every prod +
+        # optional native dependency it finds (module-walker.js: types defaults
+        # to ['prod','optional']). Since isolated-vm is an optionalDependency at
+        # the repo root, the `-m ..` invocation walked into it and tried to
+        # rebuild it regardless of the `-w better-sqlite3` argument — which is
+        # what actually broke the v0.15.0 AND v0.15.1 Windows builds (it cannot
+        # link against Electron's V8 there). `-o` sets `onlyModules`, which the
+        # walker filters modulesToRebuild against directly — the only flag that
+        # truly scopes the rebuild. The desktop app uses the worker sandbox for
+        # dynamic tools by design; the hard isolate remains a CLI/npm (plain
+        # Node) feature via its prebuilds.
         run: |
-          npx @electron/rebuild -f -w node-pty
+          npx @electron/rebuild -f -o node-pty
           ELECTRON_VERSION=$(node -p "require('./node_modules/electron/package.json').version")
-          npx @electron/rebuild -f -m .. -w better-sqlite3 --version "$ELECTRON_VERSION"
+          npx @electron/rebuild -f -m .. -o better-sqlite3 --version "$ELECTRON_VERSION"
         shell: bash
 
       - name: Package & publish installer
