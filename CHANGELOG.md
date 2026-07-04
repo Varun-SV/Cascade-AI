@@ -5,6 +5,11 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.1] - 2026-07-04
+
+### Fixed
+- **Windows desktop build works again.** The v0.15.0 release published npm and the macOS/Linux installers, but the Windows job failed rebuilding `isolated-vm` for Electron — a structural impossibility (isolated-vm cannot link against Electron's V8 on Windows, and Electron ABIs never match its Node prebuilds), and the step's `|| echo` guard was swallowed by a Windows/Git-Bash exit-code quirk. The desktop app now **deliberately neither rebuilds nor ships isolated-vm**: inside Electron, dynamic tools use the worker sandbox (the designed, tested fallback), while CLI/npm users on plain Node keep the hard V8 isolate via prebuilds. This returns the Windows build to its known-good path permanently.
+
 ## [0.15.0] - 2026-07-03
 
 Release-pipeline repair plus a desktop bug round and four features.

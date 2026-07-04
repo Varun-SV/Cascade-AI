@@ -148,15 +148,16 @@ jobs:
         # node-pty lives in app/node_modules; better-sqlite3 (the embedded
         # backend's DB engine) is hoisted to the repo-root node_modules, so it's
         # rebuilt with an explicit --module-dir against the same Electron version.
+        # isolated-vm is deliberately NOT rebuilt here: it cannot link against
+        # Electron's V8 on Windows (LNK2001 unresolved v8:: symbols — broke the
+        # v0.15.0 windows build even behind a `|| echo` guard), and Electron
+        # ABIs never match its Node prebuilds. The desktop app uses the worker
+        # sandbox for dynamic tools by design; the hard isolate is a CLI/npm
+        # (plain Node) feature.
         run: |
           npx @electron/rebuild -f -w node-pty
           ELECTRON_VERSION=$(node -p "require('./node_modules/electron/package.json').version")
           npx @electron/rebuild -f -m .. -w better-sqlite3 --version "$ELECTRON_VERSION"
-          # isolated-vm powers the hard-isolate dynamic-tool sandbox. It's an
-          # OPTIONAL native addon (the core falls back to the worker sandbox if
-          # it's missing), so its rebuild must never fail the release — and it
-          # ships node-gyp-build prebuilds that may already match the Electron ABI.
-          npx @electron/rebuild -f -m .. -w isolated-vm --version "$ELECTRON_VERSION" || echo "::warning::isolated-vm rebuild failed — dynamic-tool sandbox will fall back to the worker on this platform"
         shell: bash
 
       - name: Package & publish installer
