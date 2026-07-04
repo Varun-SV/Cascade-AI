@@ -25,6 +25,10 @@ contextBridge.exposeInMainWorld('cascade', {
     ipcRenderer.on('cascade:backendStatus', (_e, s) => cb(s));
   },
 
+  // Rebind the running backend's task-execution workspace to a folder opened
+  // in Code view — persists to desktop meta and applies immediately, no restart.
+  setWorkspace: (dir: string) => ipcRenderer.invoke('cascade:setWorkspace', dir) as Promise<{ ok: boolean }>,
+
   // Config: read/write provider key + workspace for onboarding
   getConfig: () => ipcRenderer.invoke('cascade:getConfig') as Promise<{
     provider: string;

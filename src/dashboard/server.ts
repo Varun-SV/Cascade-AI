@@ -248,6 +248,17 @@ export class DashboardServer {
   }
 
   /**
+   * Rebind the workspace tasks execute in — e.g. the desktop app's Code view
+   * opening a different project folder — without tearing down the socket
+   * server (which would drop the port/auth token/connection mid-session).
+   * The next `cascade:run` picks this up immediately since `this.workspacePath`
+   * is read live per-run (see onCascadeRun below).
+   */
+  setWorkspacePath(workspacePath: string): void {
+    this.workspacePath = workspacePath;
+  }
+
+  /**
    * Write the in-memory config back to the workspace config file so mutations
    * made over the socket (Settings → Save) persist across restarts. Best-effort:
    * a write failure is logged but never crashes the running dashboard.

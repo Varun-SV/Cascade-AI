@@ -63,6 +63,22 @@ const TIER_PROVIDERS: ProviderDef[] = [
 
 interface TierSel { provider: string; model: string }
 
+/** One Azure OpenAI deployment row — Azure is the only provider type that can
+ * have more than one entry (each its own resource/endpoint), so unlike every
+ * other provider it gets its own repeating editor instead of a single field. */
+interface AzureDeploymentDraft {
+  id: string; // client-side only, for React keys / row identity — never sent
+  label: string;
+  baseUrl: string;
+  apiKey: string; // blank + hasKey=true means "leave blank to keep"
+  deploymentName: string;
+  apiVersion: string;
+  hasKey: boolean;
+}
+const emptyAzureRow = (): AzureDeploymentDraft => ({
+  id: crypto.randomUUID(), label: '', baseUrl: '', apiKey: '', deploymentName: '', apiVersion: '', hasKey: false,
+});
+
 // Parse a stored override ('auto' | 'provider:model' | bare model id) into a
 // { provider, model } selection for the two dropdowns.
 function parseOverride(val: string | undefined): TierSel {
@@ -101,9 +117,12 @@ export function SettingsView({ socket }: Props) {
   const [ocKey, setOcKey] = useState('');
   const [ocUrl, setOcUrl] = useState('');
   const [ollamaUrl, setOllamaUrl] = useState('');
-  // Azure configuration
-  const [azureKey, setAzureKey] = useState('');
-  const [azureUrl, setAzureUrl] = useState('');
+  // Azure configuration — multiple deployments, each its own resource/endpoint.
+  const [azureDeployments, setAzureDeployments] = useState<AzureDeploymentDraft[]>([]);
+  const updateAzureRow = (id: string, patch: Partial<AzureDeploymentDraft>) =>
+    setAzureDeployments((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  const addAzureRow = () => setAzureDeployments((prev) => [...prev, emptyAzureRow()]);
+  const removeAzureRow = (id: string) => setAzureDeployments((prev) => prev.filter((r) => r.id !== id));
 
   // Per-tier provider + model
   const [t1, setT1] = useState<TierSel>({ provider: 'auto', model: '' });
@@ -147,6 +166,7 @@ export function SettingsView({ socket }: Props) {
     budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number };
     providersWithKey?: string[];
     endpoints?: Record<string, string>;
+    azureDeployments?: Array<{ label?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string; hasKey: boolean }>;
     advanced?: Record<string, unknown>;
   }) => {
     setT1(parseOverride(cfg.models?.t1));
@@ -163,7 +183,17 @@ export function SettingsView({ socket }: Props) {
     if (cfg.providersWithKey) setProvidersWithKey(cfg.providersWithKey);
     if (cfg.endpoints?.['openai-compatible']) setOcUrl(cfg.endpoints['openai-compatible']);
     if (cfg.endpoints?.['ollama']) setOllamaUrl(cfg.endpoints['ollama']);
-    if (cfg.endpoints?.['azure']) setAzureUrl(cfg.endpoints['azure']);
+    if (cfg.azureDeployments) {
+      setAzureDeployments(cfg.azureDeployments.map((d) => ({
+        id: crypto.randomUUID(),
+        label: d.label ?? '',
+        baseUrl: d.baseUrl ?? '',
+        apiKey: '', // never sent back — blank + hasKey means "leave blank to keep"
+        deploymentName: d.deploymentName ?? '',
+        apiVersion: d.apiVersion ?? '',
+        hasKey: d.hasKey,
+      })));
+    }
     if (cfg.advanced && typeof cfg.advanced === 'object') {
       setAdv((prev) => {
         const next = { ...prev };
@@ -217,7 +247,7 @@ export function SettingsView({ socket }: Props) {
   const save = async () => {
     setSaveError('');
     const payload = {
-      keys: { anthropic: anthropicKey || undefined, openai: openaiKey || undefined, gemini: geminiKey || undefined, 'openai-compatible': ocKey || undefined, azure: azureKey || undefined },
+      keys: { anthropic: anthropicKey || undefined, openai: openaiKey || undefined, gemini: geminiKey || undefined, 'openai-compatible': ocKey || undefined },
       models: { t1: composeOverride(t1), t2: composeOverride(t2), t3: composeOverride(t3) },
       budget: {
         maxCostPerRun: maxCost ? parseFloat(maxCost) : undefined,
@@ -227,7 +257,16 @@ export function SettingsView({ socket }: Props) {
         maxTokensPerRun: maxTokens ? parseInt(maxTokens, 10) : undefined,
         warnAtPct: warnAt ? parseFloat(warnAt) : undefined,
       },
-      endpoints: { 'openai-compatible': ocUrl.trim() || undefined, ollama: ollamaUrl.trim() || undefined, azure: azureUrl.trim() || undefined },
+      endpoints: { 'openai-compatible': ocUrl.trim() || undefined, ollama: ollamaUrl.trim() || undefined },
+      azureDeployments: azureDeployments
+        .filter((d) => d.label.trim() || d.baseUrl.trim() || d.apiKey.trim() || d.deploymentName.trim())
+        .map((d) => ({
+          label: d.label.trim() || undefined,
+          apiKey: d.apiKey.trim() || undefined,
+          baseUrl: d.baseUrl.trim() || undefined,
+          deploymentName: d.deploymentName.trim() || undefined,
+          apiVersion: d.apiVersion.trim() || undefined,
+        })),
       advanced: { ...adv },
     };
 
@@ -256,7 +295,7 @@ export function SettingsView({ socket }: Props) {
     }
 
     // Keys are now stored; clear the inputs so placeholders show "key set".
-    setAnthropicKey(''); setOpenaiKey(''); setGeminiKey(''); setOcKey(''); setAzureKey('');
+    setAnthropicKey(''); setOpenaiKey(''); setGeminiKey(''); setOcKey('');
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -324,21 +363,45 @@ export function SettingsView({ socket }: Props) {
                     style={{ width: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
                 </div>
               ))}
-              <div style={{ display: 'flex', gap: 10 }}>
-                <div style={{ flex: 1 }}>
-                  <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>
-                    Azure OpenAI
-                    {providersWithKey.includes('azure') && (<span style={{ color: 'var(--success)', marginLeft: 6 }}>• key set</span>)}
+              <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center' }}>
+                  <label style={{ fontSize: 11, color: 'var(--text-muted)', flex: 1 }}>
+                    Azure OpenAI — each deployment is its own resource/endpoint
                   </label>
-                  <input type="password" value={azureKey} onChange={(e) => setAzureKey(e.target.value)}
-                    placeholder={providersWithKey.includes('azure') ? '•••••••• (leave blank to keep)' : 'Azure API Key'}
-                    style={{ width: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
+                  <button onClick={addAzureRow} type="button" style={{
+                    background: 'none', border: '1px solid var(--border)', borderRadius: 5, cursor: 'pointer',
+                    color: 'var(--text-muted)', fontSize: 11, padding: '3px 8px',
+                  }}>+ Add deployment</button>
                 </div>
-                <div style={{ flex: 1 }}>
-                  <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>Azure Endpoint</label>
-                  <input type="text" value={azureUrl} onChange={(e) => setAzureUrl(e.target.value)} placeholder="https://your-resource.openai.azure.com"
-                    style={{ width: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
-                </div>
+                {azureDeployments.length === 0 && (
+                  <p style={{ fontSize: 11, color: 'var(--text-dim)', margin: 0 }}>No Azure deployments configured yet.</p>
+                )}
+                {azureDeployments.map((row, i) => (
+                  <div key={row.id} style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: 8, background: 'var(--bg-raised)', borderRadius: 6 }}>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <input type="text" value={row.label} onChange={(e) => updateAzureRow(row.id, { label: e.target.value })}
+                        placeholder={`Label (e.g. prod-${i + 1})`}
+                        style={{ flex: 1, background: 'var(--bg-overlay)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text)', padding: '6px 8px', fontSize: 11.5, outline: 'none', boxSizing: 'border-box' }} />
+                      <button onClick={() => removeAzureRow(row.id)} title="Remove this deployment" type="button" style={{
+                        background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-dim)', fontSize: 15, lineHeight: 1, padding: '0 4px',
+                      }}>×</button>
+                    </div>
+                    <input type="text" value={row.baseUrl} onChange={(e) => updateAzureRow(row.id, { baseUrl: e.target.value })}
+                      placeholder="https://your-resource.openai.azure.com"
+                      style={{ width: '100%', background: 'var(--bg-overlay)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text)', padding: '6px 8px', fontSize: 11.5, outline: 'none', boxSizing: 'border-box' }} />
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <input type="password" value={row.apiKey} onChange={(e) => updateAzureRow(row.id, { apiKey: e.target.value })}
+                        placeholder={row.hasKey ? '•••••••• (leave blank to keep)' : 'API Key'}
+                        style={{ flex: 1, background: 'var(--bg-overlay)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text)', padding: '6px 8px', fontSize: 11.5, outline: 'none', boxSizing: 'border-box' }} />
+                      <input type="text" value={row.deploymentName} onChange={(e) => updateAzureRow(row.id, { deploymentName: e.target.value })}
+                        placeholder="Deployment name"
+                        style={{ flex: 1, background: 'var(--bg-overlay)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text)', padding: '6px 8px', fontSize: 11.5, outline: 'none', boxSizing: 'border-box' }} />
+                    </div>
+                    <input type="text" value={row.apiVersion} onChange={(e) => updateAzureRow(row.id, { apiVersion: e.target.value })}
+                      placeholder="API version (default 2024-08-01-preview)"
+                      style={{ width: '100%', background: 'var(--bg-overlay)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text)', padding: '6px 8px', fontSize: 11.5, outline: 'none', boxSizing: 'border-box' }} />
+                  </div>
+                ))}
               </div>
               <div>
                 <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>

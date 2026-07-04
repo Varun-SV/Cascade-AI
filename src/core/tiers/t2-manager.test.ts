@@ -1,8 +1,9 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, afterEach } from 'vitest';
 import type { GenerateResult, T1ToT2Assignment, ToolDefinition } from '../../types.js';
 import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import { T2Manager } from './t2-manager.js';
+import { T3Worker } from './t3-worker.js';
 
 function makeResult(content: string, finishReason: GenerateResult['finishReason'] = 'stop'): GenerateResult {
   return {
@@ -256,5 +257,47 @@ describe('T2Manager', () => {
     expect(router.generate).toHaveBeenCalledOnce();
     expect(req.trail).toHaveLength(1);
     expect(req.trail[0]).toMatchObject({ tier: 'T2', verdict: 'approve' });
+  });
+
+  // ── retryT3 wiring parity (bug fix) ──
+
+  describe('retryT3', () => {
+    afterEach(() => { vi.restoreAllMocks(); });
+
+    it('wires the permission escalator onto a retried T3 worker (not just the first attempt)', async () => {
+      const setEscalatorSpy = vi.spyOn(T3Worker.prototype, 'setPermissionEscalator');
+      let attempt = 0;
+      vi.spyOn(T3Worker.prototype, 'execute').mockImplementation(async function (this: T3Worker) {
+        attempt++;
+        if (attempt === 1) throw new Error('transient worker failure');
+        return {
+          subtaskId: 'draft', status: 'COMPLETED', output: 'ok',
+          testResults: { checksRun: [], passed: [] }, issues: [],
+        } as any;
+      });
+
+      const router = {
+        generate: vi.fn(async () => makeResult('Merged release notes')),
+        getModelForTier: () => undefined,
+      } as unknown as CascadeRouter;
+
+      const manager = new T2Manager(router, makeToolRegistry(), 'root');
+      const escalator = { requestPermission: vi.fn(), setT2Evaluator: vi.fn() } as any;
+      manager.setPermissionEscalator(escalator);
+
+      const assignment = makeAssignment();
+      assignment.t3Subtasks = [assignment.t3Subtasks[0]!]; // single independent subtask → one retry
+
+      await manager.execute(assignment, 'task-retry');
+
+      expect(attempt).toBeGreaterThanOrEqual(2); // the retry actually ran
+      // Every T3Worker constructed — the first attempt AND the retry — got the
+      // escalator wired. Before the fix, retryT3() built a bare worker with no
+      // setPermissionEscalator call at all.
+      for (const call of setEscalatorSpy.mock.calls) {
+        expect(call[0]).toBe(escalator);
+      }
+      expect(setEscalatorSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
   });
 });

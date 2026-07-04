@@ -30,11 +30,12 @@ declare global {
       platform: string;
       getMeta(): Promise<{ port: number; token: string; platform: string; version: string; error: string | null }>;
       restartBackend(): Promise<{ port: number; token: string; error: string | null }>;
+      setWorkspace(dir: string): Promise<{ ok: boolean }>;
       onBackendStatus(cb: (s: { port: number; token: string; error: string | null }) => void): void;
       getConfig(): Promise<{ provider: string; apiKey: string; workspace: string; onboardingDone: boolean }>;
       setConfig(cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string }): Promise<void>;
-      getSettings(): Promise<{ models: Record<string, string>; budget: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; providersWithKey: string[]; endpoints: Record<string, string>; advanced?: Record<string, unknown> }>;
-      updateSettings(data: { keys?: Record<string, string | undefined>; models?: Record<string, string | undefined>; budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; endpoints?: Record<string, string | undefined>; advanced?: Record<string, unknown> }): Promise<{ ok: boolean; error?: string; models?: Record<string, string>; budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; providersWithKey?: string[]; advanced?: Record<string, unknown> }>;
+      getSettings(): Promise<{ models: Record<string, string>; budget: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; providersWithKey: string[]; endpoints: Record<string, string>; azureDeployments?: Array<{ label?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string; hasKey: boolean }>; advanced?: Record<string, unknown> }>;
+      updateSettings(data: { keys?: Record<string, string | undefined>; models?: Record<string, string | undefined>; budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; endpoints?: Record<string, string | undefined>; azureDeployments?: Array<{ label?: string; apiKey?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string }>; advanced?: Record<string, unknown> }): Promise<{ ok: boolean; error?: string; models?: Record<string, string>; budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; providersWithKey?: string[]; advanced?: Record<string, unknown> }>;
       selectDirectory(): Promise<string | null>;
       saveJson(defaultName: string, content: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
       openJson(): Promise<{ ok: boolean; path?: string; content?: string; canceled?: boolean; error?: string }>;
@@ -74,8 +75,15 @@ declare global {
 
 export function App() {
   const dispatch = useAppDispatch();
-  const { backendPort, authToken, helpContext, showSettings, onboardingDone, backendError, view } = useAppSelector((s) => s.app);
+  const { backendPort, authToken, helpContext, showSettings, onboardingDone, backendError, view, sessionId, runSessionId } = useAppSelector((s) => s.app);
   const socketRef = useRef<Socket | null>(null);
+  // The socket-setup effect below only re-runs when backendPort/authToken
+  // change (not on every session switch) — its handlers need the LIVE
+  // session ids, so track them in refs rather than closing over stale state.
+  const sessionIdRef = useRef(sessionId);
+  const runSessionIdRef = useRef(runSessionId);
+  useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
+  useEffect(() => { runSessionIdRef.current = runSessionId; }, [runSessionId]);
 
   // Resolve + apply the System/Light/Dark appearance preference.
   useThemeSync();
@@ -141,8 +149,11 @@ export function App() {
 
     socket.on('tier:status', (data: {
       tierId: string; role: string; label: string; status: string;
-      progressPct?: number; currentAction?: string; parentId?: string;
+      progressPct?: number; currentAction?: string; parentId?: string; sessionId?: string;
     }) => {
+      // Tag the node with the run's session — always recorded (even for a
+      // session not currently on screen) so Cockpit can filter its graph to
+      // "this session's own nodes" when the user switches back to it.
       dispatch(upsertAgent({
         id: data.tierId,
         tier: data.role as 'T1' | 'T2' | 'T3',
@@ -151,16 +162,23 @@ export function App() {
         progressPct: data.progressPct,
         currentAction: data.currentAction,
         parentId: data.parentId,
+        sessionId: data.sessionId,
       }));
     });
 
-    socket.on('stream:token', (data: { text: string; tierId?: string; primary?: boolean }) => {
+    socket.on('stream:token', (data: { text: string; tierId?: string; primary?: boolean; sessionId?: string }) => {
       // The transcript shows only the run's PRESENTER stream — the root tier's
       // synthesis (T3 for Simple, T2 for Moderate, T1 for Complex), tagged
       // `primary`. Background workers stream too but would interleave into a
       // garble, so they're excluded here (watch them per-node in the Cockpit).
-      if (data.primary) dispatch(updateLastMessage({ content: data.text, streaming: true }));
-      // Every tier's tokens also accumulate on its node for the detail panel.
+      // Only apply it to the transcript if it belongs to the session actually
+      // on screen — otherwise a still-running background session's tokens
+      // were overwriting whatever session the user had since switched to.
+      if (data.primary && (!data.sessionId || data.sessionId === sessionIdRef.current)) {
+        dispatch(updateLastMessage({ content: data.text, streaming: true }));
+      }
+      // Every tier's tokens also accumulate on its node for the detail panel —
+      // unscoped, since that just feeds the (also session-tagged) node data.
       if (data.tierId) dispatch(appendAgentStream({ id: data.tierId, text: data.text }));
     });
 
@@ -189,17 +207,21 @@ export function App() {
     // unmounts), so they also own ending the run lifecycle: runEnded keeps the
     // persistent Stop control honest, and finalizeLastMessage un-sticks the
     // transcript's streaming flag when a run finishes while another view is open.
-    socket.on('session:error', (data: { error?: string }) => {
+    socket.on('session:error', (data: { sessionId?: string; error?: string }) => {
       dispatch(setBackendError(data?.error ? `Run failed: ${data.error}` : 'Run failed — check your model/key and try again.'));
       dispatch(clearApprovals());
-      dispatch(runEnded());
-      dispatch(finalizeLastMessage({}));
+      // Only end/finalize if this event belongs to the run/session actually
+      // being tracked right now — otherwise a background session finishing
+      // (or erroring) clobbered the Stop control and transcript of whatever
+      // DIFFERENT session the user had since switched to.
+      if (!data?.sessionId || data.sessionId === runSessionIdRef.current) dispatch(runEnded());
+      if (!data?.sessionId || data.sessionId === sessionIdRef.current) dispatch(finalizeLastMessage({}));
     });
-    socket.on('session:complete', (data: { result?: { output?: string } } | undefined) => {
+    socket.on('session:complete', (data: { sessionId?: string; result?: { output?: string } } | undefined) => {
       dispatch(setBackendError(null));
       dispatch(clearApprovals());
-      dispatch(runEnded());
-      dispatch(finalizeLastMessage({ finalOutput: data?.result?.output }));
+      if (!data?.sessionId || data.sessionId === runSessionIdRef.current) dispatch(runEnded());
+      if (!data?.sessionId || data.sessionId === sessionIdRef.current) dispatch(finalizeLastMessage({ finalOutput: data?.result?.output }));
     });
 
     // A dangerous tool escalated to the user — show the approval modal. The

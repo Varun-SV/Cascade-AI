@@ -44,6 +44,11 @@ let backendError: string | null = null;
 let configManager: any = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let cascadeConfig: any = null;
+// The running DashboardServer instance — held at module scope (rather than a
+// startBackend()-local const) so IPC handlers like cascade:setWorkspace can
+// rebind its workspace live without restarting the socket/port.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let dashboardServer: any = null;
 
 // Onboarding provider ids → Cascade core ProviderType (+ default base URL).
 // 'auto' has no single provider; keys are configured per concrete provider.
@@ -117,6 +122,7 @@ async function startBackend(): Promise<void> {
     };
     const server = new DashboardServer(cascadeConfig, configManager.getStore(), workspace);
     await server.start();
+    dashboardServer = server;
     console.log(`[main] Cascade backend started on port ${backendPort} (workspace: ${workspace})`);
   } catch (err) {
     console.warn('[main] Dashboard server start failed:', err);
@@ -125,6 +131,7 @@ async function startBackend(): Promise<void> {
     backendPort = 0;
     authToken = '';
     backendError = `Cascade backend unavailable: ${err instanceof Error ? err.message : String(err)}`;
+    dashboardServer = null;
   }
   notifyBackendStatus();
 }
@@ -254,6 +261,20 @@ function registerIPC(): void {
   ipcMain.handle('cascade:restartBackend', async () => {
     await startBackend();
     return { port: backendPort, token: authToken, error: backendError };
+  });
+
+  // Opening a different folder in Code view's file explorer used to only
+  // update the renderer's own workspacePath (file tree/search/terminal cwd) —
+  // tasks kept executing wherever the backend started (the onboarding-time
+  // folder, saved once in desktop meta), so files landed in what looked like
+  // the wrong directory. Persist the new workspace AND rebind the already-
+  // running server's execution root — no restart, so the port/socket/auth
+  // token (and anything in flight) survive.
+  ipcMain.handle('cascade:setWorkspace', (_e, dir: string) => {
+    if (typeof dir !== 'string' || !dir.trim()) return { ok: false };
+    saveDesktopMeta({ workspace: dir });
+    dashboardServer?.setWorkspacePath(dir);
+    return { ok: true };
   });
 
   // PTY (terminal) — node-pty runs in main process, data ferried via IPC
@@ -407,6 +428,7 @@ function registerIPC(): void {
     budget: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number };
     providersWithKey: string[];
     endpoints: Record<string, string>;
+    azureDeployments: Array<{ label?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string; hasKey: boolean }>;
     advanced: Record<string, unknown>;
   } {
     const models = (cascadeConfig?.models ?? {}) as Record<string, string>;
@@ -418,12 +440,27 @@ function registerIPC(): void {
       maxTokensPerRun: cascadeConfig?.budget?.maxTokensPerRun as number | undefined,
       warnAtPct: cascadeConfig?.budget?.warnAtPct as number | undefined,
     };
-    const providers = (cascadeConfig?.providers ?? []) as Array<{ type: string; apiKey?: string; baseUrl?: string }>;
+    const providers = (cascadeConfig?.providers ?? []) as Array<{
+      type: string; apiKey?: string; baseUrl?: string; label?: string; deploymentName?: string; apiVersion?: string;
+    }>;
     const providersWithKey = providers
       .filter((p) => typeof p.apiKey === 'string' && p.apiKey.length > 0)
       .map((p) => p.type);
     const endpoints: Record<string, string> = {};
-    for (const p of providers) { if (p?.type && p?.baseUrl) endpoints[p.type] = p.baseUrl; }
+    for (const p of providers) { if (p?.type && p?.baseUrl && p.type !== 'azure') endpoints[p.type] = p.baseUrl; }
+    // Azure supports multiple deployments (each its own resource/endpoint), so
+    // it can't be represented in the single-entry `endpoints`/`providersWithKey`
+    // maps above — surface every azure provider entry as its own row instead.
+    // The raw key is never sent back, only whether one is already set.
+    const azureDeployments = providers
+      .filter((p) => p.type === 'azure')
+      .map((p) => ({
+        label: p.label,
+        baseUrl: p.baseUrl,
+        deploymentName: p.deploymentName,
+        apiVersion: p.apiVersion,
+        hasKey: typeof p.apiKey === 'string' && p.apiKey.length > 0,
+      }));
     // Advanced knobs surfaced in the Settings "Advanced" tab — read back from
     // the same config so the panel always reflects what's on disk.
     const advanced: Record<string, unknown> = {
@@ -444,7 +481,7 @@ function registerIPC(): void {
       persistDynamicTools: cascadeConfig?.persistDynamicTools,
       telemetryEnabled: cascadeConfig?.telemetry?.enabled,
     };
-    return { models, budget, providersWithKey, endpoints, advanced };
+    return { models, budget, providersWithKey, endpoints, azureDeployments, advanced };
   }
 
   ipcMain.handle('cascade:getSettings', async () => settingsSnapshot());
@@ -495,6 +532,7 @@ function registerIPC(): void {
     models?: Record<string, string | undefined>;
     budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number };
     endpoints?: Record<string, string | undefined>;
+    azureDeployments?: Array<{ label?: string; apiKey?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string }>;
     advanced?: Record<string, unknown>;
   }) => {
     try {
@@ -510,11 +548,37 @@ function registerIPC(): void {
       }
       if (data.endpoints) {
         for (const [type, baseUrl] of Object.entries(data.endpoints)) {
-          if (baseUrl === undefined) continue;
+          if (baseUrl === undefined || type === 'azure') continue; // azure goes through azureDeployments below
           const existing = cascadeConfig.providers.find((pr: { type: string }) => pr.type === type);
           if (existing) existing.baseUrl = baseUrl || undefined;
           else if (baseUrl) cascadeConfig.providers.push({ type, baseUrl });
         }
+      }
+      // Azure supports multiple deployments — unlike every other provider type,
+      // it can't be addressed by a bare `type` string, so it gets its own
+      // replace-the-whole-list field instead of the keys/endpoints maps above.
+      // Blank/omitted apiKey on an incoming row keeps that deployment's
+      // existing key (matched by deploymentName, its natural stable identity).
+      if (Array.isArray(data.azureDeployments)) {
+        const priorAzure = cascadeConfig.providers.filter((p: { type: string }) => p.type === 'azure') as
+          Array<{ deploymentName?: string; apiKey?: string }>;
+        const nonAzure = cascadeConfig.providers.filter((p: { type: string }) => p.type !== 'azure');
+        const nextAzure = data.azureDeployments
+          .map((d) => {
+            const prior = d.deploymentName ? priorAzure.find((p) => p.deploymentName === d.deploymentName) : undefined;
+            const apiKey = d.apiKey ? d.apiKey : prior?.apiKey;
+            return {
+              type: 'azure' as const,
+              ...(d.label ? { label: d.label } : {}),
+              ...(d.baseUrl ? { baseUrl: d.baseUrl } : {}),
+              ...(d.deploymentName ? { deploymentName: d.deploymentName } : {}),
+              ...(d.apiVersion ? { apiVersion: d.apiVersion } : {}),
+              ...(apiKey ? { apiKey } : {}),
+            };
+          })
+          // Drop rows the user added then left completely empty.
+          .filter((d) => d.apiKey || d.baseUrl || d.deploymentName);
+        cascadeConfig.providers = [...nonAzure, ...nextAzure];
       }
       if (data.models) {
         cascadeConfig.models = cascadeConfig.models ?? {};

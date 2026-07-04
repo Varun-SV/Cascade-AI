@@ -271,4 +271,45 @@ describe('PermissionEscalator', () => {
     expect(decision.approved).toBe(true);
     expect(decision.reasoning).toContain('Autonomous');
   });
+
+  // ── Task-wide "always" scope (bug fix: sibling T2 sections) ──
+
+  it('a USER "always" grant covers a sibling worker under a DIFFERENT parent T2', async () => {
+    escalator.setT2Evaluator(vi.fn().mockResolvedValue(null) as any);
+    escalator.setT1Evaluator(vi.fn().mockResolvedValue(null) as any);
+
+    const reqA = makeRequest({ id: 'req-a', toolName: 'shell_run', isDangerous: true, parentT2Id: 't2-a' });
+    const promiseA = escalator.requestPermission(reqA);
+    await flushPromises();
+    escalator.resolveUserDecision('req-a', true, true); // "Always"
+    await promiseA;
+
+    // A different T2 section's worker asks for the SAME tool — should hit the
+    // task-wide cache instead of re-escalating all the way to the user again.
+    const t2 = vi.fn().mockResolvedValue(null);
+    escalator.setT2Evaluator(t2 as any);
+    const reqB = makeRequest({ id: 'req-b', toolName: 'shell_run', isDangerous: true, parentT2Id: 't2-b' });
+    const decisionB = await escalator.requestPermission(reqB);
+
+    expect(decisionB.approved).toBe(true);
+    expect(decisionB.reasoning).toContain('task-wide');
+    expect(t2).not.toHaveBeenCalled(); // never even reached the per-T2 evaluator
+  });
+
+  it('a T1 "always" grant also covers a sibling worker under a different parent T2', async () => {
+    const t1 = vi.fn().mockResolvedValue({ requestId: 'req-a', approved: true, always: true, decidedBy: 'T1' as const });
+    escalator.setT2Evaluator(vi.fn().mockResolvedValue(null) as any);
+    escalator.setT1Evaluator(t1 as any);
+
+    const reqA = makeRequest({ id: 'req-a', toolName: 'run_code', isDangerous: true, parentT2Id: 't2-a' });
+    await escalator.requestPermission(reqA);
+
+    const t2B = vi.fn().mockResolvedValue(null);
+    escalator.setT2Evaluator(t2B as any);
+    const reqB = makeRequest({ id: 'req-b', toolName: 'run_code', isDangerous: true, parentT2Id: 't2-b' });
+    const decisionB = await escalator.requestPermission(reqB);
+
+    expect(decisionB.approved).toBe(true);
+    expect(t2B).not.toHaveBeenCalled();
+  });
 });

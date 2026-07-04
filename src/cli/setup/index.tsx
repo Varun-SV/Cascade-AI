@@ -398,12 +398,25 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
   // ── Current entry being configured ──────────
   const currentEntry = state.entries[state.currentEntryIdx];
 
+  // A "required" field (per the tag shown next to it) that's submitted blank
+  // used to be silently accepted — the wizard would report success while
+  // persisting an unusable provider entry (e.g. an empty apiKey, dropped on
+  // save), which then correctly-but-confusingly re-triggered "needs setup" on
+  // every subsequent `cascade` run. Reject it inline instead.
+  const rejectIfBlank = useCallback((val: string, message: string): boolean => {
+    if (val.trim()) return false;
+    dispatch({ type: 'SET_ERROR', error: message });
+    return true;
+  }, []);
+
   const handleFieldSubmit = useCallback((val: string) => {
     if (!currentEntry) return;
 
     if (currentEntry.type === 'azure') {
       if (fieldStage === 'deploymentName') {
+        if (rejectIfBlank(val, 'Deployment name is required.')) return;
         dispatch({ type: 'SET_ENTRY_FIELD', field: 'deploymentName', value: val });
+        dispatch({ type: 'SET_ERROR', error: '' });
         setFieldBuffer('');
         if (currentEntry.baseUrl && currentEntry.apiKey && currentEntry.apiVersion) {
           setFieldStage('askMore');
@@ -411,39 +424,52 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
           setFieldStage('baseUrl');
         }
       } else if (fieldStage === 'baseUrl') {
+        if (rejectIfBlank(val, 'Azure endpoint URL is required.')) return;
         dispatch({ type: 'SET_ENTRY_FIELD', field: 'baseUrl', value: val });
+        dispatch({ type: 'SET_ERROR', error: '' });
         setFieldBuffer('');
         setFieldStage('apiKey');
       } else if (fieldStage === 'apiKey') {
+        if (rejectIfBlank(val, 'API key is required.')) return;
         dispatch({ type: 'SET_ENTRY_FIELD', field: 'apiKey', value: val });
+        dispatch({ type: 'SET_ERROR', error: '' });
         setFieldBuffer('');
         setFieldStage('apiVersion');
       } else if (fieldStage === 'apiVersion') {
         dispatch({ type: 'SET_ENTRY_FIELD', field: 'apiVersion', value: val || '2024-08-01-preview' });
+        dispatch({ type: 'SET_ERROR', error: '' });
         setFieldBuffer('');
         setFieldStage('askMore');
       }
     } else if (currentEntry.type === 'openai-compatible') {
       if (fieldStage === 'label') {
         dispatch({ type: 'SET_ENTRY_FIELD', field: 'label', value: val || currentEntry.label });
+        dispatch({ type: 'SET_ERROR', error: '' });
         setFieldBuffer('');
         setFieldStage('baseUrl');
       } else if (fieldStage === 'baseUrl') {
+        if (rejectIfBlank(val, 'Base URL is required.')) return;
         dispatch({ type: 'SET_ENTRY_FIELD', field: 'baseUrl', value: val });
+        dispatch({ type: 'SET_ERROR', error: '' });
         setFieldBuffer('');
         setFieldStage('apiKey');
       } else if (fieldStage === 'apiKey') {
+        // Key is genuinely optional here (local servers need none) — no validation.
         dispatch({ type: 'SET_ENTRY_FIELD', field: 'apiKey', value: val });
+        dispatch({ type: 'SET_ERROR', error: '' });
         setFieldBuffer('');
         setFieldStage('askMore');
       }
     } else if (currentEntry.type === 'ollama') {
       dispatch({ type: 'SET_ENTRY_FIELD', field: 'baseUrl', value: val || 'http://localhost:11434' });
+      dispatch({ type: 'SET_ERROR', error: '' });
       setFieldBuffer('');
       setFieldStage('askMore');
     } else {
       // anthropic / openai / gemini — just need apiKey
+      if (rejectIfBlank(val, 'API key is required.')) return;
       dispatch({ type: 'SET_ENTRY_FIELD', field: 'apiKey', value: val });
+      dispatch({ type: 'SET_ERROR', error: '' });
       setFieldBuffer('');
       const nextEntry = state.entries[state.currentEntryIdx + 1];
       if (nextEntry) {
@@ -451,7 +477,7 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
       }
       dispatch({ type: 'NEXT_ENTRY' });
     }
-  }, [currentEntry, fieldStage]);
+  }, [currentEntry, fieldStage, rejectIfBlank, state.entries, state.currentEntryIdx]);
 
   // ── Render ────────────────────────────────────
 

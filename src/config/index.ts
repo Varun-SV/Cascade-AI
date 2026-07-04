@@ -19,6 +19,18 @@ import {
   GLOBAL_KEYSTORE_FILE,
 } from '../constants.js';
 
+// Provider types the setup wizard treats as key-optional (local servers need
+// no credential — see cli/setup/index.tsx's `keyOptional`/ollama handling). A
+// provider list is "usable" if it has at least one entry that either doesn't
+// need a key or already has one. Shared by both `cascade`/`cascade run` entry
+// points (src/cli/index.ts) so they can't drift out of sync with what the
+// setup wizard actually allows to be saved as a complete config.
+const KEY_OPTIONAL_PROVIDER_TYPES = new Set(['ollama', 'openai-compatible']);
+export function hasUsableProvider(providers: Array<{ type: string; apiKey?: string }> | undefined): boolean {
+  if (!providers?.length) return false;
+  return providers.some((p) => KEY_OPTIONAL_PROVIDER_TYPES.has(p.type) || !!p.apiKey);
+}
+
 export class ConfigManager {
   private config!: CascadeConfig;
   private keystore!: Keystore;

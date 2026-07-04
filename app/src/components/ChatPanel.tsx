@@ -170,6 +170,11 @@ export function ChatPanel({ socket, compact }: Props) {
   const [sessionDone, setSessionDone] = useState(false);
   const [costByFeature, setCostByFeature] = useState<Record<string, number> | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  // The socket-listener effect below only re-subscribes on [socket, dispatch]
+  // (not on every session switch), so its handler needs the LIVE current
+  // session id via a ref rather than a stale closure.
+  const currentSessionIdRef = useRef<string | null>(null);
+  useEffect(() => { currentSessionIdRef.current = activeSessionId ?? sessionId ?? null; }, [activeSessionId, sessionId]);
 
   // Compact mode (Code view's docked panel): a small picker replaces the full
   // session sidebar — select a past session to load and continue it in place.
@@ -196,7 +201,11 @@ export function ChatPanel({ socket, compact }: Props) {
     // Streaming tokens are appended by the global handler in App.tsx (so they
     // also update when you're on another view). Here we only react to
     // completion to stop the cursor and offer rating.
-    const onComplete = (data?: { result?: { output?: string; costByFeature?: Record<string, number> } }) => {
+    const onComplete = (data?: { sessionId?: string; result?: { output?: string; costByFeature?: Record<string, number> } }) => {
+      // Ignore completions for a session other than the one this panel is
+      // currently showing — otherwise a background session finishing marked
+      // THIS panel's unrelated transcript done and swapped in its cost data.
+      if (data?.sessionId && data.sessionId !== currentSessionIdRef.current) return;
       // runEnded/finalize are dispatched by the GLOBAL handler in App.tsx (it
       // survives view switches); here we only handle panel-local concerns.
       dispatch(finalizeLastMessage({ finalOutput: data?.result?.output }));
