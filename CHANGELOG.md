@@ -5,6 +5,11 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.2] - 2026-07-04
+
+### Fixed
+- **Windows desktop build actually works now (v0.15.1 didn't fully fix it).** v0.15.1 removed the explicit `isolated-vm` rebuild call, but the Windows job still failed the same way — because the CI script's `-w`/`--which-module` flag doesn't restrict what `@electron/rebuild` touches. It maps to `extraModules` ("also make sure to rebuild these"), while the module walker still scans and rebuilds **every** `prod`+`optional` native dependency it finds by default — and `isolated-vm` is an optionalDependency at the repo root, so the `better-sqlite3` rebuild step walked into it and tried (and failed) to link it against Electron's V8 regardless. Switched to `-o`/`--only`, the flag that actually sets `onlyModules` and filters the rebuild list — the only one that truly scopes it. Verified by reading `@electron/rebuild`'s own module-walker source, not just retrying.
+
 ## [0.15.1] - 2026-07-04
 
 ### Fixed
