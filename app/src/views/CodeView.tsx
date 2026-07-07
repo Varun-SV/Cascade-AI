@@ -109,6 +109,10 @@ export function CodeView({ socket }: { socket: Socket | null }) {
   });
   const openWorkspace = (dir: string) => {
     dispatch(setWorkspacePath(dir)); setReloadToken((t) => t + 1); setMode('files'); pushRecent(dir);
+    // Make this the backend's actual task-execution root too — otherwise
+    // file-creating runs kept landing wherever onboarding originally pointed,
+    // one level off from whatever folder looked "open" here.
+    void window.cascade?.setWorkspace(dir);
   };
   const openFolder = async () => {
     const dir = await window.cascade?.selectDirectory();

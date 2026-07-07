@@ -5,6 +5,25 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-07-04
+
+A batch of real orchestration/desktop bugs found by using the app, plus the
+landing-page redesign and Azure multi-deployment desktop support.
+
+### Fixed
+- **`t3Execution: 'sequential'` didn't actually serialize multi-section plans.** It was only consulted inside a single T2 section's T3 wave (`t2-manager.ts`) — the cross-section dispatcher in `t1-administrator.ts` always ran independent sections' T2 managers (and their T3 workers) in parallel via `Promise.all`, regardless of the setting. It now branches the same way, running sections one at a time when sequential mode is set.
+- **Approval prompts reappeared after a T3 worker retry, even with autonomy on.** The retry path built a bare `T3Worker` and never wired it to the run's `PermissionEscalator` (unlike the normal first-attempt path) — so a retried worker always fell back to the escalator-less legacy approval flow, which has no concept of autonomous mode. Retries are now wired identically to first attempts.
+- **A user's "Always" grant didn't cover sibling workers under a different T2 section.** Grants were cached keyed by `${parentT2Id}:${toolName}`, so only a worker under the *same* T2 manager benefited. USER- and T1-level "Always" decisions are now cached task-wide, covering every section in the run — matching what the permission model always intended.
+- **T1's corrective replan could re-spawn already-completed sections.** After a failed review, the correction-plan prompt carried only the reviewer's one-line critique — no record of what actually finished — so a fresh `T2Manager`/`T3Worker` set had no way to know a section was already done beyond an unverified "don't repeat successful sections" instruction. The correction prompt now includes a structured summary of every completed/partial section's title and result.
+- **`cascade` kept re-launching the setup wizard after it was already configured.** The "needs setup" check only exempted `ollama` from needing an API key, but the wizard itself treats `openai-compatible` (local servers) as key-optional too — so anyone using a local-only setup got re-prompted on every run. Also hardened the wizard to reject a blank submission on a field it labels "required" instead of silently saving an incomplete, unusable provider entry.
+- **Files landed in the parent of whatever folder was open in Code view.** Opening a folder there only updated the file tree/terminal — task execution stayed pinned to whatever workspace the app was onboarded with, since nothing told the running backend a different folder was now open. Opening a folder in Code view now rebinds the backend's actual execution root immediately (no restart needed).
+- **Switching chats while a run was in flight could corrupt the wrong session's transcript.** The global stream/completion handlers applied every event to "whatever's currently on screen" without checking which session the event actually belonged to — so a background run finishing (or still streaming) could overwrite an unrelated session's messages and Stop-button state. Events are now matched against the session/run actually being displayed or tracked before being applied.
+- **The Cockpit graph showed nodes from every past run, in every chat.** Agent nodes were a single unscoped list, never cleared. Nodes are now tagged with their session, so a new chat starts with a clean graph and a resumed chat shows only its own history — plus a **"Clean up session"** button to hide (not delete) finished nodes.
+
+### Added
+- **Azure multi-deployment desktop Settings.** The Providers tab previously exposed one Azure key + one endpoint, unlike the CLI wizard which already supported multiple deployments. Settings now has a repeating deployment editor (label, endpoint, key, deployment name, API version) — each entry is its own Azure resource, matching what `.cascade/config.json` already supported.
+- **Landing page redesign.** New visual identity: the product's real T1/T2/T3 tier colors are used as structural wayfinding (a "cascade spine" for how-it-works, category-colored feature groups), a `$ ls further-capabilities/` manifest replaces the old 20-card feature grid, and the page commits to a single considered dark theme.
+
 ## [0.15.2] - 2026-07-04
 
 ### Fixed

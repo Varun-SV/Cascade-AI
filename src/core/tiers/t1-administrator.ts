@@ -282,12 +282,19 @@ export class T1Administrator extends BaseTier {
       });
 
       const okBefore = okCount(allT2Results);
+      // Ground the correction call in what's actually done — otherwise "Do not
+      // repeat successful sections" is an unverified instruction with nothing
+      // behind it, and brand-new T2/T3 instances (dispatchT2Managers below)
+      // have no memory of prior delegations, so the correction plan can (and
+      // did) re-emit sections that already completed.
+      const completedSummary = this.summarizeCompletedSections(allT2Results);
+      const correctionContext = [systemContext, completedSummary].filter(Boolean).join('\n\n') || undefined;
       const correctionPlan = await this.decomposeTask(`The previous execution plan failed to fully satisfy the original goal or encountered errors.
 Review reason: ${reviewResult.reason}
 
 Original goal: ${enrichedPrompt}
 
-Create a CORRECTION PLAN that contains only the new sections needed to fix the issues. Do not repeat successful sections.`);
+Create a CORRECTION PLAN that contains only the new sections needed to fix the issues. Do not repeat successful sections.`, correctionContext);
 
       const correctionResults = await this.dispatchT2Managers(correctionPlan.sections);
       allT2Results = [...allT2Results, ...correctionResults];
@@ -415,6 +422,16 @@ In 3-5 terse bullets, flag the most important RISKS, GAPS, or over-/under-decomp
     } catch {
       return null; // reviewer is advisory — never block the gate
     }
+  }
+
+  /** Structured, grounded summary of what's already done — used to keep
+   * corrective replan passes from re-emitting completed sections. */
+  private summarizeCompletedSections(results: T2Result[]): string {
+    const done = results.filter((r) => r.status === 'COMPLETED' || r.status === 'PARTIAL');
+    if (done.length === 0) return '';
+    const lines = done.map((r) =>
+      `- "${r.sectionTitle}" [${r.status}]: ${(r.sectionSummary || '(no summary)').slice(0, 300)}`);
+    return `ALREADY COMPLETED SECTIONS (do not redo these — plan only what's still missing):\n${lines.join('\n')}`;
   }
 
   private async decomposeTask(prompt: string, systemContext?: string): Promise<TaskPlan> {
@@ -741,7 +758,7 @@ Leave dependsOn empty for sections that can run immediately in parallel.`;
       }
       if (readyIds.length === 0) return;
 
-      await Promise.all(readyIds.map(async (id) => {
+      const runOne = async (id: string) => {
         // Mark as started (prevent picking it up in next wave before it finishes)
         resultMap.set(id, null as any);
 
@@ -788,7 +805,19 @@ Leave dependsOn empty for sections that can run immediately in parallel.`;
         for (const dependentId of adj.get(id) ?? new Set()) {
           inDegree.set(dependentId, Math.max(0, (inDegree.get(dependentId) ?? 1) - 1));
         }
-      }));
+      };
+
+      // Cross-section concurrency respects the same t3Execution mode as the
+      // intra-section T3 wave (t2-manager.ts) — 'sequential' otherwise only
+      // serialized T3 workers within a single section while every section's
+      // T2Manager (and its T3 workers) still ran in parallel here.
+      if (this.router.getT3ExecutionMode?.() === 'sequential') {
+        for (const id of readyIds) {
+          await runOne(id);
+        }
+      } else {
+        await Promise.all(readyIds.map(runOne));
+      }
 
       // Check if more are ready after this wave
       if (Array.from(inDegree.values()).some(deg => deg === 0) && resultMap.size < totalSections) {

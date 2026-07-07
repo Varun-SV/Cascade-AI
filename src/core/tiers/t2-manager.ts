@@ -734,6 +734,15 @@ Return ONLY the JSON array.`;
     const worker = new T3Worker(this.router, this.toolRegistry, this.id);
     if (this.store) worker.setStore(this.store, taskId);
     worker.setPeerBus(this.t3PeerBus); // ← wire bus on retry too
+    // Bring this to parity with buildWorkerMap()'s wiring — without the
+    // escalator a retried worker fell back to the escalator-less legacy
+    // approval path (no autonomy awareness, always waits on a live human
+    // decision), and without the tier:status/log forwarding its progress
+    // silently stopped reaching the Cockpit graph.
+    if (this.permissionEscalator) worker.setPermissionEscalator(this.permissionEscalator);
+    if (this.toolCreator) worker.setToolCreator(this.toolCreator);
+    worker.on('log', (e) => this.emit('log', e));
+    worker.on('tier:status', (e) => this.emit('tier:status', e));
     worker.on('stream:token', (e) => this.emit('stream:token', e));
     worker.on('tool:approval-request', (e) => this.emit('tool:approval-request', {
       ...e,

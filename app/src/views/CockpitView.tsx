@@ -1,10 +1,10 @@
 import { useState } from 'react';
 import type { Socket } from 'socket.io-client';
-import { Send, Network } from 'lucide-react';
+import { Send, Network, Eraser } from 'lucide-react';
 import { AgentGraph } from '../components/AgentGraph.js';
 import { NodeDetailPanel } from '../components/NodeDetailPanel.js';
 import { HelpButton } from '../help/HelpButton.js';
-import { useAppDispatch, useAppSelector, appendMessage, setForceTier, setSessionId, runStarted } from '../store/index.js';
+import { useAppDispatch, useAppSelector, appendMessage, setForceTier, setSessionId, runStarted, dismissCompletedNodes } from '../store/index.js';
 
 const TIERS: { id: string; label: string; color: string }[] = [
   { id: 'T1', label: 'Planner', color: 'var(--t1)' },
@@ -18,11 +18,19 @@ export function CockpitView({ socket }: { socket: Socket | null }) {
   const [focused, setFocused] = useState(false);
   const [steerText, setSteerText] = useState('');
   const [steerAck, setSteerAck] = useState(false);
-  const agents = useAppSelector((s) => s.app.agents);
+  const allAgents = useAppSelector((s) => s.app.agents);
+  const dismissedNodeIds = useAppSelector((s) => s.app.dismissedNodeIds);
   const messages = useAppSelector((s) => s.app.messages);
   const { activeSessionId, sessionId, forceTier } = useAppSelector((s) => s.app);
+  const currentSessionId = activeSessionId ?? sessionId;
+  // Scope the graph to the session actually open — a brand-new chat has no
+  // session id anything is tagged with yet (clean graph for free), and
+  // switching back to an existing chat shows only its own nodes instead of
+  // every node from every past run in this app instance.
+  const agents = allAgents.filter((a) => a.sessionId === currentSessionId && !dismissedNodeIds.includes(a.id));
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
   const runActive = agents.some((a) => a.status === 'ACTIVE');
+  const hasCleanableNodes = agents.some((a) => a.status === 'COMPLETED' || a.status === 'FAILED' || a.status === 'ESCALATED');
 
   const steer = () => {
     if (!steerText.trim() || !socket) return;
@@ -71,6 +79,19 @@ export function CockpitView({ socket }: { socket: Socket | null }) {
             </span>
           ))}
         </div>
+        {hasCleanableNodes && (
+          <button
+            onClick={() => currentSessionId && dispatch(dismissCompletedNodes(currentSessionId))}
+            title="Hide finished nodes from this session's graph"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 5,
+              background: 'var(--bg-overlay)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+              color: 'var(--text-muted)', padding: '4px 8px', fontSize: 10.5, cursor: 'pointer',
+            }}
+          >
+            <Eraser size={11} /> Clean up session
+          </button>
+        )}
         <HelpButton context="cockpit" />
       </div>
 

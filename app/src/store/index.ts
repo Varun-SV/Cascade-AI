@@ -14,6 +14,9 @@ export interface AgentNode {
   currentAction?: string;
   parentId?: string;
   stream?: string;
+  /** The run/session this node belongs to — lets Cockpit show only the
+   * active session's own nodes instead of every node from every past run. */
+  sessionId?: string;
 }
 
 export interface ChatMessage {
@@ -104,6 +107,10 @@ export interface AppState {
   runActive: boolean;
   /** The sessionId of the in-flight run — the target for session:halt. */
   runSessionId: string | null;
+  /** Node ids hidden from the Cockpit graph via "Clean up session" — a
+   * non-destructive view filter, not a delete (a later run can still add
+   * fresh nodes with new ids). */
+  dismissedNodeIds: string[];
 }
 
 /** A live T3↔T3 / T2↔T2 message, drawn as a transient edge in the graph. */
@@ -149,6 +156,7 @@ const initialState: AppState = {
   forceTier: 'auto',
   runActive: false,
   runSessionId: null,
+  dismissedNodeIds: [],
 };
 
 // ─── Slice ────────────────────────────────────────────────────────────────────
@@ -199,6 +207,17 @@ const appSlice = createSlice({
     },
     selectNode(state, action: PayloadAction<string | null>) {
       state.selectedNodeId = action.payload;
+    },
+    // "Clean up session" — hide (not delete) every terminal-status node
+    // belonging to the given session, so the graph reads clean without
+    // losing the underlying data if the user scrolls back through history.
+    dismissCompletedNodes(state, action: PayloadAction<string>) {
+      const toHide = state.agents
+        .filter((a) => a.sessionId === action.payload && (a.status === 'COMPLETED' || a.status === 'FAILED' || a.status === 'ESCALATED'))
+        .map((a) => a.id);
+      for (const id of toHide) {
+        if (!state.dismissedNodeIds.includes(id)) state.dismissedNodeIds.push(id);
+      }
     },
     addPeerEdge(state, action: PayloadAction<PeerEdge>) {
       state.peerEdges.push(action.payload);
@@ -342,7 +361,7 @@ export const {
   setWorkspacePath, toggleTerminal, openTerminalAt, toggleCodeChat, setHelpContext, setTheme, setActiveModel, setActiveModelT1, setActiveModelChat,
   setSessions, setActiveSessionId, removeSession, toggleSessionSidebar, setSessionSidebarCollapsed,
   enqueueApproval, dequeueApproval, clearApprovals,
-  appendAgentStream, selectNode, addPeerEdge, expirePeerEdges, setForceTier, runStarted, runEnded,
+  appendAgentStream, selectNode, dismissCompletedNodes, addPeerEdge, expirePeerEdges, setForceTier, runStarted, runEnded,
   openTab, closeTab, setActiveTab, setTabDirty,
   setOnboardingDone,
 } = appSlice.actions;

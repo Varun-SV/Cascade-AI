@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CASCADE_VERSION, DEFAULT_THEME } from '../constants.js';
-import { ConfigManager } from '../config/index.js';
+import { ConfigManager, hasUsableProvider } from '../config/index.js';
 import { Repl } from './repl/index.js';
 import { Cascade } from '../core/cascade.js';
 import { initCommand } from './commands/init.js';
@@ -238,9 +238,7 @@ async function startRepl(options: {
   let config = cm.getConfig();
 
   // First-run detection: no providers configured → launch setup wizard
-  const needsSetup =
-    !config.providers?.length ||
-    config.providers.every((p: { type: string; apiKey?: string }) => p.type !== 'ollama' && !p.apiKey);
+  const needsSetup = !hasUsableProvider(config.providers);
 
   if (needsSetup) {
     console.log(chalk.magenta('  ◈ No providers configured — launching setup wizard…'));
@@ -307,9 +305,7 @@ async function runHeadless(prompt: string, options: {
   }
   const config = cm.getConfig();
 
-  const needsSetup =
-    !config.providers?.length ||
-    config.providers.every((p: { type: string; apiKey?: string }) => p.type !== 'ollama' && !p.apiKey);
+  const needsSetup = !hasUsableProvider(config.providers);
   if (needsSetup) {
     console.error(chalk.red('No providers configured. Run `cascade init` first.'));
     process.exit(1);
