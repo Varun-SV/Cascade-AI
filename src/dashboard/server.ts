@@ -21,6 +21,10 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Identity, TierLimits, BudgetConfig } from '../types.js';
 import { Cascade } from '../core/cascade.js';
 import { WorldStateDB } from '../core/knowledge/world-state.js';
+import { TaskScheduler } from '../scheduler/index.js';
+import type { ScheduledTask, CascadeRunResult } from '../types.js';
+import { aggregateCostStats } from './cost-stats.js';
+import type { WhyReport } from './cost-stats.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -48,6 +52,14 @@ export class DashboardServer {
    * map is how that answer reaches the run that's blocked on it.
    */
   private pendingApprovals = new Map<string, { resolve: (d: { approved: boolean; always: boolean }) => void; sessionId: string }>();
+  /**
+   * The orchestration decision trail ("why") of each session's most recent
+   * run — captured when the run ends so the desktop's Why panel can show it
+   * after the fact. Bounded: oldest entry evicted past 50 sessions.
+   */
+  private whyBySession = new Map<string, WhyReport>();
+  /** Cron scheduler for the Schedules UI — runs tasks while this server is up. */
+  private scheduler: TaskScheduler;
   private port: number;
   private host: string;
   private workspacePath: string;
@@ -68,6 +80,9 @@ export class DashboardServer {
         ? [`http://localhost:${this.port}`, `http://127.0.0.1:${this.port}`]
         : '*',
     });
+    // Scheduled tasks execute through the same run pipeline as /api/run while
+    // this server (CLI dashboard or the desktop's embedded backend) is up.
+    this.scheduler = new TaskScheduler(store, (task) => this.runScheduledTask(task));
     this.setupMiddleware();
     this.setupRoutes();
     this.socket.onSessionRate((sessionId, rating) => {
@@ -151,6 +166,13 @@ export class DashboardServer {
       cascade.on('peer:message', (e: unknown) => {
         this.socket.emitPeerMessage(e as import('../types.js').PeerMessageEvent);
       });
+      // Boardroom gate: with planApproval configured, the run pauses inside
+      // requestPlanApproval until a client answers over `plan:decision`.
+      // Without this listener the gate auto-approves (listenerCount === 0),
+      // so the desktop setting silently did nothing.
+      cascade.on('plan:approval-required', (e: unknown) => {
+        this.socket.emitToSocket(socketId, 'plan:approval-required', { sessionId, ...(e as object) });
+      });
 
       try {
         const result = await cascade.run({
@@ -159,7 +181,8 @@ export class DashboardServer {
           approvalCallback: this.makeApprovalCallback(sessionId),
         });
         this.recordSessionTask(sessionId, result.taskId);
-        this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED');
+        this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED', result);
+        this.captureWhy(sessionId, cascade, result);
         this.socket.emitToSocket(socketId, 'session:complete', { sessionId, result });
         this.socket.broadcast('cost:update', {
           sessionId,
@@ -169,6 +192,7 @@ export class DashboardServer {
         this.throttledBroadcast('workspace');
       } catch (err) {
         this.persistRunEnd(sessionId, title, prompt, undefined, 'FAILED');
+        this.captureWhy(sessionId, cascade);
         this.socket.emitToSocket(socketId, 'session:error', {
           sessionId,
           error: err instanceof Error ? err.message : String(err),
@@ -180,10 +204,22 @@ export class DashboardServer {
       }
     });
 
+    // Boardroom decision from the desktop's plan-review modal → resolve the
+    // paused run. A halt/disconnect leaves the gate to its own 2-min
+    // auto-approve timeout, matching the CLI's behavior.
+    this.socket.onPlanDecision(({ sessionId, approved, note, editedPlan }) => {
+      this.activeSessions.get(sessionId)?.resolvePlanApproval(
+        approved, note, editedPlan as Parameters<Cascade['resolvePlanApproval']>[2],
+      );
+    });
+
     this.socket.onSessionHalt((sessionId) => {
       this.activeControllers.get(sessionId)?.abort();
       // Unblock any tool waiting on approval so the aborted run can unwind.
       this.denyPendingApprovals(sessionId);
+      // And any plan paused at the boardroom — otherwise a halted run sits
+      // in the gate until its 2-minute auto-approve before unwinding.
+      this.activeSessions.get(sessionId)?.resolvePlanApproval(false);
     });
 
     // The desktop/web approval modal answers here. Resolve the run that's
@@ -223,6 +259,11 @@ export class DashboardServer {
         resolve();
       });
     });
+    // Arm persisted cron schedules once the server is actually accepting
+    // connections (a schedule may fire immediately on a matching minute).
+    try { this.scheduler.start(); } catch (err) {
+      console.warn('[dashboard] failed to start task scheduler:', err);
+    }
   }
 
   async stop(): Promise<void> {
@@ -233,6 +274,7 @@ export class DashboardServer {
       clearTimeout(this.broadcastTimer);
       this.broadcastTimer = null;
     }
+    try { this.scheduler.stop(); } catch { /* ignore */ }
     this.socket.close();
     // Release the lazily-opened global runtime DB handle so the caller can
     // safely reopen the dashboard or delete the underlying file.
@@ -361,10 +403,27 @@ export class DashboardServer {
   }
 
   /** Record run end: the assistant reply (when there is one) and the runtime row's final status. */
-  private persistRunEnd(sessionId: string, title: string, latestPrompt: string, reply: string | undefined, status: 'COMPLETED' | 'FAILED'): void {
+  private persistRunEnd(sessionId: string, title: string, latestPrompt: string, reply: string | undefined, status: 'COMPLETED' | 'FAILED', result?: CascadeRunResult): void {
     try {
       if (reply && reply.trim()) {
         this.store.addMessage({ id: randomUUID(), sessionId, role: 'assistant', content: reply, timestamp: new Date().toISOString() });
+      }
+      // Fold the run's usage into the session metadata — the cost analytics
+      // view aggregates from here, and desktop runs previously never wrote it
+      // (only the CLI did), so app-run sessions showed $0 forever.
+      if (result) {
+        const session = this.store.getSession(sessionId);
+        if (session) {
+          this.store.updateSession(sessionId, {
+            updatedAt: new Date().toISOString(),
+            metadata: {
+              ...session.metadata,
+              totalTokens: session.metadata.totalTokens + result.usage.totalTokens,
+              totalCostUsd: session.metadata.totalCostUsd + result.usage.estimatedCostUsd,
+              taskCount: session.metadata.taskCount + 1,
+            },
+          });
+        }
       }
     } catch (err) {
       console.warn('[dashboard] failed to persist run end:', err);
@@ -372,6 +431,38 @@ export class DashboardServer {
     // Keep latestPrompt — the upsert overwrites every column, and losing it
     // would blank the session's preview line in the sidebar on completion.
     this.persistRuntimeRow(sessionId, title, status, latestPrompt);
+  }
+
+  /**
+   * Capture the run's decision trail + router economics ("why") and broadcast
+   * it so the desktop's Why panel updates live; kept per-session for the
+   * GET /api/sessions/:id/why fallback (panel opened after the run).
+   */
+  private captureWhy(sessionId: string, cascade: Cascade, result?: CascadeRunResult): void {
+    try {
+      const stats = cascade.getRouter().getStats();
+      const savings = cascade.getRouter().getDelegationSavings();
+      const report: WhyReport = {
+        sessionId,
+        capturedAt: new Date().toISOString(),
+        decisions: cascade.getDecisionLog(),
+        savedUsd: savings.savedUsd,
+        savedPct: savings.savedPct,
+        totalCostUsd: stats.totalCostUsd,
+        totalTokens: stats.totalTokens,
+        costByTier: stats.costByTier,
+        durationMs: result?.durationMs,
+      };
+      this.whyBySession.set(sessionId, report);
+      // Bounded memory: evict the oldest session's report past 50.
+      if (this.whyBySession.size > 50) {
+        const oldest = this.whyBySession.keys().next().value;
+        if (oldest) this.whyBySession.delete(oldest);
+      }
+      this.socket.broadcast('run:why', report);
+    } catch (err) {
+      console.warn('[dashboard] failed to capture decision trail:', err);
+    }
   }
 
   /**
@@ -406,6 +497,55 @@ export class DashboardServer {
     return (request) => new Promise<{ approved: boolean; always: boolean }>((resolve) => {
       this.pendingApprovals.set(request.id, { resolve, sessionId });
     });
+  }
+
+  /**
+   * Execute one scheduled task firing. Runs headless (like `cascade run -p`):
+   * tool approvals are auto-granted since nobody may be watching when the cron
+   * fires — the Schedules UI states this. Events broadcast to every connected
+   * client so an open desktop sees the run appear live.
+   */
+  private async runScheduledTask(task: ScheduledTask): Promise<void> {
+    const sessionId = randomUUID();
+    const prompt = task.prompt;
+    const title = this.persistRunStart(sessionId, `[${task.name}] ${prompt}`);
+    const cascade = new Cascade(this.config, task.workspacePath ?? this.workspacePath, this.store);
+    this.activeSessions.set(sessionId, cascade);
+
+    cascade.on('tier:status', (e: unknown) => {
+      this.socket.broadcast('tier:status', { sessionId, ...(e as object) });
+    });
+    cascade.on('peer:message', (e: unknown) => {
+      this.socket.emitPeerMessage(e as import('../types.js').PeerMessageEvent);
+    });
+
+    try {
+      const result = await cascade.run({
+        prompt,
+        identityId: task.identityId,
+        approvalCallback: async () => ({ approved: true, always: false }),
+      });
+      this.recordSessionTask(sessionId, result.taskId);
+      this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED', result);
+      this.captureWhy(sessionId, cascade, result);
+      this.socket.broadcast('session:complete', { sessionId, result });
+      this.socket.broadcast('cost:update', {
+        sessionId,
+        totalTokens: result.usage.totalTokens,
+        totalCostUsd: result.usage.estimatedCostUsd,
+      });
+      this.throttledBroadcast('workspace');
+    } catch (err) {
+      this.persistRunEnd(sessionId, title, prompt, undefined, 'FAILED');
+      this.captureWhy(sessionId, cascade);
+      this.socket.broadcast('session:error', {
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    } finally {
+      this.activeSessions.delete(sessionId);
+    }
   }
 
   /** Deny + clear any approvals still pending for a session (run end / abort). */
@@ -999,6 +1139,9 @@ export class DashboardServer {
         cascade.on('peer:message', (e: unknown) => {
           this.socket.emitPeerMessage(e as import('../types.js').PeerMessageEvent);
         });
+        cascade.on('plan:approval-required', (e: unknown) => {
+          this.socket.broadcastToRoom(`session:${sessionId}`, 'plan:approval-required', { sessionId, ...(e as object) });
+        });
 
         try {
           const result = await cascade.run({
@@ -1007,7 +1150,8 @@ export class DashboardServer {
             approvalCallback: this.makeApprovalCallback(sessionId),
           });
           this.recordSessionTask(sessionId, result.taskId);
-          this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED');
+          this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED', result);
+          this.captureWhy(sessionId, cascade, result);
           this.socket.broadcast('cost:update', {
             sessionId,
             totalTokens: result.usage.totalTokens,
@@ -1017,6 +1161,7 @@ export class DashboardServer {
           this.throttledBroadcast('workspace');
         } catch (err) {
           this.persistRunEnd(sessionId, title, prompt, undefined, 'FAILED');
+          this.captureWhy(sessionId, cascade);
           this.socket.broadcastToRoom(`session:${sessionId}`, 'session:error', {
             sessionId,
             error: err instanceof Error ? err.message : String(err),
@@ -1039,6 +1184,189 @@ export class DashboardServer {
           label: p.label ?? p.type,
         })),
       });
+    });
+
+    // ── Run inspector ("why") ───────────────────
+    // The decision trail of the session's most recent run, captured at run
+    // end. Live updates arrive over the `run:why` broadcast; this endpoint
+    // covers opening the panel after the fact (within server lifetime).
+    this.app.get('/api/sessions/:id/why', auth, (req: Request, res: Response) => {
+      const report = this.whyBySession.get(req.params.id as string);
+      if (!report) {
+        res.status(404).json({ error: 'No decision trail recorded for this session in the current app run.' });
+        return;
+      }
+      res.json(report);
+    });
+
+    // ── File changes (diff review) ──────────────
+    // Every file this session's runs snapshotted, as before/after pairs:
+    // "before" is the oldest pre-run snapshot (same source /rollback uses),
+    // "after" is the file's current content on disk.
+    this.app.get('/api/sessions/:id/changes', auth, async (req: Request, res: Response) => {
+      const sessionId = req.params.id as string;
+      const taskIds = this.sessionTaskIds.get(sessionId) ?? [];
+      const before = new Map<string, string>();
+      for (const taskId of taskIds) {
+        for (const { filePath, content } of this.store.getLatestFileSnapshots(taskId)) {
+          if (!before.has(filePath)) before.set(filePath, content);
+        }
+      }
+      const { readFile } = await import('node:fs/promises');
+      const MAX_DIFF_BYTES = 2 * 1024 * 1024;
+      const changes = await Promise.all([...before.entries()].map(async ([filePath, beforeContent]) => {
+        let after = '';
+        let missing = false;
+        try {
+          const buf = await readFile(filePath);
+          after = buf.length > MAX_DIFF_BYTES ? `[file too large to diff — ${buf.length} bytes]` : buf.toString('utf-8');
+        } catch {
+          missing = true; // deleted (or unreadable) since the run
+        }
+        return { filePath, before: beforeContent, after, missing, changed: missing || after !== beforeContent };
+      }));
+      res.json({ sessionId, changes: changes.filter((c) => c.changed) });
+    });
+
+    // Restore ONE file to its pre-run snapshot (finer-grained than the
+    // session-wide /rollback). Only paths the session actually snapshotted
+    // are restorable — this is not a general file-write endpoint.
+    this.app.post('/api/sessions/:id/revert-file', auth, mutationLimiter, async (req: Request, res: Response) => {
+      const sessionId = req.params.id as string;
+      const body = req.body as { filePath?: string };
+      if (!body.filePath || typeof body.filePath !== 'string') {
+        res.status(400).json({ error: 'filePath is required' });
+        return;
+      }
+      const taskIds = this.sessionTaskIds.get(sessionId) ?? [];
+      let content: string | undefined;
+      for (const taskId of taskIds) {
+        const snap = this.store.getLatestFileSnapshots(taskId).find((s) => s.filePath === body.filePath);
+        if (snap) { content = snap.content; break; }
+      }
+      if (content === undefined) {
+        res.status(404).json({ error: 'No snapshot recorded for that file in this session.' });
+        return;
+      }
+      try {
+        const { writeFile } = await import('node:fs/promises');
+        await writeFile(body.filePath, content, 'utf-8');
+        res.json({ ok: true, filePath: body.filePath });
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    // ── Cost analytics ──────────────────────────
+    this.app.get('/api/costs', auth, (_req: Request, res: Response) => {
+      try {
+        const sessions = this.store.listSessions(undefined, 1000);
+        const budget = this.config.budget ?? { warnAtPct: 80 };
+        res.json({
+          ...aggregateCostStats(sessions, { days: 30, topN: 8 }),
+          budget: {
+            dailyBudgetUsd: budget.dailyBudgetUsd,
+            sessionBudgetUsd: budget.sessionBudgetUsd,
+            maxCostPerRunUsd: budget.maxCostPerRunUsd,
+          },
+        });
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    // ── Scheduled tasks ─────────────────────────
+    this.app.get('/api/schedules', auth, (_req: Request, res: Response) => {
+      try {
+        res.json(this.scheduler.list().map((t) => ({ ...t, armed: this.scheduler.isRunning(t.id) })));
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    this.app.post('/api/schedules', auth, mutationLimiter, (req: Request, res: Response) => {
+      const body = req.body as { name?: string; cronExpression?: string; prompt?: string; enabled?: boolean };
+      if (!body.name?.trim() || !body.cronExpression?.trim() || !body.prompt?.trim()) {
+        res.status(400).json({ error: 'name, cronExpression, and prompt are required' });
+        return;
+      }
+      if (!TaskScheduler.validateCron(body.cronExpression.trim())) {
+        res.status(400).json({ error: `Invalid cron expression: ${body.cronExpression}` });
+        return;
+      }
+      const task: ScheduledTask = {
+        id: randomUUID(),
+        name: body.name.trim(),
+        cronExpression: body.cronExpression.trim(),
+        prompt: body.prompt.trim(),
+        workspacePath: this.workspacePath,
+        createdAt: new Date().toISOString(),
+        enabled: body.enabled !== false,
+      };
+      try {
+        this.scheduler.add(task);
+        res.json(task);
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    this.app.put('/api/schedules/:id', auth, mutationLimiter, (req: Request, res: Response) => {
+      const id = req.params.id as string;
+      const existing = this.scheduler.list().find((t) => t.id === id);
+      if (!existing) { res.status(404).json({ error: 'Not found' }); return; }
+      const body = req.body as { name?: string; cronExpression?: string; prompt?: string; enabled?: boolean };
+      if (body.cronExpression !== undefined && !TaskScheduler.validateCron(body.cronExpression)) {
+        res.status(400).json({ error: `Invalid cron expression: ${body.cronExpression}` });
+        return;
+      }
+      const updated: ScheduledTask = {
+        ...existing,
+        name: body.name?.trim() || existing.name,
+        cronExpression: body.cronExpression?.trim() || existing.cronExpression,
+        prompt: body.prompt?.trim() || existing.prompt,
+        enabled: body.enabled ?? existing.enabled,
+      };
+      try {
+        // add() persists + re-arms; a disabled task must also be un-armed.
+        this.scheduler.add(updated);
+        if (!updated.enabled) this.scheduler.unschedule(id);
+        res.json(updated);
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    this.app.delete('/api/schedules/:id', auth, mutationLimiter, (req: Request, res: Response) => {
+      try {
+        this.scheduler.remove(req.params.id as string);
+        res.json({ ok: true });
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    // ── Tamper-evident audit chain ──────────────
+    // Pages through the encrypted hash-chained AuditLogger (newest first).
+    // Distinct from /api/audit/:sessionId, which reads the per-session
+    // memory-store audit table.
+    this.app.get('/api/audit-chain', auth, async (req: Request, res: Response) => {
+      try {
+        const limit = Math.min(500, Math.max(1, parseInt((req.query['limit'] as string) || '200', 10) || 200));
+        const offset = Math.max(0, parseInt((req.query['offset'] as string) || '0', 10) || 0);
+        const { AuditLogger } = await import('../core/audit/audit-logger.js');
+        const logger = new AuditLogger(this.workspacePath);
+        try {
+          const all = logger.getAllLogs();
+          const total = all.length;
+          const entries = all.reverse().slice(offset, offset + limit);
+          res.json({ total, offset, entries });
+        } finally {
+          logger.close();
+        }
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
     });
 
     // ── Serve React app ─────────────────────────

@@ -147,6 +147,26 @@ export class DashboardSocket {
     });
   }
 
+  /**
+   * Boardroom plan decisions from a connected client. The desktop shows a
+   * plan-review modal on `plan:approval-required` and answers here; the
+   * server routes the decision into the paused run via resolvePlanApproval.
+   */
+  onPlanDecision(callback: (data: { sessionId: string; approved: boolean; note?: string; editedPlan?: unknown }) => void): void {
+    this.io.on('connection', (socket) => {
+      socket.on('plan:decision', (payload: { sessionId?: string; approved?: boolean; note?: string; editedPlan?: unknown }) => {
+        if (typeof payload?.sessionId === 'string' && typeof payload?.approved === 'boolean') {
+          callback({
+            sessionId: payload.sessionId,
+            approved: payload.approved,
+            note: typeof payload.note === 'string' && payload.note.trim() ? payload.note.trim() : undefined,
+            editedPlan: payload.editedPlan,
+          });
+        }
+      });
+    });
+  }
+
   onSessionSteer(callback: (message: string, sessionId?: string, nodeId?: string) => void): void {
     this.io.on('connection', (socket) => {
       socket.on('session:steer', (payload: { message?: string; sessionId?: string; nodeId?: string }) => {

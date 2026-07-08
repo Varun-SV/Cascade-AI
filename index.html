@@ -207,9 +207,41 @@
   .install-row .hint { margin-left: 6px; font-size: 10px; color: var(--dim); border-left: 1px solid var(--line); padding-left: 12px; }
   .install-row .copied { position: absolute; right: 14px; font-size: 10px; color: var(--go); opacity: 0; transition: opacity 0.2s; }
   .install-row.did-copy .copied { opacity: 1; }
-  .releases-link { display: block; margin-top: 14px; font-size: 11.5px; color: var(--mute); text-decoration: none; }
-  .releases-link:hover { color: var(--paper); }
-  .releases-link span { color: var(--t3); }
+  /* ── smart download (desktop app) ── */
+  .download-box { position: relative; display: inline-flex; align-items: stretch; margin-top: 14px; }
+  .btn-download {
+    display: inline-flex; align-items: center; gap: 9px; text-decoration: none;
+    background: var(--ink-card); border: 1px solid var(--line-2);
+    border-radius: var(--radius-md) 0 0 var(--radius-md); border-right: none;
+    color: var(--paper); font-size: 12px; font-weight: 700; letter-spacing: 0.02em;
+    padding: 11px 16px; transition: border-color 0.14s, background 0.14s;
+  }
+  .btn-download:hover { border-color: rgba(185,255,61,0.35); background: rgba(185,255,61,0.05); }
+  .btn-download svg { color: var(--go); flex-shrink: 0; }
+  .btn-download .dl-meta { font-size: 10px; font-weight: 400; color: var(--dim); border-left: 1px solid var(--line); padding-left: 9px; }
+  .btn-download-more {
+    display: inline-flex; align-items: center; justify-content: center; width: 34px; cursor: pointer;
+    background: var(--ink-card); border: 1px solid var(--line-2);
+    border-radius: 0 var(--radius-md) var(--radius-md) 0;
+    color: var(--mute); font-size: 10px; transition: border-color 0.14s, color 0.14s;
+  }
+  .btn-download-more:hover { border-color: rgba(185,255,61,0.35); color: var(--paper); }
+  .dl-menu {
+    position: absolute; top: calc(100% + 6px); left: 0; z-index: 50; min-width: 300px;
+    background: var(--ink-raised); border: 1px solid var(--line-2); border-radius: var(--radius-md);
+    box-shadow: 0 18px 40px rgba(0,0,0,0.5); padding: 6px; max-height: 320px; overflow-y: auto;
+  }
+  .dl-menu[hidden] { display: none; }
+  .dl-group { font-size: 9.5px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); padding: 8px 10px 3px; }
+  .dl-item {
+    display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 7px;
+    font-size: 11.5px; color: var(--mute); text-decoration: none; transition: background 0.12s, color 0.12s;
+  }
+  .dl-item:hover { background: rgba(255,255,255,0.05); color: var(--paper); }
+  .dl-item b { color: var(--paper); font-weight: 600; }
+  .dl-item .dl-size { margin-left: auto; font-size: 10px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .dl-fallback { display: block; padding: 8px 10px; font-size: 10.5px; color: var(--dim); text-decoration: none; border-top: 1px solid var(--line); margin-top: 4px; }
+  .dl-fallback:hover { color: var(--paper); }
 
   /* ── hero terminal ── */
   .hero-terminal {
@@ -464,9 +496,19 @@
         <span class="hint">click to copy</span>
         <span class="copied">✓ copied</span>
       </div>
-      <a class="releases-link reveal" href="https://github.com/Varun-SV/Cascade-AI/releases" target="_blank">
-        or <span>download the desktop app →</span>
-      </a>
+      <!-- Smart download: detects the visitor's OS and direct-downloads the
+           right installer from the latest GitHub release (the file starts
+           downloading in place — no trip to github.com). Falls back to the
+           releases page when the API is unreachable. -->
+      <div class="download-box reveal" id="downloadBox">
+        <a class="btn-download" id="dlPrimary" href="https://github.com/Varun-SV/Cascade-AI/releases/latest">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <span id="dlLabel">Download the desktop app</span>
+          <span class="dl-meta" id="dlMeta" hidden></span>
+        </a>
+        <button class="btn-download-more" id="dlMore" aria-haspopup="true" aria-expanded="false" title="All platforms" type="button">▾</button>
+        <div class="dl-menu" id="dlMenu" hidden></div>
+      </div>
     </div>
 
     <div class="reveal" style="transition-delay:120ms">
@@ -796,6 +838,108 @@
       setTimeout(() => el.classList.remove('did-copy'), 1800);
     });
   }
+
+  // ── Smart download ──────────────────────────────────────────────────────
+  // Queries the latest GitHub release once, detects the visitor's OS, and
+  // points the primary button at the right installer asset so a click starts
+  // the download directly (the assets are hosted on GitHub's release CDN, but
+  // the visitor never has to navigate github.com). The "all platforms" menu
+  // lists every installer. If the API call fails (rate limit, offline), the
+  // button keeps its default releases-page href — it always works.
+  (function smartDownload() {
+    const primary = document.getElementById('dlPrimary');
+    const label = document.getElementById('dlLabel');
+    const meta = document.getElementById('dlMeta');
+    const more = document.getElementById('dlMore');
+    const menu = document.getElementById('dlMenu');
+    if (!primary || !more || !menu) return;
+
+    const RELEASES_PAGE = 'https://github.com/Varun-SV/Cascade-AI/releases/latest';
+
+    const ua = navigator.userAgent;
+    const os = /Windows/i.test(ua) ? 'windows' : /Mac|iPhone|iPad/i.test(ua) ? 'mac' : /Linux|X11/i.test(ua) ? 'linux' : 'unknown';
+
+    function fmtSize(bytes) {
+      return bytes >= 1024 * 1024 ? (bytes / (1024 * 1024)).toFixed(0) + ' MB' : Math.max(1, Math.round(bytes / 1024)) + ' KB';
+    }
+
+    // Classify a release asset by extension + name (electron-builder output).
+    function classify(a) {
+      const n = a.name;
+      if (/\.dmg$/i.test(n)) return { group: 'macOS', variant: /arm64/i.test(n) ? 'Apple Silicon (.dmg)' : 'Intel (.dmg)', os: 'mac', rank: /arm64/i.test(n) ? 0 : 1 };
+      if (/\.exe$/i.test(n)) return { group: 'Windows', variant: /setup/i.test(n) ? 'Installer (.exe)' : 'Portable (.exe)', os: 'windows', rank: /setup/i.test(n) ? 0 : 1 };
+      if (/\.AppImage$/i.test(n)) return { group: 'Linux', variant: 'AppImage', os: 'linux', rank: 0 };
+      if (/\.deb$/i.test(n)) return { group: 'Linux', variant: 'Debian / Ubuntu (.deb)', os: 'linux', rank: 1 };
+      if (/\.rpm$/i.test(n)) return { group: 'Linux', variant: 'Fedora / RHEL (.rpm)', os: 'linux', rank: 2 };
+      if (/\.pacman$/i.test(n) || /\.pkg\.tar\.zst$/i.test(n)) return { group: 'Linux', variant: 'Arch (.pacman)', os: 'linux', rank: 3 };
+      return null; // zips (updater feed), .yml manifests, blockmaps, etc.
+    }
+
+    fetch('https://api.github.com/repos/Varun-SV/Cascade-AI/releases/latest', {
+      headers: { Accept: 'application/vnd.github+json' },
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
+      .then((rel) => {
+        const assets = (rel.assets || [])
+          .map((a) => ({ a, c: classify(a) }))
+          .filter((x) => x.c)
+          .map((x) => ({ name: x.a.name, url: x.a.browser_download_url, size: x.a.size, ...x.c }));
+        if (!assets.length) return; // release still publishing — keep fallback
+
+        const version = (rel.tag_name || '').replace(/^v/, '');
+
+        // Primary button: best asset for the detected OS.
+        const mine = assets.filter((x) => x.os === os).sort((a, b) => a.rank - b.rank);
+        if (mine.length) {
+          const pick = mine[0];
+          primary.href = pick.url;
+          primary.removeAttribute('target');
+          const osLabel = os === 'mac' ? 'macOS' + (/arm64/i.test(pick.name) ? ' · Apple Silicon' : ' · Intel') : os === 'windows' ? 'Windows' : 'Linux';
+          label.textContent = 'Download for ' + osLabel;
+          meta.textContent = (version ? 'v' + version + ' · ' : '') + fmtSize(pick.size);
+          meta.hidden = false;
+        }
+
+        // All-platforms menu, grouped macOS → Windows → Linux.
+        const order = ['macOS', 'Windows', 'Linux'];
+        menu.innerHTML = '';
+        order.forEach((group) => {
+          const items = assets.filter((x) => x.group === group).sort((a, b) => a.rank - b.rank);
+          if (!items.length) return;
+          const h = document.createElement('div');
+          h.className = 'dl-group';
+          h.textContent = group;
+          menu.appendChild(h);
+          items.forEach((x) => {
+            const a = document.createElement('a');
+            a.className = 'dl-item';
+            a.href = x.url;
+            a.innerHTML = '<b></b><span class="dl-size"></span>';
+            a.querySelector('b').textContent = x.variant;
+            a.querySelector('.dl-size').textContent = fmtSize(x.size);
+            menu.appendChild(a);
+          });
+        });
+        const fb = document.createElement('a');
+        fb.className = 'dl-fallback';
+        fb.href = RELEASES_PAGE;
+        fb.target = '_blank';
+        fb.rel = 'noopener';
+        fb.textContent = 'All releases & checksums on GitHub →';
+        menu.appendChild(fb);
+      })
+      .catch(() => { /* keep the releases-page fallback href */ });
+
+    more.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = menu.hidden;
+      menu.hidden = !open;
+      more.setAttribute('aria-expanded', String(open));
+    });
+    document.addEventListener('click', () => {
+      if (!menu.hidden) { menu.hidden = true; more.setAttribute('aria-expanded', 'false'); }
+    });
+  })();
 
   const reveals = document.querySelectorAll('.reveal');
   const io = new IntersectionObserver((entries) => {

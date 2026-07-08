@@ -1,10 +1,11 @@
-import { Network, MessageSquare, Code2, Settings } from 'lucide-react';
+import { Network, MessageSquare, Code2, BarChart3, Settings } from 'lucide-react';
 import { useAppDispatch, useAppSelector, setView, setShowSettings, type ViewMode } from '../store/index.js';
 
 const NAV_ITEMS: { icon: typeof Network; label: string; view: ViewMode }[] = [
-  { icon: Network,        label: 'Cockpit', view: 'cockpit' },
-  { icon: MessageSquare,  label: 'Chat',    view: 'chat'    },
-  { icon: Code2,          label: 'Code',    view: 'code'    },
+  { icon: Network,        label: 'Cockpit',  view: 'cockpit'  },
+  { icon: MessageSquare,  label: 'Chat',     view: 'chat'     },
+  { icon: Code2,          label: 'Code',     view: 'code'     },
+  { icon: BarChart3,      label: 'Insights', view: 'insights' },
 ];
 
 export function ActivityBar() {

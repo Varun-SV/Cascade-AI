@@ -1,11 +1,11 @@
-import { Wifi, WifiOff, Terminal, Coins, Square } from 'lucide-react';
+import { Wifi, WifiOff, Terminal, Coins, Square, Radio, HelpCircle } from 'lucide-react';
 import type { Socket } from 'socket.io-client';
-import { useAppDispatch, useAppSelector, toggleTerminal } from '../store/index.js';
+import { useAppDispatch, useAppSelector, toggleTerminal, openBottomTab, setShowWhyPanel } from '../store/index.js';
 
 export function StatusBar({ socket }: { socket?: Socket | null }) {
   const dispatch = useAppDispatch();
   const { connected, reconnecting, backendError, totalCostUsd, totalTokens, activeModel } = useAppSelector((s) => s.app);
-  const { runActive, runSessionId, activeSessionId, sessionId } = useAppSelector((s) => s.app);
+  const { runActive, runSessionId, activeSessionId, sessionId, showWhyPanel } = useAppSelector((s) => s.app);
 
   const fmtCost = (c: number) => c < 0.001 ? '<$0.001' : `$${c.toFixed(4)}`;
   const fmtTokens = (t: number) => t >= 1000 ? `${(t / 1000).toFixed(1)}k` : String(t);
@@ -102,6 +102,28 @@ export function StatusBar({ socket }: { socket?: Socket | null }) {
       </span>
 
       <Divider />
+
+      {/* Why? — the run inspector for the current session's last run */}
+      <button
+        onClick={() => dispatch(setShowWhyPanel(!showWhyPanel))}
+        title="Why? — explain how the last run was routed"
+        style={{ background: 'none', border: 'none', cursor: 'pointer', color: showWhyPanel ? 'var(--accent)' : 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 4, transition: 'color var(--dur) var(--ease)' }}
+        onMouseEnter={(e) => { if (!showWhyPanel) (e.currentTarget as HTMLElement).style.color = 'var(--text-muted)'; }}
+        onMouseLeave={(e) => { if (!showWhyPanel) (e.currentTarget as HTMLElement).style.color = 'var(--text-dim)'; }}
+      >
+        <HelpCircle size={10} /> why?
+      </button>
+
+      {/* Comms feed — agent-to-agent chatter in the bottom panel */}
+      <button
+        onClick={() => dispatch(openBottomTab('comms'))}
+        title="Open the agent comms feed"
+        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 4, transition: 'color var(--dur) var(--ease)' }}
+        onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text-muted)'; }}
+        onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text-dim)'; }}
+      >
+        <Radio size={10} /> comms
+      </button>
 
       {/* Terminal toggle */}
       <button

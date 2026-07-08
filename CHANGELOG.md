@@ -5,6 +5,23 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-07-08
+
+Eight desktop features in one round — run control, insight surfaces, and
+workflow speed — plus a professional landing-page download.
+
+### Added
+- **Boardroom plan review in the desktop.** The `planApproval` setting existed in desktop Settings, but no desktop UI ever rendered the paused plan — the gate silently auto-approved because the embedded server never listened for `plan:approval-required`. Runs now pause in a proper boardroom modal: T1's proposed sections (with worker counts and descriptions), the reviewer critique, complexity, and estimated cost — approve, reject, drop individual sections, or send a steering note that makes T1 re-plan and re-ask. Unanswered plans still auto-approve after 2 minutes, so a closed window can't hang a run.
+- **"Why?" run inspector.** Desktop parity for the CLI's `/why`: a slide-over panel (status-bar button or palette) with the run's decision trail — complexity verdict and classifier reasoning, model per tier, failovers, escalations — plus the delegation-savings receipt and a per-tier cost split. Live via the new `run:why` broadcast, with `GET /api/sessions/:id/why` covering panels opened after the fact.
+- **Diff review with per-file revert.** A new changes modal (session row or palette) lists every file a session's runs touched as before/after Monaco diffs — "before" is the same pre-run snapshot `/rollback` uses — with a one-click **revert this file**, finer-grained than the all-or-nothing session rollback. Endpoints: `GET /api/sessions/:id/changes`, `POST /api/sessions/:id/revert-file` (restorable paths are limited to the session's own snapshots).
+- **Live comms feed.** Desktop `/comms`: the bottom panel is now tabbed (Terminal · Comms), with a live ticker of PeerBus traffic — peer messages, broadcasts, file locks, barrier syncs — plus your `/steer` injections, timestamped with from → to routing.
+- **Insights view (new activity-bar section)** with three tabs:
+  - **Costs** — spend/tokens/sessions/runs stat tiles, a 30-day spend-per-day chart (with table toggle), most-expensive-sessions list, and a today-vs-daily-budget meter, aggregated by the new `GET /api/costs`. Desktop runs now also fold their usage into session metadata — previously only CLI runs recorded cost, so app sessions showed $0 forever.
+  - **Schedules** — create/pause/delete cron-scheduled prompts (`GET/POST/PUT/DELETE /api/schedules`, cron-validated) with presets; the embedded server now runs a `TaskScheduler`, so schedules actually fire while the app is open and their runs stream into the Cockpit like any other.
+  - **Audit log** — browse the encrypted, hash-chained audit trail (`GET /api/audit-chain`) with expandable payloads and a one-click **Verify integrity** that walks the whole chain (`GET /api/audit/verify`).
+- **Command palette (Ctrl/Cmd+K).** Fuzzy jump (fuse.js) to any view or action — new chat, settings, terminal, comms, why-panel, diff review — and to any past session, which opens in Chat with its transcript loaded.
+- **Smart landing-page download.** The hero's "download the desktop app →" GitHub redirect is now a proper download button: it queries the latest release once, detects the visitor's OS (and Mac architecture), and the click directly starts the right installer — with an all-platforms menu (dmg arm64/x64, exe installer/portable, AppImage/deb/rpm/pacman) and a graceful fallback to the releases page when the API is unreachable.
+
 ## [0.16.0] - 2026-07-04
 
 A batch of real orchestration/desktop bugs found by using the app, plus the

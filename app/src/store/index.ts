@@ -2,7 +2,7 @@ import { configureStore, createSlice, PayloadAction } from '@reduxjs/toolkit';
 import { useDispatch, useSelector } from 'react-redux';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-export type ViewMode = 'onboarding' | 'cockpit' | 'chat' | 'code';
+export type ViewMode = 'onboarding' | 'cockpit' | 'chat' | 'code' | 'insights';
 export type ThemePref = 'system' | 'light' | 'dark' | 'midnight';
 
 export interface AgentNode {
@@ -111,6 +111,20 @@ export interface AppState {
    * non-destructive view filter, not a delete (a later run can still add
    * fresh nodes with new ids). */
   dismissedNodeIds: string[];
+  /** T1's plan paused at the boardroom gate — renders the plan-review modal. */
+  pendingPlan: PendingPlan | null;
+  /** Per-session decision trails from `run:why`, keyed by sessionId. */
+  whyBySession: Record<string, WhyReport>;
+  /** The Why panel (run inspector) slide-over is open. */
+  showWhyPanel: boolean;
+  /** Ring buffer of agent-to-agent comms for the bottom-panel feed. */
+  commsEvents: CommsEvent[];
+  /** Which bottom-panel tab is active when the panel is visible. */
+  bottomTab: 'terminal' | 'comms';
+  /** The command palette (Ctrl/Cmd+K) is open. */
+  showPalette: boolean;
+  /** Session whose file changes are open in the diff-review modal. */
+  changesSessionId: string | null;
 }
 
 /** A live T3↔T3 / T2↔T2 message, drawn as a transient edge in the graph. */
@@ -120,6 +134,51 @@ export interface PeerEdge {
   toId: string;
   syncType?: string;
   at: number;
+}
+
+/** One section of a boardroom plan (mirrors the CLI's PlanApprovalSection). */
+export interface PlanSection {
+  sectionId?: string;
+  sectionTitle: string;
+  description?: string;
+  t3Subtasks?: unknown[];
+  dependsOn?: string[];
+}
+
+/** T1's proposed plan, paused at the boardroom gate awaiting the user. */
+export interface PendingPlan {
+  sessionId?: string;
+  taskId: string;
+  plan: { complexity?: string; reasoning?: string; sections: PlanSection[] };
+  t2Count: number;
+  t3Count: number;
+  estCostUsd: number;
+  critique?: string;
+  summary?: string;
+}
+
+/** The decision trail + economics of a session's most recent run (/why). */
+export interface WhyReport {
+  sessionId: string;
+  capturedAt: string;
+  decisions: Array<{ at: string; kind: 'complexity' | 'model' | 'failover' | 'escalation'; detail: string }>;
+  savedUsd: number;
+  savedPct: number;
+  totalCostUsd: number;
+  totalTokens: number;
+  costByTier: Record<string, number>;
+  durationMs?: number;
+}
+
+/** One agent-to-agent communication, shown in the bottom-panel Comms feed. */
+export interface CommsEvent {
+  id: string;
+  at: number;
+  fromId: string;
+  toId?: string;
+  syncType: string;
+  payload?: string;
+  sessionId?: string;
 }
 
 const initialState: AppState = {
@@ -157,6 +216,13 @@ const initialState: AppState = {
   runActive: false,
   runSessionId: null,
   dismissedNodeIds: [],
+  pendingPlan: null,
+  whyBySession: {},
+  showWhyPanel: false,
+  commsEvents: [],
+  bottomTab: 'terminal',
+  showPalette: false,
+  changesSessionId: null,
 };
 
 // ─── Slice ────────────────────────────────────────────────────────────────────
@@ -352,6 +418,41 @@ const appSlice = createSlice({
       state.onboardingDone = action.payload;
       if (action.payload && state.view === 'onboarding') state.view = 'cockpit';
     },
+    // Boardroom plan review
+    setPendingPlan(state, action: PayloadAction<PendingPlan | null>) {
+      state.pendingPlan = action.payload;
+    },
+    // Why panel (run inspector)
+    setWhyReport(state, action: PayloadAction<WhyReport>) {
+      state.whyBySession[action.payload.sessionId] = action.payload;
+    },
+    setShowWhyPanel(state, action: PayloadAction<boolean>) {
+      state.showWhyPanel = action.payload;
+    },
+    // Comms feed
+    appendCommsEvent(state, action: PayloadAction<CommsEvent>) {
+      state.commsEvents.push(action.payload);
+      if (state.commsEvents.length > 200) state.commsEvents.splice(0, state.commsEvents.length - 200);
+    },
+    clearCommsEvents(state) {
+      state.commsEvents = [];
+    },
+    setBottomTab(state, action: PayloadAction<'terminal' | 'comms'>) {
+      state.bottomTab = action.payload;
+    },
+    // Bottom panel visibility with a specific tab (Comms button, palette).
+    openBottomTab(state, action: PayloadAction<'terminal' | 'comms'>) {
+      state.bottomTab = action.payload;
+      state.terminalVisible = true;
+    },
+    // Command palette
+    setShowPalette(state, action: PayloadAction<boolean>) {
+      state.showPalette = action.payload;
+    },
+    // Diff review modal
+    setChangesSessionId(state, action: PayloadAction<string | null>) {
+      state.changesSessionId = action.payload;
+    },
   },
 });
 
@@ -364,6 +465,9 @@ export const {
   appendAgentStream, selectNode, dismissCompletedNodes, addPeerEdge, expirePeerEdges, setForceTier, runStarted, runEnded,
   openTab, closeTab, setActiveTab, setTabDirty,
   setOnboardingDone,
+  setPendingPlan, setWhyReport, setShowWhyPanel,
+  appendCommsEvent, clearCommsEvents, setBottomTab, openBottomTab,
+  setShowPalette, setChangesSessionId,
 } = appSlice.actions;
 
 // ─── Store ────────────────────────────────────────────────────────────────────
