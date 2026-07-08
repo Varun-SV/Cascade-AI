@@ -17,7 +17,8 @@ function cssVar(name: string, fallback: string): string {
 
 // Define editor themes whose chrome (background, gutter, line highlight) matches
 // the app's design tokens, while inheriting Monaco's base syntax colors.
-function defineThemes(monaco: Monaco): void {
+// Exported for the DiffEditor in ChangesModal, which needs the same themes.
+export function defineThemes(monaco: Monaco): void {
   monaco.editor.defineTheme('cascade-dark', {
     base: 'vs-dark', inherit: true, rules: [],
     colors: {

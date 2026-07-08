@@ -18,10 +18,15 @@ import {
   setConnected, setReconnecting, setBackendError, setMeta, updateCost, upsertAgent, updateLastMessage,
   setSessions, removeSession, setOnboardingDone,
   enqueueApproval, clearApprovals, appendAgentStream, addPeerEdge, expirePeerEdges, runEnded, finalizeLastMessage,
-  type RuntimeSession,
+  setPendingPlan, setWhyReport, appendCommsEvent,
+  type RuntimeSession, type PendingPlan, type WhyReport,
 } from './store/index.js';
 import { SettingsView } from './views/SettingsView.js';
 import { ApprovalModal } from './components/ApprovalModal.js';
+import { PlanApprovalModal } from './components/PlanApprovalModal.js';
+import { WhyPanel } from './components/WhyPanel.js';
+import { CommandPalette } from './components/CommandPalette.js';
+import { ChangesModal } from './components/ChangesModal.js';
 import { useThemeSync } from './theme/useTheme.js';
 
 declare global {
@@ -182,13 +187,41 @@ export function App() {
       if (data.tierId) dispatch(appendAgentStream({ id: data.tierId, text: data.text }));
     });
 
-    // Peer coordination (T3↔T3 / T2↔T2) — draw a transient edge in the graph.
-    socket.on('peer:message', (data: { fromId?: string; toId?: string; syncType?: string }) => {
+    // Peer coordination (T3↔T3 / T2↔T2) — draw a transient edge in the graph
+    // and log the message into the bottom-panel Comms feed.
+    socket.on('peer:message', (data: { fromId?: string; toId?: string; syncType?: string; payload?: string; sessionId?: string }) => {
       if (!data?.fromId) return;
       dispatch(addPeerEdge({
         id: crypto.randomUUID(), fromId: data.fromId, toId: data.toId ?? '*',
         syncType: data.syncType, at: Date.now(),
       }));
+      dispatch(appendCommsEvent({
+        id: crypto.randomUUID(), at: Date.now(), fromId: data.fromId, toId: data.toId,
+        syncType: data.syncType ?? 'SHARE_OUTPUT', payload: data.payload, sessionId: data.sessionId,
+      }));
+    });
+
+    // User steering injections also show in the Comms feed — they're part of
+    // the run's communication history.
+    socket.on('session:message-injected', (data: { message?: string; sessionId?: string; nodeId?: string }) => {
+      if (!data?.message) return;
+      dispatch(appendCommsEvent({
+        id: crypto.randomUUID(), at: Date.now(), fromId: 'you', toId: data.nodeId,
+        syncType: 'STEER', payload: data.message, sessionId: data.sessionId,
+      }));
+    });
+
+    // Boardroom: T1's plan paused for review (planApproval in Settings).
+    // The modal answers over `plan:decision`; an unanswered plan auto-approves
+    // server-side after 2 minutes, so a closed window can't hang a run.
+    socket.on('plan:approval-required', (data: PendingPlan) => {
+      if (!data?.plan) return;
+      dispatch(setPendingPlan(data));
+    });
+
+    // The decision trail of the run that just ended — powers the Why panel.
+    socket.on('run:why', (data: WhyReport) => {
+      if (data?.sessionId) dispatch(setWhyReport(data));
     });
 
     // Session list updates
@@ -210,6 +243,7 @@ export function App() {
     socket.on('session:error', (data: { sessionId?: string; error?: string }) => {
       dispatch(setBackendError(data?.error ? `Run failed: ${data.error}` : 'Run failed — check your model/key and try again.'));
       dispatch(clearApprovals());
+      dispatch(setPendingPlan(null));
       // Only end/finalize if this event belongs to the run/session actually
       // being tracked right now — otherwise a background session finishing
       // (or erroring) clobbered the Stop control and transcript of whatever
@@ -220,6 +254,7 @@ export function App() {
     socket.on('session:complete', (data: { sessionId?: string; result?: { output?: string } } | undefined) => {
       dispatch(setBackendError(null));
       dispatch(clearApprovals());
+      dispatch(setPendingPlan(null));
       if (!data?.sessionId || data.sessionId === runSessionIdRef.current) dispatch(runEnded());
       if (!data?.sessionId || data.sessionId === sessionIdRef.current) dispatch(finalizeLastMessage({ finalOutput: data?.result?.output }));
     });
@@ -281,10 +316,15 @@ export function App() {
           <BottomPanel />
         </div>
         {helpContext && <HelpPanel />}
+        {/* Why panel anchors to the content area, like HelpPanel. */}
+        <WhyPanel />
       </div>
       <StatusBar socket={socketRef.current} />
       {showSettings && <SettingsView socket={socketRef.current} />}
       <ApprovalModal socket={socketRef.current} />
+      <PlanApprovalModal socket={socketRef.current} />
+      <ChangesModal />
+      <CommandPalette socket={socketRef.current} />
     </div>
   );
 }

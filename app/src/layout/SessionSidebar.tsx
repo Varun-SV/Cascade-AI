@@ -1,10 +1,10 @@
 import { useState } from 'react';
 import type { Socket } from 'socket.io-client';
-import { Trash2, MessageSquare, PanelLeftClose, PanelLeftOpen, RotateCcw, Download } from 'lucide-react';
+import { Trash2, MessageSquare, PanelLeftClose, PanelLeftOpen, RotateCcw, Download, GitCompareArrows } from 'lucide-react';
 import {
   useAppDispatch, useAppSelector,
   setActiveSessionId, removeSession, loadTranscript,
-  toggleSessionSidebar, setSessionSidebarCollapsed,
+  toggleSessionSidebar, setSessionSidebarCollapsed, setChangesSessionId,
   type RuntimeSession,
 } from '../store/index.js';
 import { fetchSessionTranscript } from '../utils/sessionLoad.js';
@@ -21,7 +21,7 @@ function relativeTime(iso: string): string {
 }
 
 function SessionRow({
-  session, active, authToken, backendPort, socket, onSelect, onDelete, onRollback,
+  session, active, authToken, backendPort, socket, onSelect, onDelete, onRollback, onReviewChanges,
 }: {
   session: RuntimeSession;
   active: boolean;
@@ -31,6 +31,7 @@ function SessionRow({
   onSelect: () => void;
   onDelete: () => void;
   onRollback: () => void;
+  onReviewChanges: () => void;
 }) {
   const [hovered, setHovered] = useState(false);
   const statusColor = session.status === 'ACTIVE' ? 'var(--success)' : 'var(--text-dim)';
@@ -101,6 +102,20 @@ function SessionRow({
               onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text-dim)'; }}
             >
               <Download size={10} />
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); onReviewChanges(); }}
+              title="Review file changes (diffs) from this session"
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer',
+                color: 'var(--text-dim)', padding: 2, borderRadius: 3,
+                display: 'flex', alignItems: 'center',
+                transition: 'color var(--dur) var(--ease)',
+              }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--accent)'; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text-dim)'; }}
+            >
+              <GitCompareArrows size={10} />
             </button>
             <button
               onClick={(e) => { e.stopPropagation(); onRollback(); }}
@@ -282,6 +297,7 @@ export function SessionSidebar({ socket }: { socket: Socket | null }) {
               onSelect={() => handleSelect(s)}
               onDelete={() => handleDelete(s.sessionId)}
               onRollback={() => setRollbackTarget(s)}
+              onReviewChanges={() => dispatch(setChangesSessionId(s.sessionId))}
             />
           ))
         )}
