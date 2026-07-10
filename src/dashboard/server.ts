@@ -25,6 +25,7 @@ import { TaskScheduler } from '../scheduler/index.js';
 import type { ScheduledTask, CascadeRunResult } from '../types.js';
 import { aggregateCostStats } from './cost-stats.js';
 import type { WhyReport } from './cost-stats.js';
+import { saveGlobalCredentials } from '../config/global-credentials.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -312,6 +313,13 @@ export class DashboardServer {
       fs.writeFileSync(configPath, JSON.stringify(this.config, null, 2), 'utf-8');
     } catch (err) {
       console.warn(`[dashboard] Failed to persist config: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    // Keys saved over the socket path must survive workspace switches too —
+    // same global sync ConfigManager.save() performs.
+    try {
+      saveGlobalCredentials(path.join(os.homedir(), GLOBAL_CONFIG_DIR), this.config.providers ?? []);
+    } catch (err) {
+      console.warn(`[dashboard] Failed to sync global credentials: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -1341,6 +1349,54 @@ export class DashboardServer {
       try {
         this.scheduler.remove(req.params.id as string);
         res.json({ ok: true });
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    // ── Project knowledge graph (world-state facts) ──
+    // The facts the planner remembers about this workspace — the same store T1
+    // folds into planning. The desktop Knowledge tab shows and prunes it.
+    this.app.get('/api/knowledge', auth, (_req: Request, res: Response) => {
+      try {
+        const ws = new WorldStateDB(this.workspacePath);
+        try {
+          const facts = ws.getAllFacts();
+          res.json({ total: facts.length, facts });
+        } finally {
+          ws.close();
+        }
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    this.app.delete('/api/knowledge/fact', auth, mutationLimiter, (req: Request, res: Response) => {
+      const body = req.body as { entity?: string; relation?: string };
+      if (!body.entity || !body.relation) {
+        res.status(400).json({ error: 'entity and relation are required' });
+        return;
+      }
+      try {
+        const ws = new WorldStateDB(this.workspacePath);
+        try {
+          res.json({ ok: true, deleted: ws.deleteFact(body.entity, body.relation) });
+        } finally {
+          ws.close();
+        }
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    this.app.delete('/api/knowledge', auth, mutationLimiter, (_req: Request, res: Response) => {
+      try {
+        const ws = new WorldStateDB(this.workspacePath);
+        try {
+          res.json({ ok: true, deleted: ws.clearFacts() });
+        } finally {
+          ws.close();
+        }
       } catch (err) {
         res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
       }

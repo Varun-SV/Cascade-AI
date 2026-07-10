@@ -12,6 +12,7 @@ import { CascadeIgnore } from './ignore.js';
 import { loadCascadeMd, type CascadeMdContent } from './cascade-md.js';
 import { MemoryStore } from '../memory/store.js';
 import { validateConfig } from './validate.js';
+import { loadGlobalCredentials, mergeGlobalCredentials, saveGlobalCredentials } from './global-credentials.js';
 import {
   CASCADE_CONFIG_FILE,
   CASCADE_DB_FILE,
@@ -40,9 +41,10 @@ export class ConfigManager {
   private workspacePath: string;
   private globalDir: string;
 
-  constructor(workspacePath = process.cwd()) {
+  /** `globalDirOverride` exists for tests — never point it at the real home dir there. */
+  constructor(workspacePath = process.cwd(), globalDirOverride?: string) {
     this.workspacePath = workspacePath;
-    this.globalDir = path.join(os.homedir(), GLOBAL_CONFIG_DIR);
+    this.globalDir = globalDirOverride ?? path.join(os.homedir(), GLOBAL_CONFIG_DIR);
   }
 
   async load(): Promise<void> {
@@ -53,6 +55,12 @@ export class ConfigManager {
     this.keystore = new Keystore(path.join(this.globalDir, GLOBAL_KEYSTORE_FILE));
     this.store = new MemoryStore(path.join(this.workspacePath, CASCADE_DB_FILE));
     await this.injectEnvKeys();
+    // Fill in machine-global credentials (~/.cascade-ai/credentials.json) so
+    // keys entered once are available in EVERY workspace — previously keys
+    // lived only in the workspace config, so pointing the desktop app (or CLI)
+    // at a different folder silently "forgot" them all. A workspace entry that
+    // carries its own key still wins (per-project override).
+    this.config.providers = mergeGlobalCredentials(this.config.providers, loadGlobalCredentials(this.globalDir));
     await this.ensureDefaultIdentity();
   }
 
@@ -84,6 +92,14 @@ export class ConfigManager {
     const configPath = path.join(this.workspacePath, CASCADE_CONFIG_FILE);
     await fs.mkdir(path.dirname(configPath), { recursive: true });
     await fs.writeFile(configPath, JSON.stringify(this.config, null, 2), 'utf-8');
+    // Sync credential-bearing provider entries to the global store so they
+    // survive workspace switches. Best-effort: a read-only home dir must not
+    // fail the workspace save.
+    try {
+      saveGlobalCredentials(this.globalDir, this.config.providers);
+    } catch (err) {
+      console.warn(`Failed to sync credentials to global store: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   async updateConfig(updates: Partial<CascadeConfig>): Promise<void> {

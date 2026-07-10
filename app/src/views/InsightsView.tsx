@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   BarChart3, CalendarClock, ShieldCheck, RefreshCcw, Plus, Trash2, Play, Pause,
   Coins, Cpu, MessageSquare, ListChecks, Table2, ShieldAlert, ChevronDown, ChevronRight,
+  Brain, Search, X,
 } from 'lucide-react';
 import { useAppSelector } from '../store/index.js';
 import { HelpButton } from '../help/HelpButton.js';
@@ -30,7 +31,7 @@ const fmtCompact = (v: number) => (v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1
 
 // ─── View shell with sub-tabs ─────────────────────────────────────────────────
 
-type InsightsTab = 'costs' | 'schedules' | 'audit';
+type InsightsTab = 'costs' | 'schedules' | 'audit' | 'knowledge';
 
 export function InsightsView() {
   const [tab, setTab] = useState<InsightsTab>('costs');
@@ -62,6 +63,7 @@ export function InsightsView() {
           {tabBtn('costs', 'Costs', Coins)}
           {tabBtn('schedules', 'Schedules', CalendarClock)}
           {tabBtn('audit', 'Audit log', ShieldCheck)}
+          {tabBtn('knowledge', 'Knowledge', Brain)}
         </div>
         <div style={{ flex: 1 }} />
         <HelpButton context="cost-analytics" />
@@ -70,6 +72,7 @@ export function InsightsView() {
         {tab === 'costs' && <CostsTab />}
         {tab === 'schedules' && <SchedulesTab />}
         {tab === 'audit' && <AuditTab />}
+        {tab === 'knowledge' && <KnowledgeTab />}
       </div>
     </div>
   );
@@ -601,6 +604,148 @@ function AuditTab() {
                     whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 260, overflowY: 'auto',
                   }}>{prettyPayload(e.payload)}</pre>
                 )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Knowledge graph ──────────────────────────────────────────────────────────
+
+interface WorldFact {
+  entity: string;
+  relation: string;
+  value: string;
+  sourceWorker: string;
+  timestamp: string;
+}
+
+/**
+ * The project knowledge graph — the facts the planner has learned about this
+ * workspace (world-state v2), which silently shape every plan T1 produces.
+ * Shown so users can see and PRUNE what the AI remembers: per-fact delete and
+ * a confirm-gated clear-all.
+ */
+function KnowledgeTab() {
+  const api = useApi();
+  const [facts, setFacts] = useState<WorldFact[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    api('/api/knowledge')
+      .then((d) => { setFacts((d as unknown as { facts: WorldFact[] }).facts); setError(null); })
+      .catch((e: Error) => setError(e.message));
+  }, [api]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const removeFact = async (f: WorldFact) => {
+    setBusyKey(`${f.entity}|${f.relation}`);
+    try {
+      await api('/api/knowledge/fact', { method: 'DELETE', body: JSON.stringify({ entity: f.entity, relation: f.relation }) });
+      setFacts((prev) => prev?.filter((x) => !(x.entity === f.entity && x.relation === f.relation)) ?? null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const clearAll = async () => {
+    setConfirmClear(false);
+    try {
+      await api('/api/knowledge', { method: 'DELETE', body: JSON.stringify({}) });
+      setFacts([]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const q = query.trim().toLowerCase();
+  const visible = (facts ?? []).filter((f) =>
+    !q || `${f.entity} ${f.relation} ${f.value} ${f.sourceWorker}`.toLowerCase().includes(q));
+
+  return (
+    <div style={{ padding: 18, maxWidth: 860, margin: '0 auto' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>Project knowledge</span>
+        {facts && <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>{facts.length} fact{facts.length !== 1 ? 's' : ''}</span>}
+        <div style={{ flex: 1 }} />
+        <button onClick={load} title="Refresh" style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-muted)', padding: '4px 8px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5, fontSize: 11 }}>
+          <RefreshCcw size={11} /> Refresh
+        </button>
+        {facts && facts.length > 0 && (
+          <button
+            onClick={() => setConfirmClear(true)}
+            style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'none', border: '1px solid color-mix(in srgb, var(--danger) 45%, transparent)', color: 'var(--danger)', borderRadius: 7, padding: '5px 11px', fontSize: 11.5, fontWeight: 600, cursor: 'pointer' }}
+          >
+            <Trash2 size={12} /> Clear all
+          </button>
+        )}
+      </div>
+      <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.5 }}>
+        What Cascade has learned about this workspace — these facts feed directly into T1's planning. Delete anything wrong or stale; workers will re-learn from fresh runs.
+      </div>
+
+      {confirmClear && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 13px', marginBottom: 12, borderRadius: 9, fontSize: 12, background: 'color-mix(in srgb, var(--danger) 9%, transparent)', border: '1px solid color-mix(in srgb, var(--danger) 40%, transparent)', color: 'var(--text)' }}>
+          <span style={{ flex: 1 }}>Delete all {facts?.length ?? 0} facts? The planner starts from a blank memory of this project.</span>
+          <button onClick={() => void clearAll()} style={{ background: 'var(--danger)', border: 'none', color: '#fff', borderRadius: 6, padding: '5px 12px', fontSize: 11.5, fontWeight: 700, cursor: 'pointer' }}>Delete all</button>
+          <button onClick={() => setConfirmClear(false)} style={{ background: 'none', border: '1px solid var(--border)', color: 'var(--text-muted)', borderRadius: 6, padding: '5px 10px', fontSize: 11.5, cursor: 'pointer' }}>Cancel</button>
+        </div>
+      )}
+
+      {error && <div style={{ fontSize: 11.5, color: 'var(--danger)', marginBottom: 10 }}>{error}</div>}
+
+      {facts && facts.length > 0 && (
+        <div style={{ position: 'relative', marginBottom: 12 }}>
+          <Search size={12} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-dim)' }} />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Filter facts…"
+            style={{ width: '100%', boxSizing: 'border-box', background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text)', padding: '7px 10px 7px 30px', fontSize: 12, outline: 'none' }}
+          />
+        </div>
+      )}
+
+      {!facts ? (
+        <PanelMessage text="Loading project knowledge…" />
+      ) : facts.length === 0 ? (
+        <div style={{ padding: '32px 0', textAlign: 'center', color: 'var(--text-dim)', fontSize: 12.5 }}>
+          <Brain size={24} style={{ opacity: 0.4, marginBottom: 8 }} />
+          <div>No facts yet — the knowledge graph fills in as workers complete tasks.</div>
+        </div>
+      ) : visible.length === 0 ? (
+        <div style={{ padding: '24px 0', textAlign: 'center', color: 'var(--text-dim)', fontSize: 12.5 }}>No facts match “{query}”.</div>
+      ) : (
+        <div style={{ border: '1px solid var(--border)', borderRadius: 10, overflow: 'hidden' }}>
+          {visible.map((f) => {
+            const key = `${f.entity}|${f.relation}`;
+            return (
+              <div key={key} style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '8px 12px', borderBottom: '1px solid var(--border)', background: 'var(--bg-surface)', fontSize: 12 }}>
+                <span style={{ fontWeight: 600, color: 'var(--t1)', flexShrink: 0, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={f.entity}>{f.entity}</span>
+                <span style={{ color: 'var(--text-dim)', flexShrink: 0, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={f.relation}>{f.relation}</span>
+                <span style={{ color: 'var(--text)', flex: 1, minWidth: 0, wordBreak: 'break-word' }}>{f.value}</span>
+                <span style={{ color: 'var(--text-dim)', fontSize: 10, flexShrink: 0 }} title={`${f.sourceWorker} · ${new Date(f.timestamp).toLocaleString()}`}>
+                  {new Date(f.timestamp).toLocaleDateString()}
+                </span>
+                <button
+                  onClick={() => void removeFact(f)}
+                  disabled={busyKey === key}
+                  title="Delete this fact"
+                  style={{ background: 'none', border: 'none', cursor: busyKey === key ? 'wait' : 'pointer', color: 'var(--text-dim)', padding: 2, display: 'flex', flexShrink: 0, alignSelf: 'center' }}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--danger)'; }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text-dim)'; }}
+                >
+                  <X size={12} />
+                </button>
               </div>
             );
           })}

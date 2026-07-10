@@ -83,6 +83,23 @@ describe('WorldStateDB v2 — facts', () => {
     expect(db.getAllEntries()).toHaveLength(1);
     expect(db.getAllFacts()).toHaveLength(1);
   });
+
+  it('deleteFact removes one (normalized) entity+relation pair and reports whether it existed', () => {
+    db.upsertFact('auth module', 'uses', 'JWT', 't3-a');
+    db.upsertFact('auth module', 'exposes', 'REST API', 't3-a');
+    expect(db.deleteFact('AUTH  Module', 'Uses')).toBe(true);   // normalized match
+    expect(db.deleteFact('auth module', 'uses')).toBe(false);   // already gone
+    expect(db.getAllFacts()).toHaveLength(1);
+    expect(db.getAllFacts()[0]!.relation).toBe('exposes');
+  });
+
+  it('clearFacts empties the graph and returns the count', () => {
+    db.upsertFact('a', 'r1', 'v', 't3');
+    db.upsertFact('b', 'r2', 'v', 't3');
+    expect(db.clearFacts()).toBe(2);
+    expect(db.getAllFacts()).toHaveLength(0);
+    expect(db.clearFacts()).toBe(0);
+  });
 });
 
 describe('WorldStateDB export / import (v0.15.0)', () => {

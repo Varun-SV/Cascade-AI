@@ -313,9 +313,13 @@ export function SettingsView({ socket }: Props) {
         border: '1px solid var(--border-strong)', borderRadius: 'var(--radius-lg)',
         boxShadow: 'var(--shadow-3)',
         overflow: 'hidden',
+        // The panel must never outgrow the window (multiple Azure deployment
+        // rows used to push the footer/Save off-screen with no way to scroll):
+        // header/tabs/footer stay pinned, the content area scrolls.
+        maxHeight: '86vh', display: 'flex', flexDirection: 'column',
       }} onClick={(e) => e.stopPropagation()}>
         {/* Header */}
-        <div style={{ padding: '15px 18px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center' }}>
+        <div style={{ padding: '15px 18px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', flexShrink: 0 }}>
           <span style={{ fontWeight: 700, fontSize: 14, flex: 1, letterSpacing: '-0.2px' }}>Settings</span>
           <button onClick={() => dispatch(setShowSettings(false))} title="Close (Esc)" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex', padding: 4, borderRadius: 5, transition: 'color var(--dur), background var(--dur)' }}
             onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text)'; (e.currentTarget as HTMLElement).style.background = 'var(--bg-hover)'; }}
@@ -325,7 +329,7 @@ export function SettingsView({ socket }: Props) {
         </div>
 
         {/* Tabs */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', borderBottom: '1px solid var(--border)', padding: '0 18px' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', borderBottom: '1px solid var(--border)', padding: '0 18px', flexShrink: 0 }}>
           {(['keys', 'models', 'budget', 'advanced', 'data', 'appearance', 'updates'] as Tab[]).map((t) => (
             <button key={t} onClick={() => setTab(t)} style={{
               background: 'none', border: 'none', cursor: 'pointer', padding: '10px 10px',
@@ -339,8 +343,8 @@ export function SettingsView({ socket }: Props) {
           ))}
         </div>
 
-        {/* Content */}
-        <div style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 14, minHeight: 220 }}>
+        {/* Content — scrolls within the height-capped panel */}
+        <div style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 14, minHeight: 220, flex: 1, overflowY: 'auto' }}>
           {tab === 'keys' && (
             <>
               <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: 0 }}>
@@ -676,7 +680,7 @@ export function SettingsView({ socket }: Props) {
         </div>
 
         {/* Footer */}
-        <div style={{ padding: '12px 18px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8 }}>
+        <div style={{ padding: '12px 18px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, flexShrink: 0 }}>
           {saveError && (
             <span style={{ flex: 1, fontSize: 11, color: 'var(--danger)', lineHeight: 1.3 }}>{saveError}</span>
           )}
