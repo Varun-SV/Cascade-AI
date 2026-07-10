@@ -5,6 +5,19 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-07-08
+
+Fixes for the three problems reported from the v0.17.0 Linux AppImage, plus
+the project knowledge graph surfaced in the desktop.
+
+### Fixed
+- **API keys and Azure deployments survive app restarts — permanently.** Credentials used to live only in the per-workspace `.cascade/config.json`, so pointing the app (or CLI) at a different folder silently "forgot" every key — the AppImage "forgets everything" report. Provider credentials (keys, Azure deployments, custom endpoints) now also live in a machine-global `~/.cascade-ai/credentials.json` (chmod 600, like Claude Code's `~/.claude/.credentials.json`): saved there on every settings save (desktop Settings, onboarding, CLI wizard, web dashboard), merged into whatever workspace config loads, shared by the desktop app AND the `cascade` CLI. A workspace config that carries its own key still wins (per-project override), and removing a provider removes it globally too.
+- **Insights no longer shows "Invalid or expired token".** The desktop's embedded backend runs with auth disabled, but the auth middleware still verified any Bearer token it was handed — and the renderer always sends its Electron session token (random hex, not a JWT), so every desktop REST call 401'd. With auth disabled, an unverifiable token is now treated as anonymous. This also un-breaks session-transcript loads, export, rollback, and the diff review — all silently failing before.
+- **Settings panel no longer grows past the screen.** Adding Azure deployments expanded the modal unbounded (no height cap, no scrolling) until the Save button was off-screen. The panel is now capped at 86% of the window height with a scrollable content area; header, tabs, and footer stay pinned.
+
+### Added
+- **Knowledge tab (Insights).** The project knowledge graph — the world-state facts workers learn and T1 folds into planning — is now visible: a searchable entity · relation · value table with provenance, per-fact delete, and a confirm-gated clear-all, so users can see and prune what the AI remembers about their project. Endpoints: `GET /api/knowledge`, `DELETE /api/knowledge/fact`, `DELETE /api/knowledge`.
+
 ## [0.17.0] - 2026-07-08
 
 Eight desktop features in one round — run control, insight surfaces, and

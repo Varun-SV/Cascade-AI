@@ -239,6 +239,24 @@ export class WorldStateDB {
     return selected.slice(0, limit).map((f) => `- ${f.entity} ${f.relation} ${f.value}`).join('\n');
   }
 
+  /**
+   * Delete one fact by its (normalized) entity + relation key. Returns whether
+   * a row was actually removed. Powers the desktop Knowledge tab's per-fact
+   * delete — users can prune what the planner remembers about their project.
+   */
+  public deleteFact(entity: string, relation: string): boolean {
+    const e = normalizeKey(entity);
+    const r = normalizeKey(relation);
+    if (!e || !r) return false;
+    const result = this.db.prepare('DELETE FROM facts WHERE entity = ? AND relation = ?').run(e, r);
+    return result.changes > 0;
+  }
+
+  /** Delete every fact. Returns how many were removed. */
+  public clearFacts(): number {
+    return this.db.prepare('DELETE FROM facts').run().changes;
+  }
+
   // ── Export / Import ──────────────────────────
   //
   //  Knowledge travels DECRYPTED in the export bundle (a portable plaintext

@@ -21,6 +21,8 @@ export const CASCADE_DASHBOARD_SECRET_FILE = '.cascade/dashboard-secret';
 export const GLOBAL_CONFIG_DIR = '.cascade-ai';
 export const GLOBAL_DB_FILE = 'memory.db';
 export const GLOBAL_KEYSTORE_FILE = 'keystore.enc';
+/** Machine-global provider credentials (API keys, Azure deployments) — chmod 600. */
+export const GLOBAL_CREDENTIALS_FILE = 'credentials.json';
 export const GLOBAL_RUNTIME_DB_FILE = 'runtime.db';
 
 export const DEFAULT_DASHBOARD_PORT = 4891;

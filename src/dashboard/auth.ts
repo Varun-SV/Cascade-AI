@@ -40,6 +40,16 @@ export function authMiddleware(secret: string, required = true) {
 
     const user = verifyToken(token, secret);
     if (!user) {
+      // Auth disabled: an unverifiable token is treated as anonymous, same as
+      // no token at all. The desktop app runs the embedded backend with auth
+      // off but its renderer still sends its Electron session token (a random
+      // hex string, not a JWT) — rejecting it here 401'd every desktop REST
+      // call ("Invalid or expired token") despite auth being disabled.
+      if (!required) {
+        (req as Request & { user?: DashboardUser }).user = undefined;
+        next();
+        return;
+      }
       res.status(401).json({ error: 'Invalid or expired token' });
       return;
     }
