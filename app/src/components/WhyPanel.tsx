@@ -23,9 +23,25 @@ export function WhyPanel() {
   const dispatch = useAppDispatch();
   const open = useAppSelector((s) => s.app.showWhyPanel);
   const { whyBySession, activeSessionId, sessionId, backendPort, authToken } = useAppSelector((s) => s.app);
+  const agents = useAppSelector((s) => s.app.agents);
   const currentSessionId = activeSessionId ?? sessionId;
   const report = currentSessionId ? whyBySession[currentSessionId] : undefined;
   const [fetchState, setFetchState] = useState<'idle' | 'loading' | 'missing'>('idle');
+
+  // Which model served which node, compiled from this session's live agent
+  // graph (nodes carry `model` once their tier resolves it) — includes
+  // Cascade Auto per-subtask overrides the tier-level trail can't show.
+  const modelsUsed = (() => {
+    const byModel = new Map<string, { tiers: Set<string>; count: number }>();
+    for (const a of agents) {
+      if (a.sessionId !== currentSessionId || !a.model) continue;
+      const entry = byModel.get(a.model) ?? { tiers: new Set<string>(), count: 0 };
+      entry.tiers.add(a.tier);
+      entry.count++;
+      byModel.set(a.model, entry);
+    }
+    return [...byModel.entries()].sort((x, y) => y[1].count - x[1].count);
+  })();
 
   // REST fallback when the panel opens without a live-captured report.
   useEffect(() => {
@@ -113,6 +129,24 @@ export function WhyPanel() {
                       <div style={{ width: `${Math.max(2, (cost / maxTierCost) * 100)}%`, height: '100%', background: TIER_COLOR[tier] ?? 'var(--accent)', borderRadius: 4 }} />
                     </div>
                     <span style={{ fontSize: 10.5, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', flexShrink: 0, minWidth: 54, textAlign: 'right' }}>${cost.toFixed(4)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Models used — per node, from the session's agent graph */}
+            {modelsUsed.length > 0 && (
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--text-dim)', marginBottom: 6 }}>Models used</div>
+                {modelsUsed.map(([model, info]) => (
+                  <div key={model} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, fontSize: 11.5 }}>
+                    <span style={{ display: 'flex', gap: 3, flexShrink: 0 }}>
+                      {[...info.tiers].sort().map((t) => (
+                        <span key={t} style={{ fontSize: 9, fontWeight: 800, color: TIER_COLOR[t] ?? 'var(--text-muted)', padding: '1px 4px', borderRadius: 3, background: `color-mix(in srgb, ${TIER_COLOR[t] ?? 'var(--text-muted)'} 14%, transparent)` }}>{t}</span>
+                      ))}
+                    </span>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{model}</span>
+                    <span style={{ color: 'var(--text-dim)', fontSize: 10.5, flexShrink: 0 }}>{info.count} node{info.count !== 1 ? 's' : ''}</span>
                   </div>
                 ))}
               </div>

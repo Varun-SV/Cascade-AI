@@ -38,7 +38,7 @@ const ADVANCED_DEFAULTS: AdvancedSettings = {
   localInferenceTimeoutMs: 300_000,
   cloudInferenceTimeoutMs: 120_000,
   reflectionEnabled: false,
-  cascadeAuto: false,
+  cascadeAuto: true,
   forceTier: 'auto',
   benchmarksLive: true,
   dynamicToolSandbox: 'auto',
@@ -117,6 +117,12 @@ export function SettingsView({ socket }: Props) {
   const [ocKey, setOcKey] = useState('');
   const [ocUrl, setOcUrl] = useState('');
   const [ollamaUrl, setOllamaUrl] = useState('');
+  // Web-search backends (tools.webSearch) — without one configured, the
+  // web_search tool depends entirely on scraping DuckDuckGo.
+  const [searxngUrl, setSearxngUrl] = useState('');
+  const [braveKey, setBraveKey] = useState('');
+  const [tavilyKey, setTavilyKey] = useState('');
+  const [searchKeysSet, setSearchKeysSet] = useState<{ brave: boolean; tavily: boolean }>({ brave: false, tavily: false });
   // Azure configuration — multiple deployments, each its own resource/endpoint.
   const [azureDeployments, setAzureDeployments] = useState<AzureDeploymentDraft[]>([]);
   const updateAzureRow = (id: string, patch: Partial<AzureDeploymentDraft>) =>
@@ -167,6 +173,7 @@ export function SettingsView({ socket }: Props) {
     providersWithKey?: string[];
     endpoints?: Record<string, string>;
     azureDeployments?: Array<{ label?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string; hasKey: boolean }>;
+    webSearch?: { searxngUrl?: string; hasBraveKey: boolean; hasTavilyKey: boolean };
     advanced?: Record<string, unknown>;
   }) => {
     setT1(parseOverride(cfg.models?.t1));
@@ -183,6 +190,10 @@ export function SettingsView({ socket }: Props) {
     if (cfg.providersWithKey) setProvidersWithKey(cfg.providersWithKey);
     if (cfg.endpoints?.['openai-compatible']) setOcUrl(cfg.endpoints['openai-compatible']);
     if (cfg.endpoints?.['ollama']) setOllamaUrl(cfg.endpoints['ollama']);
+    if (cfg.webSearch) {
+      if (cfg.webSearch.searxngUrl) setSearxngUrl(cfg.webSearch.searxngUrl);
+      setSearchKeysSet({ brave: cfg.webSearch.hasBraveKey, tavily: cfg.webSearch.hasTavilyKey });
+    }
     if (cfg.azureDeployments) {
       setAzureDeployments(cfg.azureDeployments.map((d) => ({
         id: crypto.randomUUID(),
@@ -258,6 +269,7 @@ export function SettingsView({ socket }: Props) {
         warnAtPct: warnAt ? parseFloat(warnAt) : undefined,
       },
       endpoints: { 'openai-compatible': ocUrl.trim() || undefined, ollama: ollamaUrl.trim() || undefined },
+      webSearch: { searxngUrl: searxngUrl.trim(), braveApiKey: braveKey || undefined, tavilyApiKey: tavilyKey || undefined },
       azureDeployments: azureDeployments
         .filter((d) => d.label.trim() || d.baseUrl.trim() || d.apiKey.trim() || d.deploymentName.trim())
         .map((d) => ({
@@ -425,6 +437,22 @@ export function SettingsView({ socket }: Props) {
                   placeholder="http://localhost:11434"
                   style={{ width: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
               </div>
+              <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  Web search — without a backend, the <code>web_search</code> tool relies on scraping DuckDuckGo (works, but rate-limited and less reliable)
+                </label>
+                <input type="text" value={searxngUrl} onChange={(e) => setSearxngUrl(e.target.value)}
+                  placeholder="SearXNG URL (self-hosted) — e.g. https://searx.example.com"
+                  style={{ width: '100%', background: 'var(--bg-overlay)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text)', padding: '6px 8px', fontSize: 11.5, outline: 'none', boxSizing: 'border-box' }} />
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input type="password" value={braveKey} onChange={(e) => setBraveKey(e.target.value)}
+                    placeholder={searchKeysSet.brave ? 'Brave key •••• (blank to keep)' : 'Brave Search API key'}
+                    style={{ flex: 1, background: 'var(--bg-overlay)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text)', padding: '6px 8px', fontSize: 11.5, outline: 'none', boxSizing: 'border-box' }} />
+                  <input type="password" value={tavilyKey} onChange={(e) => setTavilyKey(e.target.value)}
+                    placeholder={searchKeysSet.tavily ? 'Tavily key •••• (blank to keep)' : 'Tavily API key'}
+                    style={{ flex: 1, background: 'var(--bg-overlay)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text)', padding: '6px 8px', fontSize: 11.5, outline: 'none', boxSizing: 'border-box' }} />
+                </div>
+              </div>
             </>
           )}
 
@@ -443,7 +471,7 @@ export function SettingsView({ socket }: Props) {
                         onChange={(e) => {
                           const next = TIER_PROVIDERS.find((p) => p.id === e.target.value)!;
                           setSel({ provider: next.id, model: next.models[0] ?? '' });
-                          if (next.freeText) fetchModels();
+                          fetchModels();
                         }}
                         style={{ flex: 1, minWidth: 0, maxWidth: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none' }}>
                         {TIER_PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
@@ -451,21 +479,22 @@ export function SettingsView({ socket }: Props) {
                       {sel.provider !== 'auto' && (() => {
                         const fieldStyle = { flex: 1, minWidth: 0, maxWidth: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' as const };
                         const btnStyle = { flexShrink: 0, width: 32, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-muted)', cursor: 'pointer' };
-                        if (!def.freeText) {
-                          return (
-                            <select value={sel.model} onChange={(e) => setSel({ ...sel, model: e.target.value })} style={fieldStyle}>
-                              {def.models.map((m) => <option key={m} value={m}>{m}</option>)}
-                            </select>
-                          );
-                        }
-                        // OpenAI-compatible / Ollama: offer the endpoint's real model ids.
-                        const opts = dynModels.filter((m) => m.provider === sel.provider).map((m) => m.id);
+                        // EVERY provider offers its live-discovered models (cloud
+                        // catalogs, Azure deployments, local endpoint tags), with
+                        // the curated list as fallback — previously only the
+                        // free-text providers used discovery, so Google/Anthropic/
+                        // OpenAI were stuck on a hardcoded set and Azure showed
+                        // nothing at all.
+                        const discovered = dynModels.filter((m) => m.provider === sel.provider).map((m) => m.id);
+                        const opts = Array.from(new Set([...discovered, ...def.models]));
                         const showInput = (customTiers[label] ?? false) || opts.length === 0;
                         return (
                           <div style={{ flex: 1, display: 'flex', gap: 6 }}>
                             {showInput ? (
                               <input value={sel.model} onChange={(e) => setSel({ ...sel, model: e.target.value })}
-                                placeholder={modelsLoading ? 'Loading from endpoint…' : 'model id (endpoint unreachable?)'}
+                                placeholder={modelsLoading ? 'Loading from endpoint…'
+                                  : sel.provider === 'azure' ? 'deployment name (add deployments in Providers)'
+                                  : 'model id (endpoint unreachable?)'}
                                 style={fieldStyle} />
                             ) : (
                               <select value={opts.includes(sel.model) ? sel.model : '__custom__'}

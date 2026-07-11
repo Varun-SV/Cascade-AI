@@ -241,6 +241,13 @@ export interface T3SubtaskSpec {
   peerT3Ids: string[];
   dependsOn?: string[];
   executionMode?: 'parallel' | 'sequential';
+  /** Spec slice: the exact file paths this subtask creates or edits. */
+  files?: string[];
+  /** Objectively verifiable acceptance checks for the subtask's output. */
+  acceptance?: string[];
+  /** The ONLY background the worker needs — workers see nothing else, so the
+   * planner must make it self-sufficient (keeps worker context minimal). */
+  contextBrief?: string;
 }
 
 export interface T2ToT3Assignment {
@@ -254,6 +261,10 @@ export interface T2ToT3Assignment {
   sectionTitle?: string;
   dependsOn?: string[];
   executionMode?: 'parallel' | 'sequential';
+  /** Spec slice fields — see T3SubtaskSpec. */
+  files?: string[];
+  acceptance?: string[];
+  contextBrief?: string;
 }
 
 export interface StatusUpdate {

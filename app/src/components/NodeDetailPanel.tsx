@@ -46,6 +46,11 @@ export function NodeDetailPanel() {
       <div style={{ padding: '8px 12px', fontSize: 11.5, color: 'var(--text-muted)', display: 'flex', gap: 10, flexWrap: 'wrap', borderBottom: '1px solid var(--border)' }}>
         <span>Status: <b style={{ color: 'var(--text)' }}>{STATUS_LABEL[node.status] ?? 'idle'}</b></span>
         {node.progressPct !== undefined && <span>Progress: <b style={{ color: 'var(--text)' }}>{node.progressPct}%</b></span>}
+        {node.model && (
+          <span title="The model serving this agent">
+            Model: <b style={{ color: 'var(--text)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>{node.model}</b>
+          </span>
+        )}
       </div>
       {node.currentAction && (
         <div style={{ padding: '6px 12px', fontSize: 11.5, color: 'var(--text)', borderBottom: '1px solid var(--border)' }}>

@@ -15,7 +15,7 @@ import type {
   TokenUsage,
 } from '../../types.js';
 import { AnthropicProvider } from '../../providers/anthropic.js';
-import { AzureOpenAIProvider } from '../../providers/azure.js';
+import { AzureOpenAIProvider, azureModelForDeployment } from '../../providers/azure.js';
 import { GeminiProvider } from '../../providers/gemini.js';
 import { OllamaProvider } from '../../providers/ollama.js';
 import { OpenAICompatibleProvider } from '../../providers/openai-compatible.js';
@@ -140,6 +140,18 @@ export class CascadeRouter extends EventEmitter {
     if (ocConfigs.length > 0) {
       const results = await Promise.all(ocConfigs.map((cfg) => this.discoverOpenAICompatibleModels(cfg)));
       if (results.some(Boolean)) this.selector.markProviderAvailable('openai-compatible');
+    }
+
+    // Azure deployments are declared in config (there is no discovery endpoint)
+    // — register one model per deployment so pickers and per-tier overrides can
+    // address them by deployment name. Previously azure existed only as a
+    // synthesized seed model with the literal id 'azure', so configured
+    // deployments never showed up anywhere.
+    if (availableProviders.has('azure')) {
+      for (const cfg of config.providers) {
+        const model = azureModelForDeployment(cfg);
+        if (model) this.selector.addDynamicModel(model);
+      }
     }
 
     // Apply explicit tier overrides first.
@@ -878,7 +890,13 @@ export class CascadeRouter extends EventEmitter {
     const key = `${model.provider}:${model.id}`;
     if (this.providers.has(key)) return;
 
-    const cfg = configs.find((c) => c.type === model.provider)
+    // Azure supports multiple deployments, each its own resource/endpoint/key —
+    // the model's id IS the deployment name, so bind the matching config entry
+    // (find-first would silently route every deployment to the first resource).
+    const cfg = (model.provider === 'azure'
+      ? configs.find((c) => c.type === 'azure' && c.deploymentName === model.id)
+      : undefined)
+      ?? configs.find((c) => c.type === model.provider)
       ?? { type: model.provider };
 
     const provider = this.createProvider(cfg, model);

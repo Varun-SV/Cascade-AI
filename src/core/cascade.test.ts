@@ -177,6 +177,40 @@ describe('Cascade routing complexity', () => {
     const log = cascade.getDecisionLog();
     expect(log[0]!.detail).toContain('heuristic floor');
   });
+
+  it('right-sizes a small single-deliverable build to Moderate, never the full hierarchy (token-bomb fix)', async () => {
+    const cascade = new Cascade(baseConfig, process.cwd());
+    const generate = vi.fn().mockResolvedValue({
+      content: 'Simple — quick single-file build',
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimatedCostUsd: 0 },
+      finishReason: 'stop',
+    });
+    (cascade as any).router = { generate };
+
+    // "create ... app" used to floor straight to Complex (3-5 managers ×
+    // workers for a one-worker task). One scale noun without multi-part
+    // phrasing is a single manager's worth: Simple floors to Moderate only.
+    const complexity = await (cascade as any).determineComplexity(
+      'create a small todo app for my browser homepage with a clean look', '/dummy');
+    expect(complexity).toBe('Moderate');
+    const log = cascade.getDecisionLog();
+    expect(log[0]!.detail).toContain('single manager');
+  });
+
+  it('leaves a Moderate verdict on a single-deliverable build alone (no Complex floor)', async () => {
+    const cascade = new Cascade(baseConfig, process.cwd());
+    const generate = vi.fn().mockResolvedValue({
+      content: 'Moderate — one manager can handle this',
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimatedCostUsd: 0 },
+      finishReason: 'stop',
+    });
+    (cascade as any).router = { generate };
+
+    const complexity = await (cascade as any).determineComplexity(
+      'create a small todo app for my browser homepage with a clean look', '/dummy');
+    expect(complexity).toBe('Moderate');
+    expect(cascade.getDecisionLog()[0]!.detail).not.toContain('heuristic floor');
+  });
 });
 
 describe('Boardroom plan approval gate', () => {
