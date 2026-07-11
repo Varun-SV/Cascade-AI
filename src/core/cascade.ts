@@ -509,13 +509,32 @@ export class Cascade extends EventEmitter {
    * explicit multi-part structure, so ordinary single-file asks (handled as
    * Simple/Moderate) don't get over-escalated.
    */
-  private looksClearlyComplex(prompt: string): boolean {
+  /** Shared build/scale signals for the complexity floors below. */
+  private buildSignals(prompt: string): { buildVerb: boolean; scaleCount: number; multiPart: boolean } {
     const p = prompt.trim();
-    if (p.length < 24) return false;
+    if (p.length < 24) return { buildVerb: false, scaleCount: 0, multiPart: false };
     const buildVerb = /\b(?:build|implement|create|develop|design|scaffold|refactor|migrate|architect|set up|integrate)\b/i.test(p);
-    const scaleNoun = /\b(?:app(?:lication)?|system|platform|service|api|backend|frontend|full[- ]?stack|website|dashboard|pipeline|microservices?|database schema|authentication|end[- ]to[- ]end|codebase|project|multiple files|several (?:files|modules|components)|test suite)\b/i.test(p);
+    const scaleCount = (p.match(/\b(?:app(?:lication)?|system|platform|service|api|backend|frontend|full[- ]?stack|website|dashboard|pipeline|microservices?|database schema|authentication|end[- ]to[- ]end|codebase|project|multiple files|several (?:files|modules|components)|test suite)\b/gi) ?? []).length;
     const multiPart = /(?:\b(?:and|then|also|plus|as well as)\b.*\b(?:and|then|also)\b)|(?:^|\n)\s*(?:[-*]|\d+[.)])\s+/i.test(p); // 2+ conjunctions or a list
-    return buildVerb && (scaleNoun || multiPart);
+    return { buildVerb, scaleCount, multiPart };
+  }
+
+  /**
+   * A build prompt with REAL scale: multiple system-level deliverables, or a
+   * deliverable plus explicitly multi-part phrasing. Only these floor to the
+   * full T1→T2→T3 hierarchy — "create a todo app" is a build prompt too, but
+   * flooring every small build to Complex was the #1 token bomb (3-5 managers
+   * × workers for a task one worker handles).
+   */
+  private looksClearlyComplex(prompt: string): boolean {
+    const s = this.buildSignals(prompt);
+    return s.buildVerb && (s.scaleCount >= 2 || (s.scaleCount >= 1 && s.multiPart));
+  }
+
+  /** A small single-deliverable build — real work, but one manager's worth. */
+  private looksLikeModerateBuild(prompt: string): boolean {
+    const s = this.buildSignals(prompt);
+    return s.buildVerb && (s.scaleCount >= 1 || s.multiPart);
   }
 
   // Cache glob scan results per workspace path to avoid repeated I/O.
@@ -630,6 +649,12 @@ ${prompt}`
         if (verdict !== 'Complex' && this.looksClearlyComplex(prompt)) {
           this.recordDecision('complexity', `Complex — heuristic floor over classifier "${verdict}": explicit multi-step build/implementation signals (T1 engaged)`);
           verdict = 'Complex';
+        } else if (verdict === 'Simple' && this.looksLikeModerateBuild(prompt)) {
+          // A single-deliverable build is real work (one manager), but must
+          // NOT engage the full hierarchy — that was the token bomb for
+          // small tasks. Simple → Moderate; a Moderate verdict stands as-is.
+          this.recordDecision('complexity', 'Moderate — heuristic floor over classifier "Simple": build signals without multi-system scale (single manager)');
+          verdict = 'Moderate';
         } else {
           this.recordDecision('complexity', `${verdict} — classifier: ${reason || 'no reason given'}`);
         }

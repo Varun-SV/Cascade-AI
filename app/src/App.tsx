@@ -39,8 +39,8 @@ declare global {
       onBackendStatus(cb: (s: { port: number; token: string; error: string | null }) => void): void;
       getConfig(): Promise<{ provider: string; apiKey: string; workspace: string; onboardingDone: boolean }>;
       setConfig(cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string }): Promise<void>;
-      getSettings(): Promise<{ models: Record<string, string>; budget: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; providersWithKey: string[]; endpoints: Record<string, string>; azureDeployments?: Array<{ label?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string; hasKey: boolean }>; advanced?: Record<string, unknown> }>;
-      updateSettings(data: { keys?: Record<string, string | undefined>; models?: Record<string, string | undefined>; budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; endpoints?: Record<string, string | undefined>; azureDeployments?: Array<{ label?: string; apiKey?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string }>; advanced?: Record<string, unknown> }): Promise<{ ok: boolean; error?: string; models?: Record<string, string>; budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; providersWithKey?: string[]; advanced?: Record<string, unknown> }>;
+      getSettings(): Promise<{ models: Record<string, string>; budget: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; providersWithKey: string[]; endpoints: Record<string, string>; azureDeployments?: Array<{ label?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string; hasKey: boolean }>; webSearch?: { searxngUrl?: string; hasBraveKey: boolean; hasTavilyKey: boolean }; advanced?: Record<string, unknown> }>;
+      updateSettings(data: { keys?: Record<string, string | undefined>; models?: Record<string, string | undefined>; budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; endpoints?: Record<string, string | undefined>; azureDeployments?: Array<{ label?: string; apiKey?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string }>; webSearch?: { searxngUrl?: string; braveApiKey?: string; tavilyApiKey?: string }; advanced?: Record<string, unknown> }): Promise<{ ok: boolean; error?: string; models?: Record<string, string>; budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; providersWithKey?: string[]; advanced?: Record<string, unknown> }>;
       selectDirectory(): Promise<string | null>;
       saveJson(defaultName: string, content: string): Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
       openJson(): Promise<{ ok: boolean; path?: string; content?: string; canceled?: boolean; error?: string }>;
@@ -154,7 +154,7 @@ export function App() {
 
     socket.on('tier:status', (data: {
       tierId: string; role: string; label: string; status: string;
-      progressPct?: number; currentAction?: string; parentId?: string; sessionId?: string;
+      progressPct?: number; currentAction?: string; parentId?: string; sessionId?: string; model?: string;
     }) => {
       // Tag the node with the run's session — always recorded (even for a
       // session not currently on screen) so Cockpit can filter its graph to
@@ -168,6 +168,7 @@ export function App() {
         currentAction: data.currentAction,
         parentId: data.parentId,
         sessionId: data.sessionId,
+        model: data.model,
       }));
     });
 

@@ -5,6 +5,25 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-07-10
+
+Routing and efficiency round: Azure deployments become real selectable models,
+model pickers go live, benchmark routing turns on by default, plans become
+spec-driven so small models execute reliably without token explosions, and
+web search works again.
+
+### Fixed
+- **Azure "endpoint unreachable" in the Models tab.** Azure existed internally only as a placeholder model with the literal id `azure` — configured deployments never surfaced anywhere, and multi-deployment setups all bound to the first resource. Each configured deployment is now registered as its own selectable model (id = deployment name) bound to its own resource/endpoint/key, and the Models tab lists them.
+- **Web search works on default installs.** With no keyed backend configured, `web_search` depended entirely on scraping DuckDuckGo Lite with a regex that only matched double-quoted attributes (DDG emits single quotes), never unwrapped DDG's `uddg` redirect URLs, and sent a bot-like User-Agent. The parser is now quote/order-tolerant, unwraps redirects, uses a browser UA, and tries `html.duckduckgo.com` before Lite. Settings → Providers gains fields for SearXNG / Brave / Tavily backends (`tools.webSearch`).
+- **Small builds no longer explode into the full hierarchy.** The v0.13.2 complexity floor sent ANY "build/create X" prompt with one scale-ish noun to Complex (3-5 managers × workers) — the main reason small tasks burned 2M+ tokens. The floor is now two-stage: multi-system builds still floor to Complex; a single-deliverable build floors Simple→Moderate only (one manager).
+- **Tool results are bounded in worker context.** A worker re-sends its whole accumulated context on every loop iteration (up to 15), so one unbounded file read or chatty command multiplied into a token bomb. Tool results are now capped (head+tail, explicit elision marker) before entering context.
+
+### Added
+- **Spec-driven planning (openspec-style).** T1/T2 plans now give every subtask a self-contained spec slice: `files` (the exact paths it owns), `acceptance` (1-3 mechanically checkable done-criteria), and `contextBrief` (the ONLY background the worker sees). Workers execute from their slice alone — small/local models get unambiguous, minimal-context assignments; artifact verification uses the declared files deterministically instead of regex guesses; the self-test gate checks the acceptance criteria; and planners are instructed to RIGHT-SIZE (fewest sections/workers that cover the task).
+- **Benchmark-value routing ON by default.** `cascadeAuto` (live benchmark scores × live pricing, per-task model selection) was documented as the headline feature but shipped off — "Auto" was just a static priority list. Now on by default; explicit per-tier pins are unaffected, and Settings → Advanced can disable it.
+- **Live model lists for every provider.** The desktop Models tab previously used live discovery only for local endpoints; Google/Anthropic/OpenAI were stuck on a hardcoded set. All providers now list their discovered models (cloud catalogs via live listing, Azure deployments, local tags) with the curated list as fallback and a Custom… option.
+- **Model-per-task visibility.** Every agent node now carries the model that actually served it (including Cascade Auto per-subtask overrides): shown in the Cockpit node detail panel, plus a "Models used" section in the Why panel.
+
 ## [0.18.0] - 2026-07-08
 
 Fixes for the three problems reported from the v0.17.0 Linux AppImage, plus

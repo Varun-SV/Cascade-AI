@@ -154,43 +154,92 @@ async function searchTavily(
     }));
 }
 
-// ── DuckDuckGo Lite (no key required, last resort) ───────────────────
+// ── DuckDuckGo scraping (no key required, last resort) ───────────────
+//
+//  Two endpoints, both parsed with deliberately tolerant patterns: DDG's
+//  markup varies (single- vs double-quoted attributes, attribute order) and
+//  the old double-quote-only regex silently matched nothing — the reason
+//  web_search "didn't work" on default installs with no keyed backend.
 
-async function searchDuckDuckGoLite(
+// A real browser UA — DDG serves bot-looking agents an anomaly page.
+const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
+
+/**
+ * DDG wraps result hrefs in a redirect (`//duckduckgo.com/l/?uddg=<encoded>`).
+ * Unwrap to the real destination so downstream web_fetch hits the actual site.
+ * Exported for tests.
+ */
+export function unwrapDdgRedirect(href: string): string {
+  try {
+    const url = new URL(href.startsWith('//') ? `https:${href}` : href, 'https://duckduckgo.com');
+    if (/(^|\.)duckduckgo\.com$/i.test(url.hostname) && url.pathname.startsWith('/l/')) {
+      const target = url.searchParams.get('uddg');
+      if (target) return decodeURIComponent(target);
+    }
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : href;
+  } catch {
+    return href;
+  }
+}
+
+function stripTags(html: string): string {
+  return html.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function decodeEntities(text: string): string {
+  return text
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#x27;|&#39;/g, "'").replace(/&nbsp;/g, ' ');
+}
+
+/**
+ * Parse anchors carrying the given class from DDG markup, tolerating single
+ * OR double quotes and any attribute order. Exported for tests.
+ */
+export function parseDdgAnchors(html: string, anchorClass: string, snippetClass: string): WebSearchResult[] {
+  const anchorRe = new RegExp(`<a\\b[^>]*class=["']?[^"'>]*\\b${anchorClass}\\b[^"'>]*["']?[^>]*>([\\s\\S]*?)<\\/a>`, 'gi');
+  const snippetRe = new RegExp(`class=["']?[^"'>]*\\b${snippetClass}\\b[^"'>]*["']?[^>]*>([\\s\\S]*?)<\\/(?:td|a|div|span)>`, 'gi');
+
+  const results: WebSearchResult[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = anchorRe.exec(html)) !== null) {
+    const tag = m[0]!;
+    const href = /href=["']([^"']+)["']/i.exec(tag)?.[1];
+    const title = decodeEntities(stripTags(m[1] ?? ''));
+    if (!href || !title) continue;
+    results.push({ title, url: unwrapDdgRedirect(decodeEntities(href)), snippet: '' });
+  }
+
+  const snippets: string[] = [];
+  while ((m = snippetRe.exec(html)) !== null) {
+    snippets.push(decodeEntities(stripTags(m[1] ?? '')));
+  }
+  for (let i = 0; i < results.length; i++) {
+    if (snippets[i]) results[i]!.snippet = snippets[i]!;
+  }
+  return results;
+}
+
+async function searchDuckDuckGo(
   query: string,
   maxResults: number,
+  variant: 'html' | 'lite',
 ): Promise<WebSearchResult[]> {
-  // DuckDuckGo Lite returns an HTML page — we parse key `<a>` tags
-  const resp = await fetch(`https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`, {
-    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Cascade-AI/1.0)' },
+  const base = variant === 'html'
+    ? 'https://html.duckduckgo.com/html/?q='
+    : 'https://lite.duckduckgo.com/lite/?q=';
+  const resp = await fetch(`${base}${encodeURIComponent(query)}`, {
+    headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html' },
     signal: AbortSignal.timeout(10_000),
   });
-
-  if (!resp.ok) throw new Error(`DuckDuckGo Lite returned HTTP ${resp.status}`);
-
+  if (!resp.ok) throw new Error(`DuckDuckGo ${variant} returned HTTP ${resp.status}`);
   const html = await resp.text();
 
-  // Extract result links from the lite HTML (result links follow a predictable pattern)
-  const linkPattern = /<a[^>]+class="result-link"[^>]+href="([^"]+)"[^>]*>([^<]+)<\/a>/g;
-  const snippetPattern = /<td[^>]+class="result-snippet"[^>]*>([\s\S]*?)<\/td>/g;
+  const parsed = variant === 'html'
+    ? parseDdgAnchors(html, 'result__a', 'result__snippet')
+    : parseDdgAnchors(html, 'result-link', 'result-snippet');
 
-  const links: Array<{ url: string; title: string }> = [];
-  const snippets: string[] = [];
-
-  let m: RegExpExecArray | null;
-  while ((m = linkPattern.exec(html)) !== null) {
-    links.push({ url: m[1]!, title: m[2]!.trim() });
-  }
-  while ((m = snippetPattern.exec(html)) !== null) {
-    snippets.push(m[1]!.replace(/<[^>]+>/g, '').trim());
-  }
-
-  return links.slice(0, maxResults).map((link, i) => ({
-    title: link.title,
-    url: link.url,
-    snippet: snippets[i] ?? '',
-    engine: 'duckduckgo-lite',
-  }));
+  return parsed.slice(0, maxResults).map((r) => ({ ...r, engine: `duckduckgo-${variant}` }));
 }
 
 // ── WebSearchTool ────────────────────────────
@@ -265,13 +314,16 @@ export class WebSearchTool extends BaseTool {
       }
     }
 
-    // ── 4. DuckDuckGo Lite (always available, no key needed) ─────────────
-    try {
-      results = await searchDuckDuckGoLite(query, maxResults);
-      if (results.length > 0) return this.formatResults(query, results);
-      errors.push('DuckDuckGo Lite: returned 0 results');
-    } catch (err) {
-      errors.push(`DuckDuckGo Lite: ${err instanceof Error ? err.message : String(err)}`);
+    // ── 4. DuckDuckGo (always available, no key needed) ──────────────────
+    // html.duckduckgo.com first (richer markup), lite as the final fallback.
+    for (const variant of ['html', 'lite'] as const) {
+      try {
+        results = await searchDuckDuckGo(query, maxResults, variant);
+        if (results.length > 0) return this.formatResults(query, results);
+        errors.push(`DuckDuckGo ${variant}: returned 0 results`);
+      } catch (err) {
+        errors.push(`DuckDuckGo ${variant}: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
 
     // All backends failed

@@ -30,6 +30,12 @@ export abstract class BaseTier extends EventEmitter {
    * which would interleave, are not tagged.
    */
   protected isPresenter = false;
+  /**
+   * The model actually serving this tier (`provider:id`), once resolved —
+   * rides on every tier:status event so the desktop can show which model ran
+   * which node (Cockpit node panel / Why panel).
+   */
+  protected servingModel?: string;
 
   constructor(role: TierRole, id?: string, parentId?: string) {
     super();
@@ -59,9 +65,15 @@ export abstract class BaseTier extends EventEmitter {
       status,
       timestamp,
       output,
+      model: this.servingModel,
     };
     this.emit('status', event);
     this.emit('tier:status', event);
+  }
+
+  /** Record the model serving this tier; future status events carry it. */
+  protected setServingModel(model: string | undefined): void {
+    this.servingModel = model || undefined;
   }
 
   protected setLabel(label: string): void {
@@ -90,6 +102,7 @@ export abstract class BaseTier extends EventEmitter {
       progressPct: update.progressPct,
       timestamp,
       output: update.output,
+      model: this.servingModel,
     });
   }
 

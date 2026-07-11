@@ -147,8 +147,11 @@ export const CascadeConfigSchema = z.object({
    * Cascade Auto: when true, the TaskAnalyzer selects the optimal model for each
    * tier based on task type and complexity, overriding the static priority lists.
    * Heuristic-first with AI inference fallback (adds ~0–500ms per task).
+   * ON by default since v0.19.0 — "Auto" without it was just a static priority
+   * list, not the benchmark-value routing the docs describe. Explicit per-tier
+   * model pins are unaffected; disable via config/Settings → Advanced.
    */
-  cascadeAuto: z.boolean().default(false),
+  cascadeAuto: z.boolean().default(true),
   /**
    * Cascade Auto trade-off bias when picking a model for a task:
    *   - 'balanced' (default): quality × cost-efficiency — cheap models win

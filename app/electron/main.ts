@@ -429,6 +429,7 @@ function registerIPC(): void {
     providersWithKey: string[];
     endpoints: Record<string, string>;
     azureDeployments: Array<{ label?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string; hasKey: boolean }>;
+    webSearch: { searxngUrl?: string; hasBraveKey: boolean; hasTavilyKey: boolean };
     advanced: Record<string, unknown>;
   } {
     const models = (cascadeConfig?.models ?? {}) as Record<string, string>;
@@ -461,6 +462,13 @@ function registerIPC(): void {
         apiVersion: p.apiVersion,
         hasKey: typeof p.apiKey === 'string' && p.apiKey.length > 0,
       }));
+    // Web-search backends (tools.webSearch) — URL is shown, keys only as set/unset.
+    const ws = (cascadeConfig?.tools?.webSearch ?? {}) as { searxngUrl?: string; braveApiKey?: string; tavilyApiKey?: string };
+    const webSearch = {
+      searxngUrl: ws.searxngUrl,
+      hasBraveKey: typeof ws.braveApiKey === 'string' && ws.braveApiKey.length > 0,
+      hasTavilyKey: typeof ws.tavilyApiKey === 'string' && ws.tavilyApiKey.length > 0,
+    };
     // Advanced knobs surfaced in the Settings "Advanced" tab — read back from
     // the same config so the panel always reflects what's on disk.
     const advanced: Record<string, unknown> = {
@@ -481,7 +489,7 @@ function registerIPC(): void {
       persistDynamicTools: cascadeConfig?.persistDynamicTools,
       telemetryEnabled: cascadeConfig?.telemetry?.enabled,
     };
-    return { models, budget, providersWithKey, endpoints, azureDeployments, advanced };
+    return { models, budget, providersWithKey, endpoints, azureDeployments, webSearch, advanced };
   }
 
   ipcMain.handle('cascade:getSettings', async () => settingsSnapshot());
@@ -502,6 +510,10 @@ function registerIPC(): void {
       // so swallow that and still return whatever was discovered. Otherwise the
       // Models dropdown can never fill the very models needed to fix the pin.
       try { await router.init(cascadeConfig); } catch { /* keep discovered models */ }
+      // Also query cloud providers' LIVE model catalogs (Gemini/OpenAI/Anthropic
+      // listings) so the pickers show every model the key can actually use, not
+      // just the bundled snapshot. Best-effort — failures keep local results.
+      try { await router.refreshLiveData?.(); } catch { /* keep local results */ }
       let models: Array<{ id: string; provider: string; isLocal: boolean; supportsToolUse?: boolean; contextWindow?: number; isVisionCapable?: boolean }> = [];
       try {
         // Pass capability facts through — the picker shows tool/vision/context
@@ -533,6 +545,7 @@ function registerIPC(): void {
     budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number };
     endpoints?: Record<string, string | undefined>;
     azureDeployments?: Array<{ label?: string; apiKey?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string }>;
+    webSearch?: { searxngUrl?: string; braveApiKey?: string; tavilyApiKey?: string };
     advanced?: Record<string, unknown>;
   }) => {
     try {
@@ -597,6 +610,18 @@ function registerIPC(): void {
         if (typeof data.budget.sessionBudgetUsd === 'number' && data.budget.sessionBudgetUsd >= 0) cascadeConfig.budget.sessionBudgetUsd = data.budget.sessionBudgetUsd;
         if (typeof data.budget.maxTokensPerRun === 'number' && data.budget.maxTokensPerRun > 0) cascadeConfig.budget.maxTokensPerRun = Math.floor(data.budget.maxTokensPerRun);
         if (typeof data.budget.warnAtPct === 'number' && data.budget.warnAtPct > 0 && data.budget.warnAtPct <= 100) cascadeConfig.budget.warnAtPct = data.budget.warnAtPct;
+      }
+      // Web-search backends: URL is set/cleared directly ('' clears it); API
+      // keys keep the "blank means keep the existing key" semantics of the
+      // provider key fields above.
+      if (data.webSearch && typeof data.webSearch === 'object') {
+        cascadeConfig.tools = cascadeConfig.tools ?? {};
+        const prior = (cascadeConfig.tools.webSearch ?? {}) as { searxngUrl?: string; braveApiKey?: string; tavilyApiKey?: string };
+        const next = { ...prior };
+        if (typeof data.webSearch.searxngUrl === 'string') next.searxngUrl = data.webSearch.searxngUrl.trim() || undefined;
+        if (data.webSearch.braveApiKey) next.braveApiKey = data.webSearch.braveApiKey;
+        if (data.webSearch.tavilyApiKey) next.tavilyApiKey = data.webSearch.tavilyApiKey;
+        cascadeConfig.tools.webSearch = next;
       }
       // Advanced settings: every field is individually validated against an
       // explicit allowlist — an unknown or malformed key is IGNORED, never

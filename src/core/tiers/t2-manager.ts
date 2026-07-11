@@ -158,6 +158,8 @@ export class T2Manager extends BaseTier {
     this.assignment = assignment;
     this.taskId = taskId;
     this.setLabel(assignment.sectionTitle);
+    const m = this.router.getModelForTier('T2');
+    if (m) this.setServingModel(`${m.provider}:${m.id}`);
     this.setStatus('ACTIVE');
 
     this.sendStatusUpdate({
@@ -277,7 +279,7 @@ export class T2Manager extends BaseTier {
       .map(p => `[Peer ${p.fromId} Plan]: ${(p.content as any).sectionTitle} - ${(p.content as any).subtaskTitles?.join(', ')}`)
       .join('\n');
 
-    const prompt = `Decompose this section into 2-5 concrete subtasks for T3 workers.
+    const prompt = `Decompose this section into 1-4 concrete subtasks for T3 workers — the FEWEST that fully cover it (one subtask is the correct answer for a small section).
 
 Section: ${assignment.sectionTitle}
 Description: ${assignment.description}
@@ -293,6 +295,9 @@ Return a JSON array of subtask objects, each with:
 - peerT3Ids: string[] (empty for now)
 - dependsOn: string[] (array of subtaskIds this task depends on to start)
 - executionMode: "parallel|sequential" (default is parallel)
+- files: string[] (the EXACT relative paths this subtask creates or edits)
+- acceptance: string[] (1-3 mechanically checkable done-criteria: file exists / contains X / command exits 0)
+- contextBrief: string (1-3 short sentences with ALL the background the worker needs — it sees nothing else)
 
 Return ONLY the JSON array.`;
 

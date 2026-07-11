@@ -30,6 +30,7 @@ import {
   buildTextToolSystemPrompt,
   buildTextToolReminder,
 } from '../../tools/text-tool-parser.js';
+import { truncateForContext } from '../../utils/truncate.js';
 
 /**
  * Thrown by executeTool() when the underlying tool error indicates an
@@ -421,6 +422,9 @@ export class T3Worker extends BaseTier {
     // Detect tool-use mode against the EFFECTIVE model (per-subtask override if
     // any, else the tier default).
     const effectiveModel = subtaskModel ?? this.router.getModelForTier('T3');
+    // Tag this node with the model actually serving it — including a Cascade
+    // Auto per-subtask override — so the desktop can show model-per-task.
+    if (effectiveModel) this.setServingModel(`${effectiveModel.provider}:${effectiveModel.id}`);
     const useTextTools = effectiveModel?.supportsToolUse === false && tools.length > 0;
     // Token economy for text-tool models: the FULL per-parameter contract goes
     // out only on the first call (and again whenever the tool list changes,
@@ -537,9 +541,12 @@ export class T3Worker extends BaseTier {
       for (const tc of effectiveResult.toolCalls) {
         allToolCalls.push(tc);
         const toolResult = await this.executeTool(tc);
+        // Bound what enters the context: the WHOLE history is re-sent on every
+        // remaining iteration, so an unbounded tool result (big file read,
+        // chatty command) multiplies into a token bomb across the loop.
         await this.context.addMessage({
           role: 'tool',
-          content: toolResult,
+          content: truncateForContext(toolResult),
           toolCallId: tc.id,
         });
       }
@@ -847,6 +854,8 @@ export class T3Worker extends BaseTier {
   }
 
   private requiresArtifact(): boolean {
+    // An explicit spec slice is authoritative — no regex guessing needed.
+    if (this.assignment?.files?.length) return true;
     const haystack = `${this.assignment?.description ?? ''}
 ${this.assignment?.expectedOutput ?? ''}`;
     return /\b[\w./-]+\.(pdf|md|html|txt|json|csv|py|js|ts|tsx|jsx|docx?|png|jpg|jpeg|svg|gif)\b/i.test(haystack)
@@ -854,10 +863,13 @@ ${this.assignment?.expectedOutput ?? ''}`;
   }
 
   private extractArtifactPaths(assignment: T2ToT3Assignment): string[] {
+    // Spec-declared files verify deterministically; regex over the prose is
+    // the fallback for plans that didn't declare them.
+    const declared = (assignment.files ?? []).map((f) => f.trim()).filter((f) => f.includes('.'));
     const haystack = `${assignment.description}
 ${assignment.expectedOutput}`;
     const matches = haystack.match(/\b[\w./-]+\.(pdf|md|html|txt|json|csv|py|js|ts|tsx|jsx|docx?|png|jpg|jpeg|svg|gif)\b/gi) ?? [];
-    return [...new Set(matches.map((m) => m.trim()))];
+    return [...new Set([...declared, ...matches.map((m) => m.trim())])];
   }
 
   private async verifyArtifacts(assignment: T2ToT3Assignment): Promise<{ ok: boolean; issues: string[] }> {
@@ -1002,7 +1014,9 @@ ${current}`,
 Assignment: ${assignment.description}
 Expected output: ${assignment.expectedOutput}
 Constraints: ${assignment.constraints.join('; ')}
-
+${assignment.acceptance?.length ? `Acceptance criteria — ALL must be satisfied for "completeness" to pass:
+${assignment.acceptance.map((a) => `- ${a}`).join('\n')}
+` : ''}
 Output to test:
 ${output}
 
@@ -1102,18 +1116,31 @@ Your subtask:
 - Title: ${assignment.subtaskTitle}
 - Description: ${assignment.description}
 - Expected output: ${assignment.expectedOutput}
-- Constraints: ${assignment.constraints.join('; ')}`;
+- Constraints: ${assignment.constraints.join('; ')}${assignment.files?.length ? `
+- Files you own (create/edit ONLY these): ${assignment.files.join(', ')}` : ''}${assignment.acceptance?.length ? `
+- Definition of done: ${assignment.acceptance.join('; ')}` : ''}`;
   }
 
   private buildInitialPrompt(assignment: T2ToT3Assignment): string {
+    // Spec-slice prompt: with a contextBrief, the worker gets exactly the
+    // background the planner chose for it — small, self-sufficient, and
+    // executable by small models without the rest of the task in context.
     return `Execute the following subtask completely:
 
 **${assignment.subtaskTitle}**
-
+${assignment.contextBrief ? `
+Context: ${assignment.contextBrief}
+` : ''}
 ${assignment.description}
 
 Expected output: ${assignment.expectedOutput}
-
+${assignment.files?.length ? `
+Files you own (create or edit exactly these paths):
+${assignment.files.map((f) => `- ${f}`).join('\n')}
+` : ''}${assignment.acceptance?.length ? `
+Definition of done (your output must satisfy ALL of these):
+${assignment.acceptance.map((a) => `- ${a}`).join('\n')}
+` : ''}
 Constraints:
 ${assignment.constraints.map((c) => `- ${c}`).join('\n')}
 

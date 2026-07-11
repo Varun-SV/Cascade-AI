@@ -46,6 +46,7 @@ contextBridge.exposeInMainWorld('cascade', {
     budget: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number };
     providersWithKey: string[];
     endpoints: Record<string, string>;
+    webSearch?: { searxngUrl?: string; hasBraveKey: boolean; hasTavilyKey: boolean };
     advanced?: Record<string, unknown>;
   }>,
   updateSettings: (data: {
@@ -53,6 +54,7 @@ contextBridge.exposeInMainWorld('cascade', {
     models?: Record<string, string | undefined>;
     budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number };
     endpoints?: Record<string, string | undefined>;
+    webSearch?: { searxngUrl?: string; braveApiKey?: string; tavilyApiKey?: string };
     advanced?: Record<string, unknown>;
   }) => ipcRenderer.invoke('cascade:updateSettings', data) as Promise<{
     ok: boolean;

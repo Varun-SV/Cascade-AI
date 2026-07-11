@@ -14,6 +14,8 @@ export interface AgentNode {
   currentAction?: string;
   parentId?: string;
   stream?: string;
+  /** The model serving this node (`provider:id`), once the tier resolved it. */
+  model?: string;
   /** The run/session this node belongs to — lets Cockpit show only the
    * active session's own nodes instead of every node from every past run. */
   sessionId?: string;
@@ -261,10 +263,18 @@ const appSlice = createSlice({
     },
     upsertAgent(state, action: PayloadAction<AgentNode>) {
       const idx = state.agents.findIndex((a) => a.id === action.payload.id);
-      // Preserve the accumulated per-node stream across status updates (which
-      // arrive without it) so the node-detail panel keeps the worker's output.
-      if (idx >= 0) state.agents[idx] = { ...action.payload, stream: state.agents[idx]!.stream };
-      else state.agents.push(action.payload);
+      // Preserve accumulated per-node fields across status updates that arrive
+      // without them: the stream (never re-sent) and the serving model (only
+      // sent once the tier resolves it).
+      if (idx >= 0) {
+        state.agents[idx] = {
+          ...action.payload,
+          stream: state.agents[idx]!.stream,
+          model: action.payload.model ?? state.agents[idx]!.model,
+        };
+      } else {
+        state.agents.push(action.payload);
+      }
     },
     // Per-node live output (every tier), shown in the Cockpit node-detail panel.
     appendAgentStream(state, action: PayloadAction<{ id: string; text: string }>) {

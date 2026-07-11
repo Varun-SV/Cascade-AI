@@ -173,6 +173,8 @@ export class T1Administrator extends BaseTier {
     this.signal = signal;
     this.taskId = randomUUID();
     this.setLabel('Administrator');
+    const m = this.router.getModelForTier('T1');
+    if (m) this.setServingModel(`${m.provider}:${m.id}`);
     this.setStatus('ACTIVE');
     this.taskGoal = userPrompt; // store for permission evaluation later
 
@@ -478,10 +480,13 @@ Return JSON where SECTIONS can declare dependencies on other SECTIONS:
       "description": "Run npm init",
       "expectedOutput": "package.json created",
       "constraints": [],
-      "dependsOn": []
+      "dependsOn": [],
+      "files": ["package.json"],                       // ← exact paths this subtask owns
+      "acceptance": ["package.json exists and parses as JSON"],  // ← objectively checkable
+      "contextBrief": "Fresh Node 20 project; npm available."    // ← ALL the background the worker gets
     }]
   }, {
-    "sectionId": "s2", 
+    "sectionId": "s2",
     "sectionTitle": "Write Tests",
     "description": "Write tests for the project",
     "expectedOutput": "Tests passing",
@@ -491,7 +496,13 @@ Return JSON where SECTIONS can declare dependencies on other SECTIONS:
   }]
 }
 Use dependsOn at the SECTION level when a whole T2 Manager needs the output of a previous T2 Manager.
-Leave dependsOn empty for sections that can run immediately in parallel.`;
+Leave dependsOn empty for sections that can run immediately in parallel.
+
+SPEC RULES — each subtask is a self-contained spec slice (workers execute from their slice ALONE):
+- "files": the exact relative paths the subtask creates or edits. Never vague ("some files"); always concrete.
+- "acceptance": 1-3 checks a reviewer could verify mechanically (file exists / contains X / command exits 0). These define done.
+- "contextBrief": 1-3 short sentences with the ONLY background the worker needs. It sees nothing else about the task, so make the brief self-sufficient — but never pad it.
+- RIGHT-SIZE the plan: use the FEWEST sections and workers that fully cover the task. One section with 1-2 subtasks is the CORRECT plan for a small task; padding a plan with filler sections wastes the user's money.`;
 
     const messages: ConversationMessage[] = [{ role: 'user', content: decompositionPrompt }];
     const result = await this.router.generate('T1', {
