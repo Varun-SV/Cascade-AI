@@ -466,7 +466,11 @@
 <section class="hero">
   <div class="container">
     <div>
-      <div class="hero-eyebrow"><span class="hero-dot"></span> Open-source · MIT · v0.16.0 — Desktop app is here</div>
+      <!-- The version is refreshed from the latest GitHub release by the
+           smart-download script below; the static text is only the fallback
+           for when that API call fails (it previously hardcoded a version,
+           which silently went stale with every release). -->
+      <div class="hero-eyebrow"><span class="hero-dot"></span> Open-source · MIT · <span id="heroVersion">v0.19.0</span> — Desktop app is here</div>
 
       <h1 class="reveal">Agents that<br /><span class="cascade-word"><span>cascade</span></span><span class="dim">.</span></h1>
 
@@ -887,6 +891,13 @@
         if (!assets.length) return; // release still publishing — keep fallback
 
         const version = (rel.tag_name || '').replace(/^v/, '');
+
+        // Keep the hero's version badge in lockstep with the actual latest
+        // release — the hardcoded text is only a fallback.
+        if (version) {
+          const heroVersion = document.getElementById('heroVersion');
+          if (heroVersion) heroVersion.textContent = 'v' + version;
+        }
 
         // Primary button: best asset for the detected OS.
         const mine = assets.filter((x) => x.os === os).sort((a, b) => a.rank - b.rank);
