@@ -5,6 +5,9 @@
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import { randomBytes } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { CloudEnv } from './env.js';
 import type { CloudStore, OAuthProvider } from './db.js';
 import {
@@ -205,6 +208,19 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     const used = store.getUsage(req.session!.userId, todayKey());
     res.json({ plan, dailyRuns: used, dailyRunLimit: limits.dailyRuns, maxConcurrentRuns: limits.maxConcurrentRuns });
   });
+
+  // ── Serve the built SPA ──────────────────────
+  // In dev, cloud/web runs its own Vite server (proxying /api, /auth,
+  // /socket.io back here — see cloud/web/vite.config.ts) and this simply
+  // finds nothing to serve. In production (one Railway service), cloud/web
+  // is built first and this serves it directly — no separate static host.
+  const webDistDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../web/dist');
+  if (fs.existsSync(webDistDir)) {
+    app.use(express.static(webDistDir));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.join(webDistDir, 'index.html'));
+    });
+  }
 
   return app;
 }

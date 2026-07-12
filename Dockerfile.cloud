@@ -1,0 +1,39 @@
+# Cascade Cloud — builds the core SDK, the cloud/web SPA, and cloud/server,
+# then runs cloud/server (which serves the built SPA statically too — one
+# Railway service handles both the API/socket and the web app).
+
+FROM node:20-slim AS build
+WORKDIR /repo
+
+# better-sqlite3 (used by cloud/server and the core SDK) ships prebuilt
+# binaries for most platforms, but keep a source-build fallback so an image
+# rebuild never breaks on a platform/Node combo without one.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . .
+# cloud/server depends on the core SDK as "cascade-ai": "file:../.." — an
+# npm-managed symlink to the repo root, resolved once here and live
+# thereafter (unlike app/'s "cascade-ai": "*", which intentionally consumes
+# whatever's on the npm registry post-`npm publish` — cloud/server has no
+# publish step, so it needs the local build directly).
+RUN npm ci
+RUN npm run build:cli
+RUN npm run build -w cascade-cloud-web
+RUN npm run build -w cascade-cloud-server
+RUN npm prune --omit=dev
+
+FROM node:20-slim AS runtime
+WORKDIR /repo
+ENV NODE_ENV=production
+
+COPY --from=build /repo/node_modules ./node_modules
+COPY --from=build /repo/dist ./dist
+COPY --from=build /repo/package.json ./package.json
+COPY --from=build /repo/cloud/server/dist ./cloud/server/dist
+COPY --from=build /repo/cloud/server/package.json ./cloud/server/package.json
+COPY --from=build /repo/cloud/web/dist ./cloud/web/dist
+
+WORKDIR /repo/cloud/server
+EXPOSE 8787
+CMD ["node", "dist/index.js"]
