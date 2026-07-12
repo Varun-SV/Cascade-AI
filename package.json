@@ -18,7 +18,8 @@
   },
   "workspaces": [
     "web",
-    "app"
+    "app",
+    "cloud/server"
   ],
   "scripts": {
     "build:web": "npm run build -w web",
@@ -28,6 +29,7 @@
     "dev": "tsup --watch",
     "dev:web": "npm run dev -w web",
     "dev:app": "npm run dev -w app",
+    "dev:cloud": "npm run dev -w cascade-cloud-server",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",

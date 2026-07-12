@@ -1,0 +1,43 @@
+{
+  "name": "cascade-cloud-server",
+  "version": "0.1.0",
+  "description": "Cascade Cloud — hosted multi-tenant chat server (OAuth, sessions, run pipeline)",
+  "author": "Varun SV",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "predev": "npm --prefix ../.. run build:cli",
+    "dev": "tsx watch src/index.ts",
+    "prebuild": "npm --prefix ../.. run build:cli",
+    "build": "tsup",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "cascade-ai": "*",
+    "dotenv": "^16.4.0",
+    "express": "^4.21.0",
+    "express-rate-limit": "^7.4.0",
+    "jsonwebtoken": "^9.0.2",
+    "socket.io": "^4.8.0",
+    "socket.io-msgpack-parser": "^3.0.2",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.0",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^22.10.0",
+    "tsup": "^8.3.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
