@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { KeyRound, Plus, Trash2, ShieldCheck } from 'lucide-react';
 import type { ProviderConfig, ProviderType } from '../lib/types.js';
+import DriveSyncPanel from './DriveSyncPanel.js';
 
 // Local LLMs (Ollama) are out of v1 scope — a hosted page cannot reach a
 // user's local network. Only cloud providers are offered here.
@@ -27,9 +28,12 @@ function summaryFor(p: ProviderConfig): string {
 interface Props {
   keys: ProviderConfig[];
   onChange: (keys: ProviderConfig[]) => void;
+  /** Only offered for Google-authenticated users with a Google OAuth client configured server-side. */
+  driveSyncEnabled?: boolean;
+  googleClientId?: string | null;
 }
 
-export default function KeyVault({ keys, onChange }: Props) {
+export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClientId }: Props) {
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState<ProviderConfig>({ type: 'anthropic' });
 
@@ -205,6 +209,10 @@ export default function KeyVault({ keys, onChange }: Props) {
             </button>
           </div>
         </div>
+      )}
+
+      {driveSyncEnabled && googleClientId && (
+        <DriveSyncPanel googleClientId={googleClientId} keys={keys} onRestore={onChange} />
       )}
     </div>
   );

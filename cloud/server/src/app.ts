@@ -44,11 +44,14 @@ export function createApp(env: CloudEnv, store: CloudStore) {
   });
 
   // Public, non-sensitive — lets the SPA decide which login buttons to show
-  // without hardcoding provider availability at build time.
+  // without hardcoding provider availability at build time. googleClientId
+  // is not a secret (only GOOGLE_CLIENT_SECRET is) — the SPA needs it to run
+  // its own client-side Drive appData consent flow (see task #28).
   app.get('/api/config', (_req, res) => {
     res.json({
       githubEnabled: Boolean(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET),
       googleEnabled: Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET),
+      googleClientId: env.GOOGLE_CLIENT_ID ?? null,
       devLoginEnabled: env.CLOUD_DEV_BYPASS,
     });
   });

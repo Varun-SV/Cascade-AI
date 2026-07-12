@@ -3,6 +3,7 @@ import type { CloudConversation, CloudMessage, CloudUser } from './types.js';
 export interface CloudConfig {
   githubEnabled: boolean;
   googleEnabled: boolean;
+  googleClientId: string | null;
   devLoginEnabled: boolean;
 }
 

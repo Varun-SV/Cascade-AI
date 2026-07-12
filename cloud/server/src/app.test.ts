@@ -68,7 +68,12 @@ describe('cloud/server app', () => {
 
   it('GET /api/config reports dev-login enabled and OAuth providers unconfigured', async () => {
     const res = await fetch(`${baseUrl}/api/config`);
-    expect(await res.json()).toEqual({ githubEnabled: false, googleEnabled: false, devLoginEnabled: true });
+    expect(await res.json()).toEqual({
+      githubEnabled: false,
+      googleEnabled: false,
+      googleClientId: null,
+      devLoginEnabled: true,
+    });
   });
 
   it('GET /api/me with no session cookie returns a null user', async () => {

@@ -51,4 +51,17 @@ describe('KeyVault', () => {
     fireEvent.click(screen.getByLabelText(/remove anthropic/i));
     expect(onChange).toHaveBeenCalledWith([]);
   });
+
+  it('hides Drive sync by default (non-Google users, or no client id configured)', () => {
+    render(<KeyVault keys={[]} onChange={vi.fn()} />);
+    expect(screen.queryByText(/sync your keys across devices/i)).not.toBeInTheDocument();
+
+    render(<KeyVault keys={[]} onChange={vi.fn()} driveSyncEnabled={true} googleClientId={null} />);
+    expect(screen.queryByText(/sync your keys across devices/i)).not.toBeInTheDocument();
+  });
+
+  it('shows Drive sync only when enabled AND a Google client id is configured', () => {
+    render(<KeyVault keys={[]} onChange={vi.fn()} driveSyncEnabled={true} googleClientId="test-client-id" />);
+    expect(screen.getByText(/sync your keys across devices/i)).toBeInTheDocument();
+  });
 });

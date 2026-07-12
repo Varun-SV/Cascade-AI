@@ -19,7 +19,7 @@ export default function App() {
   useEffect(() => {
     fetchConfig()
       .then(setConfig)
-      .catch(() => setConfig({ githubEnabled: false, googleEnabled: false, devLoginEnabled: false }));
+      .catch(() => setConfig({ githubEnabled: false, googleEnabled: false, googleClientId: null, devLoginEnabled: false }));
   }, []);
 
   const refreshMe = useCallback(() => {
@@ -118,7 +118,12 @@ export default function App() {
                 ✕
               </button>
             </div>
-            <KeyVault keys={providers} onChange={updateProviders} />
+            <KeyVault
+              keys={providers}
+              onChange={updateProviders}
+              driveSyncEnabled={user.provider === 'google'}
+              googleClientId={config.googleClientId}
+            />
           </div>
         </div>
       )}
