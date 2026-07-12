@@ -1,20 +1,25 @@
 import clsx from 'clsx';
-import { MessageSquarePlus, KeyRound, LogOut, Crown } from 'lucide-react';
+import { MessageSquarePlus, KeyRound, LogOut, Crown, Brain } from 'lucide-react';
+import UsageMeter from './UsageMeter.js';
 import type { CloudConversation, CloudUser } from '../lib/types.js';
 
 interface Props {
   user: CloudUser;
   conversations: CloudConversation[];
   activeConversationId: string | undefined;
+  lastTokens: number;
+  usageRefreshSignal: unknown;
   onSelect: (id: string) => void;
   onNewChat: () => void;
   onOpenKeyVault: () => void;
   onOpenUpgrade: () => void;
+  onOpenMemory: () => void;
   onLogout: () => void;
 }
 
 export default function ConversationSidebar({
-  user, conversations, activeConversationId, onSelect, onNewChat, onOpenKeyVault, onOpenUpgrade, onLogout,
+  user, conversations, activeConversationId, lastTokens, usageRefreshSignal,
+  onSelect, onNewChat, onOpenKeyVault, onOpenUpgrade, onOpenMemory, onLogout,
 }: Props) {
   return (
     <div className="flex h-full w-64 flex-col bg-ink-900">
@@ -48,6 +53,14 @@ export default function ConversationSidebar({
       </div>
 
       <div className="flex flex-col gap-1 border-t border-ink-700 p-3">
+        <UsageMeter lastTokens={lastTokens} refreshSignal={usageRefreshSignal} />
+        <button
+          type="button"
+          onClick={onOpenMemory}
+          className="flex items-center gap-2 rounded-md px-3 py-2 text-sm text-ink-200 hover:bg-ink-800"
+        >
+          <Brain size={16} /> Memory
+        </button>
         <button
           type="button"
           onClick={onOpenKeyVault}

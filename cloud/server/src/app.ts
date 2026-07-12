@@ -4,7 +4,7 @@
 
 import express from 'express';
 import rateLimit from 'express-rate-limit';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,13 +20,26 @@ import {
 } from './auth/session.js';
 import { githubAuthUrl, exchangeGithubCode, googleAuthUrl, exchangeGoogleCode, type OAuthProfile } from './auth/oauth.js';
 import { limitsForPlan, todayKey } from './entitlements.js';
+import { skillCatalog } from './skills.js';
+import { tenantScratchDir } from './paths.js';
+
+const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+const MAX_MEMORY_LEN = 2000;
 
 const OAUTH_STATE_COOKIE = 'cascade_oauth_state';
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 
 export function createApp(env: CloudEnv, store: CloudStore) {
   const app = express();
-  app.use(express.json());
+  // Image uploads carry a base64 payload larger than a normal API body, so
+  // they get their own bigger parser on the route; every other endpoint keeps
+  // the tight default limit.
+  const uploadJson = express.json({ limit: '8mb' });
+  app.use((req, res, next) => {
+    if (req.path === '/api/uploads') { next(); return; }
+    express.json()(req, res, next);
+  });
 
   const secure = env.OAUTH_REDIRECT_BASE_URL.startsWith('https://');
 
@@ -198,7 +211,77 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid conversation id' }); return; }
     const conversation = store.getConversation(id, req.session!.userId);
     if (!conversation) { res.status(404).json({ error: 'Not found' }); return; }
-    res.json({ messages: store.getMessages(conversation.id) });
+    const messages = store.getMessages(conversation.id).map((m) => ({
+      ...m,
+      attachments: store.getAttachmentsForMessage(m.id).map((a) => ({ id: a.id, mime: a.mime, kind: a.kind })),
+    }));
+    res.json({ conversation: { id: conversation.id, title: conversation.title, skillId: conversation.skillId }, messages });
+  });
+
+  // ── Skills (prompt presets) — public catalog, no secrets ──
+  app.get('/api/skills', (_req, res) => {
+    res.json({ skills: skillCatalog() });
+  });
+
+  // ── Memory (per-user persistent facts) ──
+  app.get('/api/memories', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    res.json({ memories: store.listMemories(req.session!.userId) });
+  });
+
+  app.post('/api/memories', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const content = typeof req.body?.content === 'string' ? req.body.content.trim() : '';
+    if (!content) { res.status(400).json({ error: 'Memory content is required' }); return; }
+    if (content.length > MAX_MEMORY_LEN) { res.status(400).json({ error: `Memory must be ≤ ${MAX_MEMORY_LEN} characters` }); return; }
+    res.json({ memory: store.addMemory(req.session!.userId, content) });
+  });
+
+  app.put('/api/memories/:id', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const id = req.params['id'];
+    const content = typeof req.body?.content === 'string' ? req.body.content.trim() : '';
+    if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid memory id' }); return; }
+    if (!content) { res.status(400).json({ error: 'Memory content is required' }); return; }
+    if (content.length > MAX_MEMORY_LEN) { res.status(400).json({ error: `Memory must be ≤ ${MAX_MEMORY_LEN} characters` }); return; }
+    const memory = store.updateMemory(id, req.session!.userId, content);
+    if (!memory) { res.status(404).json({ error: 'Not found' }); return; }
+    res.json({ memory });
+  });
+
+  app.delete('/api/memories/:id', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const id = req.params['id'];
+    if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid memory id' }); return; }
+    res.json({ ok: store.deleteMemory(id, req.session!.userId) });
+  });
+
+  // ── Image uploads (multimodal input) ──
+  // Client sends { mime, dataBase64 }; we validate type + size, write to the
+  // per-tenant dir, and return an id the chat:run payload references. Keys and
+  // bytes never leave the tenant's own scratch space.
+  app.post('/api/uploads', sessionMiddleware(env.SESSION_SECRET), uploadJson, (req: AuthedRequest, res) => {
+    const userId = req.session!.userId;
+    const mime = typeof req.body?.mime === 'string' ? req.body.mime : '';
+    const dataBase64 = typeof req.body?.dataBase64 === 'string' ? req.body.dataBase64 : '';
+    if (!IMAGE_MIME_TYPES.has(mime)) { res.status(400).json({ error: 'Unsupported image type (jpeg, png, gif, webp only)' }); return; }
+    if (!dataBase64) { res.status(400).json({ error: 'Missing image data' }); return; }
+    const bytes = Buffer.from(dataBase64, 'base64');
+    if (bytes.length === 0 || bytes.length > MAX_UPLOAD_BYTES) {
+      res.status(400).json({ error: `Image must be between 1 byte and ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB` });
+      return;
+    }
+    const dir = path.join(tenantScratchDir(env, userId), 'uploads');
+    fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, randomUUID());
+    fs.writeFileSync(filePath, bytes);
+    const att = store.addAttachment({ userId, messageId: null, kind: 'image', mime, path: filePath });
+    res.json({ id: att.id, mime: att.mime });
+  });
+
+  app.get('/api/uploads/:id', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const id = req.params['id'];
+    if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid upload id' }); return; }
+    const att = store.getOwnedAttachment(id, req.session!.userId);
+    if (!att) { res.status(404).json({ error: 'Not found' }); return; }
+    res.type(att.mime);
+    fs.createReadStream(att.path).on('error', () => res.status(404).end()).pipe(res);
   });
 
   app.get('/api/usage', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {

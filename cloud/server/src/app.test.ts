@@ -46,6 +46,8 @@ describe('cloud/server app', () => {
 
   beforeEach(async () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-app-'));
+    // Keep per-tenant upload writes inside the throwaway temp dir, not ./data.
+    env.DATA_DIR = dir;
     store = new CloudStore(path.join(dir, 'cloud.db'));
     const app = createApp(env, store);
     server = http.createServer(app);
@@ -195,5 +197,112 @@ describe('cloud/server app', () => {
       await fetch(`${baseUrl}/api/conversations`, { headers: { Cookie: aliceCookie } })
     ).json()) as { conversations: unknown[] };
     expect(aliceConversations.conversations).toHaveLength(1);
+  });
+
+  // A 1×1 transparent PNG.
+  const TINY_PNG_BASE64 =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+
+  async function login(name: string): Promise<string> {
+    const res = await fetch(`${baseUrl}/auth/dev-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    return extractCookie(res, SESSION_COOKIE_NAME)!;
+  }
+
+  it('GET /api/skills returns the catalog without leaking system prompts', async () => {
+    const res = await fetch(`${baseUrl}/api/skills`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { skills: Array<Record<string, unknown>> };
+    expect(body.skills.length).toBeGreaterThan(0);
+    expect(body.skills[0]).toHaveProperty('id');
+    expect(body.skills[0]).toHaveProperty('name');
+    expect(body.skills[0]).not.toHaveProperty('systemPrompt');
+  });
+
+  it('memories: add, list, update, delete — scoped to the owner', async () => {
+    const alice = await login('Alice');
+    const bob = await login('Bob');
+
+    const added = (await (await fetch(`${baseUrl}/api/memories`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ content: 'Prefers TypeScript' }),
+    })).json()) as { memory: { id: string; content: string } };
+    expect(added.memory.content).toBe('Prefers TypeScript');
+
+    // Bob cannot see Alice's memory.
+    const bobList = (await (await fetch(`${baseUrl}/api/memories`, { headers: { Cookie: bob } })).json()) as { memories: unknown[] };
+    expect(bobList.memories).toEqual([]);
+
+    // Bob cannot update or delete Alice's memory.
+    const bobUpdate = await fetch(`${baseUrl}/api/memories/${added.memory.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: bob },
+      body: JSON.stringify({ content: 'hacked' }),
+    });
+    expect(bobUpdate.status).toBe(404);
+
+    const updated = (await (await fetch(`${baseUrl}/api/memories/${added.memory.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ content: 'Prefers Rust' }),
+    })).json()) as { memory: { content: string } };
+    expect(updated.memory.content).toBe('Prefers Rust');
+
+    const del = await fetch(`${baseUrl}/api/memories/${added.memory.id}`, { method: 'DELETE', headers: { Cookie: alice } });
+    expect(((await del.json()) as { ok: boolean }).ok).toBe(true);
+    const aliceList = (await (await fetch(`${baseUrl}/api/memories`, { headers: { Cookie: alice } })).json()) as { memories: unknown[] };
+    expect(aliceList.memories).toEqual([]);
+  });
+
+  it('POST /api/memories rejects blank and over-long content', async () => {
+    const alice = await login('Alice');
+    const blank = await fetch(`${baseUrl}/api/memories`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice }, body: JSON.stringify({ content: '   ' }),
+    });
+    expect(blank.status).toBe(400);
+    const tooLong = await fetch(`${baseUrl}/api/memories`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice }, body: JSON.stringify({ content: 'x'.repeat(2001) }),
+    });
+    expect(tooLong.status).toBe(400);
+  });
+
+  it('uploads: accepts a valid image, serves it back to the owner, and denies others', async () => {
+    const alice = await login('Alice');
+    const bob = await login('Bob');
+
+    const upload = await fetch(`${baseUrl}/api/uploads`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ mime: 'image/png', dataBase64: TINY_PNG_BASE64 }),
+    });
+    expect(upload.status).toBe(200);
+    const { id } = (await upload.json()) as { id: string };
+
+    // Owner can fetch the bytes back.
+    const owned = await fetch(`${baseUrl}/api/uploads/${id}`, { headers: { Cookie: alice } });
+    expect(owned.status).toBe(200);
+    expect(owned.headers.get('content-type')).toContain('image/png');
+
+    // A different user cannot.
+    const foreign = await fetch(`${baseUrl}/api/uploads/${id}`, { headers: { Cookie: bob } });
+    expect(foreign.status).toBe(404);
+  });
+
+  it('POST /api/uploads rejects a non-image mime and missing data', async () => {
+    const alice = await login('Alice');
+    const badMime = await fetch(`${baseUrl}/api/uploads`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ mime: 'application/pdf', dataBase64: TINY_PNG_BASE64 }),
+    });
+    expect(badMime.status).toBe(400);
+    const noData = await fetch(`${baseUrl}/api/uploads`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ mime: 'image/png' }),
+    });
+    expect(noData.status).toBe(400);
   });
 });

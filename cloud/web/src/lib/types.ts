@@ -29,6 +29,12 @@ export interface CloudConversation {
   updatedAt: number;
 }
 
+export interface MessageAttachment {
+  id: string;
+  mime: string;
+  kind: string;
+}
+
 export interface CloudMessage {
   id: string;
   conversationId: string;
@@ -37,4 +43,19 @@ export interface CloudMessage {
   model: string | null;
   costUsd: number | null;
   createdAt: number;
+  attachments?: MessageAttachment[];
+}
+
+export interface Skill {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export interface Memory {
+  id: string;
+  userId: string;
+  content: string;
+  createdAt: number;
+  updatedAt: number;
 }

@@ -11,7 +11,7 @@ import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import { PeerBus } from '../peer/bus.js';
 import { PermissionEscalator } from '../permissions/escalator.js';
-import { T3Worker } from './t3-worker.js';
+import { T3Worker, buildWorkerRules } from './t3-worker.js';
 
 function makeResult(
   content: string,
@@ -184,6 +184,43 @@ describe('T3Worker', () => {
       fromId: sender.id,
       content: { ready: true },
     });
+  });
+});
+
+describe('buildWorkerRules — tool-scoped guidance', () => {
+  // The complete built-in tool set (registry.ts registerDefaults).
+  const FULL = new Set([
+    'shell', 'file_read', 'file_write', 'file_edit', 'file_delete', 'file_list',
+    'git', 'github', 'image_analyze', 'pdf_create', 'run_code', 'peer_message',
+    'web_search', 'glob', 'grep', 'web_fetch',
+  ]);
+
+  it('with the full tool set, renders the original prompt verbatim (no behavior change for desktop)', () => {
+    const out = buildWorkerRules((name) => FULL.has(name));
+    expect(out).toBe(`You are a T3 Worker agent in the Cascade AI system. Your job is to execute a specific subtask completely and accurately.
+
+Rules:
+- Execute the subtask completely — do not stop partway through.
+- Use tools when needed. Ask for approval only when the tool registry requires it.
+- If the task asks for a file or artifact, you must actually create it in the workspace, verify that it exists, and inspect it before claiming success.
+- Use the "web_search" tool to find current information, documentation, news, or general web data.
+- Use the "pdf_create" tool for PDF requests.
+- Use the "run_code" tool for any file types (Excel, Zip, csv, etc.) or complex processing not covered by other tools. Always cleanup after code execution.
+- If you are not making meaningful progress, stop and escalate rather than looping or padding the response.
+- Use the "peer_message" tool to communicate with other T3 workers if your tasks have dependencies or shared state. You can send updates or wait for signals.
+- Return structured output that directly addresses the expected output specification.`);
+  });
+
+  it('with a web-only cloud tool set, omits guidance for tools that do not exist', () => {
+    const out = buildWorkerRules((name) => new Set(['web_search', 'web_fetch']).has(name));
+    // The one enabled tool is still described…
+    expect(out).toContain('- Use the "web_search" tool');
+    // …and the absent tools are NOT mentioned, so the model never wastes a
+    // turn calling a tool that isn't registered.
+    expect(out).not.toContain('run_code');
+    expect(out).not.toContain('pdf_create');
+    expect(out).not.toContain('peer_message');
+    expect(out).not.toContain('If the task asks for a file or artifact');
   });
 });
 

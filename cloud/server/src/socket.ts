@@ -14,11 +14,16 @@ interface CloudSocketData {
   userId: string;
 }
 
-type ChatRunAck = (res: { conversationId: string; output: string; costUsd: number } | { error: string }) => void;
+type ChatRunAck = (
+  res: { conversationId: string; output: string; costUsd: number; totalTokens: number } | { error: string },
+) => void;
 
 export function attachSocket(httpServer: HttpServer, env: CloudEnv, store: CloudStore): SocketIOServer {
   const io = new SocketIOServer(httpServer, {
     cors: { origin: env.WEB_ORIGIN, credentials: true },
+    // Images travel over REST (POST /api/uploads), so run payloads stay small;
+    // a modest ceiling keeps a malformed/oversized frame from exhausting memory.
+    maxHttpBufferSize: 2 * 1024 * 1024,
   });
 
   io.use((socket, next) => {

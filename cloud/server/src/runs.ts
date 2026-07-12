@@ -9,13 +9,17 @@
 // into another user's run.
 
 import { createCascade } from '#cascade-ai';
-import type { Cascade, CascadeConfig, ConversationMessage, ProviderConfig } from '#cascade-ai';
-import path from 'node:path';
+import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ProviderConfig } from '#cascade-ai';
+import fs from 'node:fs/promises';
 import type { Socket } from 'socket.io';
 import { z } from 'zod';
 import type { CloudEnv } from './env.js';
-import type { CloudStore } from './db.js';
+import type { CloudAttachment, CloudStore } from './db.js';
 import { beginRun, checkDailyLimit, todayKey } from './entitlements.js';
+import { getSkill } from './skills.js';
+import { tenantScratchDir } from './paths.js';
+
+export { tenantScratchDir };
 
 const MAX_HISTORY_MESSAGES = 20;
 const PROVIDER_TYPES = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama'] as const;
@@ -32,6 +36,11 @@ const optionalNonEmptyString = z.string().optional().transform((v) => (v === '' 
 const ChatRunPayloadSchema = z.object({
   conversationId: z.string().optional(),
   prompt: z.string().min(1).max(20_000),
+  // Ids of images the client already uploaded via POST /api/uploads. Loaded
+  // and ownership-checked server-side; unknown/foreign ids are ignored.
+  attachmentIds: z.array(z.string()).max(4).optional(),
+  // Selected prompt-preset ("skill"). Unknown ids resolve to no preset.
+  skillId: optionalNonEmptyString,
   providers: z
     .array(
       z.object({
@@ -52,13 +61,6 @@ export type ChatRunPayload = z.infer<typeof ChatRunPayloadSchema>;
 
 export function parseChatRunPayload(input: unknown): ChatRunPayload {
   return ChatRunPayloadSchema.parse(input);
-}
-
-export function tenantScratchDir(env: CloudEnv, userId: string): string {
-  // WorldStateDB and the audit log write under <workspacePath>/.cascade/ —
-  // a per-tenant directory keeps those files (and any dynamic-tool output)
-  // from crossing between tenants.
-  return path.join(path.resolve(env.DATA_DIR), 'tenants', userId);
 }
 
 export function buildCloudConfig(providers: ProviderConfig[], maxCostPerRunUsd: number): Partial<CascadeConfig> {
@@ -84,6 +86,24 @@ export interface ChatRunResult {
   conversationId: string;
   output: string;
   costUsd: number;
+  totalTokens: number;
+}
+
+const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+
+// Builds the run prompt from the user's text plus any selected skill preset
+// and their saved memories. Kept a pure function so it's unit-testable and so
+// the ORIGINAL user text (not this augmented version) is what gets persisted.
+export function buildRunPrompt(userPrompt: string, skillSystemPrompt: string | undefined, memories: string[]): string {
+  const preamble: string[] = [];
+  if (skillSystemPrompt) preamble.push(skillSystemPrompt);
+  if (memories.length) {
+    preamble.push(
+      'Persistent facts about the user (they asked you to remember these):\n' +
+        memories.map((m) => `- ${m}`).join('\n'),
+    );
+  }
+  return preamble.length ? `${preamble.join('\n\n')}\n\n---\n\n${userPrompt}` : userPrompt;
 }
 
 export interface ChatRunDeps {
@@ -123,7 +143,31 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     .slice(-MAX_HISTORY_MESSAGES)
     .map((m) => ({ role: m.role as ConversationMessage['role'], content: m.content }));
 
-  store.addMessage({ conversationId: conversation.id, role: 'user', content: payload.prompt });
+  // Load the images the client already uploaded (ownership-checked). Foreign
+  // or missing ids are skipped silently rather than failing the whole run.
+  const images: ImageAttachment[] = [];
+  const loadedAttachments: CloudAttachment[] = [];
+  for (const id of payload.attachmentIds ?? []) {
+    const att = store.getOwnedAttachment(id, userId);
+    if (!att || att.kind !== 'image' || !IMAGE_MIME_TYPES.has(att.mime)) continue;
+    try {
+      const bytes = await fs.readFile(att.path);
+      images.push({ type: 'base64', data: bytes.toString('base64'), mimeType: att.mime as ImageAttachment['mimeType'] });
+      loadedAttachments.push(att);
+    } catch {
+      /* file vanished from disk — skip it */
+    }
+  }
+
+  // Persist the user's ORIGINAL text (not the skill/memory-augmented prompt),
+  // then link its attachments so the transcript re-renders them on reload.
+  const userMessage = store.addMessage({ conversationId: conversation.id, role: 'user', content: payload.prompt });
+  for (const att of loadedAttachments) store.linkAttachmentToMessage(att.id, userId, userMessage.id);
+  if (payload.skillId !== undefined) store.setConversationSkill(conversation.id, userId, payload.skillId ?? null);
+
+  const skill = getSkill(payload.skillId);
+  const memories = store.listMemories(userId).map((m) => m.content);
+  const runPrompt = buildRunPrompt(payload.prompt, skill?.systemPrompt || undefined, memories);
 
   const scratchDir = tenantScratchDir(env, userId);
   const config = buildCloudConfig(payload.providers as ProviderConfig[], env.MAX_COST_PER_RUN_USD);
@@ -143,7 +187,12 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   cascade.on('plan:approval-required', onPlan);
 
   try {
-    const result = await cascade.run({ prompt: payload.prompt, conversationHistory, workspacePath: scratchDir });
+    const result = await cascade.run({
+      prompt: runPrompt,
+      images: images.length ? images : undefined,
+      conversationHistory,
+      workspacePath: scratchDir,
+    });
     store.addMessage({
       conversationId: conversation.id,
       role: 'assistant',
@@ -152,7 +201,12 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     });
     store.incrementUsage(userId, todayKey());
     socket.emit('session:complete', { conversationId: conversation.id, result });
-    return { conversationId: conversation.id, output: result.output, costUsd: result.usage.estimatedCostUsd };
+    return {
+      conversationId: conversation.id,
+      output: result.output,
+      costUsd: result.usage.estimatedCostUsd,
+      totalTokens: result.usage.totalTokens ?? 0,
+    };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     socket.emit('session:error', { conversationId: conversation.id, error: message });

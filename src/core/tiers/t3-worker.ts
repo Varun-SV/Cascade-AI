@@ -58,18 +58,35 @@ export class WorkerStallError extends Error {
   }
 }
 
-const T3_SYSTEM_PROMPT = `You are a T3 Worker agent in the Cascade AI system. Your job is to execute a specific subtask completely and accurately.
+// The worker's system prompt is assembled per-run from the tools that are
+// ACTUALLY registered, not a fixed list. When Cascade is embedded with a
+// restricted tool set (e.g. the hosted `cloud/server`, which enables only
+// web_search/web_fetch), instructing the model to "use run_code" or "create a
+// file in the workspace" just makes it call tools that don't exist and burn
+// turns on tool-not-found errors. With the full desktop tool set every line
+// below renders, so the prompt is byte-identical to the previous static one.
+export function buildWorkerRules(has: (toolName: string) => boolean): string {
+  const canWriteFiles = has('file_write') || has('file_edit') || has('run_code');
+  const rules: Array<string | false> = [
+    '- Execute the subtask completely — do not stop partway through.',
+    '- Use tools when needed. Ask for approval only when the tool registry requires it.',
+    canWriteFiles &&
+      '- If the task asks for a file or artifact, you must actually create it in the workspace, verify that it exists, and inspect it before claiming success.',
+    has('web_search') &&
+      '- Use the "web_search" tool to find current information, documentation, news, or general web data.',
+    has('pdf_create') && '- Use the "pdf_create" tool for PDF requests.',
+    has('run_code') &&
+      '- Use the "run_code" tool for any file types (Excel, Zip, csv, etc.) or complex processing not covered by other tools. Always cleanup after code execution.',
+    '- If you are not making meaningful progress, stop and escalate rather than looping or padding the response.',
+    has('peer_message') &&
+      '- Use the "peer_message" tool to communicate with other T3 workers if your tasks have dependencies or shared state. You can send updates or wait for signals.',
+    '- Return structured output that directly addresses the expected output specification.',
+  ];
+  return `You are a T3 Worker agent in the Cascade AI system. Your job is to execute a specific subtask completely and accurately.
 
 Rules:
-- Execute the subtask completely — do not stop partway through.
-- Use tools when needed. Ask for approval only when the tool registry requires it.
-- If the task asks for a file or artifact, you must actually create it in the workspace, verify that it exists, and inspect it before claiming success.
-- Use the "web_search" tool to find current information, documentation, news, or general web data.
-- Use the "pdf_create" tool for PDF requests.
-- Use the "run_code" tool for any file types (Excel, Zip, csv, etc.) or complex processing not covered by other tools. Always cleanup after code execution.
-- If you are not making meaningful progress, stop and escalate rather than looping or padding the response.
-- Use the "peer_message" tool to communicate with other T3 workers if your tasks have dependencies or shared state. You can send updates or wait for signals.
-- Return structured output that directly addresses the expected output specification.`;
+${rules.filter((r): r is string => r !== false).join('\n')}`;
+}
 
 export class T3Worker extends BaseTier {
   private router: CascadeRouter;
@@ -1110,7 +1127,8 @@ Correct the issues and provide an improved version that addresses all failures.`
   }
 
   private buildSystemPrompt(assignment: T2ToT3Assignment): string {
-    return `${T3_SYSTEM_PROMPT}
+    const available = new Set(this.toolRegistry.getToolDefinitions().map((t) => t.name));
+    return `${buildWorkerRules((name) => available.has(name))}
 
 Your subtask:
 - Title: ${assignment.subtaskTitle}

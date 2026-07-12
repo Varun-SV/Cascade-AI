@@ -45,7 +45,21 @@ export function isStrongKeywordOverlap(a: string[] = [], b: string[] = []): bool
   return shared.length >= 3 && ratio >= 0.6;
 }
 
-const T1_SYSTEM_PROMPT = `You are T1, the Administrator in the Cascade AI orchestration system.
+// Assembled from the registered tools, not fixed: the artifact/tool lines
+// below only appear when the matching tool actually exists. With the full
+// desktop tool set every line renders (byte-identical to the previous static
+// prompt); a restricted embed (e.g. hosted cloud/server, web tools only)
+// drops them so T1 never plans steps around tools the workers can't call.
+export function buildT1SystemPrompt(has: (toolName: string) => boolean): string {
+  const canWriteArtifacts = has('file_write') || has('file_edit') || has('run_code') || has('pdf_create');
+  const rules: Array<string | false> = [
+    '- Simple → 1 T3, Moderate → 2-3 T2s, Complex → 3-5 T2s, Highly Complex → 5+ T2s',
+    '- Return ONLY valid JSON — no other text',
+    has('pdf_create') && '- If the user asks for a PDF, explicitly use the "pdf_create" tool',
+    has('run_code') && '- If the user asks for Excel/Zip/complex processing, use "run_code" with Python or Node.js',
+    canWriteArtifacts && '- Ensure every plan includes explicit creation and verification steps for requested artifacts',
+  ];
+  return `You are T1, the Administrator in the Cascade AI orchestration system.
 
 Your responsibilities:
 1. Analyze task complexity: Simple | Moderate | Complex | Highly Complex
@@ -61,11 +75,7 @@ The directory must appear verbatim in every subtask that creates or reads a file
 NEVER omit the directory prefix when decomposing into subtasks.
 
 Rules:
-- Simple → 1 T3, Moderate → 2-3 T2s, Complex → 3-5 T2s, Highly Complex → 5+ T2s
-- Return ONLY valid JSON — no other text
-- If the user asks for a PDF, explicitly use the "pdf_create" tool
-- If the user asks for Excel/Zip/complex processing, use "run_code" with Python or Node.js
-- Ensure every plan includes explicit creation and verification steps for requested artifacts
+${rules.filter((r): r is string => r !== false).join('\n')}
 
 DEPENDENCY GUIDANCE:
 - Leave "dependsOn" empty [] for sections that are independent (e.g. writing different files, researching different topics).
@@ -77,6 +87,7 @@ QUALITY RULES:
 - Each section must have a clear, testable "expectedOutput" so T2 knows when it is done.
 - Do NOT create trivial sections that only move files or print summaries — fold those into adjacent sections.
 - If the plan would naturally produce fewer than 2 independent sections, prefer Moderate routing (single T2).`;
+}
 
 export interface TaskPlan {
   complexity: TaskComplexity;
@@ -504,10 +515,11 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
 - "contextBrief": 1-3 short sentences with the ONLY background the worker needs. It sees nothing else about the task, so make the brief self-sufficient — but never pad it.
 - RIGHT-SIZE the plan: use the FEWEST sections and workers that fully cover the task. One section with 1-2 subtasks is the CORRECT plan for a small task; padding a plan with filler sections wastes the user's money.`;
 
+    const available = new Set(this.toolRegistry.getToolDefinitions().map((t) => t.name));
     const messages: ConversationMessage[] = [{ role: 'user', content: decompositionPrompt }];
     const result = await this.router.generate('T1', {
       messages,
-      systemPrompt: this.systemPromptOverride + T1_SYSTEM_PROMPT,
+      systemPrompt: this.systemPromptOverride + buildT1SystemPrompt((name) => available.has(name)),
       maxTokens: 4000,
     });
 

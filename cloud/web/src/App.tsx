@@ -3,25 +3,30 @@ import clsx from 'clsx';
 import LoginGate from './components/LoginGate.js';
 import Modal from './components/Modal.js';
 import UpgradeModal from './components/UpgradeModal.js';
+import MemoryModal from './components/MemoryModal.js';
 import ConversationSidebar from './chat/ConversationSidebar.js';
 import ChatPanel from './chat/ChatPanel.js';
 import ChatTopBar from './chat/ChatTopBar.js';
 import KeyVault from './keys/KeyVault.js';
 import { useChatSession } from './chat/useChatSession.js';
 import { loadKeys, saveKeys } from './keys/store.js';
-import { fetchConfig, fetchMe, getMessages, listConversations, logout, type CloudConfig } from './lib/api.js';
+import { fetchConfig, fetchMe, fetchSkills, getMessages, listConversations, logout, type CloudConfig } from './lib/api.js';
 import { closeSocket, getSocket } from './lib/socket.js';
-import type { CloudConversation, CloudUser, ProviderConfig } from './lib/types.js';
+import type { CloudConversation, CloudUser, ProviderConfig, Skill } from './lib/types.js';
 
 const SIDEBAR_OPEN_KEY = 'cascade-cloud-sidebar-open';
+const DEFAULT_SKILL = 'general';
 
 export default function App() {
   const [config, setConfig] = useState<CloudConfig | null>(null);
   const [user, setUser] = useState<CloudUser | null | undefined>(undefined);
   const [conversations, setConversations] = useState<CloudConversation[]>([]);
   const [providers, setProviders] = useState<ProviderConfig[]>(() => loadKeys());
+  const [skills, setSkills] = useState<Skill[]>([]);
+  const [skillId, setSkillId] = useState<string>(DEFAULT_SKILL);
   const [showVault, setShowVault] = useState(false);
   const [showUpgrade, setShowUpgrade] = useState(false);
+  const [showMemory, setShowMemory] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     const stored = localStorage.getItem(SIDEBAR_OPEN_KEY);
     // No explicit preference yet: default open on desktop (today's always-visible
@@ -42,6 +47,7 @@ export default function App() {
     fetchConfig()
       .then(setConfig)
       .catch(() => setConfig({ githubEnabled: false, googleEnabled: false, googleClientId: null, devLoginEnabled: false }));
+    fetchSkills().then((r) => setSkills(r.skills)).catch(() => setSkills([]));
   }, []);
 
   const refreshMe = useCallback(() => {
@@ -59,7 +65,7 @@ export default function App() {
   }, [user, refreshConversations]);
 
   const socket = user ? getSocket() : null;
-  const chat = useChatSession(socket, providers);
+  const chat = useChatSession(socket, providers, skillId);
 
   // A run may have created a new conversation or renamed one — refresh the
   // sidebar once the run settles (covers the initial idle mount too, which
@@ -74,9 +80,18 @@ export default function App() {
   }
 
   async function selectConversation(id: string) {
-    const { messages } = await getMessages(id);
+    const { conversation, messages } = await getMessages(id);
     chat.setConversationId(id);
-    chat.loadMessages(messages.map((m) => ({ id: m.id, role: m.role === 'user' ? 'user' : 'assistant', content: m.content })));
+    if (conversation?.skillId) setSkillId(conversation.skillId);
+    chat.loadMessages(
+      messages.map((m) => ({
+        id: m.id,
+        role: m.role === 'user' ? 'user' : 'assistant',
+        content: m.content,
+        costUsd: m.costUsd,
+        attachments: m.attachments?.map((a) => ({ id: a.id, mime: a.mime })),
+      })),
+    );
   }
 
   function newChat() {
@@ -114,10 +129,13 @@ export default function App() {
             user={user}
             conversations={conversations}
             activeConversationId={chat.conversationId}
+            lastTokens={chat.lastTokens}
+            usageRefreshSignal={chat.busy}
             onSelect={selectConversation}
             onNewChat={newChat}
             onOpenKeyVault={() => setShowVault(true)}
             onOpenUpgrade={() => setShowUpgrade(true)}
+            onOpenMemory={() => setShowMemory(true)}
             onLogout={handleLogout}
           />
         </div>
@@ -137,8 +155,13 @@ export default function App() {
             messages={chat.messages}
             busy={chat.busy}
             error={chat.error}
+            status={chat.status}
             hasProviders={providers.length > 0}
+            skills={skills}
+            skillId={skillId}
+            onSkillChange={setSkillId}
             onSend={chat.send}
+            onRegenerate={chat.regenerate}
           />
         </div>
       </div>
@@ -159,6 +182,8 @@ export default function App() {
           <UpgradeModal />
         </Modal>
       )}
+
+      {showMemory && <MemoryModal onClose={() => setShowMemory(false)} />}
     </div>
   );
 }

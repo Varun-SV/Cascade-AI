@@ -9,3 +9,27 @@ html, body, #root {
 body {
   @apply bg-ink-950 text-ink-100;
 }
+
+/* Compact self-contained highlight.js dark theme (rehype-highlight adds the
+   .hljs-* classes). Inlined instead of importing highlight.js/styles/*.css so
+   the bundle has no external CSS dependency to resolve. */
+.hljs { color: #e4e4e9; background: transparent; }
+.hljs-comment, .hljs-quote { color: #6b6b76; font-style: italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-section, .hljs-doctag, .hljs-type, .hljs-name, .hljs-strong { color: #ff8a3d; }
+.hljs-string, .hljs-regexp, .hljs-addition, .hljs-attribute, .hljs-meta .hljs-string { color: #3ecf8e; }
+.hljs-number, .hljs-symbol, .hljs-bullet, .hljs-template-variable, .hljs-variable, .hljs-params { color: #ffb56b; }
+.hljs-title, .hljs-title.function_, .hljs-built_in, .hljs-attr { color: #4f9dff; }
+.hljs-tag, .hljs-selector-id, .hljs-selector-class, .hljs-keyword.hljs-property { color: #f2c94c; }
+.hljs-meta, .hljs-deletion { color: #a8a8b3; }
+.hljs-emphasis { font-style: italic; }
+
+/* Keep react-markdown's prose code blocks flush with our custom <pre> chrome. */
+.prose pre { background: transparent; padding: 0; margin: 0; }
+.prose :where(code):not(:where(pre code)) {
+  background: #1c1c20;
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-weight: 400;
+}
+.prose :where(code):not(:where(pre code))::before,
+.prose :where(code):not(:where(pre code))::after { content: none; }
