@@ -5,6 +5,53 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-07-12
+
+Cascade Cloud — a hosted, ChatGPT/Claude.ai-style chat experience at
+`app.cascadeai.in`, reachable from the landing page. Two new workspaces,
+`cloud/server` and `cloud/web`, ship the first version of this.
+
+### Added
+- **Sign in with GitHub or Google.** Standard authorization-code OAuth (no
+  passport dependency); a CSRF `state` cookie guards the callback. A
+  `CLOUD_DEV_BYPASS` dev-only login shortcut is available for local testing
+  and is refused outside a real deployment.
+- **Bring-your-own-key chat, with keys that never touch our server.** Every
+  provider (Anthropic, OpenAI, Gemini, Azure, OpenAI-compatible) can be
+  configured in the browser's KeyVault (localStorage-only) and travels with
+  each run request only — `createCascade` (never `runCascade`, which would
+  merge machine-global credentials) runs the T1/T2/T3 orchestration scoped
+  to safe tools only (`web_search`/`web_fetch` — no shell/file/git exist for
+  a hosted run, via the new `tools.enabledTools` core allowlist) and a
+  per-tenant scratch directory, streaming `stream:token`/`tier:status`
+  events back over an authenticated socket.
+- **Google Drive key sync (opt-in).** For Google-signed-in users, keys can
+  be encrypted client-side (WebCrypto AES-GCM, PBKDF2 over a
+  user-chosen passphrase — never sent anywhere) and synced through the
+  `drive.appdata` hidden folder via a client-side-only Google Identity
+  Services consent flow. The server and Google Drive itself only ever see
+  ciphertext.
+- **Entitlements.** Per-plan daily run caps and concurrent-run limits (free:
+  20/day, 1 concurrent), checked before a run ever touches the database, plus
+  an "Upgrade" panel showing today's usage and a Pro plan comparison
+  ("coming soon" — Razorpay Subscriptions is a fast-follow, not in this
+  release).
+- **Landing page CTA.** The hero gains a "Launch Cascade Web" button to
+  `https://app.cascadeai.in`.
+
+### Fixed
+- **`.github/workflows/static.yml` was publishing the entire repository to
+  GitHub Pages**, not just the landing page. It now stages `index.html` and
+  a `cascadeai.in` CNAME only.
+
+### Core (SDK)
+- **`tools.enabledTools?: string[]` allowlist** (`ToolsConfig`) — the one
+  true core change the whole hosted flow depends on. When set, only the
+  listed built-in tools are registered at all (shell/file/git have no other
+  off-switch — `requireApprovalFor` still just gates them behind a click).
+  Undefined preserves the existing full-tool-set default for every other
+  consumer.
+
 ## [0.19.1] - 2026-07-12
 
 ### Fixed
