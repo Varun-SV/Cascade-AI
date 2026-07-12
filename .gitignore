@@ -51,6 +51,10 @@ app/mockups/out/
 cloud/server/data/
 cloud/server/e2e-data/
 
+# Generated symlinks pointing at the root workspace's build output
+# (recreated by scripts/link-cascade-ai.mjs via predev/prebuild)
+cloud/server/vendor/
+
 # Playwright artifacts (cloud/web e2e)
 cloud/web/test-results/
 cloud/web/playwright-report/

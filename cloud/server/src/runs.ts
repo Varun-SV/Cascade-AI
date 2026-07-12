@@ -8,8 +8,8 @@
 // On a shared multi-tenant server that would leak one user's provider keys
 // into another user's run.
 
-import { createCascade } from 'cascade-ai';
-import type { Cascade, CascadeConfig, ConversationMessage, ProviderConfig } from 'cascade-ai';
+import { createCascade } from '#cascade-ai';
+import type { Cascade, CascadeConfig, ConversationMessage, ProviderConfig } from '#cascade-ai';
 import path from 'node:path';
 import type { Socket } from 'socket.io';
 import { z } from 'zod';

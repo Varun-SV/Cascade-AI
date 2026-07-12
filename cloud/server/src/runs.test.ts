@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { ToolRegistry } from 'cascade-ai';
+import { ToolRegistry } from '#cascade-ai';
 import { buildCloudConfig, parseChatRunPayload, runChatTurn, tenantScratchDir } from './runs.js';
 import { CloudStore } from './db.js';
 import type { CloudEnv } from './env.js';

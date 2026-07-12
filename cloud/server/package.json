@@ -7,10 +7,13 @@
   "private": true,
   "type": "module",
   "main": "dist/index.js",
+  "imports": {
+    "#cascade-ai": "./vendor/cascade-ai.js"
+  },
   "scripts": {
-    "predev": "npm --prefix ../.. run build:cli",
+    "predev": "npm --prefix ../.. run build:cli && node scripts/link-cascade-ai.mjs",
     "dev": "tsx watch src/index.ts",
-    "prebuild": "npm --prefix ../.. run build:cli",
+    "prebuild": "npm --prefix ../.. run build:cli && node scripts/link-cascade-ai.mjs",
     "build": "tsup",
     "start": "node dist/index.js",
     "test": "vitest run",
@@ -18,7 +21,6 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",
-    "cascade-ai": "file:../..",
     "dotenv": "^16.4.0",
     "express": "^4.21.0",
     "express-rate-limit": "^7.4.0",
