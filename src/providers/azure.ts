@@ -64,14 +64,34 @@ export class AzureOpenAIProvider extends OpenAIProvider {
   }
 
   async isAvailable(): Promise<boolean> {
+    const params = {
+      model: this.model.id,
+      messages: [{ role: 'user' as const, content: 'ping' }],
+      max_tokens: 1,
+    };
     try {
-      await this.client.chat.completions.create({
-        model: this.model.id,
-        messages: [{ role: 'user', content: 'ping' }],
-        max_tokens: 1,
-      });
+      await this.client.chat.completions.create(params);
       return true;
-    } catch {
+    } catch (err: any) {
+      // Reasoning-family deployments (o1/o3/gpt-5.x-class) reject `max_tokens`
+      // and demand `max_completion_tokens` — the same quirk generateStream()
+      // already retries around. Without this fallback, a perfectly reachable
+      // reasoning deployment fails THIS ping (not real generation), gets
+      // marked provider-wide unavailable, and every explicit "azure:<deploy>"
+      // override then errors as "not available or unreachable" even though a
+      // real run would have worked fine.
+      if (err?.message && String(err.message).includes('max_completion_tokens')) {
+        try {
+          await this.client.chat.completions.create({
+            model: this.model.id,
+            messages: [{ role: 'user', content: 'ping' }],
+            max_completion_tokens: 1,
+          } as any);
+          return true;
+        } catch {
+          return false;
+        }
+      }
       return false;
     }
   }
