@@ -59,10 +59,10 @@ export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClien
   }
 
   return (
-    <div className="flex flex-col gap-3 p-4 text-sm text-cascade-100">
-      <div className="flex items-center gap-2 text-cascade-200">
-        <ShieldCheck size={16} className="text-cascade-400" />
-        <p className="text-xs leading-snug text-cascade-300">
+    <div className="flex flex-col gap-3 p-4 text-sm text-ink-100">
+      <div className="flex items-center gap-2 text-ink-200">
+        <ShieldCheck size={16} className="text-ink-400" />
+        <p className="text-xs leading-snug text-ink-300">
           Your API keys stay in this browser's storage and are sent only with each run you start —
           Cascade Cloud never stores them on our servers.
         </p>
@@ -70,24 +70,24 @@ export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClien
 
       <div className="flex flex-col gap-2">
         {keys.length === 0 && (
-          <p className="rounded-md border border-dashed border-cascade-800 px-3 py-4 text-center text-xs text-cascade-400">
+          <p className="rounded-md border border-dashed border-ink-700 px-3 py-4 text-center text-xs text-ink-400">
             No providers configured yet. Add one to start chatting.
           </p>
         )}
         {keys.map((k, i) => (
-          <div key={i} className="flex items-center justify-between rounded-md bg-cascade-950/60 px-3 py-2">
+          <div key={i} className="flex items-center justify-between rounded-md bg-ink-800 px-3 py-2">
             <div className="flex items-center gap-2">
-              <KeyRound size={14} className="text-cascade-400" />
+              <KeyRound size={14} className="text-ink-400" />
               <div>
-                <div className="font-medium text-cascade-100">{labelFor(k)}</div>
-                <div className="text-xs text-cascade-400">{summaryFor(k)}</div>
+                <div className="font-medium text-ink-100">{labelFor(k)}</div>
+                <div className="text-xs text-ink-400">{summaryFor(k)}</div>
               </div>
             </div>
             <button
               type="button"
               aria-label={`Remove ${labelFor(k)}`}
               onClick={() => removeKey(i)}
-              className="rounded p-1 text-cascade-400 hover:bg-cascade-900 hover:text-red-400"
+              className="rounded p-1 text-ink-400 hover:bg-ink-700 hover:text-danger-500"
             >
               <Trash2 size={14} />
             </button>
@@ -99,18 +99,18 @@ export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClien
         <button
           type="button"
           onClick={() => setAdding(true)}
-          className="flex items-center justify-center gap-1 rounded-md border border-cascade-700 px-3 py-2 text-xs font-medium text-cascade-200 hover:bg-cascade-900"
+          className="flex items-center justify-center gap-1 rounded-md border border-ink-700 px-3 py-2 text-xs font-medium text-ink-200 hover:bg-ink-800"
         >
           <Plus size={14} /> Add provider
         </button>
       )}
 
       {adding && (
-        <div className="flex flex-col gap-2 rounded-md border border-cascade-800 p-3">
+        <div className="flex flex-col gap-2 rounded-md border border-ink-700 p-3">
           <label className="flex flex-col gap-1">
-            <span className="text-xs text-cascade-400">Provider</span>
+            <span className="text-xs text-ink-400">Provider</span>
             <select
-              className="rounded bg-cascade-950 px-2 py-1.5 text-sm"
+              className="rounded border border-ink-700 bg-ink-950 px-2 py-1.5 text-sm text-ink-100"
               value={draft.type}
               onChange={(e) => setDraft({ type: e.target.value as ProviderConfig['type'] })}
             >
@@ -122,10 +122,10 @@ export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClien
 
           {draft.type !== 'openai-compatible' && (
             <label className="flex flex-col gap-1">
-              <span className="text-xs text-cascade-400">API key</span>
+              <span className="text-xs text-ink-400">API key</span>
               <input
                 type="password"
-                className="rounded bg-cascade-950 px-2 py-1.5 text-sm"
+                className="rounded border border-ink-700 bg-ink-950 px-2 py-1.5 text-sm text-ink-100"
                 value={draft.apiKey ?? ''}
                 onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))}
                 placeholder="sk-..."
@@ -135,11 +135,11 @@ export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClien
 
           {(draft.type === 'azure' || draft.type === 'openai-compatible') && (
             <label className="flex flex-col gap-1">
-              <span className="text-xs text-cascade-400">
+              <span className="text-xs text-ink-400">
                 {draft.type === 'azure' ? 'Azure endpoint URL' : 'Endpoint base URL'}
               </span>
               <input
-                className="rounded bg-cascade-950 px-2 py-1.5 text-sm"
+                className="rounded border border-ink-700 bg-ink-950 px-2 py-1.5 text-sm text-ink-100"
                 value={draft.baseUrl ?? ''}
                 onChange={(e) => setDraft((d) => ({ ...d, baseUrl: e.target.value }))}
                 placeholder="https://..."
@@ -149,10 +149,10 @@ export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClien
 
           {draft.type === 'openai-compatible' && (
             <label className="flex flex-col gap-1">
-              <span className="text-xs text-cascade-400">API key (optional)</span>
+              <span className="text-xs text-ink-400">API key (optional)</span>
               <input
                 type="password"
-                className="rounded bg-cascade-950 px-2 py-1.5 text-sm"
+                className="rounded border border-ink-700 bg-ink-950 px-2 py-1.5 text-sm text-ink-100"
                 value={draft.apiKey ?? ''}
                 onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))}
               />
@@ -162,17 +162,17 @@ export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClien
           {draft.type === 'azure' && (
             <>
               <label className="flex flex-col gap-1">
-                <span className="text-xs text-cascade-400">Deployment name</span>
+                <span className="text-xs text-ink-400">Deployment name</span>
                 <input
-                  className="rounded bg-cascade-950 px-2 py-1.5 text-sm"
+                  className="rounded border border-ink-700 bg-ink-950 px-2 py-1.5 text-sm text-ink-100"
                   value={draft.deploymentName ?? ''}
                   onChange={(e) => setDraft((d) => ({ ...d, deploymentName: e.target.value }))}
                 />
               </label>
               <label className="flex flex-col gap-1">
-                <span className="text-xs text-cascade-400">API version (optional)</span>
+                <span className="text-xs text-ink-400">API version (optional)</span>
                 <input
-                  className="rounded bg-cascade-950 px-2 py-1.5 text-sm"
+                  className="rounded border border-ink-700 bg-ink-950 px-2 py-1.5 text-sm text-ink-100"
                   value={draft.apiVersion ?? ''}
                   onChange={(e) => setDraft((d) => ({ ...d, apiVersion: e.target.value }))}
                   placeholder="2024-08-01-preview"
@@ -183,9 +183,9 @@ export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClien
 
           {(draft.type === 'openai' || draft.type === 'anthropic' || draft.type === 'gemini' || draft.type === 'openai-compatible') && (
             <label className="flex flex-col gap-1">
-              <span className="text-xs text-cascade-400">Model (optional — leave blank for auto)</span>
+              <span className="text-xs text-ink-400">Model (optional — leave blank for auto)</span>
               <input
-                className="rounded bg-cascade-950 px-2 py-1.5 text-sm"
+                className="rounded border border-ink-700 bg-ink-950 px-2 py-1.5 text-sm text-ink-100"
                 value={draft.model ?? ''}
                 onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
               />
@@ -196,14 +196,14 @@ export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClien
             <button
               type="button"
               onClick={addKey}
-              className="flex-1 rounded-md bg-cascade-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-cascade-500"
+              className="flex-1 rounded-md bg-accent-500 px-3 py-1.5 text-xs font-semibold text-ink-950 hover:bg-accent-400"
             >
               Save
             </button>
             <button
               type="button"
               onClick={() => { setAdding(false); setDraft({ type: 'anthropic' }); }}
-              className="rounded-md border border-cascade-700 px-3 py-1.5 text-xs text-cascade-300 hover:bg-cascade-900"
+              className="rounded-md border border-ink-700 px-3 py-1.5 text-xs text-ink-200 hover:bg-ink-800"
             >
               Cancel
             </button>

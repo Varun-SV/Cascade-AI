@@ -1,3 +1,4 @@
+import clsx from 'clsx';
 import { MessageSquarePlus, KeyRound, LogOut, Crown } from 'lucide-react';
 import type { CloudConversation, CloudUser } from '../lib/types.js';
 
@@ -16,12 +17,12 @@ export default function ConversationSidebar({
   user, conversations, activeConversationId, onSelect, onNewChat, onOpenKeyVault, onOpenUpgrade, onLogout,
 }: Props) {
   return (
-    <div className="flex h-full w-64 flex-col border-r border-cascade-900 bg-cascade-950/40">
+    <div className="flex h-full w-64 flex-col bg-ink-900">
       <div className="p-3">
         <button
           type="button"
           onClick={onNewChat}
-          className="flex w-full items-center gap-2 rounded-md border border-cascade-700 px-3 py-2 text-sm text-cascade-100 hover:bg-cascade-900"
+          className="flex w-full items-center gap-2 rounded-md border border-ink-700 px-3 py-2 text-sm text-ink-100 hover:bg-ink-800"
         >
           <MessageSquarePlus size={16} /> New chat
         </button>
@@ -33,10 +34,12 @@ export default function ConversationSidebar({
             key={c.id}
             type="button"
             onClick={() => onSelect(c.id)}
-            className={
-              'mb-1 block w-full truncate rounded-md px-3 py-2 text-left text-sm ' +
-              (c.id === activeConversationId ? 'bg-cascade-800 text-white' : 'text-cascade-300 hover:bg-cascade-900')
-            }
+            className={clsx(
+              'mb-1 block w-full truncate border-l-2 px-3 py-2 text-left text-sm',
+              c.id === activeConversationId
+                ? 'border-accent-500 bg-ink-800 text-ink-50'
+                : 'border-transparent text-ink-200 hover:bg-ink-800',
+            )}
             title={c.title ?? 'Untitled conversation'}
           >
             {c.title ?? 'Untitled conversation'}
@@ -44,24 +47,24 @@ export default function ConversationSidebar({
         ))}
       </div>
 
-      <div className="flex flex-col gap-1 border-t border-cascade-900 p-3">
+      <div className="flex flex-col gap-1 border-t border-ink-700 p-3">
         <button
           type="button"
           onClick={onOpenKeyVault}
-          className="flex items-center gap-2 rounded-md px-3 py-2 text-sm text-cascade-300 hover:bg-cascade-900"
+          className="flex items-center gap-2 rounded-md px-3 py-2 text-sm text-ink-200 hover:bg-ink-800"
         >
           <KeyRound size={16} /> API keys
         </button>
         <button
           type="button"
           onClick={onOpenUpgrade}
-          className="flex items-center gap-2 rounded-md px-3 py-2 text-sm text-cascade-300 hover:bg-cascade-900"
+          className="flex items-center gap-2 rounded-md px-3 py-2 text-sm text-ink-200 hover:bg-ink-800"
         >
           <Crown size={16} /> Upgrade
         </button>
-        <div className="flex items-center justify-between rounded-md px-3 py-2 text-sm text-cascade-300">
+        <div className="flex items-center justify-between rounded-md px-3 py-2 text-sm text-ink-200">
           <span className="truncate">{user.name ?? user.email ?? 'Signed in'}</span>
-          <button type="button" aria-label="Log out" onClick={onLogout} className="text-cascade-400 hover:text-red-400">
+          <button type="button" aria-label="Log out" onClick={onLogout} className="text-ink-400 hover:text-danger-500">
             <LogOut size={16} />
           </button>
         </div>

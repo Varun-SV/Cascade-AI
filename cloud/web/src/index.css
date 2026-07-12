@@ -7,6 +7,5 @@ html, body, #root {
 }
 
 body {
-  background-color: #0b0a12;
-  color: #e8e6f0;
+  @apply bg-ink-950 text-ink-100;
 }

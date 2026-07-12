@@ -1,14 +1,19 @@
 import { useCallback, useEffect, useState } from 'react';
+import clsx from 'clsx';
 import LoginGate from './components/LoginGate.js';
+import Modal from './components/Modal.js';
 import UpgradeModal from './components/UpgradeModal.js';
 import ConversationSidebar from './chat/ConversationSidebar.js';
 import ChatPanel from './chat/ChatPanel.js';
+import ChatTopBar from './chat/ChatTopBar.js';
 import KeyVault from './keys/KeyVault.js';
 import { useChatSession } from './chat/useChatSession.js';
 import { loadKeys, saveKeys } from './keys/store.js';
 import { fetchConfig, fetchMe, getMessages, listConversations, logout, type CloudConfig } from './lib/api.js';
 import { closeSocket, getSocket } from './lib/socket.js';
 import type { CloudConversation, CloudUser, ProviderConfig } from './lib/types.js';
+
+const SIDEBAR_OPEN_KEY = 'cascade-cloud-sidebar-open';
 
 export default function App() {
   const [config, setConfig] = useState<CloudConfig | null>(null);
@@ -17,6 +22,21 @@ export default function App() {
   const [providers, setProviders] = useState<ProviderConfig[]>(() => loadKeys());
   const [showVault, setShowVault] = useState(false);
   const [showUpgrade, setShowUpgrade] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    const stored = localStorage.getItem(SIDEBAR_OPEN_KEY);
+    // No explicit preference yet: default open on desktop (today's always-visible
+    // sidebar), closed on narrow viewports (a drawer covering the whole screen
+    // on first mobile visit is a worse default than starting collapsed).
+    return stored !== null ? stored !== '0' : window.innerWidth >= 768;
+  });
+
+  function toggleSidebar() {
+    setSidebarOpen((open) => {
+      const next = !open;
+      localStorage.setItem(SIDEBAR_OPEN_KEY, next ? '1' : '0');
+      return next;
+    });
+  }
 
   useEffect(() => {
     fetchConfig()
@@ -72,88 +92,72 @@ export default function App() {
   }
 
   if (user === undefined || config === null) {
-    return <div className="flex h-screen items-center justify-center bg-cascade-950 text-cascade-400">Loading…</div>;
+    return <div className="flex h-screen items-center justify-center bg-ink-950 text-ink-400">Loading…</div>;
   }
 
   if (!user) {
     return <LoginGate config={config} onDevLogin={refreshMe} />;
   }
 
+  const activeTitle = conversations.find((c) => c.id === chat.conversationId)?.title ?? undefined;
+
   return (
-    <div className="flex h-screen bg-cascade-950">
-      <ConversationSidebar
-        user={user}
-        conversations={conversations}
-        activeConversationId={chat.conversationId}
-        onSelect={selectConversation}
-        onNewChat={newChat}
-        onOpenKeyVault={() => setShowVault(true)}
-        onOpenUpgrade={() => setShowUpgrade(true)}
-        onLogout={handleLogout}
-      />
-      <div className="min-w-0 flex-1">
-        <ChatPanel
-          messages={chat.messages}
-          busy={chat.busy}
-          error={chat.error}
-          hasProviders={providers.length > 0}
-          onSend={chat.send}
+    <div className="flex h-screen overflow-hidden bg-ink-950">
+      <div
+        className={clsx(
+          'fixed inset-y-0 left-0 z-30 w-64 shrink-0 overflow-hidden border-r border-ink-700 bg-ink-900 transition-all duration-200 md:relative md:translate-x-0',
+          sidebarOpen ? 'translate-x-0 md:w-64' : '-translate-x-full md:w-0 md:border-r-0',
+        )}
+      >
+        <div className="h-full w-64">
+          <ConversationSidebar
+            user={user}
+            conversations={conversations}
+            activeConversationId={chat.conversationId}
+            onSelect={selectConversation}
+            onNewChat={newChat}
+            onOpenKeyVault={() => setShowVault(true)}
+            onOpenUpgrade={() => setShowUpgrade(true)}
+            onLogout={handleLogout}
+          />
+        </div>
+      </div>
+
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 z-20 bg-black/60 backdrop-blur-sm md:hidden"
+          onClick={() => setSidebarOpen(false)}
         />
+      )}
+
+      <div className="flex min-w-0 flex-1 flex-col">
+        <ChatTopBar title={activeTitle} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+        <div className="min-h-0 flex-1">
+          <ChatPanel
+            messages={chat.messages}
+            busy={chat.busy}
+            error={chat.error}
+            hasProviders={providers.length > 0}
+            onSend={chat.send}
+          />
+        </div>
       </div>
 
       {showVault && (
-        <div
-          className="fixed inset-0 z-10 flex items-center justify-center bg-black/60"
-          onClick={() => setShowVault(false)}
-        >
-          <div
-            className="w-full max-w-md rounded-xl border border-cascade-800 bg-cascade-950"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between border-b border-cascade-900 px-4 py-3">
-              <h2 className="text-sm font-semibold text-cascade-100">API keys</h2>
-              <button
-                type="button"
-                aria-label="Close"
-                onClick={() => setShowVault(false)}
-                className="text-cascade-400 hover:text-cascade-100"
-              >
-                ✕
-              </button>
-            </div>
-            <KeyVault
-              keys={providers}
-              onChange={updateProviders}
-              driveSyncEnabled={user.provider === 'google'}
-              googleClientId={config.googleClientId}
-            />
-          </div>
-        </div>
+        <Modal title="API keys" onClose={() => setShowVault(false)}>
+          <KeyVault
+            keys={providers}
+            onChange={updateProviders}
+            driveSyncEnabled={user.provider === 'google'}
+            googleClientId={config.googleClientId}
+          />
+        </Modal>
       )}
 
       {showUpgrade && (
-        <div
-          className="fixed inset-0 z-10 flex items-center justify-center bg-black/60"
-          onClick={() => setShowUpgrade(false)}
-        >
-          <div
-            className="w-full max-w-lg rounded-xl border border-cascade-800 bg-cascade-950"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between border-b border-cascade-900 px-4 py-3">
-              <h2 className="text-sm font-semibold text-cascade-100">Upgrade</h2>
-              <button
-                type="button"
-                aria-label="Close"
-                onClick={() => setShowUpgrade(false)}
-                className="text-cascade-400 hover:text-cascade-100"
-              >
-                ✕
-              </button>
-            </div>
-            <UpgradeModal />
-          </div>
-        </div>
+        <Modal title="Upgrade" onClose={() => setShowUpgrade(false)} maxWidth="max-w-lg">
+          <UpgradeModal />
+        </Modal>
       )}
     </div>
   );
