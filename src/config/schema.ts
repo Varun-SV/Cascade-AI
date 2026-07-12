@@ -58,6 +58,12 @@ export const ToolsConfigSchema = z.object({
    * - 'auto' (default): use the isolate when `isolated-vm` loads, else fall back to worker.
    */
   dynamicToolSandbox: z.enum(['isolate', 'worker', 'auto']).default('auto'),
+  /**
+   * When set, ONLY these tool names are registered — the sole way to omit a
+   * built-in tool (shell/file/git/…) from existing at all, rather than just
+   * gating it behind approval. Omitted = full default set (unchanged).
+   */
+  enabledTools: z.array(z.string()).optional(),
 });
 
 export const HookDefinitionSchema = z.object({

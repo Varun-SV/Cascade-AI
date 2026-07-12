@@ -201,31 +201,40 @@ export class ToolRegistry extends EventEmitter {
   }
 
   private registerDefaults(): void {
-    const tools: BaseTool[] = [
-      new ShellTool(this.config.shellAllowlist, this.config.shellBlocklist),
-      new FileReadTool(),
-      new FileWriteTool(),
-      new FileEditTool(),
-      new FileDeleteTool(),
-      new FileListTool(),
-      new GitTool(),
-      new GitHubTool(),
-      new ImageAnalyzeTool(),
-      new PDFCreateTool(),
-      new CodeInterpreterTool(),
-      new PeerCommunicationTool(),
-      new WebSearchTool(this.config.webSearch),
-      new GlobTool(),
-      new GrepTool(),
-      new WebFetchTool(),
+    // `enabledTools` is the ONLY way to omit a built-in tool entirely (shell,
+    // file_*, git, … have no other off-switch — requireApprovalFor still
+    // requires a click, it doesn't remove the tool). Built for embedding
+    // Cascade where the full tool surface must never exist for a run, not
+    // just be gated. Undefined = unchanged default behavior (full set).
+    const allowlist = this.config.enabledTools;
+    const enabled = (name: string): boolean => !allowlist || allowlist.includes(name);
+
+    const candidates: Array<BaseTool | false> = [
+      enabled('shell') && new ShellTool(this.config.shellAllowlist, this.config.shellBlocklist),
+      enabled('file_read') && new FileReadTool(),
+      enabled('file_write') && new FileWriteTool(),
+      enabled('file_edit') && new FileEditTool(),
+      enabled('file_delete') && new FileDeleteTool(),
+      enabled('file_list') && new FileListTool(),
+      enabled('git') && new GitTool(),
+      enabled('github') && new GitHubTool(),
+      enabled('image_analyze') && new ImageAnalyzeTool(),
+      enabled('pdf_create') && new PDFCreateTool(),
+      enabled('run_code') && new CodeInterpreterTool(),
+      enabled('peer_message') && new PeerCommunicationTool(),
+      enabled('web_search') && new WebSearchTool(this.config.webSearch),
+      enabled('glob') && new GlobTool(),
+      enabled('grep') && new GrepTool(),
+      enabled('web_fetch') && new WebFetchTool(),
     ];
+    const tools = candidates.filter((t): t is BaseTool => t !== false);
 
     for (const tool of tools) {
       tool.setWorkspaceRoot(this.workspaceRoot);
       this.register(tool);
     }
 
-    if (this.config.browserEnabled) {
+    if (this.config.browserEnabled && enabled('browser')) {
       const browser = new BrowserTool();
       browser.setWorkspaceRoot(this.workspaceRoot);
       this.register(browser);
