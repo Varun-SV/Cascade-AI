@@ -41,6 +41,7 @@ describe('cloud/server app', () => {
     GOOGLE_CLIENT_ID: undefined,
     GOOGLE_CLIENT_SECRET: undefined,
     CLOUD_DEV_BYPASS: true,
+    MAX_COST_PER_RUN_USD: 0.5,
   };
 
   beforeEach(async () => {

@@ -13,6 +13,7 @@ const baseEnv: CloudEnv = {
   GOOGLE_CLIENT_ID: 'gg-client-id',
   GOOGLE_CLIENT_SECRET: 'gg-client-secret',
   CLOUD_DEV_BYPASS: false,
+  MAX_COST_PER_RUN_USD: 0.5,
 };
 
 describe('auth URL builders', () => {

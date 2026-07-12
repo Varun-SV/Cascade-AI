@@ -21,6 +21,10 @@ const EnvSchema = z.object({
     .string()
     .optional()
     .transform((v) => v === '1' || v === 'true'),
+  // Hard per-run cost ceiling passed straight to Cascade's own budget guard
+  // (src/core/router — maxCostPerRunUsd). A safety rail on the shared server
+  // ahead of real per-plan entitlements (task #29).
+  MAX_COST_PER_RUN_USD: z.coerce.number().positive().default(0.5),
 });
 
 export type CloudEnv = z.infer<typeof EnvSchema>;
