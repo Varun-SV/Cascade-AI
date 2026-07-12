@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import LoginGate from './components/LoginGate.js';
+import UpgradeModal from './components/UpgradeModal.js';
 import ConversationSidebar from './chat/ConversationSidebar.js';
 import ChatPanel from './chat/ChatPanel.js';
 import KeyVault from './keys/KeyVault.js';
@@ -15,6 +16,7 @@ export default function App() {
   const [conversations, setConversations] = useState<CloudConversation[]>([]);
   const [providers, setProviders] = useState<ProviderConfig[]>(() => loadKeys());
   const [showVault, setShowVault] = useState(false);
+  const [showUpgrade, setShowUpgrade] = useState(false);
 
   useEffect(() => {
     fetchConfig()
@@ -86,6 +88,7 @@ export default function App() {
         onSelect={selectConversation}
         onNewChat={newChat}
         onOpenKeyVault={() => setShowVault(true)}
+        onOpenUpgrade={() => setShowUpgrade(true)}
         onLogout={handleLogout}
       />
       <div className="min-w-0 flex-1">
@@ -124,6 +127,31 @@ export default function App() {
               driveSyncEnabled={user.provider === 'google'}
               googleClientId={config.googleClientId}
             />
+          </div>
+        </div>
+      )}
+
+      {showUpgrade && (
+        <div
+          className="fixed inset-0 z-10 flex items-center justify-center bg-black/60"
+          onClick={() => setShowUpgrade(false)}
+        >
+          <div
+            className="w-full max-w-lg rounded-xl border border-cascade-800 bg-cascade-950"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-cascade-900 px-4 py-3">
+              <h2 className="text-sm font-semibold text-cascade-100">Upgrade</h2>
+              <button
+                type="button"
+                aria-label="Close"
+                onClick={() => setShowUpgrade(false)}
+                className="text-cascade-400 hover:text-cascade-100"
+              >
+                ✕
+              </button>
+            </div>
+            <UpgradeModal />
           </div>
         </div>
       )}

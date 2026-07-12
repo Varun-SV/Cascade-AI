@@ -31,17 +31,10 @@ export function attachSocket(httpServer: HttpServer, env: CloudEnv, store: Cloud
   });
 
   io.on('connection', (socket: Socket) => {
-    // One run per connection at a time — overlapping runs on the same
-    // socket would otherwise race on conversationHistory reads/writes and
-    // interleave stream:token events from two Cascade instances.
-    let runInFlight = false;
-
+    // Concurrency (including "two runs on this same connection") and daily
+    // quota are both enforced per-user inside runChatTurn via entitlements.ts
+    // — no separate per-connection flag needed here.
     socket.on('chat:run', async (payload: unknown, ack?: ChatRunAck) => {
-      if (runInFlight) {
-        ack?.({ error: 'A run is already in progress on this connection.' });
-        return;
-      }
-      runInFlight = true;
       try {
         const parsed = parseChatRunPayload(payload);
         const userId = (socket.data as CloudSocketData).userId;
@@ -50,8 +43,6 @@ export function attachSocket(httpServer: HttpServer, env: CloudEnv, store: Cloud
       } catch (err) {
         const message = err instanceof ZodError ? err.issues.map((i) => i.message).join('; ') : err instanceof Error ? err.message : String(err);
         ack?.({ error: message });
-      } finally {
-        runInFlight = false;
       }
     });
   });

@@ -173,4 +173,25 @@ describe('runChatTurn (stub-provider integration)', () => {
       runChatTurn(payload, { env, store, userId: bob.id, socket: new FakeSocket() as unknown as import('socket.io').Socket }),
     ).rejects.toThrow(/Conversation not found/);
   });
+
+  it('blocks a run once the daily limit is hit, without creating a conversation or a stray message', async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-runs-'));
+    store = new CloudStore(path.join(dir, 'cloud.db'));
+    const env = { DATA_DIR: dir, MAX_COST_PER_RUN_USD: 1 } as CloudEnv;
+    const user = store.upsertUser({ provider: 'dev', providerId: 'quota-user', email: null, name: null, avatar: null });
+
+    // free plan's daily cap — see entitlements.ts.
+    for (let i = 0; i < 20; i++) store.incrementUsage(user.id, new Date().toISOString().slice(0, 10));
+
+    const payload = parseChatRunPayload({
+      prompt: 'hello',
+      providers: [{ type: 'openai-compatible', baseUrl: 'http://127.0.0.1:1/v1' }],
+    });
+
+    await expect(
+      runChatTurn(payload, { env, store, userId: user.id, socket: new FakeSocket() as unknown as import('socket.io').Socket }),
+    ).rejects.toThrow(/Daily run limit reached/);
+
+    expect(store.listConversations(user.id)).toEqual([]);
+  });
 });

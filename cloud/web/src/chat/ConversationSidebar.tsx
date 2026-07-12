@@ -1,4 +1,4 @@
-import { MessageSquarePlus, KeyRound, LogOut } from 'lucide-react';
+import { MessageSquarePlus, KeyRound, LogOut, Crown } from 'lucide-react';
 import type { CloudConversation, CloudUser } from '../lib/types.js';
 
 interface Props {
@@ -8,11 +8,12 @@ interface Props {
   onSelect: (id: string) => void;
   onNewChat: () => void;
   onOpenKeyVault: () => void;
+  onOpenUpgrade: () => void;
   onLogout: () => void;
 }
 
 export default function ConversationSidebar({
-  user, conversations, activeConversationId, onSelect, onNewChat, onOpenKeyVault, onLogout,
+  user, conversations, activeConversationId, onSelect, onNewChat, onOpenKeyVault, onOpenUpgrade, onLogout,
 }: Props) {
   return (
     <div className="flex h-full w-64 flex-col border-r border-cascade-900 bg-cascade-950/40">
@@ -50,6 +51,13 @@ export default function ConversationSidebar({
           className="flex items-center gap-2 rounded-md px-3 py-2 text-sm text-cascade-300 hover:bg-cascade-900"
         >
           <KeyRound size={16} /> API keys
+        </button>
+        <button
+          type="button"
+          onClick={onOpenUpgrade}
+          className="flex items-center gap-2 rounded-md px-3 py-2 text-sm text-cascade-300 hover:bg-cascade-900"
+        >
+          <Crown size={16} /> Upgrade
         </button>
         <div className="flex items-center justify-between rounded-md px-3 py-2 text-sm text-cascade-300">
           <span className="truncate">{user.name ?? user.email ?? 'Signed in'}</span>

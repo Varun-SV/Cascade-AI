@@ -87,6 +87,24 @@ describe('cloud/server app', () => {
     expect(res.status).toBe(401);
   });
 
+  it('GET /api/usage without a session is rejected', async () => {
+    const res = await fetch(`${baseUrl}/api/usage`);
+    expect(res.status).toBe(401);
+  });
+
+  it('GET /api/usage reports plan and today\'s usage for a signed-in user', async () => {
+    const loginRes = await fetch(`${baseUrl}/auth/dev-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Usage Checker' }),
+    });
+    const cookie = extractCookie(loginRes, SESSION_COOKIE_NAME)!;
+
+    const res = await fetch(`${baseUrl}/api/usage`, { headers: { Cookie: cookie } });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ plan: 'free', dailyRuns: 0, dailyRunLimit: 20, maxConcurrentRuns: 1 });
+  });
+
   it('dev-login sets a session cookie and /api/me resolves the logged-in user', async () => {
     const loginRes = await fetch(`${baseUrl}/auth/dev-login`, {
       method: 'POST',

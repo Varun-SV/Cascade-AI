@@ -15,6 +15,7 @@ import type { Socket } from 'socket.io';
 import { z } from 'zod';
 import type { CloudEnv } from './env.js';
 import type { CloudStore } from './db.js';
+import { beginRun, checkDailyLimit, todayKey } from './entitlements.js';
 
 const MAX_HISTORY_MESSAGES = 20;
 const PROVIDER_TYPES = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama'] as const;
@@ -95,6 +96,23 @@ export interface ChatRunDeps {
 export async function runChatTurn(payload: ChatRunPayload, deps: ChatRunDeps): Promise<ChatRunResult> {
   const { env, store, userId, socket } = deps;
 
+  // Fail fast, before touching the conversation/DB at all — a rate-limited
+  // request shouldn't leave behind a user message with no reply.
+  const user = store.getUserById(userId);
+  const plan = user?.plan ?? 'free';
+  checkDailyLimit(store, userId, plan);
+  const releaseRun = beginRun(userId, plan);
+
+  try {
+    return await runChatTurnInner(payload, deps);
+  } finally {
+    releaseRun();
+  }
+}
+
+async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Promise<ChatRunResult> {
+  const { env, store, userId, socket } = deps;
+
   const conversation = payload.conversationId
     ? store.getConversation(payload.conversationId, userId)
     : store.createConversation(userId, payload.prompt.slice(0, 80));
@@ -132,7 +150,7 @@ export async function runChatTurn(payload: ChatRunPayload, deps: ChatRunDeps): P
       content: result.output,
       costUsd: result.usage.estimatedCostUsd,
     });
-    store.incrementUsage(userId, new Date().toISOString().slice(0, 10));
+    store.incrementUsage(userId, todayKey());
     socket.emit('session:complete', { conversationId: conversation.id, result });
     return { conversationId: conversation.id, output: result.output, costUsd: result.usage.estimatedCostUsd };
   } catch (err) {

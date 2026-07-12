@@ -16,6 +16,7 @@ import {
   type AuthedRequest,
 } from './auth/session.js';
 import { githubAuthUrl, exchangeGithubCode, googleAuthUrl, exchangeGoogleCode, type OAuthProfile } from './auth/oauth.js';
+import { limitsForPlan, todayKey } from './entitlements.js';
 
 const OAUTH_STATE_COOKIE = 'cascade_oauth_state';
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
@@ -195,6 +196,14 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     const conversation = store.getConversation(id, req.session!.userId);
     if (!conversation) { res.status(404).json({ error: 'Not found' }); return; }
     res.json({ messages: store.getMessages(conversation.id) });
+  });
+
+  app.get('/api/usage', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const user = store.getUserById(req.session!.userId);
+    const plan = user?.plan ?? 'free';
+    const limits = limitsForPlan(plan);
+    const used = store.getUsage(req.session!.userId, todayKey());
+    res.json({ plan, dailyRuns: used, dailyRunLimit: limits.dailyRuns, maxConcurrentRuns: limits.maxConcurrentRuns });
   });
 
   return app;

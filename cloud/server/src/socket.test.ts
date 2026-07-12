@@ -127,13 +127,14 @@ describe('attachSocket', () => {
 
     const payload = { prompt: 'hello', providers: [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }] };
 
-    // Fire both without awaiting the first — parseChatRunPayload + the
-    // in-flight flag are set synchronously before Cascade's first `await`,
-    // so the second call reliably observes the guard regardless of timing.
+    // Fire both without awaiting the first — checkDailyLimit/beginRun
+    // (entitlements.ts) run synchronously before Cascade's first `await`,
+    // so the second call reliably observes the per-user concurrency guard
+    // regardless of timing.
     const firstAck = new Promise((resolve) => client.emit('chat:run', payload, resolve));
     const secondAck = await new Promise<{ error?: string }>((resolve) => client.emit('chat:run', payload, resolve));
 
-    expect(secondAck.error).toMatch(/already in progress/);
+    expect(secondAck.error).toMatch(/run\(s\) in progress/);
     await firstAck;
   }, 30_000);
 });

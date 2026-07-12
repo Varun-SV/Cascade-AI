@@ -46,3 +46,14 @@ export function listConversations(): Promise<{ conversations: CloudConversation[
 export function getMessages(conversationId: string): Promise<{ messages: CloudMessage[] }> {
   return json(fetch(`/api/conversations/${encodeURIComponent(conversationId)}/messages`, { credentials: 'include' }));
 }
+
+export interface UsageInfo {
+  plan: string;
+  dailyRuns: number;
+  dailyRunLimit: number;
+  maxConcurrentRuns: number;
+}
+
+export function fetchUsage(): Promise<UsageInfo> {
+  return json(fetch('/api/usage', { credentials: 'include' }));
+}
