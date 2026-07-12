@@ -1,4 +1,6 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { type ReactNode } from 'react';
+import { motion } from 'framer-motion';
+import { X } from 'lucide-react';
 
 interface Props {
   title: string;
@@ -8,30 +10,38 @@ interface Props {
 }
 
 export default function Modal({ title, onClose, maxWidth = 'max-w-md', children }: Props) {
-  const [entered, setEntered] = useState(false);
-
-  useEffect(() => {
-    const id = requestAnimationFrame(() => setEntered(true));
-    return () => cancelAnimationFrame(id);
-  }, []);
-
   return (
-    <div className="fixed inset-0 z-10 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div
-        className={
-          `w-full ${maxWidth} rounded-xl border border-ink-700 bg-ink-900 transition-all duration-150 ` +
-          (entered ? 'scale-100 opacity-100' : 'scale-95 opacity-0')
-        }
+    <motion.div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 p-4 backdrop-blur-md"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.18 }}
+      onClick={onClose}
+    >
+      <motion.div
+        className={`glass-strong w-full ${maxWidth} overflow-hidden rounded-2xl`}
+        initial={{ opacity: 0, scale: 0.94, y: 12 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.96, y: 8 }}
+        transition={{ type: 'spring', stiffness: 380, damping: 30 }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between border-b border-ink-700 px-4 py-3">
-          <h2 className="text-sm font-semibold text-ink-100">{title}</h2>
-          <button type="button" aria-label="Close" onClick={onClose} className="text-ink-400 hover:text-ink-100">
-            ✕
-          </button>
+        <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+          <h2 className="text-sm font-semibold text-ink-50">{title}</h2>
+          <motion.button
+            type="button"
+            aria-label="Close"
+            onClick={onClose}
+            whileHover={{ scale: 1.1 }}
+            whileTap={{ scale: 0.9 }}
+            className="rounded-md p-1 text-ink-400 hover:bg-white/10 hover:text-ink-100"
+          >
+            <X size={16} />
+          </motion.button>
         </div>
         {children}
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   );
 }

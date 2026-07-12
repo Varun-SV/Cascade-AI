@@ -1,5 +1,6 @@
 import { useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react';
 import clsx from 'clsx';
+import { motion } from 'framer-motion';
 import { Send, Paperclip, X, Loader2 } from 'lucide-react';
 import { uploadImage } from '../lib/api.js';
 import type { Skill } from '../lib/types.js';
@@ -102,8 +103,8 @@ export default function Composer({ skills, skillId, onSkillChange, hasProviders,
     <div className="px-4 py-3 sm:px-6">
       <div
         className={clsx(
-          'mx-auto max-w-3xl rounded-2xl border bg-ink-900 transition-colors',
-          dragOver ? 'border-accent-500' : 'border-ink-700',
+          'mx-auto max-w-3xl rounded-2xl border bg-white/[0.04] backdrop-blur-xl transition-colors',
+          dragOver ? 'border-accent-500 ring-2 ring-accent-500/40' : 'border-white/10',
         )}
         onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
@@ -113,12 +114,12 @@ export default function Composer({ skills, skillId, onSkillChange, hasProviders,
           <div className="flex flex-wrap gap-2 px-3 pt-3">
             {pending.map((p) => (
               <div key={p.id} className="relative">
-                <img src={p.previewUrl} alt="pending" className="h-16 w-16 rounded-lg border border-ink-700 object-cover" />
+                <img src={p.previewUrl} alt="pending" className="h-16 w-16 rounded-xl border border-white/10 object-cover shadow-lg" />
                 <button
                   type="button"
                   aria-label="Remove attachment"
                   onClick={() => removePending(p.id)}
-                  className="absolute -right-1.5 -top-1.5 rounded-full bg-ink-800 p-0.5 text-ink-200 hover:text-ink-50"
+                  className="absolute -right-1.5 -top-1.5 rounded-full border border-white/10 bg-ink-800 p-0.5 text-ink-200 backdrop-blur hover:text-ink-50"
                 >
                   <X size={12} />
                 </button>
@@ -136,23 +137,25 @@ export default function Composer({ skills, skillId, onSkillChange, hasProviders,
             hidden
             onChange={(e) => { if (e.target.files) void addFiles(e.target.files); e.target.value = ''; }}
           />
-          <button
+          <motion.button
             type="button"
             aria-label="Attach image"
             title="Attach an image — files coming soon"
             disabled={disabled || pending.length >= MAX_FILES}
             onClick={() => fileRef.current?.click()}
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-400 hover:bg-ink-800 hover:text-ink-100 disabled:opacity-40"
+            whileHover={{ scale: 1.1 }}
+            whileTap={{ scale: 0.9 }}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-400 hover:bg-white/10 hover:text-ink-100 disabled:opacity-40"
           >
             {uploading ? <Loader2 size={16} className="animate-spin" /> : <Paperclip size={16} />}
-          </button>
+          </motion.button>
 
           <select
             aria-label="Skill"
             value={skillId}
             onChange={(e) => onSkillChange(e.target.value)}
             disabled={disabled}
-            className="max-w-[9rem] shrink-0 truncate rounded-md border border-ink-700 bg-ink-950 px-2 py-1.5 text-xs text-ink-200 outline-none disabled:opacity-40"
+            className="max-w-[9rem] shrink-0 truncate rounded-lg border border-white/10 bg-white/[0.04] px-2 py-1.5 text-xs text-ink-200 outline-none backdrop-blur disabled:opacity-40"
           >
             {skills.map((s) => (
               <option key={s.id} value={s.id}>{s.name}</option>
@@ -170,15 +173,22 @@ export default function Composer({ skills, skillId, onSkillChange, hasProviders,
             rows={1}
           />
 
-          <button
+          <motion.button
             type="button"
             onClick={submit}
             disabled={disabled || uploading || !input.trim()}
             aria-label="Send"
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent-500 text-ink-950 hover:bg-accent-400 disabled:cursor-not-allowed disabled:bg-ink-700 disabled:text-ink-400"
+            whileHover={{ scale: 1.06 }}
+            whileTap={{ scale: 0.92 }}
+            className={clsx(
+              'flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-950 transition-shadow',
+              disabled || uploading || !input.trim()
+                ? 'cursor-not-allowed bg-ink-700 text-ink-400'
+                : 'accent-grad shadow-lg shadow-accent-700/30',
+            )}
           >
             <Send size={15} />
-          </button>
+          </motion.button>
         </div>
       </div>
       <p className="mx-auto mt-1.5 max-w-3xl px-1 text-[11px] text-ink-400">

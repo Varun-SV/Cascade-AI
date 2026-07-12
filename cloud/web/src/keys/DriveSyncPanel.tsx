@@ -54,7 +54,7 @@ export default function DriveSyncPanel({ googleClientId, keys, onRestore }: Prop
   }
 
   return (
-    <div className="mt-2 rounded-md border border-ink-700 p-3">
+    <div className="mt-2 rounded-md border border-white/10 p-3">
       <div className="mb-2 flex items-start gap-2 text-xs text-ink-300">
         <Cloud size={14} className="mt-0.5 shrink-0 text-ink-400" />
         <span>
@@ -64,7 +64,7 @@ export default function DriveSyncPanel({ googleClientId, keys, onRestore }: Prop
       </div>
       <input
         type="password"
-        className="mb-2 w-full rounded border border-ink-700 bg-ink-950 px-2 py-1.5 text-sm text-ink-100"
+        className="mb-2 w-full rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
         placeholder="Passphrase"
         value={passphrase}
         onChange={(e) => setPassphrase(e.target.value)}
@@ -82,7 +82,7 @@ export default function DriveSyncPanel({ googleClientId, keys, onRestore }: Prop
           type="button"
           disabled={busy !== null}
           onClick={handleDownload}
-          className="flex-1 rounded-md border border-ink-700 px-3 py-1.5 text-xs text-ink-200 hover:bg-ink-800 disabled:opacity-50"
+          className="flex-1 rounded-md border border-white/10 px-3 py-1.5 text-xs text-ink-200 hover:bg-white/[0.05] disabled:opacity-50"
         >
           {busy === 'download' ? <Loader2 size={14} className="mx-auto animate-spin" /> : 'Restore'}
         </button>

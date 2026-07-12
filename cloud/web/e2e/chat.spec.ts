@@ -81,11 +81,14 @@ test('dev login -> add a key -> pick a skill -> attach an image -> send -> reply
     // The uploaded image re-renders in the sent user message.
     await expect(page.locator('[data-role="user"] img')).toBeVisible();
 
-    // Add a memory and confirm it persists in the panel.
+    // Add a memory and confirm it persists in the panel. Use a unique string
+    // (the e2e DB is reused across runs) and scope to the list row span so the
+    // draft textarea's value doesn't collide with the assertion.
+    const memory = `e2e memory ${Date.now()}`;
     await page.getByRole('button', { name: /Memory/ }).click();
-    await page.getByPlaceholder(/I prefer TypeScript/).fill('Prefers concise answers');
+    await page.getByPlaceholder(/I prefer TypeScript/).fill(memory);
     await page.getByRole('button', { name: /^Add/ }).click();
-    await expect(page.getByText('Prefers concise answers')).toBeVisible();
+    await expect(page.locator('span.whitespace-pre-wrap', { hasText: memory })).toBeVisible();
   } finally {
     await stub.close();
   }

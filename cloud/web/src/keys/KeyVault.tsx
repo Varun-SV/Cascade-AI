@@ -70,12 +70,12 @@ export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClien
 
       <div className="flex flex-col gap-2">
         {keys.length === 0 && (
-          <p className="rounded-md border border-dashed border-ink-700 px-3 py-4 text-center text-xs text-ink-400">
+          <p className="rounded-md border border-dashed border-white/10 px-3 py-4 text-center text-xs text-ink-400">
             No providers configured yet. Add one to start chatting.
           </p>
         )}
         {keys.map((k, i) => (
-          <div key={i} className="flex items-center justify-between rounded-md bg-ink-800 px-3 py-2">
+          <div key={i} className="flex items-center justify-between rounded-md bg-white/[0.05] px-3 py-2">
             <div className="flex items-center gap-2">
               <KeyRound size={14} className="text-ink-400" />
               <div>
@@ -87,7 +87,7 @@ export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClien
               type="button"
               aria-label={`Remove ${labelFor(k)}`}
               onClick={() => removeKey(i)}
-              className="rounded p-1 text-ink-400 hover:bg-ink-700 hover:text-danger-500"
+              className="rounded p-1 text-ink-400 hover:bg-white/10 hover:text-danger-500"
             >
               <Trash2 size={14} />
             </button>
@@ -99,18 +99,18 @@ export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClien
         <button
           type="button"
           onClick={() => setAdding(true)}
-          className="flex items-center justify-center gap-1 rounded-md border border-ink-700 px-3 py-2 text-xs font-medium text-ink-200 hover:bg-ink-800"
+          className="flex items-center justify-center gap-1 rounded-md border border-white/10 px-3 py-2 text-xs font-medium text-ink-200 hover:bg-white/[0.05]"
         >
           <Plus size={14} /> Add provider
         </button>
       )}
 
       {adding && (
-        <div className="flex flex-col gap-2 rounded-md border border-ink-700 p-3">
+        <div className="flex flex-col gap-2 rounded-md border border-white/10 p-3">
           <label className="flex flex-col gap-1">
             <span className="text-xs text-ink-400">Provider</span>
             <select
-              className="rounded border border-ink-700 bg-ink-950 px-2 py-1.5 text-sm text-ink-100"
+              className="rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
               value={draft.type}
               onChange={(e) => setDraft({ type: e.target.value as ProviderConfig['type'] })}
             >
@@ -125,7 +125,7 @@ export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClien
               <span className="text-xs text-ink-400">API key</span>
               <input
                 type="password"
-                className="rounded border border-ink-700 bg-ink-950 px-2 py-1.5 text-sm text-ink-100"
+                className="rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
                 value={draft.apiKey ?? ''}
                 onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))}
                 placeholder="sk-..."
@@ -139,7 +139,7 @@ export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClien
                 {draft.type === 'azure' ? 'Azure endpoint URL' : 'Endpoint base URL'}
               </span>
               <input
-                className="rounded border border-ink-700 bg-ink-950 px-2 py-1.5 text-sm text-ink-100"
+                className="rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
                 value={draft.baseUrl ?? ''}
                 onChange={(e) => setDraft((d) => ({ ...d, baseUrl: e.target.value }))}
                 placeholder="https://..."
@@ -152,7 +152,7 @@ export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClien
               <span className="text-xs text-ink-400">API key (optional)</span>
               <input
                 type="password"
-                className="rounded border border-ink-700 bg-ink-950 px-2 py-1.5 text-sm text-ink-100"
+                className="rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
                 value={draft.apiKey ?? ''}
                 onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))}
               />
@@ -164,7 +164,7 @@ export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClien
               <label className="flex flex-col gap-1">
                 <span className="text-xs text-ink-400">Deployment name</span>
                 <input
-                  className="rounded border border-ink-700 bg-ink-950 px-2 py-1.5 text-sm text-ink-100"
+                  className="rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
                   value={draft.deploymentName ?? ''}
                   onChange={(e) => setDraft((d) => ({ ...d, deploymentName: e.target.value }))}
                 />
@@ -172,7 +172,7 @@ export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClien
               <label className="flex flex-col gap-1">
                 <span className="text-xs text-ink-400">API version (optional)</span>
                 <input
-                  className="rounded border border-ink-700 bg-ink-950 px-2 py-1.5 text-sm text-ink-100"
+                  className="rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
                   value={draft.apiVersion ?? ''}
                   onChange={(e) => setDraft((d) => ({ ...d, apiVersion: e.target.value }))}
                   placeholder="2024-08-01-preview"
@@ -185,7 +185,7 @@ export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClien
             <label className="flex flex-col gap-1">
               <span className="text-xs text-ink-400">Model (optional — leave blank for auto)</span>
               <input
-                className="rounded border border-ink-700 bg-ink-950 px-2 py-1.5 text-sm text-ink-100"
+                className="rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
                 value={draft.model ?? ''}
                 onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
               />
@@ -203,7 +203,7 @@ export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClien
             <button
               type="button"
               onClick={() => { setAdding(false); setDraft({ type: 'anthropic' }); }}
-              className="rounded-md border border-ink-700 px-3 py-1.5 text-xs text-ink-200 hover:bg-ink-800"
+              className="rounded-md border border-white/10 px-3 py-1.5 text-xs text-ink-200 hover:bg-white/[0.05]"
             >
               Cancel
             </button>

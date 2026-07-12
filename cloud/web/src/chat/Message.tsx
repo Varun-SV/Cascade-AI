@@ -32,9 +32,9 @@ function CodeBlock({ children }: { children?: ReactNode }) {
     <div className="group relative">
       <CopyButton
         getText={() => ref.current?.innerText ?? ''}
-        className="absolute right-2 top-2 rounded-md bg-ink-800/80 p-1.5 text-ink-300 opacity-0 transition-opacity hover:text-ink-50 group-hover:opacity-100"
+        className="absolute right-2 top-2 rounded-md border border-white/10 bg-white/10 p-1.5 text-ink-200 opacity-0 backdrop-blur transition-opacity hover:text-ink-50 group-hover:opacity-100"
       />
-      <pre ref={ref} className="overflow-x-auto rounded-lg border border-ink-700 bg-ink-950 p-3 text-sm">
+      <pre ref={ref} className="overflow-x-auto rounded-xl border border-white/10 bg-black/40 p-3 text-sm shadow-inner">
         {children}
       </pre>
     </div>
@@ -59,13 +59,13 @@ export default function Message({ message, onRegenerate }: Props) {
                 key={a.id}
                 src={uploadUrl(a.id)}
                 alt="attachment"
-                className="max-h-40 rounded-lg border border-ink-700 object-cover"
+                className="max-h-40 rounded-xl border border-white/10 object-cover shadow-lg"
               />
             ))}
           </div>
         )}
         {message.content && (
-          <div className="max-w-[80%] whitespace-pre-wrap rounded-2xl rounded-br-sm bg-accent-600/90 px-4 py-2 text-white">
+          <div className="accent-grad max-w-[80%] whitespace-pre-wrap rounded-2xl rounded-br-md px-4 py-2 font-medium text-ink-950 shadow-lg shadow-accent-700/20">
             {message.content}
           </div>
         )}
@@ -75,16 +75,22 @@ export default function Message({ message, onRegenerate }: Props) {
 
   return (
     <div data-role="assistant" className="group flex flex-col gap-1.5">
-      <span className="text-xs font-medium text-ink-400">Cascade</span>
-      <div className="prose prose-invert prose-sm max-w-none text-ink-100">
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
-          components={{ pre: ({ children }) => <CodeBlock>{children}</CodeBlock> }}
-        >
-          {message.content || (message.streaming ? '…' : '')}
-        </ReactMarkdown>
-      </div>
+      <span className="flex items-center gap-1.5 text-xs font-medium text-ink-400">
+        <span className="accent-grad h-2 w-2 rounded-full" /> Cascade
+      </span>
+      {message.streaming && !message.content ? (
+        <span className="shimmer-text text-sm">Composing a response…</span>
+      ) : (
+        <div className="prose prose-invert prose-sm max-w-none text-ink-100">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+            components={{ pre: ({ children }) => <CodeBlock>{children}</CodeBlock> }}
+          >
+            {message.content}
+          </ReactMarkdown>
+        </div>
+      )}
       {!message.streaming && message.content && (
         <div className="flex items-center gap-2 pt-0.5 text-ink-400 opacity-0 transition-opacity group-hover:opacity-100">
           <CopyButton getText={() => message.content} />

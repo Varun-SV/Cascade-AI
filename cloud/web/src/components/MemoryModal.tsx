@@ -51,16 +51,16 @@ export default function MemoryModal({ onClose }: { onClose: () => void }) {
 
         <div className="flex flex-col gap-2">
           {memories.length === 0 && (
-            <p className="rounded-md border border-dashed border-ink-700 px-3 py-4 text-center text-xs text-ink-400">
+            <p className="rounded-md border border-dashed border-white/10 px-3 py-4 text-center text-xs text-ink-400">
               No memories yet. Add something Cascade should remember about you.
             </p>
           )}
           {memories.map((m) => (
-            <div key={m.id} className="flex items-start justify-between gap-2 rounded-md bg-ink-800 px-3 py-2">
+            <div key={m.id} className="flex items-start justify-between gap-2 rounded-md bg-white/[0.05] px-3 py-2">
               {editingId === m.id ? (
                 <>
                   <textarea
-                    className="flex-1 resize-none rounded border border-ink-700 bg-ink-950 px-2 py-1 text-sm text-ink-100 outline-none"
+                    className="flex-1 resize-none rounded border border-white/10 bg-white/[0.04] px-2 py-1 text-sm text-ink-100 outline-none"
                     value={editText}
                     onChange={(e) => setEditText(e.target.value)}
                     rows={2}
@@ -99,7 +99,7 @@ export default function MemoryModal({ onClose }: { onClose: () => void }) {
 
         <div className="flex items-end gap-2">
           <textarea
-            className="flex-1 resize-none rounded-md border border-ink-700 bg-ink-950 px-2 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-400"
+            className="flex-1 resize-none rounded-md border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-400"
             placeholder="e.g. I prefer TypeScript and concise answers"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}

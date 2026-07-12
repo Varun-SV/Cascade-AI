@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import clsx from 'clsx';
+import { AnimatePresence, motion } from 'framer-motion';
 import LoginGate from './components/LoginGate.js';
 import Modal from './components/Modal.js';
 import UpgradeModal from './components/UpgradeModal.js';
@@ -107,7 +108,17 @@ export default function App() {
   }
 
   if (user === undefined || config === null) {
-    return <div className="flex h-screen items-center justify-center bg-ink-950 text-ink-400">Loading…</div>;
+    return (
+      <div className="flex h-screen items-center justify-center text-ink-400">
+        <motion.span
+          className="shimmer-text text-sm font-medium"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+        >
+          Loading Cascade…
+        </motion.span>
+      </div>
+    );
   }
 
   if (!user) {
@@ -116,39 +127,62 @@ export default function App() {
 
   const activeTitle = conversations.find((c) => c.id === chat.conversationId)?.title ?? undefined;
 
+  const sidebar = (
+    <ConversationSidebar
+      user={user}
+      conversations={conversations}
+      activeConversationId={chat.conversationId}
+      lastTokens={chat.lastTokens}
+      usageRefreshSignal={chat.busy}
+      onSelect={(id) => { void selectConversation(id); if (window.innerWidth < 768) setSidebarOpen(false); }}
+      onNewChat={() => { newChat(); if (window.innerWidth < 768) setSidebarOpen(false); }}
+      onOpenKeyVault={() => setShowVault(true)}
+      onOpenUpgrade={() => setShowUpgrade(true)}
+      onOpenMemory={() => setShowMemory(true)}
+      onLogout={handleLogout}
+    />
+  );
+
   return (
-    <div className="flex h-screen overflow-hidden bg-ink-950">
+    <div className="relative flex h-screen gap-0 overflow-hidden md:gap-3 md:p-3">
+      {/* Desktop: collapsible floating glass panel */}
       <div
         className={clsx(
-          'fixed inset-y-0 left-0 z-30 w-64 shrink-0 overflow-hidden border-r border-ink-700 bg-ink-900 transition-all duration-200 md:relative md:translate-x-0',
-          sidebarOpen ? 'translate-x-0 md:w-64' : '-translate-x-full md:w-0 md:border-r-0',
+          'hidden shrink-0 overflow-hidden transition-[width,opacity] duration-300 ease-out md:block',
+          sidebarOpen ? 'w-72 opacity-100' : 'w-0 opacity-0',
         )}
       >
-        <div className="h-full w-64">
-          <ConversationSidebar
-            user={user}
-            conversations={conversations}
-            activeConversationId={chat.conversationId}
-            lastTokens={chat.lastTokens}
-            usageRefreshSignal={chat.busy}
-            onSelect={selectConversation}
-            onNewChat={newChat}
-            onOpenKeyVault={() => setShowVault(true)}
-            onOpenUpgrade={() => setShowUpgrade(true)}
-            onOpenMemory={() => setShowMemory(true)}
-            onLogout={handleLogout}
-          />
-        </div>
+        <div className="glass h-full w-72 overflow-hidden rounded-2xl">{sidebar}</div>
       </div>
 
-      {sidebarOpen && (
-        <div
-          className="fixed inset-0 z-20 bg-black/60 backdrop-blur-sm md:hidden"
-          onClick={() => setSidebarOpen(false)}
-        />
-      )}
+      {/* Mobile: spring-in glass drawer */}
+      <AnimatePresence>
+        {sidebarOpen && (
+          <>
+            <motion.div
+              key="scrim"
+              className="fixed inset-0 z-30 bg-black/50 backdrop-blur-sm md:hidden"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setSidebarOpen(false)}
+            />
+            <motion.div
+              key="drawer"
+              className="fixed inset-y-0 left-0 z-40 w-72 p-2 md:hidden"
+              initial={{ x: '-105%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '-105%' }}
+              transition={{ type: 'spring', stiffness: 360, damping: 34 }}
+            >
+              <div className="glass-strong h-full w-full overflow-hidden rounded-2xl">{sidebar}</div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
 
-      <div className="flex min-w-0 flex-1 flex-col">
+      {/* Main chat panel */}
+      <div className="glass flex min-w-0 flex-1 flex-col overflow-hidden md:rounded-2xl">
         <ChatTopBar title={activeTitle} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
         <div className="min-h-0 flex-1">
           <ChatPanel
@@ -166,24 +200,24 @@ export default function App() {
         </div>
       </div>
 
-      {showVault && (
-        <Modal title="API keys" onClose={() => setShowVault(false)}>
-          <KeyVault
-            keys={providers}
-            onChange={updateProviders}
-            driveSyncEnabled={user.provider === 'google'}
-            googleClientId={config.googleClientId}
-          />
-        </Modal>
-      )}
-
-      {showUpgrade && (
-        <Modal title="Upgrade" onClose={() => setShowUpgrade(false)} maxWidth="max-w-lg">
-          <UpgradeModal />
-        </Modal>
-      )}
-
-      {showMemory && <MemoryModal onClose={() => setShowMemory(false)} />}
+      <AnimatePresence>
+        {showVault && (
+          <Modal title="API keys" onClose={() => setShowVault(false)}>
+            <KeyVault
+              keys={providers}
+              onChange={updateProviders}
+              driveSyncEnabled={user.provider === 'google'}
+              googleClientId={config.googleClientId}
+            />
+          </Modal>
+        )}
+        {showUpgrade && (
+          <Modal title="Upgrade" onClose={() => setShowUpgrade(false)} maxWidth="max-w-lg">
+            <UpgradeModal />
+          </Modal>
+        )}
+        {showMemory && <MemoryModal onClose={() => setShowMemory(false)} />}
+      </AnimatePresence>
     </div>
   );
 }

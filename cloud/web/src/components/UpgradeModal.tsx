@@ -22,7 +22,7 @@ export default function UpgradeModal() {
       )}
 
       <div className="grid grid-cols-2 gap-3">
-        <div className="rounded-lg border border-ink-700 p-3">
+        <div className="rounded-lg border border-white/10 p-3">
           <h3 className="mb-2 text-sm font-semibold text-ink-100">Free</h3>
           <ul className="flex flex-col gap-1.5 text-xs text-ink-300">
             {FREE_FEATURES.map((f) => (
@@ -33,7 +33,7 @@ export default function UpgradeModal() {
           </ul>
         </div>
 
-        <div className="rounded-lg border border-accent-600 bg-ink-800 p-3">
+        <div className="rounded-lg border border-accent-600 bg-white/[0.05] p-3">
           <h3 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-ink-100">
             <Crown size={14} className="text-accent-400" /> Pro
           </h3>
