@@ -1,6 +1,6 @@
 {
   "name": "cascade-ai-desktop",
-  "version": "0.20.0",
+  "version": "0.20.1",
   "description": "Cascade AI — purpose-built desktop application",
   "author": "Varun SV",
   "homepage": "https://github.com/Varun-SV/Cascade-AI",
@@ -24,7 +24,6 @@
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
     "better-sqlite3": "^12.9.0",
-    "cascade-ai": "*",
     "electron-updater": "^6.3.0",
     "fuse.js": "^7.0.0",
     "lucide-react": "^0.460.0",

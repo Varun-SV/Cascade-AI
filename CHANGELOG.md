@@ -5,6 +5,11 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.1] - 2026-07-12
+
+### Fixed
+- **Desktop release builds failed on every platform:** `⨯ .../.dockerignore must be under .../app/` during "Package & publish installer". `app/package.json` carried a vestigial `"cascade-ai": "*"` dependency that nothing in `app/` actually imports (the desktop process loads the core via a direct file path, dev or packaged, never the bare specifier) — npm workspaces resolved it by symlinking `app/node_modules/cascade-ai` straight back to the repo root (since the root package is itself named `cascade-ai`). electron-builder's ASAR packager walks into that symlink and computes each file's path relative to `app/`; once this release added a top-level `.dockerignore` for the new Cascade Cloud deploy config, that computation had a file (`.dockerignore`) it could no longer place under `app/`, and crashed. Removed the unused dependency, which removes the symlink entirely. `cloud/server`'s equivalent `"cascade-ai": "file:../.."` dependency (used so it always runs against the local build rather than a stale/unpublished registry version) is replaced with a `"#cascade-ai"` private subpath import pointing at a symlink generated inside `cloud/server/vendor/` — Node's `imports` field requires in-package targets, and keeping this off the npm dependency graph entirely means it can no longer influence any other workspace's resolution.
+
 ## [0.20.0] - 2026-07-12
 
 Cascade Cloud — a hosted, ChatGPT/Claude.ai-style chat experience at
