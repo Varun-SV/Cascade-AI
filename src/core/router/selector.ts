@@ -180,6 +180,17 @@ export class ModelSelector {
       }
     }
 
+    // A model matching the STRIPPED id may already be registered under its
+    // real id (e.g. an Azure deployment or an Ollama tag added via
+    // addDynamicModel) with real pricing/context/tool-support metadata.
+    // Prefer it over synthesizing a blank $0/generic placeholder below — this
+    // is what previously discarded azureModelForDeployment()'s real model the
+    // moment a user selected "azure:<deployment>" instead of the bare id.
+    const registered = this.availableModels.get(actualId);
+    if (registered && (!providerStr || registered.provider === providerStr)) {
+      return registered;
+    }
+
     if (!providerStr) {
       const lower = actualId.toLowerCase();
       if (lower.includes('claude')) providerStr = 'anthropic';

@@ -5,7 +5,11 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.19.0] - 2026-07-10
+## [0.19.1] - 2026-07-12
+
+### Fixed
+- **Explicit Azure deployment pins on reasoning-family models failed with "provider not available or unreachable."** `AzureOpenAIProvider.isAvailable()`'s health-check ping used `max_tokens`, which o1/o3/gpt-5.x-class reasoning deployments reject (they require `max_completion_tokens`) — unlike real generation calls, which already retry with the right parameter. That single ping failure marked the whole `azure` provider unavailable, so every explicit `azure:<deployment>` override errored even though the deployment itself worked fine. The ping now retries with `max_completion_tokens` on the same error the generation path already handles.
+- **A model addressed as `"azure:<deployment>"` (or any `"provider:id"` override) lost its real pricing/context/tool-support metadata.** The selector's dynamic-model fallback always synthesized a fresh $0/generic placeholder for a `"provider:id"` override instead of checking whether a model already registered under the bare id (e.g. an Azure deployment from `azureModelForDeployment`, or a discovered Ollama/OpenAI-compatible model) — silently discarding real cost tracking and capability flags. It now prefers the already-registered model when one exists.
 
 Routing and efficiency round: Azure deployments become real selectable models,
 model pickers go live, benchmark routing turns on by default, plans become

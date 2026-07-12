@@ -50,4 +50,31 @@ describe('ModelSelector — provider attribution for local models', () => {
     const selector = new ModelSelector(new Set(['ollama', 'openai-compatible']));
     expect(selector.selectForTier('T3', 'openai-compatible:some-model')!.provider).toBe('openai-compatible');
   });
+
+  it('prefers an already-registered model over a blank synthetic one when addressed with a "provider:id" override', () => {
+    // Regression: an Azure deployment (or any dynamic model) registered under
+    // its bare id with real pricing/context/tool-support was being discarded
+    // the moment the user picked it as "azure:<deployment>" — selectForTier
+    // synthesized a fresh $0/generic placeholder instead of reusing the real
+    // one, silently losing cost tracking and capability metadata.
+    const selector = new ModelSelector(new Set(['azure']));
+    const real: ModelInfo = {
+      id: 'gpt-5.4-mini', name: 'Prod GPT-5.4-mini', provider: 'azure',
+      contextWindow: 128_000, isVisionCapable: false,
+      inputCostPer1kTokens: 0.0025, outputCostPer1kTokens: 0.01,
+      maxOutputTokens: 16_000, supportsStreaming: true, isLocal: false, supportsToolUse: true,
+    };
+    selector.addDynamicModel(real);
+    const m = selector.selectForTier('T1', 'azure:gpt-5.4-mini');
+    expect(m).toBe(real);
+    expect(m!.inputCostPer1kTokens).toBeGreaterThan(0);
+  });
+
+  it('still synthesizes a placeholder when no registered model matches the stripped id', () => {
+    const selector = new ModelSelector(new Set(['azure']));
+    const m = selector.selectForTier('T1', 'azure:some-other-deployment');
+    expect(m).not.toBeNull();
+    expect(m!.id).toBe('some-other-deployment');
+    expect(m!.provider).toBe('azure');
+  });
 });
