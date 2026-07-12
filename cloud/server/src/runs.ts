@@ -19,6 +19,13 @@ import type { CloudStore } from './db.js';
 const MAX_HISTORY_MESSAGES = 20;
 const PROVIDER_TYPES = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama'] as const;
 
+// A blank form field submits as '' — plain `.optional()` accepts that as a
+// "defined" empty string rather than absent, and provider clients downstream
+// (e.g. `new OpenAI({ apiKey: '' })`) throw on a defined-but-empty key where
+// they'd happily fall back to unauthenticated on a genuinely absent one.
+// Coerce '' to undefined so "left blank" always means "not set".
+const optionalNonEmptyString = z.string().optional().transform((v) => (v === '' ? undefined : v));
+
 // Keys are browser-held and travel with the run request only — never
 // persisted server-side (see db.ts: no api key column anywhere).
 const ChatRunPayloadSchema = z.object({
@@ -28,12 +35,12 @@ const ChatRunPayloadSchema = z.object({
     .array(
       z.object({
         type: z.enum(PROVIDER_TYPES),
-        label: z.string().optional(),
-        apiKey: z.string().optional(),
-        baseUrl: z.string().optional(),
-        deploymentName: z.string().optional(),
-        apiVersion: z.string().optional(),
-        model: z.string().optional(),
+        label: optionalNonEmptyString,
+        apiKey: optionalNonEmptyString,
+        baseUrl: optionalNonEmptyString,
+        deploymentName: optionalNonEmptyString,
+        apiVersion: optionalNonEmptyString,
+        model: optionalNonEmptyString,
       }),
     )
     .min(1)

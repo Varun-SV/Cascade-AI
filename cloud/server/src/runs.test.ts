@@ -56,6 +56,20 @@ describe('parseChatRunPayload', () => {
     const parsed = parseChatRunPayload({ prompt: 'hi', providers: [{ type: 'openai' }] });
     expect(parsed.prompt).toBe('hi');
   });
+
+  it('normalizes blank optional provider fields to undefined, not empty strings', () => {
+    // A KeyVault form left blank submits '' — some provider SDKs (e.g.
+    // `new OpenAI({ apiKey: '' })`) throw on a defined-but-empty key where
+    // they'd fall back gracefully on a genuinely absent one, so '' must
+    // never reach createCascade as-is.
+    const parsed = parseChatRunPayload({
+      prompt: 'hi',
+      providers: [{ type: 'openai-compatible', baseUrl: 'http://127.0.0.1:1/v1', apiKey: '', model: '' }],
+    });
+    expect(parsed.providers[0]!.apiKey).toBeUndefined();
+    expect(parsed.providers[0]!.model).toBeUndefined();
+    expect(parsed.providers[0]!.baseUrl).toBe('http://127.0.0.1:1/v1');
+  });
 });
 
 describe('runChatTurn (stub-provider integration)', () => {
@@ -117,6 +131,27 @@ describe('runChatTurn (stub-provider integration)', () => {
     // confirms the run actually went through the real provider HTTP client.
     expect(stub.requestLog.some((r) => r.includes('models'))).toBe(true);
     expect(stub.requestLog.some((r) => r.includes('chat/completions'))).toBe(true);
+  }, 30_000);
+
+  it('runs successfully when apiKey and model are left blank (KeyVault "optional" fields)', async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-runs-'));
+    store = new CloudStore(path.join(dir, 'cloud.db'));
+    stub = await startStubOpenAIServer();
+
+    const env = { DATA_DIR: dir, MAX_COST_PER_RUN_USD: 1 } as CloudEnv;
+    const user = store.upsertUser({ provider: 'dev', providerId: 'blank-fields', email: null, name: 'Blank', avatar: null });
+    const socket = new FakeSocket();
+
+    // Mirrors exactly what KeyVault used to send before it stopped
+    // persisting empty strings: apiKey/model submitted as '' rather than
+    // omitted, which made discovery throw and left T3 with no model.
+    const payload = parseChatRunPayload({
+      prompt: 'hello',
+      providers: [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: '', model: '' }],
+    });
+
+    const result = await runChatTurn(payload, { env, store, userId: user.id, socket: socket as unknown as import('socket.io').Socket });
+    expect(result.output).toContain('Hello from the stub model.');
   }, 30_000);
 
   it('rejects a conversationId that does not belong to the caller', async () => {

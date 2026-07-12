@@ -43,6 +43,16 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     res.json({ ok: true });
   });
 
+  // Public, non-sensitive — lets the SPA decide which login buttons to show
+  // without hardcoding provider availability at build time.
+  app.get('/api/config', (_req, res) => {
+    res.json({
+      githubEnabled: Boolean(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET),
+      googleEnabled: Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET),
+      devLoginEnabled: env.CLOUD_DEV_BYPASS,
+    });
+  });
+
   // Brute-force / abuse protection on unauthenticated entry points — OAuth
   // starts and callbacks and the dev-login shortcut all take unauthenticated
   // requests from the open internet.
