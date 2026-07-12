@@ -46,3 +46,12 @@ src/cli/repl/utils/
 
 # Throwaway design mockup renders
 app/mockups/out/
+
+# Cascade Cloud server-local SQLite data (dev only — never committed)
+cloud/server/data/
+cloud/server/e2e-data/
+
+# Playwright artifacts (cloud/web e2e)
+cloud/web/test-results/
+cloud/web/playwright-report/
+

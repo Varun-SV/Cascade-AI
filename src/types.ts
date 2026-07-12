@@ -578,6 +578,16 @@ export interface ToolsConfig {
    * 'auto' (default) = isolate when available else worker.
    */
   dynamicToolSandbox?: 'isolate' | 'worker' | 'auto';
+  /**
+   * When set, ONLY these tool names are registered — every other built-in tool
+   * (including shell/file/git, which have no other off-switch) is omitted
+   * entirely rather than merely approval-gated. Built for embedding Cascade in
+   * an untrusted/multi-tenant context (e.g. a hosted chat server) where the
+   * full tool surface must never exist for a run, not just require a click to
+   * use. `undefined`/omitted registers the full default set (unchanged
+   * behavior). An empty array registers no tools at all.
+   */
+  enabledTools?: string[];
 }
 
 export interface HooksConfig {

@@ -73,3 +73,51 @@ describe('ToolRegistry .cascadeignore', () => {
     expect(kept).toContain('keep');
   });
 });
+
+describe('ToolRegistry enabledTools allowlist', () => {
+  const ALL_DEFAULT_TOOLS = [
+    'shell', 'file_read', 'file_write', 'file_edit', 'file_delete', 'file_list',
+    'git', 'github', 'image_analyze', 'pdf_create', 'run_code', 'peer_message',
+    'web_search', 'glob', 'grep', 'web_fetch',
+  ];
+
+  it('registers the full default tool set when enabledTools is omitted (unchanged behavior)', () => {
+    const reg = new ToolRegistry(toolsConfig, '/tmp');
+    for (const name of ALL_DEFAULT_TOOLS) {
+      expect(reg.hasTool(name), name).toBe(true);
+    }
+  });
+
+  it('registers ONLY the listed tools — the sole way to omit shell/file/git entirely', () => {
+    // This is the hosted-multi-tenant case: web_search/web_fetch only, no
+    // shell/file/git/run_code should exist at all (not just be approval-gated).
+    const cfg = { ...toolsConfig, enabledTools: ['web_search', 'web_fetch'] } as unknown as Parameters<typeof ToolRegistry>[0];
+    const reg = new ToolRegistry(cfg, '/tmp');
+    expect(reg.hasTool('web_search')).toBe(true);
+    expect(reg.hasTool('web_fetch')).toBe(true);
+    for (const name of ALL_DEFAULT_TOOLS) {
+      if (name === 'web_search' || name === 'web_fetch') continue;
+      expect(reg.hasTool(name), name).toBe(false);
+    }
+  });
+
+  it('registers no tools at all for an empty allowlist', () => {
+    const cfg = { ...toolsConfig, enabledTools: [] } as unknown as Parameters<typeof ToolRegistry>[0];
+    const reg = new ToolRegistry(cfg, '/tmp');
+    for (const name of ALL_DEFAULT_TOOLS) {
+      expect(reg.hasTool(name), name).toBe(false);
+    }
+  });
+
+  it('still respects browserEnabled=false even when browser is in the allowlist', () => {
+    const cfg = { ...toolsConfig, enabledTools: ['browser'], browserEnabled: false } as unknown as Parameters<typeof ToolRegistry>[0];
+    const reg = new ToolRegistry(cfg, '/tmp');
+    expect(reg.hasTool('browser')).toBe(false);
+  });
+
+  it('registers browser when both browserEnabled and the allowlist permit it', () => {
+    const cfg = { ...toolsConfig, enabledTools: ['browser'], browserEnabled: true } as unknown as Parameters<typeof ToolRegistry>[0];
+    const reg = new ToolRegistry(cfg, '/tmp');
+    expect(reg.hasTool('browser')).toBe(true);
+  });
+});

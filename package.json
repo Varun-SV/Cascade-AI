@@ -1,6 +1,6 @@
 {
   "name": "cascade-ai",
-  "version": "0.19.1",
+  "version": "0.20.0",
   "description": "Multi-tier AI orchestration CLI — T1/T2/T3 hierarchical agent system",
   "type": "module",
   "main": "dist/index.cjs",
@@ -18,7 +18,9 @@
   },
   "workspaces": [
     "web",
-    "app"
+    "app",
+    "cloud/server",
+    "cloud/web"
   ],
   "scripts": {
     "build:web": "npm run build -w web",
@@ -28,6 +30,8 @@
     "dev": "tsup --watch",
     "dev:web": "npm run dev -w web",
     "dev:app": "npm run dev -w app",
+    "dev:cloud": "npm run dev -w cascade-cloud-server",
+    "dev:cloud-web": "npm run dev -w cascade-cloud-web",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
