@@ -218,6 +218,13 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     res.json({ conversation: { id: conversation.id, title: conversation.title, skillId: conversation.skillId }, messages });
   });
 
+  // ── Run explorer: tier mix for today ──
+  app.get('/api/tier-mix', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const start = new Date();
+    start.setUTCHours(0, 0, 0, 0);
+    res.json({ mix: store.tierMixSince(req.session!.userId, start.getTime()) });
+  });
+
   // ── Skills (prompt presets) — public catalog, no secrets ──
   app.get('/api/skills', (_req, res) => {
     res.json({ skills: skillCatalog() });

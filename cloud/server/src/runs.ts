@@ -82,11 +82,42 @@ export function buildCloudConfig(providers: ProviderConfig[], maxCostPerRunUsd: 
   };
 }
 
+/** The run-explorer report forwarded to the client (mirrors the desktop /why). */
+export interface WhyReport {
+  /** 'T1' | 'T2' | 'T3' — the tier that did the most work on this run. */
+  tier: string | null;
+  model: string | null;
+  decisions: Array<{ at: string; kind: string; detail: string }>;
+  savedUsd: number;
+  savedPct: number;
+  totalCostUsd: number;
+  totalTokens: number;
+  durationMs: number;
+  costByTier: Record<string, number>;
+  tokensByTier: Record<string, number>;
+  /** tier → model that served it (from tier:status). */
+  models: Record<string, string>;
+}
+
 export interface ChatRunResult {
   conversationId: string;
   output: string;
   costUsd: number;
   totalTokens: number;
+  tier: string | null;
+  model: string | null;
+  savedUsd: number;
+  savedPct: number;
+}
+
+// Picks the tier that did the most work as the "answering" tier: the one with
+// the most tokens, falling back to the most cost. Undefined for runs that never
+// surfaced tier data (e.g. the conversational fast-path) — the UI then shows no
+// badge rather than a fabricated one.
+export function primaryTierOf(tokensByTier: Record<string, number>, costByTier: Record<string, number>): string | null {
+  const rank = (m: Record<string, number>) =>
+    Object.entries(m).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1])[0]?.[0];
+  return rank(tokensByTier) ?? rank(costByTier) ?? null;
 }
 
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
@@ -173,10 +204,17 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   const config = buildCloudConfig(payload.providers as ProviderConfig[], env.MAX_COST_PER_RUN_USD);
   const cascade: Cascade = createCascade(config, scratchDir);
 
+  // Accumulate which model served each tier — the model rides on every
+  // tier:status event (base.ts setServingModel), and there's no post-run
+  // getter for a tier→model map, so we build it from the stream.
+  const tierModels: Record<string, string> = {};
+
   const onToken = (e: { text: string; tierId: string; primary?: boolean }) => {
     socket.emit('stream:token', { conversationId: conversation.id, ...e });
   };
   const onStatus = (e: unknown) => {
+    const ev = e as { role?: string; model?: string };
+    if (ev.role && ev.model) tierModels[ev.role] = ev.model;
     socket.emit('tier:status', { conversationId: conversation.id, ...(e as object) });
   };
   const onPlan = (e: unknown) => {
@@ -193,19 +231,51 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
       conversationHistory,
       workspacePath: scratchDir,
     });
-    store.addMessage({
+
+    // Build the run-explorer report the same way the desktop's captureWhy does:
+    // the decision trail + delegation savings + per-tier economics, all from
+    // getters on the same cascade handle.
+    const stats = cascade.getRouter().getStats();
+    const savings = cascade.getRouter().getDelegationSavings();
+    const costByTier = result.costByTier ?? stats.costByTier ?? {};
+    const tokensByTier = result.tokensByTier ?? stats.tokensByTier ?? {};
+    const tier = primaryTierOf(tokensByTier, costByTier);
+    const model = (tier && tierModels[tier]) || null;
+    const why: WhyReport = {
+      tier,
+      model,
+      decisions: cascade.getDecisionLog(),
+      savedUsd: savings.savedUsd,
+      savedPct: savings.savedPct,
+      totalCostUsd: stats.totalCostUsd,
+      totalTokens: stats.totalTokens,
+      durationMs: result.durationMs,
+      costByTier,
+      tokensByTier,
+      models: tierModels,
+    };
+
+    const assistantMessage = store.addMessage({
       conversationId: conversation.id,
       role: 'assistant',
       content: result.output,
+      model,
+      tier,
+      why: JSON.stringify(why),
       costUsd: result.usage.estimatedCostUsd,
     });
     store.incrementUsage(userId, todayKey());
+    socket.emit('run:why', { conversationId: conversation.id, messageId: assistantMessage.id, ...why });
     socket.emit('session:complete', { conversationId: conversation.id, result });
     return {
       conversationId: conversation.id,
       output: result.output,
       costUsd: result.usage.estimatedCostUsd,
       totalTokens: result.usage.totalTokens ?? 0,
+      tier,
+      model,
+      savedUsd: savings.savedUsd,
+      savedPct: savings.savedPct,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

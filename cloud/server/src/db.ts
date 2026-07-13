@@ -40,6 +40,10 @@ export interface CloudMessage {
   role: string;
   content: string;
   model: string | null;
+  /** Tier that produced this assistant message: 'T1' | 'T2' | 'T3'. */
+  tier: string | null;
+  /** JSON-encoded run-explorer report (decisions, savings, per-tier cost). */
+  why: string | null;
   costUsd: number | null;
   createdAt: number;
 }
@@ -106,6 +110,8 @@ interface DbMessageRow {
   role: string;
   content: string;
   model: string | null;
+  tier: string | null;
+  why_json: string | null;
   cost_usd: number | null;
   created_at: number;
 }
@@ -193,13 +199,16 @@ export class CloudStore {
       CREATE INDEX IF NOT EXISTS idx_attachments_user ON attachments(user_id);
     `);
 
-    // Additive column for conversations created before skills existed —
-    // ALTER ... ADD COLUMN throws if it's already there, so guard on the
-    // current schema (this migrate() runs on every boot).
-    const conversationCols = this.db.prepare('PRAGMA table_info(conversations)').all() as Array<{ name: string }>;
-    if (!conversationCols.some((c) => c.name === 'skill_id')) {
-      this.db.exec('ALTER TABLE conversations ADD COLUMN skill_id TEXT');
-    }
+    // Additive columns — ALTER ... ADD COLUMN throws if the column already
+    // exists, so guard on the current schema (this migrate() runs every boot).
+    const hasCol = (table: string, col: string) =>
+      (this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === col);
+    if (!hasCol('conversations', 'skill_id')) this.db.exec('ALTER TABLE conversations ADD COLUMN skill_id TEXT');
+    // Run-explorer: which tier answered + the JSON /why report.
+    if (!hasCol('messages', 'tier')) this.db.exec('ALTER TABLE messages ADD COLUMN tier TEXT');
+    if (!hasCol('messages', 'why_json')) this.db.exec('ALTER TABLE messages ADD COLUMN why_json TEXT');
+    // Per-user memory categories (STACK/STYLE/PROJECT/…).
+    if (!hasCol('memories', 'category')) this.db.exec('ALTER TABLE memories ADD COLUMN category TEXT');
   }
 
   // ── Users ─────────────────────────────────────
@@ -289,6 +298,8 @@ export class CloudStore {
     role: string;
     content: string;
     model?: string | null;
+    tier?: string | null;
+    why?: string | null;
     costUsd?: number | null;
   }): CloudMessage {
     const row: DbMessageRow = {
@@ -297,17 +308,34 @@ export class CloudStore {
       role: input.role,
       content: input.content,
       model: input.model ?? null,
+      tier: input.tier ?? null,
+      why_json: input.why ?? null,
       cost_usd: input.costUsd ?? null,
       created_at: Date.now(),
     };
     this.db
       .prepare(
-        `INSERT INTO messages (id, conversation_id, role, content, model, cost_usd, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages (id, conversation_id, role, content, model, tier, why_json, cost_usd, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(row.id, row.conversation_id, row.role, row.content, row.model, row.cost_usd, row.created_at);
+      .run(row.id, row.conversation_id, row.role, row.content, row.model, row.tier, row.why_json, row.cost_usd, row.created_at);
     this.touchConversation(input.conversationId);
     return this.deserializeMessage(row);
+  }
+
+  /**
+   * Tier mix for a user's runs since `sinceMs` — a count of assistant messages
+   * grouped by the tier that produced them. Powers "Tier mix — today".
+   */
+  tierMixSince(userId: string, sinceMs: number): Array<{ tier: string; count: number }> {
+    return this.db
+      .prepare(
+        `SELECT m.tier AS tier, COUNT(*) AS count
+         FROM messages m JOIN conversations c ON c.id = m.conversation_id
+         WHERE c.user_id = ? AND m.role = 'assistant' AND m.tier IS NOT NULL AND m.created_at >= ?
+         GROUP BY m.tier ORDER BY count DESC`,
+      )
+      .all(userId, sinceMs) as Array<{ tier: string; count: number }>;
   }
 
   getMessages(conversationId: string): CloudMessage[] {
@@ -443,6 +471,8 @@ export class CloudStore {
       role: row.role,
       content: row.content,
       model: row.model,
+      tier: row.tier ?? null,
+      why: row.why_json ?? null,
       costUsd: row.cost_usd,
       createdAt: row.created_at,
     };

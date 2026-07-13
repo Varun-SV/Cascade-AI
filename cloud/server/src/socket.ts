@@ -15,7 +15,18 @@ interface CloudSocketData {
 }
 
 type ChatRunAck = (
-  res: { conversationId: string; output: string; costUsd: number; totalTokens: number } | { error: string },
+  res:
+    | {
+        conversationId: string;
+        output: string;
+        costUsd: number;
+        totalTokens: number;
+        tier: string | null;
+        model: string | null;
+        savedUsd: number;
+        savedPct: number;
+      }
+    | { error: string },
 ) => void;
 
 export function attachSocket(httpServer: HttpServer, env: CloudEnv, store: CloudStore): SocketIOServer {
