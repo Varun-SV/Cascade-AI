@@ -13,10 +13,20 @@ import { useChatSession } from './chat/useChatSession.js';
 import { loadKeys, saveKeys } from './keys/store.js';
 import { fetchConfig, fetchMe, fetchSkills, getMessages, listConversations, logout, type CloudConfig } from './lib/api.js';
 import { closeSocket, getSocket } from './lib/socket.js';
-import type { CloudConversation, CloudUser, ProviderConfig, Skill } from './lib/types.js';
+import type { CloudConversation, CloudUser, ProviderConfig, Skill, WhyReport } from './lib/types.js';
 
 const SIDEBAR_OPEN_KEY = 'cascade-cloud-sidebar-open';
 const DEFAULT_SKILL = 'general';
+
+/** Parse a persisted /why JSON blob back into a WhyReport (null on absent/bad JSON). */
+function parseWhy(raw: string | null): WhyReport | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as WhyReport;
+  } catch {
+    return null;
+  }
+}
 
 export default function App() {
   const [config, setConfig] = useState<CloudConfig | null>(null);
@@ -90,6 +100,9 @@ export default function App() {
         role: m.role === 'user' ? 'user' : 'assistant',
         content: m.content,
         costUsd: m.costUsd,
+        tier: m.tier,
+        model: m.model,
+        why: parseWhy(m.why),
         attachments: m.attachments?.map((a) => ({ id: a.id, mime: a.mime })),
       })),
     );
@@ -183,7 +196,7 @@ export default function App() {
 
       {/* Main chat panel */}
       <div className="glass flex min-w-0 flex-1 flex-col overflow-hidden md:rounded-2xl">
-        <ChatTopBar title={activeTitle} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+        <ChatTopBar title={activeTitle} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} saved={chat.lastSaved} />
         <div className="min-h-0 flex-1">
           <ChatPanel
             messages={chat.messages}

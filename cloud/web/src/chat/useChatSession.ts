@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
-import type { ProviderConfig } from '../lib/types.js';
+import type { ProviderConfig, WhyReport } from '../lib/types.js';
 
 export interface ChatAttachment {
   id: string;
@@ -14,6 +14,9 @@ export interface ChatMessage {
   streaming?: boolean;
   attachments?: ChatAttachment[];
   costUsd?: number | null;
+  tier?: string | null;
+  model?: string | null;
+  why?: WhyReport | null;
 }
 
 export interface SendInput {
@@ -26,6 +29,10 @@ interface ChatRunAck {
   output?: string;
   costUsd?: number;
   totalTokens?: number;
+  tier?: string | null;
+  model?: string | null;
+  savedUsd?: number;
+  savedPct?: number;
   error?: string;
 }
 
@@ -52,7 +59,11 @@ export function useChatSession(
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [lastTokens, setLastTokens] = useState<number>(0);
+  const [lastSaved, setLastSaved] = useState<{ usd: number; pct: number } | null>(null);
   const streamingRef = useRef('');
+  // run:why arrives just before the chat:run ack; stash it so the ack can
+  // attach the full report to the assistant message it creates.
+  const pendingWhyRef = useRef<WhyReport | null>(null);
 
   useEffect(() => {
     setConversationId(initialConversationId);
@@ -72,11 +83,14 @@ export function useChatSession(
       });
     };
     const onStatus = (e: Record<string, unknown>) => setStatus(statusLabel(e));
+    const onWhy = (r: WhyReport) => { pendingWhyRef.current = r; };
     socket.on('stream:token', onToken);
     socket.on('tier:status', onStatus);
+    socket.on('run:why', onWhy);
     return () => {
       socket.off('stream:token', onToken);
       socket.off('tier:status', onStatus);
+      socket.off('run:why', onWhy);
     };
   }, [socket]);
 
@@ -112,12 +126,25 @@ export function useChatSession(
             return;
           }
           if (typeof ack.totalTokens === 'number') setLastTokens(ack.totalTokens);
+          if (typeof ack.savedUsd === 'number' && ack.savedUsd > 0) {
+            setLastSaved({ usd: ack.savedUsd, pct: ack.savedPct ?? 0 });
+          }
           setConversationId(ack.conversationId);
+          const why = pendingWhyRef.current;
+          pendingWhyRef.current = null;
           setMessages((prev) => {
             const withoutStreaming = prev.filter((m) => !m.streaming);
             return [
               ...withoutStreaming,
-              { id: crypto.randomUUID(), role: 'assistant', content: ack.output ?? '', costUsd: ack.costUsd ?? null },
+              {
+                id: crypto.randomUUID(),
+                role: 'assistant',
+                content: ack.output ?? '',
+                costUsd: ack.costUsd ?? null,
+                tier: ack.tier ?? null,
+                model: ack.model ?? null,
+                why,
+              },
             ];
           });
         },
@@ -141,5 +168,5 @@ export function useChatSession(
     runChat(lastUser.content, lastUser.attachments, false);
   }, [busy, messages, runChat]);
 
-  return { messages, send, regenerate, busy, error, status, lastTokens, conversationId, loadMessages, setConversationId };
+  return { messages, send, regenerate, busy, error, status, lastTokens, lastSaved, conversationId, loadMessages, setConversationId };
 }

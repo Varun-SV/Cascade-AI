@@ -53,6 +53,10 @@ export function fetchSkills(): Promise<{ skills: Skill[] }> {
   return json(fetch('/api/skills', { credentials: 'include' }));
 }
 
+export function fetchTierMix(): Promise<{ mix: Array<{ tier: string; count: number }> }> {
+  return json(fetch('/api/tier-mix', { credentials: 'include' }));
+}
+
 export function fetchMemories(): Promise<{ memories: Memory[] }> {
   return json(fetch('/api/memories', { credentials: 'include' }));
 }

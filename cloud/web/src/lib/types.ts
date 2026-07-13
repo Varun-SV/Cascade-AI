@@ -41,6 +41,9 @@ export interface CloudMessage {
   role: string;
   content: string;
   model: string | null;
+  tier: string | null;
+  /** JSON-encoded WhyReport, or null. Parsed client-side on transcript load. */
+  why: string | null;
   costUsd: number | null;
   createdAt: number;
   attachments?: MessageAttachment[];
@@ -58,4 +61,19 @@ export interface Memory {
   content: string;
   createdAt: number;
   updatedAt: number;
+}
+
+/** Run-explorer report: the decision trail + router economics of one run. */
+export interface WhyReport {
+  tier: string | null;
+  model: string | null;
+  decisions: Array<{ at: string; kind: string; detail: string }>;
+  savedUsd: number;
+  savedPct: number;
+  totalCostUsd: number;
+  totalTokens: number;
+  durationMs: number;
+  costByTier: Record<string, number>;
+  tokensByTier: Record<string, number>;
+  models: Record<string, string>;
 }
