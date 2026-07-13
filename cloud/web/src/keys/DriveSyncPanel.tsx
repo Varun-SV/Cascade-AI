@@ -54,9 +54,9 @@ export default function DriveSyncPanel({ googleClientId, keys, onRestore }: Prop
   }
 
   return (
-    <div className="mt-2 rounded-md border border-cascade-800 p-3">
-      <div className="mb-2 flex items-start gap-2 text-xs text-cascade-300">
-        <Cloud size={14} className="mt-0.5 shrink-0 text-cascade-400" />
+    <div className="mt-2 rounded-md border border-white/10 p-3">
+      <div className="mb-2 flex items-start gap-2 text-xs text-ink-300">
+        <Cloud size={14} className="mt-0.5 shrink-0 text-ink-400" />
         <span>
           Sync your keys across devices via Google Drive. They're encrypted with a passphrase only you
           know before upload — we never see the passphrase, the keys, or the decrypted file.
@@ -64,7 +64,7 @@ export default function DriveSyncPanel({ googleClientId, keys, onRestore }: Prop
       </div>
       <input
         type="password"
-        className="mb-2 w-full rounded bg-cascade-950 px-2 py-1.5 text-sm"
+        className="mb-2 w-full rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
         placeholder="Passphrase"
         value={passphrase}
         onChange={(e) => setPassphrase(e.target.value)}
@@ -74,7 +74,7 @@ export default function DriveSyncPanel({ googleClientId, keys, onRestore }: Prop
           type="button"
           disabled={busy !== null}
           onClick={handleUpload}
-          className="flex-1 rounded-md bg-cascade-700 px-3 py-1.5 text-xs text-white hover:bg-cascade-600 disabled:opacity-50"
+          className="flex-1 rounded-md bg-accent-600 px-3 py-1.5 text-xs text-white hover:bg-accent-500 disabled:opacity-50"
         >
           {busy === 'upload' ? <Loader2 size={14} className="mx-auto animate-spin" /> : 'Upload'}
         </button>
@@ -82,12 +82,12 @@ export default function DriveSyncPanel({ googleClientId, keys, onRestore }: Prop
           type="button"
           disabled={busy !== null}
           onClick={handleDownload}
-          className="flex-1 rounded-md border border-cascade-700 px-3 py-1.5 text-xs text-cascade-200 hover:bg-cascade-900 disabled:opacity-50"
+          className="flex-1 rounded-md border border-white/10 px-3 py-1.5 text-xs text-ink-200 hover:bg-white/[0.05] disabled:opacity-50"
         >
           {busy === 'download' ? <Loader2 size={14} className="mx-auto animate-spin" /> : 'Restore'}
         </button>
       </div>
-      {status && <p className="mt-2 text-xs text-cascade-400">{status}</p>}
+      {status && <p className="mt-2 text-xs text-ink-400">{status}</p>}
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import type { CloudConversation, CloudMessage, CloudUser } from './types.js';
+import type { CloudConversation, CloudMessage, CloudUser, Memory, Skill } from './types.js';
 
 export interface CloudConfig {
   githubEnabled: boolean;
@@ -43,8 +43,61 @@ export function listConversations(): Promise<{ conversations: CloudConversation[
   return json(fetch('/api/conversations', { credentials: 'include' }));
 }
 
-export function getMessages(conversationId: string): Promise<{ messages: CloudMessage[] }> {
+export function getMessages(
+  conversationId: string,
+): Promise<{ conversation?: { id: string; title: string | null; skillId: string | null }; messages: CloudMessage[] }> {
   return json(fetch(`/api/conversations/${encodeURIComponent(conversationId)}/messages`, { credentials: 'include' }));
+}
+
+export function fetchSkills(): Promise<{ skills: Skill[] }> {
+  return json(fetch('/api/skills', { credentials: 'include' }));
+}
+
+export function fetchMemories(): Promise<{ memories: Memory[] }> {
+  return json(fetch('/api/memories', { credentials: 'include' }));
+}
+
+export function addMemory(content: string): Promise<{ memory: Memory }> {
+  return json(
+    fetch('/api/memories', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    }),
+  );
+}
+
+export function updateMemory(id: string, content: string): Promise<{ memory: Memory }> {
+  return json(
+    fetch(`/api/memories/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    }),
+  );
+}
+
+export function deleteMemory(id: string): Promise<{ ok: boolean }> {
+  return json(fetch(`/api/memories/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' }));
+}
+
+/** Uploads one image and returns its server id (referenced later in chat:run). */
+export function uploadImage(mime: string, dataBase64: string): Promise<{ id: string; mime: string }> {
+  return json(
+    fetch('/api/uploads', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mime, dataBase64 }),
+    }),
+  );
+}
+
+/** Owner-scoped URL for rendering a previously-uploaded image in the transcript. */
+export function uploadUrl(id: string): string {
+  return `/api/uploads/${encodeURIComponent(id)}`;
 }
 
 export interface UsageInfo {

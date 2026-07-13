@@ -41,27 +41,54 @@ function startStubLLM(): Promise<{ url: string; close: () => Promise<void> }> {
   });
 }
 
-test('dev login -> add a provider key -> send a message -> streamed reply renders', async ({ page }) => {
+// 1×1 transparent PNG.
+const TINY_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+test('dev login -> add a key -> pick a skill -> attach an image -> send -> reply; then add a memory', async ({ page }) => {
   const stub = await startStubLLM();
   try {
     await page.goto('/');
 
     await page.getByPlaceholder('Your name').fill('E2E Tester');
     await page.getByText('Dev login').click();
-    await expect(page.getByText('API keys')).toBeVisible();
+    await expect(page.getByRole('button', { name: /API keys/ })).toBeVisible();
 
-    await page.getByText('API keys').click();
+    // Add a provider key. Scope the provider <select> (the composer also has a
+    // skill <select>) via its unique 'openai-compatible' option.
+    await page.getByRole('button', { name: /API keys/ }).click();
     await page.getByText('Add provider').click();
-    await page.locator('select').selectOption('openai-compatible');
+    const providerSelect = page.locator('select').filter({ has: page.locator('option[value="openai-compatible"]') });
+    await providerSelect.selectOption('openai-compatible');
     await page.getByPlaceholder('https://...').fill(stub.url);
     await page.getByText('Save').click();
     await page.getByLabel('Close').click();
 
-    await page.getByPlaceholder('Message Cascade…').fill('hello');
+    // Pick a skill preset in the composer.
+    await page.getByLabel('Skill').selectOption('code-reviewer');
+
+    // Attach an image; wait for the upload thumbnail before sending.
+    await page.locator('input[type="file"]').setInputFiles({ name: 'pixel.png', mimeType: 'image/png', buffer: TINY_PNG });
+    await expect(page.locator('img[alt="pending"]')).toBeVisible();
+
+    await page.getByPlaceholder('Message Cascade…').fill('review this');
     await page.getByLabel('Send').click();
 
     await expect(page.locator('[data-role="assistant"]')).toContainText('e2e stub model', { timeout: 20_000 });
-    await expect(page.locator('[data-role="user"]')).toContainText('hello');
+    await expect(page.locator('[data-role="user"]')).toContainText('review this');
+    // The uploaded image re-renders in the sent user message.
+    await expect(page.locator('[data-role="user"] img')).toBeVisible();
+
+    // Add a memory and confirm it persists in the panel. Use a unique string
+    // (the e2e DB is reused across runs) and scope to the list row span so the
+    // draft textarea's value doesn't collide with the assertion.
+    const memory = `e2e memory ${Date.now()}`;
+    await page.getByRole('button', { name: /Memory/ }).click();
+    await page.getByPlaceholder(/I prefer TypeScript/).fill(memory);
+    await page.getByRole('button', { name: /^Add/ }).click();
+    await expect(page.locator('span.whitespace-pre-wrap', { hasText: memory })).toBeVisible();
   } finally {
     await stub.close();
   }

@@ -6,7 +6,86 @@ html, body, #root {
   height: 100%;
 }
 
+/* Fluent-style ground: a deep ink base with soft, fixed accent glows so the
+   frosted-glass panels layered on top read with real depth. */
 body {
-  background-color: #0b0a12;
-  color: #e8e6f0;
+  @apply text-ink-100;
+  background:
+    radial-gradient(1100px 620px at 12% -12%, rgba(255, 138, 61, 0.12), transparent 55%),
+    radial-gradient(1000px 700px at 100% 0%, rgba(79, 157, 255, 0.09), transparent 52%),
+    radial-gradient(900px 700px at 50% 120%, rgba(124, 106, 247, 0.08), transparent 55%),
+    #08080b;
+  background-attachment: fixed;
 }
+
+@layer components {
+  /* Frosted translucent surface with an inset top highlight + soft drop shadow. */
+  .glass {
+    @apply border border-white/10 bg-ink-900/55 backdrop-blur-xl;
+    box-shadow:
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.05),
+      0 12px 34px -14px rgba(0, 0, 0, 0.7);
+  }
+  .glass-strong {
+    @apply border border-white/10 bg-ink-900/80 backdrop-blur-2xl;
+    box-shadow:
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.06),
+      0 24px 60px -18px rgba(0, 0, 0, 0.75);
+  }
+  /* Reveal-on-hover highlight for interactive rows. */
+  .reveal {
+    @apply relative transition-colors duration-200;
+  }
+  .reveal:hover {
+    @apply bg-white/[0.06];
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  }
+  /* Warm accent gradient used on primary actions. */
+  .accent-grad {
+    background-image: linear-gradient(135deg, #ffb56b 0%, #ff8a3d 45%, #e56a1f 100%);
+  }
+}
+
+/* Shimmer sweep for streaming / loading states. */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.shimmer-text {
+  background: linear-gradient(90deg, rgba(168,168,179,0.5) 25%, rgba(244,245,247,0.95) 50%, rgba(168,168,179,0.5) 75%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 1.6s linear infinite;
+}
+
+/* Thin, unobtrusive scrollbars that suit the glass surfaces. */
+* { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.14) transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 99px; }
+*::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.22); }
+
+/* Compact self-contained highlight.js dark theme (rehype-highlight adds the
+   .hljs-* classes). Inlined instead of importing highlight.js/styles/*.css so
+   the bundle has no external CSS dependency to resolve. */
+.hljs { color: #e4e4e9; background: transparent; }
+.hljs-comment, .hljs-quote { color: #6b6b76; font-style: italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-section, .hljs-doctag, .hljs-type, .hljs-name, .hljs-strong { color: #ff8a3d; }
+.hljs-string, .hljs-regexp, .hljs-addition, .hljs-attribute, .hljs-meta .hljs-string { color: #3ecf8e; }
+.hljs-number, .hljs-symbol, .hljs-bullet, .hljs-template-variable, .hljs-variable, .hljs-params { color: #ffb56b; }
+.hljs-title, .hljs-title.function_, .hljs-built_in, .hljs-attr { color: #4f9dff; }
+.hljs-tag, .hljs-selector-id, .hljs-selector-class, .hljs-keyword.hljs-property { color: #f2c94c; }
+.hljs-meta, .hljs-deletion { color: #a8a8b3; }
+.hljs-emphasis { font-style: italic; }
+
+/* Keep react-markdown's prose code blocks flush with our custom <pre> chrome. */
+.prose pre { background: transparent; padding: 0; margin: 0; }
+.prose :where(code):not(:where(pre code)) {
+  background: #1c1c20;
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-weight: 400;
+}
+.prose :where(code):not(:where(pre code))::before,
+.prose :where(code):not(:where(pre code))::after { content: none; }

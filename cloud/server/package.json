@@ -1,6 +1,6 @@
 {
   "name": "cascade-cloud-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Cascade Cloud — hosted multi-tenant chat server (OAuth, sessions, run pipeline)",
   "author": "Varun SV",
   "license": "MIT",

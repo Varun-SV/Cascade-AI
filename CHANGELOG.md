@@ -5,6 +5,44 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Cascade Cloud 0.2.0 - 2026-07-12
+
+A flagship-quality rebuild of the hosted chat app (`cloud/web` + `cloud/server`),
+plus one core-SDK fix that stops hosted runs wasting tokens. Desktop is
+unaffected (no version bump); Cascade Cloud redeploys on merge.
+
+### Added
+- **Multimodal image input.** Attach images to a message — file picker, drag-and-drop,
+  or paste. Uploads go to a per-tenant, owner-scoped store (`POST /api/uploads`, ≤4
+  images/message, ≤5 MB each, jpeg/png/gif/webp only) and are passed to the run as
+  `ImageAttachment`s, which every provider adapter (Anthropic/OpenAI/Gemini) already
+  understands. Thumbnails re-render in the transcript on reload. (Agent-generated file
+  **downloads** are deliberately deferred to a sandboxed phase 2 — the composer says so.)
+- **Skills (prompt presets).** Pick a persona per chat — General, Code reviewer, Research
+  analyst, Writing editor, Brainstorm partner. The selected skill's system prompt is
+  prepended to the run and remembered on the conversation. `GET /api/skills` exposes the
+  catalog (system-prompt text never leaves the server).
+- **Persistent memory.** A Memory panel to add/edit/delete facts about yourself
+  (`GET/POST/PUT/DELETE /api/memories`, per-user). Saved facts are injected into every run
+  so replies stay consistent across conversations.
+- **Context & usage meter.** The sidebar shows runs-used-today vs. your plan limit and a
+  per-conversation context gauge, with graceful "daily limit reached" / "context getting
+  full" states.
+- **Rebuilt chat surface.** Borderless assistant messages with syntax-highlighted code
+  blocks (copy button), per-message copy/regenerate and cost, live tier-status chips
+  ("Planning… / Coordinating… / Executing…"), a pill composer, collapsible sidebar with a
+  mobile drawer, and blurred modal transitions — all on a neutral-ink + warm-accent dark
+  palette.
+
+### Core (SDK)
+- **Worker & planner prompts now describe only the tools that are actually registered.**
+  `T3_SYSTEM_PROMPT`/`T1_SYSTEM_PROMPT` hard-coded guidance for `run_code`, `pdf_create`,
+  `peer_message`, and "create a file in the workspace" regardless of the tool set. On the
+  hosted server — which enables only `web_search`/`web_fetch` — the model kept calling
+  tools that don't exist and burning turns on tool-not-found errors. The tool lines are now
+  emitted per registered tool, so a restricted embed drops them. **The full desktop tool set
+  renders every line exactly as before (byte-identical), so desktop behavior is unchanged.**
+
 ## [0.20.1] - 2026-07-12
 
 ### Fixed
