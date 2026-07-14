@@ -49,6 +49,17 @@ export function getMessages(
   return json(fetch(`/api/conversations/${encodeURIComponent(conversationId)}/messages`, { credentials: 'include' }));
 }
 
+export function renameConversation(id: string, title: string): Promise<{ ok: boolean; title: string }> {
+  return json(
+    fetch(`/api/conversations/${encodeURIComponent(id)}/title`, {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    }),
+  );
+}
+
 export function fetchSkills(): Promise<{ skills: Skill[] }> {
   return json(fetch('/api/skills', { credentials: 'include' }));
 }

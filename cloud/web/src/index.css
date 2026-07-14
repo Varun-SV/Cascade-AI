@@ -16,6 +16,17 @@ select option {
   color-scheme: dark;
 }
 
+/* Appearance → "Reduce motion": neutralize CSS transitions/animations. Framer
+   Motion is handled separately via <MotionConfig reducedMotion>. */
+:root[data-reduce-motion="1"] *,
+:root[data-reduce-motion="1"] *::before,
+:root[data-reduce-motion="1"] *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+  scroll-behavior: auto !important;
+}
+
 /* Fluent-style ground: a deep ink base with soft, fixed accent glows so the
    frosted-glass panels layered on top read with real depth. */
 body {

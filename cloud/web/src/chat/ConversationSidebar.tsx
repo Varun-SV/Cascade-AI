@@ -1,6 +1,6 @@
 import clsx from 'clsx';
 import { motion } from 'framer-motion';
-import { MessageSquarePlus, KeyRound, LogOut, Crown, Brain, Sparkles } from 'lucide-react';
+import { MessageSquarePlus, Settings } from 'lucide-react';
 import UsageMeter from './UsageMeter.js';
 import TierMix from './TierMix.js';
 import type { CloudConversation, CloudUser } from '../lib/types.js';
@@ -13,30 +13,12 @@ interface Props {
   usageRefreshSignal: unknown;
   onSelect: (id: string) => void;
   onNewChat: () => void;
-  onOpenKeyVault: () => void;
-  onOpenUpgrade: () => void;
-  onOpenMemory: () => void;
-  onOpenSkills: () => void;
-  onLogout: () => void;
-}
-
-function FooterButton({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
-  return (
-    <motion.button
-      type="button"
-      onClick={onClick}
-      whileHover={{ x: 2 }}
-      whileTap={{ scale: 0.98 }}
-      className="reveal flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-ink-200"
-    >
-      {icon} {label}
-    </motion.button>
-  );
+  onOpenSettings: () => void;
 }
 
 export default function ConversationSidebar({
   user, conversations, activeConversationId, lastTokens, usageRefreshSignal,
-  onSelect, onNewChat, onOpenKeyVault, onOpenUpgrade, onOpenMemory, onOpenSkills, onLogout,
+  onSelect, onNewChat, onOpenSettings,
 }: Props) {
   return (
     <div className="flex h-full w-72 flex-col">
@@ -82,26 +64,24 @@ export default function ConversationSidebar({
         })}
       </div>
 
-      <div className="flex flex-col gap-0.5 border-t border-white/10 p-3">
+      <div className="flex flex-col gap-1 border-t border-white/10 p-3">
         <UsageMeter lastTokens={lastTokens} refreshSignal={usageRefreshSignal} />
         <TierMix refreshSignal={usageRefreshSignal} />
-        <FooterButton icon={<Sparkles size={16} />} label="Skills" onClick={onOpenSkills} />
-        <FooterButton icon={<Brain size={16} />} label="Memory" onClick={onOpenMemory} />
-        <FooterButton icon={<KeyRound size={16} />} label="API keys" onClick={onOpenKeyVault} />
-        <FooterButton icon={<Crown size={16} />} label="Upgrade" onClick={onOpenUpgrade} />
-        <div className="mt-1 flex items-center justify-between rounded-lg px-3 py-2 text-sm text-ink-200">
-          <span className="truncate">{user.name ?? user.email ?? 'Signed in'}</span>
-          <motion.button
-            type="button"
-            aria-label="Log out"
-            onClick={onLogout}
-            whileHover={{ scale: 1.1 }}
-            whileTap={{ scale: 0.9 }}
-            className="text-ink-400 hover:text-danger-500"
-          >
-            <LogOut size={16} />
-          </motion.button>
-        </div>
+        <motion.button
+          type="button"
+          aria-label="Settings"
+          onClick={onOpenSettings}
+          whileTap={{ scale: 0.98 }}
+          className="mt-1 flex items-center justify-between gap-2 rounded-lg px-3 py-2 text-sm text-ink-200 hover:bg-white/[0.06]"
+        >
+          <span className="flex min-w-0 items-center gap-2.5">
+            <span className="accent-grad flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-ink-950">
+              {(user.name ?? user.email ?? 'U').charAt(0).toUpperCase()}
+            </span>
+            <span className="truncate">{user.name ?? user.email ?? 'Signed in'}</span>
+          </span>
+          <Settings size={16} className="shrink-0 text-ink-400" />
+        </motion.button>
       </div>
     </div>
   );

@@ -5,6 +5,32 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Cascade Cloud 0.4.0 - 2026-07-14
+
+A consolidated Settings surface and an opt-in, fully on-device conversation
+titler.
+
+### Added
+- **Settings modal** (click your name, bottom-left): Account (name / email /
+  plan), an on-device auto-title toggle, a Reduce-motion appearance control, and
+  quick links to Skills / Memory / API keys / Upgrade, plus Sign out. The four
+  separate sidebar footer buttons are folded into it.
+- **On-device auto-titling (opt-in, off by default).** When enabled and the chat
+  sits idle, a small model (WebLLM / Qwen2.5-0.5B) runs **in your browser** to
+  name untitled conversations — nothing leaves your device, and it works offline
+  after a one-time model download. It's capability-gated (needs WebGPU + enough
+  RAM) and the engine/weights load lazily, so the app bundle is unchanged for
+  everyone who doesn't turn it on. Unsupported or declined → the current
+  first-message titles stay. New `PATCH /api/conversations/:id/title`
+  (owner-scoped; doesn't reorder the recency-sorted list).
+- **Reduce motion** appearance toggle — minimizes animations (honored via CSS
+  and Framer Motion).
+
+### Fixed
+- A sub-modal opened from Settings (Skills, Memory, …) now renders above
+  Settings' briefly-exiting backdrop instead of behind it, so its controls stay
+  clickable.
+
 ## Cascade Cloud 0.3.1 - 2026-07-14
 
 Production reliability fixes for the hosted app — hosted runs were failing to

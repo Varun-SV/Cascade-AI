@@ -1,17 +1,20 @@
 import { useCallback, useEffect, useState } from 'react';
 import clsx from 'clsx';
-import { AnimatePresence, motion } from 'framer-motion';
+import { AnimatePresence, MotionConfig, motion } from 'framer-motion';
 import LoginGate from './components/LoginGate.js';
 import Modal from './components/Modal.js';
 import UpgradeModal from './components/UpgradeModal.js';
 import MemoryModal from './components/MemoryModal.js';
 import SkillsModal from './components/SkillsModal.js';
+import SettingsModal from './components/SettingsModal.js';
 import ConversationSidebar from './chat/ConversationSidebar.js';
 import ChatPanel from './chat/ChatPanel.js';
 import ChatTopBar from './chat/ChatTopBar.js';
 import KeyVault from './keys/KeyVault.js';
 import { useChatSession } from './chat/useChatSession.js';
+import { useAutoTitler } from './chat/useAutoTitler.js';
 import { loadKeys, saveKeys } from './keys/store.js';
+import { localModelEnabled, reduceMotionEnabled } from './lib/prefs.js';
 import { fetchConfig, fetchMe, fetchSkills, getMessages, listConversations, logout, type CloudConfig } from './lib/api.js';
 import { closeSocket, getSocket } from './lib/socket.js';
 import type { CloudConversation, CloudUser, ProviderConfig, Skill, WhyReport } from './lib/types.js';
@@ -40,6 +43,8 @@ export default function App() {
   const [showUpgrade, setShowUpgrade] = useState(false);
   const [showMemory, setShowMemory] = useState(false);
   const [showSkills, setShowSkills] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [reduceMotion, setReduceMotion] = useState(() => reduceMotionEnabled());
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     const stored = localStorage.getItem(SIDEBAR_OPEN_KEY);
     // No explicit preference yet: default open on desktop (today's always-visible
@@ -89,6 +94,7 @@ export default function App() {
 
   const socket = user ? getSocket() : null;
   const chat = useChatSession(socket, providers, skillId);
+  const [localModelOn, setLocalModelOn] = useState(() => localModelEnabled());
 
   // A run may have created a new conversation or renamed one — refresh the
   // sidebar once the run settles (covers the initial idle mount too, which
@@ -96,6 +102,20 @@ export default function App() {
   useEffect(() => {
     if (user && !chat.busy) refreshConversations();
   }, [user, chat.busy, refreshConversations]);
+
+  // Opt-in on-device auto-titling: when idle, name the current conversation.
+  useAutoTitler({
+    enabled: localModelOn,
+    conversationId: chat.conversationId,
+    messages: chat.messages,
+    busy: chat.busy,
+    onTitled: refreshConversations,
+  });
+
+  // Reflect the reduce-motion preference on the document so CSS can honor it.
+  useEffect(() => {
+    document.documentElement.dataset['reduceMotion'] = reduceMotion ? '1' : '0';
+  }, [reduceMotion]);
 
   function updateProviders(next: ProviderConfig[]) {
     setProviders(next);
@@ -161,15 +181,12 @@ export default function App() {
       usageRefreshSignal={chat.busy}
       onSelect={(id) => { void selectConversation(id); if (window.innerWidth < 768) setSidebarOpen(false); }}
       onNewChat={() => { newChat(); if (window.innerWidth < 768) setSidebarOpen(false); }}
-      onOpenKeyVault={() => setShowVault(true)}
-      onOpenUpgrade={() => setShowUpgrade(true)}
-      onOpenMemory={() => setShowMemory(true)}
-      onOpenSkills={() => setShowSkills(true)}
-      onLogout={handleLogout}
+      onOpenSettings={() => setShowSettings(true)}
     />
   );
 
   return (
+    <MotionConfig reducedMotion={reduceMotion ? 'always' : 'user'}>
     <div className="relative flex h-screen gap-0 overflow-hidden md:gap-3 md:p-3">
       {/* Desktop: collapsible floating glass panel */}
       <div
@@ -234,6 +251,22 @@ export default function App() {
       </div>
 
       <AnimatePresence>
+        {/* Settings renders FIRST so that a sub-modal opened from it (Skills,
+            Memory, API keys…) paints ABOVE Settings' briefly-exiting backdrop
+            instead of behind it — otherwise the exiting scrim eats clicks. */}
+        {showSettings && (
+          <SettingsModal
+            user={user}
+            onClose={() => setShowSettings(false)}
+            onOpenSkills={() => setShowSkills(true)}
+            onOpenMemory={() => setShowMemory(true)}
+            onOpenKeyVault={() => setShowVault(true)}
+            onOpenUpgrade={() => setShowUpgrade(true)}
+            onLogout={handleLogout}
+            onLocalModelChange={setLocalModelOn}
+            onReduceMotionChange={setReduceMotion}
+          />
+        )}
         {showVault && (
           <Modal title="API keys" onClose={() => setShowVault(false)}>
             <KeyVault
@@ -255,5 +288,6 @@ export default function App() {
         )}
       </AnimatePresence>
     </div>
+    </MotionConfig>
   );
 }

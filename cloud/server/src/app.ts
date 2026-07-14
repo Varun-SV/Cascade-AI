@@ -27,6 +27,7 @@ const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 const MAX_MEMORY_LEN = 2000;
 const MAX_MEMORY_CATEGORY_LEN = 32;
+const MAX_TITLE_LEN = 120;
 const MAX_SKILL_NAME_LEN = 60;
 const MAX_SKILL_DESC_LEN = 200;
 const MAX_SKILL_PROMPT_LEN = 8000;
@@ -91,7 +92,7 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     res.header('Access-Control-Allow-Origin', env.WEB_ORIGIN);
     res.header('Access-Control-Allow-Credentials', 'true');
     res.header('Access-Control-Allow-Headers', 'Content-Type');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
     res.header('Vary', 'Origin');
     if (req.method === 'OPTIONS') { res.sendStatus(204); return; }
     next();
@@ -245,6 +246,20 @@ export function createApp(env: CloudEnv, store: CloudStore) {
   app.get('/api/conversations', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
     const conversations = store.listConversations(req.session!.userId);
     res.json({ conversations });
+  });
+
+  // Rename a conversation — used by the opt-in in-browser titler and manual edits.
+  app.patch('/api/conversations/:id/title', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const id = req.params['id'];
+    if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid conversation id' }); return; }
+    const raw = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+    if (!raw) { res.status(400).json({ error: 'Title is required' }); return; }
+    const title = raw.slice(0, MAX_TITLE_LEN);
+    if (!store.renameConversation(id, req.session!.userId, title)) {
+      res.status(404).json({ error: 'Not found' });
+      return;
+    }
+    res.json({ ok: true, title });
   });
 
   app.get('/api/conversations/:id/messages', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
