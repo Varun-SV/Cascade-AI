@@ -15,11 +15,38 @@ import type {
 import { MODELS } from '../constants.js';
 import { BaseProvider } from './base.js';
 
+/**
+ * Reasoning-family models (o1/o3/o4, gpt-5*) reject the classic `max_tokens`
+ * and a non-default `temperature` — they require `max_completion_tokens` and
+ * temperature 1 (i.e. omit it). Deployment names are user-chosen (an Azure
+ * `gpt-5-mini` deployment could be named anything), so this heuristic is only a
+ * first guess; the request path also LEARNS from the API's own error and adapts.
+ */
+export function isReasoningModel(id: string): boolean {
+  const m = (id || '').toLowerCase();
+  return /(^o[1345]\b)|(^o[1345]-)|gpt-?5/.test(m);
+}
+
+/** True when an API error indicates the wrong token param / temperature was sent. */
+export function isParamShapeError(err: unknown): boolean {
+  const e = err as { message?: string; error?: { message?: string } } | undefined;
+  const msg = String(e?.message ?? e?.error?.message ?? '').toLowerCase();
+  return (
+    msg.includes('max_completion_tokens') ||
+    (msg.includes('max_tokens') && (msg.includes('unsupported') || msg.includes('not supported') || msg.includes('use'))) ||
+    (msg.includes('temperature') && (msg.includes('unsupported') || msg.includes('does not support') || msg.includes('only the default')))
+  );
+}
+
 export class OpenAIProvider extends BaseProvider {
   protected client: OpenAI;
+  /** Once we learn (from the model id or an API error) that this deployment
+   *  needs max_completion_tokens, remember it so we don't re-fail every call. */
+  protected useMaxCompletionTokens: boolean;
 
   constructor(config: ProviderConfig, model: ModelInfo) {
     super(config, model);
+    this.useMaxCompletionTokens = isReasoningModel(model.id);
     this.client = new OpenAI({
       apiKey: config.apiKey,
       baseURL: config.baseUrl,
@@ -50,32 +77,29 @@ export class OpenAIProvider extends BaseProvider {
     let outputTokens = 0;
     let finishReason: GenerateResult['finishReason'] = 'stop';
 
-    const params: OpenAI.Chat.ChatCompletionCreateParams = {
+    const budget = options.maxTokens ?? this.model.maxOutputTokens;
+    // Build the request shape based on what we currently believe this model
+    // accepts. Reasoning models take `max_completion_tokens` and reject a custom
+    // temperature (omit it); everyone else takes classic `max_tokens`.
+    const buildParams = (useCompletionTokens: boolean): Record<string, unknown> => ({
       model: this.model.id,
       messages,
-      max_tokens: options.maxTokens ?? this.model.maxOutputTokens,
-      temperature: options.temperature ?? 0.7,
+      ...(useCompletionTokens ? { max_completion_tokens: budget } : { max_tokens: budget }),
+      ...(useCompletionTokens ? {} : { temperature: options.temperature ?? 0.7 }),
       tools: tools?.length ? tools : undefined,
       stream: true,
       stream_options: { include_usage: true },
-    };
+    });
 
     let stream: any;
     try {
-      stream = await this.client.chat.completions.create(params, { signal: options.signal });
+      stream = await this.client.chat.completions.create(buildParams(this.useMaxCompletionTokens) as any, { signal: options.signal });
     } catch (err: any) {
-      // Retry with max_completion_tokens instead if the model demands it (e.g., o1/o3 or custom proxy models)
-      if (err.message && err.message.includes('max_completion_tokens')) {
-        const fallbackParams = { ...params } as Record<string, unknown>;
-        delete fallbackParams.max_tokens;
-        fallbackParams.max_completion_tokens = options.maxTokens ?? this.model.maxOutputTokens;
-        
-        // o1 models also often strictly require temperature to be 1
-        if (this.model.id.includes('o1') || this.model.id.includes('o3')) {
-          fallbackParams.temperature = 1;
-        }
-        
-        stream = await this.client.chat.completions.create(fallbackParams as any, { signal: options.signal });
+      // The API told us the param shape was wrong — flip to max_completion_tokens
+      // (dropping temperature), remember it for the rest of this run, and retry.
+      if (!this.useMaxCompletionTokens && isParamShapeError(err)) {
+        this.useMaxCompletionTokens = true;
+        stream = await this.client.chat.completions.create(buildParams(true) as any, { signal: options.signal });
       } else {
         throw err;
       }

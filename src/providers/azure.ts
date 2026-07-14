@@ -5,7 +5,12 @@
 import { AzureOpenAI } from 'openai';
 import { AZURE_BASE_URL_TEMPLATE } from '../constants.js';
 import type { ModelInfo, ProviderConfig } from '../types.js';
-import { OpenAIProvider } from './openai.js';
+import { OpenAIProvider, isReasoningModel, isParamShapeError } from './openai.js';
+
+// Default Azure API version. Bumped from 2024-08-01-preview, which predates the
+// gpt-5 / reasoning deployments and made their availability probe (and runs)
+// fail as "deployment not found". Users can still override it per-deployment.
+const DEFAULT_AZURE_API_VERSION = '2024-12-01-preview';
 
 /**
  * The ModelInfo for one configured Azure deployment. On Azure the deployment
@@ -50,7 +55,7 @@ export class AzureOpenAIProvider extends OpenAIProvider {
       apiKey: config.apiKey,
       endpoint: endpoint,
       deployment: config.deploymentName ?? model.id,
-      apiVersion: config.apiVersion ?? '2024-08-01-preview',
+      apiVersion: config.apiVersion ?? DEFAULT_AZURE_API_VERSION,
     });
   }
 
@@ -64,32 +69,31 @@ export class AzureOpenAIProvider extends OpenAIProvider {
   }
 
   async isAvailable(): Promise<boolean> {
-    const params = {
-      model: this.model.id,
-      messages: [{ role: 'user' as const, content: 'ping' }],
-      max_tokens: 1,
-    };
+    const ping = (extra: Record<string, unknown>) =>
+      this.client.chat.completions.create({
+        model: this.model.id,
+        messages: [{ role: 'user' as const, content: 'ping' }],
+        ...extra,
+      } as any);
+
+    // Reasoning deployments (o1/o3, gpt-5*) reject max_tokens and a custom
+    // temperature; give them max_completion_tokens (with enough budget to answer
+    // past their internal reasoning) up front, others the cheap max_tokens: 1.
+    const reasoning = isReasoningModel(this.model.id);
     try {
-      await this.client.chat.completions.create(params);
+      await ping(reasoning ? { max_completion_tokens: 16 } : { max_tokens: 1 });
       return true;
-    } catch (err: any) {
-      // Reasoning-family deployments (o1/o3/gpt-5.x-class) reject `max_tokens`
-      // and demand `max_completion_tokens` — the same quirk generateStream()
-      // already retries around. Without this fallback, a perfectly reachable
-      // reasoning deployment fails THIS ping (not real generation), gets
-      // marked provider-wide unavailable, and every explicit "azure:<deploy>"
-      // override then errors as "not available or unreachable" even though a
-      // real run would have worked fine.
-      if (err?.message && String(err.message).includes('max_completion_tokens')) {
+    } catch (err) {
+      // Wrong param shape → retry the other way. Crucially, a param complaint
+      // proves the deployment EXISTS and is reachable, so treat it as available
+      // rather than marking the whole provider down (which surfaced downstream
+      // as "No model available for tier T1").
+      if (isParamShapeError(err)) {
         try {
-          await this.client.chat.completions.create({
-            model: this.model.id,
-            messages: [{ role: 'user', content: 'ping' }],
-            max_completion_tokens: 1,
-          } as any);
+          await ping({ max_completion_tokens: 16 });
           return true;
-        } catch {
-          return false;
+        } catch (err2) {
+          return isParamShapeError(err2);
         }
       }
       return false;

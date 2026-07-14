@@ -5,6 +5,21 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.20.2 - 2026-07-14
+
+### Fixed
+- **Azure gpt-5 / reasoning deployments now connect** (desktop + cloud). They
+  reject the classic `max_tokens` and a custom `temperature`, and predate the
+  old default API version — so their availability probe failed and the run
+  surfaced as **"No model available for tier T1"**. Now: the default Azure API
+  version is **`2024-12-01-preview`** (override still respected); the OpenAI/
+  Azure request path picks **`max_completion_tokens`** (omitting temperature)
+  for reasoning-family models (`o1`/`o3`/`o4`, `gpt-5*`) and, for any deployment,
+  **learns from the API's own error** and retries with the right shape,
+  remembering it for the rest of the run; and the Azure availability probe treats
+  a parameter complaint as **reachable** (the deployment exists) instead of
+  marking the whole provider down.
+
 ## Cascade Cloud 0.4.1 - 2026-07-14
 
 ### Added
