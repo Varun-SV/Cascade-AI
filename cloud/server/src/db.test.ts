@@ -80,6 +80,21 @@ describe('CloudStore', () => {
     expect(store.getUsage(alice.id, '2026-07-13')).toBe(0);
   });
 
+  it('renames a conversation only for its owner and without bumping recency', () => {
+    const alice = store.upsertUser({ provider: 'dev', providerId: 'ra', email: null, name: null, avatar: null });
+    const bob = store.upsertUser({ provider: 'dev', providerId: 'rb', email: null, name: null, avatar: null });
+    const conv = store.createConversation(alice.id, 'Old title');
+    const before = store.getConversation(conv.id, alice.id)!.updatedAt;
+
+    expect(store.renameConversation(conv.id, bob.id, 'Hijacked')).toBe(false);
+    expect(store.renameConversation(conv.id, alice.id, 'New title')).toBe(true);
+
+    const after = store.getConversation(conv.id, alice.id)!;
+    expect(after.title).toBe('New title');
+    // A background auto-title must not reorder the recency-sorted list.
+    expect(after.updatedAt).toBe(before);
+  });
+
   it('stores and updates a memory category', () => {
     const user = store.upsertUser({ provider: 'dev', providerId: 'm', email: null, name: null, avatar: null });
     const mem = store.addMemory(user.id, 'Prefers TypeScript', 'STACK');

@@ -54,10 +54,11 @@ test('dev login -> add a key -> pick a skill -> attach an image -> send -> reply
 
     await page.getByPlaceholder('Your name').fill('E2E Tester');
     await page.getByText('Dev login').click();
-    await expect(page.getByRole('button', { name: /API keys/ })).toBeVisible();
+    // Logged in — the consolidated Settings button (username, bottom-left) shows.
+    await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible();
 
-    // Add a provider key. Scope the provider <select> (the composer also has a
-    // skill <select>) via its unique 'openai-compatible' option.
+    // Add a provider key. API keys now live in the Settings modal.
+    await page.getByRole('button', { name: 'Settings' }).click();
     await page.getByRole('button', { name: /API keys/ }).click();
     await page.getByText('Add provider').click();
     const providerSelect = page.locator('select').filter({ has: page.locator('option[value="openai-compatible"]') });
@@ -85,7 +86,9 @@ test('dev login -> add a key -> pick a skill -> attach an image -> send -> reply
     // (the e2e DB is reused across runs) and scope to the list row span so the
     // draft textarea's value doesn't collide with the assertion.
     const memory = `e2e memory ${Date.now()}`;
-    await page.getByRole('button', { name: /Memory/ }).click();
+    // Memory now lives behind the consolidated Settings modal (username, bottom-left).
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.getByRole('button', { name: /^Memory/ }).click();
     await page.getByPlaceholder(/I prefer TypeScript/).fill(memory);
     await page.getByRole('button', { name: /^Add/ }).click();
     await expect(page.locator('span.whitespace-pre-wrap', { hasText: memory })).toBeVisible();
@@ -100,6 +103,7 @@ test('dev login -> add a key -> pick a skill -> attach an image -> send -> reply
     // Custom skill CRUD: create one, confirm it lists with a usage badge, and
     // that it then appears in the composer's skill picker.
     const skillName = `E2E Skill ${Date.now()}`;
+    await page.getByRole('button', { name: 'Settings' }).click();
     await page.getByRole('button', { name: /^Skills/ }).click();
     await page.getByRole('button', { name: /New skill/ }).click();
     await page.getByPlaceholder(/Name \(e\.g\. SQL Tutor\)/).fill(skillName);

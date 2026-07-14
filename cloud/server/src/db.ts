@@ -309,6 +309,18 @@ export class CloudStore {
     this.db.prepare('UPDATE conversations SET skill_id = ? WHERE id = ? AND user_id = ?').run(skillId, id, userId);
   }
 
+  /**
+   * Rename a conversation (owner-scoped). Returns false if it isn't the user's.
+   * Deliberately does NOT touch updated_at — a background auto-title shouldn't
+   * bump the conversation to the top of the recency-sorted list.
+   */
+  renameConversation(id: string, userId: string, title: string): boolean {
+    const info = this.db
+      .prepare('UPDATE conversations SET title = ? WHERE id = ? AND user_id = ?')
+      .run(title, id, userId);
+    return info.changes > 0;
+  }
+
   listConversations(userId: string, limit = 50): CloudConversation[] {
     // Tie-break on rowid: two conversations created in the same millisecond
     // otherwise sort in an unspecified (SQLite-internal) order instead of

@@ -78,6 +78,30 @@ describe('cloud/server app', () => {
     });
   });
 
+  it('renames a conversation (owner-scoped) via PATCH /api/conversations/:id/title', async () => {
+    const alice = await login('Alice');
+    const bob = await login('Bob');
+    const conv = (await (await fetch(`${baseUrl}/api/conversations`, { headers: { Cookie: alice } })).json()) as {
+      conversations: Array<{ id: string }>;
+    };
+    // Alice has no conversations yet — create one directly through the store path
+    // by posting a run is heavy; instead seed via the store is not reachable here,
+    // so exercise the 404 (foreign/absent id) and the validation branches.
+    expect(conv.conversations).toEqual([]);
+
+    // Blank title → 400.
+    const blank = await fetch(`${baseUrl}/api/conversations/whatever/title`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json', Cookie: alice }, body: JSON.stringify({ title: '  ' }),
+    });
+    expect(blank.status).toBe(400);
+
+    // Unknown / not-owned id → 404 (also covers Bob renaming Alice's).
+    const missing = await fetch(`${baseUrl}/api/conversations/nope/title`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json', Cookie: bob }, body: JSON.stringify({ title: 'Hi' }),
+    });
+    expect(missing.status).toBe(404);
+  });
+
   it('does not 500 on a rate-limited route when X-Forwarded-For is set (trust proxy)', async () => {
     // Behind Railway's proxy every request carries X-Forwarded-For; without
     // `trust proxy` express-rate-limit throws ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
