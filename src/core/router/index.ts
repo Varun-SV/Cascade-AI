@@ -830,6 +830,11 @@ export class CascadeRouter extends EventEmitter {
 
   // ── Private ──────────────────────────────────
 
+  /** Logs why a configured provider failed its availability probe. */
+  private emitProbeFailure(type: ProviderType, reason: string): void {
+    console.warn(`[router] provider "${type}" is not available: ${reason}`);
+  }
+
   private async detectAvailableProviders(
     configs: ProviderConfig[],
   ): Promise<Set<ProviderType>> {
@@ -842,7 +847,13 @@ export class CascadeRouter extends EventEmitter {
         const provider = this.createProvider(cfg, testModel);
         const ok = await provider.isAvailable();
         if (ok) available.add(cfg.type);
-      } catch { /* provider not available */ }
+        else this.emitProbeFailure(cfg.type, 'availability check returned false (bad key, wrong endpoint/deployment, or unreachable)');
+      } catch (err) {
+        // Don't silently drop the provider — a swallowed probe error is exactly
+        // why a misconfigured Azure deployment surfaced only as the downstream
+        // "No model available for tier T3". Log the concrete reason.
+        this.emitProbeFailure(cfg.type, err instanceof Error ? err.message : String(err));
+      }
     });
 
     await Promise.allSettled(checks);

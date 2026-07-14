@@ -66,6 +66,13 @@ const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 
 export function createApp(env: CloudEnv, store: CloudStore) {
   const app = express();
+  // Behind Railway (and most PaaS) the app sits behind exactly one reverse
+  // proxy that sets X-Forwarded-For. Without trusting it, express-rate-limit
+  // THROWS ERR_ERL_UNEXPECTED_X_FORWARDED_FOR on every request (it refuses to
+  // key limits off a spoofable header), which surfaced as 500s in production.
+  // Trust exactly one hop — `true` would trust a client-supplied XFF and let
+  // anyone forge their rate-limit identity.
+  app.set('trust proxy', 1);
   // Image uploads carry a base64 payload larger than a normal API body, so
   // they get their own bigger parser on the route; every other endpoint keeps
   // the tight default limit.

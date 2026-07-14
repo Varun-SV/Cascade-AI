@@ -105,9 +105,10 @@ test('dev login -> add a key -> pick a skill -> attach an image -> send -> reply
     await page.getByPlaceholder(/Name \(e\.g\. SQL Tutor\)/).fill(skillName);
     await page.getByPlaceholder(/Instructions/).fill('You are an e2e test persona.');
     await page.getByRole('button', { name: /^Create/ }).click();
-    // The "used N×" badge is unique to a custom skill row in the modal (the
-    // name also renders as a composer <option>, so scope to the badge instead).
-    await expect(page.getByText(/used 0×/)).toBeVisible();
+    // The new skill shows a "used N×" badge (the reused e2e DB may already hold
+    // other custom skills, so assert at least one such badge is present rather
+    // than a unique match).
+    await expect(page.getByText(/used 0×/).first()).toBeVisible();
     await page.getByLabel('Close').click();
     await expect(page.getByLabel('Skill').locator('option', { hasText: skillName })).toHaveCount(1);
   } finally {

@@ -6,6 +6,16 @@ html, body, #root {
   height: 100%;
 }
 
+/* The app is a dark surface, but a native <select>'s option popup is drawn by
+   the OS with its own light background — our near-white option text then washes
+   out to near-invisible (the provider picker looked blank). color-scheme: dark
+   tells the browser to render native controls (and their popups) dark, so the
+   options read as light text on a dark list. */
+select,
+select option {
+  color-scheme: dark;
+}
+
 /* Fluent-style ground: a deep ink base with soft, fixed accent glows so the
    frosted-glass panels layered on top read with real depth. */
 body {

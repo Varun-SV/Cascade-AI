@@ -65,25 +65,30 @@ export class GeminiProvider extends BaseProvider {
     let finishReason: GenerateResult['finishReason'] = 'stop';
 
     for await (const chunk of stream) {
-      // ── Text content ──────────────────────────
-      const text = chunk.text ?? '';
-      if (text) {
-        fullContent += text;
-        onChunk({ text, finishReason: null });
-      }
-
-      // ── Tool / function calls ─────────────────
+      // Walk candidate parts directly instead of the `chunk.text` convenience
+      // getter. On a response that also carries functionCall/thinking parts,
+      // `chunk.text` logs "non-text parts … returning concatenation of all text
+      // parts" AND can come back empty — which stranded the classifier and the
+      // T3 self-test with no content, surfacing as "Task failed". Reading parts
+      // ourselves is warning-free and always yields the real answer text.
       const candidates = (chunk as any).candidates ?? [];
       for (const candidate of candidates) {
         for (const part of candidate?.content?.parts ?? []) {
+          // A model's private "thinking" (gemini-2.5 thinking models) is not the
+          // answer — never fold it into the streamed/aggregated content.
+          if (part.thought) continue;
+          if (typeof part.text === 'string' && part.text) {
+            fullContent += part.text;
+            onChunk({ text: part.text, finishReason: null });
+          }
           if (part.functionCall) {
-              // Use function name as ID — Gemini matches functionResponse by name, not timestamp
-              toolCalls.push({
-                id: part.functionCall.name as string,
-                name: part.functionCall.name as string,
-                input: (part.functionCall.args ?? {}) as Record<string, unknown>,
-              });
-              finishReason = 'tool_use';
+            // Use function name as ID — Gemini matches functionResponse by name, not timestamp
+            toolCalls.push({
+              id: part.functionCall.name as string,
+              name: part.functionCall.name as string,
+              input: (part.functionCall.args ?? {}) as Record<string, unknown>,
+            });
+            finishReason = 'tool_use';
           }
         }
         // Capture finish reason from candidate

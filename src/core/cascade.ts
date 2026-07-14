@@ -1,4 +1,4 @@
-import EventEmitter from 'node:events';
+import EventEmitter, { setMaxListeners } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { glob } from 'glob';
@@ -670,7 +670,13 @@ ${prompt}`
         this.recordDecision('complexity', `${verdict} — classifier output unparseable; defaulted by length/signals`);
       }
       return verdict;
-    } catch {
+    } catch (err) {
+      // Don't swallow the real reason — a mistyped key, an unreachable provider,
+      // or an empty model response all land here and previously vanished behind
+      // "classifier unavailable". Log it so it's visible in the server output.
+      const detail = err instanceof Error ? err.message : String(err);
+      if (this.listenerCount('log') > 0) this.emit('log', { level: 'warn', message: `Complexity classifier failed: ${detail}` });
+      else console.warn(`[cascade] Complexity classifier failed: ${detail}`);
       const followUpPrompt = /^(proceed|continue|go ahead|do it|yes|yep|ok|okay|carry on)$/i.test(prompt.trim());
       if (followUpPrompt && recentHistory.length > 0) {
         this.recordDecision('complexity', 'Complex — classifier unavailable; short follow-up inherits prior context');
@@ -678,7 +684,7 @@ ${prompt}`
       }
       // A transient classifier failure must not silently route every task into
       // the most expensive full-hierarchy path — default to Moderate instead.
-      this.recordDecision('complexity', 'Moderate — classifier unavailable; defaulting to the mid-cost route');
+      this.recordDecision('complexity', `Moderate — classifier unavailable (${detail}); defaulting to the mid-cost route`);
       return 'Moderate';
     }
   }
@@ -689,6 +695,12 @@ ${prompt}`
     this.router.beginRun();
     // Wire the abort signal into the router so a cancel aborts in-flight LLM
     // calls (not just the checkpoints between them) — i.e. near-instant cancel.
+    // A multi-tier run fans the SAME signal out to many concurrent tier/provider
+    // calls, each adding an 'abort' listener — well past Node's default ceiling
+    // of 10, which logged a MaxListenersExceededWarning. Raise the limit for
+    // this run's signal so the warning doesn't fire (the listeners are expected
+    // and are removed when their calls settle).
+    if (options.signal) setMaxListeners(64, options.signal);
     this.router.setRunSignal(options.signal);
     const startMs = Date.now();
     const taskId = randomUUID();
@@ -937,7 +949,24 @@ ${prompt}`
       if (completed.length > 0) {
         finalOutput = t2Result.sectionSummary + '\n\n' + completed.map((r: T3Result) => r.output).join('\n\n');
       } else {
-        finalOutput = 'Task failed to complete successfully.';
+        // Don't return a bare "Task failed" — surface whatever the worker(s)
+        // produced plus the concrete reason(s), so the user (and logs) can see
+        // WHY (e.g. an empty model response or a self-test failure) instead of a
+        // dead end. Prefer the longest partial output as the salvageable answer.
+        const partial = t2Result.t3Results
+          .map((r: T3Result) => (typeof r.output === 'string' ? r.output : ''))
+          .filter((o) => o.trim())
+          .sort((a, b) => b.length - a.length)[0];
+        const reasons = Array.from(
+          new Set(t2Result.t3Results.flatMap((r: T3Result) => r.issues ?? []).filter(Boolean)),
+        );
+        if (partial) {
+          finalOutput = reasons.length ? `${partial}\n\n_(incomplete: ${reasons.join('; ')})_` : partial;
+        } else {
+          finalOutput = reasons.length
+            ? `The task could not be completed: ${reasons.join('; ')}`
+            : 'The task could not be completed — the model returned no usable output.';
+        }
       }
     } else {
       const t1 = new T1Administrator(this.router, this.toolRegistry, this.config);

@@ -78,6 +78,14 @@ describe('cloud/server app', () => {
     });
   });
 
+  it('does not 500 on a rate-limited route when X-Forwarded-For is set (trust proxy)', async () => {
+    // Behind Railway's proxy every request carries X-Forwarded-For; without
+    // `trust proxy` express-rate-limit throws ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
+    // and the endpoint 500s. /api/config is under the /api rate limiter.
+    const res = await fetch(`${baseUrl}/api/config`, { headers: { 'X-Forwarded-For': '203.0.113.7' } });
+    expect(res.status).toBe(200);
+  });
+
   it('GET /api/me with no session cookie returns a null user', async () => {
     const res = await fetch(`${baseUrl}/api/me`);
     expect(res.status).toBe(200);
