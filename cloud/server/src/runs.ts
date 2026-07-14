@@ -263,9 +263,16 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   const onPlan = (e: unknown) => {
     socket.emit('plan:approval-required', { conversationId: conversation.id, ...(e as object) });
   };
+  // Surface the SDK's own diagnostics (failed classifier, provider warnings) in
+  // the server log — otherwise they vanished and a run just read "Task failed".
+  const onLog = (e: unknown) => {
+    const ev = e as { level?: string; message?: string };
+    console.warn(`[run ${conversation.id}] ${ev.level ?? 'info'}: ${ev.message ?? ''}`);
+  };
   cascade.on('stream:token', onToken);
   cascade.on('tier:status', onStatus);
   cascade.on('plan:approval-required', onPlan);
+  cascade.on('log', onLog);
 
   try {
     const result = await cascade.run({
@@ -328,9 +335,13 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    // Log the full error (with stack) server-side — the client only gets the
+    // message, but the stack is what pins a crash like the FK violation.
+    console.error(`[run ${conversation.id}] failed:`, err);
     socket.emit('session:error', { conversationId: conversation.id, error: message });
     throw err;
   } finally {
+    cascade.off('log', onLog);
     cascade.off('stream:token', onToken);
     cascade.off('tier:status', onStatus);
     cascade.off('plan:approval-required', onPlan);

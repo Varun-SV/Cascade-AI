@@ -5,6 +5,37 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Cascade Cloud 0.3.1 - 2026-07-14
+
+Production reliability fixes for the hosted app — hosted runs were failing to
+produce answers, and the real reasons were being swallowed.
+
+### Fixed
+- **Rate limiter crashed behind Railway's proxy.** Every request carries an
+  `X-Forwarded-For` header, and `express-rate-limit` threw
+  `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR` because `trust proxy` was unset — so
+  rate-limited API routes 500'd. The server now trusts exactly one proxy hop.
+- **Gemini runs returned "Task failed to complete successfully."** The Gemini
+  provider read response text via the SDK's `chunk.text` getter, which logs a
+  "non-text parts" warning and can return **empty** when the response also
+  carries thinking/`functionCall` parts (as gemini-2.5 models do). The empty
+  content stranded the complexity classifier and the T3 self-test, cascading to
+  a generic failure. The provider now reads answer text from the response parts
+  directly (skipping private "thinking" parts) — warning-free and reliable.
+- **Real failures are no longer hidden.** A failed complexity classifier now
+  logs the concrete reason instead of a bare "classifier unavailable"; a run
+  that produces no completed work returns the partial output plus the actual
+  reason(s) instead of "Task failed to complete successfully."; provider
+  availability-probe failures (e.g. a misconfigured Azure deployment) are logged
+  with why; and the cloud server logs full run errors (with stack) and forwards
+  SDK diagnostics to its output.
+- **`MaxListenersExceededWarning` on cancelable runs.** A multi-tier run fans one
+  `AbortSignal` out to many tier/provider calls; the per-signal listener ceiling
+  is now raised so the expected listeners don't trip Node's warning.
+- **Provider dropdown was unreadable.** The API-keys provider `<select>` rendered
+  near-white option text on the OS's light native popup. Selects now use
+  `color-scheme: dark`, so option lists render dark with legible text.
+
 ## Cascade Cloud 0.3.0 - 2026-07-14
 
 Run-explorer features for the hosted chat app, in the shipped ink + coral-glass
