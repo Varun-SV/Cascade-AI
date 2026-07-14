@@ -10,6 +10,15 @@ export interface ProviderConfig {
   model?: string;
 }
 
+/** Browser-held web-search backend. Whichever is set is used (SearXNG → Brave
+ *  → Tavily priority); empty → the keyless DuckDuckGo fallback. */
+export interface WebSearchSettings {
+  backend: 'brave' | 'tavily' | 'searxng';
+  braveApiKey?: string;
+  tavilyApiKey?: string;
+  searxngUrl?: string;
+}
+
 export interface CloudUser {
   id: string;
   provider: 'github' | 'google' | 'dev';
