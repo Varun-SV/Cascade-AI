@@ -149,6 +149,9 @@ export default function Message({ message, onRegenerate }: Props) {
         )}
         <span>Cascade</span>
         {message.model && <span className="text-ink-500">{message.model}</span>}
+        {message.cancelled && (
+          <span className="rounded bg-danger-500/15 px-1.5 py-0.5 text-[10px] font-medium text-danger-300">stopped</span>
+        )}
         {message.why && (
           <button
             type="button"

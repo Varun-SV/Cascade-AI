@@ -65,11 +65,23 @@ export class WorkerStallError extends Error {
 // file in the workspace" just makes it call tools that don't exist and burn
 // turns on tool-not-found errors. With the full desktop tool set every line
 // below renders, so the prompt is byte-identical to the previous static one.
+// Every tool the built-in registry can register (registry.ts registerDefaults).
+// Used only to decide whether ANY tool is present — a fully restricted run
+// (e.g. hosted pure-chat with enabledTools: []) then drops the generic
+// "use tools" guidance entirely, so the model is never told to reach for a
+// capability it doesn't have.
+const KNOWN_TOOLS = [
+  'shell', 'file_read', 'file_write', 'file_edit', 'file_delete', 'file_list',
+  'git', 'github', 'image_analyze', 'pdf_create', 'run_code', 'peer_message',
+  'web_search', 'glob', 'grep', 'web_fetch',
+];
+
 export function buildWorkerRules(has: (toolName: string) => boolean): string {
   const canWriteFiles = has('file_write') || has('file_edit') || has('run_code');
+  const hasAnyTool = KNOWN_TOOLS.some(has);
   const rules: Array<string | false> = [
     '- Execute the subtask completely — do not stop partway through.',
-    '- Use tools when needed. Ask for approval only when the tool registry requires it.',
+    hasAnyTool && '- Use tools when needed. Ask for approval only when the tool registry requires it.',
     canWriteFiles &&
       '- If the task asks for a file or artifact, you must actually create it in the workspace, verify that it exists, and inspect it before claiming success.',
     has('web_search') &&

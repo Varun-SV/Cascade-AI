@@ -41,6 +41,11 @@ const ChatRunPayloadSchema = z.object({
   attachmentIds: z.array(z.string()).max(4).optional(),
   // Selected prompt-preset ("skill"). Unknown ids resolve to no preset.
   skillId: optionalNonEmptyString,
+  // Run-explorer controls. routingMode biases Cascade Auto; forceTier pins the
+  // root tier; webSearch toggles the two hosted tools on/off for this run.
+  routingMode: z.enum(['auto', 'quality', 'fast']).optional(),
+  forceTier: z.enum(['auto', 'T1', 'T2', 'T3']).optional(),
+  webSearch: z.boolean().optional(),
   providers: z
     .array(
       z.object({
@@ -63,9 +68,32 @@ export function parseChatRunPayload(input: unknown): ChatRunPayload {
   return ChatRunPayloadSchema.parse(input);
 }
 
-export function buildCloudConfig(providers: ProviderConfig[], maxCostPerRunUsd: number): Partial<CascadeConfig> {
+export interface RunControls {
+  routingMode?: 'auto' | 'quality' | 'fast';
+  forceTier?: 'auto' | 'T1' | 'T2' | 'T3';
+  /** When false, no tools are registered for the run at all. Default true. */
+  webSearch?: boolean;
+}
+
+// Maps the UI's routing mode to Cascade Auto's bias. Cascade Auto stays ON for
+// all three (per-task model selection); the bias tunes the quality↔cost knob.
+const BIAS_BY_MODE: Record<string, 'balanced' | 'quality' | 'cost'> = {
+  auto: 'balanced',
+  quality: 'quality',
+  fast: 'cost',
+};
+
+export function buildCloudConfig(
+  providers: ProviderConfig[],
+  maxCostPerRunUsd: number,
+  controls: RunControls = {},
+): Partial<CascadeConfig> {
+  const webSearchOn = controls.webSearch !== false;
   return {
     providers,
+    cascadeAuto: true,
+    autoBias: BIAS_BY_MODE[controls.routingMode ?? 'auto'] ?? 'balanced',
+    routing: { forceTier: controls.forceTier ?? 'auto' },
     tools: {
       shellAllowlist: [],
       shellBlocklist: [],
@@ -73,8 +101,9 @@ export function buildCloudConfig(providers: ProviderConfig[], maxCostPerRunUsd: 
       browserEnabled: false,
       // v1 scope: chat + safe tools only. No shell/file/git exist for a
       // hosted run — not just approval-gated, genuinely absent from the
-      // registry (see src/tools/registry.ts: enabledTools allowlist).
-      enabledTools: ['web_search', 'web_fetch'],
+      // registry (see src/tools/registry.ts: enabledTools allowlist). The web
+      // toggle drops even these when off.
+      enabledTools: webSearchOn ? ['web_search', 'web_fetch'] : [],
     },
     knowledge: { factsExtraction: false },
     telemetry: { enabled: false },
@@ -108,6 +137,8 @@ export interface ChatRunResult {
   model: string | null;
   savedUsd: number;
   savedPct: number;
+  /** True when the user stopped the run — output is whatever completed first. */
+  cancelled: boolean;
 }
 
 // Picks the tier that did the most work as the "answering" tier: the one with
@@ -142,6 +173,8 @@ export interface ChatRunDeps {
   store: CloudStore;
   userId: string;
   socket: Socket;
+  /** Aborts the run mid-flight (client "Stop", or socket disconnect). */
+  signal?: AbortSignal;
 }
 
 export async function runChatTurn(payload: ChatRunPayload, deps: ChatRunDeps): Promise<ChatRunResult> {
@@ -162,7 +195,7 @@ export async function runChatTurn(payload: ChatRunPayload, deps: ChatRunDeps): P
 }
 
 async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Promise<ChatRunResult> {
-  const { env, store, userId, socket } = deps;
+  const { env, store, userId, socket, signal } = deps;
 
   const conversation = payload.conversationId
     ? store.getConversation(payload.conversationId, userId)
@@ -201,7 +234,11 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   const runPrompt = buildRunPrompt(payload.prompt, skill?.systemPrompt || undefined, memories);
 
   const scratchDir = tenantScratchDir(env, userId);
-  const config = buildCloudConfig(payload.providers as ProviderConfig[], env.MAX_COST_PER_RUN_USD);
+  const config = buildCloudConfig(payload.providers as ProviderConfig[], env.MAX_COST_PER_RUN_USD, {
+    routingMode: payload.routingMode,
+    forceTier: payload.forceTier,
+    webSearch: payload.webSearch,
+  });
   const cascade: Cascade = createCascade(config, scratchDir);
 
   // Accumulate which model served each tier — the model rides on every
@@ -230,6 +267,10 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
       images: images.length ? images : undefined,
       conversationHistory,
       workspacePath: scratchDir,
+      // When aborted, cascade.run() resolves with a partial result (it does not
+      // reject) and stops all tiers at the next safe checkpoint — so a runaway
+      // run can be halted from the UI instead of burning the whole budget.
+      signal,
     });
 
     // Build the run-explorer report the same way the desktop's captureWhy does:
@@ -265,8 +306,9 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
       costUsd: result.usage.estimatedCostUsd,
     });
     store.incrementUsage(userId, todayKey());
+    const cancelled = signal?.aborted ?? false;
     socket.emit('run:why', { conversationId: conversation.id, messageId: assistantMessage.id, ...why });
-    socket.emit('session:complete', { conversationId: conversation.id, result });
+    socket.emit('session:complete', { conversationId: conversation.id, result, cancelled });
     return {
       conversationId: conversation.id,
       output: result.output,
@@ -276,6 +318,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
       model,
       savedUsd: savings.savedUsd,
       savedPct: savings.savedPct,
+      cancelled,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

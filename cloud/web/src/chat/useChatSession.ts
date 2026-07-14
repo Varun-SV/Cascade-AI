@@ -17,12 +17,16 @@ export interface ChatMessage {
   tier?: string | null;
   model?: string | null;
   why?: WhyReport | null;
+  cancelled?: boolean;
 }
 
 export interface SendInput {
   prompt: string;
   attachments?: ChatAttachment[];
 }
+
+export type RoutingMode = 'auto' | 'quality' | 'fast';
+export type ForceTier = 'auto' | 'T1' | 'T2' | 'T3';
 
 interface ChatRunAck {
   conversationId?: string;
@@ -33,6 +37,7 @@ interface ChatRunAck {
   model?: string | null;
   savedUsd?: number;
   savedPct?: number;
+  cancelled?: boolean;
   error?: string;
 }
 
@@ -60,6 +65,15 @@ export function useChatSession(
   const [status, setStatus] = useState<string | null>(null);
   const [lastTokens, setLastTokens] = useState<number>(0);
   const [lastSaved, setLastSaved] = useState<{ usd: number; pct: number } | null>(null);
+  // Per-run routing controls (sticky across sends in a session). routingMode
+  // biases Cascade Auto; forceTier pins the root tier; webSearch toggles the
+  // hosted web_search/web_fetch tools. Defaults mirror prior behaviour.
+  const [routingMode, setRoutingMode] = useState<RoutingMode>('auto');
+  const [forceTier, setForceTier] = useState<ForceTier>('auto');
+  // Default OFF: a hosted chat is pure conversation unless the user opts into
+  // web tools. With the toggle off the run registers no tools at all, so the
+  // model is never handed a capability it can't reliably use.
+  const [webSearch, setWebSearch] = useState(false);
   const streamingRef = useRef('');
   // run:why arrives just before the chat:run ack; stash it so the ack can
   // attach the full report to the assistant message it creates.
@@ -116,7 +130,16 @@ export function useChatSession(
 
       socket.emit(
         'chat:run',
-        { conversationId, prompt: text, providers, attachmentIds: attachments?.map((a) => a.id), skillId },
+        {
+          conversationId,
+          prompt: text,
+          providers,
+          attachmentIds: attachments?.map((a) => a.id),
+          skillId,
+          routingMode,
+          forceTier,
+          webSearch,
+        },
         (ack: ChatRunAck) => {
           setBusy(false);
           setStatus(null);
@@ -144,16 +167,26 @@ export function useChatSession(
                 tier: ack.tier ?? null,
                 model: ack.model ?? null,
                 why,
+                cancelled: ack.cancelled ?? false,
               },
             ];
           });
         },
       );
     },
-    [socket, busy, conversationId, providers, skillId],
+    [socket, busy, conversationId, providers, skillId, routingMode, forceTier, webSearch],
   );
 
   const send = useCallback((input: SendInput) => runChat(input.prompt, input.attachments, true), [runChat]);
+
+  // Ask the server to abort the in-flight run. The run still resolves (with
+  // whatever completed), so the normal ack path finalises the message; we just
+  // reflect "stopping" until it lands.
+  const stop = useCallback(() => {
+    if (!socket || !busy) return;
+    socket.emit('chat:stop');
+    setStatus('Stopping…');
+  }, [socket, busy]);
 
   const regenerate = useCallback(() => {
     if (busy) return;
@@ -168,5 +201,8 @@ export function useChatSession(
     runChat(lastUser.content, lastUser.attachments, false);
   }, [busy, messages, runChat]);
 
-  return { messages, send, regenerate, busy, error, status, lastTokens, lastSaved, conversationId, loadMessages, setConversationId };
+  return {
+    messages, send, stop, regenerate, busy, error, status, lastTokens, lastSaved, conversationId, loadMessages, setConversationId,
+    routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch,
+  };
 }

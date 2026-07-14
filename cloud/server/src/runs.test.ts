@@ -33,6 +33,30 @@ describe('buildCloudConfig', () => {
     expect(config.knowledge?.factsExtraction).toBe(false);
     expect(config.budget?.maxCostPerRunUsd).toBe(1.23);
   });
+
+  it('registers NO tools when webSearch is off (pure chat)', () => {
+    const config = buildCloudConfig([], 0.5, { webSearch: false });
+    const registry = new ToolRegistry(config.tools as ConstructorParameters<typeof ToolRegistry>[0], '/tmp');
+    expect(registry.hasTool('web_search')).toBe(false);
+    expect(registry.hasTool('web_fetch')).toBe(false);
+  });
+
+  it('re-enables web tools when webSearch is explicitly on', () => {
+    const config = buildCloudConfig([], 0.5, { webSearch: true });
+    const registry = new ToolRegistry(config.tools as ConstructorParameters<typeof ToolRegistry>[0], '/tmp');
+    expect(registry.hasTool('web_search')).toBe(true);
+    expect(registry.hasTool('web_fetch')).toBe(true);
+  });
+
+  it('maps routing mode to Cascade Auto bias and pins the forced tier', () => {
+    expect(buildCloudConfig([], 0.5, { routingMode: 'quality' }).autoBias).toBe('quality');
+    expect(buildCloudConfig([], 0.5, { routingMode: 'fast' }).autoBias).toBe('cost');
+    expect(buildCloudConfig([], 0.5, { routingMode: 'auto' }).autoBias).toBe('balanced');
+    // Cascade Auto stays ON for every mode — the bias just tunes quality↔cost.
+    expect(buildCloudConfig([], 0.5, { routingMode: 'fast' }).cascadeAuto).toBe(true);
+    expect(buildCloudConfig([], 0.5, { forceTier: 'T2' }).routing?.forceTier).toBe('T2');
+    expect(buildCloudConfig([], 0.5).routing?.forceTier).toBe('auto');
+  });
 });
 
 describe('tenantScratchDir', () => {
@@ -55,6 +79,25 @@ describe('parseChatRunPayload', () => {
   it('accepts a minimal valid payload', () => {
     const parsed = parseChatRunPayload({ prompt: 'hi', providers: [{ type: 'openai' }] });
     expect(parsed.prompt).toBe('hi');
+  });
+
+  it('accepts routing controls and rejects out-of-range values', () => {
+    const parsed = parseChatRunPayload({
+      prompt: 'hi',
+      providers: [{ type: 'openai' }],
+      routingMode: 'quality',
+      forceTier: 'T3',
+      webSearch: true,
+    });
+    expect(parsed.routingMode).toBe('quality');
+    expect(parsed.forceTier).toBe('T3');
+    expect(parsed.webSearch).toBe(true);
+    expect(() =>
+      parseChatRunPayload({ prompt: 'hi', providers: [{ type: 'openai' }], forceTier: 'T9' }),
+    ).toThrow();
+    expect(() =>
+      parseChatRunPayload({ prompt: 'hi', providers: [{ type: 'openai' }], routingMode: 'turbo' }),
+    ).toThrow();
   });
 
   it('normalizes blank optional provider fields to undefined, not empty strings', () => {
@@ -131,6 +174,46 @@ describe('runChatTurn (stub-provider integration)', () => {
     // confirms the run actually went through the real provider HTTP client.
     expect(stub.requestLog.some((r) => r.includes('models'))).toBe(true);
     expect(stub.requestLog.some((r) => r.includes('chat/completions'))).toBe(true);
+  }, 30_000);
+
+  it('marks the run cancelled and still persists partial output when the signal aborts', async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-runs-'));
+    store = new CloudStore(path.join(dir, 'cloud.db'));
+    stub = await startStubOpenAIServer();
+
+    const env: CloudEnv = {
+      PORT: 0,
+      SESSION_SECRET: 'x'.repeat(20),
+      DATA_DIR: dir,
+      WEB_ORIGIN: 'http://localhost:5173',
+      OAUTH_REDIRECT_BASE_URL: 'http://localhost:8787',
+      GITHUB_CLIENT_ID: undefined,
+      GITHUB_CLIENT_SECRET: undefined,
+      GOOGLE_CLIENT_ID: undefined,
+      GOOGLE_CLIENT_SECRET: undefined,
+      CLOUD_DEV_BYPASS: false,
+      MAX_COST_PER_RUN_USD: 1,
+    };
+    const user = store.upsertUser({ provider: 'dev', providerId: 'tester', email: null, name: 'Tester', avatar: null });
+    const socket = new FakeSocket();
+    const payload = parseChatRunPayload({
+      prompt: 'hello',
+      providers: [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }],
+    });
+
+    // Already-aborted signal: the run resolves (does not throw) with whatever
+    // it had, and the result is flagged cancelled so the UI can label it.
+    const controller = new AbortController();
+    controller.abort();
+    const result = await runChatTurn(payload, {
+      env, store, userId: user.id, socket: socket as unknown as import('socket.io').Socket, signal: controller.signal,
+    });
+
+    expect(result.cancelled).toBe(true);
+    // A user turn is always persisted; the run never rejected.
+    const messages = store.getMessages(result.conversationId);
+    expect(messages[0]!.role).toBe('user');
+    expect(socket.events.some((e) => e.event === 'session:error')).toBe(false);
   }, 30_000);
 
   it('runs successfully when apiKey and model are left blank (KeyVault "optional" fields)', async () => {

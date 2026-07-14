@@ -208,7 +208,14 @@ export default function App() {
             skillId={skillId}
             onSkillChange={setSkillId}
             onSend={chat.send}
+            onStop={chat.stop}
             onRegenerate={chat.regenerate}
+            routingMode={chat.routingMode}
+            onRoutingModeChange={chat.setRoutingMode}
+            forceTier={chat.forceTier}
+            onForceTierChange={chat.setForceTier}
+            webSearch={chat.webSearch}
+            onWebSearchChange={chat.setWebSearch}
           />
         </div>
       </div>
