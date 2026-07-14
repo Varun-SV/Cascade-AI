@@ -46,6 +46,16 @@ const ChatRunPayloadSchema = z.object({
   routingMode: z.enum(['auto', 'quality', 'fast']).optional(),
   forceTier: z.enum(['auto', 'T1', 'T2', 'T3']).optional(),
   webSearch: z.boolean().optional(),
+  // Optional web-search backend the user configured (browser-held, like keys).
+  // Whichever field is set is used — SearXNG → Brave → Tavily priority in the
+  // tool. Absent → the tool's keyless DuckDuckGo fallback.
+  webSearchConfig: z
+    .object({
+      searxngUrl: optionalNonEmptyString,
+      braveApiKey: optionalNonEmptyString,
+      tavilyApiKey: optionalNonEmptyString,
+    })
+    .optional(),
   providers: z
     .array(
       z.object({
@@ -68,11 +78,19 @@ export function parseChatRunPayload(input: unknown): ChatRunPayload {
   return ChatRunPayloadSchema.parse(input);
 }
 
+export interface WebSearchBackend {
+  searxngUrl?: string;
+  braveApiKey?: string;
+  tavilyApiKey?: string;
+}
+
 export interface RunControls {
   routingMode?: 'auto' | 'quality' | 'fast';
   forceTier?: 'auto' | 'T1' | 'T2' | 'T3';
   /** When false, no tools are registered for the run at all. Default true. */
   webSearch?: boolean;
+  /** User-configured web-search backend (browser-held). Used only when webSearch is on. */
+  webSearchConfig?: WebSearchBackend;
 }
 
 // Maps the UI's routing mode to Cascade Auto's bias. Cascade Auto stays ON for
@@ -89,6 +107,10 @@ export function buildCloudConfig(
   controls: RunControls = {},
 ): Partial<CascadeConfig> {
   const webSearchOn = controls.webSearch !== false;
+  // Only pass a backend when web search is on AND the user actually configured
+  // one — otherwise leave webSearch unset so the tool uses its keyless fallback.
+  const wsc = controls.webSearchConfig;
+  const hasBackend = !!(wsc && (wsc.searxngUrl || wsc.braveApiKey || wsc.tavilyApiKey));
   return {
     providers,
     cascadeAuto: true,
@@ -105,6 +127,9 @@ export function buildCloudConfig(
       // toggle drops even these when off.
       enabledTools: webSearchOn ? ['web_search', 'web_fetch'] : [],
     },
+    ...(webSearchOn && hasBackend
+      ? { webSearch: { searxngUrl: wsc!.searxngUrl, braveApiKey: wsc!.braveApiKey, tavilyApiKey: wsc!.tavilyApiKey } }
+      : {}),
     knowledge: { factsExtraction: false },
     telemetry: { enabled: false },
     budget: { warnAtPct: 80, maxCostPerRunUsd },
@@ -244,6 +269,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     routingMode: payload.routingMode,
     forceTier: payload.forceTier,
     webSearch: payload.webSearch,
+    webSearchConfig: payload.webSearchConfig,
   });
   const cascade: Cascade = createCascade(config, scratchDir);
 

@@ -14,6 +14,7 @@ import KeyVault from './keys/KeyVault.js';
 import { useChatSession } from './chat/useChatSession.js';
 import { useAutoTitler } from './chat/useAutoTitler.js';
 import { loadKeys, saveKeys } from './keys/store.js';
+import { loadWebSearch, saveWebSearch, webSearchPayload } from './keys/webSearch.js';
 import { localModelEnabled, reduceMotionEnabled } from './lib/prefs.js';
 import { fetchConfig, fetchMe, fetchSkills, getMessages, listConversations, logout, type CloudConfig } from './lib/api.js';
 import { closeSocket, getSocket } from './lib/socket.js';
@@ -37,6 +38,7 @@ export default function App() {
   const [user, setUser] = useState<CloudUser | null | undefined>(undefined);
   const [conversations, setConversations] = useState<CloudConversation[]>([]);
   const [providers, setProviders] = useState<ProviderConfig[]>(() => loadKeys());
+  const [webSearch, setWebSearch] = useState(() => loadWebSearch());
   const [skills, setSkills] = useState<Skill[]>([]);
   const [skillId, setSkillId] = useState<string>(DEFAULT_SKILL);
   const [showVault, setShowVault] = useState(false);
@@ -93,7 +95,7 @@ export default function App() {
   }, [user, refreshSkills]);
 
   const socket = user ? getSocket() : null;
-  const chat = useChatSession(socket, providers, skillId);
+  const chat = useChatSession(socket, providers, skillId, webSearchPayload(webSearch));
   const [localModelOn, setLocalModelOn] = useState(() => localModelEnabled());
 
   // A run may have created a new conversation or renamed one — refresh the
@@ -120,6 +122,11 @@ export default function App() {
   function updateProviders(next: ProviderConfig[]) {
     setProviders(next);
     saveKeys(next);
+  }
+
+  function updateWebSearch(next: import('./lib/types.js').WebSearchSettings | null) {
+    setWebSearch(next);
+    saveWebSearch(next);
   }
 
   async function selectConversation(id: string) {
@@ -272,6 +279,8 @@ export default function App() {
             <KeyVault
               keys={providers}
               onChange={updateProviders}
+              webSearch={webSearch}
+              onWebSearchChange={updateWebSearch}
               driveSyncEnabled={user.provider === 'google'}
               googleClientId={config.googleClientId}
             />

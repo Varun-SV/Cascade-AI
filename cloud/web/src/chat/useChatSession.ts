@@ -52,10 +52,17 @@ function statusLabel(e: Record<string, unknown>): string {
   return 'Working…';
 }
 
+export interface WebSearchPayload {
+  searxngUrl?: string;
+  braveApiKey?: string;
+  tavilyApiKey?: string;
+}
+
 export function useChatSession(
   socket: Socket | null,
   providers: ProviderConfig[],
   skillId: string,
+  webSearchConfig?: WebSearchPayload,
   initialConversationId?: string,
 ) {
   const [conversationId, setConversationId] = useState<string | undefined>(initialConversationId);
@@ -139,6 +146,7 @@ export function useChatSession(
           routingMode,
           forceTier,
           webSearch,
+          webSearchConfig,
         },
         (ack: ChatRunAck) => {
           setBusy(false);
@@ -174,7 +182,7 @@ export function useChatSession(
         },
       );
     },
-    [socket, busy, conversationId, providers, skillId, routingMode, forceTier, webSearch],
+    [socket, busy, conversationId, providers, skillId, routingMode, forceTier, webSearch, webSearchConfig],
   );
 
   const send = useCallback((input: SendInput) => runChat(input.prompt, input.attachments, true), [runChat]);

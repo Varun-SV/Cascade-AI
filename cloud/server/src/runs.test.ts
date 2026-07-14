@@ -48,6 +48,21 @@ describe('buildCloudConfig', () => {
     expect(registry.hasTool('web_fetch')).toBe(true);
   });
 
+  it('passes a configured web-search backend through only when web search is on', () => {
+    const backend = { braveApiKey: 'brave-key' };
+    // On + configured → webSearch config is set.
+    expect(buildCloudConfig([], 0.5, { webSearch: true, webSearchConfig: backend }).webSearch).toEqual({
+      searxngUrl: undefined,
+      braveApiKey: 'brave-key',
+      tavilyApiKey: undefined,
+    });
+    // On but no backend configured → left unset (tool uses keyless fallback).
+    expect(buildCloudConfig([], 0.5, { webSearch: true }).webSearch).toBeUndefined();
+    expect(buildCloudConfig([], 0.5, { webSearch: true, webSearchConfig: {} }).webSearch).toBeUndefined();
+    // Web search off → never pass a backend, even if configured.
+    expect(buildCloudConfig([], 0.5, { webSearch: false, webSearchConfig: backend }).webSearch).toBeUndefined();
+  });
+
   it('maps routing mode to Cascade Auto bias and pins the forced tier', () => {
     expect(buildCloudConfig([], 0.5, { routingMode: 'quality' }).autoBias).toBe('quality');
     expect(buildCloudConfig([], 0.5, { routingMode: 'fast' }).autoBias).toBe('cost');

@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { KeyRound, Plus, Trash2, ShieldCheck } from 'lucide-react';
-import type { ProviderConfig, ProviderType } from '../lib/types.js';
+import { KeyRound, Plus, Trash2, ShieldCheck, Globe } from 'lucide-react';
+import type { ProviderConfig, ProviderType, WebSearchSettings } from '../lib/types.js';
 import DriveSyncPanel from './DriveSyncPanel.js';
 
 // Local LLMs (Ollama) are out of v1 scope — a hosted page cannot reach a
@@ -25,15 +25,91 @@ function summaryFor(p: ProviderConfig): string {
   return p.model ? `model: ${p.model}` : 'default model';
 }
 
+const WEB_SEARCH_BACKENDS: { value: WebSearchSettings['backend']; label: string }[] = [
+  { value: 'brave', label: 'Brave Search' },
+  { value: 'tavily', label: 'Tavily' },
+  { value: 'searxng', label: 'SearXNG (self-hosted)' },
+];
+
+function WebSearchSection({
+  settings,
+  onChange,
+}: {
+  settings: WebSearchSettings | null;
+  onChange: (s: WebSearchSettings | null) => void;
+}) {
+  const backend = settings?.backend ?? 'brave';
+  const value =
+    backend === 'brave' ? settings?.braveApiKey ?? ''
+    : backend === 'tavily' ? settings?.tavilyApiKey ?? ''
+    : settings?.searxngUrl ?? '';
+
+  function update(patch: Partial<WebSearchSettings>) {
+    onChange({ backend, braveApiKey: settings?.braveApiKey, tavilyApiKey: settings?.tavilyApiKey, searxngUrl: settings?.searxngUrl, ...patch });
+  }
+
+  return (
+    <div className="flex flex-col gap-2 rounded-md border border-white/10 p-3">
+      <div className="flex items-center gap-2 text-ink-200">
+        <Globe size={15} className="text-ink-400" />
+        <span className="font-medium">Web search</span>
+      </div>
+      <p className="text-xs leading-snug text-ink-400">
+        Optional. Configure a backend so the composer's <span className="text-ink-300">Web</span> toggle returns real
+        results instead of the basic keyless fallback.
+      </p>
+      <label className="flex flex-col gap-1">
+        <span className="text-xs text-ink-400">Backend</span>
+        <select
+          aria-label="Web search backend"
+          className="rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
+          value={backend}
+          onChange={(e) => update({ backend: e.target.value as WebSearchSettings['backend'] })}
+        >
+          {WEB_SEARCH_BACKENDS.map((b) => (
+            <option key={b.value} value={b.value}>{b.label}</option>
+          ))}
+        </select>
+      </label>
+      <label className="flex flex-col gap-1">
+        <span className="text-xs text-ink-400">{backend === 'searxng' ? 'SearXNG URL' : 'API key'}</span>
+        <input
+          type={backend === 'searxng' ? 'text' : 'password'}
+          className="rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
+          placeholder={backend === 'searxng' ? 'https://searx.example.com' : 'key…'}
+          value={value}
+          onChange={(e) => {
+            const v = e.target.value;
+            if (backend === 'brave') update({ braveApiKey: v });
+            else if (backend === 'tavily') update({ tavilyApiKey: v });
+            else update({ searxngUrl: v });
+          }}
+        />
+      </label>
+      {settings && (
+        <button
+          type="button"
+          onClick={() => onChange(null)}
+          className="self-start rounded-md border border-white/10 px-2.5 py-1 text-xs text-ink-300 hover:bg-white/[0.05] hover:text-danger-400"
+        >
+          Clear web search
+        </button>
+      )}
+    </div>
+  );
+}
+
 interface Props {
   keys: ProviderConfig[];
   onChange: (keys: ProviderConfig[]) => void;
+  webSearch: WebSearchSettings | null;
+  onWebSearchChange: (s: WebSearchSettings | null) => void;
   /** Only offered for Google-authenticated users with a Google OAuth client configured server-side. */
   driveSyncEnabled?: boolean;
   googleClientId?: string | null;
 }
 
-export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClientId }: Props) {
+export default function KeyVault({ keys, onChange, webSearch, onWebSearchChange, driveSyncEnabled, googleClientId }: Props) {
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState<ProviderConfig>({ type: 'anthropic' });
 
@@ -110,6 +186,7 @@ export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClien
           <label className="flex flex-col gap-1">
             <span className="text-xs text-ink-400">Provider</span>
             <select
+              aria-label="Provider"
               className="rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
               value={draft.type}
               onChange={(e) => setDraft({ type: e.target.value as ProviderConfig['type'] })}
@@ -210,6 +287,8 @@ export default function KeyVault({ keys, onChange, driveSyncEnabled, googleClien
           </div>
         </div>
       )}
+
+      <WebSearchSection settings={webSearch} onChange={onWebSearchChange} />
 
       {driveSyncEnabled && googleClientId && (
         <DriveSyncPanel googleClientId={googleClientId} keys={keys} onRestore={onChange} />
