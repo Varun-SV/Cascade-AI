@@ -24,8 +24,9 @@ vi.mock('openai', () => {
   return { default: FakeOpenAI };
 });
 
-import { OpenAIProvider } from './openai.js';
+import { OpenAIProvider, isReasoningModel, isParamShapeError } from './openai.js';
 import { MODELS } from '../constants.js';
+import type { ModelInfo } from '../types.js';
 
 function makeProvider(): OpenAIProvider {
   const model = Object.values(MODELS).find((m) => m.provider === 'openai')!;
@@ -80,5 +81,50 @@ describe('OpenAIProvider streaming tool-call parsing', () => {
     );
     const input = result.toolCalls?.[0]?.input as Record<string, unknown>;
     expect(input).toEqual({ path: '/tmp/y' });
+  });
+});
+
+describe('OpenAIProvider — adaptive token parameter', () => {
+  const emptyStream = () => ({ async *[Symbol.asyncIterator]() { /* no frames */ } });
+  function providerWith(modelId: string, create: ReturnType<typeof vi.fn>): OpenAIProvider {
+    const model: ModelInfo = {
+      id: modelId, name: modelId, provider: 'openai', contextWindow: 128_000, isVisionCapable: false,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, maxOutputTokens: 1000, supportsStreaming: true, isLocal: false,
+    };
+    const p = new OpenAIProvider({ type: 'openai', apiKey: 'sk' }, model);
+    (p as unknown as { client: { chat: { completions: { create: typeof create } } } }).client = { chat: { completions: { create } } };
+    return p;
+  }
+
+  it('uses max_completion_tokens (and omits temperature) up front for reasoning models', async () => {
+    const create = vi.fn(async () => emptyStream());
+    const p = providerWith('gpt-5-mini', create);
+    await p.generateStream({ messages: [{ role: 'user', content: 'hi' }] }, () => {});
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0]![0]).toMatchObject({ max_completion_tokens: expect.any(Number) });
+    expect(create.mock.calls[0]![0]).not.toHaveProperty('max_tokens');
+    expect(create.mock.calls[0]![0]).not.toHaveProperty('temperature');
+  });
+
+  it('adapts: on a max_tokens rejection, retries with max_completion_tokens', async () => {
+    const create = vi.fn()
+      .mockRejectedValueOnce(new Error("Unsupported parameter: 'max_tokens'. Use 'max_completion_tokens' instead."))
+      .mockResolvedValueOnce(emptyStream());
+    const p = providerWith('gpt-4o', create);
+    await p.generateStream({ messages: [{ role: 'user', content: 'hi' }] }, () => {});
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(create.mock.calls[0]![0]).toHaveProperty('max_tokens');
+    expect(create.mock.calls[1]![0]).toMatchObject({ max_completion_tokens: expect.any(Number) });
+    expect(create.mock.calls[1]![0]).not.toHaveProperty('temperature');
+  });
+
+  it('isReasoningModel / isParamShapeError detect the right cases', () => {
+    expect(isReasoningModel('gpt-5-mini')).toBe(true);
+    expect(isReasoningModel('o1-preview')).toBe(true);
+    expect(isReasoningModel('o3-mini')).toBe(true);
+    expect(isReasoningModel('gpt-4o')).toBe(false);
+    expect(isParamShapeError(new Error('Please use max_completion_tokens'))).toBe(true);
+    expect(isParamShapeError(new Error("'temperature' does not support 0.7 — only the default"))).toBe(true);
+    expect(isParamShapeError(new Error('network timeout'))).toBe(false);
   });
 });

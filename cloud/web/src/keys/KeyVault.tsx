@@ -252,7 +252,7 @@ export default function KeyVault({ keys, onChange, webSearch, onWebSearchChange,
                   className="rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
                   value={draft.apiVersion ?? ''}
                   onChange={(e) => setDraft((d) => ({ ...d, apiVersion: e.target.value }))}
-                  placeholder="2024-08-01-preview"
+                  placeholder="2024-12-01-preview"
                 />
               </label>
             </>
