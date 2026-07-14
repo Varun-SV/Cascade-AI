@@ -38,6 +38,40 @@ import type { WorldStateDB } from '../knowledge/world-state.js';
 import type { PrivacyPaths } from '../privacy/paths.js';
 import type { GuidanceQueue } from '../steering/guidance.js';
 
+/**
+ * Rough capability score inferred from a model/deployment name, used to order
+ * benchmark-less Azure deployments across tiers. Higher = stronger/pricier.
+ * Purely heuristic (deployment names are opaque) — size/cost keywords dominate,
+ * with the version number as a mild secondary signal.
+ */
+export function inferModelCapability(id: string): number {
+  const s = (id || '').toLowerCase();
+  let score = 0;
+  if (/\b(mini|nano|small|lite|flash|instant|tiny|micro|0\.5b|1b|1\.5b|3b|7b|8b)\b/.test(s)) score -= 30;
+  else if (/\b(pro|max|opus|ultra|large|xl|xxl|70b|405b|405)\b/.test(s)) score += 30;
+  // First major(.minor) version, e.g. gpt-5.4 → 5.4, o3 → 3, gpt-35 → 3.5.
+  const m = s.match(/(\d{1,3})(?:\.(\d))?/);
+  if (m) {
+    let major = parseInt(m[1]!, 10);
+    let minor = m[2] ? parseInt(m[2]!, 10) : 0;
+    if (major >= 30 && major < 100) { minor = major % 10; major = Math.floor(major / 10); } // '35' → 3.5
+    score += major + minor / 10;
+  }
+  return score;
+}
+
+/**
+ * Picks the rank-appropriate deployment for a tier from a capability-descending
+ * list: T1 the strongest, T3 the cheapest, T2 the middle (reusing neighbours
+ * when there are fewer than three deployments).
+ */
+export function azureModelForTier<T>(tier: 'T1' | 'T2' | 'T3', ranked: T[]): T | undefined {
+  if (ranked.length === 0) return undefined;
+  if (tier === 'T1') return ranked[0];
+  if (tier === 'T3') return ranked[ranked.length - 1];
+  return ranked[Math.min(1, ranked.length - 1)]; // T2: second-strongest, or the only one
+}
+
 export interface RouterStats {
   totalTokens: number;
   totalCostUsd: number;
@@ -187,10 +221,29 @@ export class CascadeRouter extends EventEmitter {
       this.ensureProvider(model, config.providers);
     }
 
-    // Fill any tiers without explicit overrides using priority defaults.
+    // Azure deployments carry no benchmark data (their ids are opaque
+    // deployment names), so the generic fallback used to hand the SAME "first
+    // available" deployment to every tier. Instead, rank the configured
+    // deployments by an inferred capability score from their names and spread
+    // them across tiers — strongest to T1, cheapest to T3 — so a multi-deployment
+    // Azure setup actually uses each deployment.
+    const azureRanked = availableProviders.has('azure')
+      ? config.providers
+          .map((cfg) => azureModelForDeployment(cfg))
+          .filter((m): m is ModelInfo => m !== null)
+          .sort((a, b) => inferModelCapability(b.id) - inferModelCapability(a.id))
+      : [];
+
+    // Fill any tiers without explicit overrides.
     for (const tier of ['T1', 'T2', 'T3'] as TierRole[]) {
       if (this.tierModels.has(tier)) continue;
-      const model = this.selector.selectForTier(tier);
+      // 1. A benchmarked model from the tier's priority chain wins when present.
+      // 2. Otherwise, the rank-appropriate Azure deployment for this tier.
+      // 3. Otherwise, the generic "any available model" fallback.
+      const model =
+        this.selector.getCandidatesForTier(tier)[0]
+        ?? (azureRanked.length ? azureModelForTier(tier, azureRanked) : undefined)
+        ?? this.selector.selectForTier(tier);
       if (model) {
         this.tierModels.set(tier, model);
         this.ensureProvider(model, config.providers);
