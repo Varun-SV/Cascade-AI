@@ -5,6 +5,45 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Cascade Cloud 0.3.0 - 2026-07-14
+
+Run-explorer features for the hosted chat app, in the shipped ink + coral-glass
+style, plus two token-waste fixes. Desktop is unaffected (the core prompt change
+is byte-identical for the full tool set); Cascade Cloud redeploys on merge.
+
+### Added
+- **T1/T2/T3 run explorer.** Each assistant reply shows the tier that answered
+  (T1 green / T2 amber / T3 violet), the model that served it, and a `/why`
+  panel with the decision trail, delegation savings, and per-tier cost — all
+  from the SDK's own `getDecisionLog()` / router stats (`run:why` over the
+  socket; persisted so it re-renders on reload). A "saved $X" chip appears in
+  the top bar when delegating below the top tier saved money.
+- **Routing controls in the composer.** A routing-mode selector
+  (Auto / Quality / Fast) biases Cascade Auto's quality↔cost knob, a tier
+  picker pins the root tier, and a web toggle enables `web_search`/`web_fetch`
+  for a run.
+- **Custom Skills.** Create/edit/delete your own prompt-preset skills
+  (name, description, instructions) alongside the built-ins, with a "used N×"
+  usage badge; `POST/PUT/DELETE /api/skills`, owner-scoped. A custom skill's
+  instructions drive the run and bump its usage counter.
+- **Memory categories & search.** Tag persistent facts with an optional
+  category and filter them in the Memory panel.
+- **Tier mix · today.** A compact sidebar bar showing how the day's runs split
+  across T1/T2/T3 (`GET /api/tier-mix`).
+
+### Fixed
+- **Runaway runs can now be stopped.** The send button becomes a Stop button
+  while a run is in flight; it aborts the run via the SDK's `AbortSignal`
+  (the run resolves with its partial output, which is saved and marked
+  "stopped"). A socket disconnect also aborts, so a closed tab never leaves a
+  run spending tokens.
+- **No more "tool hope" on hosted runs.** Hosted chat now defaults to pure
+  conversation with no tools registered (flip the composer's Web toggle to
+  opt in). When no tool is registered, the T3 worker prompt drops its generic
+  "use tools" line and the T2 planner drops its `peer_message` hint — so the
+  model is never told to reach for a capability it doesn't have. Byte-identical
+  with the full desktop tool set.
+
 ## Cascade Cloud 0.2.0 - 2026-07-12
 
 A flagship-quality rebuild of the hosted chat app (`cloud/web` + `cloud/server`),
@@ -59,10 +98,12 @@ Cascade Cloud — a hosted, ChatGPT/Claude.ai-style chat experience at
   passport dependency); a CSRF `state` cookie guards the callback. A
   `CLOUD_DEV_BYPASS` dev-only login shortcut is available for local testing
   and is refused outside a real deployment.
-- **Bring-your-own-key chat, with keys that never touch our server.** Every
+- **Bring-your-own-key chat, with keys we never persist.** Every
   provider (Anthropic, OpenAI, Gemini, Azure, OpenAI-compatible) can be
-  configured in the browser's KeyVault (localStorage-only) and travels with
-  each run request only — `createCascade` (never `runCascade`, which would
+  configured in the browser's KeyVault (localStorage-only). A key travels
+  with each run request and is used in-memory for that run only — it is never
+  written to our database or logs (see `db.ts`: there is no API-key column
+  anywhere) — `createCascade` (never `runCascade`, which would
   merge machine-global credentials) runs the T1/T2/T3 orchestration scoped
   to safe tools only (`web_search`/`web_fetch` — no shell/file/git exist for
   a hosted run, via the new `tools.enabledTools` core allowlist) and a

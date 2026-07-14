@@ -1,10 +1,10 @@
 import { useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react';
 import clsx from 'clsx';
 import { motion } from 'framer-motion';
-import { Send, Paperclip, X, Loader2 } from 'lucide-react';
+import { Send, Paperclip, X, Loader2, Globe, Square } from 'lucide-react';
 import { uploadImage } from '../lib/api.js';
 import type { Skill } from '../lib/types.js';
-import type { ChatAttachment, SendInput } from './useChatSession.js';
+import type { ChatAttachment, ForceTier, RoutingMode, SendInput } from './useChatSession.js';
 
 const ALLOWED = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 const MAX_FILES = 4;
@@ -22,6 +22,14 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
+const ROUTING_MODES: Array<{ value: RoutingMode; label: string; title: string }> = [
+  { value: 'auto', label: 'Auto', title: 'Balanced — Cascade picks the cheapest model that clears the bar' },
+  { value: 'quality', label: 'Quality', title: 'Bias toward stronger models' },
+  { value: 'fast', label: 'Fast', title: 'Bias toward cheaper, faster models' },
+];
+
+const FORCE_TIERS: ForceTier[] = ['auto', 'T1', 'T2', 'T3'];
+
 interface Props {
   skills: Skill[];
   skillId: string;
@@ -29,9 +37,19 @@ interface Props {
   hasProviders: boolean;
   busy: boolean;
   onSend: (input: SendInput) => void;
+  onStop: () => void;
+  routingMode: RoutingMode;
+  onRoutingModeChange: (m: RoutingMode) => void;
+  forceTier: ForceTier;
+  onForceTierChange: (t: ForceTier) => void;
+  webSearch: boolean;
+  onWebSearchChange: (on: boolean) => void;
 }
 
-export default function Composer({ skills, skillId, onSkillChange, hasProviders, busy, onSend }: Props) {
+export default function Composer({
+  skills, skillId, onSkillChange, hasProviders, busy, onSend, onStop,
+  routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange,
+}: Props) {
   const [input, setInput] = useState('');
   const [pending, setPending] = useState<Pending[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -173,22 +191,92 @@ export default function Composer({ skills, skillId, onSkillChange, hasProviders,
             rows={1}
           />
 
-          <motion.button
+          {busy ? (
+            <motion.button
+              type="button"
+              onClick={onStop}
+              aria-label="Stop"
+              title="Stop this run"
+              whileHover={{ scale: 1.06 }}
+              whileTap={{ scale: 0.92 }}
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-danger-500/90 text-white shadow-lg shadow-danger-700/30"
+            >
+              <Square size={13} fill="currentColor" />
+            </motion.button>
+          ) : (
+            <motion.button
+              type="button"
+              onClick={submit}
+              disabled={disabled || uploading || !input.trim()}
+              aria-label="Send"
+              whileHover={{ scale: 1.06 }}
+              whileTap={{ scale: 0.92 }}
+              className={clsx(
+                'flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-950 transition-shadow',
+                disabled || uploading || !input.trim()
+                  ? 'cursor-not-allowed bg-ink-700 text-ink-400'
+                  : 'accent-grad shadow-lg shadow-accent-700/30',
+              )}
+            >
+              <Send size={15} />
+            </motion.button>
+          )}
+        </div>
+
+        {/* Routing controls: bias Cascade Auto, pin a tier, toggle web tools */}
+        <div className="flex flex-wrap items-center gap-1.5 border-t border-white/5 px-2.5 py-1.5">
+          <div className="flex items-center gap-0.5 rounded-lg bg-white/[0.04] p-0.5" role="group" aria-label="Routing mode">
+            {ROUTING_MODES.map((m) => (
+              <button
+                key={m.value}
+                type="button"
+                title={m.title}
+                disabled={disabled}
+                aria-pressed={routingMode === m.value}
+                onClick={() => onRoutingModeChange(m.value)}
+                className={clsx(
+                  'rounded-md px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-40',
+                  routingMode === m.value
+                    ? 'accent-grad text-ink-950 shadow-sm'
+                    : 'text-ink-400 hover:bg-white/10 hover:text-ink-100',
+                )}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+
+          <label className="flex items-center gap-1 text-[11px] text-ink-400">
+            <span className="hidden sm:inline">Tier</span>
+            <select
+              aria-label="Force tier"
+              value={forceTier}
+              onChange={(e) => onForceTierChange(e.target.value as ForceTier)}
+              disabled={disabled}
+              className="rounded-lg border border-white/10 bg-white/[0.04] px-1.5 py-1 text-[11px] text-ink-200 outline-none backdrop-blur disabled:opacity-40"
+            >
+              {FORCE_TIERS.map((t) => (
+                <option key={t} value={t}>{t === 'auto' ? 'Auto' : t}</option>
+              ))}
+            </select>
+          </label>
+
+          <button
             type="button"
-            onClick={submit}
-            disabled={disabled || uploading || !input.trim()}
-            aria-label="Send"
-            whileHover={{ scale: 1.06 }}
-            whileTap={{ scale: 0.92 }}
+            title="Allow web search & fetch for this run"
+            disabled={disabled}
+            aria-pressed={webSearch}
+            onClick={() => onWebSearchChange(!webSearch)}
             className={clsx(
-              'flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-950 transition-shadow',
-              disabled || uploading || !input.trim()
-                ? 'cursor-not-allowed bg-ink-700 text-ink-400'
-                : 'accent-grad shadow-lg shadow-accent-700/30',
+              'flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-40',
+              webSearch
+                ? 'border-accent-500/30 bg-accent-500/10 text-accent-300'
+                : 'border-white/10 bg-white/[0.04] text-ink-400 hover:text-ink-100',
             )}
           >
-            <Send size={15} />
-          </motion.button>
+            <Globe size={12} />
+            Web
+          </button>
         </div>
       </div>
       <p className="mx-auto mt-1.5 max-w-3xl px-1 text-[11px] text-ink-400">

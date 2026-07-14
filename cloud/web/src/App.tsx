@@ -5,6 +5,7 @@ import LoginGate from './components/LoginGate.js';
 import Modal from './components/Modal.js';
 import UpgradeModal from './components/UpgradeModal.js';
 import MemoryModal from './components/MemoryModal.js';
+import SkillsModal from './components/SkillsModal.js';
 import ConversationSidebar from './chat/ConversationSidebar.js';
 import ChatPanel from './chat/ChatPanel.js';
 import ChatTopBar from './chat/ChatTopBar.js';
@@ -13,10 +14,20 @@ import { useChatSession } from './chat/useChatSession.js';
 import { loadKeys, saveKeys } from './keys/store.js';
 import { fetchConfig, fetchMe, fetchSkills, getMessages, listConversations, logout, type CloudConfig } from './lib/api.js';
 import { closeSocket, getSocket } from './lib/socket.js';
-import type { CloudConversation, CloudUser, ProviderConfig, Skill } from './lib/types.js';
+import type { CloudConversation, CloudUser, ProviderConfig, Skill, WhyReport } from './lib/types.js';
 
 const SIDEBAR_OPEN_KEY = 'cascade-cloud-sidebar-open';
 const DEFAULT_SKILL = 'general';
+
+/** Parse a persisted /why JSON blob back into a WhyReport (null on absent/bad JSON). */
+function parseWhy(raw: string | null): WhyReport | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as WhyReport;
+  } catch {
+    return null;
+  }
+}
 
 export default function App() {
   const [config, setConfig] = useState<CloudConfig | null>(null);
@@ -28,6 +39,7 @@ export default function App() {
   const [showVault, setShowVault] = useState(false);
   const [showUpgrade, setShowUpgrade] = useState(false);
   const [showMemory, setShowMemory] = useState(false);
+  const [showSkills, setShowSkills] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     const stored = localStorage.getItem(SIDEBAR_OPEN_KEY);
     // No explicit preference yet: default open on desktop (today's always-visible
@@ -44,12 +56,16 @@ export default function App() {
     });
   }
 
+  const refreshSkills = useCallback(() => {
+    fetchSkills().then((r) => setSkills(r.skills)).catch(() => setSkills([]));
+  }, []);
+
   useEffect(() => {
     fetchConfig()
       .then(setConfig)
       .catch(() => setConfig({ githubEnabled: false, googleEnabled: false, googleClientId: null, devLoginEnabled: false }));
-    fetchSkills().then((r) => setSkills(r.skills)).catch(() => setSkills([]));
-  }, []);
+    refreshSkills();
+  }, [refreshSkills]);
 
   const refreshMe = useCallback(() => {
     fetchMe().then((r) => setUser(r.user)).catch(() => setUser(null));
@@ -64,6 +80,12 @@ export default function App() {
   useEffect(() => {
     if (user) refreshConversations();
   }, [user, refreshConversations]);
+
+  // Re-fetch once logged in so the user's own custom skills join the built-ins
+  // (the pre-login fetch only sees the public catalog).
+  useEffect(() => {
+    if (user) refreshSkills();
+  }, [user, refreshSkills]);
 
   const socket = user ? getSocket() : null;
   const chat = useChatSession(socket, providers, skillId);
@@ -90,6 +112,9 @@ export default function App() {
         role: m.role === 'user' ? 'user' : 'assistant',
         content: m.content,
         costUsd: m.costUsd,
+        tier: m.tier,
+        model: m.model,
+        why: parseWhy(m.why),
         attachments: m.attachments?.map((a) => ({ id: a.id, mime: a.mime })),
       })),
     );
@@ -139,6 +164,7 @@ export default function App() {
       onOpenKeyVault={() => setShowVault(true)}
       onOpenUpgrade={() => setShowUpgrade(true)}
       onOpenMemory={() => setShowMemory(true)}
+      onOpenSkills={() => setShowSkills(true)}
       onLogout={handleLogout}
     />
   );
@@ -183,7 +209,7 @@ export default function App() {
 
       {/* Main chat panel */}
       <div className="glass flex min-w-0 flex-1 flex-col overflow-hidden md:rounded-2xl">
-        <ChatTopBar title={activeTitle} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+        <ChatTopBar title={activeTitle} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} saved={chat.lastSaved} />
         <div className="min-h-0 flex-1">
           <ChatPanel
             messages={chat.messages}
@@ -195,7 +221,14 @@ export default function App() {
             skillId={skillId}
             onSkillChange={setSkillId}
             onSend={chat.send}
+            onStop={chat.stop}
             onRegenerate={chat.regenerate}
+            routingMode={chat.routingMode}
+            onRoutingModeChange={chat.setRoutingMode}
+            forceTier={chat.forceTier}
+            onForceTierChange={chat.setForceTier}
+            webSearch={chat.webSearch}
+            onWebSearchChange={chat.setWebSearch}
           />
         </div>
       </div>
@@ -217,6 +250,9 @@ export default function App() {
           </Modal>
         )}
         {showMemory && <MemoryModal onClose={() => setShowMemory(false)} />}
+        {showSkills && (
+          <SkillsModal skills={skills} onClose={() => setShowSkills(false)} onChange={refreshSkills} />
+        )}
       </AnimatePresence>
     </div>
   );

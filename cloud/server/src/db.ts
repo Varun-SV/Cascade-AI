@@ -40,6 +40,10 @@ export interface CloudMessage {
   role: string;
   content: string;
   model: string | null;
+  /** Tier that produced this assistant message: 'T1' | 'T2' | 'T3'. */
+  tier: string | null;
+  /** JSON-encoded run-explorer report (decisions, savings, per-tier cost). */
+  why: string | null;
   costUsd: number | null;
   createdAt: number;
 }
@@ -48,6 +52,20 @@ export interface CloudMemory {
   id: string;
   userId: string;
   content: string;
+  /** Optional user-assigned bucket (e.g. STACK / STYLE / PROJECT). */
+  category: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CloudSkill {
+  id: string;
+  userId: string;
+  name: string;
+  description: string;
+  systemPrompt: string;
+  /** How many runs have used this skill (drives the "used N×" badge). */
+  usageCount: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -86,6 +104,18 @@ interface DbMemoryRow {
   id: string;
   user_id: string;
   content: string;
+  category: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+interface DbSkillRow {
+  id: string;
+  user_id: string;
+  name: string;
+  description: string;
+  system_prompt: string;
+  usage_count: number;
   created_at: number;
   updated_at: number;
 }
@@ -106,6 +136,8 @@ interface DbMessageRow {
   role: string;
   content: string;
   model: string | null;
+  tier: string | null;
+  why_json: string | null;
   cost_usd: number | null;
   created_at: number;
 }
@@ -191,15 +223,31 @@ export class CloudStore {
 
       CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);
       CREATE INDEX IF NOT EXISTS idx_attachments_user ON attachments(user_id);
+
+      CREATE TABLE IF NOT EXISTS skills (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        system_prompt TEXT NOT NULL,
+        usage_count INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_skills_user ON skills(user_id);
     `);
 
-    // Additive column for conversations created before skills existed —
-    // ALTER ... ADD COLUMN throws if it's already there, so guard on the
-    // current schema (this migrate() runs on every boot).
-    const conversationCols = this.db.prepare('PRAGMA table_info(conversations)').all() as Array<{ name: string }>;
-    if (!conversationCols.some((c) => c.name === 'skill_id')) {
-      this.db.exec('ALTER TABLE conversations ADD COLUMN skill_id TEXT');
-    }
+    // Additive columns — ALTER ... ADD COLUMN throws if the column already
+    // exists, so guard on the current schema (this migrate() runs every boot).
+    const hasCol = (table: string, col: string) =>
+      (this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === col);
+    if (!hasCol('conversations', 'skill_id')) this.db.exec('ALTER TABLE conversations ADD COLUMN skill_id TEXT');
+    // Run-explorer: which tier answered + the JSON /why report.
+    if (!hasCol('messages', 'tier')) this.db.exec('ALTER TABLE messages ADD COLUMN tier TEXT');
+    if (!hasCol('messages', 'why_json')) this.db.exec('ALTER TABLE messages ADD COLUMN why_json TEXT');
+    // Per-user memory categories (STACK/STYLE/PROJECT/…).
+    if (!hasCol('memories', 'category')) this.db.exec('ALTER TABLE memories ADD COLUMN category TEXT');
   }
 
   // ── Users ─────────────────────────────────────
@@ -289,6 +337,8 @@ export class CloudStore {
     role: string;
     content: string;
     model?: string | null;
+    tier?: string | null;
+    why?: string | null;
     costUsd?: number | null;
   }): CloudMessage {
     const row: DbMessageRow = {
@@ -297,17 +347,34 @@ export class CloudStore {
       role: input.role,
       content: input.content,
       model: input.model ?? null,
+      tier: input.tier ?? null,
+      why_json: input.why ?? null,
       cost_usd: input.costUsd ?? null,
       created_at: Date.now(),
     };
     this.db
       .prepare(
-        `INSERT INTO messages (id, conversation_id, role, content, model, cost_usd, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages (id, conversation_id, role, content, model, tier, why_json, cost_usd, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(row.id, row.conversation_id, row.role, row.content, row.model, row.cost_usd, row.created_at);
+      .run(row.id, row.conversation_id, row.role, row.content, row.model, row.tier, row.why_json, row.cost_usd, row.created_at);
     this.touchConversation(input.conversationId);
     return this.deserializeMessage(row);
+  }
+
+  /**
+   * Tier mix for a user's runs since `sinceMs` — a count of assistant messages
+   * grouped by the tier that produced them. Powers "Tier mix — today".
+   */
+  tierMixSince(userId: string, sinceMs: number): Array<{ tier: string; count: number }> {
+    return this.db
+      .prepare(
+        `SELECT m.tier AS tier, COUNT(*) AS count
+         FROM messages m JOIN conversations c ON c.id = m.conversation_id
+         WHERE c.user_id = ? AND m.role = 'assistant' AND m.tier IS NOT NULL AND m.created_at >= ?
+         GROUP BY m.tier ORDER BY count DESC`,
+      )
+      .all(userId, sinceMs) as Array<{ tier: string; count: number }>;
   }
 
   getMessages(conversationId: string): CloudMessage[] {
@@ -350,19 +417,19 @@ export class CloudStore {
     return rows.map((r) => this.deserializeMemory(r));
   }
 
-  addMemory(userId: string, content: string): CloudMemory {
+  addMemory(userId: string, content: string, category: string | null = null): CloudMemory {
     const now = Date.now();
-    const row: DbMemoryRow = { id: randomUUID(), user_id: userId, content, created_at: now, updated_at: now };
+    const row: DbMemoryRow = { id: randomUUID(), user_id: userId, content, category, created_at: now, updated_at: now };
     this.db
-      .prepare('INSERT INTO memories (id, user_id, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
-      .run(row.id, row.user_id, row.content, row.created_at, row.updated_at);
+      .prepare('INSERT INTO memories (id, user_id, content, category, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(row.id, row.user_id, row.content, row.category, row.created_at, row.updated_at);
     return this.deserializeMemory(row);
   }
 
-  updateMemory(id: string, userId: string, content: string): CloudMemory | null {
+  updateMemory(id: string, userId: string, content: string, category: string | null = null): CloudMemory | null {
     const info = this.db
-      .prepare('UPDATE memories SET content = ?, updated_at = ? WHERE id = ? AND user_id = ?')
-      .run(content, Date.now(), id, userId);
+      .prepare('UPDATE memories SET content = ?, category = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+      .run(content, category, Date.now(), id, userId);
     if (info.changes === 0) return null;
     const row = this.db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as DbMemoryRow;
     return this.deserializeMemory(row);
@@ -443,6 +510,8 @@ export class CloudStore {
       role: row.role,
       content: row.content,
       model: row.model,
+      tier: row.tier ?? null,
+      why: row.why_json ?? null,
       costUsd: row.cost_usd,
       createdAt: row.created_at,
     };
@@ -453,6 +522,80 @@ export class CloudStore {
       id: row.id,
       userId: row.user_id,
       content: row.content,
+      category: row.category ?? null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  // ── Skills (per-user custom prompt presets) ──
+
+  listUserSkills(userId: string): CloudSkill[] {
+    const rows = this.db
+      .prepare('SELECT * FROM skills WHERE user_id = ? ORDER BY created_at ASC, rowid ASC')
+      .all(userId) as DbSkillRow[];
+    return rows.map((r) => this.deserializeSkill(r));
+  }
+
+  getUserSkill(id: string, userId: string): CloudSkill | null {
+    const row = this.db
+      .prepare('SELECT * FROM skills WHERE id = ? AND user_id = ?')
+      .get(id, userId) as DbSkillRow | undefined;
+    return row ? this.deserializeSkill(row) : null;
+  }
+
+  createUserSkill(userId: string, input: { name: string; description: string; systemPrompt: string }): CloudSkill {
+    const now = Date.now();
+    const row: DbSkillRow = {
+      id: randomUUID(),
+      user_id: userId,
+      name: input.name,
+      description: input.description,
+      system_prompt: input.systemPrompt,
+      usage_count: 0,
+      created_at: now,
+      updated_at: now,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO skills (id, user_id, name, description, system_prompt, usage_count, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(row.id, row.user_id, row.name, row.description, row.system_prompt, row.usage_count, row.created_at, row.updated_at);
+    return this.deserializeSkill(row);
+  }
+
+  updateUserSkill(
+    id: string,
+    userId: string,
+    input: { name: string; description: string; systemPrompt: string },
+  ): CloudSkill | null {
+    const info = this.db
+      .prepare('UPDATE skills SET name = ?, description = ?, system_prompt = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+      .run(input.name, input.description, input.systemPrompt, Date.now(), id, userId);
+    if (info.changes === 0) return null;
+    const row = this.db.prepare('SELECT * FROM skills WHERE id = ?').get(id) as DbSkillRow;
+    return this.deserializeSkill(row);
+  }
+
+  deleteUserSkill(id: string, userId: string): boolean {
+    const info = this.db.prepare('DELETE FROM skills WHERE id = ? AND user_id = ?').run(id, userId);
+    return info.changes > 0;
+  }
+
+  /** Bump a skill's usage counter after a run that used it (owner-scoped). */
+  incrementSkillUsage(id: string, userId: string): void {
+    this.db.prepare('UPDATE skills SET usage_count = usage_count + 1 WHERE id = ? AND user_id = ?').run(id, userId);
+  }
+
+  private deserializeSkill(row: DbSkillRow): CloudSkill {
+    return {
+      id: row.id,
+      userId: row.user_id,
+      name: row.name,
+      description: row.description,
+      systemPrompt: row.system_prompt,
+      usageCount: row.usage_count,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };

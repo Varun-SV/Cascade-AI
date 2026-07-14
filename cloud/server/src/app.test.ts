@@ -270,6 +270,74 @@ describe('cloud/server app', () => {
     expect(tooLong.status).toBe(400);
   });
 
+  it('custom skills: create, list (with usage + systemPrompt), edit, delete — owner-scoped', async () => {
+    const alice = await login('Alice');
+    const bob = await login('Bob');
+
+    const created = (await (await fetch(`${baseUrl}/api/skills`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ name: 'SQL Tutor', description: 'teaches SQL', systemPrompt: 'You teach SQL.' }),
+    })).json()) as { skill: { id: string; custom: boolean; usageCount: number } };
+    expect(created.skill.custom).toBe(true);
+
+    // Alice's catalog now includes her custom skill WITH its systemPrompt (she owns it).
+    const aliceList = (await (await fetch(`${baseUrl}/api/skills`, { headers: { Cookie: alice } })).json()) as {
+      skills: Array<{ id: string; custom: boolean; usageCount: number; systemPrompt?: string }>;
+    };
+    const mine = aliceList.skills.find((s) => s.id === created.skill.id)!;
+    expect(mine.systemPrompt).toBe('You teach SQL.');
+
+    // Bob only sees built-ins (custom:false), never Alice's skill.
+    const bobList = (await (await fetch(`${baseUrl}/api/skills`, { headers: { Cookie: bob } })).json()) as {
+      skills: Array<{ id: string; custom: boolean }>;
+    };
+    expect(bobList.skills.some((s) => s.id === created.skill.id)).toBe(false);
+    expect(bobList.skills.every((s) => s.custom === false)).toBe(true);
+
+    // Bob cannot edit or delete Alice's skill.
+    const bobEdit = await fetch(`${baseUrl}/api/skills/${created.skill.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: bob },
+      body: JSON.stringify({ name: 'Hijacked', description: '', systemPrompt: 'x' }),
+    });
+    expect(bobEdit.status).toBe(404);
+
+    const edited = (await (await fetch(`${baseUrl}/api/skills/${created.skill.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ name: 'SQL Coach', description: 'coaches SQL', systemPrompt: 'You coach SQL.' }),
+    })).json()) as { skill: { name: string } };
+    expect(edited.skill.name).toBe('SQL Coach');
+
+    const del = await fetch(`${baseUrl}/api/skills/${created.skill.id}`, { method: 'DELETE', headers: { Cookie: alice } });
+    expect(((await del.json()) as { ok: boolean }).ok).toBe(true);
+  });
+
+  it('POST /api/skills rejects a blank name or missing instructions', async () => {
+    const alice = await login('Alice');
+    const noName = await fetch(`${baseUrl}/api/skills`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ name: '  ', systemPrompt: 'x' }),
+    });
+    expect(noName.status).toBe(400);
+    const noPrompt = await fetch(`${baseUrl}/api/skills`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ name: 'Nameless', systemPrompt: '   ' }),
+    });
+    expect(noPrompt.status).toBe(400);
+  });
+
+  it('memories: round-trips a category', async () => {
+    const alice = await login('Alice');
+    const added = (await (await fetch(`${baseUrl}/api/memories`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ content: 'Ships on Fridays', category: 'PROJECT' }),
+    })).json()) as { memory: { category: string | null } };
+    expect(added.memory.category).toBe('PROJECT');
+  });
+
   it('uploads: accepts a valid image, serves it back to the owner, and denies others', async () => {
     const alice = await login('Alice');
     const bob = await login('Bob');

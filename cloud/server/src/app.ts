@@ -26,6 +26,40 @@ import { tenantScratchDir } from './paths.js';
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 const MAX_MEMORY_LEN = 2000;
+const MAX_MEMORY_CATEGORY_LEN = 32;
+const MAX_SKILL_NAME_LEN = 60;
+const MAX_SKILL_DESC_LEN = 200;
+const MAX_SKILL_PROMPT_LEN = 8000;
+// A generous ceiling so one account can't fill the shared DB with presets.
+const MAX_SKILLS_PER_USER = 50;
+
+/** Reads + trims an optional short category, or null when blank/oversized/absent. */
+function parseCategory(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim().slice(0, MAX_MEMORY_CATEGORY_LEN);
+  return trimmed ? trimmed : null;
+}
+
+/** Shapes a stored custom skill into the same wire shape as the /api/skills catalog. */
+function customSkillView(s: { id: string; name: string; description: string; usageCount: number; systemPrompt: string }) {
+  return { id: s.id, name: s.name, description: s.description, custom: true as const, usageCount: s.usageCount, systemPrompt: s.systemPrompt };
+}
+
+/** Validates a custom-skill create/update body into a normalized shape. */
+function parseSkillBody(
+  body: unknown,
+): { name: string; description: string; systemPrompt: string } | { error: string } {
+  const b = (body ?? {}) as Record<string, unknown>;
+  const name = typeof b['name'] === 'string' ? b['name'].trim() : '';
+  const description = typeof b['description'] === 'string' ? b['description'].trim() : '';
+  const systemPrompt = typeof b['systemPrompt'] === 'string' ? b['systemPrompt'].trim() : '';
+  if (!name) return { error: 'Skill name is required' };
+  if (name.length > MAX_SKILL_NAME_LEN) return { error: `Name must be ≤ ${MAX_SKILL_NAME_LEN} characters` };
+  if (description.length > MAX_SKILL_DESC_LEN) return { error: `Description must be ≤ ${MAX_SKILL_DESC_LEN} characters` };
+  if (!systemPrompt) return { error: 'Skill instructions are required' };
+  if (systemPrompt.length > MAX_SKILL_PROMPT_LEN) return { error: `Instructions must be ≤ ${MAX_SKILL_PROMPT_LEN} characters` };
+  return { name, description, systemPrompt };
+}
 
 const OAUTH_STATE_COOKIE = 'cascade_oauth_state';
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
@@ -218,9 +252,59 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     res.json({ conversation: { id: conversation.id, title: conversation.title, skillId: conversation.skillId }, messages });
   });
 
-  // ── Skills (prompt presets) — public catalog, no secrets ──
-  app.get('/api/skills', (_req, res) => {
-    res.json({ skills: skillCatalog() });
+  // ── Run explorer: tier mix for today ──
+  app.get('/api/tier-mix', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const start = new Date();
+    start.setUTCHours(0, 0, 0, 0);
+    res.json({ mix: store.tierMixSince(req.session!.userId, start.getTime()) });
+  });
+
+  // ── Skills — built-in catalog (public) merged with the user's custom
+  // presets. Session is optional so a logged-out mount still gets the built-ins;
+  // a logged-in user additionally gets their own editable skills + usage counts.
+  app.get('/api/skills', sessionMiddleware(env.SESSION_SECRET, false), (req: AuthedRequest, res) => {
+    const builtins = skillCatalog().map((s) => ({ ...s, custom: false, usageCount: 0 }));
+    const userId = req.session?.userId;
+    const custom = userId
+      ? store.listUserSkills(userId).map((s) => ({
+          id: s.id,
+          name: s.name,
+          description: s.description,
+          custom: true,
+          usageCount: s.usageCount,
+          // Safe to return: the requester owns these skills. Built-in prompt
+          // text stays server-side (it's the product's IP, not the user's).
+          systemPrompt: s.systemPrompt,
+        }))
+      : [];
+    res.json({ skills: [...builtins, ...custom] });
+  });
+
+  app.post('/api/skills', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const parsed = parseSkillBody(req.body);
+    if ('error' in parsed) { res.status(400).json({ error: parsed.error }); return; }
+    const userId = req.session!.userId;
+    if (store.listUserSkills(userId).length >= MAX_SKILLS_PER_USER) {
+      res.status(400).json({ error: `You can have at most ${MAX_SKILLS_PER_USER} custom skills` });
+      return;
+    }
+    res.json({ skill: customSkillView(store.createUserSkill(userId, parsed)) });
+  });
+
+  app.put('/api/skills/:id', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const id = req.params['id'];
+    if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid skill id' }); return; }
+    const parsed = parseSkillBody(req.body);
+    if ('error' in parsed) { res.status(400).json({ error: parsed.error }); return; }
+    const skill = store.updateUserSkill(id, req.session!.userId, parsed);
+    if (!skill) { res.status(404).json({ error: 'Not found' }); return; }
+    res.json({ skill: customSkillView(skill) });
+  });
+
+  app.delete('/api/skills/:id', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const id = req.params['id'];
+    if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid skill id' }); return; }
+    res.json({ ok: store.deleteUserSkill(id, req.session!.userId) });
   });
 
   // ── Memory (per-user persistent facts) ──
@@ -232,7 +316,7 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     const content = typeof req.body?.content === 'string' ? req.body.content.trim() : '';
     if (!content) { res.status(400).json({ error: 'Memory content is required' }); return; }
     if (content.length > MAX_MEMORY_LEN) { res.status(400).json({ error: `Memory must be ≤ ${MAX_MEMORY_LEN} characters` }); return; }
-    res.json({ memory: store.addMemory(req.session!.userId, content) });
+    res.json({ memory: store.addMemory(req.session!.userId, content, parseCategory(req.body?.category)) });
   });
 
   app.put('/api/memories/:id', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
@@ -241,7 +325,7 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid memory id' }); return; }
     if (!content) { res.status(400).json({ error: 'Memory content is required' }); return; }
     if (content.length > MAX_MEMORY_LEN) { res.status(400).json({ error: `Memory must be ≤ ${MAX_MEMORY_LEN} characters` }); return; }
-    const memory = store.updateMemory(id, req.session!.userId, content);
+    const memory = store.updateMemory(id, req.session!.userId, content, parseCategory(req.body?.category));
     if (!memory) { res.status(404).json({ error: 'Not found' }); return; }
     res.json({ memory });
   });

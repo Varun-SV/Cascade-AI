@@ -221,6 +221,23 @@ Rules:
     expect(out).not.toContain('pdf_create');
     expect(out).not.toContain('peer_message');
     expect(out).not.toContain('If the task asks for a file or artifact');
+    // A web tool exists, so the generic "use tools" line is still present.
+    expect(out).toContain('- Use tools when needed.');
+  });
+
+  it('with NO tools registered (hosted pure-chat), drops all tool guidance', () => {
+    const out = buildWorkerRules(() => false);
+    // The model has zero tools — never tell it to reach for one, so it can't
+    // waste turns hallucinating tool calls against an empty registry.
+    expect(out).not.toContain('- Use tools when needed.');
+    expect(out).not.toContain('web_search');
+    expect(out).not.toContain('run_code');
+    expect(out).not.toContain('pdf_create');
+    expect(out).not.toContain('peer_message');
+    expect(out).not.toContain('If the task asks for a file or artifact');
+    // Non-tool execution guidance still renders.
+    expect(out).toContain('- Execute the subtask completely');
+    expect(out).toContain('- Return structured output');
   });
 });
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
-import type { ProviderConfig } from '../lib/types.js';
+import type { ProviderConfig, WhyReport } from '../lib/types.js';
 
 export interface ChatAttachment {
   id: string;
@@ -14,6 +14,10 @@ export interface ChatMessage {
   streaming?: boolean;
   attachments?: ChatAttachment[];
   costUsd?: number | null;
+  tier?: string | null;
+  model?: string | null;
+  why?: WhyReport | null;
+  cancelled?: boolean;
 }
 
 export interface SendInput {
@@ -21,11 +25,19 @@ export interface SendInput {
   attachments?: ChatAttachment[];
 }
 
+export type RoutingMode = 'auto' | 'quality' | 'fast';
+export type ForceTier = 'auto' | 'T1' | 'T2' | 'T3';
+
 interface ChatRunAck {
   conversationId?: string;
   output?: string;
   costUsd?: number;
   totalTokens?: number;
+  tier?: string | null;
+  model?: string | null;
+  savedUsd?: number;
+  savedPct?: number;
+  cancelled?: boolean;
   error?: string;
 }
 
@@ -52,7 +64,20 @@ export function useChatSession(
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [lastTokens, setLastTokens] = useState<number>(0);
+  const [lastSaved, setLastSaved] = useState<{ usd: number; pct: number } | null>(null);
+  // Per-run routing controls (sticky across sends in a session). routingMode
+  // biases Cascade Auto; forceTier pins the root tier; webSearch toggles the
+  // hosted web_search/web_fetch tools. Defaults mirror prior behaviour.
+  const [routingMode, setRoutingMode] = useState<RoutingMode>('auto');
+  const [forceTier, setForceTier] = useState<ForceTier>('auto');
+  // Default OFF: a hosted chat is pure conversation unless the user opts into
+  // web tools. With the toggle off the run registers no tools at all, so the
+  // model is never handed a capability it can't reliably use.
+  const [webSearch, setWebSearch] = useState(false);
   const streamingRef = useRef('');
+  // run:why arrives just before the chat:run ack; stash it so the ack can
+  // attach the full report to the assistant message it creates.
+  const pendingWhyRef = useRef<WhyReport | null>(null);
 
   useEffect(() => {
     setConversationId(initialConversationId);
@@ -72,11 +97,14 @@ export function useChatSession(
       });
     };
     const onStatus = (e: Record<string, unknown>) => setStatus(statusLabel(e));
+    const onWhy = (r: WhyReport) => { pendingWhyRef.current = r; };
     socket.on('stream:token', onToken);
     socket.on('tier:status', onStatus);
+    socket.on('run:why', onWhy);
     return () => {
       socket.off('stream:token', onToken);
       socket.off('tier:status', onStatus);
+      socket.off('run:why', onWhy);
     };
   }, [socket]);
 
@@ -102,7 +130,16 @@ export function useChatSession(
 
       socket.emit(
         'chat:run',
-        { conversationId, prompt: text, providers, attachmentIds: attachments?.map((a) => a.id), skillId },
+        {
+          conversationId,
+          prompt: text,
+          providers,
+          attachmentIds: attachments?.map((a) => a.id),
+          skillId,
+          routingMode,
+          forceTier,
+          webSearch,
+        },
         (ack: ChatRunAck) => {
           setBusy(false);
           setStatus(null);
@@ -112,21 +149,44 @@ export function useChatSession(
             return;
           }
           if (typeof ack.totalTokens === 'number') setLastTokens(ack.totalTokens);
+          if (typeof ack.savedUsd === 'number' && ack.savedUsd > 0) {
+            setLastSaved({ usd: ack.savedUsd, pct: ack.savedPct ?? 0 });
+          }
           setConversationId(ack.conversationId);
+          const why = pendingWhyRef.current;
+          pendingWhyRef.current = null;
           setMessages((prev) => {
             const withoutStreaming = prev.filter((m) => !m.streaming);
             return [
               ...withoutStreaming,
-              { id: crypto.randomUUID(), role: 'assistant', content: ack.output ?? '', costUsd: ack.costUsd ?? null },
+              {
+                id: crypto.randomUUID(),
+                role: 'assistant',
+                content: ack.output ?? '',
+                costUsd: ack.costUsd ?? null,
+                tier: ack.tier ?? null,
+                model: ack.model ?? null,
+                why,
+                cancelled: ack.cancelled ?? false,
+              },
             ];
           });
         },
       );
     },
-    [socket, busy, conversationId, providers, skillId],
+    [socket, busy, conversationId, providers, skillId, routingMode, forceTier, webSearch],
   );
 
   const send = useCallback((input: SendInput) => runChat(input.prompt, input.attachments, true), [runChat]);
+
+  // Ask the server to abort the in-flight run. The run still resolves (with
+  // whatever completed), so the normal ack path finalises the message; we just
+  // reflect "stopping" until it lands.
+  const stop = useCallback(() => {
+    if (!socket || !busy) return;
+    socket.emit('chat:stop');
+    setStatus('Stopping…');
+  }, [socket, busy]);
 
   const regenerate = useCallback(() => {
     if (busy) return;
@@ -141,5 +201,8 @@ export function useChatSession(
     runChat(lastUser.content, lastUser.attachments, false);
   }, [busy, messages, runChat]);
 
-  return { messages, send, regenerate, busy, error, status, lastTokens, conversationId, loadMessages, setConversationId };
+  return {
+    messages, send, stop, regenerate, busy, error, status, lastTokens, lastSaved, conversationId, loadMessages, setConversationId,
+    routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch,
+  };
 }

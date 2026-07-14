@@ -79,4 +79,59 @@ describe('CloudStore', () => {
     expect(store.getUsage(bob.id, '2026-07-12')).toBe(1);
     expect(store.getUsage(alice.id, '2026-07-13')).toBe(0);
   });
+
+  it('stores and updates a memory category', () => {
+    const user = store.upsertUser({ provider: 'dev', providerId: 'm', email: null, name: null, avatar: null });
+    const mem = store.addMemory(user.id, 'Prefers TypeScript', 'STACK');
+    expect(mem.category).toBe('STACK');
+    const updated = store.updateMemory(mem.id, user.id, 'Prefers TypeScript strict mode', 'STYLE');
+    expect(updated?.category).toBe('STYLE');
+    // A null category clears it.
+    const cleared = store.updateMemory(mem.id, user.id, 'Prefers TypeScript', null);
+    expect(cleared?.category).toBeNull();
+  });
+
+  it('does CRUD on per-user custom skills and scopes them to the owner', () => {
+    const alice = store.upsertUser({ provider: 'dev', providerId: 'sa', email: null, name: null, avatar: null });
+    const bob = store.upsertUser({ provider: 'dev', providerId: 'sb', email: null, name: null, avatar: null });
+
+    const skill = store.createUserSkill(alice.id, { name: 'SQL Tutor', description: 'teaches SQL', systemPrompt: 'You teach SQL.' });
+    expect(skill.usageCount).toBe(0);
+    expect(store.listUserSkills(alice.id)).toHaveLength(1);
+    // Bob cannot see or fetch Alice's skill.
+    expect(store.listUserSkills(bob.id)).toHaveLength(0);
+    expect(store.getUserSkill(skill.id, bob.id)).toBeNull();
+
+    const updated = store.updateUserSkill(skill.id, alice.id, { name: 'SQL Coach', description: 'coaches SQL', systemPrompt: 'You coach SQL.' });
+    expect(updated?.name).toBe('SQL Coach');
+    // Bob's update is a no-op (not his skill).
+    expect(store.updateUserSkill(skill.id, bob.id, { name: 'Hijack', description: '', systemPrompt: 'x' })).toBeNull();
+
+    store.incrementSkillUsage(skill.id, alice.id);
+    store.incrementSkillUsage(skill.id, bob.id); // ignored — wrong owner
+    expect(store.getUserSkill(skill.id, alice.id)?.usageCount).toBe(1);
+
+    expect(store.deleteUserSkill(skill.id, bob.id)).toBe(false);
+    expect(store.deleteUserSkill(skill.id, alice.id)).toBe(true);
+    expect(store.listUserSkills(alice.id)).toHaveLength(0);
+  });
+
+  it('groups a user\'s assistant messages by tier for the tier-mix panel', () => {
+    const user = store.upsertUser({ provider: 'dev', providerId: 'tm', email: null, name: null, avatar: null });
+    const conv = store.createConversation(user.id, 'c');
+    store.addMessage({ conversationId: conv.id, role: 'user', content: 'q' });
+    store.addMessage({ conversationId: conv.id, role: 'assistant', content: 'a', tier: 'T1' });
+    store.addMessage({ conversationId: conv.id, role: 'assistant', content: 'b', tier: 'T1' });
+    store.addMessage({ conversationId: conv.id, role: 'assistant', content: 'c', tier: 'T3' });
+    // A tier-less (conversational fast-path) reply is excluded.
+    store.addMessage({ conversationId: conv.id, role: 'assistant', content: 'd', tier: null });
+
+    const mix = store.tierMixSince(user.id, 0);
+    expect(mix).toEqual([
+      { tier: 'T1', count: 2 },
+      { tier: 'T3', count: 1 },
+    ]);
+    // A future cutoff excludes everything.
+    expect(store.tierMixSince(user.id, Date.now() + 60_000)).toEqual([]);
+  });
 });

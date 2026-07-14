@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { AlertTriangle, KeyRound, Loader2, Sparkles } from 'lucide-react';
 import Message from './Message.js';
 import Composer from './Composer.js';
-import type { ChatMessage, SendInput } from './useChatSession.js';
+import type { ChatMessage, ForceTier, RoutingMode, SendInput } from './useChatSession.js';
 import type { Skill } from '../lib/types.js';
 
 interface Props {
@@ -16,11 +16,19 @@ interface Props {
   skillId: string;
   onSkillChange: (id: string) => void;
   onSend: (input: SendInput) => void;
+  onStop: () => void;
   onRegenerate: () => void;
+  routingMode: RoutingMode;
+  onRoutingModeChange: (m: RoutingMode) => void;
+  forceTier: ForceTier;
+  onForceTierChange: (t: ForceTier) => void;
+  webSearch: boolean;
+  onWebSearchChange: (on: boolean) => void;
 }
 
 export default function ChatPanel({
-  messages, busy, error, status, hasProviders, skills, skillId, onSkillChange, onSend, onRegenerate,
+  messages, busy, error, status, hasProviders, skills, skillId, onSkillChange, onSend, onStop, onRegenerate,
+  routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const lastAssistantId = [...messages].reverse().find((m) => m.role === 'assistant' && !m.streaming)?.id;
@@ -100,6 +108,13 @@ export default function ChatPanel({
         hasProviders={hasProviders}
         busy={busy}
         onSend={onSend}
+        onStop={onStop}
+        routingMode={routingMode}
+        onRoutingModeChange={onRoutingModeChange}
+        forceTier={forceTier}
+        onForceTierChange={onForceTierChange}
+        webSearch={webSearch}
+        onWebSearchChange={onWebSearchChange}
       />
     </div>
   );

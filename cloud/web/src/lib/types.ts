@@ -41,6 +41,9 @@ export interface CloudMessage {
   role: string;
   content: string;
   model: string | null;
+  tier: string | null;
+  /** JSON-encoded WhyReport, or null. Parsed client-side on transcript load. */
+  why: string | null;
   costUsd: number | null;
   createdAt: number;
   attachments?: MessageAttachment[];
@@ -50,12 +53,34 @@ export interface Skill {
   id: string;
   name: string;
   description: string;
+  /** True for a user-created skill (editable); false for a built-in preset. */
+  custom: boolean;
+  /** Runs that have used this skill (0 for built-ins). */
+  usageCount: number;
+  /** Present only for the owner's custom skills — built-in prompts stay server-side. */
+  systemPrompt?: string;
 }
 
 export interface Memory {
   id: string;
   userId: string;
   content: string;
+  category: string | null;
   createdAt: number;
   updatedAt: number;
+}
+
+/** Run-explorer report: the decision trail + router economics of one run. */
+export interface WhyReport {
+  tier: string | null;
+  model: string | null;
+  decisions: Array<{ at: string; kind: string; detail: string }>;
+  savedUsd: number;
+  savedPct: number;
+  totalCostUsd: number;
+  totalTokens: number;
+  durationMs: number;
+  costByTier: Record<string, number>;
+  tokensByTier: Record<string, number>;
+  models: Record<string, string>;
 }

@@ -1,7 +1,8 @@
 import clsx from 'clsx';
 import { motion } from 'framer-motion';
-import { MessageSquarePlus, KeyRound, LogOut, Crown, Brain } from 'lucide-react';
+import { MessageSquarePlus, KeyRound, LogOut, Crown, Brain, Sparkles } from 'lucide-react';
 import UsageMeter from './UsageMeter.js';
+import TierMix from './TierMix.js';
 import type { CloudConversation, CloudUser } from '../lib/types.js';
 
 interface Props {
@@ -15,6 +16,7 @@ interface Props {
   onOpenKeyVault: () => void;
   onOpenUpgrade: () => void;
   onOpenMemory: () => void;
+  onOpenSkills: () => void;
   onLogout: () => void;
 }
 
@@ -34,7 +36,7 @@ function FooterButton({ icon, label, onClick }: { icon: React.ReactNode; label: 
 
 export default function ConversationSidebar({
   user, conversations, activeConversationId, lastTokens, usageRefreshSignal,
-  onSelect, onNewChat, onOpenKeyVault, onOpenUpgrade, onOpenMemory, onLogout,
+  onSelect, onNewChat, onOpenKeyVault, onOpenUpgrade, onOpenMemory, onOpenSkills, onLogout,
 }: Props) {
   return (
     <div className="flex h-full w-72 flex-col">
@@ -82,6 +84,8 @@ export default function ConversationSidebar({
 
       <div className="flex flex-col gap-0.5 border-t border-white/10 p-3">
         <UsageMeter lastTokens={lastTokens} refreshSignal={usageRefreshSignal} />
+        <TierMix refreshSignal={usageRefreshSignal} />
+        <FooterButton icon={<Sparkles size={16} />} label="Skills" onClick={onOpenSkills} />
         <FooterButton icon={<Brain size={16} />} label="Memory" onClick={onOpenMemory} />
         <FooterButton icon={<KeyRound size={16} />} label="API keys" onClick={onOpenKeyVault} />
         <FooterButton icon={<Crown size={16} />} label="Upgrade" onClick={onOpenUpgrade} />

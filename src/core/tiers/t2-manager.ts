@@ -25,11 +25,21 @@ import type { PermissionEscalator } from '../permissions/escalator.js';
 import type { ToolCreator } from '../../tools/tool-creator.js';
 import { RedactionLayer } from '../audit/redaction.js';
 
-const T2_SYSTEM_PROMPT = `You are a T2 Manager agent in the Cascade AI system.
-Your role is to analyze a section of a task and decompose it into 2-5 discrete subtasks for T3 Workers.
-If subtasks have dependencies, you can specify "executionMode": "sequential" for the section.
-Provide "peerT3Ids" to subtasks so they can coordinate using the peer_message tool.
-Return ONLY valid JSON matching the T3 subtask array schema — no other text.`;
+// Built per-run so the peer-coordination hint only appears when the
+// peer_message tool is actually registered. On a restricted host (e.g. cloud
+// pure-chat) the planner isn't told to hand out peerT3Ids for a tool that
+// doesn't exist. With the full tool set the prompt is unchanged.
+function buildT2SystemPrompt(hasPeerMessage: boolean): string {
+  return [
+    'You are a T2 Manager agent in the Cascade AI system.',
+    'Your role is to analyze a section of a task and decompose it into 2-5 discrete subtasks for T3 Workers.',
+    'If subtasks have dependencies, you can specify "executionMode": "sequential" for the section.',
+    hasPeerMessage && 'Provide "peerT3Ids" to subtasks so they can coordinate using the peer_message tool.',
+    'Return ONLY valid JSON matching the T3 subtask array schema — no other text.',
+  ]
+    .filter((l): l is string => l !== false)
+    .join('\n');
+}
 
 export class T2Manager extends BaseTier {
   private router: CascadeRouter;
@@ -304,7 +314,7 @@ Return ONLY the JSON array.`;
     const messages: ConversationMessage[] = [{ role: 'user', content: prompt }];
     const result = await this.router.generate('T2', {
       messages,
-      systemPrompt: this.systemPromptOverride + T2_SYSTEM_PROMPT + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
+      systemPrompt: this.systemPromptOverride + buildT2SystemPrompt(this.toolRegistry.hasTool('peer_message')) + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
       maxTokens: 2000,
       ...(this.sectionModel ? { model: this.sectionModel } : {}),
     });

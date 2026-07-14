@@ -15,7 +15,19 @@ interface CloudSocketData {
 }
 
 type ChatRunAck = (
-  res: { conversationId: string; output: string; costUsd: number; totalTokens: number } | { error: string },
+  res:
+    | {
+        conversationId: string;
+        output: string;
+        costUsd: number;
+        totalTokens: number;
+        tier: string | null;
+        model: string | null;
+        savedUsd: number;
+        savedPct: number;
+        cancelled: boolean;
+      }
+    | { error: string },
 ) => void;
 
 export function attachSocket(httpServer: HttpServer, env: CloudEnv, store: CloudStore): SocketIOServer {
@@ -36,19 +48,41 @@ export function attachSocket(httpServer: HttpServer, env: CloudEnv, store: Cloud
   });
 
   io.on('connection', (socket: Socket) => {
-    // Concurrency (including "two runs on this same connection") and daily
-    // quota are both enforced per-user inside runChatTurn via entitlements.ts
-    // — no separate per-connection flag needed here.
+    // In-flight runs on THIS connection, so `chat:stop` (and a disconnect) can
+    // abort them — otherwise a runaway run keeps burning the budget with no way
+    // to halt it. Concurrency and daily quota are still enforced per-user inside
+    // runChatTurn via entitlements.ts.
+    const activeRuns = new Set<AbortController>();
+
     socket.on('chat:run', async (payload: unknown, ack?: ChatRunAck) => {
+      const controller = new AbortController();
+      activeRuns.add(controller);
       try {
         const parsed = parseChatRunPayload(payload);
         const userId = (socket.data as CloudSocketData).userId;
-        const result: ChatRunResult = await runChatTurn(parsed, { env, store, userId, socket });
+        const result: ChatRunResult = await runChatTurn(parsed, {
+          env, store, userId, socket, signal: controller.signal,
+        });
         ack?.(result);
       } catch (err) {
         const message = err instanceof ZodError ? err.issues.map((i) => i.message).join('; ') : err instanceof Error ? err.message : String(err);
         ack?.({ error: message });
+      } finally {
+        activeRuns.delete(controller);
       }
+    });
+
+    // Stop every run in flight on this connection. The run resolves with its
+    // partial output, which still gets persisted and acked normally.
+    socket.on('chat:stop', () => {
+      for (const c of activeRuns) c.abort();
+    });
+
+    // Tab closed / navigated away — don't leave an orphaned run spending tokens
+    // for a client that will never see the result.
+    socket.on('disconnect', () => {
+      for (const c of activeRuns) c.abort();
+      activeRuns.clear();
     });
   });
 
