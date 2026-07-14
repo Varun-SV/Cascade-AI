@@ -5,6 +5,22 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Cascade Cloud 0.5.0 - 2026-07-14
+
+### Added
+- **Razorpay recurring subscriptions.** The Upgrade page (Settings → Upgrade)
+  now offers a real **Pro** subscription: Subscribe opens Razorpay Checkout for
+  a recurring plan; a **signature-verified webhook** (`/api/billing/webhook`,
+  HMAC-SHA256 of the raw body) flips the user's plan on `subscription.charged` /
+  `activated` and reverts it on `cancelled` / `halted`; a **Manage** section
+  shows the status + renewal date and a **Cancel** (at cycle end). All secrets
+  live only in env (`RAZORPAY_KEY_ID` / `KEY_SECRET` / `WEBHOOK_SECRET` /
+  `PLAN_ID`) — with them unset, billing reports "not configured" and the page
+  falls back to the plan comparison. The client only ever receives the public
+  key id + subscription id.
+- The Upgrade page states plainly that **the desktop app is free, always** —
+  Cascade Cloud is the hosted convenience.
+
 ## 0.20.3 - 2026-07-14
 
 ### Fixed

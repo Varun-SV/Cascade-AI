@@ -102,6 +102,26 @@ describe('cloud/server app', () => {
     expect(missing.status).toBe(404);
   });
 
+  it('GET /api/billing reports not-configured when Razorpay env is absent', async () => {
+    const alice = await login('Alice');
+    const body = (await (await fetch(`${baseUrl}/api/billing`, { headers: { Cookie: alice } })).json()) as {
+      configured: boolean; plan: string; keyId: string | null;
+    };
+    expect(body.configured).toBe(false);
+    expect(body.keyId).toBeNull();
+    expect(body.plan).toBe('free');
+  });
+
+  it('billing mutations are 503 and the webhook rejects a bad signature when unconfigured', async () => {
+    const alice = await login('Alice');
+    const sub = await fetch(`${baseUrl}/api/billing/subscribe`, { method: 'POST', headers: { Cookie: alice } });
+    expect(sub.status).toBe(503);
+    const hook = await fetch(`${baseUrl}/api/billing/webhook`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-razorpay-signature': 'bad' }, body: '{}',
+    });
+    expect(hook.status).toBe(503);
+  });
+
   it('does not 500 on a rate-limited route when X-Forwarded-For is set (trust proxy)', async () => {
     // Behind Railway's proxy every request carries X-Forwarded-For; without
     // `trust proxy` express-rate-limit throws ERR_ERL_UNEXPECTED_X_FORWARDED_FOR

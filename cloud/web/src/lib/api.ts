@@ -147,6 +147,28 @@ export function uploadUrl(id: string): string {
   return `/api/uploads/${encodeURIComponent(id)}`;
 }
 
+export interface BillingInfo {
+  configured: boolean;
+  keyId: string | null;
+  priceLabel: string | null;
+  plan: string;
+  status: string | null;
+  currentEnd: number | null;
+  hasSubscription: boolean;
+}
+
+export function fetchBilling(): Promise<BillingInfo> {
+  return json(fetch('/api/billing', { credentials: 'include' }));
+}
+
+export function startSubscription(): Promise<{ subscriptionId: string; keyId: string }> {
+  return json(fetch('/api/billing/subscribe', { method: 'POST', credentials: 'include' }));
+}
+
+export function cancelSubscription(): Promise<{ ok: boolean }> {
+  return json(fetch('/api/billing/cancel', { method: 'POST', credentials: 'include' }));
+}
+
 export interface UsageInfo {
   plan: string;
   dailyRuns: number;

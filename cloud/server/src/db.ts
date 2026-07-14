@@ -22,6 +22,12 @@ export interface CloudUser {
   name: string | null;
   avatar: string | null;
   plan: string;
+  /** Razorpay subscription id backing a paid plan, or null. */
+  subscriptionId: string | null;
+  /** Razorpay subscription status (active/cancelled/…), or null. */
+  subscriptionStatus: string | null;
+  /** Unix seconds — end of the current billing period, or null. */
+  subscriptionCurrentEnd: number | null;
   createdAt: number;
 }
 
@@ -88,6 +94,9 @@ interface DbUserRow {
   name: string | null;
   avatar: string | null;
   plan: string;
+  subscription_id: string | null;
+  subscription_status: string | null;
+  subscription_current_end: number | null;
   created_at: number;
 }
 
@@ -248,6 +257,10 @@ export class CloudStore {
     if (!hasCol('messages', 'why_json')) this.db.exec('ALTER TABLE messages ADD COLUMN why_json TEXT');
     // Per-user memory categories (STACK/STYLE/PROJECT/…).
     if (!hasCol('memories', 'category')) this.db.exec('ALTER TABLE memories ADD COLUMN category TEXT');
+    // Razorpay subscription state.
+    if (!hasCol('users', 'subscription_id')) this.db.exec('ALTER TABLE users ADD COLUMN subscription_id TEXT');
+    if (!hasCol('users', 'subscription_status')) this.db.exec('ALTER TABLE users ADD COLUMN subscription_status TEXT');
+    if (!hasCol('users', 'subscription_current_end')) this.db.exec('ALTER TABLE users ADD COLUMN subscription_current_end INTEGER');
   }
 
   // ── Users ─────────────────────────────────────
@@ -278,6 +291,9 @@ export class CloudStore {
       name: input.name,
       avatar: input.avatar,
       plan: 'free',
+      subscription_id: null,
+      subscription_status: null,
+      subscription_current_end: null,
       created_at: Date.now(),
     };
     this.db
@@ -292,6 +308,25 @@ export class CloudStore {
   getUserById(id: string): CloudUser | null {
     const row = this.db.prepare('SELECT * FROM users WHERE id = ?').get(id) as DbUserRow | undefined;
     return row ? this.deserializeUser(row) : null;
+  }
+
+  getUserBySubscriptionId(subscriptionId: string): CloudUser | null {
+    const row = this.db
+      .prepare('SELECT * FROM users WHERE subscription_id = ?')
+      .get(subscriptionId) as DbUserRow | undefined;
+    return row ? this.deserializeUser(row) : null;
+  }
+
+  /** Persist subscription state + the derived plan (webhook / subscribe / cancel). */
+  setUserSubscription(
+    userId: string,
+    input: { subscriptionId: string | null; status: string | null; currentEnd: number | null; plan: string },
+  ): void {
+    this.db
+      .prepare(
+        'UPDATE users SET subscription_id = ?, subscription_status = ?, subscription_current_end = ?, plan = ? WHERE id = ?',
+      )
+      .run(input.subscriptionId, input.status, input.currentEnd, input.plan, userId);
   }
 
   // ── Conversations ─────────────────────────────
@@ -500,6 +535,9 @@ export class CloudStore {
       name: row.name,
       avatar: row.avatar,
       plan: row.plan,
+      subscriptionId: row.subscription_id ?? null,
+      subscriptionStatus: row.subscription_status ?? null,
+      subscriptionCurrentEnd: row.subscription_current_end ?? null,
       createdAt: row.created_at,
     };
   }
