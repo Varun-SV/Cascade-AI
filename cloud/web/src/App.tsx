@@ -5,6 +5,7 @@ import LoginGate from './components/LoginGate.js';
 import Modal from './components/Modal.js';
 import UpgradeModal from './components/UpgradeModal.js';
 import MemoryModal from './components/MemoryModal.js';
+import SkillsModal from './components/SkillsModal.js';
 import ConversationSidebar from './chat/ConversationSidebar.js';
 import ChatPanel from './chat/ChatPanel.js';
 import ChatTopBar from './chat/ChatTopBar.js';
@@ -38,6 +39,7 @@ export default function App() {
   const [showVault, setShowVault] = useState(false);
   const [showUpgrade, setShowUpgrade] = useState(false);
   const [showMemory, setShowMemory] = useState(false);
+  const [showSkills, setShowSkills] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     const stored = localStorage.getItem(SIDEBAR_OPEN_KEY);
     // No explicit preference yet: default open on desktop (today's always-visible
@@ -54,12 +56,16 @@ export default function App() {
     });
   }
 
+  const refreshSkills = useCallback(() => {
+    fetchSkills().then((r) => setSkills(r.skills)).catch(() => setSkills([]));
+  }, []);
+
   useEffect(() => {
     fetchConfig()
       .then(setConfig)
       .catch(() => setConfig({ githubEnabled: false, googleEnabled: false, googleClientId: null, devLoginEnabled: false }));
-    fetchSkills().then((r) => setSkills(r.skills)).catch(() => setSkills([]));
-  }, []);
+    refreshSkills();
+  }, [refreshSkills]);
 
   const refreshMe = useCallback(() => {
     fetchMe().then((r) => setUser(r.user)).catch(() => setUser(null));
@@ -74,6 +80,12 @@ export default function App() {
   useEffect(() => {
     if (user) refreshConversations();
   }, [user, refreshConversations]);
+
+  // Re-fetch once logged in so the user's own custom skills join the built-ins
+  // (the pre-login fetch only sees the public catalog).
+  useEffect(() => {
+    if (user) refreshSkills();
+  }, [user, refreshSkills]);
 
   const socket = user ? getSocket() : null;
   const chat = useChatSession(socket, providers, skillId);
@@ -152,6 +164,7 @@ export default function App() {
       onOpenKeyVault={() => setShowVault(true)}
       onOpenUpgrade={() => setShowUpgrade(true)}
       onOpenMemory={() => setShowMemory(true)}
+      onOpenSkills={() => setShowSkills(true)}
       onLogout={handleLogout}
     />
   );
@@ -237,6 +250,9 @@ export default function App() {
           </Modal>
         )}
         {showMemory && <MemoryModal onClose={() => setShowMemory(false)} />}
+        {showSkills && (
+          <SkillsModal skills={skills} onClose={() => setShowSkills(false)} onChange={refreshSkills} />
+        )}
       </AnimatePresence>
     </div>
   );

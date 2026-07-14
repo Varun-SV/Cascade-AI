@@ -53,6 +53,38 @@ export function fetchSkills(): Promise<{ skills: Skill[] }> {
   return json(fetch('/api/skills', { credentials: 'include' }));
 }
 
+export interface SkillInput {
+  name: string;
+  description: string;
+  systemPrompt: string;
+}
+
+export function createSkill(input: SkillInput): Promise<{ skill: Skill }> {
+  return json(
+    fetch('/api/skills', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    }),
+  );
+}
+
+export function updateSkill(id: string, input: SkillInput): Promise<{ skill: Skill }> {
+  return json(
+    fetch(`/api/skills/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    }),
+  );
+}
+
+export function deleteSkill(id: string): Promise<{ ok: boolean }> {
+  return json(fetch(`/api/skills/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' }));
+}
+
 export function fetchTierMix(): Promise<{ mix: Array<{ tier: string; count: number }> }> {
   return json(fetch('/api/tier-mix', { credentials: 'include' }));
 }
@@ -61,24 +93,24 @@ export function fetchMemories(): Promise<{ memories: Memory[] }> {
   return json(fetch('/api/memories', { credentials: 'include' }));
 }
 
-export function addMemory(content: string): Promise<{ memory: Memory }> {
+export function addMemory(content: string, category?: string | null): Promise<{ memory: Memory }> {
   return json(
     fetch('/api/memories', {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ content, category: category ?? null }),
     }),
   );
 }
 
-export function updateMemory(id: string, content: string): Promise<{ memory: Memory }> {
+export function updateMemory(id: string, content: string, category?: string | null): Promise<{ memory: Memory }> {
   return json(
     fetch(`/api/memories/${encodeURIComponent(id)}`, {
       method: 'PUT',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ content, category: category ?? null }),
     }),
   );
 }

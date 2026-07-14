@@ -53,12 +53,19 @@ export interface Skill {
   id: string;
   name: string;
   description: string;
+  /** True for a user-created skill (editable); false for a built-in preset. */
+  custom: boolean;
+  /** Runs that have used this skill (0 for built-ins). */
+  usageCount: number;
+  /** Present only for the owner's custom skills — built-in prompts stay server-side. */
+  systemPrompt?: string;
 }
 
 export interface Memory {
   id: string;
   userId: string;
   content: string;
+  category: string | null;
   createdAt: number;
   updatedAt: number;
 }

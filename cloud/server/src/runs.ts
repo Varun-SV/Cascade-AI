@@ -229,9 +229,15 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   for (const att of loadedAttachments) store.linkAttachmentToMessage(att.id, userId, userMessage.id);
   if (payload.skillId !== undefined) store.setConversationSkill(conversation.id, userId, payload.skillId ?? null);
 
-  const skill = getSkill(payload.skillId);
+  // A skillId resolves to either a built-in preset or one of the user's own
+  // custom skills (UUID ids never collide with the fixed built-in ids). Bump
+  // the custom skill's usage counter so the Skills page can show "used N×".
+  const builtinSkill = getSkill(payload.skillId);
+  const userSkill = !builtinSkill && payload.skillId ? store.getUserSkill(payload.skillId, userId) : null;
+  if (userSkill) store.incrementSkillUsage(userSkill.id, userId);
+  const skillSystemPrompt = builtinSkill?.systemPrompt || userSkill?.systemPrompt || undefined;
   const memories = store.listMemories(userId).map((m) => m.content);
-  const runPrompt = buildRunPrompt(payload.prompt, skill?.systemPrompt || undefined, memories);
+  const runPrompt = buildRunPrompt(payload.prompt, skillSystemPrompt, memories);
 
   const scratchDir = tenantScratchDir(env, userId);
   const config = buildCloudConfig(payload.providers as ProviderConfig[], env.MAX_COST_PER_RUN_USD, {
