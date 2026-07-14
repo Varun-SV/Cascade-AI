@@ -89,6 +89,27 @@ test('dev login -> add a key -> pick a skill -> attach an image -> send -> reply
     await page.getByPlaceholder(/I prefer TypeScript/).fill(memory);
     await page.getByRole('button', { name: /^Add/ }).click();
     await expect(page.locator('span.whitespace-pre-wrap', { hasText: memory })).toBeVisible();
+    await page.getByLabel('Close').click();
+
+    // Routing controls render in the composer: Auto mode selected by default,
+    // the Web toggle present and OFF (hosted chat is pure conversation unless
+    // the user opts in).
+    await expect(page.getByRole('button', { name: 'Auto', pressed: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Web', pressed: false })).toBeVisible();
+
+    // Custom skill CRUD: create one, confirm it lists with a usage badge, and
+    // that it then appears in the composer's skill picker.
+    const skillName = `E2E Skill ${Date.now()}`;
+    await page.getByRole('button', { name: /^Skills/ }).click();
+    await page.getByRole('button', { name: /New skill/ }).click();
+    await page.getByPlaceholder(/Name \(e\.g\. SQL Tutor\)/).fill(skillName);
+    await page.getByPlaceholder(/Instructions/).fill('You are an e2e test persona.');
+    await page.getByRole('button', { name: /^Create/ }).click();
+    // The "used N×" badge is unique to a custom skill row in the modal (the
+    // name also renders as a composer <option>, so scope to the badge instead).
+    await expect(page.getByText(/used 0×/)).toBeVisible();
+    await page.getByLabel('Close').click();
+    await expect(page.getByLabel('Skill').locator('option', { hasText: skillName })).toHaveCount(1);
   } finally {
     await stub.close();
   }
