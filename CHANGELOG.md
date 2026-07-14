@@ -5,6 +5,25 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.20.3 - 2026-07-14
+
+### Fixed
+- **Multiple Azure deployments are now spread across tiers automatically**
+  (desktop + cloud). With no benchmark data for opaque deployment names, the
+  router used to hand the same "first available" deployment to every tier. It
+  now infers a rough capability score from each deployment name (size/cost
+  keywords + version) and assigns **strongest → T1, cheapest → T3** — so a setup
+  like `gpt-5.4` + `gpt-5-mini` uses the mini for cheap worker tasks and the
+  full model up top, staying fully automatic (no per-run picking).
+
+### Cloud
+- **Only the answer streams now.** The hosted chat streamed every node's output
+  (planning, decomposition, background workers) before the final result, which
+  flashed intermediate text and read as a runaway. It now streams only the
+  presenter tier's output (the actual answer) and keeps a status chip up while
+  the other nodes work.
+- Settings toggles no longer let the knob overflow the track.
+
 ## 0.20.2 - 2026-07-14
 
 ### Fixed

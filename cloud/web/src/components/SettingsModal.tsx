@@ -6,6 +6,9 @@ import { localModelEnabled, setLocalModelEnabled, reduceMotionEnabled, setReduce
 import type { CloudUser } from '../lib/types.js';
 
 function Toggle({ on, onChange, disabled, label }: { on: boolean; onChange: (v: boolean) => void; disabled?: boolean; label: string }) {
+  // Flex + justify keeps the knob physically inside the track — it can't
+  // overflow the way an absolute/translate knob could when the pixel math is
+  // off. items-center handles the vertical centering.
   return (
     <button
       type="button"
@@ -14,9 +17,11 @@ function Toggle({ on, onChange, disabled, label }: { on: boolean; onChange: (v: 
       aria-label={label}
       disabled={disabled}
       onClick={() => onChange(!on)}
-      className={`relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-40 ${on ? 'bg-accent-500' : 'bg-white/15'}`}
+      className={`flex h-5 w-9 shrink-0 items-center rounded-full px-0.5 transition-colors disabled:opacity-40 ${
+        on ? 'justify-end bg-accent-500' : 'justify-start bg-white/15'
+      }`}
     >
-      <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${on ? 'translate-x-4' : 'translate-x-0.5'}`} />
+      <span className="h-4 w-4 rounded-full bg-white shadow-sm" />
     </button>
   );
 }

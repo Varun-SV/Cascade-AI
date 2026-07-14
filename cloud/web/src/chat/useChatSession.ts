@@ -92,9 +92,14 @@ export function useChatSession(
 
   useEffect(() => {
     if (!socket) return;
-    const onToken = (e: { text: string }) => {
+    const onToken = (e: { text: string; primary?: boolean }) => {
+      // Only stream the PRESENTER tier's output (the actual answer). Intermediate
+      // nodes — planning, decomposition, background workers — emit primary:false;
+      // showing those made each node's output flash by before the final result,
+      // which read as a runaway. Keep the status chip up while they work.
+      if (e.primary === false) return;
       streamingRef.current += e.text;
-      setStatus(null); // tokens are flowing — drop the "planning" chip
+      setStatus(null); // presenter tokens are flowing — drop the "planning" chip
       setMessages((prev) => {
         const last = prev[prev.length - 1];
         if (last?.streaming) {
