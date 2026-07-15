@@ -5,6 +5,28 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Cascade Cloud 0.6.0 - 2026-07-15
+
+### Added
+- **Session continuation between web and desktop ("open-and-continue").** Pick
+  up a chat where you left off on the other device. On either surface, open
+  **Continue elsewhere**, choose **Send this chat** to get a short one-time code
+  (`XXXX-XXXX`), then enter it on the other surface under **Bring a chat here** —
+  the transcript comes across and you keep going.
+  - The cloud acts only as a **short-lived courier**, never a shared source of
+    truth: the snapshot lives in memory with a **15-minute TTL** and is never
+    stored durably. The code is the only bearer secret (unambiguous alphabet, no
+    O/0/I/1/L), so the courier endpoints are unauthenticated — which is what lets
+    the keyless desktop app use them — with their own tighter rate limits, an
+    open **non-credentialed** CORS policy (the session cookie never travels
+    there), and a 404 that doesn't distinguish "unknown" from "expired".
+  - **Web:** a new **Continue elsewhere** control in the chat top bar. Redeeming
+    a code seeds a **new cloud conversation** from the transcript, owner-scoped
+    and ready to continue in the cloud.
+  - **Desktop:** the same handoff from the session sidebar and the ⌘/Ctrl-K
+    command palette. Sending hands off the active session; redeeming imports the
+    chat into the local backend as a new session to continue with your own keys.
+
 ## Cascade Cloud 0.5.1 - 2026-07-15
 
 ### Added

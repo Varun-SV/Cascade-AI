@@ -26,6 +26,7 @@ import {
   billingConfig, makeRazorpay, createSubscription, cancelSubscription,
   verifyWebhookSignature, planForStatus, subscriptionFromWebhook,
 } from './billing.js';
+import { HandoffStore, parseHandoffBody } from './handoff.js';
 
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
@@ -96,8 +97,17 @@ export function createApp(env: CloudEnv, store: CloudStore) {
   // that origin's requests carry the session cookie — cloud/web and
   // cloud/server run on different ports in dev, same origin in prod.
   app.use((req, res, next) => {
-    res.header('Access-Control-Allow-Origin', env.WEB_ORIGIN);
-    res.header('Access-Control-Allow-Credentials', 'true');
+    // The handoff courier is reached cross-origin from the KEYLESS desktop app,
+    // which carries no session cookie — so those routes advertise an open,
+    // NON-credentialed CORS policy (the code in the URL is the only bearer
+    // secret). Every other route stays pinned to the configured web origin and
+    // allows credentials, so the session cookie only ever travels there.
+    if (req.path.startsWith('/api/handoff')) {
+      res.header('Access-Control-Allow-Origin', '*');
+    } else {
+      res.header('Access-Control-Allow-Origin', env.WEB_ORIGIN);
+      res.header('Access-Control-Allow-Credentials', 'true');
+    }
     res.header('Access-Control-Allow-Headers', 'Content-Type');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
     res.header('Vary', 'Origin');
@@ -488,6 +498,48 @@ export function createApp(env: CloudEnv, store: CloudStore) {
       }
     }
     res.json({ ok: true }); // always 200 to a validly-signed event so Razorpay stops retrying
+  });
+
+  // ── Conversation handoff (open-and-continue, web ↔ desktop) ──
+  // A short-lived courier: snapshot a transcript here → get a code, redeem the
+  // code on the other surface → get the snapshot back. Nothing is stored
+  // durably (see handoff.ts). Create + read are unauthenticated so the keyless
+  // desktop app can use them; they get their own tighter limiters on top of the
+  // /api one, and the read endpoint 404s a bad/expired code without leaking
+  // which it was.
+  const handoffs = new HandoffStore();
+  const handoffCreateLimiter = rateLimit({
+    windowMs: 60 * 1000, limit: 15, standardHeaders: 'draft-7', legacyHeaders: false,
+    message: { error: 'Too many handoff codes. Slow down.' },
+  });
+  const handoffReadLimiter = rateLimit({
+    windowMs: 60 * 1000, limit: 30, standardHeaders: 'draft-7', legacyHeaders: false,
+    message: { error: 'Too many attempts. Slow down.' },
+  });
+
+  app.post('/api/handoff', handoffCreateLimiter, (req, res) => {
+    const parsed = parseHandoffBody(req.body);
+    if ('error' in parsed) { res.status(400).json({ error: parsed.error }); return; }
+    const { code, expiresAt } = handoffs.create(parsed);
+    res.json({ code, expiresAt });
+  });
+
+  app.get('/api/handoff/:code', handoffReadLimiter, (req, res) => {
+    const code = req.params['code'];
+    if (typeof code !== 'string') { res.status(400).json({ error: 'Invalid code' }); return; }
+    const snapshot = handoffs.get(code);
+    if (!snapshot) { res.status(404).json({ error: 'That code is invalid or has expired.' }); return; }
+    res.json(snapshot);
+  });
+
+  // Seed a NEW conversation from a redeemed transcript — the web side of a
+  // redeem. Authenticated + owner-scoped: the imported chat becomes the
+  // caller's own conversation, ready to continue in the cloud.
+  app.post('/api/conversations/import', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const parsed = parseHandoffBody(req.body);
+    if ('error' in parsed) { res.status(400).json({ error: parsed.error }); return; }
+    const convo = store.importConversation(req.session!.userId, parsed.title, parsed.skillId, parsed.messages);
+    res.json({ conversation: { id: convo.id, title: convo.title, skillId: convo.skillId } });
   });
 
   // ── Serve the built SPA ──────────────────────

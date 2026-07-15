@@ -1,10 +1,10 @@
 import { useState } from 'react';
 import type { Socket } from 'socket.io-client';
-import { Trash2, MessageSquare, PanelLeftClose, PanelLeftOpen, RotateCcw, Download, GitCompareArrows } from 'lucide-react';
+import { Trash2, MessageSquare, PanelLeftClose, PanelLeftOpen, RotateCcw, Download, GitCompareArrows, MonitorSmartphone } from 'lucide-react';
 import {
   useAppDispatch, useAppSelector,
   setActiveSessionId, removeSession, loadTranscript,
-  toggleSessionSidebar, setSessionSidebarCollapsed, setChangesSessionId,
+  toggleSessionSidebar, setSessionSidebarCollapsed, setChangesSessionId, setShowContinue,
   type RuntimeSession,
 } from '../store/index.js';
 import { fetchSessionTranscript } from '../utils/sessionLoad.js';
@@ -261,6 +261,9 @@ export function SessionSidebar({ socket }: { socket: Socket | null }) {
         }}>
           {sorted.length}
         </span>
+        <button title="Continue elsewhere — hand off to / from the web" onClick={() => dispatch(setShowContinue(true))} style={railBtnStyle}>
+          <MonitorSmartphone size={13} />
+        </button>
         <button title="Hide sessions" onClick={() => dispatch(toggleSessionSidebar())} style={railBtnStyle}>
           <PanelLeftClose size={13} />
         </button>

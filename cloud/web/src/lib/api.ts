@@ -179,3 +179,49 @@ export interface UsageInfo {
 export function fetchUsage(): Promise<UsageInfo> {
   return json(fetch('/api/usage', { credentials: 'include' }));
 }
+
+// ── Conversation handoff (open-and-continue, web ↔ desktop) ──
+
+export interface HandoffMessage {
+  role: string;
+  content: string;
+}
+
+export interface HandoffInput {
+  title: string | null;
+  skillId: string | null;
+  messages: HandoffMessage[];
+}
+
+/** Snapshot the current transcript into a short-lived code to continue elsewhere. */
+export function createHandoff(input: HandoffInput): Promise<{ code: string; expiresAt: number }> {
+  return json(
+    fetch('/api/handoff', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    }),
+  );
+}
+
+/** Redeem a code minted on another surface → its transcript snapshot. */
+export function fetchHandoff(
+  code: string,
+): Promise<{ title: string | null; skillId: string | null; messages: HandoffMessage[]; expiresAt: number }> {
+  return json(fetch(`/api/handoff/${encodeURIComponent(code)}`, { credentials: 'include' }));
+}
+
+/** Seed a NEW cloud conversation from a redeemed transcript (owner-scoped). */
+export function importConversation(
+  input: HandoffInput,
+): Promise<{ conversation: { id: string; title: string | null; skillId: string | null } }> {
+  return json(
+    fetch('/api/conversations/import', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    }),
+  );
+}

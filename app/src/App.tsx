@@ -27,6 +27,7 @@ import { PlanApprovalModal } from './components/PlanApprovalModal.js';
 import { WhyPanel } from './components/WhyPanel.js';
 import { CommandPalette } from './components/CommandPalette.js';
 import { ChangesModal } from './components/ChangesModal.js';
+import { ContinueModal } from './components/ContinueModal.js';
 import { useThemeSync } from './theme/useTheme.js';
 
 declare global {
@@ -325,6 +326,7 @@ export function App() {
       <ApprovalModal socket={socketRef.current} />
       <PlanApprovalModal socket={socketRef.current} />
       <ChangesModal />
+      <ContinueModal />
       <CommandPalette socket={socketRef.current} />
     </div>
   );

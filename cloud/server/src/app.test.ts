@@ -211,6 +211,89 @@ describe('cloud/server app', () => {
     expect(res.headers.get('access-control-allow-credentials')).toBe('true');
   });
 
+  it('handoff: a transcript round-trips through a code with no session, open CORS', async () => {
+    // Create — unauthenticated, as the keyless desktop app would.
+    const created = await fetch(`${baseUrl}/api/handoff`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Ported chat',
+        skillId: 'general',
+        messages: [
+          { role: 'user', content: 'first question' },
+          { role: 'assistant', content: 'first answer' },
+        ],
+      }),
+    });
+    expect(created.status).toBe(200);
+    // The courier is reachable cross-origin but never with credentials.
+    expect(created.headers.get('access-control-allow-origin')).toBe('*');
+    expect(created.headers.get('access-control-allow-credentials')).toBeNull();
+    const { code } = (await created.json()) as { code: string };
+    expect(code).toMatch(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/);
+
+    // Redeem — also unauthenticated, dash/case-insensitive.
+    const read = await fetch(`${baseUrl}/api/handoff/${encodeURIComponent(code.toLowerCase())}`);
+    expect(read.status).toBe(200);
+    const snap = (await read.json()) as { title: string; skillId: string; messages: Array<{ role: string; content: string }> };
+    expect(snap.title).toBe('Ported chat');
+    expect(snap.skillId).toBe('general');
+    expect(snap.messages).toEqual([
+      { role: 'user', content: 'first question' },
+      { role: 'assistant', content: 'first answer' },
+    ]);
+  });
+
+  it('handoff: rejects an empty transcript and 404s an unknown code', async () => {
+    const empty = await fetch(`${baseUrl}/api/handoff`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [] }),
+    });
+    expect(empty.status).toBe(400);
+
+    const missing = await fetch(`${baseUrl}/api/handoff/ZZZZ-ZZZZ`);
+    expect(missing.status).toBe(404);
+  });
+
+  it('conversation import: seeds an owner-scoped conversation from a transcript', async () => {
+    const alice = await login('Alice');
+    const imported = await fetch(`${baseUrl}/api/conversations/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({
+        title: 'Brought from desktop',
+        messages: [
+          { role: 'user', content: 'ported prompt' },
+          { role: 'assistant', content: 'ported reply' },
+          { role: 'system', content: 'should be dropped' },
+        ],
+      }),
+    });
+    expect(imported.status).toBe(200);
+    const { conversation } = (await imported.json()) as { conversation: { id: string; title: string } };
+    expect(conversation.title).toBe('Brought from desktop');
+
+    // It shows in the owner's list and its transcript reads back (system dropped).
+    const list = (await (await fetch(`${baseUrl}/api/conversations`, { headers: { Cookie: alice } })).json()) as {
+      conversations: Array<{ id: string }>;
+    };
+    expect(list.conversations.map((c) => c.id)).toContain(conversation.id);
+
+    const msgs = (await (await fetch(`${baseUrl}/api/conversations/${conversation.id}/messages`, { headers: { Cookie: alice } })).json()) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    expect(msgs.messages).toEqual([
+      { role: 'user', content: 'ported prompt' },
+      { role: 'assistant', content: 'ported reply' },
+    ].map((m) => expect.objectContaining(m)));
+  });
+
+  it('conversation import without a session is rejected', async () => {
+    const res = await fetch(`${baseUrl}/api/conversations/import`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }] }),
+    });
+    expect(res.status).toBe(401);
+  });
+
   it('rate-limits repeated hits on unauthenticated /auth endpoints', async () => {
     const requests = Array.from({ length: 21 }, () => fetch(`${baseUrl}/auth/logout`, { method: 'POST' }));
     const responses = await Promise.all(requests);

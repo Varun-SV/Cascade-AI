@@ -10,6 +10,7 @@ import SettingsModal from './components/SettingsModal.js';
 import ConversationSidebar from './chat/ConversationSidebar.js';
 import ChatPanel from './chat/ChatPanel.js';
 import ChatTopBar from './chat/ChatTopBar.js';
+import ContinueModal from './chat/ContinueModal.js';
 import KeyVault from './keys/KeyVault.js';
 import { useChatSession } from './chat/useChatSession.js';
 import { useAutoTitler } from './chat/useAutoTitler.js';
@@ -46,6 +47,7 @@ export default function App() {
   const [showMemory, setShowMemory] = useState(false);
   const [showSkills, setShowSkills] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showContinue, setShowContinue] = useState(false);
   const [reduceMotion, setReduceMotion] = useState(() => reduceMotionEnabled());
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     const stored = localStorage.getItem(SIDEBAR_OPEN_KEY);
@@ -152,6 +154,15 @@ export default function App() {
     chat.loadMessages([]);
   }
 
+  // A code redeemed in the Continue modal seeded a new cloud conversation —
+  // refresh the sidebar and open it so the user keeps going right where the
+  // other device left off.
+  async function handleRedeemed(conversationId: string) {
+    setShowContinue(false);
+    refreshConversations();
+    await selectConversation(conversationId);
+  }
+
   async function handleLogout() {
     await logout();
     closeSocket();
@@ -178,6 +189,16 @@ export default function App() {
   }
 
   const activeTitle = conversations.find((c) => c.id === chat.conversationId)?.title ?? undefined;
+
+  // The current transcript, shaped for a handoff (only settled user/assistant
+  // turns — drop the in-flight streaming placeholder and any empty content).
+  const continueTranscript = {
+    title: activeTitle ?? null,
+    skillId,
+    messages: chat.messages
+      .filter((m) => !m.streaming && m.content.trim())
+      .map((m) => ({ role: m.role, content: m.content })),
+  };
 
   const sidebar = (
     <ConversationSidebar
@@ -233,7 +254,13 @@ export default function App() {
 
       {/* Main chat panel */}
       <div className="glass flex min-w-0 flex-1 flex-col overflow-hidden md:rounded-2xl">
-        <ChatTopBar title={activeTitle} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} saved={chat.lastSaved} />
+        <ChatTopBar
+          title={activeTitle}
+          sidebarOpen={sidebarOpen}
+          onToggleSidebar={toggleSidebar}
+          saved={chat.lastSaved}
+          onContinueElsewhere={() => setShowContinue(true)}
+        />
         <div className="min-h-0 flex-1">
           <ChatPanel
             messages={chat.messages}
@@ -294,6 +321,13 @@ export default function App() {
         {showMemory && <MemoryModal onClose={() => setShowMemory(false)} />}
         {showSkills && (
           <SkillsModal skills={skills} onClose={() => setShowSkills(false)} onChange={refreshSkills} />
+        )}
+        {showContinue && (
+          <ContinueModal
+            transcript={continueTranscript}
+            onClose={() => setShowContinue(false)}
+            onRedeemed={handleRedeemed}
+          />
         )}
       </AnimatePresence>
     </div>

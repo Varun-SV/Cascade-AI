@@ -345,6 +345,32 @@ export class CloudStore {
   }
 
   /**
+   * Create a conversation seeded with an imported transcript — the receiving
+   * end of an "open-and-continue" handoff. Only user/assistant turns are kept
+   * (system/other roles dropped); no per-message economics (model/tier/why/cost)
+   * come across since they belonged to the other surface's run. Runs in one
+   * transaction so a partial import can't leave a half-populated conversation.
+   */
+  importConversation(
+    userId: string,
+    title: string | null,
+    skillId: string | null,
+    messages: Array<{ role: string; content: string }>,
+  ): CloudConversation {
+    const insert = this.db.transaction(() => {
+      const convo = this.createConversation(userId, title);
+      if (skillId) this.setConversationSkill(convo.id, userId, skillId);
+      for (const m of messages) {
+        if (m.role !== 'user' && m.role !== 'assistant') continue;
+        if (typeof m.content !== 'string' || !m.content) continue;
+        this.addMessage({ conversationId: convo.id, role: m.role, content: m.content });
+      }
+      return convo;
+    });
+    return insert();
+  }
+
+  /**
    * Rename a conversation (owner-scoped). Returns false if it isn't the user's.
    * Deliberately does NOT touch updated_at — a background auto-title shouldn't
    * bump the conversation to the top of the recency-sorted list.
