@@ -106,13 +106,13 @@ export default function SettingsModal({
         <p className="mt-3 text-[11px] font-semibold uppercase tracking-wide text-ink-400">On-device</p>
         <Row
           icon={<Cpu size={15} />}
-          title="Auto-title chats on your device"
+          title="On-device assist"
           subtitle={
             cap.supported
-              ? 'Runs a small model in your browser when idle to name untitled chats. Downloads once (~a few hundred MB), then works offline — nothing leaves your device.'
+              ? 'Runs a small model in your browser (WebGPU) to name untitled chats and pre-classify routing complexity — so the server can skip a step and use fewer tokens. Downloads once (~a few hundred MB), then works offline; nothing leaves your device.'
               : `Unavailable on this device — ${cap.reason}.`
           }
-          right={<Toggle on={localOn && cap.supported} onChange={toggleLocal} disabled={!cap.supported} label="Auto-title chats on device" />}
+          right={<Toggle on={localOn && cap.supported} onChange={toggleLocal} disabled={!cap.supported} label="On-device assist" />}
         />
 
         {/* Appearance */}

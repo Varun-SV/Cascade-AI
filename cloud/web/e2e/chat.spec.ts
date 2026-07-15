@@ -67,8 +67,12 @@ test('dev login -> add a key -> pick a skill -> attach an image -> send -> reply
     await page.getByText('Save').click();
     await page.getByLabel('Close').click();
 
-    // Pick a skill preset in the composer.
+    // Exercise the skill picker (the dropdown has the presets), then keep the
+    // default 'general' so this send is a fast single-tier run — a heavy skill
+    // prompt pushes the stub into a slow multi-tier replan loop, and only the
+    // presenter's output streams now (intermediate node output is hidden).
     await page.getByLabel('Skill').selectOption('code-reviewer');
+    await page.getByLabel('Skill').selectOption('general');
 
     // Attach an image; wait for the upload thumbnail before sending.
     await page.locator('input[type="file"]').setInputFiles({ name: 'pixel.png', mimeType: 'image/png', buffer: TINY_PNG });
@@ -77,10 +81,10 @@ test('dev login -> add a key -> pick a skill -> attach an image -> send -> reply
     await page.getByPlaceholder('Message Cascade…').fill('review this');
     await page.getByLabel('Send').click();
 
-    await expect(page.locator('[data-role="assistant"]')).toContainText('e2e stub model', { timeout: 20_000 });
-    await expect(page.locator('[data-role="user"]')).toContainText('review this');
+    await expect(page.locator('[data-role="assistant"]').last()).toContainText('e2e stub model', { timeout: 20_000 });
+    await expect(page.locator('[data-role="user"]').last()).toContainText('review this');
     // The uploaded image re-renders in the sent user message.
-    await expect(page.locator('[data-role="user"] img')).toBeVisible();
+    await expect(page.locator('[data-role="user"] img').last()).toBeVisible();
 
     // Add a memory and confirm it persists in the panel. Use a unique string
     // (the e2e DB is reused across runs) and scope to the list row span so the

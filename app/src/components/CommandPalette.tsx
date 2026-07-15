@@ -3,12 +3,12 @@ import type { Socket } from 'socket.io-client';
 import Fuse from 'fuse.js';
 import {
   Network, MessageSquare, Code2, BarChart3, Settings, TerminalSquare, Radio,
-  HelpCircle, GitCompareArrows, Plus, Search, CornerDownLeft,
+  HelpCircle, GitCompareArrows, Plus, Search, CornerDownLeft, MonitorSmartphone,
 } from 'lucide-react';
 import {
   useAppDispatch, useAppSelector, setShowPalette, setView, setShowSettings,
   toggleTerminal, openBottomTab, setShowWhyPanel, setChangesSessionId,
-  setActiveSessionId, loadTranscript, setSessionSidebarCollapsed,
+  setActiveSessionId, loadTranscript, setSessionSidebarCollapsed, setShowContinue,
 } from '../store/index.js';
 import { fetchSessionTranscript } from '../utils/sessionLoad.js';
 
@@ -78,6 +78,7 @@ export function CommandPalette({ socket }: { socket: Socket | null }) {
       { id: 'terminal',      title: 'Toggle Terminal', hint: 'Ctrl+`', keywords: 'shell console pty', icon: TerminalSquare, run: () => { dispatch(toggleTerminal()); } },
       { id: 'comms',         title: 'Open Comms feed', hint: 'agent-to-agent chatter', keywords: 'peer messages broadcast radio', icon: Radio, run: () => { dispatch(openBottomTab('comms')); } },
       { id: 'why',           title: 'Why? — explain the last run', hint: 'routing · models · savings', keywords: 'decision trail complexity failover savings inspector', icon: HelpCircle, run: () => { dispatch(setShowWhyPanel(true)); } },
+      { id: 'continue',      title: 'Continue elsewhere', hint: 'hand off to / from the web', keywords: 'handoff continue web desktop sync transfer code portable', icon: MonitorSmartphone, run: () => { dispatch(setShowContinue(true)); } },
     ];
     if (currentSessionId) {
       actions.push({

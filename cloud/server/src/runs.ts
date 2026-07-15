@@ -45,6 +45,11 @@ const ChatRunPayloadSchema = z.object({
   // root tier; webSearch toggles the two hosted tools on/off for this run.
   routingMode: z.enum(['auto', 'quality', 'fast']).optional(),
   forceTier: z.enum(['auto', 'T1', 'T2', 'T3']).optional(),
+  // Optional complexity verdict computed on the user's device (opt-in browser
+  // model). When present, the orchestrator skips its own classifier LLM call and
+  // starts from this — its heuristic floors + escalation still apply as
+  // guardrails. Ignored when a tier is pinned via forceTier.
+  complexityHint: z.enum(['Simple', 'Moderate', 'Complex']).optional(),
   webSearch: z.boolean().optional(),
   // Optional web-search backend the user configured (browser-held, like keys).
   // Whichever field is set is used — SearXNG → Brave → Tavily priority in the
@@ -306,6 +311,11 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
       images: images.length ? images : undefined,
       conversationHistory,
       workspacePath: scratchDir,
+      // On-device complexity verdict (opt-in browser model). Lets the
+      // orchestrator skip its own classifier LLM call; a pinned tier overrides
+      // it, and the SDK's heuristic floors + escalation still guard against a
+      // small model's miss.
+      complexityHint: payload.forceTier && payload.forceTier !== 'auto' ? undefined : payload.complexityHint,
       // When aborted, cascade.run() resolves with a partial result (it does not
       // reject) and stops all tiers at the next safe checkpoint — so a runaway
       // run can be halted from the UI instead of burning the whole budget.

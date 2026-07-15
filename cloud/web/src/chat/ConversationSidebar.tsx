@@ -21,7 +21,7 @@ export default function ConversationSidebar({
   onSelect, onNewChat, onOpenSettings,
 }: Props) {
   return (
-    <div className="flex h-full w-72 flex-col">
+    <div className="flex h-full w-full min-w-0 flex-col">
       <div className="flex items-center gap-2 px-4 pb-2 pt-4">
         <div className="accent-grad flex h-6 w-6 items-center justify-center rounded-lg text-ink-950 shadow-lg">
           <span className="text-xs font-bold">C</span>

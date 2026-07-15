@@ -105,6 +105,49 @@ describe('Cascade routing complexity', () => {
     expect(generate).not.toHaveBeenCalled();
   });
 
+  it('uses a caller complexity hint and skips the classifier LLM call', async () => {
+    const cascade = new Cascade(baseConfig, process.cwd());
+    const generate = vi.fn();
+    (cascade as any).router = { generate };
+
+    const complexity = await (cascade as any).determineComplexity(
+      'refactor the parser and add tests', '/dummy', [], 'Moderate',
+    );
+
+    expect(complexity).toBe('Moderate');
+    expect(generate).not.toHaveBeenCalled();
+    expect(cascade.getDecisionLog()[0]!.detail).toContain('Moderate — on-device hint');
+  });
+
+  it('floors a too-low hint to Complex when the prompt clearly needs the full hierarchy', async () => {
+    const cascade = new Cascade(baseConfig, process.cwd());
+    const generate = vi.fn();
+    (cascade as any).router = { generate };
+
+    // Multiple system-level deliverables — the same floor the classifier path uses.
+    const complexity = await (cascade as any).determineComplexity(
+      'Build a full-stack web application with an authentication system and a REST api',
+      '/dummy', [], 'Simple',
+    );
+
+    expect(complexity).toBe('Complex');
+    expect(generate).not.toHaveBeenCalled();
+    expect(cascade.getDecisionLog()[0]!.detail).toContain('heuristic floor over on-device hint');
+  });
+
+  it('floors a "Simple" hint on a single-deliverable build up to Moderate', async () => {
+    const cascade = new Cascade(baseConfig, process.cwd());
+    const generate = vi.fn();
+    (cascade as any).router = { generate };
+
+    const complexity = await (cascade as any).determineComplexity(
+      'Build a todo list application for me', '/dummy', [], 'Simple',
+    );
+
+    expect(complexity).toBe('Moderate');
+    expect(generate).not.toHaveBeenCalled();
+  });
+
   it('parses a verdict embedded in preamble/markdown instead of defaulting to Complex', async () => {
     const cascade = new Cascade(baseConfig, process.cwd());
     // A chatty local model prepends text before the verdict — must still be Simple.

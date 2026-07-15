@@ -25,6 +25,16 @@ const EnvSchema = z.object({
   // (src/core/router — maxCostPerRunUsd). A safety rail on the shared server
   // ahead of real per-plan entitlements (task #29).
   MAX_COST_PER_RUN_USD: z.coerce.number().positive().default(0.5),
+  // Razorpay recurring subscriptions. All optional — billing is simply disabled
+  // (the Upgrade page shows "not configured") until KEY_ID/KEY_SECRET/PLAN_ID
+  // are set. WEBHOOK_SECRET verifies the /api/billing/webhook signature.
+  RAZORPAY_KEY_ID: z.string().optional(),
+  RAZORPAY_KEY_SECRET: z.string().optional(),
+  RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
+  RAZORPAY_PLAN_ID: z.string().optional(),
+  // Display-only price string for the Pro plan (actual price lives on the
+  // Razorpay Plan). Shown on the Upgrade page.
+  RAZORPAY_PRICE_LABEL: z.string().default('₹499 / month'),
 });
 
 export type CloudEnv = z.infer<typeof EnvSchema>;

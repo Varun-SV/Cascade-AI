@@ -127,6 +127,8 @@ export interface AppState {
   showPalette: boolean;
   /** Session whose file changes are open in the diff-review modal. */
   changesSessionId: string | null;
+  /** The "Continue elsewhere" handoff modal (web ↔ desktop) is open. */
+  showContinue: boolean;
 }
 
 /** A live T3↔T3 / T2↔T2 message, drawn as a transient edge in the graph. */
@@ -225,6 +227,7 @@ const initialState: AppState = {
   bottomTab: 'terminal',
   showPalette: false,
   changesSessionId: null,
+  showContinue: false,
 };
 
 // ─── Slice ────────────────────────────────────────────────────────────────────
@@ -463,6 +466,10 @@ const appSlice = createSlice({
     setChangesSessionId(state, action: PayloadAction<string | null>) {
       state.changesSessionId = action.payload;
     },
+    // Continue-elsewhere handoff modal
+    setShowContinue(state, action: PayloadAction<boolean>) {
+      state.showContinue = action.payload;
+    },
   },
 });
 
@@ -477,7 +484,7 @@ export const {
   setOnboardingDone,
   setPendingPlan, setWhyReport, setShowWhyPanel,
   appendCommsEvent, clearCommsEvents, setBottomTab, openBottomTab,
-  setShowPalette, setChangesSessionId,
+  setShowPalette, setChangesSessionId, setShowContinue,
 } = appSlice.actions;
 
 // ─── Store ────────────────────────────────────────────────────────────────────

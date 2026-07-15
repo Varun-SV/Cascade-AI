@@ -5,6 +5,68 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Cascade Cloud 0.6.0 - 2026-07-15
+
+### Added
+- **Session continuation between web and desktop ("open-and-continue").** Pick
+  up a chat where you left off on the other device. On either surface, open
+  **Continue elsewhere**, choose **Send this chat** to get a short one-time code
+  (`XXXX-XXXX`), then enter it on the other surface under **Bring a chat here** —
+  the transcript comes across and you keep going.
+  - The cloud acts only as a **short-lived courier**, never a shared source of
+    truth: the snapshot lives in memory with a **15-minute TTL** and is never
+    stored durably. The code is the only bearer secret (unambiguous alphabet, no
+    O/0/I/1/L), so the courier endpoints are unauthenticated — which is what lets
+    the keyless desktop app use them — with their own tighter rate limits, an
+    open **non-credentialed** CORS policy (the session cookie never travels
+    there), and a 404 that doesn't distinguish "unknown" from "expired".
+  - **Web:** a new **Continue elsewhere** control in the chat top bar. Redeeming
+    a code seeds a **new cloud conversation** from the transcript, owner-scoped
+    and ready to continue in the cloud.
+  - **Desktop:** the same handoff from the session sidebar and the ⌘/Ctrl-K
+    command palette. Sending hands off the active session; redeeming imports the
+    chat into the local backend as a new session to continue with your own keys.
+
+## Cascade Cloud 0.5.1 - 2026-07-15
+
+### Added
+- **On-device complexity classification (opt-in) to cut token use.** When the
+  in-browser model is enabled, the app now classifies a prompt's complexity
+  (Simple / Moderate / Complex) locally before sending the run, and the server
+  **skips its own classifier LLM call**, starting from that verdict instead. It's
+  only ever a hint: the orchestrator still applies its heuristic complexity
+  floors and mid-run escalation, so a tiny model under-rating real work can't
+  strand it on a cheap tier — and a pinned tier or a cold/unsure classifier
+  falls straight through to normal server-side classification. Runs entirely on
+  the user's device (WebGPU); nothing about the prompt leaves the browser for
+  this step. Shared engine with the auto-titler — one model download.
+  - Core: `CascadeRunOptions.complexityHint` lets any SDK consumer supply a
+    pre-computed verdict and skip the classifier round-trip (benefits desktop too).
+
+### Fixed
+- **Mobile alignment & responsiveness.** The conversation sidebar no longer
+  overflows the phone drawer (which clipped the right edge of the usage meter);
+  modals cap their height and scroll on short viewports instead of running
+  off-screen; the Upgrade plan cards stack to one column on narrow screens; and
+  the message / code-block action buttons (copy, regenerate) are now reachable on
+  touch instead of being hover-only.
+
+## Cascade Cloud 0.5.0 - 2026-07-14
+
+### Added
+- **Razorpay recurring subscriptions.** The Upgrade page (Settings → Upgrade)
+  now offers a real **Pro** subscription: Subscribe opens Razorpay Checkout for
+  a recurring plan; a **signature-verified webhook** (`/api/billing/webhook`,
+  HMAC-SHA256 of the raw body) flips the user's plan on `subscription.charged` /
+  `activated` and reverts it on `cancelled` / `halted`; a **Manage** section
+  shows the status + renewal date and a **Cancel** (at cycle end). All secrets
+  live only in env (`RAZORPAY_KEY_ID` / `KEY_SECRET` / `WEBHOOK_SECRET` /
+  `PLAN_ID`) — with them unset, billing reports "not configured" and the page
+  falls back to the plan comparison. The client only ever receives the public
+  key id + subscription id.
+- The Upgrade page states plainly that **the desktop app is free, always** —
+  Cascade Cloud is the hosted convenience.
+
 ## 0.20.3 - 2026-07-14
 
 ### Fixed
