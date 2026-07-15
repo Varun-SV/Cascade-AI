@@ -5,6 +5,30 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Cascade Cloud 0.5.1 - 2026-07-15
+
+### Added
+- **On-device complexity classification (opt-in) to cut token use.** When the
+  in-browser model is enabled, the app now classifies a prompt's complexity
+  (Simple / Moderate / Complex) locally before sending the run, and the server
+  **skips its own classifier LLM call**, starting from that verdict instead. It's
+  only ever a hint: the orchestrator still applies its heuristic complexity
+  floors and mid-run escalation, so a tiny model under-rating real work can't
+  strand it on a cheap tier — and a pinned tier or a cold/unsure classifier
+  falls straight through to normal server-side classification. Runs entirely on
+  the user's device (WebGPU); nothing about the prompt leaves the browser for
+  this step. Shared engine with the auto-titler — one model download.
+  - Core: `CascadeRunOptions.complexityHint` lets any SDK consumer supply a
+    pre-computed verdict and skip the classifier round-trip (benefits desktop too).
+
+### Fixed
+- **Mobile alignment & responsiveness.** The conversation sidebar no longer
+  overflows the phone drawer (which clipped the right edge of the usage meter);
+  modals cap their height and scroll on short viewports instead of running
+  off-screen; the Upgrade plan cards stack to one column on narrow screens; and
+  the message / code-block action buttons (copy, regenerate) are now reachable on
+  touch instead of being hover-only.
+
 ## Cascade Cloud 0.5.0 - 2026-07-14
 
 ### Added

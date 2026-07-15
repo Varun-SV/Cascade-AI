@@ -1,11 +1,13 @@
-// Opt-in, in-browser conversation titler. The heavy WebLLM engine is imported
-// lazily (only when the user has enabled the feature and a title is needed), so
-// it never touches the initial bundle. The prompt-building and output-cleaning
-// are pure functions kept separate for unit testing.
+// Opt-in, in-browser conversation titler. The heavy WebLLM engine lives in the
+// shared engine module and is imported lazily (only when the user has enabled
+// the feature and a title is needed), so it never touches the initial bundle.
+// The prompt-building and output-cleaning are pure functions kept separate for
+// unit testing.
+import { getEngine, isEngineWarm, LOCAL_MODEL_ID, type EngineProgress } from './engine.js';
 
-// A small, capable instruct model from WebLLM's prebuilt list. ~0.5B params,
-// a few hundred MB quantized — enough to summarize a chat into a short title.
-export const TITLE_MODEL_ID = 'Qwen2.5-0.5B-Instruct-q4f16_1-MLC';
+// Kept as an alias for backwards compatibility with existing imports/tests.
+export const TITLE_MODEL_ID = LOCAL_MODEL_ID;
+export { isEngineWarm };
 
 const MAX_TITLE_WORDS = 8;
 const MAX_TITLE_CHARS = 60;
@@ -32,50 +34,8 @@ export function cleanTitle(raw: string): string {
   return words.join(' ').slice(0, MAX_TITLE_CHARS);
 }
 
-export interface TitleProgress {
-  stage: 'loading' | 'ready' | 'generating';
-  /** 0..1 while the model downloads/initializes. */
-  progress?: number;
-  text?: string;
-}
-
-// Minimal shape of the WebLLM engine we use — avoids importing its types at
-// module load (which would pull the library into the main chunk).
-interface MlcEngine {
-  chat: {
-    completions: {
-      create(req: {
-        messages: Array<{ role: string; content: string }>;
-        max_tokens?: number;
-        temperature?: number;
-      }): Promise<{ choices: Array<{ message: { content: string | null } }> }>;
-    };
-  };
-}
-
-let enginePromise: Promise<MlcEngine> | null = null;
-
-/** Lazily spins up the WebLLM engine in a Web Worker (once per page). */
-async function getEngine(onProgress?: (p: TitleProgress) => void): Promise<MlcEngine> {
-  if (!enginePromise) {
-    enginePromise = (async () => {
-      const { CreateWebWorkerMLCEngine } = await import('@mlc-ai/web-llm');
-      const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
-      const engine = await CreateWebWorkerMLCEngine(worker, TITLE_MODEL_ID, {
-        initProgressCallback: (r: { progress: number; text: string }) =>
-          onProgress?.({ stage: 'loading', progress: r.progress, text: r.text }),
-      });
-      onProgress?.({ stage: 'ready' });
-      return engine as unknown as MlcEngine;
-    })();
-  }
-  return enginePromise;
-}
-
-/** True once the engine has been created this session (model downloaded/cached). */
-export function isEngineWarm(): boolean {
-  return enginePromise !== null;
-}
+// Progress shape re-exported under the titler's historical name.
+export type TitleProgress = EngineProgress;
 
 /**
  * Generate a title for a conversation from its first user + assistant turns.

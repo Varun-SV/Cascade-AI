@@ -557,10 +557,38 @@ export class Cascade extends EventEmitter {
     }
   }
 
+  /**
+   * Raises a raw complexity verdict (from the classifier LLM or a caller hint)
+   * to the tier the prompt's signals demand. A small model that under-rates
+   * clearly multi-step build work can't strand it below where it belongs:
+   * explicit build+scale signals floor it to Complex (full T1→T2→T3), and a
+   * single-deliverable build floors a "Simple" up to Moderate (one manager).
+   * Conservative on purpose — the source is free to go higher, and a manual
+   * tier override is the escape hatch. Records the decision it makes.
+   */
+  private floorComplexity(
+    prompt: string,
+    verdict: TaskComplexity,
+    source: string,
+    reason?: string,
+  ): TaskComplexity {
+    if (verdict !== 'Complex' && this.looksClearlyComplex(prompt)) {
+      this.recordDecision('complexity', `Complex — heuristic floor over ${source} "${verdict}": explicit multi-step build/implementation signals (T1 engaged)`);
+      return 'Complex';
+    }
+    if (verdict === 'Simple' && this.looksLikeModerateBuild(prompt)) {
+      this.recordDecision('complexity', `Moderate — heuristic floor over ${source} "Simple": build signals without multi-system scale (single manager)`);
+      return 'Moderate';
+    }
+    this.recordDecision('complexity', `${verdict} — ${source}${reason ? `: ${reason}` : ''}`);
+    return verdict;
+  }
+
   private async determineComplexity(
     prompt: string,
     workspacePath: string,
     conversationHistory: ConversationMessage[] = [],
+    hint?: Exclude<TaskComplexity, 'Highly Complex'>,
   ): Promise<TaskComplexity> {
     if (this.isCasualGreeting(prompt)) {
       this.recordDecision('complexity', 'Simple — heuristic: casual greeting (no classifier call)');
@@ -577,6 +605,14 @@ export class Cascade extends EventEmitter {
     if (this.looksLikeReadOnlyInquiry(prompt)) {
       this.recordDecision('complexity', 'Simple — heuristic: read-only inquiry over existing content (single agent, no classifier call)');
       return 'Simple';
+    }
+
+    // A caller-supplied verdict (e.g. an opt-in on-device classifier) lets us
+    // skip the classifier LLM round-trip entirely. Apply the SAME heuristic
+    // floors as the classifier path so a small model under-rating clearly
+    // multi-step work can't strand it below the tier it needs.
+    if (hint) {
+      return this.floorComplexity(prompt, hint, 'on-device hint');
     }
 
     // Quick workspace scout (cached for 30s)
@@ -640,24 +676,8 @@ ${prompt}`
       const reason = content.replace(/^\S+\s*[—–-]*\s*/, '').trim();
       let verdict: TaskComplexity;
       if (match) {
-        verdict = match[1] === 'simple' ? 'Simple' : match[1] === 'moderate' ? 'Moderate' : 'Complex';
-        // Complexity floor: a small local classifier that keeps under-rating
-        // clearly multi-step build work (defaulting to Simple/Moderate) can't
-        // strand it at T2 — explicit build+scale signals raise it to the full
-        // T1→T2→T3 hierarchy. Conservative on purpose; the classifier is still
-        // free to go higher, and the manual tier override is the escape hatch.
-        if (verdict !== 'Complex' && this.looksClearlyComplex(prompt)) {
-          this.recordDecision('complexity', `Complex — heuristic floor over classifier "${verdict}": explicit multi-step build/implementation signals (T1 engaged)`);
-          verdict = 'Complex';
-        } else if (verdict === 'Simple' && this.looksLikeModerateBuild(prompt)) {
-          // A single-deliverable build is real work (one manager), but must
-          // NOT engage the full hierarchy — that was the token bomb for
-          // small tasks. Simple → Moderate; a Moderate verdict stands as-is.
-          this.recordDecision('complexity', 'Moderate — heuristic floor over classifier "Simple": build signals without multi-system scale (single manager)');
-          verdict = 'Moderate';
-        } else {
-          this.recordDecision('complexity', `${verdict} — classifier: ${reason || 'no reason given'}`);
-        }
+        const raw = match[1] === 'simple' ? 'Simple' : match[1] === 'moderate' ? 'Moderate' : 'Complex';
+        verdict = this.floorComplexity(prompt, raw, 'classifier', reason || 'no reason given');
       } else {
         // Unparseable verdict (common with chatty local models). Default by
         // length, but do NOT cap a clearly-complex-looking long prompt at
@@ -757,7 +777,12 @@ ${prompt}`
       complexity = forced;
       this.recordDecision('complexity', `${forced} — manually forced via routing.forceTier=${forceTier}`);
     } else {
-      complexity = await this.determineComplexity(options.prompt, options.workspacePath || process.cwd(), options.conversationHistory);
+      complexity = await this.determineComplexity(
+        options.prompt,
+        options.workspacePath || process.cwd(),
+        options.conversationHistory,
+        options.complexityHint,
+      );
     }
 
     this.telemetry.capture('cascade:session_start', {

@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 import type { ProviderConfig, WhyReport } from '../lib/types.js';
+import { localModelEnabled } from '../lib/prefs.js';
+import { detectLocalModelCapability } from '../lib/localModel/capability.js';
+import { warmLocalModel } from '../lib/localModel/engine.js';
+import { classifyLocalComplexity } from '../lib/localModel/classifier.js';
 
 export interface ChatAttachment {
   id: string;
@@ -90,6 +94,16 @@ export function useChatSession(
     setConversationId(initialConversationId);
   }, [initialConversationId]);
 
+  // If the user opted into the on-device model, warm it in the background so it
+  // can classify complexity (and title chats) without a first-use stall. The
+  // engine is shared with the titler — this is a no-op if it's already loading.
+  useEffect(() => {
+    if (!localModelEnabled() || !detectLocalModelCapability().supported) return;
+    const idle = (cb: () => void) =>
+      typeof requestIdleCallback === 'function' ? requestIdleCallback(cb, { timeout: 4000 }) : setTimeout(cb, 1500);
+    idle(() => warmLocalModel());
+  }, []);
+
   useEffect(() => {
     if (!socket) return;
     const onToken = (e: { text: string; primary?: boolean }) => {
@@ -140,20 +154,26 @@ export function useChatSession(
         setMessages((prev) => [...prev, { id: crypto.randomUUID(), role: 'user', content: text, attachments }]);
       }
 
-      socket.emit(
-        'chat:run',
-        {
-          conversationId,
-          prompt: text,
-          providers,
-          attachmentIds: attachments?.map((a) => a.id),
-          skillId,
-          routingMode,
-          forceTier,
-          webSearch,
-          webSearchConfig,
-        },
-        (ack: ChatRunAck) => {
+      const emitRun = (complexityHint?: 'Simple' | 'Moderate' | 'Complex') => {
+        socket.emit(
+          'chat:run',
+          {
+            conversationId,
+            prompt: text,
+            providers,
+            attachmentIds: attachments?.map((a) => a.id),
+            skillId,
+            routingMode,
+            forceTier,
+            webSearch,
+            webSearchConfig,
+            complexityHint,
+          },
+          onAck,
+        );
+      };
+
+      const onAck = (ack: ChatRunAck) => {
           setBusy(false);
           setStatus(null);
           if (ack.error) {
@@ -184,8 +204,19 @@ export function useChatSession(
               },
             ];
           });
-        },
-      );
+      };
+
+      // Classify complexity on-device first when the opt-in model is enabled,
+      // supported, and warm — the server then skips its own classifier LLM call
+      // and starts from this verdict (still applying its heuristic floors and
+      // escalation as guardrails). Anything short of a confident local verdict
+      // falls straight through to a normal send, so this never blocks or
+      // degrades the run. A pinned tier (forceTier) makes the hint moot, so skip.
+      if (forceTier === 'auto' && localModelEnabled() && detectLocalModelCapability().supported) {
+        void classifyLocalComplexity(text).then((hint) => emitRun(hint ?? undefined)).catch(() => emitRun());
+      } else {
+        emitRun();
+      }
     },
     [socket, busy, conversationId, providers, skillId, routingMode, forceTier, webSearch, webSearchConfig],
   );

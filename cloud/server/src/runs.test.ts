@@ -115,6 +115,20 @@ describe('parseChatRunPayload', () => {
     ).toThrow();
   });
 
+  it('accepts an on-device complexity hint and rejects an unknown level', () => {
+    const parsed = parseChatRunPayload({
+      prompt: 'hi',
+      providers: [{ type: 'openai' }],
+      complexityHint: 'Moderate',
+    });
+    expect(parsed.complexityHint).toBe('Moderate');
+    // Absent by default, and 'Highly Complex' is not a valid client hint.
+    expect(parseChatRunPayload({ prompt: 'hi', providers: [{ type: 'openai' }] }).complexityHint).toBeUndefined();
+    expect(() =>
+      parseChatRunPayload({ prompt: 'hi', providers: [{ type: 'openai' }], complexityHint: 'Highly Complex' }),
+    ).toThrow();
+  });
+
   it('normalizes blank optional provider fields to undefined, not empty strings', () => {
     // A KeyVault form left blank submits '' — some provider SDKs (e.g.
     // `new OpenAI({ apiKey: '' })`) throw on a defined-but-empty key where

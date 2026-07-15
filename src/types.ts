@@ -855,6 +855,16 @@ export interface CascadeRunOptions {
    * controller.abort();
    */
   signal?: AbortSignal;
+  /**
+   * An optional, pre-computed complexity verdict for this run — e.g. from a
+   * cheap on-device classifier the caller ran first. When provided (and no tier
+   * is manually forced), the orchestrator uses it as the starting verdict and
+   * skips its own classifier LLM call, saving that round-trip. The heuristic
+   * complexity floors and mid-run escalation still apply, so an under-estimate
+   * can't strand genuinely complex work on a cheap tier. Only the first three
+   * levels are accepted as a hint; 'Highly Complex' is derived server-side.
+   */
+  complexityHint?: Exclude<TaskComplexity, 'Highly Complex'>;
 }
 
 export interface CascadeRunResult {
