@@ -73,12 +73,12 @@ export default function UpgradeModal() {
         </p>
       )}
 
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="rounded-lg border border-white/10 p-3">
           <h3 className="mb-2 text-sm font-semibold text-ink-100">Free</h3>
           <ul className="flex flex-col gap-1.5 text-xs text-ink-300">
             {FREE_FEATURES.map((f) => (
-              <li key={f} className="flex items-center gap-1.5"><Check size={12} className="shrink-0 text-ink-400" /> {f}</li>
+              <li key={f} className="flex items-start gap-1.5"><Check size={12} className="mt-0.5 shrink-0 text-ink-400" /> {f}</li>
             ))}
           </ul>
         </div>
@@ -92,7 +92,7 @@ export default function UpgradeModal() {
           </div>
           <ul className="flex flex-col gap-1.5 text-xs text-ink-300">
             {PRO_FEATURES.map((f) => (
-              <li key={f} className="flex items-center gap-1.5"><Check size={12} className="shrink-0 text-accent-400" /> {f}</li>
+              <li key={f} className="flex items-start gap-1.5"><Check size={12} className="mt-0.5 shrink-0 text-accent-400" /> {f}</li>
             ))}
           </ul>
 

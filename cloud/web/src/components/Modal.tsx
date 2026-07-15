@@ -20,14 +20,14 @@ export default function Modal({ title, onClose, maxWidth = 'max-w-md', children 
       onClick={onClose}
     >
       <motion.div
-        className={`glass-strong w-full ${maxWidth} overflow-hidden rounded-2xl`}
+        className={`glass-strong flex max-h-[90vh] w-full ${maxWidth} flex-col overflow-hidden rounded-2xl`}
         initial={{ opacity: 0, scale: 0.94, y: 12 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.96, y: 8 }}
         transition={{ type: 'spring', stiffness: 380, damping: 30 }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+        <div className="flex shrink-0 items-center justify-between border-b border-white/10 px-4 py-3">
           <h2 className="text-sm font-semibold text-ink-50">{title}</h2>
           <motion.button
             type="button"
@@ -40,7 +40,7 @@ export default function Modal({ title, onClose, maxWidth = 'max-w-md', children 
             <X size={16} />
           </motion.button>
         </div>
-        {children}
+        <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
       </motion.div>
     </motion.div>
   );

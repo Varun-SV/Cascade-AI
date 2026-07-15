@@ -97,7 +97,7 @@ function CodeBlock({ children }: { children?: ReactNode }) {
     <div className="group relative">
       <CopyButton
         getText={() => ref.current?.innerText ?? ''}
-        className="absolute right-2 top-2 rounded-md border border-white/10 bg-white/10 p-1.5 text-ink-200 opacity-0 backdrop-blur transition-opacity hover:text-ink-50 group-hover:opacity-100"
+        className="absolute right-2 top-2 rounded-md border border-white/10 bg-white/10 p-1.5 text-ink-200 opacity-100 backdrop-blur transition-opacity hover:text-ink-50 sm:opacity-0 sm:group-hover:opacity-100"
       />
       <pre ref={ref} className="overflow-x-auto rounded-xl border border-white/10 bg-black/40 p-3 text-sm shadow-inner">
         {children}
@@ -189,7 +189,7 @@ export default function Message({ message, onRegenerate }: Props) {
         </div>
       )}
       {!message.streaming && message.content && (
-        <div className="flex items-center gap-2 pt-0.5 text-ink-400 opacity-0 transition-opacity group-hover:opacity-100">
+        <div className="flex items-center gap-2 pt-0.5 text-ink-400 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
           <CopyButton getText={() => message.content} />
           {onRegenerate && (
             <button type="button" aria-label="Regenerate" onClick={onRegenerate} className="hover:text-ink-100">
