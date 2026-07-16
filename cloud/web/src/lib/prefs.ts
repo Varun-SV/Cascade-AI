@@ -6,6 +6,7 @@ const FAST_MODEL_KEY = 'cascade-cloud-fast-model';
 const THEME_KEY = 'cascade-cloud-theme';
 const DENSITY_KEY = 'cascade-cloud-density';
 const UI_MODE_KEY = 'cascade-cloud-ui-mode';
+const TIER_PARAMS_KEY = 'cascade-cloud-tier-params';
 
 export type ThemeMode = 'light' | 'dark' | 'system';
 export type Density = 'comfortable' | 'compact';
@@ -61,6 +62,40 @@ export const setDensity = (v: Density) => writeString(DENSITY_KEY, v);
 /** UI mode: minimal chat (default) vs. full console. */
 export const uiMode = (): UiMode => readString(UI_MODE_KEY, ['simple', 'advanced'] as const, 'simple');
 export const setUiMode = (v: UiMode) => writeString(UI_MODE_KEY, v);
+
+/** Advanced per-tier generation knobs. Both fields optional per tier. */
+export interface TierParam { maxTokens?: number; temperature?: number }
+export interface TierParams { t1?: TierParam; t2?: TierParam; t3?: TierParam }
+
+/** Read the stored per-tier params (empty object when unset/corrupt). */
+export function tierParams(): TierParams {
+  try {
+    const raw = localStorage.getItem(TIER_PARAMS_KEY);
+    return raw ? (JSON.parse(raw) as TierParams) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Persist per-tier params, pruning empty tiers/fields so unset knobs stay unset. */
+export function setTierParams(v: TierParams): void {
+  const prune = (p?: TierParam): TierParam | undefined => {
+    if (!p) return undefined;
+    const out: TierParam = {};
+    if (typeof p.maxTokens === 'number' && p.maxTokens > 0) out.maxTokens = Math.floor(p.maxTokens);
+    if (typeof p.temperature === 'number' && p.temperature >= 0 && p.temperature <= 2) out.temperature = p.temperature;
+    return Object.keys(out).length ? out : undefined;
+  };
+  const cleaned: TierParams = {};
+  for (const tier of ['t1', 't2', 't3'] as const) {
+    const p = prune(v[tier]);
+    if (p) cleaned[tier] = p;
+  }
+  try {
+    if (Object.keys(cleaned).length) localStorage.setItem(TIER_PARAMS_KEY, JSON.stringify(cleaned));
+    else localStorage.removeItem(TIER_PARAMS_KEY);
+  } catch { /* storage unavailable */ }
+}
 
 /** Optional model id to pin for "Fast answer" (blank = auto-pick a mid model). */
 export function fastAnswerModel(): string {

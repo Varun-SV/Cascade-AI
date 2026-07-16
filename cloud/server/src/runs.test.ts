@@ -72,6 +72,22 @@ describe('buildCloudConfig', () => {
     expect(buildCloudConfig([], 0.5, { forceTier: 'T2' }).routing?.forceTier).toBe('T2');
     expect(buildCloudConfig([], 0.5).routing?.forceTier).toBe('auto');
   });
+
+  it('maps per-tier params to tierLimits, omitting unset knobs', () => {
+    const cfg = buildCloudConfig([], 0.5, {
+      tierParams: { t1: { maxTokens: 1000 }, t2: { temperature: 0.7 }, t3: { maxTokens: 512, temperature: 0.2 } },
+    });
+    expect(cfg.tierLimits).toEqual({
+      t1MaxTokens: 1000,
+      t2Temperature: 0.7,
+      t3MaxTokens: 512,
+      t3Temperature: 0.2,
+    });
+    // No tierParams at all → tierLimits stays unset (SDK defaults apply).
+    expect(buildCloudConfig([], 0.5).tierLimits).toBeUndefined();
+    // An empty tierParams object contributes nothing.
+    expect(buildCloudConfig([], 0.5, { tierParams: {} }).tierLimits).toBeUndefined();
+  });
 });
 
 describe('tenantScratchDir', () => {
@@ -146,6 +162,22 @@ describe('parseChatRunPayload', () => {
     ).toBeUndefined();
     expect(() =>
       parseChatRunPayload({ prompt: 'hi', providers: [{ type: 'openai' }], fastAnswer: 'yes' }),
+    ).toThrow();
+  });
+
+  it('accepts per-tier params and rejects out-of-range temperature', () => {
+    const parsed = parseChatRunPayload({
+      prompt: 'hi',
+      providers: [{ type: 'openai' }],
+      tierParams: { t2: { maxTokens: 2048, temperature: 0.6 } },
+    });
+    expect(parsed.tierParams?.t2).toEqual({ maxTokens: 2048, temperature: 0.6 });
+    // temperature is bounded 0–2; maxTokens must be a positive int.
+    expect(() =>
+      parseChatRunPayload({ prompt: 'hi', providers: [{ type: 'openai' }], tierParams: { t1: { temperature: 5 } } }),
+    ).toThrow();
+    expect(() =>
+      parseChatRunPayload({ prompt: 'hi', providers: [{ type: 'openai' }], tierParams: { t3: { maxTokens: -1 } } }),
     ).toThrow();
   });
 

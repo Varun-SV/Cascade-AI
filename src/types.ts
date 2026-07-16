@@ -628,6 +628,11 @@ export interface TierLimits {
   t1MaxTokens?: number;
   t2MaxTokens?: number;
   t3MaxTokens?: number;
+  /** Per-tier sampling temperature (0–2). Applied only when a call doesn't set
+   *  its own temperature — deterministic internal calls (temperature: 0) win. */
+  t1Temperature?: number;
+  t2Temperature?: number;
+  t3Temperature?: number;
 }
 
 export interface BudgetConfig {

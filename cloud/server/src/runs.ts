@@ -31,6 +31,15 @@ const PROVIDER_TYPES = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compat
 // Coerce '' to undefined so "left blank" always means "not set".
 const optionalNonEmptyString = z.string().optional().transform((v) => (v === '' ? undefined : v));
 
+// Per-tier generation knobs (Advanced). Both optional; bounded so a bad client
+// value can't ask for an absurd budget or an out-of-range temperature.
+const TierParamSchema = z
+  .object({
+    maxTokens: z.number().int().positive().max(200_000).optional(),
+    temperature: z.number().min(0).max(2).optional(),
+  })
+  .optional();
+
 // Keys are browser-held and travel with the run request only — never
 // persisted server-side (see db.ts: no api key column anywhere).
 const ChatRunPayloadSchema = z.object({
@@ -49,6 +58,17 @@ const ChatRunPayloadSchema = z.object({
   // fastAnswerModel optionally pins the model; otherwise it's auto-selected.
   fastAnswer: z.boolean().optional(),
   fastAnswerModel: optionalNonEmptyString,
+  // Advanced per-tier generation parameters (developer knobs). maxTokens is a
+  // per-tier output ceiling; temperature (0–2) is applied to non-deterministic
+  // calls on that tier. Each field optional; omitted → SDK defaults.
+  tierParams: z
+    .object({
+      t1: TierParamSchema,
+      t2: TierParamSchema,
+      t3: TierParamSchema,
+    })
+    .partial()
+    .optional(),
   // Optional complexity verdict computed on the user's device (opt-in browser
   // model). When present, the orchestrator skips its own classifier LLM call and
   // starts from this — its heuristic floors + escalation still apply as
@@ -93,6 +113,11 @@ export interface WebSearchBackend {
   tavilyApiKey?: string;
 }
 
+export interface TierParam {
+  maxTokens?: number;
+  temperature?: number;
+}
+
 export interface RunControls {
   routingMode?: 'auto' | 'quality' | 'fast';
   forceTier?: 'auto' | 'T1' | 'T2' | 'T3';
@@ -100,6 +125,8 @@ export interface RunControls {
   webSearch?: boolean;
   /** User-configured web-search backend (browser-held). Used only when webSearch is on. */
   webSearchConfig?: WebSearchBackend;
+  /** Advanced per-tier generation params (developer knobs). */
+  tierParams?: { t1?: TierParam; t2?: TierParam; t3?: TierParam };
 }
 
 // Maps the UI's routing mode to Cascade Auto's bias. Cascade Auto stays ON for
@@ -120,11 +147,25 @@ export function buildCloudConfig(
   // one — otherwise leave webSearch unset so the tool uses its keyless fallback.
   const wsc = controls.webSearchConfig;
   const hasBackend = !!(wsc && (wsc.searxngUrl || wsc.braveApiKey || wsc.tavilyApiKey));
+  // Advanced per-tier params → SDK tierLimits. Only include keys the client
+  // actually set, so unset knobs fall through to the SDK defaults.
+  const tp = controls.tierParams;
+  const tierLimits = tp
+    ? {
+        ...(tp.t1?.maxTokens !== undefined ? { t1MaxTokens: tp.t1.maxTokens } : {}),
+        ...(tp.t1?.temperature !== undefined ? { t1Temperature: tp.t1.temperature } : {}),
+        ...(tp.t2?.maxTokens !== undefined ? { t2MaxTokens: tp.t2.maxTokens } : {}),
+        ...(tp.t2?.temperature !== undefined ? { t2Temperature: tp.t2.temperature } : {}),
+        ...(tp.t3?.maxTokens !== undefined ? { t3MaxTokens: tp.t3.maxTokens } : {}),
+        ...(tp.t3?.temperature !== undefined ? { t3Temperature: tp.t3.temperature } : {}),
+      }
+    : undefined;
   return {
     providers,
     cascadeAuto: true,
     autoBias: BIAS_BY_MODE[controls.routingMode ?? 'auto'] ?? 'balanced',
     routing: { forceTier: controls.forceTier ?? 'auto' },
+    ...(tierLimits && Object.keys(tierLimits).length ? { tierLimits } : {}),
     tools: {
       shellAllowlist: [],
       shellBlocklist: [],
@@ -279,6 +320,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     forceTier: payload.forceTier,
     webSearch: payload.webSearch,
     webSearchConfig: payload.webSearchConfig,
+    tierParams: payload.tierParams,
   });
   const cascade: Cascade = createCascade(config, scratchDir);
 

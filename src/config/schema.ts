@@ -110,6 +110,12 @@ export const TierLimitsSchema = z.object({
   t1MaxTokens: z.number().optional(),
   t2MaxTokens: z.number().optional(),
   t3MaxTokens: z.number().optional(),
+  // Per-tier sampling temperature (0–2). Applied only to calls that don't set
+  // their own temperature — internal deterministic calls (classification,
+  // routing) pin temperature: 0 explicitly and are never overridden.
+  t1Temperature: z.number().min(0).max(2).optional(),
+  t2Temperature: z.number().min(0).max(2).optional(),
+  t3Temperature: z.number().min(0).max(2).optional(),
 });
 
 export const BudgetConfigSchema = z.object({

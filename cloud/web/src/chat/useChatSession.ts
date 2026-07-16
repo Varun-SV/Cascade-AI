@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 import type { ProviderConfig, WhyReport } from '../lib/types.js';
-import { localModelEnabled, fastAnswerModel } from '../lib/prefs.js';
+import { localModelEnabled, fastAnswerModel, tierParams } from '../lib/prefs.js';
 import { detectLocalModelCapability } from '../lib/localModel/capability.js';
 import { warmLocalModel } from '../lib/localModel/engine.js';
 import { classifyLocalComplexity } from '../lib/localModel/classifier.js';
@@ -194,6 +194,9 @@ export function useChatSession(
             complexityHint,
             fastAnswer: fast || undefined,
             fastAnswerModel: fast ? (fastAnswerModel() || undefined) : undefined,
+            // Advanced per-tier generation params (omitted when none are set,
+            // and moot for a fast answer, which is a single direct call).
+            tierParams: fast ? undefined : (() => { const tp = tierParams(); return Object.keys(tp).length ? tp : undefined; })(),
           },
           onAck,
         );
