@@ -45,6 +45,33 @@ export interface DecisionLogEntry {
   detail: string;
 }
 
+/**
+ * Prefixes the latest user message with a compact block of recent conversation
+ * so the executing tier resolves a follow-up IN CONTEXT. `determineComplexity`
+ * already receives history for routing, but the execution tiers only ever saw
+ * the bare latest message — which is why short follow-ups ("1", "yes", "make it
+ * shorter") were run as standalone tasks with no memory of the prior turn.
+ * Returns the prompt unchanged when there's no history (a conversation's first
+ * message), so it's a no-op for single-shot runs and the desktop path (which
+ * already stitches context in via buildContinuationPrompt and passes none here).
+ */
+export function buildContextualPrompt(prompt: string, history: ConversationMessage[] = []): string {
+  const recent = history.slice(-6);
+  if (recent.length === 0) return prompt;
+  const asText = (content: ConversationMessage['content']): string =>
+    typeof content === 'string'
+      ? content
+      : content.map((b) => (b.type === 'text' ? b.text : '[non-text]')).join(' ');
+  const block = recent
+    .map((m) => `${m.role === 'assistant' ? 'Assistant' : 'User'}: ${asText(m.content).slice(0, 2000)}`)
+    .join('\n');
+  return `Recent conversation (for context — the user is continuing it; resolve their latest message with this in mind):
+${block}
+
+Latest user message:
+${prompt}`;
+}
+
 export class Cascade extends EventEmitter {
   private router: CascadeRouter;
   private toolRegistry: ToolRegistry;
@@ -834,6 +861,12 @@ ${prompt}`
     const toolCreator = this.toolCreator;
     if (toolCreator) toolCreator.setPermissionEscalator(escalator);
 
+    // Thread recent conversation into the ROOT task so a follow-up is resolved
+    // in context. Without this the execution tiers only received the bare latest
+    // message (the classifier saw history, execution didn't) — so a short reply
+    // like "1" ran as a standalone task. No-op when there's no history.
+    const rootPrompt = buildContextualPrompt(options.prompt, options.conversationHistory);
+
     let finalOutput = '';
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let t2Results: any[] = [];
@@ -913,7 +946,7 @@ ${prompt}`
       const assignment = {
         subtaskId: taskId,
         subtaskTitle: 'Direct Request',
-        description: options.prompt,
+        description: rootPrompt,
         expectedOutput: 'A complete and direct answer.',
         constraints: [],
         peerT3Ids: [],
@@ -962,7 +995,7 @@ ${prompt}`
       const assignment = {
         sectionId: taskId,
         sectionTitle: 'Direct Task',
-        description: options.prompt,
+        description: rootPrompt,
         expectedOutput: 'A complete resolution of the task.',
         constraints: [],
         t3Subtasks: []
@@ -1019,7 +1052,7 @@ ${prompt}`
         });
       }
       
-      const result = await t1.execute(options.prompt, options.images, undefined, options.signal);
+      const result = await t1.execute(rootPrompt, options.images, undefined, options.signal);
       finalOutput = result.output;
       t2Results = result.t2Results;
     }
