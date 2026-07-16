@@ -1,7 +1,7 @@
 import { useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react';
 import clsx from 'clsx';
 import { motion } from 'framer-motion';
-import { Send, Paperclip, X, Loader2, Globe, Square } from 'lucide-react';
+import { Send, Paperclip, X, Loader2, Globe, Square, Zap } from 'lucide-react';
 import { uploadImage } from '../lib/api.js';
 import type { Skill } from '../lib/types.js';
 import type { ChatAttachment, ForceTier, RoutingMode, SendInput } from './useChatSession.js';
@@ -86,9 +86,9 @@ export default function Composer({
     });
   }
 
-  function submit() {
+  function submit(fast = false) {
     if (!input.trim() || busy || uploading) return;
-    onSend({ prompt: input, attachments: pending.map(({ id, mime }) => ({ id, mime })) });
+    onSend({ prompt: input, attachments: pending.map(({ id, mime }) => ({ id, mime })), fast });
     setInput('');
     pending.forEach((p) => URL.revokeObjectURL(p.previewUrl));
     setPending([]);
@@ -191,6 +191,25 @@ export default function Composer({
             rows={1}
           />
 
+          {!busy && (
+            <motion.button
+              type="button"
+              onClick={() => submit(true)}
+              disabled={disabled || uploading || !input.trim()}
+              aria-label="Fast answer"
+              title="Fast answer — one quick model, skips the multi-agent orchestration (cheaper &amp; faster)"
+              whileHover={{ scale: 1.06 }}
+              whileTap={{ scale: 0.92 }}
+              className={clsx(
+                'flex h-8 w-8 shrink-0 items-center justify-center rounded-full border transition-colors',
+                disabled || uploading || !input.trim()
+                  ? 'cursor-not-allowed border-white/10 text-ink-500'
+                  : 'border-warning-500/40 bg-warning-500/10 text-warning-300 hover:bg-warning-500/20',
+              )}
+            >
+              <Zap size={15} />
+            </motion.button>
+          )}
           {busy ? (
             <motion.button
               type="button"
@@ -206,7 +225,7 @@ export default function Composer({
           ) : (
             <motion.button
               type="button"
-              onClick={submit}
+              onClick={() => submit()}
               disabled={disabled || uploading || !input.trim()}
               aria-label="Send"
               whileHover={{ scale: 1.06 }}

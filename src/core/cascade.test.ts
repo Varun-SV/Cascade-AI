@@ -339,3 +339,59 @@ describe('Boardroom plan approval gate', () => {
     expect(est).toBeGreaterThan(0);
   });
 });
+
+describe('Fast answer (direct single-model path)', () => {
+  const midModel = { id: 'gpt-4o-mini', provider: 'openai', inputCostPer1kTokens: 0, outputCostPer1kTokens: 0 };
+
+  function mockRouter(generate: ReturnType<typeof vi.fn>) {
+    const selector = {
+      getCandidatesForTier: () => [midModel],
+      selectForTier: () => midModel,
+    };
+    return {
+      getSelector: () => selector,
+      generate,
+      getStats: () => ({ totalTokens: 8, totalCostUsd: 0.0001, costByTier: {}, tokensByTier: { T2: 8 }, costByFeature: {} }),
+      getTierCostPercentages: () => ({}),
+    };
+  }
+
+  it('answers with one generate call — no tiers, no tools — and streams the reply', async () => {
+    const cascade = new Cascade(baseConfig, process.cwd());
+    const generate = vi.fn(async (_tier: string, opts: any, onChunk?: (c: { text: string }) => void) => {
+      onChunk?.({ text: 'Fast ' });
+      onChunk?.({ text: 'reply.' });
+      // The fast path must pin the mid model and pass NO tools.
+      expect(opts.model?.id).toBe('gpt-4o-mini');
+      expect(opts.tools).toBeUndefined();
+      return { content: 'Fast reply.', usage: { inputTokens: 5, outputTokens: 3, totalTokens: 8, estimatedCostUsd: 0.0001 }, finishReason: 'stop' };
+    });
+    (cascade as any).router = mockRouter(generate);
+
+    const tokens: string[] = [];
+    cascade.on('stream:token', (e: { text: string; primary?: boolean }) => { if (e.primary) tokens.push(e.text); });
+
+    const result = await (cascade as any).runFastAnswer({ prompt: 'hi there' }, Date.now(), 'task-fast');
+
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(result.output).toBe('Fast reply.');
+    expect(result.t2Results).toEqual([]);
+    expect(tokens.join('')).toBe('Fast reply.');
+    expect((cascade as any).decisionLog?.some((d: { detail: string }) => /Fast answer/.test(d.detail))).toBe(true);
+  });
+
+  it('passes recent conversation history into the single call', async () => {
+    const cascade = new Cascade(baseConfig, process.cwd());
+    let seenMessages: any[] = [];
+    const generate = vi.fn(async (_t: string, opts: any) => { seenMessages = opts.messages; return { content: 'ok', usage: {}, finishReason: 'stop' }; });
+    (cascade as any).router = mockRouter(generate);
+
+    await (cascade as any).runFastAnswer(
+      { prompt: 'and the second one', conversationHistory: [{ role: 'assistant', content: '1) A  2) B' }] },
+      Date.now(), 'task-fast-2',
+    );
+
+    expect(seenMessages[0]).toEqual({ role: 'assistant', content: '1) A  2) B' });
+    expect(seenMessages[seenMessages.length - 1]).toEqual({ role: 'user', content: 'and the second one' });
+  });
+});

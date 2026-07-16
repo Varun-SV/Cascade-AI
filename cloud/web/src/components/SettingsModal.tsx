@@ -1,8 +1,11 @@
 import { useState } from 'react';
-import { Sparkles, Brain, KeyRound, Crown, LogOut, Cpu, Eye, ChevronRight } from 'lucide-react';
+import { Sparkles, Brain, KeyRound, Crown, LogOut, Cpu, Eye, ChevronRight, Zap } from 'lucide-react';
 import Modal from './Modal.js';
 import { detectLocalModelCapability } from '../lib/localModel/capability.js';
-import { localModelEnabled, setLocalModelEnabled, reduceMotionEnabled, setReduceMotionEnabled } from '../lib/prefs.js';
+import {
+  localModelEnabled, setLocalModelEnabled, reduceMotionEnabled, setReduceMotionEnabled,
+  fastAnswerModel, setFastAnswerModel,
+} from '../lib/prefs.js';
 import type { CloudUser } from '../lib/types.js';
 
 function Toggle({ on, onChange, disabled, label }: { on: boolean; onChange: (v: boolean) => void; disabled?: boolean; label: string }) {
@@ -74,6 +77,7 @@ export default function SettingsModal({
   const cap = detectLocalModelCapability();
   const [localOn, setLocalOn] = useState(localModelEnabled());
   const [reduceMotion, setReduceMotion] = useState(reduceMotionEnabled());
+  const [fastModel, setFastModel] = useState(fastAnswerModel());
 
   function toggleLocal(v: boolean) {
     setLocalOn(v);
@@ -123,6 +127,23 @@ export default function SettingsModal({
           subtitle="Minimize animations and transitions."
           right={<Toggle on={reduceMotion} onChange={toggleMotion} label="Reduce motion" />}
         />
+
+        {/* Chat */}
+        <p className="mt-3 text-[11px] font-semibold uppercase tracking-wide text-ink-400">Chat</p>
+        <div className="flex items-start gap-2.5 py-2.5">
+          <span className="mt-0.5 text-ink-400"><Zap size={15} /></span>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm text-ink-100">Fast answer model</p>
+            <p className="mt-0.5 text-xs text-ink-400">The model the ⚡ Fast answer button uses. Leave blank to auto-pick a capable mid-tier model.</p>
+            <input
+              value={fastModel}
+              onChange={(e) => { setFastModel(e.target.value); setFastAnswerModel(e.target.value); }}
+              placeholder="auto — e.g. gpt-4o-mini"
+              spellCheck={false}
+              className="mt-1.5 w-full rounded-md border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-500 focus:border-accent-500/40"
+            />
+          </div>
+        </div>
 
         {/* Manage */}
         <p className="mt-3 text-[11px] font-semibold uppercase tracking-wide text-ink-400">Manage</p>

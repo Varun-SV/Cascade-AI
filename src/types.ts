@@ -865,6 +865,18 @@ export interface CascadeRunOptions {
    * levels are accepted as a hint; 'Highly Complex' is derived server-side.
    */
   complexityHint?: Exclude<TaskComplexity, 'Highly Complex'>;
+  /**
+   * "Fast answer" — bypass the whole T1/T2/T3 orchestration and reply with a
+   * single mid-tier model, no tools and no artifact verification. For quick
+   * questions and small edits where the multi-agent machinery just adds latency
+   * and cost. The reply still streams and is persisted like a normal turn.
+   */
+  fastAnswer?: boolean;
+  /**
+   * Optional model id to use for a fast answer (e.g. 'gpt-4o-mini'). When unset,
+   * a validated mid-tier model is auto-selected. Ignored unless `fastAnswer`.
+   */
+  fastAnswerModel?: string;
 }
 
 export interface CascadeRunResult {

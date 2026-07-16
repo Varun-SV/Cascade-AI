@@ -5,6 +5,20 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.21.0 - 2026-07-16
+
+### Added
+- **Fast answer — one quick model, no orchestration.** A new `⚡` button in the
+  hosted composer (and a `fastAnswer` option on `cascade.run()`) answers with a
+  single mid-tier model directly: it skips the T1 → T2 → T3 planning/worker
+  machinery, registers no tools, and does no artifact verification — the fastest,
+  cheapest path for quick questions and small asks. The reply still streams and is
+  persisted like a normal turn. The routing controls (mode/tier/web) don't apply
+  to a fast answer since it's a single direct call. Which model it uses is
+  auto-picked from your validated mid-tier candidates, or you can pin one in
+  **Settings → Chat → Fast answer model** (e.g. `gpt-4o-mini`). The full
+  multi-agent Send path is unchanged.
+
 ## 0.20.4 - 2026-07-16
 
 ### Fixed
