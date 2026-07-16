@@ -36,12 +36,15 @@ import { ToolCreator } from '../tools/tool-creator.js';
 import { CascadeCancelledError } from '../utils/retry.js';
 import { WorldStateDB } from './knowledge/world-state.js';
 import { PrivacyPaths } from './privacy/paths.js';
+import {
+  estimateTokens, messagesTokens, needsCompaction, rollingSummary, mapReduceCompact, type Summarize,
+} from './context/compaction.js';
 import { GuidanceQueue } from './steering/guidance.js';
 
 /** One entry in the per-run orchestration decision trail (see /why). */
 export interface DecisionLogEntry {
   at: string;
-  kind: 'complexity' | 'model' | 'failover' | 'escalation';
+  kind: 'complexity' | 'model' | 'failover' | 'escalation' | 'context';
   detail: string;
 }
 
@@ -272,6 +275,103 @@ export class Cascade extends EventEmitter {
    */
   resolvePlanApproval(approved: boolean, note?: string, editedPlan?: TaskPlan): void {
     this.pendingPlanApproval?.({ approved, note, editedPlan });
+  }
+
+  // ── Extended-context approval ───────────────────────────────────────
+  // Same gate pattern: an oversized single input costs extra model calls to
+  // chunk + map-reduce, so we confirm before spending. No listener (headless)
+  // or a timeout means PROCEED — the feature is opt-in, and the run's budget
+  // cap is the real guardrail against runaway cost.
+
+  private pendingContextApproval?: (approved: boolean) => void;
+
+  /** Resolve a pending extended-context confirmation from a UI listener. */
+  resolveContextApproval(approved: boolean): void {
+    this.pendingContextApproval?.(approved);
+  }
+
+  private async requestContextApproval(info: {
+    inputTokens: number; windowTokens: number; multiplier: number; estChunks: number;
+  }): Promise<boolean> {
+    if (this.listenerCount('context:approval-required') === 0) return true;
+    return await new Promise<boolean>((resolve) => {
+      const timeout = setTimeout(() => {
+        if (this.pendingContextApproval) {
+          this.pendingContextApproval = undefined;
+          resolve(true);
+        }
+      }, 120_000);
+      this.pendingContextApproval = (approved) => {
+        clearTimeout(timeout);
+        this.pendingContextApproval = undefined;
+        resolve(approved);
+      };
+      this.emit('context:approval-required', info);
+    });
+  }
+
+  /**
+   * Extended context: when enabled, compact an over-budget conversation history
+   * (rolling summary — cheap, automatic) and/or a single oversized input (chunk
+   * + map-reduce — confirm-gated) so the run fits the model's window. Returns a
+   * new options object with the compacted prompt/history; a no-op when disabled,
+   * when nothing overflows, or when the model window isn't known yet.
+   */
+  private async applyExtendedContext(options: CascadeRunOptions): Promise<CascadeRunOptions> {
+    const ec = this.config.extendedContext;
+    if (!ec?.enabled) return options;
+    const windowTokens = this.router.getReferenceContextWindow();
+    if (!windowTokens) return options;
+
+    const reserve = 0.2;
+    const budget = Math.floor(windowTokens * (1 - reserve));
+    const multiplier = ec.maxMultiplier ?? 2;
+    const capTokens = windowTokens * multiplier;
+
+    // Summarize with the cheapest tier so compaction stays inexpensive.
+    const summarize: Summarize = async (input, instruction) => {
+      const res = await this.router.generate('T3', {
+        messages: [{ role: 'user', content: `${instruction}\n\n${input}` }],
+        maxTokens: 1024,
+        temperature: 0,
+      });
+      return res.content;
+    };
+
+    let history = options.conversationHistory ?? [];
+    let prompt = options.prompt;
+
+    // 1. History overflow → rolling summary (automatic; one cheap call).
+    if (history.length > 4 && needsCompaction(messagesTokens(history), windowTokens, reserve)) {
+      try {
+        const before = history.length;
+        history = await rollingSummary(history, { summarize, keepRecent: 4, targetTokens: budget });
+        this.recordDecision('context', `Extended context: folded ${before - history.length + 1} earlier turns into a summary to fit the window`);
+        this.emit('context:compacted', { kind: 'history', foldedTurns: before - (history.length - 1) });
+      } catch {
+        /* compaction is best-effort — fall back to the raw history */
+      }
+    }
+
+    // 2. Single oversized input → chunk + map-reduce (confirm-gated; expensive).
+    const inputTokens = estimateTokens(prompt);
+    if (inputTokens > windowTokens) {
+      const chunkTokens = Math.max(256, Math.floor(budget / 3));
+      const estChunks = Math.ceil(inputTokens / chunkTokens);
+      const approved = await this.requestContextApproval({ inputTokens, windowTokens, multiplier, estChunks });
+      if (approved) {
+        try {
+          const r = await mapReduceCompact(prompt, { summarize, chunkTokens, targetTokens: budget, capTokens });
+          prompt = r.text;
+          this.recordDecision('context', `Extended context: compacted a ${inputTokens}-token input via ${r.chunks} chunks (${r.calls} calls${r.truncated ? ', truncated at cap' : ''})`);
+          this.emit('context:compacted', { kind: 'input', chunks: r.chunks, calls: r.calls, truncated: r.truncated });
+        } catch {
+          /* leave the prompt as-is; the provider will truncate/handle it */
+        }
+      }
+    }
+
+    return { ...options, prompt, conversationHistory: history };
   }
 
   /**
@@ -758,6 +858,10 @@ ${prompt}`
     if (options.fastAnswer) {
       return this.runFastAnswer(options, startMs, taskId);
     }
+
+    // Extended context: compact an over-budget history/input to fit the model
+    // window before any tier sees it (no-op unless enabled + something overflows).
+    options = await this.applyExtendedContext(options);
 
     // Create a fresh permission escalator for this task run
     const escalator = new PermissionEscalator(this.config.approvalTimeoutMs ?? 600_000, this.config.autonomy === 'auto');

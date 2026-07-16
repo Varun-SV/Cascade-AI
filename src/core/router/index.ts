@@ -12,6 +12,7 @@ import type {
   ProviderConfig,
   ProviderType,
   StreamChunk,
+  TierLimits,
   TierRole,
   TokenUsage,
 } from '../../types.js';
@@ -102,6 +103,30 @@ const cloudDiscoveryCache = new Map<string, DiscoveryEntry>();
 function discoveryCacheKey(type: ProviderType, cfg: ProviderConfig): string {
   const raw = `${type}|${cfg.apiKey ?? ''}|${cfg.baseUrl ?? ''}`;
   return crypto.createHash('sha256').update(raw).digest('hex').slice(0, 24);
+}
+
+/**
+ * Apply the configured per-tier token/temperature limits to a generate call.
+ * Pure — returns a new options object only when something changed.
+ *
+ * - maxTokens is a **ceiling**: it lowers an explicit request that exceeds it,
+ *   and fills one in when absent, but never raises a smaller explicit value.
+ * - temperature is a **default**: applied only when the call left temperature
+ *   unset, so internal deterministic calls (which pin `temperature: 0`) keep it.
+ */
+export function applyTierLimits(options: GenerateOptions, tier: TierRole, limits?: TierLimits): GenerateOptions {
+  if (!limits) return options;
+  const key = tier.toLowerCase() as 't1' | 't2' | 't3';
+  const maxTokens = limits[`${key}MaxTokens` as keyof TierLimits];
+  const temperature = limits[`${key}Temperature` as keyof TierLimits];
+  let next = options;
+  if (typeof maxTokens === 'number' && maxTokens > 0 && (!next.maxTokens || next.maxTokens > maxTokens)) {
+    next = { ...next, maxTokens };
+  }
+  if (typeof temperature === 'number' && next.temperature === undefined) {
+    next = { ...next, temperature };
+  }
+  return next;
 }
 
 export class CascadeRouter extends EventEmitter {
@@ -468,13 +493,8 @@ export class CascadeRouter extends EventEmitter {
       );
     }
 
-    // ── Apply per-tier token limit ──────────────
-    const limits = this.config?.tierLimits;
-    const tierKey = tier.toLowerCase() as 't1' | 't2' | 't3';
-    const tierMaxTokens = limits?.[`${tierKey}MaxTokens` as keyof typeof limits] as number | undefined;
-    if (tierMaxTokens && (!options.maxTokens || options.maxTokens > tierMaxTokens)) {
-      options = { ...options, maxTokens: tierMaxTokens };
-    }
+    // ── Apply per-tier token + temperature limits ──────────────
+    options = applyTierLimits(options, tier, this.config?.tierLimits);
     // Inject the run's abort signal so the provider can abort the in-flight
     // request the moment a cancel fires (instant cancellation).
     if (this.runSignal && !options.signal) {
@@ -737,6 +757,18 @@ export class CascadeRouter extends EventEmitter {
 
   getSelector(): import('./selector.js').ModelSelector {
     return this.selector;
+  }
+
+  /**
+   * The tightest context window (in tokens) across the resolved tier models, or
+   * undefined if none are resolved yet. Extended-context compaction budgets
+   * against this so the compacted context fits whichever tier handles the run.
+   */
+  getReferenceContextWindow(): number | undefined {
+    const windows = [...this.tierModels.values()]
+      .map((m) => m.contextWindow)
+      .filter((n) => typeof n === 'number' && n > 0);
+    return windows.length ? Math.min(...windows) : undefined;
   }
 
   /** Wire the Cascade Auto task analyzer used for per-subtask model routing. */

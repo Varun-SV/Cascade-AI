@@ -11,6 +11,7 @@ import ConversationSidebar from './chat/ConversationSidebar.js';
 import ChatPanel from './chat/ChatPanel.js';
 import ChatTopBar from './chat/ChatTopBar.js';
 import ContinueModal from './chat/ContinueModal.js';
+import ContextApprovalDialog from './chat/ContextApprovalDialog.js';
 import KeyVault from './keys/KeyVault.js';
 import { useChatSession } from './chat/useChatSession.js';
 import { useAutoTitler } from './chat/useAutoTitler.js';
@@ -298,6 +299,7 @@ export default function App() {
             onWebSearchChange={chat.setWebSearch}
             uiMode={mode}
             approval={chat.approval}
+            compactionNotice={chat.compactionNotice}
           />
         </div>
       </div>
@@ -352,6 +354,9 @@ export default function App() {
             onClose={() => setShowContinue(false)}
             onRedeemed={handleRedeemed}
           />
+        )}
+        {chat.contextApproval && (
+          <ContextApprovalDialog info={chat.contextApproval} onResolve={chat.resolveContextApproval} />
         )}
       </AnimatePresence>
     </div>

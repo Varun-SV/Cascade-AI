@@ -480,6 +480,8 @@ export interface CascadeConfig {
   budget: BudgetConfig;
   theme: string;
   workspace: WorkspaceConfig;
+  /** Extended context: compact history/input that exceeds the model's window. */
+  extendedContext?: ExtendedContextConfig;
   cascadeAuto?: boolean;
   /** Cascade Auto trade-off bias when picking a model. Default: 'balanced'. */
   autoBias?: 'balanced' | 'quality' | 'cost';
@@ -624,10 +626,23 @@ export interface MemoryConfig {
   retentionDays: number;
 }
 
+export interface ExtendedContextConfig {
+  /** Off by default — when on, oversized history/input is compacted to fit. */
+  enabled: boolean;
+  /** How far past the model's native window an input may go before it's
+   *  truncated (via chunk + map-reduce). 2 = up to 2× the window. */
+  maxMultiplier: number;
+}
+
 export interface TierLimits {
   t1MaxTokens?: number;
   t2MaxTokens?: number;
   t3MaxTokens?: number;
+  /** Per-tier sampling temperature (0–2). Applied only when a call doesn't set
+   *  its own temperature — deterministic internal calls (temperature: 0) win. */
+  t1Temperature?: number;
+  t2Temperature?: number;
+  t3Temperature?: number;
 }
 
 export interface BudgetConfig {
@@ -704,7 +719,9 @@ export type CascadeEventType =
   | 'budget:exceeded'
   | 'permission:user-required'
   | 'mcp:approval-required'
-  | 'plan:approval-required';
+  | 'plan:approval-required'
+  | 'context:approval-required'
+  | 'context:compacted';
 
 export interface CascadeEvent<T = unknown> {
   type: CascadeEventType;

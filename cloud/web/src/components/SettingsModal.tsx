@@ -1,16 +1,55 @@
 import { useState } from 'react';
 import {
   Sparkles, Brain, KeyRound, Crown, LogOut, Cpu, Eye, ChevronRight, Zap,
-  Sun, Moon, Monitor, LayoutGrid, Rows3,
+  Sun, Moon, Monitor, LayoutGrid, Rows3, SlidersHorizontal, Layers,
 } from 'lucide-react';
 import Modal from './Modal.js';
 import { detectLocalModelCapability } from '../lib/localModel/capability.js';
 import {
   localModelEnabled, setLocalModelEnabled, reduceMotionEnabled, setReduceMotionEnabled,
-  fastAnswerModel, setFastAnswerModel,
-  type ThemeMode, type Density, type UiMode,
+  fastAnswerModel, setFastAnswerModel, tierParams, setTierParams,
+  extendedContext, setExtendedContext,
+  type ThemeMode, type Density, type UiMode, type TierParams, type TierParam, type ExtendedContextPref,
 } from '../lib/prefs.js';
 import type { CloudUser } from '../lib/types.js';
+
+const TIERS: Array<{ key: 't1' | 't2' | 't3'; label: string; role: string; dot: string }> = [
+  { key: 't1', label: 'T1', role: 'Planner', dot: 'bg-t1' },
+  { key: 't2', label: 'T2', role: 'Manager', dot: 'bg-t2' },
+  { key: 't3', label: 'T3', role: 'Worker', dot: 'bg-t3' },
+];
+
+/** One tier's max-tokens + temperature inputs. Blank = SDK default. */
+function TierParamRow({ tier, value, onChange }: {
+  tier: { key: 't1' | 't2' | 't3'; label: string; role: string; dot: string };
+  value: TierParam; onChange: (v: TierParam) => void;
+}) {
+  const numOr = (s: string): number | undefined => (s.trim() === '' ? undefined : Number(s));
+  return (
+    <div className="flex items-center gap-2 py-1.5">
+      <span className="flex w-16 shrink-0 items-center gap-1.5 text-xs text-ink-200">
+        <span className={`h-2 w-2 rounded-full ${tier.dot}`} />
+        <span className="font-semibold">{tier.label}</span>
+      </span>
+      <input
+        type="number" min={1} step={64} inputMode="numeric"
+        aria-label={`${tier.label} max tokens`}
+        value={value.maxTokens ?? ''}
+        onChange={(e) => onChange({ ...value, maxTokens: numOr(e.target.value) })}
+        placeholder="max tokens"
+        className="w-24 rounded-md border border-elev/10 bg-elev/[0.04] px-2 py-1 text-xs text-ink-100 outline-none placeholder:text-ink-500 focus:border-accent-500/40"
+      />
+      <input
+        type="number" min={0} max={2} step={0.1} inputMode="decimal"
+        aria-label={`${tier.label} temperature`}
+        value={value.temperature ?? ''}
+        onChange={(e) => onChange({ ...value, temperature: numOr(e.target.value) })}
+        placeholder="temp 0–2"
+        className="w-24 rounded-md border border-elev/10 bg-elev/[0.04] px-2 py-1 text-xs text-ink-100 outline-none placeholder:text-ink-500 focus:border-accent-500/40"
+      />
+    </div>
+  );
+}
 
 /** Compact segmented control — one active option, keyboard/aria friendly. */
 function Segmented<T extends string>({ value, onChange, options, label }: {
@@ -116,6 +155,18 @@ export default function SettingsModal({
   const [localOn, setLocalOn] = useState(localModelEnabled());
   const [reduceMotion, setReduceMotion] = useState(reduceMotionEnabled());
   const [fastModel, setFastModel] = useState(fastAnswerModel());
+  const [params, setParams] = useState<TierParams>(() => tierParams());
+  const [extCtx, setExtCtx] = useState<ExtendedContextPref>(() => extendedContext());
+
+  function updateTierParam(key: 't1' | 't2' | 't3', v: TierParam) {
+    const next = { ...params, [key]: v };
+    setParams(next);
+    setTierParams(next);
+  }
+  function updateExtCtx(v: ExtendedContextPref) {
+    setExtCtx(v);
+    setExtendedContext(v);
+  }
 
   function toggleLocal(v: boolean) {
     setLocalOn(v);
@@ -231,6 +282,61 @@ export default function SettingsModal({
             />
           </div>
         </div>
+
+        {/* Model parameters — Advanced view only (developer knobs) */}
+        {uiMode === 'advanced' && (
+          <>
+            <p className="mt-3 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-ink-400">
+              <SlidersHorizontal size={12} /> Model parameters
+            </p>
+            <p className="mb-1 text-xs text-ink-400">
+              Per-tier output limit and sampling temperature. Blank = the model's default.
+              Applied to that tier's calls across the orchestration.
+            </p>
+            <div className="rounded-lg border border-elev/10 bg-elev/[0.03] px-3 py-2">
+              <div className="flex items-center gap-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-ink-500">
+                <span className="w-16">Tier</span>
+                <span className="w-24">Max tokens</span>
+                <span className="w-24">Temperature</span>
+              </div>
+              {TIERS.map((t) => (
+                <TierParamRow
+                  key={t.key}
+                  tier={t}
+                  value={params[t.key] ?? {}}
+                  onChange={(v) => updateTierParam(t.key, v)}
+                />
+              ))}
+            </div>
+
+            <Row
+              icon={<Layers size={15} />}
+              title="Extended context"
+              subtitle="Compact history and oversized inputs so they fit the model's window — a big paste is chunked, summarized, and combined (with a one-tap confirm before the extra calls)."
+              right={
+                <Toggle
+                  on={extCtx.enabled}
+                  onChange={(on) => updateExtCtx({ ...extCtx, enabled: on })}
+                  label="Extended context"
+                />
+              }
+            />
+            {extCtx.enabled && (
+              <div className="flex items-center justify-between gap-3 pb-1 pl-7">
+                <span className="text-xs text-ink-400">Max size past the window (before truncating)</span>
+                <Segmented
+                  label="Extended context cap"
+                  value={String(extCtx.maxMultiplier)}
+                  onChange={(v) => updateExtCtx({ ...extCtx, maxMultiplier: v === '3' ? 3 : 2 })}
+                  options={[
+                    { value: '2', label: '2×' },
+                    { value: '3', label: '3×' },
+                  ]}
+                />
+              </div>
+            )}
+          </>
+        )}
 
         {/* Manage */}
         <p className="mt-3 text-[11px] font-semibold uppercase tracking-wide text-ink-400">Manage</p>

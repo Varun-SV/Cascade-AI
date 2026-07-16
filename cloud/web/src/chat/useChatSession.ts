@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 import type { ProviderConfig, WhyReport } from '../lib/types.js';
-import { localModelEnabled, fastAnswerModel } from '../lib/prefs.js';
+import { localModelEnabled, fastAnswerModel, tierParams, extendedContext } from '../lib/prefs.js';
 import { detectLocalModelCapability } from '../lib/localModel/capability.js';
 import { warmLocalModel } from '../lib/localModel/engine.js';
 import { classifyLocalComplexity } from '../lib/localModel/classifier.js';
@@ -64,6 +64,15 @@ export interface WebSearchPayload {
   tavilyApiKey?: string;
 }
 
+/** Extended context: the SDK detected an oversized input and is asking whether
+ *  to spend the extra calls to chunk + compact it. Drives a one-tap confirm. */
+export interface ContextApprovalInfo {
+  inputTokens?: number;
+  windowTokens?: number;
+  multiplier?: number;
+  estChunks?: number;
+}
+
 /** A boardroom plan Cascade produced for this run — surfaced read-only (the
  *  hosted run auto-proceeds; this just shows what it decided to do). */
 export interface PlanApproval {
@@ -101,6 +110,10 @@ export function useChatSession(
   // The boardroom plan for the in-flight run, if Cascade produced one. Shown
   // read-only; cleared when the next run starts or the current one settles.
   const [approval, setApproval] = useState<PlanApproval | null>(null);
+  // Extended context: a pending "process this huge input?" confirm, and a
+  // transient notice once a compaction actually happened.
+  const [contextApproval, setContextApproval] = useState<ContextApprovalInfo | null>(null);
+  const [compactionNotice, setCompactionNotice] = useState<string | null>(null);
   // Default OFF: a hosted chat is pure conversation unless the user opts into
   // web tools. With the toggle off the run registers no tools at all, so the
   // model is never handed a capability it can't reliably use.
@@ -145,15 +158,28 @@ export function useChatSession(
     const onStatus = (e: Record<string, unknown>) => setStatus(statusLabel(e));
     const onWhy = (r: WhyReport) => { pendingWhyRef.current = r; };
     const onPlan = (e: PlanApproval) => setApproval(e);
+    const onContextApproval = (e: ContextApprovalInfo) => setContextApproval(e);
+    const onCompacted = (e: { kind?: string; chunks?: number; foldedTurns?: number; truncated?: boolean }) => {
+      setContextApproval(null);
+      if (e.kind === 'input') {
+        setCompactionNotice(`Compacted a large input into ${e.chunks ?? 0} chunks${e.truncated ? ' (truncated at the cap)' : ''}.`);
+      } else if (e.kind === 'history') {
+        setCompactionNotice(`Folded ${e.foldedTurns ?? 'earlier'} turns into a summary to fit the context window.`);
+      }
+    };
     socket.on('stream:token', onToken);
     socket.on('tier:status', onStatus);
     socket.on('run:why', onWhy);
     socket.on('plan:approval-required', onPlan);
+    socket.on('context:approval-required', onContextApproval);
+    socket.on('context:compacted', onCompacted);
     return () => {
       socket.off('stream:token', onToken);
       socket.off('tier:status', onStatus);
       socket.off('run:why', onWhy);
       socket.off('plan:approval-required', onPlan);
+      socket.off('context:approval-required', onContextApproval);
+      socket.off('context:compacted', onCompacted);
     };
   }, [socket]);
 
@@ -173,6 +199,8 @@ export function useChatSession(
       setError(null);
       setStatus('Thinking…');
       setApproval(null);
+      setContextApproval(null);
+      setCompactionNotice(null);
       streamingRef.current = '';
       if (appendUser) {
         setMessages((prev) => [...prev, { id: crypto.randomUUID(), role: 'user', content: text, attachments }]);
@@ -194,6 +222,11 @@ export function useChatSession(
             complexityHint,
             fastAnswer: fast || undefined,
             fastAnswerModel: fast ? (fastAnswerModel() || undefined) : undefined,
+            // Advanced per-tier generation params (omitted when none are set,
+            // and moot for a fast answer, which is a single direct call).
+            tierParams: fast ? undefined : (() => { const tp = tierParams(); return Object.keys(tp).length ? tp : undefined; })(),
+            // Extended context: only sent when enabled and not a fast answer.
+            extendedContext: fast ? undefined : (() => { const e = extendedContext(); return e.enabled ? e : undefined; })(),
           },
           onAck,
         );
@@ -203,6 +236,7 @@ export function useChatSession(
           setBusy(false);
           setStatus(null);
           setApproval(null);
+          setContextApproval(null);
           if (ack.error) {
             setError(ack.error);
             setMessages((prev) => prev.filter((m) => !m.streaming));
@@ -260,6 +294,14 @@ export function useChatSession(
     setStatus('Stopping…');
   }, [socket, busy]);
 
+  // Answer the extended-context confirm: proceed with (or skip) compacting the
+  // oversized input. Either way the run continues — skip just means the model
+  // handles the raw input (truncating naturally).
+  const resolveContextApproval = useCallback((approved: boolean) => {
+    socket?.emit('context:decision', { approved });
+    setContextApproval(null);
+  }, [socket]);
+
   const regenerate = useCallback(() => {
     if (busy) return;
     const lastUser = [...messages].reverse().find((m) => m.role === 'user');
@@ -276,5 +318,6 @@ export function useChatSession(
   return {
     messages, send, stop, regenerate, busy, error, status, lastTokens, lastSaved, conversationId, loadMessages, setConversationId,
     routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, approval,
+    contextApproval, resolveContextApproval, compactionNotice,
   };
 }

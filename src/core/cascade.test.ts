@@ -395,3 +395,61 @@ describe('Fast answer (direct single-model path)', () => {
     expect(seenMessages[seenMessages.length - 1]).toEqual({ role: 'user', content: 'and the second one' });
   });
 });
+
+describe('Extended context (compaction integration)', () => {
+  const enabledConfig: CascadeConfig = { ...baseConfig, extendedContext: { enabled: true, maxMultiplier: 2 } };
+
+  function mockRouter(window: number | undefined, generate = vi.fn(async () => ({ content: 'CONDENSED', usage: {}, finishReason: 'stop' }))) {
+    return { getReferenceContextWindow: () => window, generate };
+  }
+
+  it('is a no-op when extended context is disabled', async () => {
+    const cascade = new Cascade(baseConfig, process.cwd());
+    (cascade as any).router = mockRouter(1000);
+    const opts = { prompt: 'x'.repeat(100_000), conversationHistory: [] };
+    expect(await (cascade as any).applyExtendedContext(opts)).toBe(opts);
+  });
+
+  it('is a no-op when the model window is unknown', async () => {
+    const cascade = new Cascade(enabledConfig, process.cwd());
+    (cascade as any).router = mockRouter(undefined);
+    const opts = { prompt: 'x'.repeat(100_000), conversationHistory: [] };
+    expect(await (cascade as any).applyExtendedContext(opts)).toBe(opts);
+  });
+
+  it('folds an over-budget history into a leading summary (automatic)', async () => {
+    const cascade = new Cascade(enabledConfig, process.cwd());
+    const generate = vi.fn(async () => ({ content: 'CONDENSED', usage: {}, finishReason: 'stop' }));
+    (cascade as any).router = mockRouter(1000, generate); // budget 800 tokens
+    const history: ConversationMessage[] = Array.from({ length: 20 }, (_, i) => ({
+      role: i % 2 ? 'assistant' : 'user', content: 'x'.repeat(400), // ~100 tokens each → ~2000 total
+    }));
+    const out = await (cascade as any).applyExtendedContext({ prompt: 'hi', conversationHistory: history });
+    expect(generate).toHaveBeenCalled();
+    expect(out.conversationHistory[0].role).toBe('system');
+    expect(out.conversationHistory.length).toBeLessThan(history.length);
+  });
+
+  // Window 1000 → budget 800, cap 2× = 2000 tokens (~8000 chars). An input well
+  // past the window still spans several chunks after the cap, so map-reduce runs.
+  const bigInput = 'word here and there. '.repeat(1500); // ~31500 chars ≫ 1000-token window
+
+  it('compacts a single oversized input when there is no confirm listener (proceeds)', async () => {
+    const cascade = new Cascade(enabledConfig, process.cwd());
+    const generate = vi.fn(async () => ({ content: 'S', usage: {}, finishReason: 'stop' }));
+    (cascade as any).router = mockRouter(1000, generate);
+    const out = await (cascade as any).applyExtendedContext({ prompt: bigInput, conversationHistory: [] });
+    expect(generate).toHaveBeenCalled();
+    expect(out.prompt).not.toBe(bigInput);
+  });
+
+  it('leaves the oversized input untouched when the confirm is rejected', async () => {
+    const cascade = new Cascade(enabledConfig, process.cwd());
+    const generate = vi.fn(async () => ({ content: 'S', usage: {}, finishReason: 'stop' }));
+    (cascade as any).router = mockRouter(1000, generate);
+    cascade.on('context:approval-required', () => cascade.resolveContextApproval(false));
+    const out = await (cascade as any).applyExtendedContext({ prompt: bigInput, conversationHistory: [] });
+    expect(out.prompt).toBe(bigInput);
+    expect(generate).not.toHaveBeenCalled();
+  });
+});

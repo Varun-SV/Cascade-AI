@@ -110,6 +110,19 @@ export const TierLimitsSchema = z.object({
   t1MaxTokens: z.number().optional(),
   t2MaxTokens: z.number().optional(),
   t3MaxTokens: z.number().optional(),
+  // Per-tier sampling temperature (0–2). Applied only to calls that don't set
+  // their own temperature — internal deterministic calls (classification,
+  // routing) pin temperature: 0 explicitly and are never overridden.
+  t1Temperature: z.number().min(0).max(2).optional(),
+  t2Temperature: z.number().min(0).max(2).optional(),
+  t3Temperature: z.number().min(0).max(2).optional(),
+});
+
+export const ExtendedContextConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  // 1 = no headroom past the window (compact-to-fit only); 2–3 = allow chunking
+  // an input up to N× the window before truncating. Bounded to keep cost sane.
+  maxMultiplier: z.number().min(1).max(5).default(2),
 });
 
 export const BudgetConfigSchema = z.object({
@@ -146,6 +159,7 @@ export const CascadeConfigSchema = z.object({
   telemetry: TelemetryConfigSchema.default({}),
   memory: MemoryConfigSchema.default({}),
   tierLimits: TierLimitsSchema.default({}),
+  extendedContext: ExtendedContextConfigSchema.default({}),
   budget: BudgetConfigSchema.default({}),
   theme: z.string().default('cascade'),
   workspace: WorkspaceConfigSchema.default({}),
