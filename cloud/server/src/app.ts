@@ -417,6 +417,16 @@ export function createApp(env: CloudEnv, store: CloudStore) {
 
   // ── Billing (Razorpay recurring subscriptions) ──
   const billing = billingConfig(env);
+  // One-line boot diagnostic so a misconfigured deploy is obvious in the logs.
+  // Only non-secret fields are printed (key id + plan id are safe to log; the
+  // secret and webhook secret never are). The plan id length surfaces a stray
+  // space/newline that would otherwise read as "ID not found" from Razorpay.
+  if (billing) {
+    const mode = billing.keyId.startsWith('rzp_live') ? 'live' : 'test';
+    console.log(`[billing] configured — mode=${mode} keyId=${billing.keyId} planId="${billing.planId}" (len ${billing.planId.length})`);
+  } else {
+    console.log('[billing] not configured — set RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET / RAZORPAY_PLAN_ID to enable subscriptions');
+  }
 
   // Current billing state for the signed-in user. `configured:false` when the
   // env vars are absent — the Upgrade page then shows the plan comparison only.
@@ -447,7 +457,10 @@ export function createApp(env: CloudEnv, store: CloudStore) {
       });
       res.json({ subscriptionId: sub.id, keyId: billing.keyId });
     } catch (err) {
-      console.error('[billing] subscribe failed:', err);
+      // Include the (non-secret) mode + plan id so a 400 "ID not found" / 401
+      // auth error in the logs points straight at which value is wrong.
+      const mode = billing.keyId.startsWith('rzp_live') ? 'live' : 'test';
+      console.error(`[billing] subscribe failed (mode=${mode} keyId=${billing.keyId} planId="${billing.planId}"):`, err);
       res.status(502).json({ error: 'Could not start the subscription. Try again.' });
     }
   });

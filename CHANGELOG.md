@@ -5,6 +5,20 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Cascade Cloud 0.6.2 - 2026-07-16
+
+### Fixed
+- **Razorpay billing now tolerates copy-pasted whitespace and is easier to
+  diagnose.** `billingConfig` trims the key id / secret / plan id / webhook
+  secret, so a trailing space or newline picked up while pasting into the deploy
+  env no longer reaches Razorpay verbatim — that was surfacing as "Authentication
+  failed" (key) or "The ID provided is invalid or could not be found" (plan),
+  indistinguishable from a genuinely wrong value.
+- The server now logs a one-line **billing boot diagnostic** — `configured —
+  mode=test keyId=… planId="…" (len N)` — using only non-secret fields (the
+  secret and webhook secret are never logged), and subscribe failures log the
+  same (non-secret) mode + plan id so a misconfigured deploy is obvious.
+
 ## Cascade Cloud 0.6.1 - 2026-07-16
 
 ### Fixed

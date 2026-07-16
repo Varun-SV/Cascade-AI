@@ -53,4 +53,23 @@ describe('billingConfig', () => {
     } as CloudEnv);
     expect(cfg).toEqual({ keyId: 'k', keySecret: 's', webhookSecret: 'w', planId: 'plan_1', priceLabel: '₹499 / month' });
   });
+
+  it('trims stray whitespace/newlines from copy-pasted env values', () => {
+    const cfg = billingConfig({
+      ...base,
+      RAZORPAY_KEY_ID: '  rzp_test_abc\n',
+      RAZORPAY_KEY_SECRET: 'secret ',
+      RAZORPAY_PLAN_ID: ' plan_123 ',
+      RAZORPAY_WEBHOOK_SECRET: '\twhsec ',
+    } as CloudEnv);
+    expect(cfg).toEqual({
+      keyId: 'rzp_test_abc', keySecret: 'secret', webhookSecret: 'whsec', planId: 'plan_123', priceLabel: '₹499 / month',
+    });
+  });
+
+  it('treats a whitespace-only required value as not configured', () => {
+    expect(billingConfig({
+      ...base, RAZORPAY_KEY_ID: 'k', RAZORPAY_KEY_SECRET: 's', RAZORPAY_PLAN_ID: '   ',
+    } as CloudEnv)).toBeNull();
+  });
 });
