@@ -10,6 +10,10 @@ import { z } from 'zod';
 const EnvSchema = z.object({
   PORT: z.coerce.number().int().positive().default(8787),
   SESSION_SECRET: z.string().min(16, 'SESSION_SECRET must be at least 16 characters'),
+  // Where the SQLite DB + per-tenant uploads live. Defaults to ./data for local
+  // dev; on Railway it's resolved to the attached persistent volume in loadEnv()
+  // (see below) so data survives redeploys instead of sitting on the ephemeral
+  // container filesystem.
   DATA_DIR: z.string().default('./data'),
   WEB_ORIGIN: z.string().default('http://localhost:5173'),
   OAUTH_REDIRECT_BASE_URL: z.string().default('http://localhost:8787'),
@@ -39,8 +43,32 @@ const EnvSchema = z.object({
 
 export type CloudEnv = z.infer<typeof EnvSchema>;
 
+/**
+ * True when DATA_DIR resolved to a Railway persistent volume — i.e. the
+ * operator didn't pin DATA_DIR themselves and a volume is mounted. Used only
+ * for the boot diagnostic; persistence itself is just "is DATA_DIR on durable
+ * storage", which the operator owns.
+ */
+export let dataDirIsRailwayVolume = false;
+
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): CloudEnv {
-  const parsed = EnvSchema.safeParse(source);
+  // Railway mounts an attached persistent volume and injects its path as
+  // RAILWAY_VOLUME_MOUNT_PATH. If the operator hasn't set DATA_DIR explicitly,
+  // default it to that volume so the SQLite DB + tenant uploads persist across
+  // redeploys. Without this, DATA_DIR falls back to ./data on the ephemeral
+  // container filesystem and every deploy starts from an empty database — which
+  // is exactly the "all my users vanished after redeploy" symptom. An explicit
+  // DATA_DIR always wins; local dev (no volume) is unchanged.
+  const volume = source.RAILWAY_VOLUME_MOUNT_PATH;
+  const resolved: NodeJS.ProcessEnv = { ...source };
+  if (!resolved.DATA_DIR && volume) {
+    resolved.DATA_DIR = volume;
+    dataDirIsRailwayVolume = true;
+  } else {
+    dataDirIsRailwayVolume = false;
+  }
+
+  const parsed = EnvSchema.safeParse(resolved);
   if (!parsed.success) {
     throw new Error(`Invalid cloud server environment:\n${parsed.error.issues.map((i) => `  - ${i.path.join('.')}: ${i.message}`).join('\n')}`);
   }
