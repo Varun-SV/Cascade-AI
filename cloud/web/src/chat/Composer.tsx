@@ -5,6 +5,7 @@ import { Send, Paperclip, X, Loader2, Globe, Square, Zap } from 'lucide-react';
 import { uploadImage } from '../lib/api.js';
 import type { Skill } from '../lib/types.js';
 import type { ChatAttachment, ForceTier, RoutingMode, SendInput } from './useChatSession.js';
+import type { UiMode } from '../lib/prefs.js';
 
 const ALLOWED = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 const MAX_FILES = 4;
@@ -44,11 +45,12 @@ interface Props {
   onForceTierChange: (t: ForceTier) => void;
   webSearch: boolean;
   onWebSearchChange: (on: boolean) => void;
+  uiMode: UiMode;
 }
 
 export default function Composer({
   skills, skillId, onSkillChange, hasProviders, busy, onSend, onStop,
-  routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange,
+  routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange, uiMode,
 }: Props) {
   const [input, setInput] = useState('');
   const [pending, setPending] = useState<Pending[]>([]);
@@ -121,8 +123,8 @@ export default function Composer({
     <div className="px-4 py-3 sm:px-6">
       <div
         className={clsx(
-          'mx-auto max-w-3xl rounded-2xl border bg-white/[0.04] backdrop-blur-xl transition-colors',
-          dragOver ? 'border-accent-500 ring-2 ring-accent-500/40' : 'border-white/10',
+          'mx-auto max-w-3xl rounded-2xl border bg-elev/[0.04] backdrop-blur-xl transition-colors',
+          dragOver ? 'border-accent-500 ring-2 ring-accent-500/40' : 'border-elev/10',
         )}
         onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
@@ -132,12 +134,12 @@ export default function Composer({
           <div className="flex flex-wrap gap-2 px-3 pt-3">
             {pending.map((p) => (
               <div key={p.id} className="relative">
-                <img src={p.previewUrl} alt="pending" className="h-16 w-16 rounded-xl border border-white/10 object-cover shadow-lg" />
+                <img src={p.previewUrl} alt="pending" className="h-16 w-16 rounded-xl border border-elev/10 object-cover shadow-lg" />
                 <button
                   type="button"
                   aria-label="Remove attachment"
                   onClick={() => removePending(p.id)}
-                  className="absolute -right-1.5 -top-1.5 rounded-full border border-white/10 bg-ink-800 p-0.5 text-ink-200 backdrop-blur hover:text-ink-50"
+                  className="absolute -right-1.5 -top-1.5 rounded-full border border-elev/10 bg-ink-800 p-0.5 text-ink-200 backdrop-blur hover:text-ink-50"
                 >
                   <X size={12} />
                 </button>
@@ -163,7 +165,7 @@ export default function Composer({
             onClick={() => fileRef.current?.click()}
             whileHover={{ scale: 1.1 }}
             whileTap={{ scale: 0.9 }}
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-400 hover:bg-white/10 hover:text-ink-100 disabled:opacity-40"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-400 hover:bg-elev/10 hover:text-ink-100 disabled:opacity-40"
           >
             {uploading ? <Loader2 size={16} className="animate-spin" /> : <Paperclip size={16} />}
           </motion.button>
@@ -173,7 +175,7 @@ export default function Composer({
             value={skillId}
             onChange={(e) => onSkillChange(e.target.value)}
             disabled={disabled}
-            className="max-w-[9rem] shrink-0 truncate rounded-lg border border-white/10 bg-white/[0.04] px-2 py-1.5 text-xs text-ink-200 outline-none backdrop-blur disabled:opacity-40"
+            className="max-w-[9rem] shrink-0 truncate rounded-lg border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-xs text-ink-200 outline-none backdrop-blur disabled:opacity-40"
           >
             {skills.map((s) => (
               <option key={s.id} value={s.id}>{s.name}</option>
@@ -203,7 +205,7 @@ export default function Composer({
               className={clsx(
                 'flex h-8 w-8 shrink-0 items-center justify-center rounded-full border transition-colors',
                 disabled || uploading || !input.trim()
-                  ? 'cursor-not-allowed border-white/10 text-ink-500'
+                  ? 'cursor-not-allowed border-elev/10 text-ink-500'
                   : 'border-warning-500/40 bg-warning-500/10 text-warning-300 hover:bg-warning-500/20',
               )}
             >
@@ -231,10 +233,10 @@ export default function Composer({
               whileHover={{ scale: 1.06 }}
               whileTap={{ scale: 0.92 }}
               className={clsx(
-                'flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-ink-950 transition-shadow',
+                'flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-shadow',
                 disabled || uploading || !input.trim()
                   ? 'cursor-not-allowed bg-ink-700 text-ink-400'
-                  : 'accent-grad shadow-lg shadow-accent-700/30',
+                  : 'accent-grad text-white shadow-lg shadow-accent-700/30',
               )}
             >
               <Send size={15} />
@@ -242,61 +244,64 @@ export default function Composer({
           )}
         </div>
 
-        {/* Routing controls: bias Cascade Auto, pin a tier, toggle web tools */}
-        <div className="flex flex-wrap items-center gap-1.5 border-t border-white/5 px-2.5 py-1.5">
-          <div className="flex items-center gap-0.5 rounded-lg bg-white/[0.04] p-0.5" role="group" aria-label="Routing mode">
-            {ROUTING_MODES.map((m) => (
-              <button
-                key={m.value}
-                type="button"
-                title={m.title}
-                disabled={disabled}
-                aria-pressed={routingMode === m.value}
-                onClick={() => onRoutingModeChange(m.value)}
-                className={clsx(
-                  'rounded-md px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-40',
-                  routingMode === m.value
-                    ? 'accent-grad text-ink-950 shadow-sm'
-                    : 'text-ink-400 hover:bg-white/10 hover:text-ink-100',
-                )}
-              >
-                {m.label}
-              </button>
-            ))}
-          </div>
-
-          <label className="flex items-center gap-1 text-[11px] text-ink-400">
-            <span className="hidden sm:inline">Tier</span>
-            <select
-              aria-label="Force tier"
-              value={forceTier}
-              onChange={(e) => onForceTierChange(e.target.value as ForceTier)}
-              disabled={disabled}
-              className="rounded-lg border border-white/10 bg-white/[0.04] px-1.5 py-1 text-[11px] text-ink-200 outline-none backdrop-blur disabled:opacity-40"
-            >
-              {FORCE_TIERS.map((t) => (
-                <option key={t} value={t}>{t === 'auto' ? 'Auto' : t}</option>
+        {/* Routing controls: bias Cascade Auto, pin a tier, toggle web tools.
+            Advanced view only — Simple keeps the composer minimal. */}
+        {uiMode === 'advanced' && (
+          <div className="flex flex-wrap items-center gap-1.5 border-t border-elev/5 px-2.5 py-1.5">
+            <div className="flex items-center gap-0.5 rounded-lg bg-elev/[0.04] p-0.5" role="group" aria-label="Routing mode">
+              {ROUTING_MODES.map((m) => (
+                <button
+                  key={m.value}
+                  type="button"
+                  title={m.title}
+                  disabled={disabled}
+                  aria-pressed={routingMode === m.value}
+                  onClick={() => onRoutingModeChange(m.value)}
+                  className={clsx(
+                    'rounded-md px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-40',
+                    routingMode === m.value
+                      ? 'accent-grad text-white shadow-sm'
+                      : 'text-ink-400 hover:bg-elev/10 hover:text-ink-100',
+                  )}
+                >
+                  {m.label}
+                </button>
               ))}
-            </select>
-          </label>
+            </div>
 
-          <button
-            type="button"
-            title="Allow web search & fetch for this run"
-            disabled={disabled}
-            aria-pressed={webSearch}
-            onClick={() => onWebSearchChange(!webSearch)}
-            className={clsx(
-              'flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-40',
-              webSearch
-                ? 'border-accent-500/30 bg-accent-500/10 text-accent-300'
-                : 'border-white/10 bg-white/[0.04] text-ink-400 hover:text-ink-100',
-            )}
-          >
-            <Globe size={12} />
-            Web
-          </button>
-        </div>
+            <label className="flex items-center gap-1 text-[11px] text-ink-400">
+              <span className="hidden sm:inline">Tier</span>
+              <select
+                aria-label="Force tier"
+                value={forceTier}
+                onChange={(e) => onForceTierChange(e.target.value as ForceTier)}
+                disabled={disabled}
+                className="rounded-lg border border-elev/10 bg-elev/[0.04] px-1.5 py-1 text-[11px] text-ink-200 outline-none backdrop-blur disabled:opacity-40"
+              >
+                {FORCE_TIERS.map((t) => (
+                  <option key={t} value={t}>{t === 'auto' ? 'Auto' : t}</option>
+                ))}
+              </select>
+            </label>
+
+            <button
+              type="button"
+              title="Allow web search & fetch for this run"
+              disabled={disabled}
+              aria-pressed={webSearch}
+              onClick={() => onWebSearchChange(!webSearch)}
+              className={clsx(
+                'flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-40',
+                webSearch
+                  ? 'border-accent-500/30 bg-accent-500/10 text-accent-300'
+                  : 'border-elev/10 bg-elev/[0.04] text-ink-400 hover:text-ink-100',
+              )}
+            >
+              <Globe size={12} />
+              Web
+            </button>
+          </div>
+        )}
       </div>
       <p className="mx-auto mt-1.5 max-w-3xl px-1 text-[11px] text-ink-400">
         Images now · file generation &amp; download coming soon.

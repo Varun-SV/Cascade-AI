@@ -20,7 +20,7 @@ function TierBadge({ tier }: { tier: string }) {
   return (
     <span
       className={`rounded-md px-1.5 py-0.5 font-mono text-[10.5px] font-semibold uppercase tracking-wide ring-1 ${
-        TIER_STYLE[tier] ?? 'text-ink-300 bg-white/5 ring-white/10'
+        TIER_STYLE[tier] ?? 'text-ink-300 bg-elev/5 ring-elev/10'
       }`}
     >
       {tier}
@@ -38,7 +38,7 @@ const KIND_DOT: Record<string, string> = {
 function WhyPanel({ why }: { why: WhyReport }) {
   const tiers = Object.keys(why.costByTier).filter((t) => (why.costByTier[t] ?? 0) > 0);
   return (
-    <div className="mt-1 rounded-lg border border-white/10 bg-black/30 p-3 text-xs text-ink-300">
+    <div className="mt-1 rounded-lg border border-elev/10 bg-black/30 p-3 text-xs text-ink-300">
       {why.savedUsd > 0 && (
         <p className="mb-2 text-success-300">
           Saved <span className="font-mono">${why.savedUsd.toFixed(4)}</span> ({why.savedPct}%) by delegating below the
@@ -58,7 +58,7 @@ function WhyPanel({ why }: { why: WhyReport }) {
         </ul>
       )}
       {tiers.length > 0 && (
-        <div className="mt-2 flex flex-col gap-1 border-t border-white/10 pt-2">
+        <div className="mt-2 flex flex-col gap-1 border-t border-elev/10 pt-2">
           {tiers.map((t) => (
             <div key={t} className="flex items-center justify-between font-mono text-[11px]">
               <span>{t}{why.models[t] ? ` · ${why.models[t]}` : ''}</span>
@@ -97,9 +97,9 @@ function CodeBlock({ children }: { children?: ReactNode }) {
     <div className="group relative">
       <CopyButton
         getText={() => ref.current?.innerText ?? ''}
-        className="absolute right-2 top-2 rounded-md border border-white/10 bg-white/10 p-1.5 text-ink-200 opacity-100 backdrop-blur transition-opacity hover:text-ink-50 sm:opacity-0 sm:group-hover:opacity-100"
+        className="absolute right-2 top-2 rounded-md border border-elev/10 bg-elev/10 p-1.5 text-ink-200 opacity-100 backdrop-blur transition-opacity hover:text-ink-50 sm:opacity-0 sm:group-hover:opacity-100"
       />
-      <pre ref={ref} className="overflow-x-auto rounded-xl border border-white/10 bg-black/40 p-3 text-sm shadow-inner">
+      <pre ref={ref} className="overflow-x-auto rounded-xl border border-elev/10 bg-black/40 p-3 text-sm shadow-inner">
         {children}
       </pre>
     </div>
@@ -125,13 +125,13 @@ export default function Message({ message, onRegenerate }: Props) {
                 key={a.id}
                 src={uploadUrl(a.id)}
                 alt="attachment"
-                className="max-h-40 rounded-xl border border-white/10 object-cover shadow-lg"
+                className="max-h-40 rounded-xl border border-elev/10 object-cover shadow-lg"
               />
             ))}
           </div>
         )}
         {message.content && (
-          <div className="accent-grad max-w-[80%] whitespace-pre-wrap rounded-2xl rounded-br-md px-4 py-2 font-medium text-ink-950 shadow-lg shadow-accent-700/20">
+          <div className="accent-grad max-w-[80%] whitespace-pre-wrap rounded-2xl rounded-br-md px-4 py-2 font-medium text-white shadow-lg shadow-accent-700/20">
             {message.content}
           </div>
         )}

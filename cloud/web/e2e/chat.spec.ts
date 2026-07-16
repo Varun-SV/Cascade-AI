@@ -98,10 +98,15 @@ test('dev login -> add a key -> pick a skill -> attach an image -> send -> reply
     await expect(page.locator('span.whitespace-pre-wrap', { hasText: memory })).toBeVisible();
     await page.getByLabel('Close').click();
 
-    // Routing controls render in the composer: Auto mode selected by default,
-    // the Web toggle present and OFF (hosted chat is pure conversation unless
-    // the user opts in).
-    await expect(page.getByRole('button', { name: 'Auto', pressed: true })).toBeVisible();
+    // The composer starts in Simple view (minimal) — the routing controls are
+    // hidden until the user opts into Advanced. Switch to Advanced in Settings,
+    // then confirm they render: Auto mode selected by default, Web toggle OFF
+    // (hosted chat is pure conversation unless the user opts in).
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.getByRole('group', { name: 'View mode' }).getByRole('button', { name: 'Advanced' }).click();
+    await page.getByLabel('Close').click();
+    const routing = page.getByRole('group', { name: 'Routing mode' });
+    await expect(routing.getByRole('button', { name: 'Auto', pressed: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Web', pressed: false })).toBeVisible();
 
     // Custom skill CRUD: create one, confirm it lists with a usage badge, and

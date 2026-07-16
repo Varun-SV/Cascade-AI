@@ -31,7 +31,7 @@ export default function TierMix({ refreshSignal }: Props) {
         <span>Tier mix · today</span>
         <span className="tabular-nums">{total} run{total === 1 ? '' : 's'}</span>
       </div>
-      <div className="flex h-1.5 overflow-hidden rounded-full bg-white/10">
+      <div className="flex h-1.5 overflow-hidden rounded-full bg-elev/10">
         {mix.map((m) => (
           <div
             key={m.tier}

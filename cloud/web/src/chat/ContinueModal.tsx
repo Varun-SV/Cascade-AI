@@ -29,7 +29,7 @@ function formatRemaining(ms: number): string {
 
 const tabBtn = (active: boolean) =>
   `flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold transition-colors ${
-    active ? 'bg-white/[0.1] text-ink-50 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]' : 'text-ink-400 hover:text-ink-200'
+    active ? 'bg-elev/[0.1] text-ink-50 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]' : 'text-ink-400 hover:text-ink-200'
   }`;
 
 export default function ContinueModal({ transcript, onClose, onRedeemed }: Props) {
@@ -39,7 +39,7 @@ export default function ContinueModal({ transcript, onClose, onRedeemed }: Props
   return (
     <Modal title="Continue elsewhere" onClose={onClose}>
       <div className="flex flex-col gap-4 p-4 text-sm text-ink-100">
-        <div className="flex gap-1 rounded-xl border border-white/10 bg-white/[0.03] p-1">
+        <div className="flex gap-1 rounded-xl border border-elev/10 bg-elev/[0.03] p-1">
           <button type="button" className={tabBtn(tab === 'send')} onClick={() => setTab('send')}>
             <Send size={13} /> Send this chat
           </button>
@@ -106,7 +106,7 @@ function SendTab({ transcript, canSend }: { transcript: Transcript | null; canSe
 
   if (!canSend) {
     return (
-      <p className="rounded-lg border border-dashed border-white/10 px-3 py-6 text-center text-xs text-ink-400">
+      <p className="rounded-lg border border-dashed border-elev/10 px-3 py-6 text-center text-xs text-ink-400">
         Open a chat (or send a message) first, then come back here to continue it on another device.
       </p>
     );
@@ -124,7 +124,7 @@ function SendTab({ transcript, canSend }: { transcript: Transcript | null; canSe
           type="button"
           onClick={create}
           disabled={busy}
-          className="flex items-center justify-center gap-2 rounded-lg bg-accent-500 px-3 py-2.5 text-xs font-semibold text-ink-950 hover:bg-accent-400 disabled:opacity-40"
+          className="flex items-center justify-center gap-2 rounded-lg bg-accent-500 px-3 py-2.5 text-xs font-semibold text-white hover:bg-accent-400 disabled:opacity-40"
         >
           {busy ? <Loader2 size={14} className="animate-spin" /> : <ArrowRight size={14} />}
           Create a code
@@ -135,7 +135,7 @@ function SendTab({ transcript, canSend }: { transcript: Transcript | null; canSe
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex flex-col items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-4 py-5">
+      <div className="flex flex-col items-center gap-2 rounded-xl border border-elev/10 bg-elev/[0.04] px-4 py-5">
         <motion.button
           type="button"
           onClick={copy}
@@ -167,7 +167,7 @@ function SendTab({ transcript, canSend }: { transcript: Transcript | null; canSe
         type="button"
         onClick={create}
         disabled={busy}
-        className="flex items-center justify-center gap-1.5 rounded-lg border border-white/10 px-3 py-2 text-xs font-medium text-ink-200 hover:bg-white/[0.06] disabled:opacity-40"
+        className="flex items-center justify-center gap-1.5 rounded-lg border border-elev/10 px-3 py-2 text-xs font-medium text-ink-200 hover:bg-elev/[0.06] disabled:opacity-40"
       >
         {busy ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />} New code
       </button>
@@ -216,14 +216,14 @@ function ReceiveTab({ onRedeemed }: { onRedeemed: (conversationId: string) => vo
         autoCapitalize="characters"
         autoCorrect="off"
         spellCheck={false}
-        className="w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2.5 text-center font-mono text-lg uppercase tracking-[0.2em] text-ink-50 outline-none placeholder:text-ink-500 focus:border-accent-500/40"
+        className="w-full rounded-lg border border-elev/10 bg-elev/[0.04] px-3 py-2.5 text-center font-mono text-lg uppercase tracking-[0.2em] text-ink-50 outline-none placeholder:text-ink-500 focus:border-accent-500/40"
       />
       {error && <p className="text-xs text-danger-400">{error}</p>}
       <button
         type="button"
         onClick={redeem}
         disabled={busy || !value.trim()}
-        className="flex items-center justify-center gap-2 rounded-lg bg-accent-500 px-3 py-2.5 text-xs font-semibold text-ink-950 hover:bg-accent-400 disabled:opacity-40"
+        className="flex items-center justify-center gap-2 rounded-lg bg-accent-500 px-3 py-2.5 text-xs font-semibold text-white hover:bg-accent-400 disabled:opacity-40"
       >
         {busy ? <Loader2 size={14} className="animate-spin" /> : <ArrowRight size={14} />}
         Continue this chat

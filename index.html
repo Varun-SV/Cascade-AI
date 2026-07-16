@@ -40,7 +40,7 @@
     --t1: #f2a341;   /* amber  — plan / oversight   */
     --t2: #b48cff;   /* violet — coordinate / guard */
     --t3: #35d6e8;   /* cyan   — execute / runtime  */
-    --go: #b9ff3d;   /* lime   — the single action-color: CTA, cost, "active" */
+    --go: #8b7cf9;   /* violet — the single brand action-color: CTA, cost, "active" */
 
     --font-display: 'Syne', system-ui, sans-serif;
     --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
@@ -69,7 +69,7 @@
     overflow-x: clip;
   }
 
-  ::selection { background: rgba(185, 255, 61, 0.18); color: var(--go); }
+  ::selection { background: rgba(139, 124, 249, 0.18); color: var(--go); }
   ::-webkit-scrollbar { width: 5px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 99px; }
@@ -130,12 +130,12 @@
   }
   .nav-link:hover { color: var(--paper); background: rgba(255,255,255,0.04); }
   .nav-cta {
-    display: flex; align-items: center; gap: 7px; background: var(--go); color: var(--ink);
+    display: flex; align-items: center; gap: 7px; background: var(--go); color: #fff;
     font-weight: 700; font-size: 11px; letter-spacing: 0.04em; text-decoration: none;
     padding: 7px 15px; border-radius: var(--radius-sm); white-space: nowrap; flex-shrink: 0;
     transition: box-shadow 0.14s, transform 0.14s;
   }
-  .nav-cta:hover { box-shadow: 0 0 22px rgba(185,255,61,0.35); transform: translateY(-1px); }
+  .nav-cta:hover { box-shadow: 0 0 22px rgba(139, 124, 249,0.35); transform: translateY(-1px); }
   @media (max-width: 480px) {
     nav .inner { padding: 0 16px; }
     .nav-cta { padding: 8px 10px; }
@@ -152,13 +152,13 @@
   .hero::after {
     content: ''; position: absolute; top: -8%; left: 50%; transform: translateX(-50%);
     width: min(620px, 100vw); height: 420px; pointer-events: none;
-    background: radial-gradient(ellipse, rgba(178, 255, 61, 0.05) 0%, transparent 70%);
+    background: radial-gradient(ellipse, rgba(139, 124, 249, 0.05) 0%, transparent 70%);
   }
 
   .hero-eyebrow {
     display: inline-flex; align-items: center; gap: 8px;
     font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--go);
-    border: 1px solid rgba(185,255,61,0.22); background: rgba(185,255,61,0.05);
+    border: 1px solid rgba(139, 124, 249,0.22); background: rgba(139, 124, 249,0.05);
     padding: 6px 12px; border-radius: var(--radius-tag); margin-bottom: 26px;
   }
   .hero-dot { width: 5px; height: 5px; background: var(--go); border-radius: 50%; box-shadow: 0 0 8px var(--go); animation: blink 2s step-start infinite; }
@@ -184,11 +184,11 @@
 
   .hero-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 34px; }
   .btn-primary {
-    display: inline-flex; align-items: center; gap: 8px; background: var(--go); color: var(--ink);
+    display: inline-flex; align-items: center; gap: 8px; background: var(--go); color: #fff;
     font-weight: 700; font-size: 12px; letter-spacing: 0.03em; text-decoration: none;
     padding: 12px 22px; border-radius: var(--radius-md); transition: all 0.14s;
   }
-  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 0 30px rgba(185,255,61,0.28); }
+  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 0 30px rgba(139, 124, 249,0.28); }
   .btn-ghost {
     display: inline-flex; align-items: center; gap: 8px; color: var(--mute); text-decoration: none;
     font-size: 12px; padding: 12px 18px; border: 1px solid var(--line-2); border-radius: var(--radius-md);
@@ -201,7 +201,7 @@
     border: 1px solid var(--line-2); border-radius: var(--radius-md); padding: 13px 18px;
     font-size: 13px; color: var(--mute); cursor: pointer; transition: border-color 0.14s; position: relative;
   }
-  .install-row:hover { border-color: rgba(185,255,61,0.28); }
+  .install-row:hover { border-color: rgba(139, 124, 249,0.28); }
   .install-row .prompt { color: var(--go); user-select: none; }
   .install-row .cmd { color: var(--paper); }
   .install-row .hint { margin-left: 6px; font-size: 10px; color: var(--dim); border-left: 1px solid var(--line); padding-left: 12px; }
@@ -216,7 +216,7 @@
     color: var(--paper); font-size: 12px; font-weight: 700; letter-spacing: 0.02em;
     padding: 11px 16px; transition: border-color 0.14s, background 0.14s;
   }
-  .btn-download:hover { border-color: rgba(185,255,61,0.35); background: rgba(185,255,61,0.05); }
+  .btn-download:hover { border-color: rgba(139, 124, 249,0.35); background: rgba(139, 124, 249,0.05); }
   .btn-download svg { color: var(--go); flex-shrink: 0; }
   .btn-download .dl-meta { font-size: 10px; font-weight: 400; color: var(--dim); border-left: 1px solid var(--line); padding-left: 9px; }
   .btn-download-more {
@@ -225,7 +225,7 @@
     border-radius: 0 var(--radius-md) var(--radius-md) 0;
     color: var(--mute); font-size: 10px; transition: border-color 0.14s, color 0.14s;
   }
-  .btn-download-more:hover { border-color: rgba(185,255,61,0.35); color: var(--paper); }
+  .btn-download-more:hover { border-color: rgba(139, 124, 249,0.35); color: var(--paper); }
   .dl-menu {
     position: absolute; top: calc(100% + 6px); left: 0; z-index: 50; min-width: 300px;
     background: var(--ink-raised); border: 1px solid var(--line-2); border-radius: var(--radius-md);
@@ -408,7 +408,7 @@
   .cta-section::before {
     content: ''; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
     width: 640px; height: 320px; pointer-events: none;
-    background: radial-gradient(ellipse, rgba(185,255,61,0.045) 0%, transparent 70%);
+    background: radial-gradient(ellipse, rgba(139, 124, 249,0.045) 0%, transparent 70%);
   }
   .cta-section p { color: var(--mute); font-size: 13.5px; margin: 0 auto 32px; max-width: 480px; }
   .cta-actions { display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap; }

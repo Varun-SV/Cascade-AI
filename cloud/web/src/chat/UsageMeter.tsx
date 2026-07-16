@@ -35,7 +35,7 @@ export default function UsageMeter({ lastTokens, refreshSignal }: Props) {
             {usage.dailyRuns} / {usage.dailyRunLimit}
           </span>
         </div>
-        <div className="h-1 overflow-hidden rounded-full bg-white/10">
+        <div className="h-1 overflow-hidden rounded-full bg-elev/10">
           <div className={clsx('h-full rounded-full', atRunLimit ? 'bg-danger-500' : 'bg-accent-500')} style={{ width: `${runPct}%` }} />
         </div>
         {atRunLimit && <p className="mt-1 text-danger-500">Daily limit reached — resets at midnight UTC.</p>}
@@ -47,7 +47,7 @@ export default function UsageMeter({ lastTokens, refreshSignal }: Props) {
             <span>Context</span>
             <span className={clsx('tabular-nums', ctxFull && 'text-warning-500')}>~{lastTokens.toLocaleString()} tok</span>
           </div>
-          <div className="h-1 overflow-hidden rounded-full bg-white/10">
+          <div className="h-1 overflow-hidden rounded-full bg-elev/10">
             <div className={clsx('h-full rounded-full', ctxFull ? 'bg-warning-500' : 'bg-ink-600')} style={{ width: `${ctxPct}%` }} />
           </div>
           {ctxFull && <p className="mt-1 text-warning-500">Context is getting full — consider a new chat.</p>}

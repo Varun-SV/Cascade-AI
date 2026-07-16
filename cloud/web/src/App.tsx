@@ -16,7 +16,12 @@ import { useChatSession } from './chat/useChatSession.js';
 import { useAutoTitler } from './chat/useAutoTitler.js';
 import { loadKeys, saveKeys } from './keys/store.js';
 import { loadWebSearch, saveWebSearch, webSearchPayload } from './keys/webSearch.js';
-import { localModelEnabled, reduceMotionEnabled } from './lib/prefs.js';
+import {
+  localModelEnabled, reduceMotionEnabled,
+  themeMode, setThemeMode, density, setDensity, uiMode, setUiMode,
+  type ThemeMode, type Density, type UiMode,
+} from './lib/prefs.js';
+import { initTheme, applyTheme, applyDensity } from './lib/theme.js';
 import { fetchConfig, fetchMe, fetchSkills, getMessages, listConversations, logout, type CloudConfig } from './lib/api.js';
 import { closeSocket, getSocket } from './lib/socket.js';
 import type { CloudConversation, CloudUser, ProviderConfig, Skill, WhyReport } from './lib/types.js';
@@ -49,6 +54,9 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showContinue, setShowContinue] = useState(false);
   const [reduceMotion, setReduceMotion] = useState(() => reduceMotionEnabled());
+  const [theme, setTheme] = useState<ThemeMode>(() => themeMode());
+  const [densityMode, setDensityMode] = useState<Density>(() => density());
+  const [mode, setMode] = useState<UiMode>(() => uiMode());
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     const stored = localStorage.getItem(SIDEBAR_OPEN_KEY);
     // No explicit preference yet: default open on desktop (today's always-visible
@@ -56,6 +64,14 @@ export default function App() {
     // on first mobile visit is a worse default than starting collapsed).
     return stored !== null ? stored !== '0' : window.innerWidth >= 768;
   });
+
+  // Apply the stored theme + density on mount and follow the OS while in
+  // "system" mode (initTheme returns the listener-cleanup).
+  useEffect(() => initTheme(), []);
+
+  function changeTheme(m: ThemeMode) { setTheme(m); setThemeMode(m); applyTheme(m); }
+  function changeDensity(d: Density) { setDensityMode(d); setDensity(d); applyDensity(d); }
+  function changeMode(m: UiMode) { setMode(m); setUiMode(m); }
 
   function toggleSidebar() {
     setSidebarOpen((open) => {
@@ -280,6 +296,8 @@ export default function App() {
             onForceTierChange={chat.setForceTier}
             webSearch={chat.webSearch}
             onWebSearchChange={chat.setWebSearch}
+            uiMode={mode}
+            approval={chat.approval}
           />
         </div>
       </div>
@@ -299,6 +317,12 @@ export default function App() {
             onLogout={handleLogout}
             onLocalModelChange={setLocalModelOn}
             onReduceMotionChange={setReduceMotion}
+            theme={theme}
+            onThemeChange={changeTheme}
+            density={densityMode}
+            onDensityChange={changeDensity}
+            uiMode={mode}
+            onUiModeChange={changeMode}
           />
         )}
         {showVault && (

@@ -37,7 +37,7 @@ export default function LoginGate({ config, onDevLogin }: Props) {
           animate={{ rotate: 0, scale: 1 }}
           transition={{ type: 'spring', stiffness: 300, damping: 18, delay: 0.05 }}
         >
-          <Sparkles size={24} className="text-ink-950" />
+          <Sparkles size={24} className="text-white" />
         </motion.div>
         <h1 className="text-xl font-semibold text-ink-50">Sign in to Cascade Cloud</h1>
         <p className="mt-1 text-sm text-ink-400">Bring your own API keys — nothing is stored on our servers.</p>
@@ -48,7 +48,7 @@ export default function LoginGate({ config, onDevLogin }: Props) {
               href="/auth/github"
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
-              className="flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-sm font-medium text-ink-100 hover:bg-white/[0.09]"
+              className="flex items-center justify-center gap-2 rounded-xl border border-elev/10 bg-elev/[0.04] px-4 py-2.5 text-sm font-medium text-ink-100 hover:bg-elev/[0.09]"
             >
               <Github size={16} /> Continue with GitHub
             </motion.a>
@@ -58,7 +58,7 @@ export default function LoginGate({ config, onDevLogin }: Props) {
               href="/auth/google"
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
-              className="flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-sm font-medium text-ink-100 hover:bg-white/[0.09]"
+              className="flex items-center justify-center gap-2 rounded-xl border border-elev/10 bg-elev/[0.04] px-4 py-2.5 text-sm font-medium text-ink-100 hover:bg-elev/[0.09]"
             >
               Continue with Google
             </motion.a>
@@ -69,11 +69,11 @@ export default function LoginGate({ config, onDevLogin }: Props) {
         </div>
 
         {config.devLoginEnabled && (
-          <div className="mt-6 border-t border-white/10 pt-4">
+          <div className="mt-6 border-t border-elev/10 pt-4">
             <p className="mb-2 text-xs text-ink-400">Local development only</p>
             <div className="flex gap-2">
               <input
-                className="flex-1 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-1.5 text-sm text-ink-100 outline-none focus:border-accent-500/60"
+                className="flex-1 rounded-lg border border-elev/10 bg-elev/[0.04] px-3 py-1.5 text-sm text-ink-100 outline-none focus:border-accent-500/60"
                 placeholder="Your name"
                 value={devName}
                 onChange={(e) => setDevName(e.target.value)}
@@ -84,7 +84,7 @@ export default function LoginGate({ config, onDevLogin }: Props) {
                 onClick={handleDevLogin}
                 whileHover={{ scale: 1.03 }}
                 whileTap={{ scale: 0.96 }}
-                className="accent-grad rounded-lg px-3 py-1.5 text-sm font-semibold text-ink-950 shadow-lg shadow-accent-700/25 disabled:opacity-50"
+                className="accent-grad rounded-lg px-3 py-1.5 text-sm font-semibold text-white shadow-lg shadow-accent-700/25 disabled:opacity-50"
               >
                 Dev login
               </motion.button>

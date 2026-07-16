@@ -74,7 +74,7 @@ export default function UpgradeModal() {
       )}
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <div className="rounded-lg border border-white/10 p-3">
+        <div className="rounded-lg border border-elev/10 p-3">
           <h3 className="mb-2 text-sm font-semibold text-ink-100">Free</h3>
           <ul className="flex flex-col gap-1.5 text-xs text-ink-300">
             {FREE_FEATURES.map((f) => (
@@ -83,7 +83,7 @@ export default function UpgradeModal() {
           </ul>
         </div>
 
-        <div className="rounded-lg border border-accent-600 bg-white/[0.05] p-3">
+        <div className="rounded-lg border border-accent-600 bg-elev/[0.05] p-3">
           <div className="mb-2 flex items-center justify-between">
             <h3 className="flex items-center gap-1.5 text-sm font-semibold text-ink-100">
               <Crown size={14} className="text-accent-400" /> Pro
@@ -108,7 +108,7 @@ export default function UpgradeModal() {
                   type="button"
                   onClick={cancel}
                   disabled={busy}
-                  className="w-full rounded-md border border-white/10 px-3 py-1.5 text-xs text-ink-300 hover:bg-white/[0.05] hover:text-danger-400 disabled:opacity-40"
+                  className="w-full rounded-md border border-elev/10 px-3 py-1.5 text-xs text-ink-300 hover:bg-elev/[0.05] hover:text-danger-400 disabled:opacity-40"
                 >
                   Cancel subscription
                 </button>
@@ -119,7 +119,7 @@ export default function UpgradeModal() {
               type="button"
               onClick={subscribe}
               disabled={busy}
-              className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-md bg-accent-500 px-3 py-1.5 text-xs font-semibold text-ink-950 hover:bg-accent-400 disabled:opacity-50"
+              className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-md bg-accent-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-accent-400 disabled:opacity-50"
             >
               {busy ? <Loader2 size={13} className="animate-spin" /> : <Crown size={13} />} Subscribe
             </button>
@@ -134,7 +134,7 @@ export default function UpgradeModal() {
       {notice && <p className="mt-3 rounded-md border border-success-500/25 bg-success-500/10 px-3 py-2 text-xs text-success-300">{notice}</p>}
       {error && <p className="mt-3 rounded-md border border-danger-800 bg-danger-950/40 px-3 py-2 text-xs text-danger-300">{error}</p>}
 
-      <div className="mt-4 flex items-center gap-2 rounded-md border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-ink-300">
+      <div className="mt-4 flex items-center gap-2 rounded-md border border-elev/10 bg-elev/[0.03] px-3 py-2 text-xs text-ink-300">
         <Monitor size={14} className="shrink-0 text-ink-400" />
         <span>The <span className="font-medium text-ink-200">desktop app is free</span> — always. Cascade Cloud is the hosted convenience: no install, your chats synced, run from anywhere.</span>
       </div>
