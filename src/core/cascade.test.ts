@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Cascade } from './cascade.js';
+import { Cascade, buildContextualPrompt } from './cascade.js';
 import type { CascadeConfig, ConversationMessage } from '../types.js';
 
 const baseConfig: CascadeConfig = {
@@ -253,6 +253,48 @@ describe('Cascade routing complexity', () => {
       'create a small todo app for my browser homepage with a clean look', '/dummy');
     expect(complexity).toBe('Moderate');
     expect(cascade.getDecisionLog()[0]!.detail).not.toContain('heuristic floor');
+  });
+});
+
+describe('buildContextualPrompt (multi-turn context into execution)', () => {
+  it('returns the prompt unchanged when there is no history', () => {
+    expect(buildContextualPrompt('hello')).toBe('hello');
+    expect(buildContextualPrompt('hello', [])).toBe('hello');
+  });
+
+  it('prefixes recent turns and labels the latest message so a follow-up resolves in context', () => {
+    const history: ConversationMessage[] = [
+      { role: 'assistant', content: '1. Try the search again, or\n2. Summarize articles you paste.' },
+      { role: 'user', content: 'go with the first one' },
+      { role: 'assistant', content: 'Okay — retrying the web search now.' },
+    ];
+    const out = buildContextualPrompt('1', history);
+    // The bare "1" is no longer standalone — the prior turns travel with it.
+    expect(out).toContain('Recent conversation');
+    expect(out).toContain('Assistant: 1. Try the search again');
+    expect(out).toContain('User: go with the first one');
+    expect(out).toContain('Latest user message:\n1');
+    expect(out).not.toBe('1');
+  });
+
+  it('keeps only the last 6 turns', () => {
+    const history: ConversationMessage[] = Array.from({ length: 10 }, (_, i) => ({
+      role: (i % 2 === 0 ? 'user' : 'assistant') as ConversationMessage['role'],
+      content: `msg-${i}`,
+    }));
+    const out = buildContextualPrompt('next', history);
+    expect(out).not.toContain('msg-3'); // 7th-from-last, dropped
+    expect(out).toContain('msg-4'); // first kept
+    expect(out).toContain('msg-9'); // last kept
+  });
+
+  it('flattens non-string (block) message content without throwing', () => {
+    const history: ConversationMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: 'describe this' }, { type: 'image', image: { type: 'base64', data: 'x', mimeType: 'image/png' } }] },
+    ];
+    const out = buildContextualPrompt('and now?', history);
+    expect(out).toContain('describe this');
+    expect(out).toContain('[non-text]');
   });
 });
 

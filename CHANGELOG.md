@@ -5,6 +5,19 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Cascade Cloud 0.6.1 - 2026-07-16
+
+### Fixed
+- **Multi-turn chat lost its context on every follow-up.** In hosted (and CLI)
+  runs, only the complexity *classifier* saw the conversation history — the
+  execution tiers received the bare latest message, so a short reply like "1",
+  "yes", or "make it shorter" was run as a standalone task with no memory of the
+  prior turn (e.g. "Completed subtask 1. Result: 1."). Recent history is now
+  threaded into the root task for Simple / Moderate / Complex runs alike, so a
+  follow-up is resolved in the context of the conversation. No-op for a
+  conversation's first message and for the desktop path (which already stitches
+  context in via its own continuation prompt and passes no history here).
+
 ## Cascade Cloud 0.6.0 - 2026-07-15
 
 ### Added
