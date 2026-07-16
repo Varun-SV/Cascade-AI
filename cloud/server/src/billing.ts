@@ -21,12 +21,19 @@ export interface BillingConfig {
 
 /** Resolves billing config from env, or null when not fully configured. */
 export function billingConfig(env: CloudEnv): BillingConfig | null {
-  if (!env.RAZORPAY_KEY_ID || !env.RAZORPAY_KEY_SECRET || !env.RAZORPAY_PLAN_ID) return null;
+  // Trim every value — copy-pasting keys/plan id into a deploy env very easily
+  // picks up a trailing space or newline, which then reaches Razorpay verbatim
+  // and comes back as "Authentication failed" (key) or "The ID provided is
+  // invalid or could not be found" (plan), indistinguishable from a wrong value.
+  const keyId = env.RAZORPAY_KEY_ID?.trim();
+  const keySecret = env.RAZORPAY_KEY_SECRET?.trim();
+  const planId = env.RAZORPAY_PLAN_ID?.trim();
+  if (!keyId || !keySecret || !planId) return null;
   return {
-    keyId: env.RAZORPAY_KEY_ID,
-    keySecret: env.RAZORPAY_KEY_SECRET,
-    webhookSecret: env.RAZORPAY_WEBHOOK_SECRET ?? '',
-    planId: env.RAZORPAY_PLAN_ID,
+    keyId,
+    keySecret,
+    webhookSecret: (env.RAZORPAY_WEBHOOK_SECRET ?? '').trim(),
+    planId,
     priceLabel: env.RAZORPAY_PRICE_LABEL,
   };
 }
