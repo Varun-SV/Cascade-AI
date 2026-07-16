@@ -1,14 +1,15 @@
 import { useState } from 'react';
 import {
   Sparkles, Brain, KeyRound, Crown, LogOut, Cpu, Eye, ChevronRight, Zap,
-  Sun, Moon, Monitor, LayoutGrid, Rows3, SlidersHorizontal,
+  Sun, Moon, Monitor, LayoutGrid, Rows3, SlidersHorizontal, Layers,
 } from 'lucide-react';
 import Modal from './Modal.js';
 import { detectLocalModelCapability } from '../lib/localModel/capability.js';
 import {
   localModelEnabled, setLocalModelEnabled, reduceMotionEnabled, setReduceMotionEnabled,
   fastAnswerModel, setFastAnswerModel, tierParams, setTierParams,
-  type ThemeMode, type Density, type UiMode, type TierParams, type TierParam,
+  extendedContext, setExtendedContext,
+  type ThemeMode, type Density, type UiMode, type TierParams, type TierParam, type ExtendedContextPref,
 } from '../lib/prefs.js';
 import type { CloudUser } from '../lib/types.js';
 
@@ -155,11 +156,16 @@ export default function SettingsModal({
   const [reduceMotion, setReduceMotion] = useState(reduceMotionEnabled());
   const [fastModel, setFastModel] = useState(fastAnswerModel());
   const [params, setParams] = useState<TierParams>(() => tierParams());
+  const [extCtx, setExtCtx] = useState<ExtendedContextPref>(() => extendedContext());
 
   function updateTierParam(key: 't1' | 't2' | 't3', v: TierParam) {
     const next = { ...params, [key]: v };
     setParams(next);
     setTierParams(next);
+  }
+  function updateExtCtx(v: ExtendedContextPref) {
+    setExtCtx(v);
+    setExtendedContext(v);
   }
 
   function toggleLocal(v: boolean) {
@@ -302,6 +308,33 @@ export default function SettingsModal({
                 />
               ))}
             </div>
+
+            <Row
+              icon={<Layers size={15} />}
+              title="Extended context"
+              subtitle="Compact history and oversized inputs so they fit the model's window — a big paste is chunked, summarized, and combined (with a one-tap confirm before the extra calls)."
+              right={
+                <Toggle
+                  on={extCtx.enabled}
+                  onChange={(on) => updateExtCtx({ ...extCtx, enabled: on })}
+                  label="Extended context"
+                />
+              }
+            />
+            {extCtx.enabled && (
+              <div className="flex items-center justify-between gap-3 pb-1 pl-7">
+                <span className="text-xs text-ink-400">Max size past the window (before truncating)</span>
+                <Segmented
+                  label="Extended context cap"
+                  value={String(extCtx.maxMultiplier)}
+                  onChange={(v) => updateExtCtx({ ...extCtx, maxMultiplier: v === '3' ? 3 : 2 })}
+                  options={[
+                    { value: '2', label: '2×' },
+                    { value: '3', label: '3×' },
+                  ]}
+                />
+              </div>
+            )}
           </>
         )}
 

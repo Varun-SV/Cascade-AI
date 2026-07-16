@@ -759,6 +759,18 @@ export class CascadeRouter extends EventEmitter {
     return this.selector;
   }
 
+  /**
+   * The tightest context window (in tokens) across the resolved tier models, or
+   * undefined if none are resolved yet. Extended-context compaction budgets
+   * against this so the compacted context fits whichever tier handles the run.
+   */
+  getReferenceContextWindow(): number | undefined {
+    const windows = [...this.tierModels.values()]
+      .map((m) => m.contextWindow)
+      .filter((n) => typeof n === 'number' && n > 0);
+    return windows.length ? Math.min(...windows) : undefined;
+  }
+
   /** Wire the Cascade Auto task analyzer used for per-subtask model routing. */
   setTaskAnalyzer(analyzer: TaskAnalyzer): void {
     this.taskAnalyzer = analyzer;

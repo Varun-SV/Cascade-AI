@@ -69,6 +69,14 @@ const ChatRunPayloadSchema = z.object({
     })
     .partial()
     .optional(),
+  // Extended context: compact history/input that exceeds the model's window.
+  // maxMultiplier caps how far past the window an input may go before truncation.
+  extendedContext: z
+    .object({
+      enabled: z.boolean().optional(),
+      maxMultiplier: z.number().min(1).max(5).optional(),
+    })
+    .optional(),
   // Optional complexity verdict computed on the user's device (opt-in browser
   // model). When present, the orchestrator skips its own classifier LLM call and
   // starts from this — its heuristic floors + escalation still apply as
@@ -127,6 +135,8 @@ export interface RunControls {
   webSearchConfig?: WebSearchBackend;
   /** Advanced per-tier generation params (developer knobs). */
   tierParams?: { t1?: TierParam; t2?: TierParam; t3?: TierParam };
+  /** Extended context: compact oversized history/input to fit the model window. */
+  extendedContext?: { enabled?: boolean; maxMultiplier?: number };
 }
 
 // Maps the UI's routing mode to Cascade Auto's bias. Cascade Auto stays ON for
@@ -160,12 +170,14 @@ export function buildCloudConfig(
         ...(tp.t3?.temperature !== undefined ? { t3Temperature: tp.t3.temperature } : {}),
       }
     : undefined;
+  const ec = controls.extendedContext;
   return {
     providers,
     cascadeAuto: true,
     autoBias: BIAS_BY_MODE[controls.routingMode ?? 'auto'] ?? 'balanced',
     routing: { forceTier: controls.forceTier ?? 'auto' },
     ...(tierLimits && Object.keys(tierLimits).length ? { tierLimits } : {}),
+    ...(ec?.enabled ? { extendedContext: { enabled: true, maxMultiplier: ec.maxMultiplier ?? 2 } } : {}),
     tools: {
       shellAllowlist: [],
       shellBlocklist: [],
@@ -321,6 +333,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     webSearch: payload.webSearch,
     webSearchConfig: payload.webSearchConfig,
     tierParams: payload.tierParams,
+    extendedContext: payload.extendedContext,
   });
   const cascade: Cascade = createCascade(config, scratchDir);
 
@@ -353,6 +366,20 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     const ev = e as { level?: string; message?: string };
     console.warn(`[run ${conversation.id}] ${ev.level ?? 'info'}: ${ev.message ?? ''}`);
   };
+  // Extended context: forward the confirm request to the client and resolve the
+  // SDK gate from the client's decision (context:decision). Also surface the
+  // "compacted" notice. The decision handler is scoped to this run and removed
+  // in the finally block. If the client never answers, the SDK gate times out
+  // and proceeds — the run's budget cap is the real guardrail.
+  const onContextApproval = (e: unknown) =>
+    socket.emit('context:approval-required', { conversationId: conversation.id, ...(e as object) });
+  const onCompacted = (e: unknown) =>
+    socket.emit('context:compacted', { conversationId: conversation.id, ...(e as object) });
+  const onContextDecision = (d: { approved?: boolean }) => cascade.resolveContextApproval(!!d?.approved);
+  cascade.on('context:approval-required', onContextApproval);
+  cascade.on('context:compacted', onCompacted);
+  socket.on('context:decision', onContextDecision);
+
   cascade.on('stream:token', onToken);
   cascade.on('tier:status', onStatus);
   cascade.on('plan:approval-required', onPlan);
@@ -438,6 +465,9 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     cascade.off('stream:token', onToken);
     cascade.off('tier:status', onStatus);
     cascade.off('plan:approval-required', onPlan);
+    cascade.off('context:approval-required', onContextApproval);
+    cascade.off('context:compacted', onCompacted);
+    socket.off('context:decision', onContextDecision);
     try { await cascade.close(); } catch { /* non-critical */ }
   }
 }

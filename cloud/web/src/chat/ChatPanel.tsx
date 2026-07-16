@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { AlertTriangle, KeyRound, Loader2, Sparkles } from 'lucide-react';
+import { AlertTriangle, KeyRound, Loader2, Sparkles, Layers } from 'lucide-react';
 import Message from './Message.js';
 import Composer from './Composer.js';
 import PlanNotice from './PlanNotice.js';
@@ -28,11 +28,13 @@ interface Props {
   onWebSearchChange: (on: boolean) => void;
   uiMode: UiMode;
   approval: PlanApproval | null;
+  compactionNotice: string | null;
 }
 
 export default function ChatPanel({
   messages, busy, error, status, hasProviders, skills, skillId, onSkillChange, onSend, onStop, onRegenerate,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange, uiMode, approval,
+  compactionNotice,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const lastAssistantId = [...messages].reverse().find((m) => m.role === 'assistant' && !m.streaming)?.id;
@@ -79,6 +81,16 @@ export default function ChatPanel({
           </AnimatePresence>
           {/* Read-only boardroom plan — Advanced view only (Simple stays minimal). */}
           {busy && approval && uiMode === 'advanced' && <PlanNotice approval={approval} />}
+          {compactionNotice && (
+            <motion.div
+              className="flex items-center gap-2 rounded-lg border border-accent-500/20 bg-accent-500/[0.06] px-3 py-2 text-xs text-ink-300"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+            >
+              <Layers size={13} className="text-accent-300" />
+              <span>{compactionNotice}</span>
+            </motion.div>
+          )}
           {status && busy && (
             <motion.div
               className="flex items-center gap-2 text-sm text-ink-400"

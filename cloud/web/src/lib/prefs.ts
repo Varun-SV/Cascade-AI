@@ -7,6 +7,7 @@ const THEME_KEY = 'cascade-cloud-theme';
 const DENSITY_KEY = 'cascade-cloud-density';
 const UI_MODE_KEY = 'cascade-cloud-ui-mode';
 const TIER_PARAMS_KEY = 'cascade-cloud-tier-params';
+const EXT_CONTEXT_KEY = 'cascade-cloud-ext-context';
 
 export type ThemeMode = 'light' | 'dark' | 'system';
 export type Density = 'comfortable' | 'compact';
@@ -95,6 +96,25 @@ export function setTierParams(v: TierParams): void {
     if (Object.keys(cleaned).length) localStorage.setItem(TIER_PARAMS_KEY, JSON.stringify(cleaned));
     else localStorage.removeItem(TIER_PARAMS_KEY);
   } catch { /* storage unavailable */ }
+}
+
+/** Extended context: compact oversized history/input to fit the model window. */
+export interface ExtendedContextPref { enabled: boolean; maxMultiplier: 2 | 3 }
+
+export function extendedContext(): ExtendedContextPref {
+  try {
+    const raw = localStorage.getItem(EXT_CONTEXT_KEY);
+    if (!raw) return { enabled: false, maxMultiplier: 2 };
+    const p = JSON.parse(raw) as Partial<ExtendedContextPref>;
+    return { enabled: !!p.enabled, maxMultiplier: p.maxMultiplier === 3 ? 3 : 2 };
+  } catch {
+    return { enabled: false, maxMultiplier: 2 };
+  }
+}
+
+export function setExtendedContext(v: ExtendedContextPref): void {
+  try { localStorage.setItem(EXT_CONTEXT_KEY, JSON.stringify({ enabled: !!v.enabled, maxMultiplier: v.maxMultiplier === 3 ? 3 : 2 })); }
+  catch { /* storage unavailable */ }
 }
 
 /** Optional model id to pin for "Fast answer" (blank = auto-pick a mid model). */

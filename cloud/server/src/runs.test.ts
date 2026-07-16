@@ -14,6 +14,10 @@ class FakeSocket {
     this.events.push({ event, payload });
     return true;
   }
+  // The run pipeline listens for the client's extended-context decision on the
+  // socket; the stub never sends one, so these are inert no-ops.
+  on(): this { return this; }
+  off(): this { return this; }
 }
 
 describe('buildCloudConfig', () => {
@@ -87,6 +91,17 @@ describe('buildCloudConfig', () => {
     expect(buildCloudConfig([], 0.5).tierLimits).toBeUndefined();
     // An empty tierParams object contributes nothing.
     expect(buildCloudConfig([], 0.5, { tierParams: {} }).tierLimits).toBeUndefined();
+  });
+
+  it('maps extended context only when enabled, defaulting the multiplier', () => {
+    expect(buildCloudConfig([], 0.5).extendedContext).toBeUndefined();
+    expect(buildCloudConfig([], 0.5, { extendedContext: { enabled: false } }).extendedContext).toBeUndefined();
+    expect(buildCloudConfig([], 0.5, { extendedContext: { enabled: true } }).extendedContext).toEqual({
+      enabled: true, maxMultiplier: 2,
+    });
+    expect(buildCloudConfig([], 0.5, { extendedContext: { enabled: true, maxMultiplier: 3 } }).extendedContext).toEqual({
+      enabled: true, maxMultiplier: 3,
+    });
   });
 });
 

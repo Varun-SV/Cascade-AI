@@ -1371,6 +1371,7 @@ const DECISION_KIND_LABEL: Record<DecisionLogEntry['kind'], string> = {
   model: 'Models',
   failover: 'Failover',
   escalation: 'Escalation',
+  context: 'Context',
 };
 
 function formatPlanPreview(plan: { complexity: string; sections: Array<{ sectionTitle: string; t3Subtasks?: unknown[] }>; reasoning?: string }): string {

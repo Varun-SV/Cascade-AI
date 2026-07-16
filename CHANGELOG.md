@@ -5,6 +5,35 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.23.0 - 2026-07-16
+
+### Added
+- **Per-tier model parameters (Advanced).** Set max output tokens and sampling
+  temperature per orchestration tier (T1/T2/T3) in **Settings → Advanced → Model
+  parameters** (blank = the model's default). `maxTokens` is a ceiling (it lowers
+  an over-large request, never raises a smaller one); `temperature` is applied
+  only to non-deterministic calls, so internal classification/routing stays
+  deterministic. Backed by the SDK's `tierLimits` (now with per-tier temperature)
+  and a pure, tested `applyTierLimits`.
+- **Extended context — process inputs larger than the model's window.** New
+  opt-in setting (Advanced, off by default) that compacts an over-budget run to
+  fit: conversation history that nears the window is folded into a rolling
+  summary automatically, and a single oversized input is split into
+  overlapping, structure-aware chunks, summarized in parallel (map), and
+  recursively combined (reduce) — bounded by a **2× / 3× cap** past which the
+  input is truncated. Because chunking spends extra model calls, the hosted app
+  shows a **one-tap confirm** ("~N× the limit — process? ~N extra calls") before
+  running it, and a notice once compaction happens. Runs inside the SDK right
+  after routing (so the real model window is known), so desktop and cloud both
+  benefit; the per-run budget cap remains the hard guardrail.
+
+### Fixed
+- **Cloud data survives Railway redeploys.** `DATA_DIR` now defaults to the
+  attached Railway persistent volume (`RAILWAY_VOLUME_MOUNT_PATH`) when not set
+  explicitly, so the SQLite DB and per-tenant uploads no longer sit on the
+  ephemeral container filesystem that every redeploy wiped. Boot logs a storage
+  diagnostic (and a loud warning if a deploy is still writing to ephemeral disk).
+
 ## 0.22.0 - 2026-07-16
 
 ### Changed
