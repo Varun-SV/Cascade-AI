@@ -78,3 +78,50 @@ describe('ModelSelector — provider attribution for local models', () => {
     expect(m!.provider).toBe('azure');
   });
 });
+
+function geminiModel(id: string): ModelInfo {
+  return {
+    id, name: id, provider: 'gemini',
+    contextWindow: 1_000_000, isVisionCapable: true,
+    inputCostPer1kTokens: 0, outputCostPer1kTokens: 0,
+    maxOutputTokens: 8_000, supportsStreaming: true, isLocal: false,
+  };
+}
+
+describe('ModelSelector — provider model validation (discovery)', () => {
+  it('auto-selection only ever picks a validated model, never an un-validated one', () => {
+    const selector = new ModelSelector(new Set(['gemini']));
+    selector.addDynamicModel(geminiModel('gemini-real'));
+    selector.addDynamicModel(geminiModel('gemini-phantom'));   // present in catalog, not served by the key
+    selector.setValidatedModels('gemini', ['gemini-real']);    // only this one is real
+
+    for (const tier of ['T1', 'T2', 'T3'] as const) {
+      const m = selector.selectForTier(tier);
+      expect(m, tier).not.toBeNull();
+      // Never the phantom, and (since only gemini is available) never a bundled
+      // catalog id the key didn't confirm.
+      expect(m!.id, tier).toBe('gemini-real');
+    }
+  });
+
+  it('normalizes ids so a "models/" prefix matches the bare id', () => {
+    const selector = new ModelSelector(new Set(['gemini']));
+    selector.addDynamicModel(geminiModel('gemini-2.5-flash'));
+    selector.setValidatedModels('gemini', ['models/gemini-2.5-flash']); // Gemini prefix form
+    expect(selector.selectForTier('T3')!.id).toBe('gemini-2.5-flash');
+  });
+
+  it('without validation, selection is unchanged (no filtering)', () => {
+    const selector = new ModelSelector(new Set(['gemini']));
+    selector.addDynamicModel(geminiModel('gemini-phantom'));
+    // No setValidatedModels call → the model is selectable as before.
+    expect(selector.selectForTier('T3')).not.toBeNull();
+  });
+
+  it('an empty discovery result is ignored (keeps the static catalog usable)', () => {
+    const selector = new ModelSelector(new Set(['gemini']));
+    selector.addDynamicModel(geminiModel('gemini-real'));
+    selector.setValidatedModels('gemini', []); // discovery returned nothing → ignore
+    expect(selector.selectForTier('T3')).not.toBeNull();
+  });
+});

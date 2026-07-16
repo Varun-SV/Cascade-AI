@@ -100,6 +100,32 @@ Rules:
 ${rules.filter((r): r is string => r !== false).join('\n')}`;
 }
 
+/** File-writing tools — a worker can only produce a file artifact if it has one. */
+const ARTIFACT_TOOLS = new Set(['file_write', 'file_edit', 'shell']);
+
+/**
+ * Whether a worker should be *required* to produce a verified file artifact.
+ *
+ * The task text may describe a file deliverable, but requiring one is only sane
+ * when the worker actually has a tool that can create it. A hosted chat run, for
+ * example, enables only web_search/web_fetch — with no file-writing tool the
+ * worker can never satisfy the check, so it used to loop and then throw
+ * WorkerStallError ("stalled waiting for artifact creation…"), surfacing as an
+ * `(incomplete: …)` answer. With no such tool the worker's generated text IS the
+ * deliverable, so we don't demand a file it has no way to write.
+ */
+export function shouldRequireArtifact(
+  assignment: { files?: string[]; description?: string; expectedOutput?: string } | undefined,
+  toolNames: string[],
+): boolean {
+  if (!toolNames.some((n) => ARTIFACT_TOOLS.has(n))) return false;
+  // An explicit spec slice is authoritative — no regex guessing needed.
+  if (assignment?.files?.length) return true;
+  const haystack = `${assignment?.description ?? ''}\n${assignment?.expectedOutput ?? ''}`;
+  return /\b[\w./-]+\.(pdf|md|html|txt|json|csv|py|js|ts|tsx|jsx|docx?|png|jpg|jpeg|svg|gif)\b/i.test(haystack)
+    || /save (?:a|the)? file|create (?:a|the)? file|write (?:a|the)? file/i.test(haystack);
+}
+
 export class T3Worker extends BaseTier {
   private router: CascadeRouter;
   private toolRegistry: ToolRegistry;
@@ -883,12 +909,7 @@ export class T3Worker extends BaseTier {
   }
 
   private requiresArtifact(): boolean {
-    // An explicit spec slice is authoritative — no regex guessing needed.
-    if (this.assignment?.files?.length) return true;
-    const haystack = `${this.assignment?.description ?? ''}
-${this.assignment?.expectedOutput ?? ''}`;
-    return /\b[\w./-]+\.(pdf|md|html|txt|json|csv|py|js|ts|tsx|jsx|docx?|png|jpg|jpeg|svg|gif)\b/i.test(haystack)
-      || /save (?:a|the)? file|create (?:a|the)? file|write (?:a|the)? file/i.test(haystack);
+    return shouldRequireArtifact(this.assignment, this.tools.map((t) => t.name));
   }
 
   private extractArtifactPaths(assignment: T2ToT3Assignment): string[] {

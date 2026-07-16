@@ -11,9 +11,22 @@ import {
   MODELS,
 } from '../../constants.js';
 
+/** Normalize a model id for cross-source comparison (Gemini prefixes `models/`). */
+function normalizeModelId(id: string): string {
+  return id.replace(/^models\//, '').toLowerCase();
+}
+
 export class ModelSelector {
   private availableProviders: Set<ProviderType>;
   private availableModels: Map<string, ModelInfo>;
+  /**
+   * Per-provider set of model ids the provider's own API confirmed it serves
+   * (from listModels discovery). When present for a provider, AUTO selection
+   * skips that provider's bundled catalog ids that aren't in the set — so a
+   * stale/access-gated catalog id is never picked, then 404'd, then failed over.
+   * Absent for a provider ⇒ no validation ran ⇒ behave exactly as before.
+   */
+  private validatedIds = new Map<ProviderType, Set<string>>();
 
   constructor(availableProviders: Set<ProviderType>) {
     this.availableProviders = availableProviders;
@@ -22,6 +35,22 @@ export class ModelSelector {
 
   addDynamicModel(model: ModelInfo): void {
     this.availableModels.set(model.id, model);
+  }
+
+  /** Record the ids a provider's API actually serves (discovery). Empty ⇒ ignored. */
+  setValidatedModels(provider: ProviderType, ids: string[]): void {
+    if (!ids.length) return;
+    this.validatedIds.set(provider, new Set(ids.map(normalizeModelId)));
+  }
+
+  /**
+   * A model is usable for AUTO selection when its provider is available AND —
+   * if that provider was validated — the id is one the provider confirmed.
+   */
+  private isUsable(model: ModelInfo): boolean {
+    if (!this.availableProviders.has(model.provider)) return false;
+    const valid = this.validatedIds.get(model.provider);
+    return !valid || valid.has(normalizeModelId(model.id));
   }
 
   /**
@@ -70,12 +99,12 @@ export class ModelSelector {
     const priority = this.getPriorityList(tier);
     for (const key of priority) {
       const model = this.availableModels.get(key);
-      if (model && this.availableProviders.has(model.provider)) return model;
+      if (model && this.isUsable(model)) return model;
     }
 
     // Fallback: any model from available providers
     for (const [, model] of this.availableModels) {
-      if (this.availableProviders.has(model.provider)) return model;
+      if (this.isUsable(model)) return model;
     }
 
     return null;
@@ -99,7 +128,7 @@ export class ModelSelector {
     for (let i = currentIdx + 1; i < priority.length; i++) {
       const key = priority[i]!;
       const model = this.availableModels.get(key);
-      if (model && this.availableProviders.has(model.provider)) return model;
+      if (model && this.isUsable(model)) return model;
     }
     return null;
   }
@@ -127,7 +156,7 @@ export class ModelSelector {
     const candidates: ModelInfo[] = [];
     for (const key of priority) {
       const model = this.availableModels.get(key);
-      if (model && this.availableProviders.has(model.provider)) {
+      if (model && this.isUsable(model)) {
         candidates.push(model);
       }
     }
