@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 import type { ProviderConfig, WhyReport } from '../lib/types.js';
-import { localModelEnabled } from '../lib/prefs.js';
+import { localModelEnabled, fastAnswerModel } from '../lib/prefs.js';
 import { detectLocalModelCapability } from '../lib/localModel/capability.js';
 import { warmLocalModel } from '../lib/localModel/engine.js';
 import { classifyLocalComplexity } from '../lib/localModel/classifier.js';
@@ -27,6 +27,8 @@ export interface ChatMessage {
 export interface SendInput {
   prompt: string;
   attachments?: ChatAttachment[];
+  /** "Fast answer": one mid-tier model, no orchestration. */
+  fast?: boolean;
 }
 
 export type RoutingMode = 'auto' | 'quality' | 'fast';
@@ -143,7 +145,7 @@ export function useChatSession(
   // Shared run path for a fresh send and for regenerate. `appendUser` is false
   // when regenerating (the user message already exists in the transcript).
   const runChat = useCallback(
-    (prompt: string, attachments: ChatAttachment[] | undefined, appendUser: boolean) => {
+    (prompt: string, attachments: ChatAttachment[] | undefined, appendUser: boolean, fast = false) => {
       const text = prompt.trim();
       if (!socket || busy || !text) return;
       setBusy(true);
@@ -168,6 +170,8 @@ export function useChatSession(
             webSearch,
             webSearchConfig,
             complexityHint,
+            fastAnswer: fast || undefined,
+            fastAnswerModel: fast ? (fastAnswerModel() || undefined) : undefined,
           },
           onAck,
         );
@@ -212,7 +216,8 @@ export function useChatSession(
       // escalation as guardrails). Anything short of a confident local verdict
       // falls straight through to a normal send, so this never blocks or
       // degrades the run. A pinned tier (forceTier) makes the hint moot, so skip.
-      if (forceTier === 'auto' && localModelEnabled() && detectLocalModelCapability().supported) {
+      // A fast answer is a single direct call — no need to classify complexity.
+      if (!fast && forceTier === 'auto' && localModelEnabled() && detectLocalModelCapability().supported) {
         void classifyLocalComplexity(text).then((hint) => emitRun(hint ?? undefined)).catch(() => emitRun());
       } else {
         emitRun();
@@ -221,7 +226,7 @@ export function useChatSession(
     [socket, busy, conversationId, providers, skillId, routingMode, forceTier, webSearch, webSearchConfig],
   );
 
-  const send = useCallback((input: SendInput) => runChat(input.prompt, input.attachments, true), [runChat]);
+  const send = useCallback((input: SendInput) => runChat(input.prompt, input.attachments, true, input.fast), [runChat]);
 
   // Ask the server to abort the in-flight run. The run still resolves (with
   // whatever completed), so the normal ack path finalises the message; we just

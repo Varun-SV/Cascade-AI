@@ -129,6 +129,26 @@ describe('parseChatRunPayload', () => {
     ).toThrow();
   });
 
+  it('accepts a fast-answer flag with an optional pinned model, and normalizes a blank model', () => {
+    const parsed = parseChatRunPayload({
+      prompt: 'hi',
+      providers: [{ type: 'openai' }],
+      fastAnswer: true,
+      fastAnswerModel: 'gpt-4o-mini',
+    });
+    expect(parsed.fastAnswer).toBe(true);
+    expect(parsed.fastAnswerModel).toBe('gpt-4o-mini');
+    // Absent by default; a blank pinned model normalizes to undefined (auto-pick).
+    expect(parseChatRunPayload({ prompt: 'hi', providers: [{ type: 'openai' }] }).fastAnswer).toBeUndefined();
+    expect(
+      parseChatRunPayload({ prompt: 'hi', providers: [{ type: 'openai' }], fastAnswer: true, fastAnswerModel: '' })
+        .fastAnswerModel,
+    ).toBeUndefined();
+    expect(() =>
+      parseChatRunPayload({ prompt: 'hi', providers: [{ type: 'openai' }], fastAnswer: 'yes' }),
+    ).toThrow();
+  });
+
   it('normalizes blank optional provider fields to undefined, not empty strings', () => {
     // A KeyVault form left blank submits '' — some provider SDKs (e.g.
     // `new OpenAI({ apiKey: '' })`) throw on a defined-but-empty key where

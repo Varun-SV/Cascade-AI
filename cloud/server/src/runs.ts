@@ -45,6 +45,10 @@ const ChatRunPayloadSchema = z.object({
   // root tier; webSearch toggles the two hosted tools on/off for this run.
   routingMode: z.enum(['auto', 'quality', 'fast']).optional(),
   forceTier: z.enum(['auto', 'T1', 'T2', 'T3']).optional(),
+  // "Fast answer": bypass orchestration and reply with one mid-tier model.
+  // fastAnswerModel optionally pins the model; otherwise it's auto-selected.
+  fastAnswer: z.boolean().optional(),
+  fastAnswerModel: optionalNonEmptyString,
   // Optional complexity verdict computed on the user's device (opt-in browser
   // model). When present, the orchestrator skips its own classifier LLM call and
   // starts from this — its heuristic floors + escalation still apply as
@@ -316,6 +320,10 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
       // it, and the SDK's heuristic floors + escalation still guard against a
       // small model's miss.
       complexityHint: payload.forceTier && payload.forceTier !== 'auto' ? undefined : payload.complexityHint,
+      // "Fast answer": one mid-tier model, no orchestration/tools. Overrides the
+      // routing controls above (they don't apply to a single direct call).
+      fastAnswer: payload.fastAnswer,
+      fastAnswerModel: payload.fastAnswerModel,
       // When aborted, cascade.run() resolves with a partial result (it does not
       // reject) and stops all tiers at the next safe checkpoint — so a runaway
       // run can be halted from the UI instead of burning the whole budget.

@@ -753,6 +753,12 @@ ${prompt}`
     const taskId = randomUUID();
     this.decisionLog = [];
 
+    // "Fast answer": a single mid-tier model, no orchestration, no tools, no
+    // verification — the quickest, cheapest path for simple asks.
+    if (options.fastAnswer) {
+      return this.runFastAnswer(options, startMs, taskId);
+    }
+
     // Create a fresh permission escalator for this task run
     const escalator = new PermissionEscalator(this.config.approvalTimeoutMs ?? 600_000, this.config.autonomy === 'auto');
 
@@ -1141,6 +1147,71 @@ ${prompt}`
       },
       t2Results,
       durationMs,
+      costByTier: stats.costByTier,
+      tokensByTier: stats.tokensByTier,
+      costByFeature: stats.costByFeature,
+      costPercentByTier: this.router.getTierCostPercentages(),
+    };
+  }
+
+  /**
+   * Direct single-model reply — the "fast answer" path. No planning, no workers,
+   * no tools, no artifact verification: the user's message (with recent history)
+   * answered by one mid-tier model, streamed as the primary output and shaped
+   * into the normal CascadeRunResult so persistence + the run receipt still work.
+   */
+  private async runFastAnswer(options: CascadeRunOptions, startMs: number, taskId: string): Promise<CascadeRunResult> {
+    const tier: TierRole = 'T2'; // mid quality/cost
+    const selector = this.router.getSelector();
+    const model = options.fastAnswerModel
+      ? selector.selectForTier(tier, options.fastAnswerModel)
+      : (selector.getCandidatesForTier(tier)[0] ?? selector.selectForTier(tier));
+    if (!model) {
+      throw new Error('No model is available for a fast answer — add a provider API key first.');
+    }
+    this.recordDecision('model', `Fast answer → ${model.provider}:${model.id} — direct single-model reply (no orchestration)`);
+    this.emit('tier:status', { tierId: 'fast', role: tier, status: 'ACTIVE', model: `${model.provider}:${model.id}` });
+
+    const history = (options.conversationHistory ?? []).slice(-10);
+    const userContent: ConversationMessage['content'] = options.images?.length
+      ? [
+          { type: 'text', text: options.prompt },
+          ...options.images.map((image) => ({ type: 'image' as const, image })),
+        ]
+      : options.prompt;
+    const messages: ConversationMessage[] = [...history, { role: 'user', content: userContent }];
+    const systemPrompt =
+      'You are Cascade in fast mode. Answer the user directly, accurately and concisely. ' +
+      'You have no tools and cannot run code, browse, or create files — do not claim to.';
+
+    let streamed = '';
+    // With an image, let the router pick a vision-capable model instead of pinning.
+    const requireVision = !!options.images?.length;
+    const result = await this.router.generate(
+      tier,
+      { messages, systemPrompt, maxTokens: 2048, ...(requireVision ? {} : { model }) },
+      (chunk) => {
+        streamed += chunk.text;
+        this.emit('stream:token', { tierId: 'fast', text: chunk.text, primary: true });
+        options.streamCallback?.({ text: chunk.text, finishReason: null });
+      },
+      requireVision,
+    );
+    this.emit('tier:status', { tierId: 'fast', role: tier, status: 'COMPLETED', model: `${model.provider}:${model.id}` });
+
+    const stats = this.router.getStats();
+    return {
+      output: result.content || streamed,
+      sessionId: options.sessionId ?? '',
+      taskId,
+      usage: {
+        inputTokens: result.usage?.inputTokens ?? 0,
+        outputTokens: result.usage?.outputTokens ?? 0,
+        totalTokens: stats.totalTokens,
+        estimatedCostUsd: stats.totalCostUsd,
+      },
+      t2Results: [],
+      durationMs: Date.now() - startMs,
       costByTier: stats.costByTier,
       tokensByTier: stats.tokensByTier,
       costByFeature: stats.costByFeature,
