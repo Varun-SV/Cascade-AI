@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────
 
 import EventEmitter from 'node:events';
+import crypto from 'node:crypto';
 import type {
   CascadeConfig,
   GenerateOptions,
@@ -86,6 +87,21 @@ export interface RouterStats {
   outputTokensByTier: Record<string, number>;
   /** Accumulated cost (USD) broken down by feature tag (e.g. T2 section names). */
   costByFeature: Record<string, number>;
+}
+
+// ── Cloud model-discovery cache ──
+// listModels() results keyed by a hash of provider+key+baseUrl, so validating a
+// key's real models is a one-time cost even though the hosted server creates a
+// fresh router per request. In-memory + TTL-bounded; only a hash of the key is
+// stored, never the key itself.
+const DISCOVERY_TTL_MS = 15 * 60 * 1000;
+const DISCOVERY_TIMEOUT_MS = 4_000;
+interface DiscoveryEntry { ids: string[]; models: ModelInfo[]; at: number }
+const cloudDiscoveryCache = new Map<string, DiscoveryEntry>();
+
+function discoveryCacheKey(type: ProviderType, cfg: ProviderConfig): string {
+  const raw = `${type}|${cfg.apiKey ?? ''}|${cfg.baseUrl ?? ''}`;
+  return crypto.createHash('sha256').update(raw).digest('hex').slice(0, 24);
 }
 
 export class CascadeRouter extends EventEmitter {
@@ -187,6 +203,11 @@ export class CascadeRouter extends EventEmitter {
         if (model) this.selector.addDynamicModel(model);
       }
     }
+
+    // Validate the official cloud providers against their own model list, so
+    // AUTO selection can't pick a bundled catalog id the key doesn't serve (then
+    // 404 it and slowly fail over). Best-effort + time-boxed; cached per key.
+    await this.validateCloudProviderModels(config);
 
     // Apply explicit tier overrides first.
     for (const tier of ['T1', 'T2', 'T3'] as TierRole[]) {
@@ -345,6 +366,41 @@ export class CascadeRouter extends EventEmitter {
   /** Returns the live-data provider once refreshLiveData has run (UX/insight). */
   getLiveData(): LiveDataProvider | undefined {
     return this.liveData;
+  }
+
+  /**
+   * Validate the official cloud providers (anthropic/openai/gemini) against
+   * their own /models list at init time so AUTO selection only picks a model the
+   * key actually serves. This is the fix for "a non-existent catalog model gets
+   * selected, then the run fails over through several models before one works".
+   * Cached per key (TTL) so a per-request router doesn't re-discover; fully
+   * best-effort + time-boxed, so offline/error simply keeps the bundled catalog.
+   */
+  private async validateCloudProviderModels(config: CascadeConfig): Promise<void> {
+    const providers: ProviderType[] = ['anthropic', 'openai', 'gemini'];
+    await Promise.all(providers.map(async (type) => {
+      if (!this.selector.isProviderAvailable(type)) return;
+      const cfg = config.providers.find((p) => p.type === type);
+      if (!cfg?.apiKey) return;
+      const cacheKey = discoveryCacheKey(type, cfg);
+      let entry = cloudDiscoveryCache.get(cacheKey);
+      if (!entry || Date.now() - entry.at > DISCOVERY_TTL_MS) {
+        const seed = this.getAnyModelForProvider(type);
+        if (!seed) return;
+        try {
+          const provider = this.createProvider(cfg, seed);
+          if (typeof provider.listModels !== 'function') return;
+          const models = await withTimeout(provider.listModels(), DISCOVERY_TIMEOUT_MS, `${type} model discovery timed out`);
+          if (!models.length) return; // empty/unreachable → keep the static catalog
+          entry = { models, ids: models.map((m) => m.id), at: Date.now() };
+          cloudDiscoveryCache.set(cacheKey, entry);
+        } catch {
+          return; // best-effort — offline/error leaves today's behaviour intact
+        }
+      }
+      for (const m of entry.models) this.selector.addDynamicModel(m);
+      this.selector.setValidatedModels(type, entry.ids);
+    }));
   }
 
   /**
@@ -584,7 +640,10 @@ export class CascadeRouter extends EventEmitter {
       // candidate, instead of surfacing the raw provider error to the user.
       if (isModelNotFoundError(errMsg)) {
         this.selector.removeModel(model.id);
-        const next = this.selector.selectForTier(tier);
+        // Cap the not-found chain: up-front validation should mean this rarely
+        // fires, but a stale catalog with many dead ids must not walk them all.
+        const depth = ((options as GenerateOptions & { _notFoundDepth?: number })._notFoundDepth ?? 0) + 1;
+        const next = depth <= 3 ? this.selector.selectForTier(tier) : null;
         if (next && next.id !== model.id) {
           this.tierModels.set(tier, next);
           this.ensureProvider(next, this.config.providers);
@@ -597,10 +656,12 @@ export class CascadeRouter extends EventEmitter {
           releaseLocalSlot?.();
           releaseLocalSlot = undefined;
           // Clear a per-subtask override that pointed at the dead model so the
-          // recursive call resolves the tier's next-best model.
-          const retryOpts = options.model && options.model.id === model.id
+          // recursive call resolves the tier's next-best model, and carry the
+          // depth so the chain is bounded.
+          const base = options.model && options.model.id === model.id
             ? { ...options, model: undefined }
             : options;
+          const retryOpts = { ...base, _notFoundDepth: depth } as GenerateOptions;
           return this.generate(tier, retryOpts, onChunk, requireVision);
         }
       }

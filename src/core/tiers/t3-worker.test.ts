@@ -11,7 +11,7 @@ import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import { PeerBus } from '../peer/bus.js';
 import { PermissionEscalator } from '../permissions/escalator.js';
-import { T3Worker, buildWorkerRules } from './t3-worker.js';
+import { T3Worker, buildWorkerRules, shouldRequireArtifact } from './t3-worker.js';
 
 function makeResult(
   content: string,
@@ -273,5 +273,34 @@ describe('T3Worker — text-tool lean prompts (v0.15.0)', () => {
     expect(sysPrompts[1]).toContain('TOOL USE REMINDER');       // terse afterwards
     expect(sysPrompts[1]).not.toContain('TOOL USE INSTRUCTIONS');
     expect(sysPrompts[1]).toContain('file_write');              // tool names still listed
+  });
+});
+
+describe('shouldRequireArtifact', () => {
+  const fileTask = { description: 'Write a spec to specs/pump.md', expectedOutput: 'A saved file specs/pump.md' };
+
+  it('does NOT require an artifact when the worker has no file-writing tool', () => {
+    // The hosted chat run enables only web tools — requiring a file it cannot
+    // create is what produced the "stalled waiting for artifact creation" bug.
+    expect(shouldRequireArtifact(fileTask, ['web_search', 'web_fetch'])).toBe(false);
+    expect(shouldRequireArtifact({ files: ['out.pdf'] }, ['web_search'])).toBe(false);
+  });
+
+  it('requires an artifact when a file-writing tool is available and a file is asked for', () => {
+    expect(shouldRequireArtifact(fileTask, ['file_write', 'file_read'])).toBe(true);
+    expect(shouldRequireArtifact({ files: ['out.pdf'] }, ['file_write'])).toBe(true);
+    expect(shouldRequireArtifact({ description: 'create a file called notes.txt' }, ['file_edit'])).toBe(true);
+    expect(shouldRequireArtifact(fileTask, ['shell'])).toBe(true); // shell can write files too
+  });
+
+  it('does not require an artifact for a pure question, even with file tools', () => {
+    expect(shouldRequireArtifact(
+      { description: 'Determine the Flare KOD pump specifications', expectedOutput: 'A concise answer' },
+      ['file_write', 'shell'],
+    )).toBe(false);
+  });
+
+  it('tolerates an undefined assignment', () => {
+    expect(shouldRequireArtifact(undefined, ['file_write'])).toBe(false);
   });
 });

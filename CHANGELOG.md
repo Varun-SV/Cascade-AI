@@ -5,6 +5,28 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.20.4 - 2026-07-16
+
+### Fixed
+- **Provider model selection no longer picks a model your key can't serve.**
+  After adding a Gemini / OpenAI / Anthropic key, routing could select a bundled
+  catalog id the account doesn't actually have, 404 it, and then fail over
+  through several models before landing on a working one — a slow, confusing
+  first run. `init()` now validates the official cloud providers against their
+  own model list (`listModels`) and the selector skips any bundled id the
+  provider didn't confirm, preserving benchmark ordering. Discovery is cached
+  per key (so the hosted server, which builds a fresh router per request,
+  validates once), time-boxed, and fully best-effort — offline or on error it
+  falls back to today's behaviour. The rare not-found fallover is now bounded.
+- **Hosted chat runs no longer stall on "artifact creation."** A task phrased as
+  producing a file (e.g. *"Determine Flare KOD Pump Specifications"*) made a
+  worker try to write a file — but the hosted app has no file-writing tool, so
+  it looped and returned `_(incomplete: … stalled waiting for artifact
+  creation)_`. A worker now only *requires* a verified file artifact when a
+  file-writing tool (`file_write` / `file_edit` / `shell`) is actually
+  available; otherwise its answer is the deliverable. Desktop/CLI (which have
+  those tools) are unchanged.
+
 ## Cascade Cloud 0.6.2 - 2026-07-16
 
 ### Fixed
