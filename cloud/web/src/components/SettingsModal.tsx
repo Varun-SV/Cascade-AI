@@ -171,7 +171,7 @@ export default function SettingsModal({
               options={[
                 { value: 'light', label: 'Light', icon: <Sun size={13} /> },
                 { value: 'dark', label: 'Dark', icon: <Moon size={13} /> },
-                { value: 'system', label: 'Auto', icon: <Monitor size={13} /> },
+                { value: 'system', label: 'System', icon: <Monitor size={13} /> },
               ]}
             />
           }

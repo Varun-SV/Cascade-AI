@@ -5,6 +5,28 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.22.0 - 2026-07-16
+
+### Changed
+- **"Bold Console" redesign — one Cascade brand across every surface.** The
+  hosted chat app (`cloud/web`) and the marketing landing page move onto the
+  same design language already used by the desktop app and the runtime
+  dashboard: **Cascade violet** as the primary brand/action colour, with the
+  orchestration tiers as structural accents (**amber T1 / violet T2 / cyan
+  T3**). No features were removed — this is a reskin.
+  - **Light / dark / system themes** in the hosted app (Settings →
+    Appearance), with a live OS listener and a no-flash pre-paint. Every colour
+    resolves from a CSS variable, so the same components render correctly in
+    both palettes.
+  - **Density** (Cozy / Compact) and a **Simple / Advanced view** — Simple
+    (default) keeps chat minimal; Advanced reveals the routing controls and a
+    read-only plan surface.
+  - **Read-only plan surfacing:** when Cascade produces a boardroom plan for a
+    hosted run, the app now shows what it decided (tier split, estimated cost)
+    in Advanced view. Hosted runs auto-proceed — the server forwards the plan
+    then immediately approves it, which also fixes a latent 120s stall (the
+    plan gate blocked whenever a listener was attached but never resolved).
+
 ## 0.21.0 - 2026-07-16
 
 ### Added
