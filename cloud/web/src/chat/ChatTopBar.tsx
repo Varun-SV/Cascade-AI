@@ -11,14 +11,14 @@ interface Props {
 
 export default function ChatTopBar({ title, sidebarOpen, onToggleSidebar, saved, onContinueElsewhere }: Props) {
   return (
-    <div className="flex h-12 shrink-0 items-center gap-3 border-b border-white/10 px-3">
+    <div className="flex h-12 shrink-0 items-center gap-3 border-b border-elev/10 px-3">
       <motion.button
         type="button"
         aria-label={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
         onClick={onToggleSidebar}
         whileHover={{ scale: 1.08 }}
         whileTap={{ scale: 0.92 }}
-        className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-400 hover:bg-white/10 hover:text-ink-100"
+        className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-400 hover:bg-elev/10 hover:text-ink-100"
       >
         {sidebarOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
       </motion.button>
@@ -30,7 +30,7 @@ export default function ChatTopBar({ title, sidebarOpen, onToggleSidebar, saved,
         onClick={onContinueElsewhere}
         whileHover={{ scale: 1.08 }}
         whileTap={{ scale: 0.92 }}
-        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-ink-400 hover:bg-white/10 hover:text-ink-100"
+        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-ink-400 hover:bg-elev/10 hover:text-ink-100"
       >
         <MonitorSmartphone size={16} />
       </motion.button>

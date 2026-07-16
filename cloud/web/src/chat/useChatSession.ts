@@ -64,6 +64,21 @@ export interface WebSearchPayload {
   tavilyApiKey?: string;
 }
 
+/** A boardroom plan Cascade produced for this run — surfaced read-only (the
+ *  hosted run auto-proceeds; this just shows what it decided to do). */
+export interface PlanApproval {
+  taskId?: string;
+  summary?: string;
+  t2Count?: number;
+  t3Count?: number;
+  estCostUsd?: number;
+  plan?: {
+    complexity?: string;
+    reasoning?: string;
+    sections?: Array<{ title?: string; description?: string; t3Subtasks?: unknown[] }>;
+  };
+}
+
 export function useChatSession(
   socket: Socket | null,
   providers: ProviderConfig[],
@@ -83,6 +98,9 @@ export function useChatSession(
   // hosted web_search/web_fetch tools. Defaults mirror prior behaviour.
   const [routingMode, setRoutingMode] = useState<RoutingMode>('auto');
   const [forceTier, setForceTier] = useState<ForceTier>('auto');
+  // The boardroom plan for the in-flight run, if Cascade produced one. Shown
+  // read-only; cleared when the next run starts or the current one settles.
+  const [approval, setApproval] = useState<PlanApproval | null>(null);
   // Default OFF: a hosted chat is pure conversation unless the user opts into
   // web tools. With the toggle off the run registers no tools at all, so the
   // model is never handed a capability it can't reliably use.
@@ -126,13 +144,16 @@ export function useChatSession(
     };
     const onStatus = (e: Record<string, unknown>) => setStatus(statusLabel(e));
     const onWhy = (r: WhyReport) => { pendingWhyRef.current = r; };
+    const onPlan = (e: PlanApproval) => setApproval(e);
     socket.on('stream:token', onToken);
     socket.on('tier:status', onStatus);
     socket.on('run:why', onWhy);
+    socket.on('plan:approval-required', onPlan);
     return () => {
       socket.off('stream:token', onToken);
       socket.off('tier:status', onStatus);
       socket.off('run:why', onWhy);
+      socket.off('plan:approval-required', onPlan);
     };
   }, [socket]);
 
@@ -151,6 +172,7 @@ export function useChatSession(
       setBusy(true);
       setError(null);
       setStatus('Thinking…');
+      setApproval(null);
       streamingRef.current = '';
       if (appendUser) {
         setMessages((prev) => [...prev, { id: crypto.randomUUID(), role: 'user', content: text, attachments }]);
@@ -180,6 +202,7 @@ export function useChatSession(
       const onAck = (ack: ChatRunAck) => {
           setBusy(false);
           setStatus(null);
+          setApproval(null);
           if (ack.error) {
             setError(ack.error);
             setMessages((prev) => prev.filter((m) => !m.streaming));
@@ -252,6 +275,6 @@ export function useChatSession(
 
   return {
     messages, send, stop, regenerate, busy, error, status, lastTokens, lastSaved, conversationId, loadMessages, setConversationId,
-    routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch,
+    routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, approval,
   };
 }

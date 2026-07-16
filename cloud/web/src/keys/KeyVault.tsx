@@ -49,7 +49,7 @@ function WebSearchSection({
   }
 
   return (
-    <div className="flex flex-col gap-2 rounded-md border border-white/10 p-3">
+    <div className="flex flex-col gap-2 rounded-md border border-elev/10 p-3">
       <div className="flex items-center gap-2 text-ink-200">
         <Globe size={15} className="text-ink-400" />
         <span className="font-medium">Web search</span>
@@ -62,7 +62,7 @@ function WebSearchSection({
         <span className="text-xs text-ink-400">Backend</span>
         <select
           aria-label="Web search backend"
-          className="rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
+          className="rounded border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-sm text-ink-100"
           value={backend}
           onChange={(e) => update({ backend: e.target.value as WebSearchSettings['backend'] })}
         >
@@ -75,7 +75,7 @@ function WebSearchSection({
         <span className="text-xs text-ink-400">{backend === 'searxng' ? 'SearXNG URL' : 'API key'}</span>
         <input
           type={backend === 'searxng' ? 'text' : 'password'}
-          className="rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
+          className="rounded border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-sm text-ink-100"
           placeholder={backend === 'searxng' ? 'https://searx.example.com' : 'key…'}
           value={value}
           onChange={(e) => {
@@ -90,7 +90,7 @@ function WebSearchSection({
         <button
           type="button"
           onClick={() => onChange(null)}
-          className="self-start rounded-md border border-white/10 px-2.5 py-1 text-xs text-ink-300 hover:bg-white/[0.05] hover:text-danger-400"
+          className="self-start rounded-md border border-elev/10 px-2.5 py-1 text-xs text-ink-300 hover:bg-elev/[0.05] hover:text-danger-400"
         >
           Clear web search
         </button>
@@ -146,12 +146,12 @@ export default function KeyVault({ keys, onChange, webSearch, onWebSearchChange,
 
       <div className="flex flex-col gap-2">
         {keys.length === 0 && (
-          <p className="rounded-md border border-dashed border-white/10 px-3 py-4 text-center text-xs text-ink-400">
+          <p className="rounded-md border border-dashed border-elev/10 px-3 py-4 text-center text-xs text-ink-400">
             No providers configured yet. Add one to start chatting.
           </p>
         )}
         {keys.map((k, i) => (
-          <div key={i} className="flex items-center justify-between rounded-md bg-white/[0.05] px-3 py-2">
+          <div key={i} className="flex items-center justify-between rounded-md bg-elev/[0.05] px-3 py-2">
             <div className="flex items-center gap-2">
               <KeyRound size={14} className="text-ink-400" />
               <div>
@@ -163,7 +163,7 @@ export default function KeyVault({ keys, onChange, webSearch, onWebSearchChange,
               type="button"
               aria-label={`Remove ${labelFor(k)}`}
               onClick={() => removeKey(i)}
-              className="rounded p-1 text-ink-400 hover:bg-white/10 hover:text-danger-500"
+              className="rounded p-1 text-ink-400 hover:bg-elev/10 hover:text-danger-500"
             >
               <Trash2 size={14} />
             </button>
@@ -175,19 +175,19 @@ export default function KeyVault({ keys, onChange, webSearch, onWebSearchChange,
         <button
           type="button"
           onClick={() => setAdding(true)}
-          className="flex items-center justify-center gap-1 rounded-md border border-white/10 px-3 py-2 text-xs font-medium text-ink-200 hover:bg-white/[0.05]"
+          className="flex items-center justify-center gap-1 rounded-md border border-elev/10 px-3 py-2 text-xs font-medium text-ink-200 hover:bg-elev/[0.05]"
         >
           <Plus size={14} /> Add provider
         </button>
       )}
 
       {adding && (
-        <div className="flex flex-col gap-2 rounded-md border border-white/10 p-3">
+        <div className="flex flex-col gap-2 rounded-md border border-elev/10 p-3">
           <label className="flex flex-col gap-1">
             <span className="text-xs text-ink-400">Provider</span>
             <select
               aria-label="Provider"
-              className="rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
+              className="rounded border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-sm text-ink-100"
               value={draft.type}
               onChange={(e) => setDraft({ type: e.target.value as ProviderConfig['type'] })}
             >
@@ -202,7 +202,7 @@ export default function KeyVault({ keys, onChange, webSearch, onWebSearchChange,
               <span className="text-xs text-ink-400">API key</span>
               <input
                 type="password"
-                className="rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
+                className="rounded border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-sm text-ink-100"
                 value={draft.apiKey ?? ''}
                 onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))}
                 placeholder="sk-..."
@@ -216,7 +216,7 @@ export default function KeyVault({ keys, onChange, webSearch, onWebSearchChange,
                 {draft.type === 'azure' ? 'Azure endpoint URL' : 'Endpoint base URL'}
               </span>
               <input
-                className="rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
+                className="rounded border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-sm text-ink-100"
                 value={draft.baseUrl ?? ''}
                 onChange={(e) => setDraft((d) => ({ ...d, baseUrl: e.target.value }))}
                 placeholder="https://..."
@@ -229,7 +229,7 @@ export default function KeyVault({ keys, onChange, webSearch, onWebSearchChange,
               <span className="text-xs text-ink-400">API key (optional)</span>
               <input
                 type="password"
-                className="rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
+                className="rounded border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-sm text-ink-100"
                 value={draft.apiKey ?? ''}
                 onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))}
               />
@@ -241,7 +241,7 @@ export default function KeyVault({ keys, onChange, webSearch, onWebSearchChange,
               <label className="flex flex-col gap-1">
                 <span className="text-xs text-ink-400">Deployment name</span>
                 <input
-                  className="rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
+                  className="rounded border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-sm text-ink-100"
                   value={draft.deploymentName ?? ''}
                   onChange={(e) => setDraft((d) => ({ ...d, deploymentName: e.target.value }))}
                 />
@@ -249,7 +249,7 @@ export default function KeyVault({ keys, onChange, webSearch, onWebSearchChange,
               <label className="flex flex-col gap-1">
                 <span className="text-xs text-ink-400">API version (optional)</span>
                 <input
-                  className="rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
+                  className="rounded border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-sm text-ink-100"
                   value={draft.apiVersion ?? ''}
                   onChange={(e) => setDraft((d) => ({ ...d, apiVersion: e.target.value }))}
                   placeholder="2024-12-01-preview"
@@ -262,7 +262,7 @@ export default function KeyVault({ keys, onChange, webSearch, onWebSearchChange,
             <label className="flex flex-col gap-1">
               <span className="text-xs text-ink-400">Model (optional — leave blank for auto)</span>
               <input
-                className="rounded border border-white/10 bg-white/[0.04] px-2 py-1.5 text-sm text-ink-100"
+                className="rounded border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-sm text-ink-100"
                 value={draft.model ?? ''}
                 onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
               />
@@ -273,14 +273,14 @@ export default function KeyVault({ keys, onChange, webSearch, onWebSearchChange,
             <button
               type="button"
               onClick={addKey}
-              className="flex-1 rounded-md bg-accent-500 px-3 py-1.5 text-xs font-semibold text-ink-950 hover:bg-accent-400"
+              className="flex-1 rounded-md bg-accent-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-accent-400"
             >
               Save
             </button>
             <button
               type="button"
               onClick={() => { setAdding(false); setDraft({ type: 'anthropic' }); }}
-              className="rounded-md border border-white/10 px-3 py-1.5 text-xs text-ink-200 hover:bg-white/[0.05]"
+              className="rounded-md border border-elev/10 px-3 py-1.5 text-xs text-ink-200 hover:bg-elev/[0.05]"
             >
               Cancel
             </button>

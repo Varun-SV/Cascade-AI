@@ -1,12 +1,43 @@
 import { useState } from 'react';
-import { Sparkles, Brain, KeyRound, Crown, LogOut, Cpu, Eye, ChevronRight, Zap } from 'lucide-react';
+import {
+  Sparkles, Brain, KeyRound, Crown, LogOut, Cpu, Eye, ChevronRight, Zap,
+  Sun, Moon, Monitor, LayoutGrid, Rows3,
+} from 'lucide-react';
 import Modal from './Modal.js';
 import { detectLocalModelCapability } from '../lib/localModel/capability.js';
 import {
   localModelEnabled, setLocalModelEnabled, reduceMotionEnabled, setReduceMotionEnabled,
   fastAnswerModel, setFastAnswerModel,
+  type ThemeMode, type Density, type UiMode,
 } from '../lib/prefs.js';
 import type { CloudUser } from '../lib/types.js';
+
+/** Compact segmented control — one active option, keyboard/aria friendly. */
+function Segmented<T extends string>({ value, onChange, options, label }: {
+  value: T; onChange: (v: T) => void; label: string;
+  options: Array<{ value: T; label: string; icon?: React.ReactNode }>;
+}) {
+  return (
+    <div role="group" aria-label={label} className="flex items-center gap-0.5 rounded-lg bg-elev/[0.05] p-0.5">
+      {options.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          aria-pressed={value === o.value}
+          onClick={() => onChange(o.value)}
+          className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+            value === o.value
+              ? 'bg-accent-500 text-white shadow-sm'
+              : 'text-ink-400 hover:bg-elev/10 hover:text-ink-100'
+          }`}
+        >
+          {o.icon}
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function Toggle({ on, onChange, disabled, label }: { on: boolean; onChange: (v: boolean) => void; disabled?: boolean; label: string }) {
   // Flex + justify keeps the knob physically inside the track — it can't
@@ -21,7 +52,7 @@ function Toggle({ on, onChange, disabled, label }: { on: boolean; onChange: (v: 
       disabled={disabled}
       onClick={() => onChange(!on)}
       className={`flex h-5 w-9 shrink-0 items-center rounded-full px-0.5 transition-colors disabled:opacity-40 ${
-        on ? 'justify-end bg-accent-500' : 'justify-start bg-white/15'
+        on ? 'justify-end bg-accent-500' : 'justify-start bg-elev/15'
       }`}
     >
       <span className="h-4 w-4 rounded-full bg-white shadow-sm" />
@@ -55,6 +86,12 @@ interface Props {
   /** Reflects the current pref so App can react (e.g. toggle motion live). */
   onLocalModelChange: (v: boolean) => void;
   onReduceMotionChange: (v: boolean) => void;
+  theme: ThemeMode;
+  onThemeChange: (v: ThemeMode) => void;
+  density: Density;
+  onDensityChange: (v: Density) => void;
+  uiMode: UiMode;
+  onUiModeChange: (v: UiMode) => void;
 }
 
 function LinkRow({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
@@ -62,7 +99,7 @@ function LinkRow({ icon, label, onClick }: { icon: React.ReactNode; label: strin
     <button
       type="button"
       onClick={onClick}
-      className="flex w-full items-center justify-between rounded-lg px-2 py-2 text-sm text-ink-200 hover:bg-white/[0.06]"
+      className="flex w-full items-center justify-between rounded-lg px-2 py-2 text-sm text-ink-200 hover:bg-elev/[0.06]"
     >
       <span className="flex items-center gap-2.5">{icon} {label}</span>
       <ChevronRight size={15} className="text-ink-500" />
@@ -73,6 +110,7 @@ function LinkRow({ icon, label, onClick }: { icon: React.ReactNode; label: strin
 export default function SettingsModal({
   user, onClose, onOpenSkills, onOpenMemory, onOpenKeyVault, onOpenUpgrade, onLogout,
   onLocalModelChange, onReduceMotionChange,
+  theme, onThemeChange, density, onDensityChange, uiMode, onUiModeChange,
 }: Props) {
   const cap = detectLocalModelCapability();
   const [localOn, setLocalOn] = useState(localModelEnabled());
@@ -95,11 +133,11 @@ export default function SettingsModal({
       <div className="flex flex-col gap-1 p-4 text-sm text-ink-100">
         {/* Account */}
         <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-400">Account</p>
-        <div className="mb-1 rounded-lg bg-white/[0.04] px-3 py-2.5">
+        <div className="mb-1 rounded-lg bg-elev/[0.04] px-3 py-2.5">
           <p className="font-medium text-ink-100">{user.name ?? 'Signed in'}</p>
           {user.email && <p className="text-xs text-ink-400">{user.email}</p>}
           <div className="mt-1.5 flex items-center gap-2">
-            <span className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-300">
+            <span className="rounded bg-elev/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-300">
               {user.plan} plan
             </span>
             <span className="text-[10px] text-ink-500">via {user.provider}</span>
@@ -122,6 +160,55 @@ export default function SettingsModal({
         {/* Appearance */}
         <p className="mt-3 text-[11px] font-semibold uppercase tracking-wide text-ink-400">Appearance</p>
         <Row
+          icon={<Sun size={15} />}
+          title="Theme"
+          subtitle="Light, dark, or follow your system."
+          right={
+            <Segmented
+              label="Theme"
+              value={theme}
+              onChange={onThemeChange}
+              options={[
+                { value: 'light', label: 'Light', icon: <Sun size={13} /> },
+                { value: 'dark', label: 'Dark', icon: <Moon size={13} /> },
+                { value: 'system', label: 'Auto', icon: <Monitor size={13} /> },
+              ]}
+            />
+          }
+        />
+        <Row
+          icon={<Rows3 size={15} />}
+          title="Density"
+          subtitle="Comfortable spacing or a tighter, compact layout."
+          right={
+            <Segmented
+              label="Density"
+              value={density}
+              onChange={onDensityChange}
+              options={[
+                { value: 'comfortable', label: 'Cozy' },
+                { value: 'compact', label: 'Compact' },
+              ]}
+            />
+          }
+        />
+        <Row
+          icon={<LayoutGrid size={15} />}
+          title="View"
+          subtitle="Simple keeps chat minimal; Advanced reveals routing controls and tier detail."
+          right={
+            <Segmented
+              label="View mode"
+              value={uiMode}
+              onChange={onUiModeChange}
+              options={[
+                { value: 'simple', label: 'Simple' },
+                { value: 'advanced', label: 'Advanced' },
+              ]}
+            />
+          }
+        />
+        <Row
           icon={<Eye size={15} />}
           title="Reduce motion"
           subtitle="Minimize animations and transitions."
@@ -140,7 +227,7 @@ export default function SettingsModal({
               onChange={(e) => { setFastModel(e.target.value); setFastAnswerModel(e.target.value); }}
               placeholder="auto — e.g. gpt-4o-mini"
               spellCheck={false}
-              className="mt-1.5 w-full rounded-md border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-500 focus:border-accent-500/40"
+              className="mt-1.5 w-full rounded-md border border-elev/10 bg-elev/[0.04] px-2.5 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-500 focus:border-accent-500/40"
             />
           </div>
         </div>

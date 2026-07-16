@@ -296,7 +296,14 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     socket.emit('tier:status', { conversationId: conversation.id, ...(e as object) });
   };
   const onPlan = (e: unknown) => {
+    // Surface the boardroom plan to the client (read-only), then immediately
+    // approve so the hosted run proceeds. The SDK's plan gate BLOCKS for 120s
+    // whenever a listener is attached and never resolved — registering this
+    // listener without resolving would stall every plan-gated run. Hosted v1
+    // has no risky tools to gate, so auto-proceed is the intended behaviour;
+    // the client just shows what Cascade planned.
     socket.emit('plan:approval-required', { conversationId: conversation.id, ...(e as object) });
+    cascade.resolvePlanApproval(true);
   };
   // Surface the SDK's own diagnostics (failed classifier, provider warnings) in
   // the server log — otherwise they vanished and a run just read "Task failed".

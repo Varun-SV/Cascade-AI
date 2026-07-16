@@ -27,7 +27,7 @@ export default function Modal({ title, onClose, maxWidth = 'max-w-md', children 
         transition={{ type: 'spring', stiffness: 380, damping: 30 }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex shrink-0 items-center justify-between border-b border-white/10 px-4 py-3">
+        <div className="flex shrink-0 items-center justify-between border-b border-elev/10 px-4 py-3">
           <h2 className="text-sm font-semibold text-ink-50">{title}</h2>
           <motion.button
             type="button"
@@ -35,7 +35,7 @@ export default function Modal({ title, onClose, maxWidth = 'max-w-md', children 
             onClick={onClose}
             whileHover={{ scale: 1.1 }}
             whileTap={{ scale: 0.9 }}
-            className="rounded-md p-1 text-ink-400 hover:bg-white/10 hover:text-ink-100"
+            className="rounded-md p-1 text-ink-400 hover:bg-elev/10 hover:text-ink-100"
           >
             <X size={16} />
           </motion.button>

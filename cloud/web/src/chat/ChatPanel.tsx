@@ -3,8 +3,10 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { AlertTriangle, KeyRound, Loader2, Sparkles } from 'lucide-react';
 import Message from './Message.js';
 import Composer from './Composer.js';
-import type { ChatMessage, ForceTier, RoutingMode, SendInput } from './useChatSession.js';
+import PlanNotice from './PlanNotice.js';
+import type { ChatMessage, ForceTier, PlanApproval, RoutingMode, SendInput } from './useChatSession.js';
 import type { Skill } from '../lib/types.js';
+import type { UiMode } from '../lib/prefs.js';
 
 interface Props {
   messages: ChatMessage[];
@@ -24,11 +26,13 @@ interface Props {
   onForceTierChange: (t: ForceTier) => void;
   webSearch: boolean;
   onWebSearchChange: (on: boolean) => void;
+  uiMode: UiMode;
+  approval: PlanApproval | null;
 }
 
 export default function ChatPanel({
   messages, busy, error, status, hasProviders, skills, skillId, onSkillChange, onSend, onStop, onRegenerate,
-  routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange,
+  routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange, uiMode, approval,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const lastAssistantId = [...messages].reverse().find((m) => m.role === 'assistant' && !m.streaming)?.id;
@@ -48,7 +52,7 @@ export default function ChatPanel({
             transition={{ duration: 0.4 }}
           >
             <div>
-              <div className="accent-grad mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl text-ink-950 shadow-xl shadow-accent-700/30">
+              <div className="accent-grad mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl text-white shadow-xl shadow-accent-700/30">
                 <Sparkles size={26} />
               </div>
               <p className="text-lg font-semibold text-ink-100">Start a conversation</p>
@@ -73,6 +77,8 @@ export default function ChatPanel({
               </motion.div>
             ))}
           </AnimatePresence>
+          {/* Read-only boardroom plan — Advanced view only (Simple stays minimal). */}
+          {busy && approval && uiMode === 'advanced' && <PlanNotice approval={approval} />}
           {status && busy && (
             <motion.div
               className="flex items-center gap-2 text-sm text-ink-400"
@@ -115,6 +121,7 @@ export default function ChatPanel({
         onForceTierChange={onForceTierChange}
         webSearch={webSearch}
         onWebSearchChange={onWebSearchChange}
+        uiMode={uiMode}
       />
     </div>
   );

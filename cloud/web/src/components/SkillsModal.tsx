@@ -59,22 +59,22 @@ export default function SkillsModal({ skills, onClose, onChange }: Props) {
         </div>
 
         {draft ? (
-          <div className="flex flex-col gap-2 rounded-lg border border-white/10 bg-white/[0.04] p-3">
+          <div className="flex flex-col gap-2 rounded-lg border border-elev/10 bg-elev/[0.04] p-3">
             <input
-              className="rounded-md border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-400"
+              className="rounded-md border border-elev/10 bg-elev/[0.04] px-2.5 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-400"
               placeholder="Name (e.g. SQL Tutor)"
               value={draft.name}
               onChange={(e) => setDraft({ ...draft, name: e.target.value })}
               autoFocus
             />
             <input
-              className="rounded-md border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-400"
+              className="rounded-md border border-elev/10 bg-elev/[0.04] px-2.5 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-400"
               placeholder="Short description (optional)"
               value={draft.description}
               onChange={(e) => setDraft({ ...draft, description: e.target.value })}
             />
             <textarea
-              className="min-h-[120px] resize-y rounded-md border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-400"
+              className="min-h-[120px] resize-y rounded-md border border-elev/10 bg-elev/[0.04] px-2.5 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-400"
               placeholder="Instructions — the system prompt Cascade follows when this skill is active."
               value={draft.systemPrompt}
               onChange={(e) => setDraft({ ...draft, systemPrompt: e.target.value })}
@@ -84,7 +84,7 @@ export default function SkillsModal({ skills, onClose, onChange }: Props) {
               <button
                 type="button"
                 onClick={() => { setDraft(null); setError(null); }}
-                className="flex items-center gap-1 rounded-md px-3 py-1.5 text-xs text-ink-300 hover:bg-white/10 hover:text-ink-100"
+                className="flex items-center gap-1 rounded-md px-3 py-1.5 text-xs text-ink-300 hover:bg-elev/10 hover:text-ink-100"
               >
                 <X size={13} /> Cancel
               </button>
@@ -92,7 +92,7 @@ export default function SkillsModal({ skills, onClose, onChange }: Props) {
                 type="button"
                 onClick={save}
                 disabled={busy || !draft.name.trim() || !draft.systemPrompt.trim()}
-                className="flex items-center gap-1 rounded-md bg-accent-500 px-3 py-1.5 text-xs font-semibold text-ink-950 hover:bg-accent-400 disabled:opacity-40"
+                className="flex items-center gap-1 rounded-md bg-accent-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-accent-400 disabled:opacity-40"
               >
                 <Check size={13} /> {draft.id ? 'Save' : 'Create'}
               </button>
@@ -102,7 +102,7 @@ export default function SkillsModal({ skills, onClose, onChange }: Props) {
           <button
             type="button"
             onClick={() => { setDraft({ ...EMPTY_DRAFT }); setError(null); }}
-            className="flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-white/15 px-3 py-2.5 text-xs font-medium text-ink-300 hover:border-accent-500/40 hover:text-ink-100"
+            className="flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-elev/15 px-3 py-2.5 text-xs font-medium text-ink-300 hover:border-accent-500/40 hover:text-ink-100"
           >
             <Plus size={14} /> New skill
           </button>
@@ -112,11 +112,11 @@ export default function SkillsModal({ skills, onClose, onChange }: Props) {
           <div className="flex flex-col gap-1.5">
             <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-400">Your skills</p>
             {custom.map((s) => (
-              <div key={s.id} className="flex items-start justify-between gap-2 rounded-md bg-white/[0.05] px-3 py-2">
+              <div key={s.id} className="flex items-start justify-between gap-2 rounded-md bg-elev/[0.05] px-3 py-2">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <span className="truncate font-medium text-ink-100">{s.name}</span>
-                    <span className="shrink-0 rounded bg-white/10 px-1.5 py-0.5 text-[10px] text-ink-400">
+                    <span className="shrink-0 rounded bg-elev/10 px-1.5 py-0.5 text-[10px] text-ink-400">
                       used {s.usageCount}×
                     </span>
                   </div>
@@ -143,7 +143,7 @@ export default function SkillsModal({ skills, onClose, onChange }: Props) {
         <div className="flex flex-col gap-1.5">
           <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-400">Built-in</p>
           {builtin.map((s) => (
-            <div key={s.id} className="flex items-center gap-2 rounded-md bg-white/[0.03] px-3 py-2 text-ink-300">
+            <div key={s.id} className="flex items-center gap-2 rounded-md bg-elev/[0.03] px-3 py-2 text-ink-300">
               <Lock size={12} className="shrink-0 text-ink-500" />
               <div className="min-w-0">
                 <span className="font-medium text-ink-200">{s.name}</span>
