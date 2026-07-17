@@ -103,6 +103,8 @@ test('dev login -> add a key -> pick a skill -> attach an image -> send -> reply
     // then confirm they render: Auto mode selected by default, Web toggle OFF
     // (hosted chat is pure conversation unless the user opts in).
     await page.getByRole('button', { name: 'Settings' }).click();
+    // Settings is now tabbed — the View control lives under the Appearance tab.
+    await page.getByRole('button', { name: 'Appearance' }).click();
     await page.getByRole('group', { name: 'View mode' }).getByRole('button', { name: 'Advanced' }).click();
     await page.getByLabel('Close').click();
     const routing = page.getByRole('group', { name: 'Routing mode' });
