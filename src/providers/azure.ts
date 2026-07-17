@@ -3,7 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { AzureOpenAI } from 'openai';
-import { AZURE_BASE_URL_TEMPLATE } from '../constants.js';
+import { AZURE_BASE_URL_TEMPLATE, MODELS } from '../constants.js';
 import type { ModelInfo, ProviderConfig } from '../types.js';
 import { OpenAIProvider, isReasoningModel, isParamShapeError } from './openai.js';
 
@@ -13,20 +13,64 @@ import { OpenAIProvider, isReasoningModel, isParamShapeError } from './openai.js
 const DEFAULT_AZURE_API_VERSION = '2024-12-01-preview';
 
 /**
- * The ModelInfo for one configured Azure deployment. On Azure the deployment
- * IS the model (you address it by deployment name, and which base model backs
- * it is opaque to the API) — so each `providers[]` entry with a deploymentName
- * becomes exactly one selectable model. Which base model a deployment serves
- * isn't queryable, so capabilities/pricing use GPT-4o-class defaults: cost
- * tracking reads as an estimate rather than $0.
+ * Best-effort guess of the canonical base model an Azure deployment backs, from
+ * its (arbitrary) deployment name. Ordered most-specific → least so "gpt-5-mini"
+ * doesn't match the "gpt-5" base, and point releases (gpt-5.4) fold into gpt-5.
+ * Returns null when the name gives no signal (e.g. "prod-fast") — the caller
+ * then keeps neutral defaults, or the user can set an explicit base model.
+ */
+export function inferAzureBaseModel(deploymentName: string): string | null {
+  const n = deploymentName.toLowerCase();
+  const rules: Array<[RegExp, string]> = [
+    [/gpt-?5.*nano/, 'gpt-5-nano'],
+    [/gpt-?5.*mini/, 'gpt-5-mini'],
+    [/gpt-?5/, 'gpt-5'],
+    [/gpt-?4\.1-nano/, 'gpt-4.1-nano'],
+    [/gpt-?4\.1-mini/, 'gpt-4.1-mini'],
+    [/gpt-?4\.1/, 'gpt-4.1'],
+    [/gpt-?4o-mini/, 'gpt-4o-mini'],
+    [/gpt-?4o/, 'gpt-4o'],
+  ];
+  for (const [re, base] of rules) if (re.test(n)) return base;
+  return null;
+}
+
+/**
+ * The ModelInfo for one configured Azure deployment. On Azure the deployment IS
+ * the model (you address it by deployment name, and which base model backs it is
+ * opaque to the API) — so each `providers[]` entry with a deploymentName becomes
+ * one selectable model.
+ *
+ * Which base model it serves drives correct benchmark scoring + pricing, so we
+ * resolve it: an explicit `cfg.model` (user override) wins, else we infer it from
+ * the deployment name. When resolved to a known catalog model, this deployment
+ * INHERITS that model's real economics (context window, pricing, vision, output
+ * cap) while keeping the deployment name as its callable `id` and carrying the
+ * base identity in `baseModelId`. Unresolved deployments fall back to neutral
+ * GPT-4o-class defaults (an estimate, not $0), exactly as before.
  */
 export function azureModelForDeployment(cfg: ProviderConfig): ModelInfo | null {
   if (cfg.type !== 'azure' || !cfg.deploymentName?.trim()) return null;
   const id = cfg.deploymentName.trim();
+  const name = cfg.label?.trim() || id;
+  const baseModelId = cfg.model?.trim() || inferAzureBaseModel(id) || undefined;
+  const base = baseModelId ? MODELS[baseModelId] : undefined;
+  if (base) {
+    return {
+      ...base,
+      id,               // callable deployment name
+      name,
+      provider: 'azure',
+      baseModelId,      // real identity for benchmark + live pricing
+      supportsToolUse: base.supportsToolUse ?? true,
+    };
+  }
+  // Unknown base — keep neutral defaults so cost/context read as an estimate.
   return {
     id,
-    name: cfg.label?.trim() || id,
+    name,
     provider: 'azure',
+    ...(baseModelId ? { baseModelId } : {}),
     contextWindow: 128_000,
     isVisionCapable: false,
     inputCostPer1kTokens: 0.0025,

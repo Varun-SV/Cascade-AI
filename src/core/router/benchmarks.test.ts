@@ -33,6 +33,16 @@ describe('benchmarkScore01', () => {
     expect(benchmarkScore01(unknown, 'code')).toBe(0.5);
   });
 
+  it('scores the gpt-5 family (no longer a neutral 0.5)', () => {
+    expect(benchmarkScore01(MODELS['gpt-5']!, 'code')).toBeGreaterThan(0.9);
+    // A gpt-5 point release / Azure deployment resolves via baseModelId.
+    const azureDeploy = { id: 'prod-fast', name: 'Prod', provider: 'azure', baseModelId: 'gpt-5' } as ModelInfo;
+    expect(benchmarkScore01(azureDeploy, 'analysis')).toBeGreaterThan(0.9);
+    // gpt-5-mini ranks below the full gpt-5.
+    expect(benchmarkScore01(MODELS['gpt-5-mini']!, 'code'))
+      .toBeLessThan(benchmarkScore01(MODELS['gpt-5']!, 'code'));
+  });
+
   it('produces an in-range score for the mixed task type', () => {
     const s = benchmarkScore01(MODELS['claude-sonnet-4']!, 'mixed');
     expect(s).toBeGreaterThan(0);

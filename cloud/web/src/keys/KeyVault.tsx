@@ -13,6 +13,23 @@ const SELECTABLE_TYPES: { value: Exclude<ProviderType, 'ollama'>; label: string 
   { value: 'openai-compatible', label: 'OpenAI-compatible endpoint' },
 ];
 
+// Known base models an Azure deployment can back — powers the "Base model"
+// picker so a deployment gets the right benchmark scores + pricing. Mirrors the
+// SDK's inference (providers/azure.ts) for the auto-detected default.
+const AZURE_BASE_MODELS = ['gpt-5', 'gpt-5-mini', 'gpt-5-nano', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano', 'gpt-4o', 'gpt-4o-mini'];
+
+/** Best-effort guess of the base model from an Azure deployment name. */
+function inferAzureBaseModel(deploymentName: string): string {
+  const n = (deploymentName || '').toLowerCase();
+  const rules: Array<[RegExp, string]> = [
+    [/gpt-?5.*nano/, 'gpt-5-nano'], [/gpt-?5.*mini/, 'gpt-5-mini'], [/gpt-?5/, 'gpt-5'],
+    [/gpt-?4\.1-nano/, 'gpt-4.1-nano'], [/gpt-?4\.1-mini/, 'gpt-4.1-mini'], [/gpt-?4\.1/, 'gpt-4.1'],
+    [/gpt-?4o-mini/, 'gpt-4o-mini'], [/gpt-?4o/, 'gpt-4o'],
+  ];
+  for (const [re, base] of rules) if (re.test(n)) return base;
+  return '';
+}
+
 function labelFor(p: ProviderConfig): string {
   if (p.label) return p.label;
   const found = SELECTABLE_TYPES.find((t) => t.value === p.type);
@@ -20,7 +37,11 @@ function labelFor(p: ProviderConfig): string {
 }
 
 function summaryFor(p: ProviderConfig): string {
-  if (p.type === 'azure') return p.deploymentName ? `deployment: ${p.deploymentName}` : 'no deployment set';
+  if (p.type === 'azure') {
+    if (!p.deploymentName) return 'no deployment set';
+    const base = p.model || inferAzureBaseModel(p.deploymentName);
+    return base ? `deployment: ${p.deploymentName} · ${base}` : `deployment: ${p.deploymentName}`;
+  }
   if (p.type === 'openai-compatible') return p.baseUrl ?? 'no endpoint set';
   return p.model ? `model: ${p.model}` : 'default model';
 }
@@ -243,8 +264,32 @@ export default function KeyVault({ keys, onChange, webSearch, onWebSearchChange,
                 <input
                   className="rounded border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-sm text-ink-100"
                   value={draft.deploymentName ?? ''}
-                  onChange={(e) => setDraft((d) => ({ ...d, deploymentName: e.target.value }))}
+                  onChange={(e) => {
+                    const name = e.target.value;
+                    // Auto-fill the base model from the deployment name, but only
+                    // while the user hasn't typed their own (or it still equals a
+                    // prior guess) — so an explicit choice is never clobbered.
+                    setDraft((d) => {
+                      const prevGuess = inferAzureBaseModel(d.deploymentName ?? '');
+                      const keepModel = d.model && d.model !== prevGuess;
+                      return { ...d, deploymentName: name, model: keepModel ? d.model : (inferAzureBaseModel(name) || undefined) };
+                    });
+                  }}
                 />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-xs text-ink-400">Base model — for benchmark scores &amp; pricing</span>
+                <input
+                  list="azure-base-models"
+                  className="rounded border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-sm text-ink-100"
+                  value={draft.model ?? ''}
+                  onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
+                  placeholder="auto-detected from the deployment name"
+                />
+                <datalist id="azure-base-models">
+                  {AZURE_BASE_MODELS.map((m) => <option key={m} value={m} />)}
+                </datalist>
+                <span className="text-[11px] text-ink-500">Which base model this deployment runs. Auto-detected from the name — edit if wrong (e.g. a deployment named “prod-fast”).</span>
               </label>
               <label className="flex flex-col gap-1">
                 <span className="text-xs text-ink-400">API version (optional)</span>

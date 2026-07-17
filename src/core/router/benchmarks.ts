@@ -35,6 +35,11 @@ const FAMILY_BENCHMARKS: Record<string, BenchmarkProfile> = {
   'claude-opus':       { code: 95, analysis: 92, creative: 90, data: 88 },
   'claude-sonnet':     { code: 93, analysis: 88, creative: 87, data: 85 },
   'claude-haiku':      { code: 80, analysis: 75, creative: 76, data: 72 },
+  // OpenAI GPT-5 family — current flagship; strongest all-round. Offline
+  // baseline (the live fetch refreshes these); point releases (gpt-5.x) fold in.
+  'gpt-5':             { code: 96, analysis: 95, creative: 93, data: 93 },
+  'gpt-5-mini':        { code: 88, analysis: 86, creative: 86, data: 84 },
+  'gpt-5-nano':        { code: 78, analysis: 75, creative: 78, data: 73 },
   // OpenAI — strong all-round, particularly creative/writing.
   'gpt-4.1':           { code: 90, analysis: 89, creative: 91, data: 87 },
   'gpt-4.1-mini':      { code: 82, analysis: 80, creative: 83, data: 79 },
@@ -63,6 +68,11 @@ const FAMILY_MATCHERS: Array<[RegExp, string]> = [
   [/opus/i, 'claude-opus'],
   [/sonnet/i, 'claude-sonnet'],
   [/haiku/i, 'claude-haiku'],
+  // GPT-5 family — ordered most-specific first (nano/mini before the base, and
+  // point releases like gpt-5.4 fold into the gpt-5 base).
+  [/gpt-?5.*nano/i, 'gpt-5-nano'],
+  [/gpt-?5.*mini/i, 'gpt-5-mini'],
+  [/gpt-?5/i, 'gpt-5'],
   [/gpt-?4\.1-nano/i, 'gpt-4.1-nano'],
   [/gpt-?4\.1-mini/i, 'gpt-4.1-mini'],
   [/gpt-?4\.1/i, 'gpt-4.1'],
@@ -83,7 +93,9 @@ const FAMILY_MATCHERS: Array<[RegExp, string]> = [
 ];
 
 export function resolveFamily(model: ModelInfo): string | null {
-  const hay = `${model.id} ${model.name}`;
+  // Prefer the canonical base-model id (e.g. an Azure deployment's real model)
+  // so a deployment named "prod-fast" still resolves via its baseModelId.
+  const hay = `${model.baseModelId ?? ''} ${model.id} ${model.name}`;
   for (const [re, fam] of FAMILY_MATCHERS) {
     if (re.test(hay)) return fam;
   }
