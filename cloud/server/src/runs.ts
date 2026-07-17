@@ -11,6 +11,7 @@
 import { createCascade } from '#cascade-ai';
 import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ProviderConfig } from '#cascade-ai';
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import type { Socket } from 'socket.io';
 import { z } from 'zod';
 import type { CloudEnv } from './env.js';
@@ -82,6 +83,10 @@ const ChatRunPayloadSchema = z.object({
   // starts from this — its heuristic floors + escalation still apply as
   // guardrails. Ignored when a tier is pinned via forceTier.
   complexityHint: z.enum(['Simple', 'Moderate', 'Complex']).optional(),
+  // Contribute this run's anonymous model-outcome stats to the shared learning
+  // pool. Only a Pro user's `false` opts out; free users always contribute
+  // (enforced server-side against the user's plan).
+  shareLearning: z.boolean().optional(),
   webSearch: z.boolean().optional(),
   // Optional web-search backend the user configured (browser-held, like keys).
   // Whichever field is set is used — SearXNG → Brave → Tavily priority in the
@@ -137,6 +142,10 @@ export interface RunControls {
   tierParams?: { t1?: TierParam; t2?: TierParam; t3?: TierParam };
   /** Extended context: compact oversized history/input to fit the model window. */
   extendedContext?: { enabled?: boolean; maxMultiplier?: number };
+  /** Where the shared model-performance stats live (→ the persistent volume). */
+  perfStatsPath?: string;
+  /** When false, read shared scores but don't record this run's outcomes. */
+  learnFromOutcomes?: boolean;
 }
 
 // Maps the UI's routing mode to Cascade Auto's bias. Cascade Auto stays ON for
@@ -175,7 +184,11 @@ export function buildCloudConfig(
     providers,
     cascadeAuto: true,
     autoBias: BIAS_BY_MODE[controls.routingMode ?? 'auto'] ?? 'balanced',
-    routing: { forceTier: controls.forceTier ?? 'auto' },
+    routing: {
+      forceTier: controls.forceTier ?? 'auto',
+      ...(controls.perfStatsPath ? { perfStatsPath: controls.perfStatsPath } : {}),
+      ...(controls.learnFromOutcomes === false ? { learnFromOutcomes: false } : {}),
+    },
     ...(tierLimits && Object.keys(tierLimits).length ? { tierLimits } : {}),
     ...(ec?.enabled ? { extendedContext: { enabled: true, maxMultiplier: ec.maxMultiplier ?? 2 } } : {}),
     tools: {
@@ -327,6 +340,14 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   const runPrompt = buildRunPrompt(payload.prompt, skillSystemPrompt, memories);
 
   const scratchDir = tenantScratchDir(env, userId);
+  // Shared learning pool: one anonymous model-outcome dataset on the same
+  // durable dir as the DB (survives redeploys). Free users always contribute so
+  // routing improves for everyone; a Pro user's explicit opt-out is honored.
+  // The plan is read server-side so a client can't opt a free account out.
+  const plan = store.getUserById(userId)?.plan ?? 'free';
+  const learnFromOutcomes = plan === 'pro' ? payload.shareLearning !== false : true;
+  const perfStatsPath = path.join(path.resolve(env.DATA_DIR), 'model-perf.json');
+
   const config = buildCloudConfig(payload.providers as ProviderConfig[], env.MAX_COST_PER_RUN_USD, {
     routingMode: payload.routingMode,
     forceTier: payload.forceTier,
@@ -334,6 +355,8 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     webSearchConfig: payload.webSearchConfig,
     tierParams: payload.tierParams,
     extendedContext: payload.extendedContext,
+    perfStatsPath,
+    learnFromOutcomes,
   });
   const cascade: Cascade = createCascade(config, scratchDir);
 

@@ -213,12 +213,12 @@ export class TaskAnalyzer {
    * Record the outcome of a completed run across all tiers that were selected
    * during this session and persist stats to disk.
    */
-  recordRunOutcome(outcome: 'success' | 'failure', costByTier: Record<string, number>): void {
+  recordRunOutcome(outcome: 'success' | 'failure', costByTier: Record<string, number>, contextTokens = 0): void {
     if (!this.tracker || !this.lastProfile) return;
     const taskType = this.lastProfile.type;
     for (const [tier, model] of this.lastSelectedModels) {
       const cost = costByTier[tier] ?? 0;
-      this.tracker.record(model.id, taskType, outcome, 0, cost);
+      this.tracker.record(model.id, taskType, outcome, 0, cost, contextTokens);
     }
     this.lastSelectedModels.clear();
     void this.tracker.save();

@@ -18,6 +18,11 @@ interface ModelStat {
   totalRetries: number;
   totalCostUsd: number;
   sampleCount: number;
+  /** Sum of input/context tokens across samples — so we can see whether a
+   *  model tends to fail on larger contexts and route less to it accordingly. */
+  totalContextTokens: number;
+  /** Sum of context tokens on the FAILED samples only. */
+  failureContextTokens: number;
 }
 
 interface FeatureStat {
@@ -31,10 +36,17 @@ export class ModelPerformanceTracker {
   private stats = new Map<string, ModelStat>();
   private featureStats = new Map<string, FeatureStat>();
   private readonly statsFile: string;
+  private readonly readOnly: boolean;
   private loaded = false;
 
-  constructor(statsFile = DEFAULT_STATS_FILE) {
+  /**
+   * @param statsFile where stats persist (cloud → the persistent volume).
+   * @param options.readOnly consume the shared scores but don't record/save this
+   *        run's outcomes — the opt-out path for users who declined to contribute.
+   */
+  constructor(statsFile = DEFAULT_STATS_FILE, options: { readOnly?: boolean } = {}) {
     this.statsFile = statsFile;
+    this.readOnly = options.readOnly ?? false;
   }
 
   async load(): Promise<void> {
@@ -62,13 +74,22 @@ export class ModelPerformanceTracker {
   }
 
   async save(): Promise<void> {
+    if (this.readOnly) return; // opted out — never write this user's outcomes
     try {
       await fs.mkdir(path.dirname(this.statsFile), { recursive: true });
       const modelsObj: Record<string, ModelStat> = {};
       const featuresObj: Record<string, FeatureStat> = {};
       for (const [key, stat] of this.stats) modelsObj[key] = stat;
       for (const [key, stat] of this.featureStats) featuresObj[key] = stat;
-      await fs.writeFile(this.statsFile, JSON.stringify({ models: modelsObj, features: featuresObj }, null, 2), 'utf-8');
+      const json = JSON.stringify({ models: modelsObj, features: featuresObj }, null, 2);
+      // Atomic write (temp + rename) so concurrent writers on the shared cloud
+      // file never observe a half-written, corrupt JSON — the rename swaps the
+      // file in whole. A per-process temp suffix avoids two writers colliding on
+      // the same temp path. Worst case under contention is a lost increment
+      // (last rename wins), never a corrupt file.
+      const tmp = `${this.statsFile}.${process.pid}.${Date.now()}.tmp`;
+      await fs.writeFile(tmp, json, 'utf-8');
+      await fs.rename(tmp, this.statsFile);
     } catch { /* non-critical */ }
   }
 
@@ -78,10 +99,13 @@ export class ModelPerformanceTracker {
     outcome: 'success' | 'failure',
     retries = 0,
     costUsd = 0,
+    contextTokens = 0,
   ): void {
+    if (this.readOnly) return; // opted out — read scores, don't contribute
     const key = `${modelId}:${taskType}`;
     const s = this.stats.get(key) ?? {
       successCount: 0, failureCount: 0, totalRetries: 0, totalCostUsd: 0, sampleCount: 0,
+      totalContextTokens: 0, failureContextTokens: 0,
     };
     this.stats.set(key, {
       successCount: s.successCount + (outcome === 'success' ? 1 : 0),
@@ -89,10 +113,13 @@ export class ModelPerformanceTracker {
       totalRetries: s.totalRetries + retries,
       totalCostUsd: s.totalCostUsd + costUsd,
       sampleCount: s.sampleCount + 1,
+      totalContextTokens: (s.totalContextTokens ?? 0) + Math.max(0, contextTokens),
+      failureContextTokens: (s.failureContextTokens ?? 0) + (outcome === 'failure' ? Math.max(0, contextTokens) : 0),
     });
   }
 
   recordFeatureCost(featureTag: string, costUsd: number): void {
+    if (this.readOnly) return;
     const s = this.featureStats.get(featureTag) ?? { totalCostUsd: 0, runCount: 0 };
     this.featureStats.set(featureTag, {
       totalCostUsd: s.totalCostUsd + costUsd,

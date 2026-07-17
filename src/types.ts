@@ -528,7 +528,13 @@ export interface CascadeConfig {
    * hierarchy), 'T2' (manager + workers), 'T3' (single worker) — bypassing the
    * complexity classifier. 'auto' (default) uses classification.
    */
-  routing?: { forceTier?: 'auto' | 'T1' | 'T2' | 'T3' };
+  routing?: {
+    forceTier?: 'auto' | 'T1' | 'T2' | 'T3';
+    /** Override the model-performance stats file (cloud → persistent volume). */
+    perfStatsPath?: string;
+    /** Read shared scores but don't record this run's outcomes when false. Default true. */
+    learnFromOutcomes?: boolean;
+  };
   /** Render the TUI in the alternate screen buffer (vim-style). Default: false. */
   altScreen?: boolean;
 }
