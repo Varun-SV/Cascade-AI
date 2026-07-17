@@ -3,10 +3,15 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Copy, Check, RotateCcw, ChevronDown } from 'lucide-react';
+import { Copy, Check, RotateCcw, ChevronDown, FileText } from 'lucide-react';
 import { uploadUrl } from '../lib/api.js';
 import type { ChatMessage } from './useChatSession.js';
 import type { WhyReport } from '../lib/types.js';
+
+// Compact "12k chars" / "980 chars" label for a document attachment's size.
+function formatChars(n: number): string {
+  return n >= 1000 ? `${Math.round(n / 1000)}k chars` : `${n} chars`;
+}
 
 // Tier accent colors match the run-explorer design (T1 green / T2 amber /
 // T3 violet), rendered as subtle tinted chips over the existing dark surface.
@@ -112,7 +117,9 @@ interface Props {
 }
 
 export default function Message({ message, onRegenerate }: Props) {
-  const images = (message.attachments ?? []).filter((a) => a.mime.startsWith('image/'));
+  const attachments = message.attachments ?? [];
+  const images = attachments.filter((a) => a.mime.startsWith('image/'));
+  const docs = attachments.filter((a) => a.kind === 'document' || (!a.mime.startsWith('image/') && !!a.filename));
   const [whyOpen, setWhyOpen] = useState(false);
 
   if (message.role === 'user') {
@@ -127,6 +134,22 @@ export default function Message({ message, onRegenerate }: Props) {
                 alt="attachment"
                 className="max-h-40 rounded-xl border border-elev/10 object-cover shadow-lg"
               />
+            ))}
+          </div>
+        )}
+        {docs.length > 0 && (
+          <div className="flex flex-wrap justify-end gap-2">
+            {docs.map((a) => (
+              <div
+                key={a.id}
+                className="flex items-center gap-2 rounded-xl border border-elev/10 bg-elev/[0.06] px-3 py-2 text-xs text-ink-200 shadow-lg"
+              >
+                <FileText size={14} className="shrink-0 text-accent-300" />
+                <span className="max-w-[12rem] truncate font-medium">{a.filename ?? 'document'}</span>
+                {typeof a.charCount === 'number' && a.charCount > 0 && (
+                  <span className="text-ink-500">{formatChars(a.charCount)}</span>
+                )}
+              </div>
             ))}
           </div>
         )}

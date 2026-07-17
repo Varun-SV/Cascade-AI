@@ -80,9 +80,14 @@ export interface CloudAttachment {
   id: string;
   userId: string;
   messageId: string | null;
-  kind: string; // 'image'
+  kind: string; // 'image' | 'document'
   mime: string;
   path: string;
+  /** Original upload filename (documents) — shown as a chip in the transcript. */
+  filename: string | null;
+  /** Extracted-text length for documents (0/null for images). Lets the client
+   *  show "12k chars" without shipping the whole extracted body. */
+  charCount: number | null;
   createdAt: number;
 }
 
@@ -136,6 +141,34 @@ interface DbAttachmentRow {
   kind: string;
   mime: string;
   path: string;
+  filename: string | null;
+  extracted_text: string | null;
+  char_count: number | null;
+  created_at: number;
+}
+
+/** A remote MCP server / app connector, as exposed to the client (auth redacted). */
+export interface CloudMcpServer {
+  id: string;
+  userId: string;
+  name: string;
+  url: string;
+  /** True when an auth header is stored — the header value itself is never sent. */
+  hasAuth: boolean;
+  /** Connector-catalog id when this came from a preset (e.g. 'github'); else null. */
+  connectorId: string | null;
+  enabled: boolean;
+  createdAt: number;
+}
+
+interface DbMcpServerRow {
+  id: string;
+  user_id: string;
+  name: string;
+  url: string;
+  headers_json: string | null;
+  connector_id: string | null;
+  enabled: number;
   created_at: number;
 }
 
@@ -245,6 +278,22 @@ export class CloudStore {
       );
 
       CREATE INDEX IF NOT EXISTS idx_skills_user ON skills(user_id);
+
+      -- Remote MCP servers + app connectors a user has added. headers_json
+      -- carries auth (bearer token / API key) and is NEVER returned to the
+      -- client; only a redacted "has auth" flag is exposed.
+      CREATE TABLE IF NOT EXISTS mcp_servers (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        url TEXT NOT NULL,
+        headers_json TEXT,
+        connector_id TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_mcp_servers_user ON mcp_servers(user_id);
     `);
 
     // Additive columns — ALTER ... ADD COLUMN throws if the column already
@@ -257,6 +306,11 @@ export class CloudStore {
     if (!hasCol('messages', 'why_json')) this.db.exec('ALTER TABLE messages ADD COLUMN why_json TEXT');
     // Per-user memory categories (STACK/STYLE/PROJECT/…).
     if (!hasCol('memories', 'category')) this.db.exec('ALTER TABLE memories ADD COLUMN category TEXT');
+    // Document attachments: original filename + extracted text (parsed at upload)
+    // so a run injects the text without re-parsing, plus a char count for display.
+    if (!hasCol('attachments', 'filename')) this.db.exec('ALTER TABLE attachments ADD COLUMN filename TEXT');
+    if (!hasCol('attachments', 'extracted_text')) this.db.exec('ALTER TABLE attachments ADD COLUMN extracted_text TEXT');
+    if (!hasCol('attachments', 'char_count')) this.db.exec('ALTER TABLE attachments ADD COLUMN char_count INTEGER');
     // Razorpay subscription state.
     if (!hasCol('users', 'subscription_id')) this.db.exec('ALTER TABLE users ADD COLUMN subscription_id TEXT');
     if (!hasCol('users', 'subscription_status')) this.db.exec('ALTER TABLE users ADD COLUMN subscription_status TEXT');
@@ -515,7 +569,11 @@ export class CloudStore {
 
   // ── Attachments (uploaded images, on-disk, referenced by row) ──
 
-  addAttachment(input: { userId: string; messageId: string | null; kind: string; mime: string; path: string }): CloudAttachment {
+  addAttachment(input: {
+    userId: string; messageId: string | null; kind: string; mime: string; path: string;
+    filename?: string | null; extractedText?: string | null;
+  }): CloudAttachment {
+    const text = input.extractedText ?? null;
     const row: DbAttachmentRow = {
       id: randomUUID(),
       user_id: input.userId,
@@ -523,12 +581,24 @@ export class CloudStore {
       kind: input.kind,
       mime: input.mime,
       path: input.path,
+      filename: input.filename ?? null,
+      extracted_text: text,
+      char_count: text != null ? text.length : null,
       created_at: Date.now(),
     };
     this.db
-      .prepare('INSERT INTO attachments (id, user_id, message_id, kind, mime, path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(row.id, row.user_id, row.message_id, row.kind, row.mime, row.path, row.created_at);
+      .prepare('INSERT INTO attachments (id, user_id, message_id, kind, mime, path, filename, extracted_text, char_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(row.id, row.user_id, row.message_id, row.kind, row.mime, row.path, row.filename, row.extracted_text, row.char_count, row.created_at);
     return this.deserializeAttachment(row);
+  }
+
+  /** The extracted text for a document attachment, owner-scoped. Kept separate
+   *  from getOwnedAttachment so list/transcript queries never load the full body. */
+  getOwnedAttachmentText(id: string, userId: string): string | null {
+    const row = this.db
+      .prepare('SELECT extracted_text FROM attachments WHERE id = ? AND user_id = ?')
+      .get(id, userId) as { extracted_text: string | null } | undefined;
+    return row?.extracted_text ?? null;
   }
 
   linkAttachmentToMessage(id: string, userId: string, messageId: string): void {
@@ -550,7 +620,74 @@ export class CloudStore {
     return row ? this.deserializeAttachment(row) : null;
   }
 
+  // ── MCP servers / connectors (remote tool sources) ──
+
+  listMcpServers(userId: string): CloudMcpServer[] {
+    const rows = this.db
+      .prepare('SELECT * FROM mcp_servers WHERE user_id = ? ORDER BY created_at ASC, rowid ASC')
+      .all(userId) as DbMcpServerRow[];
+    return rows.map((r) => this.deserializeMcpServer(r));
+  }
+
+  /** Enabled servers with their raw auth headers — for run wiring only, never
+   *  exposed over the API. */
+  listEnabledMcpServersWithAuth(userId: string): Array<{ name: string; url: string; headers?: Record<string, string> }> {
+    const rows = this.db
+      .prepare('SELECT * FROM mcp_servers WHERE user_id = ? AND enabled = 1 ORDER BY created_at ASC, rowid ASC')
+      .all(userId) as DbMcpServerRow[];
+    return rows.map((r) => ({
+      name: r.name,
+      url: r.url,
+      ...(r.headers_json ? { headers: JSON.parse(r.headers_json) as Record<string, string> } : {}),
+    }));
+  }
+
+  addMcpServer(input: {
+    userId: string; name: string; url: string;
+    headers?: Record<string, string> | null; connectorId?: string | null;
+  }): CloudMcpServer {
+    const row: DbMcpServerRow = {
+      id: randomUUID(),
+      user_id: input.userId,
+      name: input.name,
+      url: input.url,
+      headers_json: input.headers && Object.keys(input.headers).length ? JSON.stringify(input.headers) : null,
+      connector_id: input.connectorId ?? null,
+      enabled: 1,
+      created_at: Date.now(),
+    };
+    this.db
+      .prepare('INSERT INTO mcp_servers (id, user_id, name, url, headers_json, connector_id, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(row.id, row.user_id, row.name, row.url, row.headers_json, row.connector_id, row.enabled, row.created_at);
+    return this.deserializeMcpServer(row);
+  }
+
+  setMcpServerEnabled(id: string, userId: string, enabled: boolean): boolean {
+    const info = this.db
+      .prepare('UPDATE mcp_servers SET enabled = ? WHERE id = ? AND user_id = ?')
+      .run(enabled ? 1 : 0, id, userId);
+    return info.changes > 0;
+  }
+
+  deleteMcpServer(id: string, userId: string): boolean {
+    const info = this.db.prepare('DELETE FROM mcp_servers WHERE id = ? AND user_id = ?').run(id, userId);
+    return info.changes > 0;
+  }
+
   // ── Deserializers ─────────────────────────────
+
+  private deserializeMcpServer(row: DbMcpServerRow): CloudMcpServer {
+    return {
+      id: row.id,
+      userId: row.user_id,
+      name: row.name,
+      url: row.url,
+      hasAuth: !!row.headers_json,
+      connectorId: row.connector_id ?? null,
+      enabled: !!row.enabled,
+      createdAt: row.created_at,
+    };
+  }
 
   private deserializeUser(row: DbUserRow): CloudUser {
     return {
@@ -685,6 +822,8 @@ export class CloudStore {
       kind: row.kind,
       mime: row.mime,
       path: row.path,
+      filename: row.filename ?? null,
+      charCount: row.char_count ?? null,
       createdAt: row.created_at,
     };
   }

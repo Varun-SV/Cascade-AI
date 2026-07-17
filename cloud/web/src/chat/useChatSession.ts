@@ -12,6 +12,12 @@ import { classifyLocalComplexity } from '../lib/localModel/classifier.js';
 export interface ChatAttachment {
   id: string;
   mime: string;
+  /** 'image' (default) or 'document'. Drives how the chip renders. */
+  kind?: 'image' | 'document';
+  /** Original filename — shown on document chips. */
+  filename?: string | null;
+  /** Extracted-text length for documents (for a "· 12k chars" hint). */
+  charCount?: number | null;
 }
 
 export interface ChatMessage {
@@ -50,15 +56,53 @@ interface ChatRunAck {
   error?: string;
 }
 
-// Maps a tier event to a human-legible activity label. Cascade streams
-// tier:status as it moves T1 → T2 → T3; the exact payload shape varies, so we
-// read whatever tier marker is present and fall back to a generic label.
+// Turns a tier event into a specific, human "what's happening now" line. Cascade
+// streams tier:status as it moves T1 → T2 → T3, carrying the tier's role, the
+// serving model, a label (subtask/section title) and sometimes a currentAction.
+// We prefer the most specific signal available so the chip reflects the REAL
+// work ("Working: Parse the CSV…") rather than a fixed "Executing…".
 function statusLabel(e: Record<string, unknown>): string {
-  const tier = String(e['tierId'] ?? e['tier'] ?? e['id'] ?? '').toUpperCase();
-  if (tier.startsWith('T1')) return 'Planning…';
-  if (tier.startsWith('T2')) return 'Coordinating…';
-  if (tier.startsWith('T3')) return 'Executing…';
+  const role = String(e['role'] ?? e['tierId'] ?? e['tier'] ?? e['id'] ?? '').toUpperCase();
+  const label = typeof e['label'] === 'string' ? (e['label'] as string).trim() : '';
+  const action = typeof e['currentAction'] === 'string' ? (e['currentAction'] as string).trim() : '';
+  if (action) return `${action}…`;
+  if (role.startsWith('T1')) return 'Mapping the approach…';
+  if (role.startsWith('T2')) return label ? `Cascading: ${label}…` : 'Cascading — delegating to specialists…';
+  if (role.startsWith('T3')) return label ? `Working: ${label}…` : 'Working…';
   return 'Working…';
+}
+
+/** One node of the live run activity — a tier and what it's doing right now. */
+export interface ActivityNode {
+  tierId: string;
+  role: string;            // 'T1' | 'T2' | 'T3'
+  label?: string;          // subtask / section title
+  model?: string;          // provider:model serving this tier
+  status: string;          // ACTIVE | COMPLETED | …
+  currentAction?: string;
+  progressPct?: number;
+  order: number;           // arrival order, for stable display
+}
+
+/** Merge a tier:status event into the running activity list (latest state per tier). */
+function mergeActivity(prev: ActivityNode[], e: Record<string, unknown>): ActivityNode[] {
+  const tierId = String(e['tierId'] ?? e['id'] ?? e['role'] ?? '');
+  if (!tierId) return prev;
+  const i = prev.findIndex((n) => n.tierId === tierId);
+  const cur = i >= 0 ? prev[i]! : undefined;
+  const str = (k: string) => (typeof e[k] === 'string' && (e[k] as string).trim() ? (e[k] as string).trim() : undefined);
+  const node: ActivityNode = {
+    tierId,
+    role: String(e['role'] ?? cur?.role ?? '').toUpperCase(),
+    label: str('label') ?? cur?.label,
+    model: str('model') ?? cur?.model,
+    status: str('status') ?? cur?.status ?? 'ACTIVE',
+    currentAction: str('currentAction') ?? cur?.currentAction,
+    progressPct: typeof e['progressPct'] === 'number' ? (e['progressPct'] as number) : cur?.progressPct,
+    order: cur?.order ?? prev.length,
+  };
+  if (i >= 0) { const copy = [...prev]; copy[i] = node; return copy; }
+  return [...prev, node];
 }
 
 export interface WebSearchPayload {
@@ -119,6 +163,9 @@ export function useChatSession(
   // transient notice once a compaction actually happened.
   const [contextApproval, setContextApproval] = useState<ContextApprovalInfo | null>(null);
   const [compactionNotice, setCompactionNotice] = useState<string | null>(null);
+  // Live run activity — the T1→T2→T3 tree with each tier's model + current
+  // subtask, built from tier:status events. Powers the click-to-expand drawer.
+  const [activity, setActivity] = useState<ActivityNode[]>([]);
   // Default OFF: a hosted chat is pure conversation unless the user opts into
   // web tools. With the toggle off the run registers no tools at all, so the
   // model is never handed a capability it can't reliably use.
@@ -160,7 +207,10 @@ export function useChatSession(
         return [...prev, { id: 'streaming', role: 'assistant', content: streamingRef.current, streaming: true }];
       });
     };
-    const onStatus = (e: Record<string, unknown>) => setStatus(statusLabel(e));
+    const onStatus = (e: Record<string, unknown>) => {
+      setStatus(statusLabel(e));
+      setActivity((prev) => mergeActivity(prev, e));
+    };
     const onWhy = (r: WhyReport) => { pendingWhyRef.current = r; };
     const onPlan = (e: PlanApproval) => setApproval(e);
     const onContextApproval = (e: ContextApprovalInfo) => setContextApproval(e);
@@ -202,10 +252,11 @@ export function useChatSession(
       if (!socket || busy || !text) return;
       setBusy(true);
       setError(null);
-      setStatus('Thinking…');
+      setStatus('Sizing up the task…');
       setApproval(null);
       setContextApproval(null);
       setCompactionNotice(null);
+      setActivity([]);
       streamingRef.current = '';
       if (appendUser) {
         setMessages((prev) => [...prev, { id: crypto.randomUUID(), role: 'user', content: text, attachments }]);
@@ -327,6 +378,6 @@ export function useChatSession(
   return {
     messages, send, stop, regenerate, busy, error, status, lastTokens, lastSaved, conversationId, loadMessages, setConversationId,
     routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, approval,
-    contextApproval, resolveContextApproval, compactionNotice,
+    contextApproval, resolveContextApproval, compactionNotice, activity,
   };
 }

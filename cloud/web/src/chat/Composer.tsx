@@ -1,17 +1,37 @@
 import { useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react';
 import clsx from 'clsx';
 import { motion } from 'framer-motion';
-import { Send, Paperclip, X, Loader2, Globe, Square, Zap } from 'lucide-react';
-import { uploadImage } from '../lib/api.js';
+import { Send, Paperclip, X, Loader2, Globe, Square, Zap, FileText } from 'lucide-react';
+import { uploadImage, uploadDocument } from '../lib/api.js';
 import type { Skill } from '../lib/types.js';
 import type { ChatAttachment, ForceTier, RoutingMode, SendInput } from './useChatSession.js';
 import type { UiMode } from '../lib/prefs.js';
 
 const ALLOWED = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
-const MAX_FILES = 4;
+// Document MIME types + a filename-extension fallback (browsers often report a
+// blank or octet-stream type for .md/.csv/.txt). Parsing happens server-side.
+const DOC_MIME = new Set([
+  'application/pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'text/plain', 'text/markdown', 'text/csv', 'text/tab-separated-values',
+  'application/json', 'text/json', 'application/xml', 'text/xml', 'text/html',
+  'text/yaml', 'application/x-yaml', 'text/x-yaml',
+]);
+const DOC_EXT = /\.(pdf|docx|txt|md|markdown|csv|tsv|json|xml|html?|ya?ml)$/i;
+const FILE_ACCEPT =
+  'image/png,image/jpeg,image/gif,image/webp,application/pdf,.docx,.txt,.md,.csv,.tsv,.json,.xml,.html,.yaml,.yml';
+const MAX_FILES = 6;
+
+function isImage(f: File): boolean {
+  return ALLOWED.has(f.type);
+}
+function isDocument(f: File): boolean {
+  return DOC_MIME.has(f.type) || DOC_EXT.test(f.name);
+}
 
 interface Pending extends ChatAttachment {
-  previewUrl: string;
+  /** Object URL for image previews; absent for documents. */
+  previewUrl?: string;
 }
 
 function fileToBase64(file: File): Promise<string> {
@@ -56,23 +76,35 @@ export default function Composer({
   const [pending, setPending] = useState<Pending[]>([]);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   async function addFiles(files: FileList | File[]) {
-    const images = Array.from(files).filter((f) => ALLOWED.has(f.type));
-    if (!images.length) return;
+    const usable = Array.from(files).filter((f) => isImage(f) || isDocument(f));
+    if (!usable.length) return;
+    setUploadError(null);
     setUploading(true);
     try {
-      for (const file of images) {
+      for (const file of usable) {
         if (pending.length >= MAX_FILES) break;
         try {
           const base64 = await fileToBase64(file);
-          const { id, mime } = await uploadImage(file.type, base64);
-          setPending((prev) =>
-            prev.length >= MAX_FILES ? prev : [...prev, { id, mime, previewUrl: URL.createObjectURL(file) }],
-          );
-        } catch {
-          /* one bad file shouldn't block the rest */
+          if (isImage(file)) {
+            const { id, mime } = await uploadImage(file.type, base64);
+            setPending((prev) =>
+              prev.length >= MAX_FILES ? prev : [...prev, { id, mime, kind: 'image', previewUrl: URL.createObjectURL(file) }],
+            );
+          } else {
+            const res = await uploadDocument(file.type || 'application/octet-stream', base64, file.name);
+            setPending((prev) =>
+              prev.length >= MAX_FILES
+                ? prev
+                : [...prev, { id: res.id, mime: res.mime, kind: 'document', filename: res.filename ?? file.name, charCount: res.charCount ?? null }],
+            );
+            if (res.truncated) setUploadError(`"${file.name}" was long — only the first part was kept as context.`);
+          }
+        } catch (err) {
+          setUploadError(err instanceof Error ? err.message : `Couldn't add "${file.name}".`);
         }
       }
     } finally {
@@ -83,16 +115,21 @@ export default function Composer({
   function removePending(id: string) {
     setPending((prev) => {
       const gone = prev.find((p) => p.id === id);
-      if (gone) URL.revokeObjectURL(gone.previewUrl);
+      if (gone?.previewUrl) URL.revokeObjectURL(gone.previewUrl);
       return prev.filter((p) => p.id !== id);
     });
   }
 
   function submit(fast = false) {
     if (!input.trim() || busy || uploading) return;
-    onSend({ prompt: input, attachments: pending.map(({ id, mime }) => ({ id, mime })), fast });
+    onSend({
+      prompt: input,
+      attachments: pending.map(({ id, mime, kind, filename, charCount }) => ({ id, mime, kind, filename, charCount })),
+      fast,
+    });
     setInput('');
-    pending.forEach((p) => URL.revokeObjectURL(p.previewUrl));
+    setUploadError(null);
+    pending.forEach((p) => { if (p.previewUrl) URL.revokeObjectURL(p.previewUrl); });
     setPending([]);
   }
 
@@ -105,7 +142,7 @@ export default function Composer({
 
   function onPaste(e: ClipboardEvent<HTMLTextAreaElement>) {
     const files = Array.from(e.clipboardData.files);
-    if (files.some((f) => ALLOWED.has(f.type))) {
+    if (files.some((f) => isImage(f) || isDocument(f))) {
       e.preventDefault();
       void addFiles(files);
     }
@@ -132,35 +169,59 @@ export default function Composer({
       >
         {pending.length > 0 && (
           <div className="flex flex-wrap gap-2 px-3 pt-3">
-            {pending.map((p) => (
-              <div key={p.id} className="relative">
-                <img src={p.previewUrl} alt="pending" className="h-16 w-16 rounded-xl border border-elev/10 object-cover shadow-lg" />
-                <button
-                  type="button"
-                  aria-label="Remove attachment"
-                  onClick={() => removePending(p.id)}
-                  className="absolute -right-1.5 -top-1.5 rounded-full border border-elev/10 bg-ink-800 p-0.5 text-ink-200 backdrop-blur hover:text-ink-50"
+            {pending.map((p) =>
+              p.kind === 'document' ? (
+                <div
+                  key={p.id}
+                  className="relative flex items-center gap-2 rounded-xl border border-elev/10 bg-elev/[0.06] px-3 py-2 pr-6 text-xs text-ink-200 shadow-lg"
                 >
-                  <X size={12} />
-                </button>
-              </div>
-            ))}
+                  <FileText size={14} className="shrink-0 text-accent-300" />
+                  <span className="max-w-[10rem] truncate font-medium">{p.filename ?? 'document'}</span>
+                  {typeof p.charCount === 'number' && p.charCount > 0 && (
+                    <span className="text-ink-500">{p.charCount >= 1000 ? `${Math.round(p.charCount / 1000)}k` : p.charCount}</span>
+                  )}
+                  <button
+                    type="button"
+                    aria-label="Remove attachment"
+                    onClick={() => removePending(p.id)}
+                    className="absolute -right-1.5 -top-1.5 rounded-full border border-elev/10 bg-ink-800 p-0.5 text-ink-200 backdrop-blur hover:text-ink-50"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              ) : (
+                <div key={p.id} className="relative">
+                  <img src={p.previewUrl} alt="pending" className="h-16 w-16 rounded-xl border border-elev/10 object-cover shadow-lg" />
+                  <button
+                    type="button"
+                    aria-label="Remove attachment"
+                    onClick={() => removePending(p.id)}
+                    className="absolute -right-1.5 -top-1.5 rounded-full border border-elev/10 bg-ink-800 p-0.5 text-ink-200 backdrop-blur hover:text-ink-50"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              ),
+            )}
           </div>
+        )}
+        {uploadError && (
+          <div className="px-3 pt-2 text-[11px] text-danger-300">{uploadError}</div>
         )}
 
         <div className="flex items-end gap-2 p-2">
           <input
             ref={fileRef}
             type="file"
-            accept="image/png,image/jpeg,image/gif,image/webp"
+            accept={FILE_ACCEPT}
             multiple
             hidden
             onChange={(e) => { if (e.target.files) void addFiles(e.target.files); e.target.value = ''; }}
           />
           <motion.button
             type="button"
-            aria-label="Attach image"
-            title="Attach an image — files coming soon"
+            aria-label="Attach image or document"
+            title="Attach an image, PDF, Word doc, or text file"
             disabled={disabled || pending.length >= MAX_FILES}
             onClick={() => fileRef.current?.click()}
             whileHover={{ scale: 1.1 }}
@@ -304,7 +365,7 @@ export default function Composer({
         )}
       </div>
       <p className="mx-auto mt-1.5 max-w-3xl px-1 text-[11px] text-ink-400">
-        Images now · file generation &amp; download coming soon.
+        Attach images &amp; documents (PDF, Word, text) · file generation &amp; download coming soon.
       </p>
     </div>
   );

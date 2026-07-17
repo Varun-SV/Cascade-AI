@@ -46,9 +46,9 @@ const TierParamSchema = z
 const ChatRunPayloadSchema = z.object({
   conversationId: z.string().optional(),
   prompt: z.string().min(1).max(20_000),
-  // Ids of images the client already uploaded via POST /api/uploads. Loaded
-  // and ownership-checked server-side; unknown/foreign ids are ignored.
-  attachmentIds: z.array(z.string()).max(4).optional(),
+  // Ids of images/documents the client already uploaded via POST /api/uploads.
+  // Loaded and ownership-checked server-side; unknown/foreign ids are ignored.
+  attachmentIds: z.array(z.string()).max(8).optional(),
   // Selected prompt-preset ("skill"). Unknown ids resolve to no preset.
   skillId: optionalNonEmptyString,
   // Run-explorer controls. routingMode biases Cascade Auto; forceTier pins the
@@ -153,6 +153,8 @@ export interface RunControls {
   benchmarksCacheFile?: string;
   /** Hard per-run token ceiling (overrides the SDK default). */
   maxTokensPerRun?: number;
+  /** Remote MCP servers (with auth headers) to attach as tool sources. */
+  mcpServers?: Array<{ name: string; url: string; headers?: Record<string, string> }>;
 }
 
 // Maps the UI's routing mode to Cascade Auto's bias. Cascade Auto stays ON for
@@ -212,6 +214,14 @@ export function buildCloudConfig(
       // registry (see src/tools/registry.ts: enabledTools allowlist). The web
       // toggle drops even these when off.
       enabledTools: webSearchOn ? ['web_search', 'web_fetch'] : [],
+      // Remote MCP servers the user attached. Their names are pre-trusted so
+      // they connect without an interactive gate (the hosted run auto-proceeds);
+      // the SSRF guard + https-only check already ran at add time. MCP tools
+      // register outside the enabledTools allowlist, so they're available even
+      // when the web toggle is off.
+      ...(controls.mcpServers?.length
+        ? { mcpServers: controls.mcpServers, mcpTrusted: controls.mcpServers.map((s) => s.name) }
+        : {}),
     },
     ...(webSearchOn && hasBackend
       ? { webSearch: { searxngUrl: wsc!.searxngUrl, braveApiKey: wsc!.braveApiKey, tavilyApiKey: wsc!.tavilyApiKey } }
@@ -264,16 +274,38 @@ export function primaryTierOf(tokensByTier: Record<string, number>, costByTier: 
 
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 
-// Builds the run prompt from the user's text plus any selected skill preset
-// and their saved memories. Kept a pure function so it's unit-testable and so
-// the ORIGINAL user text (not this augmented version) is what gets persisted.
-export function buildRunPrompt(userPrompt: string, skillSystemPrompt: string | undefined, memories: string[]): string {
+/** A document attachment resolved to plain text, ready to inject into a run. */
+export interface RunDocument {
+  filename: string;
+  text: string;
+}
+
+// Builds the run prompt from the user's text plus any selected skill preset,
+// their saved memories, and the text of any attached documents. Kept a pure
+// function so it's unit-testable and so the ORIGINAL user text (not this
+// augmented version) is what gets persisted.
+export function buildRunPrompt(
+  userPrompt: string,
+  skillSystemPrompt: string | undefined,
+  memories: string[],
+  documents: RunDocument[] = [],
+): string {
   const preamble: string[] = [];
   if (skillSystemPrompt) preamble.push(skillSystemPrompt);
   if (memories.length) {
     preamble.push(
       'Persistent facts about the user (they asked you to remember these):\n' +
         memories.map((m) => `- ${m}`).join('\n'),
+    );
+  }
+  if (documents.length) {
+    const blocks = documents.map(
+      (d) => `<document filename="${d.filename.replace(/"/g, '&quot;')}">\n${d.text}\n</document>`,
+    );
+    preamble.push(
+      `The user attached ${documents.length === 1 ? 'a document' : `${documents.length} documents`}. ` +
+        'Use their contents as context for the request below:\n\n' +
+        blocks.join('\n\n'),
     );
   }
   return preamble.length ? `${preamble.join('\n\n')}\n\n---\n\n${userPrompt}` : userPrompt;
@@ -318,19 +350,30 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     .slice(-MAX_HISTORY_MESSAGES)
     .map((m) => ({ role: m.role as ConversationMessage['role'], content: m.content }));
 
-  // Load the images the client already uploaded (ownership-checked). Foreign
-  // or missing ids are skipped silently rather than failing the whole run.
+  // Load the images/documents the client already uploaded (ownership-checked).
+  // Foreign or missing ids are skipped silently rather than failing the run.
+  // Images ride into the run as multimodal input; documents were parsed to text
+  // at upload time and get injected into the prompt below.
   const images: ImageAttachment[] = [];
+  const documents: RunDocument[] = [];
   const loadedAttachments: CloudAttachment[] = [];
   for (const id of payload.attachmentIds ?? []) {
     const att = store.getOwnedAttachment(id, userId);
-    if (!att || att.kind !== 'image' || !IMAGE_MIME_TYPES.has(att.mime)) continue;
-    try {
-      const bytes = await fs.readFile(att.path);
-      images.push({ type: 'base64', data: bytes.toString('base64'), mimeType: att.mime as ImageAttachment['mimeType'] });
-      loadedAttachments.push(att);
-    } catch {
-      /* file vanished from disk — skip it */
+    if (!att) continue;
+    if (att.kind === 'image' && IMAGE_MIME_TYPES.has(att.mime)) {
+      try {
+        const bytes = await fs.readFile(att.path);
+        images.push({ type: 'base64', data: bytes.toString('base64'), mimeType: att.mime as ImageAttachment['mimeType'] });
+        loadedAttachments.push(att);
+      } catch {
+        /* file vanished from disk — skip it */
+      }
+    } else if (att.kind === 'document') {
+      const text = store.getOwnedAttachmentText(att.id, userId);
+      if (text && text.trim()) {
+        documents.push({ filename: att.filename || 'document', text });
+        loadedAttachments.push(att);
+      }
     }
   }
 
@@ -348,7 +391,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   if (userSkill) store.incrementSkillUsage(userSkill.id, userId);
   const skillSystemPrompt = builtinSkill?.systemPrompt || userSkill?.systemPrompt || undefined;
   const memories = store.listMemories(userId).map((m) => m.content);
-  const runPrompt = buildRunPrompt(payload.prompt, skillSystemPrompt, memories);
+  const runPrompt = buildRunPrompt(payload.prompt, skillSystemPrompt, memories, documents);
 
   const scratchDir = tenantScratchDir(env, userId);
   // Shared learning pool: one anonymous model-outcome dataset on the same
@@ -361,6 +404,11 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   const perfStatsPath = path.join(dataDir, 'model-perf.json');
   const benchmarksCacheFile = path.join(dataDir, 'benchmarks-cache.json');
 
+  // Attach the user's enabled remote MCP servers (with their stored auth) as
+  // tool sources for this run. A fast answer is a single direct model call with
+  // no orchestration/tools, so skip MCP there.
+  const mcpServers = payload.fastAnswer ? [] : store.listEnabledMcpServersWithAuth(userId);
+
   const config = buildCloudConfig(payload.providers as ProviderConfig[], env.MAX_COST_PER_RUN_USD, {
     routingMode: payload.routingMode,
     forceTier: payload.forceTier,
@@ -372,6 +420,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     learnFromOutcomes,
     benchmarksCacheFile,
     maxTokensPerRun: payload.maxTokensPerRun,
+    mcpServers: mcpServers.length ? mcpServers : undefined,
   });
   const cascade: Cascade = createCascade(config, scratchDir);
 

@@ -130,8 +130,17 @@ export function deleteMemory(id: string): Promise<{ ok: boolean }> {
   return json(fetch(`/api/memories/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' }));
 }
 
+export interface UploadResult {
+  id: string;
+  mime: string;
+  kind?: 'image' | 'document';
+  filename?: string | null;
+  charCount?: number | null;
+  truncated?: boolean;
+}
+
 /** Uploads one image and returns its server id (referenced later in chat:run). */
-export function uploadImage(mime: string, dataBase64: string): Promise<{ id: string; mime: string }> {
+export function uploadImage(mime: string, dataBase64: string): Promise<UploadResult> {
   return json(
     fetch('/api/uploads', {
       method: 'POST',
@@ -142,9 +151,82 @@ export function uploadImage(mime: string, dataBase64: string): Promise<{ id: str
   );
 }
 
+/** Uploads one document (PDF/DOCX/text). The server parses it to text at upload
+ *  and returns its id + extracted-char count (referenced later in chat:run). */
+export function uploadDocument(mime: string, dataBase64: string, filename: string): Promise<UploadResult> {
+  return json(
+    fetch('/api/uploads', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mime, dataBase64, filename }),
+    }),
+  );
+}
+
 /** Owner-scoped URL for rendering a previously-uploaded image in the transcript. */
 export function uploadUrl(id: string): string {
   return `/api/uploads/${encodeURIComponent(id)}`;
+}
+
+// ── Remote MCP servers & connectors ──
+
+export interface ConnectorEntry {
+  id: string;
+  name: string;
+  description: string;
+  url?: string;
+  authHeader: string;
+  authPrefix: string;
+  tokenLabel: string;
+  docsUrl: string;
+  requiresUrl: boolean;
+}
+
+export interface McpServer {
+  id: string;
+  name: string;
+  url: string;
+  hasAuth: boolean;
+  connectorId: string | null;
+  enabled: boolean;
+  createdAt: number;
+}
+
+export function fetchConnectors(): Promise<{ connectors: ConnectorEntry[] }> {
+  return json(fetch('/api/mcp/connectors', { credentials: 'include' }));
+}
+
+export function fetchMcpServers(): Promise<{ servers: McpServer[] }> {
+  return json(fetch('/api/mcp/servers', { credentials: 'include' }));
+}
+
+export function addMcpServer(input: {
+  name?: string; url?: string; token?: string; authHeader?: string; connectorId?: string;
+}): Promise<{ server: McpServer }> {
+  return json(
+    fetch('/api/mcp/servers', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    }),
+  );
+}
+
+export function setMcpServerEnabled(id: string, enabled: boolean): Promise<{ ok: boolean }> {
+  return json(
+    fetch(`/api/mcp/servers/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    }),
+  );
+}
+
+export function deleteMcpServer(id: string): Promise<{ ok: boolean }> {
+  return json(fetch(`/api/mcp/servers/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' }));
 }
 
 export interface BillingInfo {

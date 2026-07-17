@@ -25,6 +25,8 @@
     "express": "^4.21.0",
     "express-rate-limit": "^7.4.0",
     "jsonwebtoken": "^9.0.2",
+    "mammoth": "^1.12.0",
+    "pdf-parse": "^1.1.4",
     "razorpay": "^2.9.6",
     "socket.io": "^4.8.0",
     "socket.io-msgpack-parser": "^3.0.2",

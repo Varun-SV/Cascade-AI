@@ -149,4 +149,38 @@ describe('CloudStore', () => {
     // A future cutoff excludes everything.
     expect(store.tierMixSince(user.id, Date.now() + 60_000)).toEqual([]);
   });
+
+  it('stores MCP servers per user, redacts auth, and exposes it only for runs', () => {
+    const alice = store.upsertUser({ provider: 'dev', providerId: 'mcp-a', email: null, name: null, avatar: null });
+    const bob = store.upsertUser({ provider: 'dev', providerId: 'mcp-b', email: null, name: null, avatar: null });
+
+    const withAuth = store.addMcpServer({
+      userId: alice.id, name: 'GitHub', url: 'https://api.githubcopilot.com/mcp/',
+      headers: { Authorization: 'Bearer secret-token' }, connectorId: 'github',
+    });
+    const noAuth = store.addMcpServer({ userId: alice.id, name: 'Open', url: 'https://mcp.example.com/', headers: null });
+
+    // Listing redacts the header value — only a hasAuth flag is exposed.
+    const listed = store.listMcpServers(alice.id);
+    expect(listed).toHaveLength(2);
+    expect(JSON.stringify(listed)).not.toContain('secret-token');
+    expect(listed.find((s) => s.id === withAuth.id)!.hasAuth).toBe(true);
+    expect(listed.find((s) => s.id === noAuth.id)!.hasAuth).toBe(false);
+
+    // Run wiring gets the real header back.
+    const forRun = store.listEnabledMcpServersWithAuth(alice.id);
+    expect(forRun.find((s) => s.name === 'GitHub')!.headers).toEqual({ Authorization: 'Bearer secret-token' });
+
+    // Disabling drops it from the run set but keeps it listed.
+    expect(store.setMcpServerEnabled(withAuth.id, alice.id, false)).toBe(true);
+    expect(store.listEnabledMcpServersWithAuth(alice.id).map((s) => s.name)).toEqual(['Open']);
+    expect(store.listMcpServers(alice.id)).toHaveLength(2);
+
+    // Ownership is enforced.
+    expect(store.setMcpServerEnabled(withAuth.id, bob.id, true)).toBe(false);
+    expect(store.deleteMcpServer(withAuth.id, bob.id)).toBe(false);
+    expect(store.deleteMcpServer(withAuth.id, alice.id)).toBe(true);
+    expect(store.listMcpServers(alice.id)).toHaveLength(1);
+    expect(store.listMcpServers(bob.id)).toHaveLength(0);
+  });
 });
