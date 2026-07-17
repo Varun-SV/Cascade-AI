@@ -564,6 +564,10 @@ export interface BenchmarksConfig {
   sourceUrl?: string;
   /** Fetch current per-token prices from OpenRouter (free, no key). Default: true. */
   pricingLive?: boolean;
+  /** Where the fetched live snapshot is cached. Cloud → the persistent volume,
+   *  so live benchmark scores survive redeploys and are shared across requests
+   *  instead of re-fetched on every fresh Cascade. Defaults to ~/.cascade. */
+  cacheFile?: string;
 }
 
 export interface ToolsConfig {

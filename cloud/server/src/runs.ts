@@ -146,6 +146,8 @@ export interface RunControls {
   perfStatsPath?: string;
   /** When false, read shared scores but don't record this run's outcomes. */
   learnFromOutcomes?: boolean;
+  /** Where the live-benchmark snapshot is cached (→ the persistent volume). */
+  benchmarksCacheFile?: string;
 }
 
 // Maps the UI's routing mode to Cascade Auto's bias. Cascade Auto stays ON for
@@ -191,6 +193,10 @@ export function buildCloudConfig(
     },
     ...(tierLimits && Object.keys(tierLimits).length ? { tierLimits } : {}),
     ...(ec?.enabled ? { extendedContext: { enabled: true, maxMultiplier: ec.maxMultiplier ?? 2 } } : {}),
+    // Cascade Auto already fetches live public benchmark scores (benchmarks.live
+    // defaults on); pointing the cache at the volume makes those scores persist
+    // across requests + redeploys instead of re-fetching on every fresh Cascade.
+    ...(controls.benchmarksCacheFile ? { benchmarks: { cacheFile: controls.benchmarksCacheFile } } : {}),
     tools: {
       shellAllowlist: [],
       shellBlocklist: [],
@@ -346,7 +352,9 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // The plan is read server-side so a client can't opt a free account out.
   const plan = store.getUserById(userId)?.plan ?? 'free';
   const learnFromOutcomes = plan === 'pro' ? payload.shareLearning !== false : true;
-  const perfStatsPath = path.join(path.resolve(env.DATA_DIR), 'model-perf.json');
+  const dataDir = path.resolve(env.DATA_DIR);
+  const perfStatsPath = path.join(dataDir, 'model-perf.json');
+  const benchmarksCacheFile = path.join(dataDir, 'benchmarks-cache.json');
 
   const config = buildCloudConfig(payload.providers as ProviderConfig[], env.MAX_COST_PER_RUN_USD, {
     routingMode: payload.routingMode,
@@ -357,6 +365,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     extendedContext: payload.extendedContext,
     perfStatsPath,
     learnFromOutcomes,
+    benchmarksCacheFile,
   });
   const cascade: Cascade = createCascade(config, scratchDir);
 

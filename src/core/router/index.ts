@@ -379,6 +379,7 @@ export class CascadeRouter extends EventEmitter {
         pricingLive: benchCfg.pricingLive,
         refreshHours: benchCfg.refreshHours,
         sourceUrl: benchCfg.sourceUrl,
+        cacheFile: benchCfg.cacheFile,
       });
       // Route benchmarkScore01 through the live source for this process.
       setBenchmarkLiveProvider(this.liveData);

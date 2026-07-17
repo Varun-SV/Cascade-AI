@@ -57,7 +57,12 @@ describe('attachSocket', () => {
     for (const c of clients.splice(0)) c.close();
     store.close();
     await new Promise((resolve) => httpServer.close(resolve));
-    await fs.rm(dir, { recursive: true, force: true });
+    // The SDK's fire-and-forget perf/benchmark saves may still be flushing into
+    // DATA_DIR as we tear down — retry the cleanup to dodge the ENOTEMPTY race.
+    for (let i = 0; i < 4; i++) {
+      try { await fs.rm(dir, { recursive: true, force: true }); break; }
+      catch { await new Promise((r) => setTimeout(r, 50)); }
+    }
     await stub?.close();
     stub = undefined;
   });

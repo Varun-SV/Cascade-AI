@@ -113,6 +113,12 @@ describe('buildCloudConfig', () => {
     expect(buildCloudConfig([], 0.5, { learnFromOutcomes: false }).routing?.learnFromOutcomes).toBe(false);
     expect(buildCloudConfig([], 0.5, { learnFromOutcomes: true }).routing?.learnFromOutcomes).toBeUndefined();
   });
+
+  it('points the live-benchmark cache at the given path when set', () => {
+    expect(buildCloudConfig([], 0.5).benchmarks).toBeUndefined();
+    expect(buildCloudConfig([], 0.5, { benchmarksCacheFile: '/data/benchmarks-cache.json' }).benchmarks)
+      .toEqual({ cacheFile: '/data/benchmarks-cache.json' });
+  });
 });
 
 describe('tenantScratchDir', () => {

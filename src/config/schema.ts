@@ -198,6 +198,8 @@ export const CascadeConfigSchema = z.object({
       sourceUrl: z.string().url().optional(),
       /** Fetch current per-token prices from OpenRouter (free, no key). */
       pricingLive: z.boolean().default(true),
+      /** Cache location for the fetched snapshot (cloud → persistent volume). */
+      cacheFile: z.string().optional(),
     })
     .default({}),
   /**
