@@ -259,7 +259,9 @@ export class LiveDataProvider {
    */
   applyLivePricing(models: ModelInfo[]): ModelInfo[] {
     return models.map((m) => {
-      const p = this.getLivePrice(m.id);
+      // Prefer the canonical base-model id so an Azure deployment (whose id is an
+      // arbitrary deployment name) still resolves to the real model's live price.
+      const p = this.getLivePrice(m.baseModelId ?? m.id);
       if (!p) return m;
       return { ...m, inputCostPer1kTokens: p.input, outputCostPer1kTokens: p.output };
     });
@@ -278,7 +280,7 @@ export class LiveDataProvider {
    */
   applyLiveCapabilities(models: ModelInfo[]): ModelInfo[] {
     return models.map((m) => {
-      const c = this.getCapability(m.id);
+      const c = this.getCapability(m.baseModelId ?? m.id);
       if (!c) return m;
       const next = { ...m };
       if (c.contextWindow) next.contextWindow = c.contextWindow;

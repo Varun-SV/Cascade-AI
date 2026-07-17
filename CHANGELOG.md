@@ -5,6 +5,25 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.25.0 - 2026-07-17
+
+### Fixed
+- **Model routing now tells Azure deployments apart and scores gpt-5 correctly.**
+  Every Azure deployment used to get an identical hardcoded profile (same cost,
+  no benchmark), so the *first one you added* always won regardless of which
+  model it was, and gpt-5 models showed a neutral "50/100" because the benchmark
+  table had no gpt-5 entries. Now each Azure deployment resolves its real **base
+  model** — inferred from the deployment name, editable in the API-keys form —
+  and inherits that model's real benchmark scores + pricing (base identity also
+  drives the live price/benchmark fetch). Added gpt-5 / gpt-5-mini / gpt-5-nano
+  to the catalog, benchmark table, and tier priorities. **Cross-provider cost
+  comparison now works:** with the same model available via an Azure key and a
+  direct-provider key, the cheaper one wins (cost is real on both sides).
+
+### Changed
+- **Settings is now tabbed** (General / Appearance / Chat / Advanced / Privacy)
+  instead of one long scrolling column, so each pane is short and easy to scan.
+
 ## 0.24.0 - 2026-07-17
 
 ### Added

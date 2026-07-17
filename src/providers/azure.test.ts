@@ -1,6 +1,48 @@
 import { describe, it, expect, vi } from 'vitest';
-import { azureModelForDeployment, AzureOpenAIProvider } from './azure.js';
+import { azureModelForDeployment, inferAzureBaseModel, AzureOpenAIProvider } from './azure.js';
+import { MODELS } from '../constants.js';
 import type { ModelInfo } from '../types.js';
+
+describe('inferAzureBaseModel', () => {
+  it('maps deployment names to canonical base models, most-specific first', () => {
+    expect(inferAzureBaseModel('gpt-5.4')).toBe('gpt-5');
+    expect(inferAzureBaseModel('gpt-5-mini')).toBe('gpt-5-mini');
+    expect(inferAzureBaseModel('gpt5nano-prod')).toBe('gpt-5-nano');
+    expect(inferAzureBaseModel('my-gpt-4o-deploy')).toBe('gpt-4o');
+    expect(inferAzureBaseModel('gpt-4.1-mini')).toBe('gpt-4.1-mini');
+  });
+  it('returns null when the name gives no signal', () => {
+    expect(inferAzureBaseModel('prod-fast')).toBeNull();
+    expect(inferAzureBaseModel('assistant')).toBeNull();
+  });
+});
+
+describe('azureModelForDeployment — base-model economics', () => {
+  it('inherits the inferred base model economics but keeps the deployment id', () => {
+    const m = azureModelForDeployment({ type: 'azure', deploymentName: 'gpt-5.4', label: 'Prod' })!;
+    const base = MODELS['gpt-5']!;
+    expect(m.id).toBe('gpt-5.4');        // still callable by deployment name
+    expect(m.baseModelId).toBe('gpt-5'); // real identity for benchmark + pricing
+    expect(m.provider).toBe('azure');
+    expect(m.contextWindow).toBe(base.contextWindow);
+    expect(m.inputCostPer1kTokens).toBe(base.inputCostPer1kTokens);
+    expect(m.outputCostPer1kTokens).toBe(base.outputCostPer1kTokens);
+    expect(m.isVisionCapable).toBe(base.isVisionCapable);
+  });
+
+  it('lets an explicit cfg.model override the inference', () => {
+    const m = azureModelForDeployment({ type: 'azure', deploymentName: 'prod-fast', model: 'gpt-5-mini' })!;
+    expect(m.baseModelId).toBe('gpt-5-mini');
+    expect(m.inputCostPer1kTokens).toBe(MODELS['gpt-5-mini']!.inputCostPer1kTokens);
+  });
+
+  it('keeps neutral estimate defaults when the base model is unknown', () => {
+    const m = azureModelForDeployment({ type: 'azure', deploymentName: 'prod-fast' })!;
+    expect(m.baseModelId).toBeUndefined();
+    expect(m.inputCostPer1kTokens).toBeGreaterThan(0);
+    expect(m.contextWindow).toBe(128_000);
+  });
+});
 
 describe('azureModelForDeployment', () => {
   it('maps a configured deployment to a model keyed by deployment name', () => {

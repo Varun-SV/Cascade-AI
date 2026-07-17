@@ -28,6 +28,13 @@ export interface ModelInfo {
   supportsToolUse?: boolean;
   /** Self-declared or API-sourced specialization categories. */
   specializations?: string[];
+  /**
+   * Canonical base-model id this entry stands for, when `id` isn't itself
+   * canonical. Azure deployments are addressed by an arbitrary deployment name
+   * (the `id`), but back a real model (e.g. gpt-5) — `baseModelId` carries that
+   * real identity so benchmark scoring and live pricing resolve correctly.
+   */
+  baseModelId?: string;
 }
 
 export interface ProviderConfig {

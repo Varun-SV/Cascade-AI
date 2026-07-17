@@ -169,6 +169,43 @@ export const MODELS: Record<string, ModelInfo> = {
     supportsStreaming: true,
     isLocal: false,
   },
+  // GPT-5 family (offline baseline pricing; the live fetch keeps it current).
+  'gpt-5': {
+    id: 'gpt-5',
+    name: 'GPT-5',
+    provider: 'openai',
+    contextWindow: 400_000,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.00125,
+    outputCostPer1kTokens: 0.01,
+    maxOutputTokens: 128_000,
+    supportsStreaming: true,
+    isLocal: false,
+  },
+  'gpt-5-mini': {
+    id: 'gpt-5-mini',
+    name: 'GPT-5 Mini',
+    provider: 'openai',
+    contextWindow: 400_000,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.00025,
+    outputCostPer1kTokens: 0.002,
+    maxOutputTokens: 128_000,
+    supportsStreaming: true,
+    isLocal: false,
+  },
+  'gpt-5-nano': {
+    id: 'gpt-5-nano',
+    name: 'GPT-5 Nano',
+    provider: 'openai',
+    contextWindow: 400_000,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.00005,
+    outputCostPer1kTokens: 0.0004,
+    maxOutputTokens: 128_000,
+    supportsStreaming: true,
+    isLocal: false,
+  },
   // Google
   'gemini-2.0-flash': {
     id: 'gemini-2.0-flash',
@@ -297,6 +334,7 @@ for (const _m of Object.values(MODELS)) {
 // ── Tier Model Priority Chains ─────────────────
 
 export const T1_MODEL_PRIORITY: string[] = [
+  'gpt-5',
   'claude-opus-4',
   'claude-sonnet-4',
   'gemini-2.5-pro',
@@ -306,6 +344,7 @@ export const T1_MODEL_PRIORITY: string[] = [
 ];
 
 export const T2_MODEL_PRIORITY: string[] = [
+  'gpt-5-mini',
   'claude-sonnet-4',
   'claude-haiku-4-5',
   'claude-haiku-3-5',
@@ -317,6 +356,7 @@ export const T2_MODEL_PRIORITY: string[] = [
 ];
 
 export const T3_MODEL_PRIORITY: string[] = [
+  'gpt-5-nano',
   'llama3.2:3b',
   'mistral:7b',
   'claude-haiku-4-5',
