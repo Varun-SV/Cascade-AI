@@ -8,6 +8,7 @@ const DENSITY_KEY = 'cascade-cloud-density';
 const UI_MODE_KEY = 'cascade-cloud-ui-mode';
 const TIER_PARAMS_KEY = 'cascade-cloud-tier-params';
 const EXT_CONTEXT_KEY = 'cascade-cloud-ext-context';
+const SHARE_LEARNING_KEY = 'cascade-cloud-share-learning';
 
 export type ThemeMode = 'light' | 'dark' | 'system';
 export type Density = 'comfortable' | 'compact';
@@ -51,6 +52,11 @@ export const setLocalModelEnabled = (v: boolean) => writeBool(LOCAL_MODEL_KEY, v
 /** Appearance: reduce/disable non-essential animation. Off by default. */
 export const reduceMotionEnabled = () => readBool(REDUCE_MOTION_KEY, false);
 export const setReduceMotionEnabled = (v: boolean) => writeBool(REDUCE_MOTION_KEY, v);
+
+/** Contribute anonymous model-outcome stats to the shared learning pool. On by
+ *  default; only a Pro user's opt-out is honored server-side (free always on). */
+export const shareLearning = () => readBool(SHARE_LEARNING_KEY, true);
+export const setShareLearning = (v: boolean) => writeBool(SHARE_LEARNING_KEY, v);
 
 /** Colour theme: light, dark, or follow the OS. Default: system. */
 export const themeMode = (): ThemeMode => readString(THEME_KEY, ['light', 'dark', 'system'] as const, 'system');

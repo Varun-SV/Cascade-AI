@@ -5,6 +5,28 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.24.0 - 2026-07-17
+
+### Added
+- **Cascade Auto learns from run outcomes (cloud).** The hosted orchestration now
+  records per-model **success/failure, retries, cost, and context size** to a
+  shared, anonymous dataset on the persistent volume, and routes away from models
+  that fail — especially on large contexts — so routing gets better the more the
+  product is used. **Free users always contribute; Pro users can opt out** in
+  Settings → Privacy (enforced server-side by plan). No prompts or content are
+  stored — only model id, task type, outcome, coarse size, and cost. Stats are
+  written atomically so concurrent runs never corrupt the shared file.
+- **Live benchmark scores for hosted routing.** Cascade Auto already fetches
+  current public benchmark scores; the hosted server now caches them on the
+  persistent volume, so live scores persist across requests and redeploys instead
+  of being re-fetched on every run (falling back to the bundled table offline).
+
+### Fixed
+- **No more false "not a persistent volume" warning.** The boot storage check now
+  recognizes a `DATA_DIR` explicitly pointed at the Railway volume's mount path
+  (e.g. `DATA_DIR=/data` with the volume at `/data`) as persistent, instead of
+  warning about data loss when data was actually being saved to the volume.
+
 ## 0.23.0 - 2026-07-16
 
 ### Added

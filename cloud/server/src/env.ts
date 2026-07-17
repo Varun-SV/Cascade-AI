@@ -3,6 +3,14 @@
 // ─────────────────────────────────────────────
 
 import { z } from 'zod';
+import path from 'node:path';
+
+/** True when `child` resolves to `parent` or a directory beneath it. */
+function isPathAtOrUnder(child: string, parent: string): boolean {
+  const c = path.resolve(child);
+  const p = path.resolve(parent);
+  return c === p || c.startsWith(p + path.sep);
+}
 
 // CLOUD_DEV_BYPASS lets local dev/tests log in without real OAuth apps
 // configured; it must never be settable in a way that survives into a real
@@ -63,10 +71,14 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): CloudEnv {
   const resolved: NodeJS.ProcessEnv = { ...source };
   if (!resolved.DATA_DIR && volume) {
     resolved.DATA_DIR = volume;
-    dataDirIsRailwayVolume = true;
-  } else {
-    dataDirIsRailwayVolume = false;
   }
+  // Persistent when the resolved DATA_DIR actually lives on the mounted volume —
+  // whether we defaulted to it OR the operator explicitly pointed DATA_DIR at
+  // the mount path (e.g. DATA_DIR=/data with the volume mounted at /data). The
+  // earlier check only credited the auto-default, so an explicit-but-correct
+  // DATA_DIR still tripped the "not a volume" warning even though data was
+  // persisting fine.
+  dataDirIsRailwayVolume = !!volume && !!resolved.DATA_DIR && isPathAtOrUnder(resolved.DATA_DIR, volume);
 
   const parsed = EnvSchema.safeParse(resolved);
   if (!parsed.success) {

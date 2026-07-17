@@ -1,14 +1,14 @@
 import { useState } from 'react';
 import {
   Sparkles, Brain, KeyRound, Crown, LogOut, Cpu, Eye, ChevronRight, Zap,
-  Sun, Moon, Monitor, LayoutGrid, Rows3, SlidersHorizontal, Layers,
+  Sun, Moon, Monitor, LayoutGrid, Rows3, SlidersHorizontal, Layers, LineChart,
 } from 'lucide-react';
 import Modal from './Modal.js';
 import { detectLocalModelCapability } from '../lib/localModel/capability.js';
 import {
   localModelEnabled, setLocalModelEnabled, reduceMotionEnabled, setReduceMotionEnabled,
   fastAnswerModel, setFastAnswerModel, tierParams, setTierParams,
-  extendedContext, setExtendedContext,
+  extendedContext, setExtendedContext, shareLearning, setShareLearning,
   type ThemeMode, type Density, type UiMode, type TierParams, type TierParam, type ExtendedContextPref,
 } from '../lib/prefs.js';
 import type { CloudUser } from '../lib/types.js';
@@ -157,6 +157,8 @@ export default function SettingsModal({
   const [fastModel, setFastModel] = useState(fastAnswerModel());
   const [params, setParams] = useState<TierParams>(() => tierParams());
   const [extCtx, setExtCtx] = useState<ExtendedContextPref>(() => extendedContext());
+  const [share, setShare] = useState<boolean>(() => shareLearning());
+  const isPro = user.plan === 'pro';
 
   function updateTierParam(key: 't1' | 't2' | 't3', v: TierParam) {
     const next = { ...params, [key]: v };
@@ -264,6 +266,31 @@ export default function SettingsModal({
           title="Reduce motion"
           subtitle="Minimize animations and transitions."
           right={<Toggle on={reduceMotion} onChange={toggleMotion} label="Reduce motion" />}
+        />
+
+        {/* Privacy */}
+        <p className="mt-3 text-[11px] font-semibold uppercase tracking-wide text-ink-400">Privacy</p>
+        <Row
+          icon={<LineChart size={15} />}
+          title="Improve routing for everyone"
+          subtitle={
+            isPro
+              ? 'Contribute anonymous outcome stats (model, task type, success/failure, size) so Cascade routes smarter over time. No prompts or content are ever stored.'
+              : 'Anonymous outcome stats (model, task type, success/failure, size) help Cascade route smarter over time. No prompts or content are stored. Included on the free plan; upgrade to Pro to opt out.'
+          }
+          right={
+            isPro ? (
+              <Toggle
+                on={share}
+                onChange={(v) => { setShare(v); setShareLearning(v); }}
+                label="Share anonymous performance data"
+              />
+            ) : (
+              <span className="shrink-0 rounded bg-elev/[0.06] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-400">
+                Always on
+              </span>
+            )
+          }
         />
 
         {/* Chat */}

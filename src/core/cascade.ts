@@ -154,7 +154,13 @@ export class Cascade extends EventEmitter {
 
   private initOptionalFeatures(): void {
     if (this.config.cascadeAuto === true) {
-      this.perfTracker = new ModelPerformanceTracker();
+      // Stats file + consent come from routing config: the cloud points the path
+      // at its persistent volume (shared, survives redeploys) and sets
+      // learnFromOutcomes=false for users who opted out (read scores, don't record).
+      this.perfTracker = new ModelPerformanceTracker(
+        this.config.routing?.perfStatsPath,
+        { readOnly: this.config.routing?.learnFromOutcomes === false },
+      );
       void this.perfTracker.load(); // non-blocking; stats available before first run completes
       this.taskAnalyzer = new TaskAnalyzer(this.perfTracker, this.config.autoBias ?? 'balanced');
       // Share the analyzer with the router so workers can route each subtask to
@@ -1213,7 +1219,9 @@ ${prompt}`
       if (this.taskAnalyzer) {
         try {
           const stats = this.router.getStats();
-          this.taskAnalyzer.recordRunOutcome(runError ? 'failure' : 'success', stats.costByTier);
+          // Pass the run's token volume so the tracker learns which models tend
+          // to fail on larger contexts (drives "send big contexts elsewhere").
+          this.taskAnalyzer.recordRunOutcome(runError ? 'failure' : 'success', stats.costByTier, stats.totalTokens);
         } catch { /* non-critical */ }
       }
 

@@ -103,6 +103,22 @@ describe('buildCloudConfig', () => {
       enabled: true, maxMultiplier: 3,
     });
   });
+
+  it('wires the shared learning stats path and opt-out into routing', () => {
+    const cfg = buildCloudConfig([], 0.5, { perfStatsPath: '/data/model-perf.json' });
+    expect(cfg.routing?.perfStatsPath).toBe('/data/model-perf.json');
+    // Default (contribute): learnFromOutcomes stays unset so the SDK default (true) applies.
+    expect(cfg.routing?.learnFromOutcomes).toBeUndefined();
+    // Only an explicit opt-out flows through as false.
+    expect(buildCloudConfig([], 0.5, { learnFromOutcomes: false }).routing?.learnFromOutcomes).toBe(false);
+    expect(buildCloudConfig([], 0.5, { learnFromOutcomes: true }).routing?.learnFromOutcomes).toBeUndefined();
+  });
+
+  it('points the live-benchmark cache at the given path when set', () => {
+    expect(buildCloudConfig([], 0.5).benchmarks).toBeUndefined();
+    expect(buildCloudConfig([], 0.5, { benchmarksCacheFile: '/data/benchmarks-cache.json' }).benchmarks)
+      .toEqual({ cacheFile: '/data/benchmarks-cache.json' });
+  });
 });
 
 describe('tenantScratchDir', () => {
@@ -219,7 +235,15 @@ describe('runChatTurn (stub-provider integration)', () => {
   afterEach(async () => {
     store?.close();
     store = undefined;
-    if (dir) await fs.rm(dir, { recursive: true, force: true });
+    // The SDK persists model-perf stats into DATA_DIR with a fire-and-forget
+    // save that can still be flushing as we tear down — retry the cleanup a few
+    // times so that ENOTEMPTY race doesn't fail the test.
+    if (dir) {
+      for (let i = 0; i < 4; i++) {
+        try { await fs.rm(dir, { recursive: true, force: true }); break; }
+        catch { await new Promise((r) => setTimeout(r, 50)); }
+      }
+    }
     await stub?.close();
     stub = undefined;
   });

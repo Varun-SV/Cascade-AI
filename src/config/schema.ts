@@ -198,6 +198,8 @@ export const CascadeConfigSchema = z.object({
       sourceUrl: z.string().url().optional(),
       /** Fetch current per-token prices from OpenRouter (free, no key). */
       pricingLive: z.boolean().default(true),
+      /** Cache location for the fetched snapshot (cloud → persistent volume). */
+      cacheFile: z.string().optional(),
     })
     .default({}),
   /**
@@ -325,7 +327,16 @@ export const CascadeConfigSchema = z.object({
     .optional(),
   /** Routing controls — forceTier pins the root tier, bypassing the classifier. */
   routing: z
-    .object({ forceTier: z.enum(['auto', 'T1', 'T2', 'T3']).default('auto') })
+    .object({
+      forceTier: z.enum(['auto', 'T1', 'T2', 'T3']).default('auto'),
+      // Where the model-performance stats live. Defaults to ~/.cascade/model-perf.json
+      // when unset; the cloud points it at the persistent volume so learning survives
+      // redeploys and is shared across users.
+      perfStatsPath: z.string().optional(),
+      // When false, Cascade still READS the shared performance scores to route, but
+      // does NOT record this run's outcomes (opt-out). Default true.
+      learnFromOutcomes: z.boolean().default(true),
+    })
     .optional(),
   /**
    * T3→T2 reinforcement: when enabled, a worker that discovers its subtask should

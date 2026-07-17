@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 import type { ProviderConfig, WhyReport } from '../lib/types.js';
-import { localModelEnabled, fastAnswerModel, tierParams, extendedContext } from '../lib/prefs.js';
+import { localModelEnabled, fastAnswerModel, tierParams, extendedContext, shareLearning } from '../lib/prefs.js';
 import { detectLocalModelCapability } from '../lib/localModel/capability.js';
 import { warmLocalModel } from '../lib/localModel/engine.js';
 import { classifyLocalComplexity } from '../lib/localModel/classifier.js';
@@ -227,6 +227,8 @@ export function useChatSession(
             tierParams: fast ? undefined : (() => { const tp = tierParams(); return Object.keys(tp).length ? tp : undefined; })(),
             // Extended context: only sent when enabled and not a fast answer.
             extendedContext: fast ? undefined : (() => { const e = extendedContext(); return e.enabled ? e : undefined; })(),
+            // Contribute to shared learning (Pro can opt out; server gates by plan).
+            shareLearning: shareLearning(),
           },
           onAck,
         );
