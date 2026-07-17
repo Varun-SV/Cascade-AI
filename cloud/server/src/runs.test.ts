@@ -119,6 +119,13 @@ describe('buildCloudConfig', () => {
     expect(buildCloudConfig([], 0.5, { benchmarksCacheFile: '/data/benchmarks-cache.json' }).benchmarks)
       .toEqual({ cacheFile: '/data/benchmarks-cache.json' });
   });
+
+  it('passes a max-tokens-per-run ceiling into the budget, keeping the cost cap', () => {
+    expect(buildCloudConfig([], 0.5).budget?.maxTokensPerRun).toBeUndefined();
+    const cfg = buildCloudConfig([], 0.5, { maxTokensPerRun: 500_000 });
+    expect(cfg.budget?.maxTokensPerRun).toBe(500_000);
+    expect(cfg.budget?.maxCostPerRunUsd).toBe(0.5);
+  });
 });
 
 describe('tenantScratchDir', () => {

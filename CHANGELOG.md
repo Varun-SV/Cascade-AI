@@ -5,6 +5,18 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.26.0 - 2026-07-17
+
+### Added
+- **Max tokens per run** (Settings → Advanced) — a hard ceiling on the total
+  tokens a single run may spend across all tiers, so a runaway multi-agent run
+  stops there. Blank = the default (200k); the per-run cost limit still applies
+  independently.
+- **Chat defaults** (Settings → Chat) — a **Default response bias** (Auto /
+  Quality / Fast) and a **Web search by default** toggle that seed every new
+  chat session (still overridable per chat). Fills out the Chat tab alongside
+  the Fast-answer model.
+
 ## 0.25.0 - 2026-07-17
 
 ### Fixed

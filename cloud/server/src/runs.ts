@@ -87,6 +87,9 @@ const ChatRunPayloadSchema = z.object({
   // pool. Only a Pro user's `false` opts out; free users always contribute
   // (enforced server-side against the user's plan).
   shareLearning: z.boolean().optional(),
+  // Hard per-run token ceiling — stops a runaway multi-agent run. Bounded so a
+  // client can't ask for an absurd budget; the per-run COST cap still applies.
+  maxTokensPerRun: z.number().int().min(1_000).max(2_000_000).optional(),
   webSearch: z.boolean().optional(),
   // Optional web-search backend the user configured (browser-held, like keys).
   // Whichever field is set is used — SearXNG → Brave → Tavily priority in the
@@ -148,6 +151,8 @@ export interface RunControls {
   learnFromOutcomes?: boolean;
   /** Where the live-benchmark snapshot is cached (→ the persistent volume). */
   benchmarksCacheFile?: string;
+  /** Hard per-run token ceiling (overrides the SDK default). */
+  maxTokensPerRun?: number;
 }
 
 // Maps the UI's routing mode to Cascade Auto's bias. Cascade Auto stays ON for
@@ -213,7 +218,7 @@ export function buildCloudConfig(
       : {}),
     knowledge: { factsExtraction: false },
     telemetry: { enabled: false },
-    budget: { warnAtPct: 80, maxCostPerRunUsd },
+    budget: { warnAtPct: 80, maxCostPerRunUsd, ...(controls.maxTokensPerRun ? { maxTokensPerRun: controls.maxTokensPerRun } : {}) },
   };
 }
 
@@ -366,6 +371,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     perfStatsPath,
     learnFromOutcomes,
     benchmarksCacheFile,
+    maxTokensPerRun: payload.maxTokensPerRun,
   });
   const cascade: Cascade = createCascade(config, scratchDir);
 

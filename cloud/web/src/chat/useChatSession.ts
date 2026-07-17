@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 import type { ProviderConfig, WhyReport } from '../lib/types.js';
-import { localModelEnabled, fastAnswerModel, tierParams, extendedContext, shareLearning } from '../lib/prefs.js';
+import {
+  localModelEnabled, fastAnswerModel, tierParams, extendedContext, shareLearning,
+  maxTokensPerRun, defaultRoutingBias, defaultWebSearch,
+} from '../lib/prefs.js';
 import { detectLocalModelCapability } from '../lib/localModel/capability.js';
 import { warmLocalModel } from '../lib/localModel/engine.js';
 import { classifyLocalComplexity } from '../lib/localModel/classifier.js';
@@ -105,7 +108,9 @@ export function useChatSession(
   // Per-run routing controls (sticky across sends in a session). routingMode
   // biases Cascade Auto; forceTier pins the root tier; webSearch toggles the
   // hosted web_search/web_fetch tools. Defaults mirror prior behaviour.
-  const [routingMode, setRoutingMode] = useState<RoutingMode>('auto');
+  // Seed the per-session routing bias + web toggle from the user's saved
+  // defaults (Settings → Chat); they stay sticky across sends within the session.
+  const [routingMode, setRoutingMode] = useState<RoutingMode>(() => defaultRoutingBias());
   const [forceTier, setForceTier] = useState<ForceTier>('auto');
   // The boardroom plan for the in-flight run, if Cascade produced one. Shown
   // read-only; cleared when the next run starts or the current one settles.
@@ -117,7 +122,7 @@ export function useChatSession(
   // Default OFF: a hosted chat is pure conversation unless the user opts into
   // web tools. With the toggle off the run registers no tools at all, so the
   // model is never handed a capability it can't reliably use.
-  const [webSearch, setWebSearch] = useState(false);
+  const [webSearch, setWebSearch] = useState(() => defaultWebSearch());
   const streamingRef = useRef('');
   // run:why arrives just before the chat:run ack; stash it so the ack can
   // attach the full report to the assistant message it creates.
@@ -229,6 +234,8 @@ export function useChatSession(
             extendedContext: fast ? undefined : (() => { const e = extendedContext(); return e.enabled ? e : undefined; })(),
             // Contribute to shared learning (Pro can opt out; server gates by plan).
             shareLearning: shareLearning(),
+            // Hard per-run token ceiling (0 = server/SDK default).
+            maxTokensPerRun: maxTokensPerRun() || undefined,
           },
           onAck,
         );

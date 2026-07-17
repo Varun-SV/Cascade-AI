@@ -2,7 +2,7 @@ import { useState } from 'react';
 import {
   Sparkles, Brain, KeyRound, Crown, LogOut, Cpu, Eye, ChevronRight, Zap,
   Sun, Moon, Monitor, LayoutGrid, Rows3, SlidersHorizontal, Layers, LineChart,
-  User, Palette, MessageSquare, Shield,
+  User, Palette, MessageSquare, Shield, Globe, Gauge,
 } from 'lucide-react';
 import Modal from './Modal.js';
 import { detectLocalModelCapability } from '../lib/localModel/capability.js';
@@ -10,7 +10,9 @@ import {
   localModelEnabled, setLocalModelEnabled, reduceMotionEnabled, setReduceMotionEnabled,
   fastAnswerModel, setFastAnswerModel, tierParams, setTierParams,
   extendedContext, setExtendedContext, shareLearning, setShareLearning,
-  type ThemeMode, type Density, type UiMode, type TierParams, type TierParam, type ExtendedContextPref,
+  maxTokensPerRun, setMaxTokensPerRun, defaultRoutingBias, setDefaultRoutingBias,
+  defaultWebSearch, setDefaultWebSearch,
+  type ThemeMode, type Density, type UiMode, type TierParams, type TierParam, type ExtendedContextPref, type RoutingBias,
 } from '../lib/prefs.js';
 import type { CloudUser } from '../lib/types.js';
 
@@ -159,6 +161,9 @@ export default function SettingsModal({
   const [params, setParams] = useState<TierParams>(() => tierParams());
   const [extCtx, setExtCtx] = useState<ExtendedContextPref>(() => extendedContext());
   const [share, setShare] = useState<boolean>(() => shareLearning());
+  const [maxRunTokens, setMaxRunTokens] = useState<number>(() => maxTokensPerRun());
+  const [routingBias, setRoutingBias] = useState<RoutingBias>(() => defaultRoutingBias());
+  const [webDefault, setWebDefault] = useState<boolean>(() => defaultWebSearch());
   const isPro = user.plan === 'pro';
 
   // Tabbed layout so the (now long) settings never force an awkward scroll —
@@ -319,20 +324,45 @@ export default function SettingsModal({
         )}
 
         {tab === 'chat' && (
-          <div className="flex items-start gap-2.5 py-2.5">
-            <span className="mt-0.5 text-ink-400"><Zap size={15} /></span>
-            <div className="min-w-0 flex-1">
-              <p className="text-sm text-ink-100">Fast answer model</p>
-              <p className="mt-0.5 text-xs text-ink-400">The model the ⚡ Fast answer button uses. Leave blank to auto-pick a capable mid-tier model.</p>
-              <input
-                value={fastModel}
-                onChange={(e) => { setFastModel(e.target.value); setFastAnswerModel(e.target.value); }}
-                placeholder="auto — e.g. gpt-4o-mini"
-                spellCheck={false}
-                className="mt-1.5 w-full rounded-md border border-elev/10 bg-elev/[0.04] px-2.5 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-500 focus:border-accent-500/40"
-              />
+          <>
+            <Row
+              icon={<Sparkles size={15} />}
+              title="Default response bias"
+              subtitle="How new chats start: Auto balances cost & quality, Quality favors stronger models, Fast favors cheaper/quicker ones. Change it per chat anytime."
+              right={
+                <Segmented
+                  label="Default response bias"
+                  value={routingBias}
+                  onChange={(v) => { setRoutingBias(v); setDefaultRoutingBias(v); }}
+                  options={[
+                    { value: 'auto', label: 'Auto' },
+                    { value: 'quality', label: 'Quality' },
+                    { value: 'fast', label: 'Fast' },
+                  ]}
+                />
+              }
+            />
+            <Row
+              icon={<Globe size={15} />}
+              title="Web search by default"
+              subtitle="Start new chats with web search & fetch enabled. Off keeps chat as pure conversation until you toggle it on."
+              right={<Toggle on={webDefault} onChange={(v) => { setWebDefault(v); setDefaultWebSearch(v); }} label="Web search by default" />}
+            />
+            <div className="flex items-start gap-2.5 py-2.5">
+              <span className="mt-0.5 text-ink-400"><Zap size={15} /></span>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm text-ink-100">Fast answer model</p>
+                <p className="mt-0.5 text-xs text-ink-400">The model the ⚡ Fast answer button uses. Leave blank to auto-pick a capable mid-tier model.</p>
+                <input
+                  value={fastModel}
+                  onChange={(e) => { setFastModel(e.target.value); setFastAnswerModel(e.target.value); }}
+                  placeholder="auto — e.g. gpt-4o-mini"
+                  spellCheck={false}
+                  className="mt-1.5 w-full rounded-md border border-elev/10 bg-elev/[0.04] px-2.5 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-500 focus:border-accent-500/40"
+                />
+              </div>
             </div>
-          </div>
+          </>
         )}
 
         {tab === 'advanced' && (
@@ -386,6 +416,26 @@ export default function SettingsModal({
                 />
               </div>
             )}
+
+            <Row
+              icon={<Gauge size={15} />}
+              title="Max tokens per run"
+              subtitle="Hard ceiling on total tokens a single run may spend across all tiers — a runaway multi-agent run stops here. Blank = the default (200k). The per-run cost limit still applies."
+              right={
+                <input
+                  type="number" min={1000} step={1000} inputMode="numeric"
+                  aria-label="Max tokens per run"
+                  value={maxRunTokens || ''}
+                  onChange={(e) => {
+                    const v = e.target.value.trim() === '' ? 0 : Math.max(0, Number(e.target.value));
+                    setMaxRunTokens(v);
+                    setMaxTokensPerRun(v);
+                  }}
+                  placeholder="200000"
+                  className="w-28 shrink-0 rounded-md border border-elev/10 bg-elev/[0.04] px-2.5 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-500 focus:border-accent-500/40"
+                />
+              }
+            />
           </>
         )}
 
