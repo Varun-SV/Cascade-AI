@@ -9,11 +9,15 @@ const UI_MODE_KEY = 'cascade-cloud-ui-mode';
 const TIER_PARAMS_KEY = 'cascade-cloud-tier-params';
 const EXT_CONTEXT_KEY = 'cascade-cloud-ext-context';
 const SHARE_LEARNING_KEY = 'cascade-cloud-share-learning';
+const MAX_TOKENS_RUN_KEY = 'cascade-cloud-max-tokens-run';
+const DEFAULT_ROUTING_KEY = 'cascade-cloud-default-routing';
+const DEFAULT_WEB_KEY = 'cascade-cloud-default-web';
 
 export type ThemeMode = 'light' | 'dark' | 'system';
 export type Density = 'comfortable' | 'compact';
 /** Simple = minimal chat; Advanced = full console (routing controls, tier detail). */
 export type UiMode = 'simple' | 'advanced';
+export type RoutingBias = 'auto' | 'quality' | 'fast';
 
 function readString<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
   try {
@@ -57,6 +61,24 @@ export const setReduceMotionEnabled = (v: boolean) => writeBool(REDUCE_MOTION_KE
  *  default; only a Pro user's opt-out is honored server-side (free always on). */
 export const shareLearning = () => readBool(SHARE_LEARNING_KEY, true);
 export const setShareLearning = (v: boolean) => writeBool(SHARE_LEARNING_KEY, v);
+
+/** Hard per-run token ceiling (stops a runaway multi-agent run). 0 = SDK default. */
+export function maxTokensPerRun(): number {
+  try { const v = Number(localStorage.getItem(MAX_TOKENS_RUN_KEY)); return Number.isFinite(v) && v > 0 ? Math.floor(v) : 0; }
+  catch { return 0; }
+}
+export function setMaxTokensPerRun(v: number): void {
+  try { if (v > 0) localStorage.setItem(MAX_TOKENS_RUN_KEY, String(Math.floor(v))); else localStorage.removeItem(MAX_TOKENS_RUN_KEY); }
+  catch { /* storage unavailable */ }
+}
+
+/** Default response bias seeded into each new chat session. */
+export const defaultRoutingBias = () => readString(DEFAULT_ROUTING_KEY, ['auto', 'quality', 'fast'] as const, 'auto');
+export const setDefaultRoutingBias = (v: RoutingBias) => writeString(DEFAULT_ROUTING_KEY, v);
+
+/** Whether web tools are on by default for a new chat session. */
+export const defaultWebSearch = () => readBool(DEFAULT_WEB_KEY, false);
+export const setDefaultWebSearch = (v: boolean) => writeBool(DEFAULT_WEB_KEY, v);
 
 /** Colour theme: light, dark, or follow the OS. Default: system. */
 export const themeMode = (): ThemeMode => readString(THEME_KEY, ['light', 'dark', 'system'] as const, 'system');
