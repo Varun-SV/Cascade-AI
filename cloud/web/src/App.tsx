@@ -5,6 +5,7 @@ import LoginGate from './components/LoginGate.js';
 import Modal from './components/Modal.js';
 import UpgradeModal from './components/UpgradeModal.js';
 import MemoryModal from './components/MemoryModal.js';
+import ConnectorsModal from './components/ConnectorsModal.js';
 import SkillsModal from './components/SkillsModal.js';
 import SettingsModal from './components/SettingsModal.js';
 import ConversationSidebar from './chat/ConversationSidebar.js';
@@ -51,6 +52,7 @@ export default function App() {
   const [showVault, setShowVault] = useState(false);
   const [showUpgrade, setShowUpgrade] = useState(false);
   const [showMemory, setShowMemory] = useState(false);
+  const [showConnectors, setShowConnectors] = useState(false);
   const [showSkills, setShowSkills] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showContinue, setShowContinue] = useState(false);
@@ -300,6 +302,7 @@ export default function App() {
             uiMode={mode}
             approval={chat.approval}
             compactionNotice={chat.compactionNotice}
+            activity={chat.activity}
           />
         </div>
       </div>
@@ -314,6 +317,7 @@ export default function App() {
             onClose={() => setShowSettings(false)}
             onOpenSkills={() => setShowSkills(true)}
             onOpenMemory={() => setShowMemory(true)}
+            onOpenConnectors={() => setShowConnectors(true)}
             onOpenKeyVault={() => setShowVault(true)}
             onOpenUpgrade={() => setShowUpgrade(true)}
             onLogout={handleLogout}
@@ -345,6 +349,7 @@ export default function App() {
           </Modal>
         )}
         {showMemory && <MemoryModal onClose={() => setShowMemory(false)} />}
+        {showConnectors && <ConnectorsModal onClose={() => setShowConnectors(false)} />}
         {showSkills && (
           <SkillsModal skills={skills} onClose={() => setShowSkills(false)} onChange={refreshSkills} />
         )}

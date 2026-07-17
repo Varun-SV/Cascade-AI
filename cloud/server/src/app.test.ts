@@ -495,11 +495,12 @@ describe('cloud/server app', () => {
     expect(foreign.status).toBe(404);
   });
 
-  it('POST /api/uploads rejects a non-image mime and missing data', async () => {
+  it('POST /api/uploads rejects an unsupported type and missing data', async () => {
     const alice = await login('Alice');
+    // A type that is neither an image nor a supported document.
     const badMime = await fetch(`${baseUrl}/api/uploads`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
-      body: JSON.stringify({ mime: 'application/pdf', dataBase64: TINY_PNG_BASE64 }),
+      body: JSON.stringify({ mime: 'application/zip', filename: 'a.zip', dataBase64: TINY_PNG_BASE64 }),
     });
     expect(badMime.status).toBe(400);
     const noData = await fetch(`${baseUrl}/api/uploads`, {
@@ -507,5 +508,53 @@ describe('cloud/server app', () => {
       body: JSON.stringify({ mime: 'image/png' }),
     });
     expect(noData.status).toBe(400);
+  });
+
+  it('POST /api/uploads parses a plain-text document and stores its text', async () => {
+    const alice = await login('Alice');
+    const dataBase64 = Buffer.from('Hello from a text document.', 'utf8').toString('base64');
+    const res = await fetch(`${baseUrl}/api/uploads`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ mime: 'text/plain', filename: 'notes.txt', dataBase64 }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.kind).toBe('document');
+    expect(body.filename).toBe('notes.txt');
+    expect(body.charCount).toBeGreaterThan(0);
+  });
+
+  it('MCP servers: add validates the URL, redacts auth, lists, toggles, deletes', async () => {
+    const alice = await login('Alice');
+    const hdr = { 'Content-Type': 'application/json', Cookie: alice };
+
+    // SSRF/loopback rejected.
+    const bad = await fetch(`${baseUrl}/api/mcp/servers`, {
+      method: 'POST', headers: hdr,
+      body: JSON.stringify({ name: 'Local', url: 'https://127.0.0.1/mcp' }),
+    });
+    expect(bad.status).toBe(400);
+
+    // Valid add via the github connector preset (fixed url + token).
+    const added = await fetch(`${baseUrl}/api/mcp/servers`, {
+      method: 'POST', headers: hdr,
+      body: JSON.stringify({ connectorId: 'github', token: 'ghp_secret' }),
+    });
+    expect(added.status).toBe(200);
+    const { server } = await added.json();
+    expect(server.hasAuth).toBe(true);
+
+    // Listing never leaks the token.
+    const list = await fetch(`${baseUrl}/api/mcp/servers`, { headers: { Cookie: alice } });
+    const listText = await list.text();
+    expect(listText).not.toContain('ghp_secret');
+
+    // Toggle + delete.
+    const patch = await fetch(`${baseUrl}/api/mcp/servers/${server.id}`, {
+      method: 'PATCH', headers: hdr, body: JSON.stringify({ enabled: false }),
+    });
+    expect(patch.status).toBe(200);
+    const del = await fetch(`${baseUrl}/api/mcp/servers/${server.id}`, { method: 'DELETE', headers: { Cookie: alice } });
+    expect((await del.json()).ok).toBe(true);
   });
 });

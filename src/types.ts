@@ -125,9 +125,15 @@ export interface ImageAttachment {
 
 export interface McpServerConfig {
   name: string;
-  command: string;
+  // Local (stdio) transport — spawns a subprocess. Desktop/CLI only.
+  command?: string;
   args?: string[];
   env?: Record<string, string>;
+  // Remote transport — connects to a hosted MCP server over Streamable HTTP
+  // (falling back to SSE). Hosted-safe: no subprocess. `headers` carry auth
+  // (e.g. a bearer token or API key) for the remote server.
+  url?: string;
+  headers?: Record<string, string>;
 }
 
 export interface ToolDefinition {

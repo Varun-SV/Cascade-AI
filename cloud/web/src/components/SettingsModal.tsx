@@ -2,7 +2,7 @@ import { useState } from 'react';
 import {
   Sparkles, Brain, KeyRound, Crown, LogOut, Cpu, Eye, ChevronRight, Zap,
   Sun, Moon, Monitor, LayoutGrid, Rows3, SlidersHorizontal, Layers, LineChart,
-  User, Palette, MessageSquare, Shield, Globe, Gauge,
+  User, Palette, MessageSquare, Shield, Globe, Gauge, Plug,
 } from 'lucide-react';
 import Modal from './Modal.js';
 import { detectLocalModelCapability } from '../lib/localModel/capability.js';
@@ -122,6 +122,7 @@ interface Props {
   onClose: () => void;
   onOpenSkills: () => void;
   onOpenMemory: () => void;
+  onOpenConnectors: () => void;
   onOpenKeyVault: () => void;
   onOpenUpgrade: () => void;
   onLogout: () => void;
@@ -150,7 +151,7 @@ function LinkRow({ icon, label, onClick }: { icon: React.ReactNode; label: strin
 }
 
 export default function SettingsModal({
-  user, onClose, onOpenSkills, onOpenMemory, onOpenKeyVault, onOpenUpgrade, onLogout,
+  user, onClose, onOpenSkills, onOpenMemory, onOpenConnectors, onOpenKeyVault, onOpenUpgrade, onLogout,
   onLocalModelChange, onReduceMotionChange,
   theme, onThemeChange, density, onDensityChange, uiMode, onUiModeChange,
 }: Props) {
@@ -250,6 +251,7 @@ export default function SettingsModal({
             <p className="mt-3 text-[11px] font-semibold uppercase tracking-wide text-ink-400">Manage</p>
             <LinkRow icon={<Sparkles size={15} className="text-ink-400" />} label="Skills" onClick={() => { onClose(); onOpenSkills(); }} />
             <LinkRow icon={<Brain size={15} className="text-ink-400" />} label="Memory" onClick={() => { onClose(); onOpenMemory(); }} />
+            <LinkRow icon={<Plug size={15} className="text-ink-400" />} label="Connectors & MCP" onClick={() => { onClose(); onOpenConnectors(); }} />
             <LinkRow icon={<KeyRound size={15} className="text-ink-400" />} label="API keys" onClick={() => { onClose(); onOpenKeyVault(); }} />
             <LinkRow icon={<Crown size={15} className="text-ink-400" />} label="Upgrade" onClick={() => { onClose(); onOpenUpgrade(); }} />
 

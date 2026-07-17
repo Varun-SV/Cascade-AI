@@ -5,6 +5,28 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.27.0 - 2026-07-17
+
+### Added
+- **Live run activity.** The working indicator now reflects the *real* step —
+  "Mapping the approach…", "Cascading: <subtask>…", "Working: <subtask>…" —
+  built from live tier events instead of a fixed thinking/planning/executing
+  cycle. Click it to expand a **run-activity drawer** showing the T1→T2→T3 tier
+  tree with each tier's serving **model**, current subtask, and status.
+- **Document upload.** Attach **PDF, Word (.docx), or text files** (txt, md,
+  csv, json, …) in the composer. They're parsed to text on upload and injected
+  as context for the run; documents show as a chip in the transcript. Up to
+  10 MB each; extracted text is capped so one huge file can't blow the budget.
+- **Remote MCP support (cloud).** Attach hosted **MCP servers** over Streamable
+  HTTP (with SSE fallback) as tool sources for orchestrated runs — enabled
+  servers apply to every run. https-only with an SSRF guard (private/loopback/
+  metadata hosts blocked); auth tokens are stored server-side and never returned.
+  The core `McpClient` now speaks remote transport in addition to stdio.
+- **Connectors.** A curated layer over MCP: one-tap **GitHub** (GitHub's hosted
+  MCP server + a Personal Access Token), plus **Slack** / **Google** and a
+  **Custom MCP server** option (bring your own remote endpoint). Manage them in
+  Settings → *Connectors & MCP* — toggle, add, or remove.
+
 ## 0.26.0 - 2026-07-17
 
 ### Added

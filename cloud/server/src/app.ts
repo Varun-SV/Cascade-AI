@@ -27,6 +27,8 @@ import {
   verifyWebhookSignature, planForStatus, subscriptionFromWebhook,
 } from './billing.js';
 import { HandoffStore, parseHandoffBody } from './handoff.js';
+import { MAX_DOCUMENT_BYTES, parseDocument, resolveDocumentMime } from './documents.js';
+import { connectorCatalog, getConnector, validateRemoteMcpUrl } from './mcp.js';
 
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
@@ -79,10 +81,12 @@ export function createApp(env: CloudEnv, store: CloudStore) {
   // Trust exactly one hop — `true` would trust a client-supplied XFF and let
   // anyone forge their rate-limit identity.
   app.set('trust proxy', 1);
-  // Image uploads carry a base64 payload larger than a normal API body, so
-  // they get their own bigger parser on the route; every other endpoint keeps
-  // the tight default limit.
-  const uploadJson = express.json({ limit: '8mb' });
+  // Image/document uploads carry a base64 payload larger than a normal API
+  // body, so they get their own bigger parser on the route; every other
+  // endpoint keeps the tight default limit. 16mb covers a 10 MB document once
+  // base64 inflation (~33%) is accounted for — the per-file byte cap in the
+  // handler is the real guard.
+  const uploadJson = express.json({ limit: '16mb' });
   // The Razorpay webhook signature is an HMAC of the RAW request body, so that
   // route needs the unparsed bytes — capture them and skip the JSON parser.
   const webhookRaw = express.raw({ type: '*/*', limit: '1mb' });
@@ -286,7 +290,9 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     if (!conversation) { res.status(404).json({ error: 'Not found' }); return; }
     const messages = store.getMessages(conversation.id).map((m) => ({
       ...m,
-      attachments: store.getAttachmentsForMessage(m.id).map((a) => ({ id: a.id, mime: a.mime, kind: a.kind })),
+      attachments: store.getAttachmentsForMessage(m.id).map((a) => ({
+        id: a.id, mime: a.mime, kind: a.kind, filename: a.filename, charCount: a.charCount,
+      })),
     }));
     res.json({ conversation: { id: conversation.id, title: conversation.title, skillId: conversation.skillId }, messages });
   });
@@ -375,27 +381,116 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     res.json({ ok: store.deleteMemory(id, req.session!.userId) });
   });
 
-  // ── Image uploads (multimodal input) ──
-  // Client sends { mime, dataBase64 }; we validate type + size, write to the
-  // per-tenant dir, and return an id the chat:run payload references. Keys and
-  // bytes never leave the tenant's own scratch space.
-  app.post('/api/uploads', sessionMiddleware(env.SESSION_SECRET), uploadJson, (req: AuthedRequest, res) => {
+  // ── Remote MCP servers & connectors ──
+  // The catalog is static presets; the servers are per-user, with auth headers
+  // stored server-side and never returned. Adding validates the URL (https +
+  // no private/loopback hosts) so the hosted server can't be used for SSRF.
+  app.get('/api/mcp/connectors', sessionMiddleware(env.SESSION_SECRET, false), (_req: AuthedRequest, res) => {
+    res.json({ connectors: connectorCatalog() });
+  });
+
+  app.get('/api/mcp/servers', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    res.json({ servers: store.listMcpServers(req.session!.userId) });
+  });
+
+  app.post('/api/mcp/servers', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const userId = req.session!.userId;
+    const body = req.body ?? {};
+    const connectorId = typeof body.connectorId === 'string' ? body.connectorId : undefined;
+    const connector = connectorId ? getConnector(connectorId) : undefined;
+    if (connectorId && !connector) { res.status(400).json({ error: 'Unknown connector' }); return; }
+
+    const name = (typeof body.name === 'string' && body.name.trim() ? body.name.trim() : connector?.name || '').slice(0, 80);
+    const rawUrl = typeof body.url === 'string' && body.url.trim() ? body.url.trim() : connector?.url ?? '';
+    const token = typeof body.token === 'string' ? body.token.trim() : '';
+    if (!name) { res.status(400).json({ error: 'A name is required.' }); return; }
+
+    const valid = validateRemoteMcpUrl(rawUrl);
+    if (!valid.ok) { res.status(400).json({ error: valid.reason }); return; }
+
+    // Build the auth header. A connector preset defines the header name/prefix;
+    // a custom server accepts an explicit { authHeader } or defaults to Bearer.
+    let headers: Record<string, string> | undefined;
+    if (token) {
+      const headerName = connector?.authHeader || (typeof body.authHeader === 'string' && body.authHeader.trim()) || 'Authorization';
+      const prefix = connector ? connector.authPrefix : 'Bearer ';
+      headers = { [headerName]: `${prefix}${token}` };
+    }
+    const server = store.addMcpServer({ userId, name, url: valid.url, headers, connectorId: connectorId ?? null });
+    res.json({ server });
+  });
+
+  app.patch('/api/mcp/servers/:id', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const id = req.params['id'];
+    if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid server id' }); return; }
+    if (typeof req.body?.enabled !== 'boolean') { res.status(400).json({ error: 'enabled (boolean) is required' }); return; }
+    const ok = store.setMcpServerEnabled(id, req.session!.userId, req.body.enabled);
+    if (!ok) { res.status(404).json({ error: 'Not found' }); return; }
+    res.json({ ok: true });
+  });
+
+  app.delete('/api/mcp/servers/:id', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const id = req.params['id'];
+    if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid server id' }); return; }
+    res.json({ ok: store.deleteMcpServer(id, req.session!.userId) });
+  });
+
+  // ── Uploads (multimodal images + documents) ──
+  // Client sends { mime, dataBase64, filename? }. Images go straight to the
+  // tenant dir for multimodal input; documents (PDF/DOCX/text) are parsed to
+  // plain text at upload time so a run injects the text without re-parsing.
+  // Both return an id the chat:run payload references. Bytes never leave the
+  // tenant's own scratch space.
+  app.post('/api/uploads', sessionMiddleware(env.SESSION_SECRET), uploadJson, async (req: AuthedRequest, res) => {
     const userId = req.session!.userId;
     const mime = typeof req.body?.mime === 'string' ? req.body.mime : '';
+    const filename = typeof req.body?.filename === 'string' ? req.body.filename.slice(0, 255) : '';
     const dataBase64 = typeof req.body?.dataBase64 === 'string' ? req.body.dataBase64 : '';
-    if (!IMAGE_MIME_TYPES.has(mime)) { res.status(400).json({ error: 'Unsupported image type (jpeg, png, gif, webp only)' }); return; }
-    if (!dataBase64) { res.status(400).json({ error: 'Missing image data' }); return; }
+    if (!dataBase64) { res.status(400).json({ error: 'Missing upload data' }); return; }
     const bytes = Buffer.from(dataBase64, 'base64');
-    if (bytes.length === 0 || bytes.length > MAX_UPLOAD_BYTES) {
-      res.status(400).json({ error: `Image must be between 1 byte and ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB` });
+    const dir = path.join(tenantScratchDir(env, userId), 'uploads');
+
+    if (IMAGE_MIME_TYPES.has(mime)) {
+      if (bytes.length === 0 || bytes.length > MAX_UPLOAD_BYTES) {
+        res.status(400).json({ error: `Image must be between 1 byte and ${MAX_UPLOAD_BYTES / (1024 * 1024)} MB` });
+        return;
+      }
+      fs.mkdirSync(dir, { recursive: true });
+      const filePath = path.join(dir, randomUUID());
+      fs.writeFileSync(filePath, bytes);
+      const att = store.addAttachment({ userId, messageId: null, kind: 'image', mime, path: filePath });
+      res.json({ id: att.id, kind: att.kind, mime: att.mime });
       return;
     }
-    const dir = path.join(tenantScratchDir(env, userId), 'uploads');
+
+    const docMime = resolveDocumentMime(mime, filename);
+    if (!docMime) {
+      res.status(400).json({ error: 'Unsupported file type. Upload an image, PDF, Word (.docx), or a text file.' });
+      return;
+    }
+    if (bytes.length === 0 || bytes.length > MAX_DOCUMENT_BYTES) {
+      res.status(400).json({ error: `Document must be between 1 byte and ${MAX_DOCUMENT_BYTES / (1024 * 1024)} MB` });
+      return;
+    }
+    let extracted: { text: string; truncated: boolean };
+    try {
+      extracted = await parseDocument({ bytes, mime: docMime, filename });
+    } catch {
+      res.status(422).json({ error: "Couldn't read that document — it may be scanned, encrypted, or corrupt." });
+      return;
+    }
+    if (!extracted.text.trim()) {
+      res.status(422).json({ error: 'No text could be extracted from that document.' });
+      return;
+    }
     fs.mkdirSync(dir, { recursive: true });
     const filePath = path.join(dir, randomUUID());
     fs.writeFileSync(filePath, bytes);
-    const att = store.addAttachment({ userId, messageId: null, kind: 'image', mime, path: filePath });
-    res.json({ id: att.id, mime: att.mime });
+    const att = store.addAttachment({
+      userId, messageId: null, kind: 'document', mime: docMime, path: filePath,
+      filename: filename || 'document', extractedText: extracted.text,
+    });
+    res.json({ id: att.id, kind: att.kind, mime: att.mime, filename: att.filename, charCount: att.charCount, truncated: extracted.truncated });
   });
 
   app.get('/api/uploads/:id', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {

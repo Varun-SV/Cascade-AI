@@ -190,7 +190,7 @@ export class Cascade extends EventEmitter {
    */
   private pendingMcpApprovals: Map<string, (approved: boolean) => void> = new Map();
 
-  private async requestMcpApproval(server: { name: string; command: string; args?: string[] }): Promise<boolean> {
+  private async requestMcpApproval(server: { name: string; command?: string; args?: string[]; url?: string }): Promise<boolean> {
     // No listeners → reject. Callers can add a listener BEFORE init() runs
     // when they need to approve servers programmatically.
     if (this.listenerCount('mcp:approval-required') === 0) {

@@ -26,6 +26,23 @@ describe('buildRunPrompt', () => {
     expect(out.indexOf('Be terse.')).toBeLessThan(out.indexOf('Persistent facts'));
     expect(out.indexOf('Persistent facts')).toBeLessThan(out.indexOf('do it'));
   });
+
+  it('injects attached document text before the user prompt', () => {
+    const out = buildRunPrompt('summarize', undefined, [], [{ filename: 'report.pdf', text: 'Q3 revenue rose 12%.' }]);
+    expect(out).toContain('The user attached a document');
+    expect(out).toContain('<document filename="report.pdf">');
+    expect(out).toContain('Q3 revenue rose 12%.');
+    expect(out.indexOf('Q3 revenue rose 12%.')).toBeLessThan(out.indexOf('summarize'));
+  });
+
+  it('counts multiple documents and escapes quotes in filenames', () => {
+    const out = buildRunPrompt('go', undefined, [], [
+      { filename: 'a"b.txt', text: 'one' },
+      { filename: 'c.md', text: 'two' },
+    ]);
+    expect(out).toContain('2 documents');
+    expect(out).toContain('filename="a&quot;b.txt"');
+  });
 });
 
 describe('skills catalog', () => {
@@ -54,9 +71,9 @@ describe('parseChatRunPayload — attachments & skill', () => {
     expect(parsed.skillId).toBe('code-reviewer');
   });
 
-  it('coerces a blank skillId to undefined and caps attachments at 4', () => {
+  it('coerces a blank skillId to undefined and caps attachments at 8', () => {
     const parsed = parseChatRunPayload({ ...base, skillId: '' });
     expect(parsed.skillId).toBeUndefined();
-    expect(() => parseChatRunPayload({ ...base, attachmentIds: ['1', '2', '3', '4', '5'] })).toThrow();
+    expect(() => parseChatRunPayload({ ...base, attachmentIds: ['1', '2', '3', '4', '5', '6', '7', '8', '9'] })).toThrow();
   });
 });

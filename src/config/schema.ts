@@ -23,12 +23,20 @@ export const ModelOverridesSchema = z.object({
   vision: z.string().optional(),
 });
 
-export const McpServerConfigSchema = z.object({
-  name: z.string(),
-  command: z.string(),
-  args: z.array(z.string()).optional(),
-  env: z.record(z.string()).optional(),
-});
+export const McpServerConfigSchema = z
+  .object({
+    name: z.string(),
+    // Local (stdio) transport.
+    command: z.string().optional(),
+    args: z.array(z.string()).optional(),
+    env: z.record(z.string()).optional(),
+    // Remote (hosted-safe) transport.
+    url: z.string().url().optional(),
+    headers: z.record(z.string()).optional(),
+  })
+  .refine((s) => !!s.command || !!s.url, {
+    message: 'MCP server needs either a command (local) or a url (remote).',
+  });
 
 export const WebSearchConfigSchema = z.object({
   /** Base URL of your SearXNG instance (e.g. http://localhost:8080) */

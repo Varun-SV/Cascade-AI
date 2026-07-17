@@ -4,13 +4,26 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { ToolDefinition } from '../types.js';
 
 export interface McpServerConfig {
   name: string;
-  command: string;
+  // Local (stdio) transport — spawns a subprocess.
+  command?: string;
   args?: string[];
   env?: Record<string, string>;
+  // Remote transport — hosted MCP server over Streamable HTTP (SSE fallback).
+  url?: string;
+  headers?: Record<string, string>;
+}
+
+/** True when the config targets a remote (hosted) MCP server rather than a
+ *  local subprocess. Remote configs are the only ones safe to run hosted. */
+export function isRemoteMcpServer(server: McpServerConfig): boolean {
+  return typeof server.url === 'string' && server.url.length > 0;
 }
 
 export interface McpTool {
@@ -59,7 +72,7 @@ export class McpClient {
   }
 
   private clients: Map<string, Client> = new Map();
-  private transports: Map<string, StdioClientTransport> = new Map();
+  private transports: Map<string, Transport> = new Map();
   private tools: Map<string, McpTool> = new Map();
   private trustedServers: Set<string>;
   private approvalCallback: McpApprovalCallback | undefined;
@@ -73,9 +86,12 @@ export class McpClient {
   }
 
   async connect(server: McpServerConfig): Promise<void> {
-    // Spawning an arbitrary subprocess is the riskiest operation in the
-    // tool system — the MCP command could be anything, including curl or a
-    // shell. Require explicit trust before transport creation.
+    const remote = isRemoteMcpServer(server);
+
+    // Connecting to an MCP server is the riskiest operation in the tool system:
+    // a local server spawns an arbitrary subprocess; a remote one sends the
+    // configured auth to a URL and runs whatever tools it advertises. Require
+    // explicit trust before creating any transport.
     if (!this.trustedServers.has(server.name)) {
       const approved = this.approvalCallback
         ? await this.approvalCallback(server)
@@ -88,23 +104,34 @@ export class McpClient {
       this.trustedServers.add(server.name);
     }
 
-    const transport = new StdioClientTransport({
-      command: server.command,
-      args: server.args ?? [],
-      env: { ...process.env, ...(server.env ?? {}) } as Record<string, string>,
-    });
-
     const client = new Client(
       { name: 'cascade-ai', version: '0.1.0' },
       { capabilities: {} },
     );
 
-    await client.connect(transport);
+    let transport: Transport;
+    if (remote) {
+      transport = await this.connectRemote(server, client);
+    } else {
+      if (!server.command) {
+        throw new Error(`MCP server "${server.name}" has neither a url nor a command.`);
+      }
+      transport = new StdioClientTransport({
+        command: server.command,
+        args: server.args ?? [],
+        env: { ...process.env, ...(server.env ?? {}) } as Record<string, string>,
+      });
+      await client.connect(transport);
+    }
     this.clients.set(server.name, client);
     this.transports.set(server.name, transport);
 
-    // Accessing undocumented but public getter in SDK
-    if (transport.pid) McpClient.activeProcessPids.add(transport.pid);
+    // Track the child pid so global exit handlers can reap it (stdio only —
+    // remote transports have no subprocess). Set after connect, when the SDK
+    // has spawned the process and populated `pid`.
+    if (transport instanceof StdioClientTransport && transport.pid) {
+      McpClient.activeProcessPids.add(transport.pid);
+    }
 
     // Discover tools from this server. If another server already registered
     // a tool with the same bare name, emit a console warning but keep the
@@ -129,12 +156,35 @@ export class McpClient {
     }
   }
 
+  /**
+   * Connect to a remote MCP server. Tries Streamable HTTP first (the current
+   * transport); if that fails (a legacy server that only speaks SSE), retries
+   * once over SSE. Auth headers ride on every request. Returns the live
+   * transport so the caller can register it.
+   */
+  private async connectRemote(server: McpServerConfig, client: Client): Promise<Transport> {
+    const url = new URL(server.url!);
+    const headers = server.headers && Object.keys(server.headers).length ? server.headers : undefined;
+    try {
+      const http = new StreamableHTTPClientTransport(url, headers ? { requestInit: { headers } } : {});
+      await client.connect(http);
+      return http;
+    } catch (httpErr) {
+      this.onWarn(`[mcp] Streamable HTTP failed for "${server.name}", falling back to SSE: ${String(httpErr)}`);
+      const sse = new SSEClientTransport(url, headers ? { requestInit: { headers } } : {});
+      await client.connect(sse);
+      return sse;
+    }
+  }
+
   async disconnect(serverName: string): Promise<void> {
     const client = this.clients.get(serverName);
     if (client) {
       const transport = this.transports.get(serverName);
-      // Accessing undocumented but public getter in SDK
-      if (transport?.pid) McpClient.activeProcessPids.delete(transport.pid);
+      // Reap the child pid for stdio transports (remote transports have none).
+      if (transport instanceof StdioClientTransport && transport.pid) {
+        McpClient.activeProcessPids.delete(transport.pid);
+      }
 
       await client.close();
       this.clients.delete(serverName);
@@ -175,8 +225,8 @@ export class McpClient {
   getActivePids(): number[] {
     const pids: number[] = [];
     for (const transport of this.transports.values()) {
-      // Accessing undocumented but public getter in SDK
-      if (transport.pid) pids.push(transport.pid);
+      // Only stdio transports own a subprocess pid; remote transports have none.
+      if (transport instanceof StdioClientTransport && transport.pid) pids.push(transport.pid);
     }
     return pids;
   }
