@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { AlertTriangle, KeyRound, Loader2, Sparkles, Layers, ChevronDown } from 'lucide-react';
+import { AlertTriangle, KeyRound, Loader2, Sparkles, Layers, ChevronDown, Search } from 'lucide-react';
 import Message from './Message.js';
 import Composer from './Composer.js';
 import PlanNotice from './PlanNotice.js';
@@ -30,13 +30,14 @@ interface Props {
   uiMode: UiMode;
   approval: PlanApproval | null;
   compactionNotice: string | null;
+  knowledgeNotice: string | null;
   activity: ActivityNode[];
 }
 
 export default function ChatPanel({
   messages, busy, error, status, hasProviders, skills, skillId, onSkillChange, onSend, onStop, onRegenerate,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange, uiMode, approval,
-  compactionNotice, activity,
+  compactionNotice, knowledgeNotice, activity,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [activityOpen, setActivityOpen] = useState(false);
@@ -92,6 +93,16 @@ export default function ChatPanel({
             >
               <Layers size={13} className="text-accent-300" />
               <span>{compactionNotice}</span>
+            </motion.div>
+          )}
+          {knowledgeNotice && (
+            <motion.div
+              className="flex items-center gap-2 rounded-lg border border-accent-500/20 bg-accent-500/[0.06] px-3 py-2 text-xs text-ink-300"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+            >
+              <Search size={13} className="text-accent-300" />
+              <span>{knowledgeNotice}</span>
             </motion.div>
           )}
           {status && busy && (

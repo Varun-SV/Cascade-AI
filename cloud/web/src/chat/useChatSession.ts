@@ -163,6 +163,9 @@ export function useChatSession(
   // transient notice once a compaction actually happened.
   const [contextApproval, setContextApproval] = useState<ContextApprovalInfo | null>(null);
   const [compactionNotice, setCompactionNotice] = useState<string | null>(null);
+  // Document RAG: a transient note when a large attached doc was searched for
+  // the most relevant passages (vs. read in full), so grounding is visible.
+  const [knowledgeNotice, setKnowledgeNotice] = useState<string | null>(null);
   // Live run activity — the T1→T2→T3 tree with each tier's model + current
   // subtask, built from tier:status events. Powers the click-to-expand drawer.
   const [activity, setActivity] = useState<ActivityNode[]>([]);
@@ -222,12 +225,21 @@ export function useChatSession(
         setCompactionNotice(`Folded ${e.foldedTurns ?? 'earlier'} turns into a summary to fit the context window.`);
       }
     };
+    const onKnowledge = (e: { mode?: string; docCount?: number; passages?: number }) => {
+      if (e.mode === 'searched') {
+        const docs = e.docCount === 1 ? 'the document' : `${e.docCount} documents`;
+        setKnowledgeNotice(`Searched ${docs} and pulled the ${e.passages ?? 0} most relevant passages.`);
+      } else if (e.mode === 'nokey') {
+        setKnowledgeNotice('Attached documents are large. Add an OpenAI-compatible key to search them; used a truncated view for now.');
+      }
+    };
     socket.on('stream:token', onToken);
     socket.on('tier:status', onStatus);
     socket.on('run:why', onWhy);
     socket.on('plan:approval-required', onPlan);
     socket.on('context:approval-required', onContextApproval);
     socket.on('context:compacted', onCompacted);
+    socket.on('knowledge:retrieved', onKnowledge);
     return () => {
       socket.off('stream:token', onToken);
       socket.off('tier:status', onStatus);
@@ -235,6 +247,7 @@ export function useChatSession(
       socket.off('plan:approval-required', onPlan);
       socket.off('context:approval-required', onContextApproval);
       socket.off('context:compacted', onCompacted);
+      socket.off('knowledge:retrieved', onKnowledge);
     };
   }, [socket]);
 
@@ -256,6 +269,7 @@ export function useChatSession(
       setApproval(null);
       setContextApproval(null);
       setCompactionNotice(null);
+      setKnowledgeNotice(null);
       setActivity([]);
       streamingRef.current = '';
       if (appendUser) {
@@ -378,6 +392,6 @@ export function useChatSession(
   return {
     messages, send, stop, regenerate, busy, error, status, lastTokens, lastSaved, conversationId, loadMessages, setConversationId,
     routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, approval,
-    contextApproval, resolveContextApproval, compactionNotice, activity,
+    contextApproval, resolveContextApproval, compactionNotice, knowledgeNotice, activity,
   };
 }

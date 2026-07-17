@@ -10,6 +10,7 @@
 import Database from 'better-sqlite3';
 import path from 'node:path';
 import fs from 'node:fs';
+import { SqliteVectorStore } from '#cascade-ai';
 import { randomUUID } from 'node:crypto';
 
 export type OAuthProvider = 'github' | 'google' | 'dev';
@@ -186,6 +187,7 @@ interface DbMessageRow {
 
 export class CloudStore {
   private db: Database.Database;
+  private _vectorStore: SqliteVectorStore | undefined;
 
   constructor(dbPath: string) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -194,6 +196,14 @@ export class CloudStore {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('synchronous = NORMAL');
     this.migrate();
+  }
+
+  /** Hybrid vector store over this tenant DB (document RAG). Chunks are
+   *  namespaced by userId, so one store serves every tenant safely. Lazily
+   *  built so the kb_* tables are only created when retrieval is first used. */
+  getVectorStore(): SqliteVectorStore {
+    if (!this._vectorStore) this._vectorStore = new SqliteVectorStore(this.db);
+    return this._vectorStore;
   }
 
   close(): void {

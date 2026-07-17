@@ -183,4 +183,27 @@ describe('CloudStore', () => {
     expect(store.listMcpServers(alice.id)).toHaveLength(1);
     expect(store.listMcpServers(bob.id)).toHaveLength(0);
   });
+
+  it('exposes a working hybrid vector store over the tenant DB', () => {
+    const vs = store.getVectorStore();
+    // Two chunks with hand-made 3-d vectors under one namespace/source.
+    vs.upsert([
+      { chunk: { id: 'u1:d1:0', text: 'photosynthesis in green plants', sourceId: 'd1', ord: 0, meta: { namespace: 'u1' } }, vector: [1, 0, 0] },
+      { chunk: { id: 'u1:d1:1', text: 'interest rates and bond prices', sourceId: 'd1', ord: 1, meta: { namespace: 'u1' } }, vector: [0, 1, 0] },
+    ], 'fake-model');
+
+    expect(vs.hasSource('u1', 'd1', 'fake-model')).toBe(true);
+    expect(vs.hasSource('u1', 'd1', 'other-model')).toBe(false);
+
+    // Lexical (BM25) finds the keyword match.
+    const lex = vs.lexicalSearch('photosynthesis', { namespace: 'u1', k: 5 });
+    expect(lex[0]!.id).toBe('u1:d1:0');
+
+    // Dense finds the nearest vector.
+    const dense = vs.denseSearch([0.9, 0.1, 0], { namespace: 'u1', k: 1 });
+    expect(dense[0]!.id).toBe('u1:d1:0');
+
+    // Namespace isolation.
+    expect(vs.denseSearch([1, 0, 0], { namespace: 'other', k: 5 })).toHaveLength(0);
+  });
 });
