@@ -5,6 +5,27 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.31.0 - 2026-07-18
+
+### Added
+- **Knowledge retrieval — Phase 4 (graph search over world-state).** A new SDK
+  `GraphRetriever` does lightweight GraphRAG over the project knowledge graph
+  (the existing `world-state` entity→relation→value facts): it seeds on entities
+  the query names, then **expands a few hops** by following entity references
+  inside fact values — the multi-hop traversal vector search can't do — and
+  ranks the collected facts by query overlap. A `knowledge_graph_search` tool
+  exposes it to workers for relational/multi-hop questions, registered at run
+  init **once the workspace has learned facts** (so a fresh repo isn't handed an
+  empty tool). This lights up the `graph` retrieval mode reserved in Phase 2,
+  reusing the graph you already have — no Microsoft-GraphRAG indexing cost.
+- New SDK exports: `GraphRetriever` and `GraphSearchTool`.
+
+### Notes
+- Phase 4 delivers the graph capability as a tool the orchestrator chooses to
+  call (agentic routing). "Connected-source" RAG — condensing long MCP/connector
+  tool outputs via retrieval — is a follow-up (4b), since it hooks the
+  tool-execution path and warrants its own change.
+
 ## 0.30.0 - 2026-07-18
 
 ### Added

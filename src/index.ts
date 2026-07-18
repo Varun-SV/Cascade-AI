@@ -23,15 +23,17 @@ export {
   Retriever, reciprocalRankFusion, SqliteVectorStore, OpenAICompatibleEmbedder,
   embedderFromProviders, chunkText, LLMReranker, chatCompleterFromProviders,
   parseRankOrder, planRetrieval, chunkCode, heuristicCodeChunker,
-  buildManifest, diffManifest, hashContent, WorkspaceIndex,
+  buildManifest, diffManifest, hashContent, WorkspaceIndex, GraphRetriever,
 } from './retrieval/index.js';
 export type {
   Chunk, ScoredChunk, Embedder, VectorStore, SearchOptions, ChunkOptions,
   RetrieverSearchOptions, OpenAIEmbedderOptions, Reranker, CompleteFn,
   RetrievalMode, RetrievalPlan, RetrievalContext, CodeChunker, CodeChunkOptions,
   FileManifest, ManifestDiff, WorkspaceIndexOptions, RefreshResult,
+  GraphFactSource, GraphSearchOptions, RankedFact,
 } from './retrieval/index.js';
 export { CodeSearchTool } from './tools/code-search.js';
+export { GraphSearchTool } from './tools/graph-search.js';
 export { AuditLogger } from './audit/log.js';
 export { Telemetry } from './telemetry/index.js';
 

@@ -19,3 +19,6 @@ export {
 export {
   WorkspaceIndex, type WorkspaceIndexOptions, type RefreshResult,
 } from './workspace-index.js';
+export {
+  GraphRetriever, type GraphFactSource, type GraphSearchOptions, type RankedFact,
+} from './graph.js';
