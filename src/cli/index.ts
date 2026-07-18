@@ -16,6 +16,7 @@ import { Repl } from './repl/index.js';
 import { Cascade } from '../core/cascade.js';
 import { initCommand } from './commands/init.js';
 import { doctorCommand } from './commands/doctor.js';
+import { indexCommand } from './commands/index-cmd.js';
 import { updateCommand } from './commands/update.js';
 import { dashboardCommand } from './commands/dashboard.js';
 import { makeIdentityCommand } from './commands/identity.js';
@@ -128,6 +129,13 @@ program
   .description('Check system configuration and API key availability')
   .action(async () => {
     await doctorCommand();
+  });
+
+program
+  .command('index [path]')
+  .description('Build or refresh the workspace code index (powers the code_search tool)')
+  .action(async (dirPath?: string) => {
+    await indexCommand(dirPath);
   });
 
 program

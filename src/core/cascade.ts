@@ -1,6 +1,8 @@
 import EventEmitter, { setMaxListeners } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import fs from 'node:fs';
+import Database from 'better-sqlite3';
 import { glob } from 'glob';
 import type {
   ApprovalRequest,
@@ -36,6 +38,11 @@ import { ToolCreator } from '../tools/tool-creator.js';
 import { CascadeCancelledError } from '../utils/retry.js';
 import { WorldStateDB } from './knowledge/world-state.js';
 import { PrivacyPaths } from './privacy/paths.js';
+import { CascadeIgnore } from '../config/ignore.js';
+import { WorkspaceIndex } from '../retrieval/workspace-index.js';
+import { embedderFromProviders } from '../retrieval/embedder.js';
+import { LLMReranker, chatCompleterFromProviders } from '../retrieval/rerank.js';
+import { CodeSearchTool } from '../tools/code-search.js';
 import {
   estimateTokens, messagesTokens, needsCompaction, rollingSummary, mapReduceCompact, type Summarize,
 } from './context/compaction.js';
@@ -79,6 +86,7 @@ export class Cascade extends EventEmitter {
   private router: CascadeRouter;
   private toolRegistry: ToolRegistry;
   private mcpClient: McpClient;
+  private codeIndex?: WorkspaceIndex;
   private config: CascadeConfig;
   /** Orchestration decisions for the CURRENT run — cleared on each run(). */
   private decisionLog: DecisionLogEntry[] = [];
@@ -209,6 +217,46 @@ export class Cascade extends EventEmitter {
       this.pendingMcpApprovals.set(server.name, wrap);
       this.emit('mcp:approval-required', { server });
     });
+  }
+
+  /**
+   * Build the workspace code index and register the `code_search` tool. Uses the
+   * user's own provider key for embeddings (and, if chat-capable, reranking).
+   * The index persists to a per-workspace SQLite file; `autoRefresh` brings it
+   * up to date at init (incremental — only changed files re-embed).
+   */
+  private async initCodeIndex(): Promise<void> {
+    const ci = this.config.codeIndex!;
+    const embedder = embedderFromProviders(this.config.providers);
+    if (!embedder) {
+      this.emit('log', { level: 'warn', message: 'Code index enabled but no embeddings-capable provider is configured — skipping.' });
+      return;
+    }
+    const dbPath = ci.dbPath || path.join(this.workspacePath, '.cascade', 'code-index.db');
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    const db = new Database(dbPath);
+    db.pragma('journal_mode = WAL');
+
+    const complete = chatCompleterFromProviders(this.config.providers);
+    const reranker = complete ? new LLMReranker({ complete }) : undefined;
+
+    const ignore = new CascadeIgnore();
+    await ignore.load(this.workspacePath);
+
+    const index = new WorkspaceIndex({
+      root: this.workspacePath,
+      db,
+      embedder,
+      reranker,
+      isIgnored: (abs) => ignore.isIgnored(abs, this.workspacePath),
+    });
+
+    if (ci.autoRefresh) {
+      const res = await index.refresh();
+      this.emit('log', { level: 'info', message: `Code index refreshed: ${res.filesIndexed} indexed, ${res.filesUnchanged} unchanged, ${res.chunks} chunks.` });
+    }
+    this.codeIndex = index;
+    this.toolRegistry.register(new CodeSearchTool(index));
   }
 
   private recordDecision(kind: DecisionLogEntry['kind'], detail: string): void {
@@ -531,6 +579,16 @@ export class Cascade extends EventEmitter {
           } catch (err) {
             console.error(`Failed to connect to MCP server "${server.name}":`, err);
           }
+        }
+      }
+
+      // Workspace code index (Phase 3) — opt-in; registers a `code_search` tool
+      // backed by a hybrid + reranked index of the workspace. Non-fatal on error.
+      if (this.config.codeIndex?.enabled) {
+        try {
+          await this.initCodeIndex();
+        } catch (err) {
+          console.error('Failed to initialize workspace code index:', err);
         }
       }
 
