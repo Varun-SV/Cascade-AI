@@ -5,6 +5,29 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.30.0 - 2026-07-18
+
+### Added
+- **Knowledge retrieval — Phase 3 (workspace code index).** Cascade can now
+  index a repository and search it by meaning + keywords. A new SDK
+  `WorkspaceIndex` scans the workspace, chunks each file at
+  definition boundaries (a dependency-free structural `chunkCode`), and embeds
+  it into the Phase-1 hybrid store; a **content-hash manifest** makes refreshes
+  **incremental** — only files whose contents changed are re-embedded. A
+  `code_search` tool (opt-in via `codeIndex.enabled`) lets workers find code by
+  concept during a run, using the user's own key for embeddings + reranking.
+- **`cascade index [path]`** — build or refresh the workspace code index from
+  the CLI (respects `.cascadeignore`, skips binaries and generated dirs).
+- New SDK exports: `WorkspaceIndex`, `chunkCode`, `heuristicCodeChunker`,
+  `buildManifest`/`diffManifest`/`hashContent`, and `CodeSearchTool`.
+
+### Notes
+- Phase 3 uses a **heuristic** (structural) code chunker — dependency-free,
+  behind a `CodeChunker` interface. A tree-sitter AST chunker can drop in later
+  for exact boundaries once its packaging is proven across the desktop build.
+- The code index is opt-in and, unless `autoRefresh` is set, is only built by
+  `cascade index` — so existing runs are unaffected.
+
 ## 0.29.0 - 2026-07-18
 
 ### Added

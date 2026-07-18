@@ -505,6 +505,8 @@ export interface CascadeConfig {
   persistDynamicTools?: boolean;
   /** Project knowledge (world state) settings. */
   knowledge?: { factsExtraction?: boolean };
+  /** Workspace code index (Phase 3). Opt-in; registers a `code_search` tool. */
+  codeIndex?: { enabled?: boolean; autoRefresh?: boolean; dbPath?: string };
   plugins?: string[];
   localConcurrency?: number;
   localInferenceTimeoutMs?: number;

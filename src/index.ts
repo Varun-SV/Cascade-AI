@@ -22,13 +22,16 @@ export { McpClient } from './mcp/client.js';
 export {
   Retriever, reciprocalRankFusion, SqliteVectorStore, OpenAICompatibleEmbedder,
   embedderFromProviders, chunkText, LLMReranker, chatCompleterFromProviders,
-  parseRankOrder, planRetrieval,
+  parseRankOrder, planRetrieval, chunkCode, heuristicCodeChunker,
+  buildManifest, diffManifest, hashContent, WorkspaceIndex,
 } from './retrieval/index.js';
 export type {
   Chunk, ScoredChunk, Embedder, VectorStore, SearchOptions, ChunkOptions,
   RetrieverSearchOptions, OpenAIEmbedderOptions, Reranker, CompleteFn,
-  RetrievalMode, RetrievalPlan, RetrievalContext,
+  RetrievalMode, RetrievalPlan, RetrievalContext, CodeChunker, CodeChunkOptions,
+  FileManifest, ManifestDiff, WorkspaceIndexOptions, RefreshResult,
 } from './retrieval/index.js';
+export { CodeSearchTool } from './tools/code-search.js';
 export { AuditLogger } from './audit/log.js';
 export { Telemetry } from './telemetry/index.js';
 

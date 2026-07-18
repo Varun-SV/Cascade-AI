@@ -12,3 +12,10 @@ export {
   type Reranker, type CompleteFn,
 } from './rerank.js';
 export { planRetrieval, type RetrievalMode, type RetrievalPlan, type RetrievalContext } from './plan.js';
+export { chunkCode, heuristicCodeChunker, type CodeChunker, type CodeChunkOptions } from './code-chunk.js';
+export {
+  buildManifest, diffManifest, hashContent, type FileManifest, type ManifestDiff,
+} from './manifest.js';
+export {
+  WorkspaceIndex, type WorkspaceIndexOptions, type RefreshResult,
+} from './workspace-index.js';

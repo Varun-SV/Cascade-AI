@@ -228,6 +228,21 @@ export const CascadeConfigSchema = z.object({
     factsExtraction: z.boolean().default(true),
   }).default({}),
   /**
+   * Workspace code index (Phase 3). Opt-in. When enabled, Cascade registers a
+   * `code_search` tool backed by a hybrid + reranked index of the workspace so
+   * workers can find code by meaning. Build/refresh the index with
+   * `cascade index`; set autoRefresh to update it at run start (incremental —
+   * only changed files are re-embedded).
+   */
+  codeIndex: z
+    .object({
+      enabled: z.boolean().default(false),
+      autoRefresh: z.boolean().default(false),
+      /** SQLite file for the index. Defaults to <workspace>/.cascade/code-index.db. */
+      dbPath: z.string().optional(),
+    })
+    .default({}),
+  /**
    * Persist runtime-generated tools to .cascade/dynamic-tools.json and reload them
    * on startup for cross-run dedup. Reloaded (and peer-received) tools are always
    * treated as UNTRUSTED — their dangerous actions re-escalate. Set false to disable
