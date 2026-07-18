@@ -43,6 +43,7 @@ import { WorkspaceIndex } from '../retrieval/workspace-index.js';
 import { embedderFromProviders } from '../retrieval/embedder.js';
 import { LLMReranker, chatCompleterFromProviders } from '../retrieval/rerank.js';
 import { CodeSearchTool } from '../tools/code-search.js';
+import { GraphSearchTool } from '../tools/graph-search.js';
 import {
   estimateTokens, messagesTokens, needsCompaction, rollingSummary, mapReduceCompact, type Summarize,
 } from './context/compaction.js';
@@ -589,6 +590,20 @@ export class Cascade extends EventEmitter {
           await this.initCodeIndex();
         } catch (err) {
           console.error('Failed to initialize workspace code index:', err);
+        }
+      }
+
+      // Knowledge graph search (Phase 4) — register a `knowledge_graph_search`
+      // tool over world-state, but only once the workspace actually has learned
+      // facts (so a fresh repo isn't handed a tool with nothing to search).
+      if (this.config.knowledge?.factsExtraction !== false) {
+        try {
+          const ws = this.worldStateDB;
+          if (ws && ws.getAllFacts().length > 0) {
+            this.toolRegistry.register(new GraphSearchTool(ws));
+          }
+        } catch (err) {
+          console.error('Failed to register knowledge graph search:', err);
         }
       }
 
