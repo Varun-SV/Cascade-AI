@@ -5,6 +5,26 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.29.0 - 2026-07-18
+
+### Added
+- **Knowledge retrieval — Phase 2 (reranking + adaptive routing).** Document
+  RAG now runs a **second-stage reranker** over the fused candidates before
+  injecting them — the biggest grounding-quality lever. The default
+  `LLMReranker` does listwise reranking through the user's own chat model
+  (`chatCompleterFromProviders`, OpenAI-compatible/Ollama), so it needs no ONNX
+  runtime and no separate rerank key; it falls back to the fused order on any
+  hiccup. A new pure `planRetrieval` decides **none / CAG / RAG** per run
+  (with `graph`/`code` slots reserved for later phases), replacing the inline
+  size check. The "searched N documents…" chat note now says when passages were
+  reranked. New SDK exports: `LLMReranker`, `chatCompleterFromProviders`,
+  `parseRankOrder`, `planRetrieval`, and a `reranker` argument on `Retriever`.
+
+### Notes
+- Reranking only runs when RAG actually fires (large attached docs) and a
+  chat-capable key is present: candidates are capped (≤20) and the call is a
+  single low-token, temperature-0 completion, so the cost/latency add is bounded.
+
 ## 0.28.0 - 2026-07-17
 
 ### Added

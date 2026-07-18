@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
 import { SqliteVectorStore } from './sqlite-store.js';
 import { Retriever, reciprocalRankFusion } from './retriever.js';
+import { LLMReranker } from './rerank.js';
 import type { Embedder, ScoredChunk } from './types.js';
 
 // Deterministic bag-of-words embedder: each lowercased token hashes to a
@@ -92,5 +93,29 @@ describe('Retriever + SqliteVectorStore', () => {
 
     const nsHits = await r.search('retrieval', { namespace: NS, k: 5 });
     expect(nsHits.map((h) => h.sourceId).sort()).toEqual(['docA', 'docB']);
+  });
+
+  it('applies a configured reranker to the fused candidates', async () => {
+    const db = new Database(':memory:');
+    // A reranker that always promotes the passage mentioning "taxes".
+    const reranker = new LLMReranker({
+      complete: async (prompt: string) => {
+        const lines = prompt.split('\n').filter((l) => /^\[\d+\]/.test(l));
+        const idx = lines.findIndex((l) => /taxes/i.test(l));
+        return idx >= 0 ? String(idx + 1) : '1';
+      },
+    });
+    const r = new Retriever(new FakeEmbedder(), new SqliteVectorStore(db), reranker);
+    await r.index(NS, 'doc1', [
+      { text: 'a note about cats and pets', ord: 0 },
+      { text: 'a note about quarterly taxes and filings', ord: 1 },
+      { text: 'a note about weather patterns', ord: 2 },
+    ]);
+    const hits = await r.search('anything', { namespace: NS, k: 3 });
+    expect(hits[0]!.text).toContain('taxes');
+
+    // rerank:false bypasses the reranker (fused order stands).
+    const noRerank = await r.search('cats', { namespace: NS, k: 1, rerank: false });
+    expect(noRerank[0]!.text).toContain('cats');
   });
 });

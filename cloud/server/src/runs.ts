@@ -8,7 +8,10 @@
 // On a shared multi-tenant server that would leak one user's provider keys
 // into another user's run.
 
-import { createCascade, Retriever, chunkText, embedderFromProviders } from '#cascade-ai';
+import {
+  createCascade, Retriever, chunkText, embedderFromProviders,
+  LLMReranker, chatCompleterFromProviders, planRetrieval,
+} from '#cascade-ai';
 import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ProviderConfig } from '#cascade-ai';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -333,10 +336,16 @@ async function resolveDocuments(
   socket: Socket,
 ): Promise<RunDocument[]> {
   const full = (): RunDocument[] => docSources.map((d) => ({ filename: d.filename, text: d.text }));
-  if (docSources.length === 0 || payload.fastAnswer) return full();
 
+  // Adaptive decision: none / CAG (inject in full) / RAG (retrieve passages).
   const totalChars = docSources.reduce((n, d) => n + d.text.length, 0);
-  if (totalChars <= DOC_CAG_CHAR_BUDGET) return full();
+  const plan = planRetrieval({
+    sourceCount: docSources.length,
+    totalChars,
+    cagCharBudget: DOC_CAG_CHAR_BUDGET,
+    fastAnswer: payload.fastAnswer,
+  });
+  if (plan.mode !== 'rag') return full();
 
   const embedder = embedderFromProviders(payload.providers as ProviderConfig[]);
   if (!embedder) {
@@ -344,7 +353,14 @@ async function resolveDocuments(
     return full();
   }
   try {
-    const retriever = new Retriever(embedder, store.getVectorStore());
+    // Second stage: an LLM reranker over the fused candidates, when the user
+    // has a chat-capable key. Reuses their own model; no extra key/dependency.
+    const complete = chatCompleterFromProviders(payload.providers as ProviderConfig[], {
+      model: payload.fastAnswerModel,
+    });
+    const reranker = complete ? new LLMReranker({ complete }) : undefined;
+
+    const retriever = new Retriever(embedder, store.getVectorStore(), reranker);
     for (const d of docSources) {
       if (!retriever.isIndexed(userId, d.sourceId)) {
         await retriever.index(userId, d.sourceId, chunkText(d.text));
@@ -363,7 +379,7 @@ async function resolveDocuments(
       grouped.set(h.sourceId, arr);
     }
     socket.emit('knowledge:retrieved', {
-      conversationId, mode: 'searched', docCount: docSources.length, passages: hits.length,
+      conversationId, mode: 'searched', docCount: docSources.length, passages: hits.length, reranked: !!reranker,
     });
     return [...grouped.entries()].map(([sid, passages]) => ({
       filename: nameById.get(sid) ?? 'document',

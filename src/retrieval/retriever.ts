@@ -8,6 +8,7 @@
 // scales and needs no per-corpus tuning.
 
 import type { Embedder, ScoredChunk, VectorStore } from './types.js';
+import type { Reranker } from './rerank.js';
 
 export interface RetrieverSearchOptions {
   namespace: string;
@@ -19,6 +20,8 @@ export interface RetrieverSearchOptions {
   candidates?: number;
   /** RRF damping constant (higher = flatter). Standard default is 60. */
   rrfK?: number;
+  /** Rerank the fused candidates when a reranker is configured (default true). */
+  rerank?: boolean;
 }
 
 /**
@@ -44,6 +47,9 @@ export class Retriever {
   constructor(
     private readonly embedder: Embedder,
     private readonly store: VectorStore,
+    /** Optional second-stage reranker (Phase 2). When set, search reranks the
+     *  fused candidates before returning the top-k. */
+    private readonly reranker?: Reranker,
   ) {}
 
   /** Chunk model this retriever embeds with (for cache/version keys). */
@@ -76,9 +82,10 @@ export class Retriever {
     return records.length;
   }
 
-  /** Hybrid search: lexical ∪ dense, fused with RRF. */
+  /** Hybrid search: lexical ∪ dense, fused with RRF, then optionally reranked. */
   async search(query: string, opts: RetrieverSearchOptions): Promise<ScoredChunk[]> {
     const candidates = opts.candidates ?? 30;
+    const k = opts.k ?? 6;
     const base = { namespace: opts.namespace, k: candidates, sourceIds: opts.sourceIds };
     const lexical = this.store.lexicalSearch(query, base);
     let dense: ScoredChunk[] = [];
@@ -88,6 +95,14 @@ export class Retriever {
     } catch {
       // Embedding the query failed (provider hiccup) — degrade to lexical-only.
     }
-    return reciprocalRankFusion([lexical, dense], opts.rrfK ?? 60).slice(0, opts.k ?? 6);
+    const fused = reciprocalRankFusion([lexical, dense], opts.rrfK ?? 60);
+
+    // Second stage: rerank the fused survivors when a reranker is configured.
+    // The reranker itself falls back to input order on any failure, so this
+    // never returns worse-than-fused results.
+    if (this.reranker && opts.rerank !== false && fused.length > 1) {
+      return this.reranker.rerank(query, fused, k);
+    }
+    return fused.slice(0, k);
   }
 }
