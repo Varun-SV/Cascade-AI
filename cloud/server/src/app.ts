@@ -12,12 +12,14 @@ import type { CloudEnv } from './env.js';
 import type { CloudStore, OAuthProvider } from './db.js';
 import {
   createSessionToken,
+  createNativeAccessToken,
   setSessionCookie,
   clearSessionCookie,
   sessionMiddleware,
   parseCookies,
   type AuthedRequest,
 } from './auth/session.js';
+import { NativeAuthStore, isLoopbackRedirect, hashRefreshToken } from './native-auth.js';
 import { githubAuthUrl, exchangeGithubCode, googleAuthUrl, exchangeGoogleCode, type OAuthProfile } from './auth/oauth.js';
 import { limitsForPlan, todayKey } from './entitlements.js';
 import { skillCatalog } from './skills.js';
@@ -71,6 +73,40 @@ function parseSkillBody(
 
 const OAUTH_STATE_COOKIE = 'cascade_oauth_state';
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+
+/** Self-contained HTML for the device-approval page. No external resources
+ *  (CSP-safe); the form calls the approve API with the session cookie. */
+function renderActivatePage(authed: boolean, webOrigin: string, prefill: string): string {
+  const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+  const body = authed
+    ? `<form id="f"><label for="c">Device code</label>
+         <input id="c" name="user_code" autocomplete="off" spellcheck="false" value="${esc(prefill)}" placeholder="WXYZ-1234" />
+         <button type="submit">Approve device</button></form>
+       <p id="msg" role="status"></p>
+       <script>
+         var f=document.getElementById('f'),m=document.getElementById('msg');
+         f.addEventListener('submit',async function(e){e.preventDefault();m.textContent='Approving…';
+           try{var r=await fetch('/api/native/device/approve',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_code:document.getElementById('c').value})});
+             var j=await r.json(); m.textContent=r.ok&&j.ok?'✓ Approved — return to your terminal or app.':'That code is invalid or expired.'; if(r.ok&&j.ok){f.querySelector('button').disabled=true;}}
+           catch(_){m.textContent='Something went wrong. Try again.';}});
+       </script>`
+    : `<p>Sign in first, then reopen this page to approve your device.</p>
+       <p><a class="btn" href="${esc(webOrigin)}">Sign in to Cascade</a></p>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/><title>Activate a device · Cascade</title>
+    <style>
+      :root{color-scheme:light dark}
+      body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0e0f13;color:#e7e7ea;font:16px/1.5 -apple-system,Segoe UI,Roboto,system-ui,sans-serif}
+      .card{width:min(92vw,420px);background:#17181d;border:1px solid #2a2c33;border-radius:16px;padding:28px}
+      h1{font-size:1.2rem;margin:0 0 6px} p{color:#a9abb3}
+      label{display:block;font-size:.8rem;text-transform:uppercase;letter-spacing:.06em;color:#8b8d95;margin:14px 0 6px}
+      input{width:100%;box-sizing:border-box;font:1.1rem ui-monospace,Menlo,monospace;letter-spacing:.12em;text-transform:uppercase;padding:12px 14px;border-radius:10px;border:1px solid #33353d;background:#0e0f13;color:#fff}
+      button,.btn{margin-top:16px;display:inline-block;width:100%;box-sizing:border-box;text-align:center;text-decoration:none;padding:12px 14px;border:0;border-radius:10px;background:#c98a2a;color:#151006;font-weight:700;cursor:pointer}
+      button:disabled{opacity:.5;cursor:default}
+    </style></head>
+    <body><main class="card"><h1>Activate a device</h1>
+      <p>Enter the code shown in your terminal or desktop app to sign it in.</p>${body}</main></body></html>`;
+}
 
 export function createApp(env: CloudEnv, store: CloudStore) {
   const app = express();
@@ -192,6 +228,42 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     return { code };
   }
 
+  // ── Native (desktop/CLI) auth broker ─────────
+  // Desktop/CLI sign in against this server (which holds the provider secrets)
+  // — never against Google/GitHub directly — so no OAuth secret ships in a
+  // native app. Loopback flow for the desktop, device-code flow for the CLI.
+  // See docs/native-auth.md.
+  const nativeStore = new NativeAuthStore();
+  const NATIVE_REFRESH_TTL_MS = 60 * 24 * 60 * 60 * 1000; // 60 days
+
+  function issueNativeTokens(userId: string) {
+    const accessToken = createNativeAccessToken(userId, env.SESSION_SECRET);
+    const refreshRaw = randomBytes(32).toString('base64url');
+    store.addRefreshToken({ userId, tokenHash: hashRefreshToken(refreshRaw), expiresAt: Date.now() + NATIVE_REFRESH_TTL_MS });
+    return { access_token: accessToken, refresh_token: refreshRaw, token_type: 'Bearer', expires_in: 3600 };
+  }
+
+  // Called from the shared OAuth callbacks: if the flow was a native loopback
+  // sign-in (a pending record keyed by the validated state), mint a one-time
+  // code and 302 it to the desktop's loopback listener. Returns true when it
+  // handled the response, so the web branch is skipped.
+  function completeNativeIfPending(
+    req: express.Request, res: express.Response, profile: OAuthProfile, provider: OAuthProvider,
+  ): boolean {
+    const state = typeof req.query['state'] === 'string' ? req.query['state'] : '';
+    const native = state ? nativeStore.consumePendingLoopback(state) : null;
+    if (!native) return false;
+    const user = store.upsertUser({
+      provider, providerId: profile.providerId, email: profile.email, name: profile.name, avatar: profile.avatar,
+    });
+    const code = nativeStore.createLoopbackCode({ userId: user.id, challenge: native.challenge, redirect: native.redirect });
+    const url = new URL(native.redirect);
+    url.searchParams.set('code', code);
+    if (native.appState) url.searchParams.set('state', native.appState);
+    res.redirect(url.toString());
+    return true;
+  }
+
   // ── GitHub ──────────────────────────────────
 
   app.get('/auth/github', (_req, res) => {
@@ -208,6 +280,7 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     if (!verified) { res.status(400).send('Invalid or expired OAuth state'); return; }
     try {
       const profile = await exchangeGithubCode(verified.code, env);
+      if (completeNativeIfPending(req, res, profile, 'github')) return;
       finishLogin(res, profile, 'github');
       res.redirect(env.WEB_ORIGIN);
     } catch (err) {
@@ -231,6 +304,7 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     if (!verified) { res.status(400).send('Invalid or expired OAuth state'); return; }
     try {
       const profile = await exchangeGoogleCode(verified.code, env);
+      if (completeNativeIfPending(req, res, profile, 'google')) return;
       finishLogin(res, profile, 'google');
       res.redirect(env.WEB_ORIGIN);
     } catch (err) {
@@ -255,6 +329,92 @@ export function createApp(env: CloudEnv, store: CloudStore) {
 
   app.post('/auth/logout', (_req, res) => {
     clearSessionCookie(res, secure);
+    res.json({ ok: true });
+  });
+
+  // ── Native auth routes ───────────────────────
+
+  // Loopback flow — start. The desktop opens this in the system browser with a
+  // loopback redirect + PKCE challenge; we run the normal web OAuth, then the
+  // shared callback 302s a one-time code back to the loopback listener.
+  app.get('/auth/native/:provider', (req, res) => {
+    const provider = req.params['provider'];
+    const redirect = String(req.query['redirect_uri'] ?? '');
+    const challenge = String(req.query['code_challenge'] ?? '');
+    const appState = typeof req.query['state'] === 'string' ? req.query['state'] : '';
+    // Validate the request shape before checking server config, so a malformed
+    // native request is a clear 400 regardless of which providers are set up.
+    if (provider !== 'github' && provider !== 'google') { res.status(400).json({ error: 'Unknown provider' }); return; }
+    if (!isLoopbackRedirect(redirect)) { res.status(400).json({ error: 'redirect_uri must be a http loopback address (127.0.0.1 / localhost)' }); return; }
+    if (!challenge) { res.status(400).json({ error: 'code_challenge (PKCE) is required' }); return; }
+    if (provider === 'github' && (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET)) { res.status(503).json({ error: 'GitHub OAuth is not configured' }); return; }
+    if (provider === 'google' && (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET)) { res.status(503).json({ error: 'Google OAuth is not configured' }); return; }
+
+    const oauthState = randomBytes(16).toString('hex');
+    nativeStore.createPendingLoopback(oauthState, { challenge, redirect, appState });
+    res.cookie(OAUTH_STATE_COOKIE, oauthState, { httpOnly: true, secure, sameSite: 'lax', maxAge: OAUTH_STATE_TTL_MS, path: '/' });
+    res.redirect(provider === 'github' ? githubAuthUrl(oauthState, env) : googleAuthUrl(oauthState, env));
+  });
+
+  // Loopback flow — redeem. The desktop posts the one-time code + PKCE verifier.
+  app.post('/api/native/token', (req: AuthedRequest, res) => {
+    const code = typeof req.body?.code === 'string' ? req.body.code : '';
+    const verifier = typeof req.body?.code_verifier === 'string' ? req.body.code_verifier : '';
+    const result = nativeStore.consumeLoopbackCode(code, verifier);
+    if (!result) { res.status(400).json({ error: 'invalid_grant' }); return; }
+    res.json(issueNativeTokens(result.userId));
+  });
+
+  // Device flow — start (CLI).
+  app.post('/api/native/device', (_req, res) => {
+    const d = nativeStore.createDevice();
+    res.json({
+      device_code: d.deviceCode,
+      user_code: d.userCode,
+      verification_uri: `${env.OAUTH_REDIRECT_BASE_URL}/activate`,
+      expires_in: d.expiresIn,
+      interval: d.interval,
+    });
+  });
+
+  // Device flow — poll (CLI). Standard device-grant responses.
+  app.post('/api/native/device/token', (req, res) => {
+    const deviceCode = typeof req.body?.device_code === 'string' ? req.body.device_code : '';
+    const poll = nativeStore.pollDevice(deviceCode);
+    if (poll.status === 'approved') { res.json(issueNativeTokens(poll.userId)); return; }
+    if (poll.status === 'slow_down') { res.status(429).json({ error: 'slow_down' }); return; }
+    if (poll.status === 'pending') { res.status(428).json({ error: 'authorization_pending' }); return; }
+    res.status(400).json({ error: 'expired_token' });
+  });
+
+  // Device flow — approve. Called by the /activate page; must be web-signed-in
+  // so the approval binds to a real user.
+  app.post('/api/native/device/approve', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const userCode = typeof req.body?.user_code === 'string' ? req.body.user_code : '';
+    if (!userCode) { res.status(400).json({ error: 'user_code required' }); return; }
+    const ok = nativeStore.approveDevice(userCode, req.session!.userId);
+    res.status(ok ? 200 : 400).json({ ok });
+  });
+
+  // The page a user opens to approve a device. Self-contained; no external
+  // resources. Requires a web session to actually approve.
+  app.get('/activate', sessionMiddleware(env.SESSION_SECRET, false), (req: AuthedRequest, res) => {
+    const prefill = typeof req.query['code'] === 'string' ? req.query['code'].replace(/[^A-Za-z0-9-]/g, '').slice(0, 12) : '';
+    res.type('html').send(renderActivatePage(!!req.session, env.WEB_ORIGIN, prefill));
+  });
+
+  // Rotate a refresh token → fresh access (+ refresh). Old token is single-use.
+  app.post('/api/native/refresh', (req, res) => {
+    const token = typeof req.body?.refresh_token === 'string' ? req.body.refresh_token : '';
+    const result = token ? store.consumeRefreshToken(hashRefreshToken(token)) : null;
+    if (!result) { res.status(401).json({ error: 'invalid_grant' }); return; }
+    res.json(issueNativeTokens(result.userId));
+  });
+
+  // Revoke the presented refresh token (native sign-out).
+  app.post('/api/native/logout', (req, res) => {
+    const token = typeof req.body?.refresh_token === 'string' ? req.body.refresh_token : '';
+    if (token) store.revokeRefreshToken(hashRefreshToken(token));
     res.json({ ok: true });
   });
 

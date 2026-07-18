@@ -557,4 +557,74 @@ describe('cloud/server app', () => {
     const del = await fetch(`${baseUrl}/api/mcp/servers/${server.id}`, { method: 'DELETE', headers: { Cookie: alice } });
     expect((await del.json()).ok).toBe(true);
   });
+
+  // ── Native auth (desktop/CLI) ──
+
+  async function devLoginCookie(name: string): Promise<string> {
+    const res = await fetch(`${baseUrl}/auth/dev-login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+    });
+    return extractCookie(res, SESSION_COOKIE_NAME)!;
+  }
+  const jsonPost = (path: string, body: unknown, headers: Record<string, string> = {}) =>
+    fetch(`${baseUrl}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+
+  it('device flow: start → approve (web-authed) → poll → tokens → Bearer works → refresh rotates', async () => {
+    const cookie = await devLoginCookie('Device Dana');
+
+    const start = await jsonPost('/api/native/device', {});
+    expect(start.status).toBe(200);
+    const dev = await start.json();
+    expect(dev.user_code).toMatch(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/);
+    expect(dev.verification_uri).toContain('/activate');
+
+    // Approving requires a web session.
+    expect((await jsonPost('/api/native/device/approve', { user_code: dev.user_code })).status).toBe(401);
+    const approve = await jsonPost('/api/native/device/approve', { user_code: dev.user_code }, { Cookie: cookie });
+    expect((await approve.json()).ok).toBe(true);
+
+    // One poll (first poll is never slow_down) → tokens.
+    const tok = await jsonPost('/api/native/device/token', { device_code: dev.device_code });
+    expect(tok.status).toBe(200);
+    const tokens = await tok.json();
+    expect(tokens.access_token).toBeTruthy();
+    expect(tokens.refresh_token).toBeTruthy();
+
+    // The access token authenticates as a Bearer on an existing route.
+    const me = await fetch(`${baseUrl}/api/me`, { headers: { Authorization: `Bearer ${tokens.access_token}` } });
+    expect((await me.json()).user?.name).toBe('Device Dana');
+
+    // Refresh rotates: old refresh token becomes invalid.
+    const refreshed = await jsonPost('/api/native/refresh', { refresh_token: tokens.refresh_token });
+    expect(refreshed.status).toBe(200);
+    const next = await refreshed.json();
+    expect(next.access_token).toBeTruthy();
+    expect((await jsonPost('/api/native/refresh', { refresh_token: tokens.refresh_token })).status).toBe(401);
+
+    // Logout revokes the current refresh token.
+    await jsonPost('/api/native/logout', { refresh_token: next.refresh_token });
+    expect((await jsonPost('/api/native/refresh', { refresh_token: next.refresh_token })).status).toBe(401);
+  });
+
+  it('device poll reports authorization_pending before approval', async () => {
+    const dev = await (await jsonPost('/api/native/device', {})).json();
+    const poll = await jsonPost('/api/native/device/token', { device_code: dev.device_code });
+    expect(poll.status).toBe(428);
+    expect((await poll.json()).error).toBe('authorization_pending');
+  });
+
+  it('native loopback start validates the redirect + PKCE challenge', async () => {
+    // Non-loopback redirect is rejected.
+    const bad = await fetch(`${baseUrl}/auth/native/github?redirect_uri=${encodeURIComponent('https://evil.com/cb')}&code_challenge=abc`, { redirect: 'manual' });
+    expect(bad.status).toBe(400);
+    // A bad one-time code can't be redeemed.
+    expect((await jsonPost('/api/native/token', { code: 'nope', code_verifier: 'x' })).status).toBe(400);
+  });
+
+  it('GET /activate serves a self-contained page', async () => {
+    const res = await fetch(`${baseUrl}/activate`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/html');
+    expect(await res.text()).toContain('Activate a device');
+  });
 });
