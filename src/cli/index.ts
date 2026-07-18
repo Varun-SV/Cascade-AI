@@ -17,6 +17,7 @@ import { Cascade } from '../core/cascade.js';
 import { initCommand } from './commands/init.js';
 import { doctorCommand } from './commands/doctor.js';
 import { indexCommand } from './commands/index-cmd.js';
+import { loginCommand, logoutCommand, whoamiCommand, sessionsCommand, sessionShowCommand } from './commands/cloud.js';
 import { updateCommand } from './commands/update.js';
 import { dashboardCommand } from './commands/dashboard.js';
 import { makeIdentityCommand } from './commands/identity.js';
@@ -136,6 +137,43 @@ program
   .description('Build or refresh the workspace code index (powers the code_search tool)')
   .action(async (dirPath?: string) => {
     await indexCommand(dirPath);
+  });
+
+  // ── Cascade Cloud account (optional sign-in) ──
+program
+  .command('login')
+  .description('Sign in to Cascade Cloud to continue your web chats here')
+  .option('--server <url>', 'Cloud server URL (or set CASCADE_CLOUD_URL)')
+  .action(async (opts: { server?: string }) => {
+    await loginCommand(opts);
+  });
+
+program
+  .command('logout')
+  .description('Sign out of Cascade Cloud on this machine')
+  .action(async () => {
+    await logoutCommand();
+  });
+
+program
+  .command('whoami')
+  .description('Show the signed-in Cascade Cloud account')
+  .action(async () => {
+    await whoamiCommand();
+  });
+
+const sessions = program
+  .command('sessions')
+  .description('List your Cascade Cloud chats')
+  .action(async () => {
+    await sessionsCommand();
+  });
+
+sessions
+  .command('show <id>')
+  .description('Print a cloud chat transcript (id or its first characters)')
+  .action(async (id: string) => {
+    await sessionShowCommand(id);
   });
 
 program
