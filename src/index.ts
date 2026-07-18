@@ -19,6 +19,14 @@ export { DashboardServer } from './dashboard/server.js';
 export { TaskScheduler } from './scheduler/index.js';
 export { HooksRunner } from './hooks/index.js';
 export { McpClient } from './mcp/client.js';
+export {
+  Retriever, reciprocalRankFusion, SqliteVectorStore, OpenAICompatibleEmbedder,
+  embedderFromProviders, chunkText,
+} from './retrieval/index.js';
+export type {
+  Chunk, ScoredChunk, Embedder, VectorStore, SearchOptions, ChunkOptions,
+  RetrieverSearchOptions, OpenAIEmbedderOptions,
+} from './retrieval/index.js';
 export { AuditLogger } from './audit/log.js';
 export { Telemetry } from './telemetry/index.js';
 

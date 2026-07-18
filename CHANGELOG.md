@@ -5,6 +5,31 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.28.0 - 2026-07-17
+
+### Added
+- **Knowledge retrieval — Phase 1 (document RAG).** New SDK retrieval core:
+  an `Embedder` interface with an OpenAI-compatible `/v1/embeddings` client
+  (works against OpenAI, OpenAI-compatible gateways, and Ollama), a
+  heading/paragraph-aware `chunkText`, a SQLite-backed hybrid `VectorStore`
+  (FTS5 BM25 ∪ brute-force cosine over normalized BLOB vectors), and a
+  `Retriever` that fuses the two stages with Reciprocal Rank Fusion. Exposed
+  from the SDK (`Retriever`, `SqliteVectorStore`, `OpenAICompatibleEmbedder`,
+  `embedderFromProviders`, `chunkText`, `reciprocalRankFusion`).
+- **Cloud document CAG-or-RAG switch.** Attached documents small enough to fit
+  a token budget are still injected in full (cache-augmented). When they exceed
+  it, each doc is chunked + embedded (cached per attachment + embed model, so
+  re-runs don't re-embed) and only the passages most relevant to the prompt are
+  injected. The chat surfaces a "searched N documents…" note; with no
+  embeddings-capable key it falls back to the previous truncated injection and
+  says so. Vectors are namespaced per user and stay in the tenant DB.
+
+### Notes
+- Phase 1 stores vectors as BLOBs with exact brute-force cosine (no native
+  vector extension) — exact and instant at document-chunk scale, and swappable
+  for an ANN index behind the `VectorStore` interface when the codebase index
+  (a later phase) makes vector counts large.
+
 ## 0.27.0 - 2026-07-17
 
 ### Added

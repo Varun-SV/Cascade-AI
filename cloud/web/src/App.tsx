@@ -302,6 +302,7 @@ export default function App() {
             uiMode={mode}
             approval={chat.approval}
             compactionNotice={chat.compactionNotice}
+            knowledgeNotice={chat.knowledgeNotice}
             activity={chat.activity}
           />
         </div>

@@ -8,7 +8,7 @@
 // On a shared multi-tenant server that would leak one user's provider keys
 // into another user's run.
 
-import { createCascade } from '#cascade-ai';
+import { createCascade, Retriever, chunkText, embedderFromProviders } from '#cascade-ai';
 import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ProviderConfig } from '#cascade-ai';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -311,6 +311,69 @@ export function buildRunPrompt(
   return preamble.length ? `${preamble.join('\n\n')}\n\n---\n\n${userPrompt}` : userPrompt;
 }
 
+/** Below this total document size, inject everything (CAG); above it, retrieve. */
+const DOC_CAG_CHAR_BUDGET = 24_000; // ~6k tokens
+/** Passages to inject when retrieving. */
+const RAG_TOP_K = 8;
+
+/**
+ * Decide how attached documents enter the run. Small total → inject in full
+ * (CAG). Large total → chunk + embed each doc (cached by attachment + embed
+ * model) and inject only the passages most relevant to the prompt (RAG). Falls
+ * back to full injection when there's no embeddings-capable key or retrieval
+ * errors, and emits a `knowledge:retrieved` notice so the client can show what
+ * happened. A fast answer is a single direct call, so docs pass through as-is.
+ */
+async function resolveDocuments(
+  docSources: Array<{ sourceId: string; filename: string; text: string }>,
+  payload: ChatRunPayload,
+  store: CloudStore,
+  userId: string,
+  conversationId: string,
+  socket: Socket,
+): Promise<RunDocument[]> {
+  const full = (): RunDocument[] => docSources.map((d) => ({ filename: d.filename, text: d.text }));
+  if (docSources.length === 0 || payload.fastAnswer) return full();
+
+  const totalChars = docSources.reduce((n, d) => n + d.text.length, 0);
+  if (totalChars <= DOC_CAG_CHAR_BUDGET) return full();
+
+  const embedder = embedderFromProviders(payload.providers as ProviderConfig[]);
+  if (!embedder) {
+    socket.emit('knowledge:retrieved', { conversationId, mode: 'nokey', docCount: docSources.length });
+    return full();
+  }
+  try {
+    const retriever = new Retriever(embedder, store.getVectorStore());
+    for (const d of docSources) {
+      if (!retriever.isIndexed(userId, d.sourceId)) {
+        await retriever.index(userId, d.sourceId, chunkText(d.text));
+      }
+    }
+    const hits = await retriever.search(payload.prompt, {
+      namespace: userId, sourceIds: docSources.map((d) => d.sourceId), k: RAG_TOP_K, candidates: 40,
+    });
+    if (hits.length === 0) return full();
+
+    const nameById = new Map(docSources.map((d) => [d.sourceId, d.filename]));
+    const grouped = new Map<string, string[]>();
+    for (const h of hits) {
+      const arr = grouped.get(h.sourceId) ?? [];
+      arr.push(h.text);
+      grouped.set(h.sourceId, arr);
+    }
+    socket.emit('knowledge:retrieved', {
+      conversationId, mode: 'searched', docCount: docSources.length, passages: hits.length,
+    });
+    return [...grouped.entries()].map(([sid, passages]) => ({
+      filename: nameById.get(sid) ?? 'document',
+      text: passages.join('\n\n[…]\n\n'),
+    }));
+  } catch {
+    return full();
+  }
+}
+
 export interface ChatRunDeps {
   env: CloudEnv;
   store: CloudStore;
@@ -355,7 +418,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // Images ride into the run as multimodal input; documents were parsed to text
   // at upload time and get injected into the prompt below.
   const images: ImageAttachment[] = [];
-  const documents: RunDocument[] = [];
+  const docSources: Array<{ sourceId: string; filename: string; text: string }> = [];
   const loadedAttachments: CloudAttachment[] = [];
   for (const id of payload.attachmentIds ?? []) {
     const att = store.getOwnedAttachment(id, userId);
@@ -371,11 +434,20 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     } else if (att.kind === 'document') {
       const text = store.getOwnedAttachmentText(att.id, userId);
       if (text && text.trim()) {
-        documents.push({ filename: att.filename || 'document', text });
+        docSources.push({ sourceId: att.id, filename: att.filename || 'document', text });
         loadedAttachments.push(att);
       }
     }
   }
+
+  // CAG-or-RAG switch. Small/stable doc context is injected in full (cache-
+  // augmented generation — the model reads everything). When the attached docs
+  // exceed a token budget, switch to retrieval: chunk + embed each doc (cached
+  // by attachment + embed model, so re-runs are free) and inject only the most
+  // relevant passages for this prompt. A fast answer skips docs entirely.
+  const documents: RunDocument[] = await resolveDocuments(
+    docSources, payload, store, userId, conversation.id, socket,
+  );
 
   // Persist the user's ORIGINAL text (not the skill/memory-augmented prompt),
   // then link its attachments so the transcript re-renders them on reload.
