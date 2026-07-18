@@ -225,10 +225,11 @@ export function useChatSession(
         setCompactionNotice(`Folded ${e.foldedTurns ?? 'earlier'} turns into a summary to fit the context window.`);
       }
     };
-    const onKnowledge = (e: { mode?: string; docCount?: number; passages?: number }) => {
+    const onKnowledge = (e: { mode?: string; docCount?: number; passages?: number; reranked?: boolean }) => {
       if (e.mode === 'searched') {
         const docs = e.docCount === 1 ? 'the document' : `${e.docCount} documents`;
-        setKnowledgeNotice(`Searched ${docs} and pulled the ${e.passages ?? 0} most relevant passages.`);
+        const verb = e.reranked ? 'reranked to the' : 'pulled the';
+        setKnowledgeNotice(`Searched ${docs} and ${verb} ${e.passages ?? 0} most relevant passages.`);
       } else if (e.mode === 'nokey') {
         setKnowledgeNotice('Attached documents are large. Add an OpenAI-compatible key to search them; used a truncated view for now.');
       }

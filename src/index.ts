@@ -21,11 +21,13 @@ export { HooksRunner } from './hooks/index.js';
 export { McpClient } from './mcp/client.js';
 export {
   Retriever, reciprocalRankFusion, SqliteVectorStore, OpenAICompatibleEmbedder,
-  embedderFromProviders, chunkText,
+  embedderFromProviders, chunkText, LLMReranker, chatCompleterFromProviders,
+  parseRankOrder, planRetrieval,
 } from './retrieval/index.js';
 export type {
   Chunk, ScoredChunk, Embedder, VectorStore, SearchOptions, ChunkOptions,
-  RetrieverSearchOptions, OpenAIEmbedderOptions,
+  RetrieverSearchOptions, OpenAIEmbedderOptions, Reranker, CompleteFn,
+  RetrievalMode, RetrievalPlan, RetrievalContext,
 } from './retrieval/index.js';
 export { AuditLogger } from './audit/log.js';
 export { Telemetry } from './telemetry/index.js';
