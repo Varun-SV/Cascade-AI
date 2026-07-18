@@ -109,8 +109,11 @@ Token-paste remains the fallback for servers without OAuth.
 ## Phasing
 
 1. **Server** — native-auth endpoints + Bearer support. ✅ implemented
-2. **CLI** — `login` / `logout` / `sessions` (device flow; token in the global
-   credentials store).
+2. **CLI** — `login` / `logout` / `whoami` / `sessions` (+ `sessions show <id>`).
+   Device flow; access + rotating refresh token stored at
+   `~/.cascade-ai/cloud-session.json` (0600). Server URL via `--server` /
+   `CASCADE_CLOUD_URL` (default `app.cascadeai.in`). ✅ implemented.
+   *Follow-up (2b): resume a pulled cloud chat live in the REPL.*
 3. **Desktop** — sign-in (loopback + Electron `safeStorage`) + browse/continue
    cloud sessions.
 4. **Key sync** (E2E blob through the account).

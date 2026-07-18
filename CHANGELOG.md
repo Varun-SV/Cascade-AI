@@ -5,6 +5,23 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.33.0 - 2026-07-18
+
+### Added
+- **Native login — Phase 2 (CLI).** Sign in to Cascade Cloud from the terminal
+  and browse the chats you started on the web:
+  - `cascade login` — device-code flow (prints a short code + `/activate` URL,
+    opens your browser, polls for approval). No OAuth secret; the CLI only ever
+    holds a Cascade token.
+  - `cascade logout` (revokes the refresh token), `cascade whoami`,
+    `cascade sessions` (list) and `cascade sessions show <id>` (print a
+    transcript; accepts an id prefix).
+  - Access + rotating refresh token persist at `~/.cascade-ai/cloud-session.json`
+    (0600); the access token auto-refreshes. Server URL via `--server` or
+    `CASCADE_CLOUD_URL` (default `app.cascadeai.in`).
+  - New SDK-internal `CloudClient` + cloud session store, covered by unit tests
+    (device flow, refresh rotation, list/read, logout) against a stub server.
+
 ## 0.32.0 - 2026-07-18
 
 ### Added
