@@ -11,6 +11,9 @@ export const SESSION_COOKIE_NAME = 'cascade_cloud_session';
 // not be able to downgrade the verification algorithm.
 const JWT_ALGORITHM = 'HS256' as const;
 const SESSION_TTL = '30d';
+/** Native (desktop/CLI) access tokens are short-lived; a refresh token renews
+ *  them. Kept brief so revoking a device takes effect within the hour. */
+const NATIVE_ACCESS_TTL = '1h';
 
 export interface CloudSession {
   userId: string;
@@ -18,6 +21,13 @@ export interface CloudSession {
 
 export function createSessionToken(session: CloudSession, secret: string): string {
   return jwt.sign(session, secret, { expiresIn: SESSION_TTL, algorithm: JWT_ALGORITHM });
+}
+
+/** Short-lived access token for a native client, carried as a Bearer header.
+ *  `aud: 'native'` marks its origin; it verifies through the same path as a
+ *  web session (same signer + claims), so every authed route accepts it. */
+export function createNativeAccessToken(userId: string, secret: string): string {
+  return jwt.sign({ userId, aud: 'native' }, secret, { expiresIn: NATIVE_ACCESS_TTL, algorithm: JWT_ALGORITHM });
 }
 
 export function verifySessionToken(token: string, secret: string): CloudSession | null {
@@ -67,10 +77,20 @@ export interface AuthedRequest extends Request {
   session?: CloudSession;
 }
 
+/** Extract a Bearer token from an Authorization header, if present. */
+export function bearerToken(header: string | undefined): string | null {
+  if (!header) return null;
+  const m = /^Bearer\s+(.+)$/i.exec(header.trim());
+  return m ? m[1]!.trim() : null;
+}
+
 export function sessionMiddleware(secret: string, required = true) {
   return (req: AuthedRequest, res: Response, next: NextFunction): void => {
+    // Web clients present the session cookie; native (desktop/CLI) clients
+    // present the same-shaped JWT as `Authorization: Bearer`. Either verifies
+    // through one path, so every authed route serves both without changes.
     const cookies = parseCookies(req.headers.cookie);
-    const token = cookies[SESSION_COOKIE_NAME];
+    const token = cookies[SESSION_COOKIE_NAME] ?? bearerToken(req.headers.authorization) ?? undefined;
 
     const session = token ? verifySessionToken(token, secret) : null;
     if (!session) {

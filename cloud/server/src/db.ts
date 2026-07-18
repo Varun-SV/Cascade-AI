@@ -304,6 +304,19 @@ export class CloudStore {
       );
 
       CREATE INDEX IF NOT EXISTS idx_mcp_servers_user ON mcp_servers(user_id);
+
+      -- Native (desktop/CLI) refresh tokens. Only the hash is stored; tokens
+      -- rotate on use (single-use) and are revoked on logout.
+      CREATE TABLE IF NOT EXISTS native_refresh_tokens (
+        token_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        revoked INTEGER NOT NULL DEFAULT 0,
+        last_used_at INTEGER
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_refresh_user ON native_refresh_tokens(user_id);
     `);
 
     // Additive columns — ALTER ... ADD COLUMN throws if the column already
@@ -682,6 +695,36 @@ export class CloudStore {
   deleteMcpServer(id: string, userId: string): boolean {
     const info = this.db.prepare('DELETE FROM mcp_servers WHERE id = ? AND user_id = ?').run(id, userId);
     return info.changes > 0;
+  }
+
+  // ── Native refresh tokens (desktop/CLI) ──
+
+  addRefreshToken(input: { userId: string; tokenHash: string; expiresAt: number }): void {
+    this.db
+      .prepare('INSERT INTO native_refresh_tokens (token_hash, user_id, created_at, expires_at, revoked, last_used_at) VALUES (?, ?, ?, ?, 0, NULL)')
+      .run(input.tokenHash, input.userId, Date.now(), input.expiresAt);
+  }
+
+  /** Redeem a refresh token: returns its user and revokes it (single-use), so
+   *  the caller must issue a fresh one (rotation). Null when unknown, revoked,
+   *  or expired. */
+  consumeRefreshToken(tokenHash: string): { userId: string } | null {
+    const row = this.db
+      .prepare('SELECT user_id, expires_at, revoked FROM native_refresh_tokens WHERE token_hash = ?')
+      .get(tokenHash) as { user_id: string; expires_at: number; revoked: number } | undefined;
+    if (!row || row.revoked || row.expires_at <= Date.now()) return null;
+    this.db.prepare('UPDATE native_refresh_tokens SET revoked = 1, last_used_at = ? WHERE token_hash = ?').run(Date.now(), tokenHash);
+    return { userId: row.user_id };
+  }
+
+  revokeRefreshToken(tokenHash: string): boolean {
+    const info = this.db.prepare('UPDATE native_refresh_tokens SET revoked = 1 WHERE token_hash = ?').run(tokenHash);
+    return info.changes > 0;
+  }
+
+  /** Sign a user out of all native devices (e.g. account switch elsewhere). */
+  revokeAllRefreshTokens(userId: string): number {
+    return this.db.prepare('UPDATE native_refresh_tokens SET revoked = 1 WHERE user_id = ? AND revoked = 0').run(userId).changes;
   }
 
   // ── Deserializers ─────────────────────────────

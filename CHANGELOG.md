@@ -5,7 +5,22 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.31.0 - 2026-07-18
+## 0.32.0 - 2026-07-18
+
+### Added
+- **Native login — Phase 1 (server).** The cloud server can now sign in the
+  desktop app and CLI without any OAuth secret shipping in a native app: they
+  authenticate against the server (which brokers the existing Google/GitHub
+  flow), using **PKCE** instead of a client secret. Two flows — a **loopback**
+  redirect for the desktop and a **device code** (`/activate`) for the CLI —
+  both mint a short-lived access token plus a rotating, single-use, 60-day
+  refresh token (hashed at rest). `sessionMiddleware` now also accepts
+  `Authorization: Bearer`, so every existing route serves native clients
+  unchanged. New: `/auth/native/:provider`, `/api/native/token`,
+  `/api/native/device[/token|/approve]`, `/activate`, `/api/native/refresh`,
+  `/api/native/logout`. Design + security are documented in
+  [`docs/native-auth.md`](docs/native-auth.md).
+
 
 ### Added
 - **Knowledge retrieval — Phase 4 (graph search over world-state).** A new SDK
