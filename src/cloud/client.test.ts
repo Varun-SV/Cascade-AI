@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,6 +13,8 @@ import { loadCloudSession } from './session-store.js';
 function startStubServer() {
   let pollCount = 0;
   let refreshCount = 0;
+  let loopCount = 0;
+  const challenges = new Map<string, string>(); // one-time code → PKCE challenge
   const readBody = (req: http.IncomingMessage) =>
     new Promise<any>((resolve) => {
       let data = '';
@@ -24,6 +27,32 @@ function startStubServer() {
     const auth = req.headers['authorization'];
     const url = req.url ?? '';
 
+    // Loopback flow — begin: mint a one-time code bound to the PKCE challenge,
+    // then 302 back to the app's loopback listener (standing in for the browser
+    // OAuth leg the real server runs).
+    if (req.method === 'GET' && url.startsWith('/auth/native/')) {
+      const u = new URL(url, 'http://stub');
+      const redirect = u.searchParams.get('redirect_uri') ?? '';
+      const challenge = u.searchParams.get('code_challenge') ?? '';
+      const state = u.searchParams.get('state') ?? '';
+      const code = `loop-${++loopCount}`;
+      challenges.set(code, challenge);
+      const loc = `${redirect}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`;
+      res.writeHead(302, { Location: loc });
+      return res.end();
+    }
+    // Loopback flow — redeem: verify the PKCE verifier hashes to the stored
+    // challenge before issuing tokens.
+    if (req.method === 'POST' && url === '/api/native/token') {
+      const body = await readBody(req);
+      const code = String(body.code ?? '');
+      const verifier = String(body.code_verifier ?? '');
+      const expected = challenges.get(code);
+      const got = createHash('sha256').update(verifier).digest('base64url');
+      if (!expected || expected !== got) return send(400, { error: 'invalid_grant' });
+      challenges.delete(code);
+      return send(200, { access_token: 'access-1', refresh_token: 'refresh-1', token_type: 'Bearer', expires_in: 3600 });
+    }
     if (req.method === 'POST' && url === '/api/native/device') {
       return send(200, { device_code: 'dev-code', user_code: 'WXYZ-1234', verification_uri: 'https://example.test/activate', expires_in: 300, interval: 0 });
     }
@@ -77,6 +106,24 @@ describe('CloudClient', () => {
     expect(stub.polls()).toBeGreaterThanOrEqual(2); // pending, then approved
     // Persisted for later commands.
     expect(loadCloudSession(dir)?.refreshToken).toBe('refresh-1');
+  });
+
+  it('runs the loopback flow: PKCE round-trips and the session persists', async () => {
+    const client = new CloudClient(stub.url, dir);
+    // `openUrl` stands in for the system browser: following the authorize URL
+    // 302s to our loopback listener with the one-time code.
+    const session = await client.runLoopbackLogin((u) => { void fetch(u); }, { provider: 'google' });
+    expect(session.user.name).toBe('Alice');
+    expect(loadCloudSession(dir)?.refreshToken).toBe('refresh-1');
+  });
+
+  it('rejects a loopback code whose state does not match', async () => {
+    const client = new CloudClient(stub.url, dir);
+    // Tamper with the echoed state so the listener sees a mismatch.
+    await expect(
+      client.runLoopbackLogin((u) => { void fetch(u.replace(/state=[^&]*/, 'state=tampered')); }, { provider: 'google', timeoutMs: 3000 }),
+    ).rejects.toThrow();
+    expect(loadCloudSession(dir)).toBeNull();
   });
 
   it('lists conversations and pulls a transcript with the stored token', async () => {
