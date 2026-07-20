@@ -75,9 +75,19 @@ declare global {
         delete(path: string): Promise<{ ok: boolean }>;
         search(root: string, query: string): Promise<Array<{ file: string; line: number; text: string }>>;
       };
+      cloud?: {
+        status(): Promise<{ signedIn: boolean; user: CloudUser | null; serverUrl: string; storage: 'keychain' | 'encrypted-file' }>;
+        login(provider: 'google' | 'github'): Promise<{ ok: boolean; error?: string; signedIn?: boolean; user?: CloudUser | null; storage?: 'keychain' | 'encrypted-file' }>;
+        cancelLogin(): Promise<{ ok: boolean }>;
+        logout(): Promise<{ ok: boolean; signedIn?: boolean }>;
+        sessions(): Promise<{ ok: boolean; error?: string; conversations: Array<{ id: string; title: string; updatedAt?: number }> }>;
+        messages(id: string): Promise<{ ok: boolean; error?: string; messages: Array<{ role: string; content: string }> }>;
+      };
     };
   }
 }
+
+export interface CloudUser { id: string; email: string | null; name: string | null; plan?: string }
 
 export function App() {
   const dispatch = useAppDispatch();

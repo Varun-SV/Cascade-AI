@@ -5,6 +5,32 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.34.0 - 2026-07-20
+
+### Added
+- **Native login — Phase 3 (desktop).** Optional sign-in to Cascade Cloud from
+  the desktop app, so you can browse and continue the chats you started on the
+  web — folded into the existing **Continue elsewhere** modal:
+  - **Loopback OAuth** (RFC 8252) driven from the Electron **main process**: the
+    system browser handles the Google/GitHub login, a one-time code lands on a
+    one-shot `127.0.0.1` listener, and **PKCE** (not a secret) proves the
+    client. No OAuth secret or provider token ever touches the desktop.
+  - **Tokens encrypted at rest** with Electron `safeStorage` (OS keychain /
+    DPAPI), falling back to a local AES-256-GCM key file (`0600`) on machines
+    without a keyring. The renderer never sees a token — it talks to a narrow
+    `cloud:*` IPC surface (`status` / `login` / `logout` / `sessions` /
+    `messages`).
+  - **Your cloud chats** tab lists your web conversations; "continue here"
+    imports the transcript as a new local session via the backend's
+    `/api/import`, mirroring the code-based handoff.
+  - The account header shows who's signed in and how the session is protected,
+    with a one-click sign-out (revokes the refresh token).
+  - New shared SDK `CloudClient.runLoopbackLogin` (PKCE S256 + loopback listener
+    + token exchange), reused by CLI and desktop; the session store is now
+    pluggable so the desktop can inject its encrypted store. Covered by unit
+    tests (loopback PKCE round-trip + state-tamper rejection) against a stub
+    server.
+
 ## 0.33.0 - 2026-07-18
 
 ### Added

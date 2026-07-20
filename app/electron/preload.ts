@@ -116,6 +116,36 @@ contextBridge.exposeInMainWorld('cascade', {
     },
   },
 
+  // Cascade Cloud account: optional sign-in (loopback OAuth, tokens encrypted at
+  // rest in the main process) + browsing the chats you started on the web.
+  cloud: {
+    status: () => ipcRenderer.invoke('cloud:status') as Promise<{
+      signedIn: boolean;
+      user: { id: string; email: string | null; name: string | null; plan?: string } | null;
+      serverUrl: string;
+      storage: 'keychain' | 'encrypted-file';
+    }>,
+    login: (provider: 'google' | 'github') => ipcRenderer.invoke('cloud:login', provider) as Promise<{
+      ok: boolean;
+      error?: string;
+      signedIn?: boolean;
+      user?: { id: string; email: string | null; name: string | null; plan?: string } | null;
+      storage?: 'keychain' | 'encrypted-file';
+    }>,
+    cancelLogin: () => ipcRenderer.invoke('cloud:cancelLogin') as Promise<{ ok: boolean }>,
+    logout: () => ipcRenderer.invoke('cloud:logout') as Promise<{ ok: boolean; signedIn?: boolean }>,
+    sessions: () => ipcRenderer.invoke('cloud:sessions') as Promise<{
+      ok: boolean;
+      error?: string;
+      conversations: Array<{ id: string; title: string; updatedAt?: number }>;
+    }>,
+    messages: (id: string) => ipcRenderer.invoke('cloud:messages', id) as Promise<{
+      ok: boolean;
+      error?: string;
+      messages: Array<{ role: string; content: string }>;
+    }>,
+  },
+
   // File system (safe subset)
   fs: {
     readDir: (dirPath: string) => ipcRenderer.invoke('fs:readDir', dirPath) as Promise<

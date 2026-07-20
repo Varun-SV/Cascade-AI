@@ -13,6 +13,7 @@ import {
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
+import { registerCloudAuthIpc } from './cloudAuth';
 
 const isDev = process.env.ELECTRON_DEV === '1';
 
@@ -700,6 +701,10 @@ function registerIPC(): void {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
   });
+
+  // Optional Cascade Cloud sign-in (loopback OAuth + encrypted token storage) so
+  // the user can browse/continue their web chats. Reuses the same core loader.
+  registerCloudAuthIpc(loadCore);
 }
 
 // ─── Desktop meta store (persistent JSON in userData) ─────────────────────────

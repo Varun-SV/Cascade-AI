@@ -41,3 +41,10 @@ export * from './types.js';
 export * from './constants.js';
 export { CascadeCancelledError, CascadeToolError } from './utils/retry.js';
 export { nodeHttpFetch, preferIpv4Host } from './utils/net.js';
+
+// Native cloud login (CLI + desktop reuse the same client).
+export { CloudClient, DEFAULT_CLOUD_URL } from './cloud/client.js';
+export type {
+  CloudConversation, CloudMessage, DeviceStart, NativeProvider, CloudSessionStore,
+} from './cloud/client.js';
+export type { CloudSession, CloudUser } from './cloud/session-store.js';

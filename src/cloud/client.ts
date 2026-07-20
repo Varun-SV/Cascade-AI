@@ -8,11 +8,16 @@
 // user's cloud chats. Only talks to the Cascade server — never to an OAuth
 // provider directly.
 
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   type CloudSession, type CloudUser, loadCloudSession, saveCloudSession, clearCloudSession,
 } from './session-store.js';
 
 export const DEFAULT_CLOUD_URL = 'https://app.cascadeai.in';
+/** Providers the loopback flow can start (must match the server's `/auth/native/:provider`). */
+export type NativeProvider = 'google' | 'github';
 /** Refresh the access token when it's within this window of expiring. */
 const REFRESH_MARGIN_MS = 60_000;
 
@@ -44,16 +49,41 @@ interface TokenResponse {
 
 export type DevicePollResult = 'pending' | 'slow_down' | 'expired' | { session: CloudSession };
 
+/**
+ * Where the signed-in session persists. The CLI uses the default file store
+ * (`~/.cascade-ai/cloud-session.json`, 0600); the desktop injects a
+ * `safeStorage`-backed one. Kept tiny so any host can implement it.
+ */
+export interface CloudSessionStore {
+  load(): CloudSession | null;
+  save(session: CloudSession): void;
+  clear(): void;
+}
+
+/** Default store: the 0600 JSON file next to the global provider credentials. */
+class FileCloudSessionStore implements CloudSessionStore {
+  constructor(private readonly dir?: string) {}
+  load(): CloudSession | null { return loadCloudSession(this.dir); }
+  save(session: CloudSession): void { saveCloudSession(session, this.dir); }
+  clear(): void { clearCloudSession(this.dir); }
+}
+
 export class CloudClient {
+  private readonly store: CloudSessionStore;
+
   constructor(
     private readonly serverUrl: string,
-    private readonly dir?: string,
-  ) {}
+    dir?: string,
+    store?: CloudSessionStore,
+  ) {
+    this.store = store ?? new FileCloudSessionStore(dir);
+  }
 
   /** Build a client from a stored session, or null if not signed in. */
-  static fromSession(dir?: string): CloudClient | null {
-    const s = loadCloudSession(dir);
-    return s ? new CloudClient(s.serverUrl, dir) : null;
+  static fromSession(dir?: string, store?: CloudSessionStore): CloudClient | null {
+    const src = store ?? new FileCloudSessionStore(dir);
+    const s = src.load();
+    return s ? new CloudClient(s.serverUrl, dir, src) : null;
   }
 
   private url(p: string): string {
@@ -105,6 +135,48 @@ export class CloudClient {
     throw new Error('The sign-in code expired. Run `cascade login` again.');
   }
 
+  // ── Loopback login (desktop) — RFC 8252 ───────
+
+  /**
+   * Run the loopback flow for a rich native client (the desktop). Opens a
+   * one-shot listener on `http://127.0.0.1:<random>`, sends the user to the
+   * provider in the system browser via `openUrl`, catches the one-time code on
+   * the loopback redirect, and exchanges it (+ the PKCE verifier) for tokens.
+   *
+   * No secret is involved: PKCE S256 proves the client that started the flow is
+   * the one redeeming the code. Storage-agnostic — persists through the same
+   * session store as the device flow, so callers get a ready `CloudSession`.
+   */
+  async runLoopbackLogin(
+    openUrl: (url: string) => void | Promise<void>,
+    opts: { provider?: NativeProvider; signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<CloudSession> {
+    const provider = opts.provider ?? 'google';
+    const { verifier, challenge } = makePkce();
+    const appState = base64url(randomBytes(16));
+    const listener = await startLoopbackListener(appState, opts);
+    try {
+      const authorizeUrl = this.url(
+        `/auth/native/${encodeURIComponent(provider)}`
+        + `?redirect_uri=${encodeURIComponent(listener.redirectUri)}`
+        + `&code_challenge=${encodeURIComponent(challenge)}`
+        + `&state=${encodeURIComponent(appState)}`,
+      );
+      await openUrl(authorizeUrl);
+      const code = await listener.waitForCode;
+      const res = await fetch(this.url('/api/native/token'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, code_verifier: verifier }),
+      });
+      if (!res.ok) throw new Error('Sign-in could not be completed. Please try again.');
+      const tokens = (await res.json()) as TokenResponse;
+      return await this.finishLogin(tokens);
+    } finally {
+      listener.close();
+    }
+  }
+
   /** Exchange a fresh token response for a stored session (fetches the user). */
   private async finishLogin(tokens: TokenResponse): Promise<CloudSession> {
     const partial: CloudSession = {
@@ -116,14 +188,14 @@ export class CloudClient {
     };
     const user = await this.fetchMe(partial.accessToken);
     const session = { ...partial, user };
-    saveCloudSession(session, this.dir);
+    this.store.save(session);
     return session;
   }
 
   // ── Token lifecycle ───────────────────────────
 
   private session(): CloudSession {
-    const s = loadCloudSession(this.dir);
+    const s = this.store.load();
     if (!s) throw new Error('Not signed in. Run `cascade login`.');
     return s;
   }
@@ -136,7 +208,7 @@ export class CloudClient {
       body: JSON.stringify({ refresh_token: s.refreshToken }),
     });
     if (!res.ok) {
-      clearCloudSession(this.dir); // refresh rejected → sign-in is dead
+      this.store.clear(); // refresh rejected → sign-in is dead
       throw new Error('Your session expired. Run `cascade login` again.');
     }
     const tokens = (await res.json()) as TokenResponse;
@@ -146,7 +218,7 @@ export class CloudClient {
       accessExpiresAt: Date.now() + tokens.expires_in * 1000,
       refreshToken: tokens.refresh_token, // rotated
     };
-    saveCloudSession(next, this.dir);
+    this.store.save(next);
     return next;
   }
 
@@ -193,7 +265,7 @@ export class CloudClient {
   }
 
   async logout(): Promise<void> {
-    const s = loadCloudSession(this.dir);
+    const s = this.store.load();
     if (s) {
       try {
         await fetch(this.url('/api/native/logout'), {
@@ -203,7 +275,7 @@ export class CloudClient {
         });
       } catch { /* revoke is best-effort; we still clear locally */ }
     }
-    clearCloudSession(this.dir);
+    this.store.clear();
   }
 }
 
@@ -212,4 +284,88 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     const t = setTimeout(resolve, ms);
     signal?.addEventListener('abort', () => { clearTimeout(t); reject(new Error('aborted')); }, { once: true });
   });
+}
+
+// ── PKCE (RFC 7636, S256) ───────────────────────
+
+function base64url(buf: Buffer): string {
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/** A fresh PKCE verifier + its S256 challenge (the shape the server verifies). */
+function makePkce(): { verifier: string; challenge: string } {
+  const verifier = base64url(randomBytes(32));
+  const challenge = base64url(createHash('sha256').update(verifier).digest());
+  return { verifier, challenge };
+}
+
+// ── Loopback listener (RFC 8252) ────────────────
+
+interface LoopbackListener {
+  /** The `http://127.0.0.1:<port>/cb` the browser is 302'd back to. */
+  redirectUri: string;
+  /** Resolves with the one-time code once the browser hits `/cb`. */
+  waitForCode: Promise<string>;
+  /** Idempotently stop the listener. */
+  close: () => void;
+}
+
+/**
+ * Bind a single-use HTTP listener on a random loopback port. It answers only
+ * `/cb`, validating the echoed `state` before resolving the one-time code, and
+ * shows the user a small "you can close this tab" page either way.
+ */
+function startLoopbackListener(
+  expectedState: string,
+  opts: { signal?: AbortSignal; timeoutMs?: number },
+): Promise<LoopbackListener> {
+  return new Promise((resolveListener, rejectListener) => {
+    let resolveCode!: (code: string) => void;
+    let rejectCode!: (err: Error) => void;
+    const waitForCode = new Promise<string>((res, rej) => { resolveCode = res; rejectCode = rej; });
+
+    let server: http.Server;
+    const close = () => { try { server?.close(); } catch { /* already closed */ } };
+
+    const timeoutMs = opts.timeoutMs ?? 5 * 60_000;
+    const timer = setTimeout(() => { rejectCode(new Error('Sign-in timed out. Please try again.')); close(); }, timeoutMs);
+    timer.unref?.();
+    const settleCode = (code: string) => { clearTimeout(timer); resolveCode(code); };
+    const failCode = (err: Error) => { clearTimeout(timer); rejectCode(err); };
+
+    server = http.createServer((req, res) => {
+      const reqUrl = new URL(req.url ?? '/', 'http://127.0.0.1');
+      if (reqUrl.pathname !== '/cb') { res.writeHead(404).end(); return; }
+      const code = reqUrl.searchParams.get('code');
+      const state = reqUrl.searchParams.get('state');
+      const err = reqUrl.searchParams.get('error');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      if (err || !code || state !== expectedState) {
+        res.end(resultPage('Sign-in failed', 'Something went wrong. Return to Cascade and try again.'));
+        failCode(new Error(err ? `Sign-in failed: ${err}` : 'The sign-in response was invalid.'));
+        return;
+      }
+      res.end(resultPage('Signed in to Cascade', 'You can close this tab and return to the app.'));
+      settleCode(code);
+    });
+
+    opts.signal?.addEventListener('abort', () => { failCode(new Error('Sign-in cancelled.')); close(); }, { once: true });
+    server.on('error', (e) => { clearTimeout(timer); rejectListener(e); });
+    server.listen(0, '127.0.0.1', () => {
+      const port = (server.address() as AddressInfo).port;
+      resolveListener({ redirectUri: `http://127.0.0.1:${port}/cb`, waitForCode, close });
+    });
+  });
+}
+
+/** Minimal self-contained page shown in the browser after the redirect. */
+function resultPage(title: string, body: string): string {
+  return '<!doctype html><meta charset="utf-8">'
+    + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    + `<title>${title} · Cascade</title>`
+    + '<body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;'
+    + 'font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0b0d12;color:#e6e8ee">'
+    + '<div style="text-align:center;padding:40px">'
+    + `<div style="font-size:15px;font-weight:600;margin-bottom:8px">${title}</div>`
+    + `<div style="font-size:13px;color:#9aa3b2">${body}</div></div></body>`;
 }

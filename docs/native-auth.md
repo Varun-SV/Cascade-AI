@@ -53,7 +53,7 @@ see the loopback redirect**, so there are **no provider-console changes**.
 | Token | Form | TTL | Sent as | Stored |
 | --- | --- | --- | --- | --- |
 | Access | JWT (`aud: "native"`, same signer as the web session) | ~1 hour | `Authorization: Bearer` | memory / short-lived |
-| Refresh | Opaque random, **hashed at rest**, **single-use (rotates)** | ~60 days | `POST /api/native/refresh` | OS keychain (desktop) · `~/.cascade-ai/credentials.json` `0600` (CLI) |
+| Refresh | Opaque random, **hashed at rest**, **single-use (rotates)** | ~60 days | `POST /api/native/refresh` | Encrypted via Electron `safeStorage` — OS keychain / DPAPI, or an AES-256-GCM key file `0600` where no keyring exists (desktop) · `~/.cascade-ai/cloud-session.json` `0600` (CLI) |
 
 `sessionMiddleware` accepts `Authorization: Bearer` in addition to the web
 cookie, so every existing authed route serves native clients unchanged.
@@ -114,8 +114,17 @@ Token-paste remains the fallback for servers without OAuth.
    `~/.cascade-ai/cloud-session.json` (0600). Server URL via `--server` /
    `CASCADE_CLOUD_URL` (default `app.cascadeai.in`). ✅ implemented.
    *Follow-up (2b): resume a pulled cloud chat live in the REPL.*
-3. **Desktop** — sign-in (loopback + Electron `safeStorage`) + browse/continue
-   cloud sessions.
+3. **Desktop** — sign-in (loopback flow) + browse/continue cloud chats. ✅
+   implemented. The Electron **main process** runs the loopback dance via the
+   shared `CloudClient.runLoopbackLogin` (system browser + a one-shot
+   `127.0.0.1` listener + PKCE), opening the provider with `shell.openExternal`.
+   Tokens are encrypted at rest with `safeStorage` (AES-256-GCM key-file
+   fallback where no keyring exists) and exposed to the renderer over a narrow
+   `cloud:*` IPC surface (`status` / `login` / `logout` / `sessions` /
+   `messages`) — the renderer never touches a token. Sign-in and a **Your cloud
+   chats** browser are folded into the existing *Continue elsewhere* modal;
+   "continue here" imports a cloud transcript as a new local session via the
+   backend's `/api/import`, mirroring the code-based handoff.
 4. **Key sync** (E2E blob through the account).
 5. **OAuth-MCP connectors**.
 
