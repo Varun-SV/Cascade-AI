@@ -18,6 +18,7 @@ import { initCommand } from './commands/init.js';
 import { doctorCommand } from './commands/doctor.js';
 import { indexCommand } from './commands/index-cmd.js';
 import { loginCommand, logoutCommand, whoamiCommand, sessionsCommand, sessionShowCommand, syncPushCommand, syncPullCommand } from './commands/cloud.js';
+import { mcpConnectCommand, mcpListCommand, mcpRemoveCommand } from './commands/mcp.js';
 import { updateCommand } from './commands/update.js';
 import { dashboardCommand } from './commands/dashboard.js';
 import { makeIdentityCommand } from './commands/identity.js';
@@ -187,6 +188,23 @@ sync
   .command('pull')
   .description('Download & apply your synced settings on this device')
   .action(async () => { await syncPullCommand(); });
+
+const mcp = program
+  .command('mcp')
+  .description('Connect and manage remote MCP servers');
+mcp
+  .command('connect <url>')
+  .description('Connect a remote MCP server via OAuth (opens your browser)')
+  .option('--name <name>', 'A name for this server (defaults to its hostname)')
+  .action(async (url: string, opts: { name?: string }) => { await mcpConnectCommand(url, opts); });
+mcp
+  .command('list')
+  .description('List configured MCP servers')
+  .action(async () => { await mcpListCommand(); });
+mcp
+  .command('remove <name>')
+  .description('Remove an MCP server (and its stored OAuth tokens)')
+  .action(async (name: string) => { await mcpRemoveCommand(name); });
 
 program
   .command('link [provider]')

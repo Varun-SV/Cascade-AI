@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Plug, Trash2, Plus, Github, Slack, Globe, ShieldCheck, Loader2, ExternalLink } from 'lucide-react';
+import { Plug, Trash2, Plus, Github, Slack, Globe, ShieldCheck, Loader2, ExternalLink, LogIn } from 'lucide-react';
 import Modal from './Modal.js';
 import {
-  fetchConnectors, fetchMcpServers, addMcpServer, setMcpServerEnabled, deleteMcpServer,
+  fetchConnectors, fetchMcpServers, addMcpServer, setMcpServerEnabled, deleteMcpServer, startMcpOAuth,
   type ConnectorEntry, type McpServer,
 } from '../lib/api.js';
 
@@ -36,6 +36,8 @@ export default function ConnectorsModal({ onClose }: { onClose: () => void }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [oauthBusy, setOauthBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   // The connector being configured (token/url form), or 'custom', or null.
   const [adding, setAdding] = useState<ConnectorEntry | 'custom' | null>(null);
   const [form, setForm] = useState({ name: '', url: '', token: '' });
@@ -47,7 +49,34 @@ export default function ConnectorsModal({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     Promise.all([fetchConnectors().then((r) => setConnectors(r.connectors)).catch(() => {}), refresh()])
       .finally(() => setLoading(false));
+    // Returning from an OAuth connect (top-level redirect back to the app).
+    const params = new URLSearchParams(window.location.search);
+    const mcp = params.get('mcp');
+    if (mcp === 'connected') setNotice('Connected — the server is ready to use.');
+    else if (mcp === 'error') setNotice('That connection could not be completed. Please try again.');
+    if (mcp) {
+      params.delete('mcp');
+      window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}`);
+    }
   }, []);
+
+  async function connectOAuth() {
+    if (oauthBusy || !adding) return;
+    setOauthBusy(true);
+    setError(null);
+    try {
+      const payload = adding === 'custom'
+        ? { name: form.name.trim(), url: form.url.trim() }
+        : { connectorId: adding.id, url: form.url.trim() || undefined };
+      const r = await startMcpOAuth(payload);
+      if (r.oauth && r.authorizeUrl) { window.location.href = r.authorizeUrl; return; }
+      setError('This server doesn’t offer OAuth sign-in — paste a token below instead.');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not start sign-in.');
+    } finally {
+      setOauthBusy(false);
+    }
+  }
 
   function startAdd(target: ConnectorEntry | 'custom') {
     setError(null);
@@ -104,8 +133,12 @@ export default function ConnectorsModal({ onClose }: { onClose: () => void }) {
         <p className="text-xs leading-relaxed text-ink-400">
           Give Cascade tools from other apps by connecting a remote{' '}
           <span className="text-ink-200">MCP server</span>. Enabled connections are available to every
-          orchestrated run. Tokens are stored on the server and never shown again.
+          orchestrated run. Sign in with OAuth where supported, or paste a token — either way it's stored on the server and never shown again.
         </p>
+
+        {notice && (
+          <div className="rounded-lg border border-accent-500/20 bg-accent-500/[0.06] px-3 py-2 text-xs text-ink-200">{notice}</div>
+        )}
 
         {loading ? (
           <div className="flex items-center gap-2 text-sm text-ink-400"><Loader2 size={14} className="animate-spin" /> Loading…</div>
@@ -176,6 +209,17 @@ export default function ConnectorsModal({ onClose }: { onClose: () => void }) {
                     className="rounded-lg border border-elev/10 bg-elev/[0.06] px-3 py-2 text-sm text-ink-100 outline-none placeholder:text-ink-500"
                   />
                 )}
+                <button
+                  type="button"
+                  onClick={connectOAuth}
+                  disabled={oauthBusy || busy}
+                  className="accent-grad flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+                >
+                  {oauthBusy ? <Loader2 size={14} className="animate-spin" /> : <LogIn size={14} />} Sign in with OAuth
+                </button>
+                <div className="flex items-center gap-2 text-[10px] uppercase tracking-wide text-ink-500">
+                  <span className="h-px flex-1 bg-elev/10" /> or paste a token <span className="h-px flex-1 bg-elev/10" />
+                </div>
                 <input
                   type="password"
                   value={form.token}

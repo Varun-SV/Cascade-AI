@@ -56,6 +56,7 @@ type CloudClientCtor = new (serverUrl: string, dir?: string, store?: SessionStor
 // The subset of the Cascade core bundle this module uses.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Cfg = any;
+interface McpFileStore { clear(): void }
 interface CoreExports {
   CloudClient: CloudClientCtor;
   DEFAULT_CLOUD_URL: string;
@@ -63,6 +64,8 @@ interface CoreExports {
   applySyncBundle: (bundle: unknown, config: Cfg) => Cfg;
   encryptSyncBlob: (data: unknown, passphrase: string) => Promise<EncBlob>;
   decryptSyncBlob: (blob: EncBlob, passphrase: string) => Promise<unknown>;
+  connectMcpWithLoopbackOAuth: (opts: { serverUrl: string; store: McpFileStore; openUrl: (u: string) => void; clientName?: string }) => Promise<unknown>;
+  FileMcpOAuthStore: new (path: string) => McpFileStore;
 }
 
 /** Live config access, so a pulled bundle takes effect without a backend restart. */
@@ -251,5 +254,65 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
       // AES-GCM's auth-tag check is what fails on a wrong passphrase.
       return { ok: false, error: 'Could not decrypt — check your passphrase.' };
     }
+  });
+
+  // ── MCP servers (OAuth connect) ──
+
+  const safeName = (name: string) => name.replace(/[^a-z0-9._-]/gi, '_').slice(0, 64) || 'server';
+  const hostnameOf = (url: string) => { try { return new URL(url).hostname; } catch { return 'mcp-server'; } };
+
+  ipcMain.handle('mcp:list', () => {
+    const cfg = hooks.getConfig();
+    const servers = (cfg?.tools?.mcpServers ?? []) as Array<{ name: string; url?: string; command?: string; headers?: unknown; oauthStore?: string }>;
+    return {
+      servers: servers.map((s) => ({
+        name: s.name,
+        target: s.url ?? s.command ?? '',
+        kind: s.oauthStore ? 'oauth' : s.headers ? 'token' : s.command ? 'local' : 'open',
+      })),
+    };
+  });
+
+  ipcMain.handle('mcp:connectOAuth', async (_e, arg: unknown) => {
+    const a = (arg ?? {}) as { url?: string; name?: string };
+    const url = String(a.url ?? '').trim();
+    const name = String(a.name ?? '').trim() || hostnameOf(url);
+    if (!/^https:\/\//i.test(url)) return { ok: false, error: 'Enter an https MCP server URL.' };
+    const cfg = hooks.getConfig();
+    if (!cfg) return { ok: false, error: 'Your settings are not ready yet.' };
+    const { connectMcpWithLoopbackOAuth, FileMcpOAuthStore } = core();
+    const storePath = join(app.getPath('userData'), 'mcp-oauth', `${safeName(name)}.json`);
+    try {
+      await connectMcpWithLoopbackOAuth({
+        serverUrl: url,
+        store: new FileMcpOAuthStore(storePath),
+        clientName: 'Cascade AI',
+        openUrl: (u) => { void shell.openExternal(u); },
+      });
+      cfg.tools = cfg.tools ?? {};
+      const servers = (cfg.tools.mcpServers ?? []) as Array<{ name: string }>;
+      const entry = { name, url, oauthStore: storePath };
+      const idx = servers.findIndex((s) => s.name === name);
+      if (idx >= 0) servers[idx] = entry; else servers.push(entry);
+      cfg.tools.mcpServers = servers;
+      cfg.tools.mcpTrusted = Array.from(new Set([...(cfg.tools.mcpTrusted ?? []), name]));
+      await hooks.persistConfig();
+      return { ok: true, name };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : 'Could not connect.' };
+    }
+  });
+
+  ipcMain.handle('mcp:remove', async (_e, name: unknown) => {
+    const cfg = hooks.getConfig();
+    const n = String(name ?? '');
+    if (cfg?.tools?.mcpServers) {
+      const match = (cfg.tools.mcpServers as Array<{ name: string; oauthStore?: string }>).find((s) => s.name === n);
+      cfg.tools.mcpServers = (cfg.tools.mcpServers as Array<{ name: string }>).filter((s) => s.name !== n);
+      cfg.tools.mcpTrusted = (cfg.tools.mcpTrusted ?? []).filter((x: string) => x !== n);
+      if (match?.oauthStore) { try { new (core().FileMcpOAuthStore)(match.oauthStore).clear(); } catch { /* gone */ } }
+      await hooks.persistConfig();
+    }
+    return { ok: true };
   });
 }

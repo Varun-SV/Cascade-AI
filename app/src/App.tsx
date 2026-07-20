@@ -85,6 +85,11 @@ declare global {
         syncPush(passphrase: string): Promise<{ ok: boolean; error?: string; version?: number }>;
         syncPull(passphrase: string): Promise<{ ok: boolean; error?: string; empty?: boolean; applied?: boolean }>;
       };
+      mcp?: {
+        list(): Promise<{ servers: Array<{ name: string; target: string; kind: 'oauth' | 'token' | 'local' | 'open' }> }>;
+        connectOAuth(url: string, name?: string): Promise<{ ok: boolean; error?: string; name?: string }>;
+        remove(name: string): Promise<{ ok: boolean }>;
+      };
     };
   }
 }

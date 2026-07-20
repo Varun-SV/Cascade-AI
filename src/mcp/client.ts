@@ -7,6 +7,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
 import type { ToolDefinition } from '../types.js';
 
 export interface McpServerConfig {
@@ -85,7 +86,7 @@ export class McpClient {
     this.onWarn = options.onWarn ?? ((message) => console.warn(message));
   }
 
-  async connect(server: McpServerConfig): Promise<void> {
+  async connect(server: McpServerConfig, opts: { authProvider?: OAuthClientProvider } = {}): Promise<void> {
     const remote = isRemoteMcpServer(server);
 
     // Connecting to an MCP server is the riskiest operation in the tool system:
@@ -111,7 +112,7 @@ export class McpClient {
 
     let transport: Transport;
     if (remote) {
-      transport = await this.connectRemote(server, client);
+      transport = await this.connectRemote(server, client, opts.authProvider);
     } else {
       if (!server.command) {
         throw new Error(`MCP server "${server.name}" has neither a url nor a command.`);
@@ -162,16 +163,23 @@ export class McpClient {
    * once over SSE. Auth headers ride on every request. Returns the live
    * transport so the caller can register it.
    */
-  private async connectRemote(server: McpServerConfig, client: Client): Promise<Transport> {
+  private async connectRemote(server: McpServerConfig, client: Client, authProvider?: OAuthClientProvider): Promise<Transport> {
     const url = new URL(server.url!);
     const headers = server.headers && Object.keys(server.headers).length ? server.headers : undefined;
+    // An OAuth `authProvider` attaches (and auto-refreshes) the bearer token; a
+    // static `headers` map is the token-paste path. They're mutually exclusive
+    // in practice, but both may be passed to the transport harmlessly.
+    const opts = {
+      ...(authProvider ? { authProvider } : {}),
+      ...(headers ? { requestInit: { headers } } : {}),
+    };
     try {
-      const http = new StreamableHTTPClientTransport(url, headers ? { requestInit: { headers } } : {});
+      const http = new StreamableHTTPClientTransport(url, opts);
       await client.connect(http);
       return http;
     } catch (httpErr) {
       this.onWarn(`[mcp] Streamable HTTP failed for "${server.name}", falling back to SSE: ${String(httpErr)}`);
-      const sse = new SSEClientTransport(url, headers ? { requestInit: { headers } } : {});
+      const sse = new SSEClientTransport(url, opts);
       await client.connect(sse);
       return sse;
     }

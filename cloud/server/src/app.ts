@@ -31,6 +31,7 @@ import {
 import { HandoffStore, parseHandoffBody } from './handoff.js';
 import { MAX_DOCUMENT_BYTES, parseDocument, resolveDocumentMime } from './documents.js';
 import { connectorCatalog, getConnector, validateRemoteMcpUrl } from './mcp.js';
+import { McpOAuthFlows, encodeOAuthBlob } from './mcp-oauth.js';
 
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
@@ -624,6 +625,53 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     const id = req.params['id'];
     if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid server id' }); return; }
     res.json({ ok: store.deleteMcpServer(id, req.session!.userId) });
+  });
+
+  // ── MCP OAuth connect ──
+  // "Connect" runs an OAuth flow (login + authorize) instead of pasting a token.
+  // The MCP SDK drives discovery/DCR/PKCE/refresh; tokens are stored encrypted.
+  const mcpOAuthFlows = new McpOAuthFlows();
+  const mcpCallbackUrl = `${env.OAUTH_REDIRECT_BASE_URL.replace(/\/$/, '')}/api/mcp/oauth/callback`;
+
+  app.post('/api/mcp/oauth/start', sessionMiddleware(env.SESSION_SECRET), async (req: AuthedRequest, res) => {
+    const userId = req.session!.userId;
+    const body = req.body ?? {};
+    const connectorId = typeof body.connectorId === 'string' ? body.connectorId : null;
+    const connector = connectorId ? getConnector(connectorId) : undefined;
+    if (connectorId && !connector) { res.status(400).json({ error: 'Unknown connector' }); return; }
+    const name = (typeof body.name === 'string' && body.name.trim() ? body.name.trim() : connector?.name || '').slice(0, 80);
+    const rawUrl = typeof body.url === 'string' && body.url.trim() ? body.url.trim() : connector?.url ?? '';
+    if (!name) { res.status(400).json({ error: 'A name is required.' }); return; }
+    const valid = validateRemoteMcpUrl(rawUrl);
+    if (!valid.ok) { res.status(400).json({ error: valid.reason }); return; }
+    try {
+      const started = await mcpOAuthFlows.start({ serverUrl: valid.url, name, connectorId, userId, redirectUrl: mcpCallbackUrl });
+      // null → the server doesn't advertise OAuth; the client falls back to a pasted token.
+      if (!started) { res.json({ oauth: false }); return; }
+      res.json({ oauth: true, authorizeUrl: started.authorizeUrl });
+    } catch (err) {
+      res.status(502).json({ error: err instanceof Error ? err.message : 'Could not start authorization.' });
+    }
+  });
+
+  // Top-level browser redirect back from the authorization server. Bound to the
+  // user via the pending flow (captured under the session at /start); `state` is
+  // the CSRF + lookup key. No session cookie is required here.
+  app.get('/api/mcp/oauth/callback', async (req, res) => {
+    const code = typeof req.query['code'] === 'string' ? req.query['code'] : '';
+    const state = typeof req.query['state'] === 'string' ? req.query['state'] : '';
+    const backTo = `${env.WEB_ORIGIN.replace(/\/$/, '')}/`;
+    if (!code || !state) { res.redirect(`${backTo}?mcp=error`); return; }
+    try {
+      const done = await mcpOAuthFlows.finish({ state, code });
+      store.addMcpServer({
+        userId: done.userId, name: done.name, url: done.serverUrl,
+        connectorId: done.connectorId, oauthJson: encodeOAuthBlob(done.stored, env.SESSION_SECRET),
+      });
+      res.redirect(`${backTo}?mcp=connected`);
+    } catch {
+      res.redirect(`${backTo}?mcp=error`);
+    }
   });
 
   // ── Uploads (multimodal images + documents) ──
