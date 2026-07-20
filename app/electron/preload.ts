@@ -144,6 +144,10 @@ contextBridge.exposeInMainWorld('cascade', {
       error?: string;
       messages: Array<{ role: string; content: string }>;
     }>,
+    // Key sync (E2E-encrypted): passphrase stays in the main process; only
+    // ciphertext leaves the machine.
+    syncPush: (passphrase: string) => ipcRenderer.invoke('cloud:syncPush', passphrase) as Promise<{ ok: boolean; error?: string; version?: number }>,
+    syncPull: (passphrase: string) => ipcRenderer.invoke('cloud:syncPull', passphrase) as Promise<{ ok: boolean; error?: string; empty?: boolean; applied?: boolean }>,
   },
 
   // File system (safe subset)

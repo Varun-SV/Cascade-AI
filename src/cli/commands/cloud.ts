@@ -7,8 +7,12 @@
 // web. No OAuth secret is involved; the CLI only ever holds a Cascade token.
 
 import chalk from 'chalk';
+import readline from 'node:readline';
 import { spawn } from 'node:child_process';
 import { CloudClient, DEFAULT_CLOUD_URL } from '../../cloud/client.js';
+import { encryptJSON, decryptJSON } from '../../cloud/keysync-crypto.js';
+import { gatherSyncBundle, applySyncBundle, type SyncBundle } from '../../cloud/keysync.js';
+import { ConfigManager } from '../../config/index.js';
 
 function resolveServerUrl(flagServer?: string): string {
   return (flagServer || process.env['CASCADE_CLOUD_URL'] || DEFAULT_CLOUD_URL).replace(/\/$/, '');
@@ -28,6 +32,20 @@ function openBrowser(url: string): void {
 function notSignedIn(): void {
   console.log(chalk.dim('\n  Not signed in. Run `cascade login` first.\n'));
   process.exitCode = 1;
+}
+
+/** Prompt for a passphrase without echoing it. Falls back to a plain read on non-TTY. */
+function promptHidden(question: string): Promise<string> {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    // Emit the question once, then mask everything the user types.
+    let masked = false;
+    (rl as unknown as { _writeToOutput: (s: string) => void })._writeToOutput = (s: string) => {
+      if (!masked || !process.stdin.isTTY) process.stdout.write(s);
+    };
+    rl.question(question, (answer) => { rl.close(); process.stdout.write('\n'); resolve(answer.trim()); });
+    masked = true;
+  });
 }
 
 export async function loginCommand(opts: { server?: string } = {}): Promise<void> {
@@ -102,6 +120,62 @@ export async function sessionShowCommand(idOrPrefix: string): Promise<void> {
     }
   } catch (err) {
     console.log(chalk.red(`\n  ${err instanceof Error ? err.message : String(err)}\n`));
+    process.exitCode = 1;
+  }
+}
+
+// ─────────────────────────────────────────────
+//  Key sync — settings that follow your account
+// ─────────────────────────────────────────────
+//
+// Encrypt this device's settings (LLM keys, web-search keys, MCP tokens, prefs)
+// with a passphrase and relay them through your Cascade account. The server
+// only ever sees ciphertext it can't read. See docs/key-sync.md.
+
+export async function syncPushCommand(): Promise<void> {
+  const client = CloudClient.fromSession();
+  if (!client) return notSignedIn();
+  const cm = new ConfigManager(process.cwd());
+  await cm.load();
+  const bundle = gatherSyncBundle(cm.getConfig());
+  console.log(chalk.magenta('\n  ◈ Sync your settings to your account'));
+  console.log(chalk.dim('  Encrypted on this device with a passphrase we never see.\n'));
+  const pass = await promptHidden('  Passphrase: ');
+  if (!pass) { console.log(chalk.dim('\n  Cancelled.\n')); return; }
+  try {
+    const blob = await encryptJSON(bundle, pass);
+    const r = await client.pushSecrets(blob);
+    console.log(chalk.green(`\n  ✓ Synced (v${r.version}). Run \`cascade sync pull\` on another device.\n`));
+  } catch (err) {
+    console.log(chalk.red(`\n  ${err instanceof Error ? err.message : String(err)}\n`));
+    process.exitCode = 1;
+  }
+}
+
+export async function syncPullCommand(): Promise<void> {
+  const client = CloudClient.fromSession();
+  if (!client) return notSignedIn();
+  let blob;
+  try {
+    ({ blob } = await client.pullSecrets());
+  } catch (err) {
+    console.log(chalk.red(`\n  ${err instanceof Error ? err.message : String(err)}\n`));
+    process.exitCode = 1;
+    return;
+  }
+  if (!blob) { console.log(chalk.dim('\n  Nothing synced to your account yet. Run `cascade sync push` first.\n')); return; }
+  console.log(chalk.magenta('\n  ◈ Apply your synced settings to this device\n'));
+  const pass = await promptHidden('  Passphrase: ');
+  if (!pass) { console.log(chalk.dim('\n  Cancelled.\n')); return; }
+  try {
+    const bundle = await decryptJSON<SyncBundle>(blob, pass);
+    const cm = new ConfigManager(process.cwd());
+    await cm.load();
+    await cm.updateConfig(applySyncBundle(bundle, cm.getConfig()));
+    console.log(chalk.green('\n  ✓ Applied your synced settings. Your keys are ready here.\n'));
+  } catch {
+    // AES-GCM's auth-tag check is what fails on a wrong passphrase.
+    console.log(chalk.red('\n  Could not decrypt — check your passphrase and try again.\n'));
     process.exitCode = 1;
   }
 }

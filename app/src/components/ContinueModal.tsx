@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Copy, Check, ArrowRight, Loader2, RefreshCw, Send, Download, Globe, X,
   Cloud, LogOut, Github, MessageSquare, ShieldCheck, ChevronRight,
+  UploadCloud, DownloadCloud, KeyRound,
 } from 'lucide-react';
 import { useAppDispatch, useAppSelector, setShowContinue } from '../store/index.js';
 import type { CloudUser } from '../App.js';
@@ -185,17 +186,20 @@ function AccountHeader({ account, onChange, onSignedIn }: {
     const label = u?.name || u?.email || 'Signed in';
     const initial = (u?.name || u?.email || '?').trim().charAt(0).toUpperCase();
     return (
-      <div style={{ ...wrap, display: 'flex', alignItems: 'center', gap: 10 }}>
-        <div style={{ width: 30, height: 30, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, fontWeight: 700, color: '#fff', background: 'linear-gradient(135deg, var(--accent), var(--accent-2))' }}>{initial}</div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}{u?.plan ? <span style={{ color: 'var(--text-dim)', fontWeight: 500 }}> · {u.plan}</span> : null}</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, color: 'var(--text-dim)' }}>
-            <ShieldCheck size={10} /> {account.storage === 'keychain' ? 'Secured by your OS keychain' : 'Encrypted on this device'}
+      <div style={{ ...wrap, display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ width: 30, height: 30, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, fontWeight: 700, color: '#fff', background: 'linear-gradient(135deg, var(--accent), var(--accent-2))' }}>{initial}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}{u?.plan ? <span style={{ color: 'var(--text-dim)', fontWeight: 500 }}> · {u.plan}</span> : null}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, color: 'var(--text-dim)' }}>
+              <ShieldCheck size={10} /> {account.storage === 'keychain' ? 'Secured by your OS keychain' : 'Encrypted on this device'}
+            </div>
           </div>
+          <button onClick={signOut} title="Sign out" style={{ display: 'flex', alignItems: 'center', gap: 5, background: 'none', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-muted)', fontSize: 11, fontWeight: 500, padding: '5px 8px', cursor: 'pointer' }}>
+            <LogOut size={12} /> Sign out
+          </button>
         </div>
-        <button onClick={signOut} title="Sign out" style={{ display: 'flex', alignItems: 'center', gap: 5, background: 'none', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-muted)', fontSize: 11, fontWeight: 500, padding: '5px 8px', cursor: 'pointer' }}>
-          <LogOut size={12} /> Sign out
-        </button>
+        <SyncBlock />
       </div>
     );
   }
@@ -221,6 +225,67 @@ function AccountHeader({ account, onChange, onSignedIn }: {
         </button>
       </div>
       {busy && <p style={{ margin: '8px 0 0', fontSize: 10.5, color: 'var(--text-dim)' }}>Finish signing in in the browser tab that just opened…</p>}
+    </div>
+  );
+}
+
+// ── Key sync (signed-in) — push/pull encrypted settings ──
+
+function SyncBlock() {
+  const [open, setOpen] = useState(false);
+  const [pass, setPass] = useState('');
+  const [busy, setBusy] = useState<null | 'push' | 'pull'>(null);
+  const [status, setStatus] = useState<string | null>(null);
+
+  if (!window.cascade?.cloud?.syncPush) return null; // older preload — feature absent
+
+  async function run(kind: 'push' | 'pull') {
+    const api = window.cascade?.cloud;
+    if (!api?.syncPush || !api.syncPull) return;
+    if (!pass) { setStatus('Enter a passphrase first.'); return; }
+    setBusy(kind);
+    setStatus(null);
+    try {
+      const r = kind === 'push' ? await api.syncPush(pass) : await api.syncPull(pass);
+      if (!r.ok) { setStatus(r.error || 'Sync failed.'); return; }
+      if (kind === 'push') setStatus(`Synced to your account${'version' in r && r.version ? ` (v${r.version})` : ''}.`);
+      else setStatus('empty' in r && r.empty ? 'Nothing synced to your account yet.' : 'Applied your synced settings here.');
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : 'Sync failed.');
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button onClick={() => setOpen(true)} style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 11, fontWeight: 600, padding: 0 }}>
+        <RefreshCw size={12} /> Sync your keys &amp; settings across devices
+      </button>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10.5, color: 'var(--text-dim)' }}>
+        <KeyRound size={11} /> Encrypted with a passphrase only you know — we store only ciphertext.
+      </div>
+      <input
+        type="password"
+        value={pass}
+        onChange={(e) => setPass(e.target.value)}
+        placeholder="Passphrase"
+        style={{ width: '100%', boxSizing: 'border-box', background: 'var(--bg-base)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 9px', fontSize: 12, outline: 'none' }}
+      />
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={() => run('push')} disabled={!!busy} style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '7px 10px', fontSize: 11.5, fontWeight: 600, borderRadius: 7, cursor: 'pointer', background: 'linear-gradient(135deg, var(--accent), var(--accent-2))', color: '#fff', border: 'none', opacity: busy ? 0.6 : 1 }}>
+          {busy === 'push' ? <Loader2 size={13} className="spin" /> : <UploadCloud size={13} />} Push
+        </button>
+        <button onClick={() => run('pull')} disabled={!!busy} style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '7px 10px', fontSize: 11.5, fontWeight: 500, borderRadius: 7, cursor: 'pointer', background: 'var(--bg-raised)', color: 'var(--text)', border: '1px solid var(--border)', opacity: busy ? 0.6 : 1 }}>
+          {busy === 'pull' ? <Loader2 size={13} className="spin" /> : <DownloadCloud size={13} />} Pull
+        </button>
+      </div>
+      {status && <p style={{ margin: 0, fontSize: 11, color: 'var(--text-dim)' }}>{status}</p>}
     </div>
   );
 }

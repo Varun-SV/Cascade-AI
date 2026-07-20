@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { KeyRound, Plus, Trash2, ShieldCheck, Globe } from 'lucide-react';
 import type { ProviderConfig, ProviderType, WebSearchSettings } from '../lib/types.js';
-import DriveSyncPanel from './DriveSyncPanel.js';
+import AccountSyncPanel from './AccountSyncPanel.js';
 
 // Local LLMs (Ollama) are out of v1 scope — a hosted page cannot reach a
 // user's local network. Only cloud providers are offered here.
@@ -125,12 +125,11 @@ interface Props {
   onChange: (keys: ProviderConfig[]) => void;
   webSearch: WebSearchSettings | null;
   onWebSearchChange: (s: WebSearchSettings | null) => void;
-  /** Only offered for Google-authenticated users with a Google OAuth client configured server-side. */
-  driveSyncEnabled?: boolean;
-  googleClientId?: string | null;
+  /** Offered to any signed-in user: sync settings E2E-encrypted through the account. */
+  syncEnabled?: boolean;
 }
 
-export default function KeyVault({ keys, onChange, webSearch, onWebSearchChange, driveSyncEnabled, googleClientId }: Props) {
+export default function KeyVault({ keys, onChange, webSearch, onWebSearchChange, syncEnabled }: Props) {
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState<ProviderConfig>({ type: 'anthropic' });
 
@@ -335,8 +334,8 @@ export default function KeyVault({ keys, onChange, webSearch, onWebSearchChange,
 
       <WebSearchSection settings={webSearch} onChange={onWebSearchChange} />
 
-      {driveSyncEnabled && googleClientId && (
-        <DriveSyncPanel googleClientId={googleClientId} keys={keys} onRestore={onChange} />
+      {syncEnabled && (
+        <AccountSyncPanel keys={keys} webSearch={webSearch} onRestoreKeys={onChange} onRestoreWebSearch={onWebSearchChange} />
       )}
     </div>
   );

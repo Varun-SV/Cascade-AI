@@ -14,6 +14,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import {
   type CloudSession, type CloudUser, loadCloudSession, saveCloudSession, clearCloudSession,
 } from './session-store.js';
+import type { EncryptedBlob } from './keysync-crypto.js';
 
 export const DEFAULT_CLOUD_URL = 'https://app.cascadeai.in';
 /** Providers the loopback flow can start (must match the server's `/auth/native/:provider`). */
@@ -228,16 +229,19 @@ export class CloudClient {
     return (await this.refresh()).accessToken;
   }
 
-  /** Authenticated GET that refreshes once on a 401 (e.g. server-side revoke). */
-  private async authedGet<T>(path: string): Promise<T> {
-    let token = await this.accessToken();
-    let res = await fetch(this.url(path), { headers: { Authorization: `Bearer ${token}` } });
-    if (res.status === 401) {
-      token = (await this.refresh()).accessToken;
-      res = await fetch(this.url(path), { headers: { Authorization: `Bearer ${token}` } });
-    }
+  /** Authenticated request that refreshes once on a 401 (e.g. server-side revoke). */
+  private async authed<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const call = (token: string) =>
+      fetch(this.url(path), { ...init, headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token}` } });
+    let res = await call(await this.accessToken());
+    if (res.status === 401) res = await call((await this.refresh()).accessToken);
     if (!res.ok) throw new Error(`Request failed (${res.status}).`);
-    return (await res.json()) as T;
+    const text = await res.text();
+    return (text ? JSON.parse(text) : {}) as T;
+  }
+
+  private authedGet<T>(path: string): Promise<T> {
+    return this.authed<T>(path);
   }
 
   private async fetchMe(token: string): Promise<CloudUser> {
@@ -262,6 +266,27 @@ export class CloudClient {
   async getMessages(conversationId: string): Promise<CloudMessage[]> {
     const b = await this.authedGet<{ messages: CloudMessage[] }>(`/api/conversations/${encodeURIComponent(conversationId)}/messages`);
     return b.messages ?? [];
+  }
+
+  // ── Key sync (E2E-encrypted settings relay) ───
+
+  /** Fetch the stored encrypted settings envelope (ciphertext only), or null. */
+  async pullSecrets(): Promise<{ blob: EncryptedBlob | null; version?: number; updatedAt?: number }> {
+    return this.authed<{ blob: EncryptedBlob | null; version?: number; updatedAt?: number }>('/api/keysync');
+  }
+
+  /** Store/replace the encrypted settings envelope. The server never decrypts it. */
+  async pushSecrets(blob: EncryptedBlob): Promise<{ version: number; updatedAt: number }> {
+    return this.authed<{ version: number; updatedAt: number }>('/api/keysync', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ blob }),
+    });
+  }
+
+  /** Forget the stored envelope on the server. */
+  async deleteSecrets(): Promise<void> {
+    await this.authed('/api/keysync', { method: 'DELETE' });
   }
 
   async logout(): Promise<void> {

@@ -52,16 +52,13 @@ describe('KeyVault', () => {
     expect(onChange).toHaveBeenCalledWith([]);
   });
 
-  it('hides Drive sync by default (non-Google users, or no client id configured)', () => {
+  it('hides account sync when signed out (no sync enabled)', () => {
     render(<KeyVault keys={[]} onChange={vi.fn()} webSearch={null} onWebSearchChange={vi.fn()} />);
-    expect(screen.queryByText(/sync your keys across devices/i)).not.toBeInTheDocument();
-
-    render(<KeyVault keys={[]} onChange={vi.fn()} webSearch={null} onWebSearchChange={vi.fn()} driveSyncEnabled={true} googleClientId={null} />);
-    expect(screen.queryByText(/sync your keys across devices/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/sync your keys across/i)).not.toBeInTheDocument();
   });
 
-  it('shows Drive sync only when enabled AND a Google client id is configured', () => {
-    render(<KeyVault keys={[]} onChange={vi.fn()} webSearch={null} onWebSearchChange={vi.fn()} driveSyncEnabled={true} googleClientId="test-client-id" />);
-    expect(screen.getByText(/sync your keys across devices/i)).toBeInTheDocument();
+  it('shows account sync for a signed-in user', () => {
+    render(<KeyVault keys={[]} onChange={vi.fn()} webSearch={null} onWebSearchChange={vi.fn()} syncEnabled={true} />);
+    expect(screen.getByText(/sync your keys across/i)).toBeInTheDocument();
   });
 });

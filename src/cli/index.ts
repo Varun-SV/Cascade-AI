@@ -17,7 +17,7 @@ import { Cascade } from '../core/cascade.js';
 import { initCommand } from './commands/init.js';
 import { doctorCommand } from './commands/doctor.js';
 import { indexCommand } from './commands/index-cmd.js';
-import { loginCommand, logoutCommand, whoamiCommand, sessionsCommand, sessionShowCommand } from './commands/cloud.js';
+import { loginCommand, logoutCommand, whoamiCommand, sessionsCommand, sessionShowCommand, syncPushCommand, syncPullCommand } from './commands/cloud.js';
 import { updateCommand } from './commands/update.js';
 import { dashboardCommand } from './commands/dashboard.js';
 import { makeIdentityCommand } from './commands/identity.js';
@@ -175,6 +175,18 @@ sessions
   .action(async (id: string) => {
     await sessionShowCommand(id);
   });
+
+const sync = program
+  .command('sync')
+  .description('Sync your settings (keys, prefs) through your Cascade account');
+sync
+  .command('push')
+  .description('Encrypt & upload this device\'s settings')
+  .action(async () => { await syncPushCommand(); });
+sync
+  .command('pull')
+  .description('Download & apply your synced settings on this device')
+  .action(async () => { await syncPullCommand(); });
 
 program
   .command('link [provider]')

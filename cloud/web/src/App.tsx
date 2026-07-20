@@ -339,8 +339,7 @@ export default function App() {
               onChange={updateProviders}
               webSearch={webSearch}
               onWebSearchChange={updateWebSearch}
-              driveSyncEnabled={user.provider === 'google'}
-              googleClientId={config.googleClientId}
+              syncEnabled={!!user}
             />
           </Modal>
         )}
