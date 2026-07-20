@@ -33,6 +33,8 @@ export const McpServerConfigSchema = z
     // Remote (hosted-safe) transport.
     url: z.string().url().optional(),
     headers: z.record(z.string()).optional(),
+    // Path to this server's OAuth token store (set by `cascade mcp connect`).
+    oauthStore: z.string().optional(),
   })
   .refine((s) => !!s.command || !!s.url, {
     message: 'MCP server needs either a command (local) or a url (remote).',

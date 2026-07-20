@@ -5,6 +5,32 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.36.0 - 2026-07-20
+
+### Added
+- **OAuth-based MCP connectors.** Connecting an MCP server can now run an
+  **OAuth flow** (log in + authorize) instead of pasting a token — across
+  **cloud web, desktop, and CLI**. Token-paste remains the fallback for servers
+  without OAuth.
+  - **Spec-complete, via the MCP SDK.** We drive the `@modelcontextprotocol/sdk`
+    OAuth client (RFC 9728 resource discovery, RFC 8414 AS metadata, RFC 7591
+    **Dynamic Client Registration**, PKCE, refresh) through a shared
+    `McpOAuthProvider` — no client secret ships anywhere; PKCE proves the client.
+  - **Cloud**: "Connect" in *Connectors* runs the flow (browser leg on our
+    callback); tokens are **encrypted at rest** with a server key and
+    auto-refreshed just-in-time before each run.
+  - **Desktop / CLI**: loopback (RFC 8252) connect — `cascade mcp connect <url>`
+    and a new *Connectors* tab in desktop Settings. Tokens are stored locally
+    (`~/.cascade-ai/mcp-oauth/…`, `0600`) and **auto-refreshed at run time** via
+    the provider (silent refresh; a dead refresh token surfaces as "reconnect").
+  - New SDK exports: `McpOAuthProvider`, `connectMcpWithLoopbackOAuth`,
+    `FileMcpOAuthStore`, and thin `beginMcpOAuth` / `completeMcpOAuth` /
+    `discoverMcpAuthServer` / `refreshMcpToken` orchestration wrappers, plus an
+    `oauthStore` field on MCP server config. Server: a `user_secrets`-style
+    encrypted `oauth_json` column, a short-TTL pending-flow store, and
+    `POST /api/mcp/oauth/start` + `GET /api/mcp/oauth/callback`.
+  - Design + security documented in [`docs/mcp-oauth.md`](docs/mcp-oauth.md).
+
 ## 0.35.0 - 2026-07-20
 
 ### Added

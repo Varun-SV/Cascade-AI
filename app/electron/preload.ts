@@ -150,6 +150,14 @@ contextBridge.exposeInMainWorld('cascade', {
     syncPull: (passphrase: string) => ipcRenderer.invoke('cloud:syncPull', passphrase) as Promise<{ ok: boolean; error?: string; empty?: boolean; applied?: boolean }>,
   },
 
+  // MCP servers — connect a remote server via OAuth (loopback in the main
+  // process), list, and remove. Tokens are stored locally and auto-refreshed.
+  mcp: {
+    list: () => ipcRenderer.invoke('mcp:list') as Promise<{ servers: Array<{ name: string; target: string; kind: 'oauth' | 'token' | 'local' | 'open' }> }>,
+    connectOAuth: (url: string, name?: string) => ipcRenderer.invoke('mcp:connectOAuth', { url, name }) as Promise<{ ok: boolean; error?: string; name?: string }>,
+    remove: (name: string) => ipcRenderer.invoke('mcp:remove', name) as Promise<{ ok: boolean }>,
+  },
+
   // File system (safe subset)
   fs: {
     readDir: (dirPath: string) => ipcRenderer.invoke('fs:readDir', dirPath) as Promise<

@@ -18,6 +18,7 @@ import path from 'node:path';
 import type { Socket } from 'socket.io';
 import { z } from 'zod';
 import type { CloudEnv } from './env.js';
+import { resolveRunMcpServers } from './mcp-oauth.js';
 import type { CloudAttachment, CloudStore } from './db.js';
 import { beginRun, checkDailyLimit, todayKey } from './entitlements.js';
 import { getSkill } from './skills.js';
@@ -495,7 +496,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // Attach the user's enabled remote MCP servers (with their stored auth) as
   // tool sources for this run. A fast answer is a single direct model call with
   // no orchestration/tools, so skip MCP there.
-  const mcpServers = payload.fastAnswer ? [] : store.listEnabledMcpServersWithAuth(userId);
+  const mcpServers = payload.fastAnswer ? [] : await resolveRunMcpServers(store, userId, env.SESSION_SECRET);
 
   const config = buildCloudConfig(payload.providers as ProviderConfig[], env.MAX_COST_PER_RUN_USD, {
     routingMode: payload.routingMode,

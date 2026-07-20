@@ -171,6 +171,7 @@ interface DbMcpServerRow {
   connector_id: string | null;
   enabled: number;
   created_at: number;
+  oauth_json?: string | null;
 }
 
 interface DbMessageRow {
@@ -349,6 +350,8 @@ export class CloudStore {
     if (!hasCol('users', 'subscription_id')) this.db.exec('ALTER TABLE users ADD COLUMN subscription_id TEXT');
     if (!hasCol('users', 'subscription_status')) this.db.exec('ALTER TABLE users ADD COLUMN subscription_status TEXT');
     if (!hasCol('users', 'subscription_current_end')) this.db.exec('ALTER TABLE users ADD COLUMN subscription_current_end INTEGER');
+    // MCP OAuth: the server's encrypted OAuth state (tokens + client reg + AS url).
+    if (!hasCol('mcp_servers', 'oauth_json')) this.db.exec('ALTER TABLE mcp_servers ADD COLUMN oauth_json TEXT');
   }
 
   // ── Users ─────────────────────────────────────
@@ -664,21 +667,28 @@ export class CloudStore {
   }
 
   /** Enabled servers with their raw auth headers — for run wiring only, never
-   *  exposed over the API. */
+   *  exposed over the API. (Token-paste servers only; OAuth ones go through
+   *  listEnabledMcpServerRows so their tokens can be refreshed first.) */
   listEnabledMcpServersWithAuth(userId: string): Array<{ name: string; url: string; headers?: Record<string, string> }> {
-    const rows = this.db
-      .prepare('SELECT * FROM mcp_servers WHERE user_id = ? AND enabled = 1 ORDER BY created_at ASC, rowid ASC')
-      .all(userId) as DbMcpServerRow[];
-    return rows.map((r) => ({
+    return this.listEnabledMcpServerRows(userId).map((r) => ({
       name: r.name,
       url: r.url,
       ...(r.headers_json ? { headers: JSON.parse(r.headers_json) as Record<string, string> } : {}),
     }));
   }
 
+  /** Raw enabled rows (id + headers_json + oauth_json) for run wiring, so OAuth
+   *  tokens can be decrypted/refreshed and their fresh header injected. */
+  listEnabledMcpServerRows(userId: string): Array<{ id: string; name: string; url: string; headers_json: string | null; oauth_json: string | null }> {
+    const rows = this.db
+      .prepare('SELECT * FROM mcp_servers WHERE user_id = ? AND enabled = 1 ORDER BY created_at ASC, rowid ASC')
+      .all(userId) as DbMcpServerRow[];
+    return rows.map((r) => ({ id: r.id, name: r.name, url: r.url, headers_json: r.headers_json ?? null, oauth_json: r.oauth_json ?? null }));
+  }
+
   addMcpServer(input: {
     userId: string; name: string; url: string;
-    headers?: Record<string, string> | null; connectorId?: string | null;
+    headers?: Record<string, string> | null; connectorId?: string | null; oauthJson?: string | null;
   }): CloudMcpServer {
     const row: DbMcpServerRow = {
       id: randomUUID(),
@@ -689,11 +699,17 @@ export class CloudStore {
       connector_id: input.connectorId ?? null,
       enabled: 1,
       created_at: Date.now(),
+      oauth_json: input.oauthJson ?? null,
     };
     this.db
-      .prepare('INSERT INTO mcp_servers (id, user_id, name, url, headers_json, connector_id, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(row.id, row.user_id, row.name, row.url, row.headers_json, row.connector_id, row.enabled, row.created_at);
+      .prepare('INSERT INTO mcp_servers (id, user_id, name, url, headers_json, connector_id, enabled, created_at, oauth_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(row.id, row.user_id, row.name, row.url, row.headers_json, row.connector_id, row.enabled, row.created_at, row.oauth_json);
     return this.deserializeMcpServer(row);
+  }
+
+  /** Persist refreshed OAuth state for a server (encrypted blob, opaque here). */
+  updateMcpServerOAuth(id: string, userId: string, oauthJson: string): boolean {
+    return this.db.prepare('UPDATE mcp_servers SET oauth_json = ? WHERE id = ? AND user_id = ?').run(oauthJson, id, userId).changes > 0;
   }
 
   setMcpServerEnabled(id: string, userId: string, enabled: boolean): boolean {
@@ -772,7 +788,7 @@ export class CloudStore {
       userId: row.user_id,
       name: row.name,
       url: row.url,
-      hasAuth: !!row.headers_json,
+      hasAuth: !!row.headers_json || !!row.oauth_json,
       connectorId: row.connector_id ?? null,
       enabled: !!row.enabled,
       createdAt: row.created_at,

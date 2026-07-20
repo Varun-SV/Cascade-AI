@@ -47,6 +47,16 @@ export function pushKeySync(blob: KeySyncBlob): Promise<{ ok: boolean; version: 
   }));
 }
 
+/** Begin an OAuth "Connect" for an MCP server. `oauth:false` → no OAuth; paste a token. */
+export function startMcpOAuth(payload: { connectorId?: string; name?: string; url?: string }): Promise<{ oauth: boolean; authorizeUrl?: string }> {
+  return json(fetch('/api/mcp/oauth/start', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }));
+}
+
 export function devLogin(name: string): Promise<{ user: CloudUser }> {
   return json(
     fetch('/auth/dev-login', {

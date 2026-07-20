@@ -6,7 +6,7 @@ import { setShowSettings } from '../store/index.js';
 import { setThemePreference } from '../theme/useTheme.js';
 import { UpdatesPanel } from './UpdatesPanel.js';
 
-type Tab = 'keys' | 'models' | 'budget' | 'advanced' | 'data' | 'appearance' | 'updates';
+type Tab = 'keys' | 'models' | 'budget' | 'connectors' | 'advanced' | 'data' | 'appearance' | 'updates';
 type Bias = 'balanced' | 'quality' | 'cost';
 
 /** Advanced config knobs surfaced 1:1 from the core schema. */
@@ -342,7 +342,7 @@ export function SettingsView({ socket }: Props) {
 
         {/* Tabs */}
         <div style={{ display: 'flex', flexWrap: 'wrap', borderBottom: '1px solid var(--border)', padding: '0 18px', flexShrink: 0 }}>
-          {(['keys', 'models', 'budget', 'advanced', 'data', 'appearance', 'updates'] as Tab[]).map((t) => (
+          {(['keys', 'models', 'budget', 'connectors', 'advanced', 'data', 'appearance', 'updates'] as Tab[]).map((t) => (
             <button key={t} onClick={() => setTab(t)} style={{
               background: 'none', border: 'none', cursor: 'pointer', padding: '10px 10px',
               fontSize: 12, fontWeight: tab === t ? 600 : 400,
@@ -350,7 +350,7 @@ export function SettingsView({ socket }: Props) {
               borderBottom: tab === t ? '2px solid var(--accent)' : '2px solid transparent',
               marginBottom: -1, transition: 'color 0.12s', whiteSpace: 'nowrap',
             }}>
-              {t === 'keys' ? 'Providers' : t === 'models' ? 'Models' : t === 'budget' ? 'Budget' : t === 'advanced' ? 'Advanced' : t === 'data' ? 'Data' : t === 'appearance' ? 'Appearance' : 'Updates'}
+              {t === 'keys' ? 'Providers' : t === 'models' ? 'Models' : t === 'budget' ? 'Budget' : t === 'connectors' ? 'Connectors' : t === 'advanced' ? 'Advanced' : t === 'data' ? 'Data' : t === 'appearance' ? 'Appearance' : 'Updates'}
             </button>
           ))}
         </div>
@@ -542,6 +542,8 @@ export function SettingsView({ socket }: Props) {
               })}
             </>
           )}
+
+          {tab === 'connectors' && <McpConnectorsPanel />}
 
           {tab === 'updates' && <UpdatesPanel />}
 
@@ -775,5 +777,95 @@ function AdvToggle({ label, hint, value, onChange }: { label: string; hint: stri
     <AdvRow label={label} hint={hint}>
       <input type="checkbox" checked={value} onChange={(e) => onChange(e.target.checked)} style={{ cursor: 'pointer' }} />
     </AdvRow>
+  );
+}
+
+// ── Connectors (OAuth-connected MCP servers) ──
+
+interface McpRow { name: string; target: string; kind: 'oauth' | 'token' | 'local' | 'open' }
+
+function McpConnectorsPanel() {
+  const [servers, setServers] = useState<McpRow[]>([]);
+  const [url, setUrl] = useState('');
+  const [name, setName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+
+  const api = window.cascade?.mcp;
+
+  async function refresh() {
+    if (!api) return;
+    try { setServers((await api.list()).servers); } catch { setServers([]); }
+  }
+  useEffect(() => { void refresh(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function connect() {
+    if (!api || busy) return;
+    const u = url.trim();
+    if (!/^https:\/\//i.test(u)) { setStatus('Enter an https MCP server URL.'); return; }
+    setBusy(true);
+    setStatus('Opening your browser to authorize…');
+    try {
+      const r = await api.connectOAuth(u, name.trim() || undefined);
+      if (!r.ok) { setStatus(r.error || 'Could not connect.'); return; }
+      setStatus(`Connected “${r.name}”. Its tools are available to your runs.`);
+      setUrl(''); setName('');
+      await refresh();
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : 'Could not connect.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(n: string) {
+    if (!api) return;
+    setServers((prev) => prev.filter((s) => s.name !== n));
+    try { await api.remove(n); } catch { void refresh(); }
+  }
+
+  if (!api) {
+    return <p style={{ fontSize: 12, color: 'var(--text-dim)' }}>Connectors are unavailable in this build.</p>;
+  }
+
+  const input: React.CSSProperties = { width: '100%', boxSizing: 'border-box', background: 'var(--bg-base)', border: '1px solid var(--border)', borderRadius: 7, color: 'var(--text)', padding: '9px 11px', fontSize: 13, outline: 'none' };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 560 }}>
+      <p style={{ margin: 0, fontSize: 12, lineHeight: 1.6, color: 'var(--text-muted)' }}>
+        Give Cascade tools from other apps by connecting a remote <b style={{ color: 'var(--text)' }}>MCP server</b>.
+        Sign in with OAuth — your browser opens to authorize, and the token is stored securely on this device and
+        refreshed automatically. No token to copy.
+      </p>
+
+      {servers.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {servers.map((s) => (
+            <div key={s.name} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 11px', borderRadius: 8, background: 'var(--bg-raised)', border: '1px solid var(--border)' }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text)' }}>{s.name}</div>
+                <div style={{ fontSize: 11, color: 'var(--text-dim)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.target}</div>
+              </div>
+              <span style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', color: s.kind === 'oauth' ? 'var(--success)' : 'var(--text-dim)' }}>{s.kind}</span>
+              <button onClick={() => remove(s.name)} style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-muted)', fontSize: 11, padding: '4px 8px', cursor: 'pointer' }}>Remove</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 12, borderRadius: 9, background: 'var(--bg-raised)', border: '1px solid var(--border)' }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>Connect a server</div>
+        <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://your-mcp-server.example.com/mcp" style={input} />
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name (optional)" style={input} />
+        <button
+          onClick={connect}
+          disabled={busy}
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '9px 12px', fontSize: 12.5, fontWeight: 600, borderRadius: 7, cursor: 'pointer', background: 'linear-gradient(135deg, var(--accent), var(--accent-2))', color: '#fff', border: 'none', opacity: busy ? 0.6 : 1 }}
+        >
+          {busy ? <RefreshCw size={14} className="spin" /> : <List size={14} />} Sign in with OAuth
+        </button>
+        {status && <p style={{ margin: 0, fontSize: 11.5, color: 'var(--text-dim)' }}>{status}</p>}
+      </div>
+    </div>
   );
 }

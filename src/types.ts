@@ -134,6 +134,9 @@ export interface McpServerConfig {
   // (e.g. a bearer token or API key) for the remote server.
   url?: string;
   headers?: Record<string, string>;
+  /** Path to a JSON store of this server's OAuth state (desktop/CLI). When set,
+   *  the run attaches an auto-refreshing OAuth token instead of a static header. */
+  oauthStore?: string;
 }
 
 export interface ToolDefinition {

@@ -20,6 +20,11 @@ export { TaskScheduler } from './scheduler/index.js';
 export { HooksRunner } from './hooks/index.js';
 export { McpClient } from './mcp/client.js';
 export {
+  McpOAuthProvider, connectMcpWithLoopbackOAuth, FileMcpOAuthStore, fileOAuthProvider,
+  beginMcpOAuth, completeMcpOAuth, discoverMcpAuthServer, refreshMcpToken,
+} from './mcp/oauth.js';
+export type { McpOAuthStore, McpOAuthState, OAuthTokens, OAuthClientInformationMixed } from './mcp/oauth.js';
+export {
   Retriever, reciprocalRankFusion, SqliteVectorStore, OpenAICompatibleEmbedder,
   embedderFromProviders, chunkText, LLMReranker, chatCompleterFromProviders,
   parseRankOrder, planRetrieval, chunkCode, heuristicCodeChunker,

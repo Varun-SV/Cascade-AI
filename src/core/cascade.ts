@@ -25,6 +25,7 @@ import { T2Manager } from './tiers/t2-manager.js';
 import { T3Worker } from './tiers/t3-worker.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { McpClient } from '../mcp/client.js';
+import { fileOAuthProvider } from '../mcp/oauth.js';
 import { AuditLogger } from '../audit/log.js';
 import { AuditLogger as EncryptedAuditLogger } from './audit/audit-logger.js';
 import { MemoryStore } from '../memory/store.js';
@@ -571,11 +572,14 @@ export class Cascade extends EventEmitter {
         }
       });
 
-      // Initialize MCP servers
+      // Initialize MCP servers. A server carrying `oauthStore` was connected via
+      // OAuth ("cascade mcp connect"); attach an auto-refreshing token provider
+      // (silent refresh; dead refresh token → surfaced as "reconnect needed").
       if (this.config.tools.mcpServers?.length) {
         for (const server of this.config.tools.mcpServers) {
           try {
-            await this.mcpClient.connect(server);
+            const authProvider = server.oauthStore ? fileOAuthProvider(server.oauthStore) : undefined;
+            await this.mcpClient.connect(server, authProvider ? { authProvider } : {});
             this.toolRegistry.registerMcpTools(this.mcpClient);
           } catch (err) {
             console.error(`Failed to connect to MCP server "${server.name}":`, err);
