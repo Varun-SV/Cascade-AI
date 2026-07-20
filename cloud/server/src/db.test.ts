@@ -68,6 +68,27 @@ describe('CloudStore', () => {
     expect(after).toBeGreaterThanOrEqual(before);
   });
 
+  it('stores, versions, and scopes the E2E key-sync envelope per user', () => {
+    const alice = store.upsertUser({ provider: 'github', providerId: 'alice', email: null, name: null, avatar: null });
+    const bob = store.upsertUser({ provider: 'github', providerId: 'bob', email: null, name: null, avatar: null });
+
+    expect(store.getUserSecrets(alice.id)).toBeNull();
+
+    const first = store.putUserSecrets(alice.id, '{"ciphertext":"a","salt":"s","iv":"i"}');
+    expect(first.version).toBe(1);
+    const second = store.putUserSecrets(alice.id, '{"ciphertext":"b","salt":"s","iv":"i"}');
+    expect(second.version).toBe(2); // replacing bumps the version
+
+    const rec = store.getUserSecrets(alice.id)!;
+    expect(rec.version).toBe(2);
+    expect(JSON.parse(rec.blob).ciphertext).toBe('b');
+
+    // Scoped per user; deleting one leaves the other.
+    expect(store.getUserSecrets(bob.id)).toBeNull();
+    expect(store.deleteUserSecrets(alice.id)).toBe(true);
+    expect(store.getUserSecrets(alice.id)).toBeNull();
+  });
+
   it('increments per-day usage counters independently per user', () => {
     const alice = store.upsertUser({ provider: 'github', providerId: 'alice', email: null, name: null, avatar: null });
     const bob = store.upsertUser({ provider: 'github', providerId: 'bob', email: null, name: null, avatar: null });

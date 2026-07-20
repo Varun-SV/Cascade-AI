@@ -37,6 +37,8 @@ interface SessionStore {
   clear(): void;
 }
 
+interface EncBlob { ciphertext: string; salt: string; iv: string }
+
 interface CloudClientLike {
   runLoopbackLogin(
     openUrl: (url: string) => void | Promise<void>,
@@ -44,10 +46,30 @@ interface CloudClientLike {
   ): Promise<CloudSession>;
   listConversations(): Promise<Array<{ id: string; title: string; updatedAt?: number }>>;
   getMessages(id: string): Promise<Array<{ role: string; content: string }>>;
+  pullSecrets(): Promise<{ blob: EncBlob | null; version?: number; updatedAt?: number }>;
+  pushSecrets(blob: EncBlob): Promise<{ version: number; updatedAt: number }>;
   logout(): Promise<void>;
 }
 
 type CloudClientCtor = new (serverUrl: string, dir?: string, store?: SessionStore) => CloudClientLike;
+
+// The subset of the Cascade core bundle this module uses.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Cfg = any;
+interface CoreExports {
+  CloudClient: CloudClientCtor;
+  DEFAULT_CLOUD_URL: string;
+  gatherSyncBundle: (config: Cfg) => unknown;
+  applySyncBundle: (bundle: unknown, config: Cfg) => Cfg;
+  encryptSyncBlob: (data: unknown, passphrase: string) => Promise<EncBlob>;
+  decryptSyncBlob: (blob: EncBlob, passphrase: string) => Promise<unknown>;
+}
+
+/** Live config access, so a pulled bundle takes effect without a backend restart. */
+export interface ConfigHooks {
+  getConfig: () => Cfg | null;
+  persistConfig: () => Promise<void>;
+}
 
 type StorageMode = 'keychain' | 'encrypted-file';
 
@@ -130,9 +152,9 @@ class SafeStorageSessionStore implements SessionStore {
  * bundle (same loader `main.ts` uses for the backend), from which we pull the
  * shared `CloudClient` and default cloud URL.
  */
-export function registerCloudAuthIpc(loadCore: () => any): void { // eslint-disable-line @typescript-eslint/no-explicit-any
+export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks): void {
   const store = new SafeStorageSessionStore();
-  const core = () => loadCore() as { CloudClient: CloudClientCtor; DEFAULT_CLOUD_URL: string };
+  const core = () => loadCore() as CoreExports;
   const serverUrl = (process.env['CASCADE_CLOUD_URL'] || '').trim().replace(/\/$/, '') || core().DEFAULT_CLOUD_URL;
   const client = (): CloudClientLike => new (core().CloudClient)(serverUrl, undefined, store);
 
@@ -174,5 +196,60 @@ export function registerCloudAuthIpc(loadCore: () => any): void { // eslint-disa
   ipcMain.handle('cloud:messages', async (_e, id: unknown) => {
     try { return { ok: true, messages: await client().getMessages(String(id)) }; }
     catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'Could not load that chat.', messages: [] }; }
+  });
+
+  // ── Key sync (E2E-encrypted settings) ──
+
+  ipcMain.handle('cloud:syncPush', async (_e, passphrase: unknown) => {
+    const pass = String(passphrase ?? '');
+    const cfg = hooks.getConfig();
+    if (!cfg) return { ok: false, error: 'Your settings are not ready yet.' };
+    if (!pass) return { ok: false, error: 'Enter a passphrase.' };
+    try {
+      const { gatherSyncBundle, encryptSyncBlob } = core();
+      const blob = await encryptSyncBlob(gatherSyncBundle(cfg), pass);
+      const r = await client().pushSecrets(blob);
+      return { ok: true, version: r.version };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : 'Sync failed.' };
+    }
+  });
+
+  ipcMain.handle('cloud:syncPull', async (_e, passphrase: unknown) => {
+    const pass = String(passphrase ?? '');
+    const cfg = hooks.getConfig();
+    if (!cfg) return { ok: false, error: 'Your settings are not ready yet.' };
+    if (!pass) return { ok: false, error: 'Enter a passphrase.' };
+    let blob: EncBlob | null;
+    try {
+      ({ blob } = await client().pullSecrets());
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : 'Could not reach your account.' };
+    }
+    if (!blob) return { ok: true, empty: true };
+    try {
+      const { decryptSyncBlob, applySyncBundle } = core();
+      const bundle = await decryptSyncBlob(blob, pass);
+      const merged = applySyncBundle(bundle, cfg);
+      // Apply onto the live config object in place so the running backend picks
+      // it up without a restart (mirrors cascade:updateSettings), then persist.
+      cfg.providers = merged.providers;
+      if (merged.tools) {
+        cfg.tools = cfg.tools ?? {};
+        cfg.tools.webSearch = merged.tools.webSearch;
+        cfg.tools.mcpServers = merged.tools.mcpServers;
+      }
+      cfg.models = merged.models;
+      cfg.budget = merged.budget;
+      cfg.autoBias = merged.autoBias;
+      cfg.cascadeAuto = merged.cascadeAuto;
+      cfg.extendedContext = merged.extendedContext;
+      cfg.autonomy = merged.autonomy;
+      await hooks.persistConfig();
+      return { ok: true, applied: true };
+    } catch {
+      // AES-GCM's auth-tag check is what fails on a wrong passphrase.
+      return { ok: false, error: 'Could not decrypt — check your passphrase.' };
+    }
   });
 }

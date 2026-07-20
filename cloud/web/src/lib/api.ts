@@ -28,6 +28,25 @@ export function logout(): Promise<{ ok: boolean }> {
   return json(fetch('/auth/logout', { method: 'POST', credentials: 'include' }));
 }
 
+// ── Key sync (E2E-encrypted settings relay) ──
+// `blob` is opaque ciphertext ({ ciphertext, salt, iv } base64) — the server
+// stores and returns it verbatim and cannot decrypt it. See docs/key-sync.md.
+
+export interface KeySyncBlob { ciphertext: string; salt: string; iv: string }
+
+export function pullKeySync(): Promise<{ blob: KeySyncBlob | null; version?: number; updatedAt?: number }> {
+  return json(fetch('/api/keysync', { credentials: 'include' }));
+}
+
+export function pushKeySync(blob: KeySyncBlob): Promise<{ ok: boolean; version: number; updatedAt: number }> {
+  return json(fetch('/api/keysync', {
+    method: 'PUT',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ blob }),
+  }));
+}
+
 export function devLogin(name: string): Promise<{ user: CloudUser }> {
   return json(
     fetch('/auth/dev-login', {

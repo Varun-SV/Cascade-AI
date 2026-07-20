@@ -82,6 +82,8 @@ declare global {
         logout(): Promise<{ ok: boolean; signedIn?: boolean }>;
         sessions(): Promise<{ ok: boolean; error?: string; conversations: Array<{ id: string; title: string; updatedAt?: number }> }>;
         messages(id: string): Promise<{ ok: boolean; error?: string; messages: Array<{ role: string; content: string }> }>;
+        syncPush(passphrase: string): Promise<{ ok: boolean; error?: string; version?: number }>;
+        syncPull(passphrase: string): Promise<{ ok: boolean; error?: string; empty?: boolean; applied?: boolean }>;
       };
     };
   }

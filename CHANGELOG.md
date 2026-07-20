@@ -5,6 +5,38 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.35.0 - 2026-07-20
+
+### Added
+- **Key sync — settings that follow your account.** Once signed in, your
+  settings sync across **web · desktop · CLI**, end-to-end encrypted, with the
+  server acting only as a **ciphertext relay it cannot read**. Replaces the
+  Google Drive appData sync with an account-based one (no second Google grant;
+  works for GitHub sign-ins too; reaches desktop + CLI).
+  - **E2E crypto**: AES-256-GCM with a PBKDF2-SHA256 (210k) passphrase-derived
+    key — the exact parameters the web KeyVault already uses, now ported to Node
+    byte-for-byte so a blob written by one client decrypts on any other
+    (covered by a cross-implementation interop test).
+  - **Bundle**: LLM provider keys, web-search backend keys, MCP/connector
+    tokens, and non-secret preferences. **Pull merges** — it adds/updates keys
+    without wiping a device's local-only providers.
+  - **Server**: a per-user `user_secrets` ciphertext envelope +
+    `GET/PUT/DELETE /api/keysync` (session-scoped, size-capped). The passphrase
+    never leaves the device; the server has nothing to decrypt with.
+  - **Web**: an *Account sync* panel (Push / Pull) replaces the Drive panel for
+    any signed-in user.
+  - **CLI**: `cascade sync push` / `cascade sync pull` (hidden passphrase
+    prompt), gathering/applying the local `.cascade` config.
+  - **Desktop**: Push / Pull from the account surface in *Continue elsewhere*;
+    the passphrase stays in the main process, and a pulled bundle applies to the
+    live config so it takes effect without a restart.
+  - Design + security documented in [`docs/key-sync.md`](docs/key-sync.md).
+
+### Removed
+- **Google Drive appData key sync** — superseded by the account-based sync
+  above. Your keys live locally on each device, so nothing is lost; the account
+  simply becomes the transfer channel.
+
 ## 0.34.0 - 2026-07-20
 
 ### Added

@@ -541,6 +541,37 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     res.json({ ok: store.deleteMemory(id, req.session!.userId) });
   });
 
+  // ── Key sync (E2E-encrypted settings relay) ──
+  // The server stores one opaque ciphertext envelope per user and hands it back
+  // verbatim; it has no passphrase and cannot decrypt it. See docs/key-sync.md.
+  const MAX_SECRETS_BLOB_BYTES = 512 * 1024;
+
+  app.get('/api/keysync', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const rec = store.getUserSecrets(req.session!.userId);
+    if (!rec) { res.json({ blob: null }); return; }
+    res.json({ blob: JSON.parse(rec.blob), version: rec.version, updatedAt: rec.updatedAt });
+  });
+
+  app.put('/api/keysync', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const blob = req.body?.blob;
+    // Shape-check only — the contents are ciphertext we must not (and can't) read.
+    if (!blob || typeof blob.ciphertext !== 'string' || typeof blob.salt !== 'string' || typeof blob.iv !== 'string') {
+      res.status(400).json({ error: 'Invalid encrypted blob' });
+      return;
+    }
+    const serialized = JSON.stringify({ ciphertext: blob.ciphertext, salt: blob.salt, iv: blob.iv });
+    if (Buffer.byteLength(serialized, 'utf-8') > MAX_SECRETS_BLOB_BYTES) {
+      res.status(413).json({ error: 'Encrypted settings are too large to sync' });
+      return;
+    }
+    const saved = store.putUserSecrets(req.session!.userId, serialized);
+    res.json({ ok: true, ...saved });
+  });
+
+  app.delete('/api/keysync', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    res.json({ ok: store.deleteUserSecrets(req.session!.userId) });
+  });
+
   // ── Remote MCP servers & connectors ──
   // The catalog is static presets; the servers are per-user, with auth headers
   // stored server-side and never returned. Adding validates the URL (https +

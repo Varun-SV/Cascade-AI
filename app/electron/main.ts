@@ -703,8 +703,12 @@ function registerIPC(): void {
   });
 
   // Optional Cascade Cloud sign-in (loopback OAuth + encrypted token storage) so
-  // the user can browse/continue their web chats. Reuses the same core loader.
-  registerCloudAuthIpc(loadCore);
+  // the user can browse/continue their web chats, plus E2E key sync. Reuses the
+  // same core loader; sync applies onto the live config so it takes effect at once.
+  registerCloudAuthIpc(loadCore, {
+    getConfig: () => cascadeConfig,
+    persistConfig: () => (configManager ? configManager.save() : Promise.resolve()),
+  });
 }
 
 // ─── Desktop meta store (persistent JSON in userData) ─────────────────────────

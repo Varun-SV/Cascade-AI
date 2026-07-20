@@ -317,6 +317,17 @@ export class CloudStore {
       );
 
       CREATE INDEX IF NOT EXISTS idx_refresh_user ON native_refresh_tokens(user_id);
+
+      -- Key sync: one end-to-end-encrypted settings envelope per user. The blob
+      -- is opaque ciphertext ({ciphertext,salt,iv} base64) encrypted on the
+      -- user's device with a passphrase we never see; the server is a relay and
+      -- CANNOT decrypt it. Replaces the old Google Drive appData sync.
+      CREATE TABLE IF NOT EXISTS user_secrets (
+        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        blob TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        updated_at INTEGER NOT NULL
+      );
     `);
 
     // Additive columns — ALTER ... ADD COLUMN throws if the column already
@@ -725,6 +736,32 @@ export class CloudStore {
   /** Sign a user out of all native devices (e.g. account switch elsewhere). */
   revokeAllRefreshTokens(userId: string): number {
     return this.db.prepare('UPDATE native_refresh_tokens SET revoked = 1 WHERE user_id = ? AND revoked = 0').run(userId).changes;
+  }
+
+  // ── Key sync (E2E-encrypted settings relay) ──
+
+  /** The user's stored ciphertext envelope, or null. `blob` is opaque to us. */
+  getUserSecrets(userId: string): { blob: string; version: number; updatedAt: number } | null {
+    const row = this.db
+      .prepare('SELECT blob, version, updated_at FROM user_secrets WHERE user_id = ?')
+      .get(userId) as { blob: string; version: number; updated_at: number } | undefined;
+    return row ? { blob: row.blob, version: row.version, updatedAt: row.updated_at } : null;
+  }
+
+  /** Store/replace the user's envelope; bumps version. Returns the new state. */
+  putUserSecrets(userId: string, blob: string): { version: number; updatedAt: number } {
+    const now = Date.now();
+    const prev = this.getUserSecrets(userId);
+    const version = (prev?.version ?? 0) + 1;
+    this.db
+      .prepare(`INSERT INTO user_secrets (user_id, blob, version, updated_at) VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET blob = excluded.blob, version = excluded.version, updated_at = excluded.updated_at`)
+      .run(userId, blob, version, now);
+    return { version, updatedAt: now };
+  }
+
+  deleteUserSecrets(userId: string): boolean {
+    return this.db.prepare('DELETE FROM user_secrets WHERE user_id = ?').run(userId).changes > 0;
   }
 
   // ── Deserializers ─────────────────────────────
