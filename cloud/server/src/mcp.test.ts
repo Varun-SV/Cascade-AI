@@ -15,6 +15,33 @@ describe('connector catalog', () => {
   it('catalog() returns every entry', () => {
     expect(connectorCatalog().length).toBe(CONNECTOR_CATALOG.length);
   });
+
+  it('ships the expanded one-click OAuth directory (Notion, Linear, Sentry, Stripe, Atlassian)', () => {
+    for (const id of ['notion', 'linear', 'sentry', 'stripe', 'atlassian']) {
+      const c = getConnector(id);
+      expect(c, id).toBeDefined();
+      expect(c!.oauth, id).toBe(true);       // one-click: no token to paste
+      expect(c!.requiresUrl, id).toBe(false); // hardcoded hosted URL — user never types it
+      expect(c!.url, id).toMatch(/^https:\/\//);
+    }
+  });
+
+  it('every hosted (non byo-url) connector has a valid https endpoint', () => {
+    for (const c of CONNECTOR_CATALOG) {
+      if (c.requiresUrl) continue;
+      expect(c.url, c.id).toBeDefined();
+      expect(validateRemoteMcpUrl(c.url!).ok, `${c.id} → ${c.url}`).toBe(true);
+    }
+  });
+
+  it('has unique ids and no empty names/descriptions', () => {
+    const ids = CONNECTOR_CATALOG.map((c) => c.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const c of CONNECTOR_CATALOG) {
+      expect(c.name.trim().length, c.id).toBeGreaterThan(0);
+      expect(c.description.trim().length, c.id).toBeGreaterThan(0);
+    }
+  });
 });
 
 describe('validateRemoteMcpUrl', () => {

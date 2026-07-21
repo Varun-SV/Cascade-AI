@@ -5,6 +5,24 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.42.0 - 2026-07-21
+
+### Added
+- **A real connector directory — browse & one-click connect, like Claude.** The
+  hosted Connectors panel used to ship three presets (GitHub + two "paste your
+  own MCP URL" entries). It's now a searchable **directory of hosted remote MCP
+  servers** with the endpoint baked in, so you never type a URL:
+  **GitHub, Notion, Linear, Sentry, Jira & Confluence (Atlassian), Stripe,** and
+  **Cloudflare Docs**. The OAuth ones are genuinely **one-click** — pick the
+  connector → the provider's sign-in page → done, no token to paste (OAuth 2.1 +
+  PKCE with discovery/DCR handled by our existing MCP-OAuth stack); public
+  servers (Cloudflare Docs) add instantly with no auth at all. Brand badges, a
+  "1-click" marker, and search make it scan at a glance. Slack/Google stay
+  "bring your MCP URL" for now — there's no single public hosted endpoint to
+  point at yet — and any service still works via **Custom MCP server**. New
+  hosted endpoints are validated against our SSRF allowlist like every other
+  connection.
+
 ## 0.41.3 - 2026-07-21
 
 ### Added
