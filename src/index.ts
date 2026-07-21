@@ -39,6 +39,10 @@ export type {
 } from './retrieval/index.js';
 export { CodeSearchTool } from './tools/code-search.js';
 export { GraphSearchTool } from './tools/graph-search.js';
+export {
+  distillSessionFacts, buildSessionTranscript, sessionWorthRemembering,
+  type DistilledFact,
+} from './core/knowledge/session-memory.js';
 export { AuditLogger } from './audit/log.js';
 export { Telemetry } from './telemetry/index.js';
 

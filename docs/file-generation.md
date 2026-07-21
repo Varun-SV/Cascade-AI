@@ -36,9 +36,13 @@ download button as a fallback (filename inferred). From a card you can:
 - **Save to Cascade files** — uploads the content to per-user storage on the
   Railway volume, metered by plan (below).
 
-The worker is steered (a hosted system instruction) to use the `file:` fence
-whenever the user asks for a document/file, so files show up as cards, not just
-prose.
+The worker is steered (a hosted system instruction) to use the `file:` fence —
+but only on turns whose request actually looks file-shaped (`wantsFileDelivery`:
+the user's own text or the active skill mentions a file/document/export, or the
+previous assistant turn already delivered a `file:` block). The guidance itself
+contains no fenced example and says to emit `file:` blocks ONLY when explicitly
+asked; both guards exist because injecting an example fence on every turn made
+small models echo a phantom `report.md` in reply to a bare "hi".
 
 ## Files storage (metered)
 

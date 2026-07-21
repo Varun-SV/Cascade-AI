@@ -353,6 +353,7 @@ describe('Fast answer (direct single-model path)', () => {
       generate,
       getStats: () => ({ totalTokens: 8, totalCostUsd: 0.0001, costByTier: {}, tokensByTier: { T2: 8 }, costByFeature: {} }),
       getTierCostPercentages: () => ({}),
+      setRunSignal: () => {},
     };
   }
 
@@ -393,6 +394,70 @@ describe('Fast answer (direct single-model path)', () => {
 
     expect(seenMessages[0]).toEqual({ role: 'assistant', content: '1) A  2) B' });
     expect(seenMessages[seenMessages.length - 1]).toEqual({ role: 'user', content: 'and the second one' });
+  });
+});
+
+describe('Small-talk gate (auto fast answer) + terse option replies', () => {
+  const cascade = new Cascade(baseConfig, process.cwd()) as any;
+
+  it('treats greetings and self-identity questions as small talk', () => {
+    expect(cascade.looksLikeSmallTalk('hi')).toBe(true);
+    expect(cascade.looksLikeSmallTalk('Hello!')).toBe(true);
+    expect(cascade.looksLikeSmallTalk('thanks')).toBe(true);
+    expect(cascade.looksLikeSmallTalk('who are you?')).toBe(true);
+    expect(cascade.looksLikeSmallTalk('what can you do')).toBe(true);
+    expect(cascade.looksLikeSmallTalk('hey there')).toBe(true);
+  });
+
+  it('does NOT treat lookups, tasks, or terse confirmations as small talk', () => {
+    // These need tools or real context — they stay on the worker path.
+    expect(cascade.looksLikeSmallTalk('what is a monad')).toBe(false);
+    expect(cascade.looksLikeSmallTalk('show me the config file')).toBe(false);
+    expect(cascade.looksLikeSmallTalk('list the failing tests')).toBe(false);
+    expect(cascade.looksLikeSmallTalk('tell me the latest on the launch')).toBe(false);
+    expect(cascade.looksLikeSmallTalk('fix the typo in README')).toBe(false);
+    // Bare confirmations in an ongoing conversation are task input.
+    const history = [{ role: 'assistant', content: 'Shall I proceed with the refactor?' }];
+    expect(cascade.looksLikeSmallTalk('yes', history)).toBe(false);
+    expect(cascade.looksLikeSmallTalk('ok', history)).toBe(false);
+  });
+
+  it('recognises terse option replies', () => {
+    expect(cascade.looksLikeTerseOptionReply('3')).toBe(true);
+    expect(cascade.looksLikeTerseOptionReply('b)')).toBe(true);
+    expect(cascade.looksLikeTerseOptionReply('(2)')).toBe(true);
+    expect(cascade.looksLikeTerseOptionReply('option 2')).toBe(true);
+    expect(cascade.looksLikeTerseOptionReply('3 please, and make it a chart')).toBe(false);
+    expect(cascade.looksLikeTerseOptionReply('proceed')).toBe(false);
+  });
+
+  it('ignores a context-free on-device hint for a terse option reply and classifies with history', async () => {
+    const c = new Cascade(baseConfig, process.cwd());
+    const generate = vi.fn().mockResolvedValue({
+      content: 'Simple',
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimatedCostUsd: 0 },
+      finishReason: 'stop',
+    });
+    (c as any).router = { generate };
+    const history: ConversationMessage[] = [
+      { role: 'assistant', content: 'Which would you like? 1) a table 2) prose 3) a recommendation chart' },
+    ];
+    // The tiny on-device model said Complex for "3" — that hint must be ignored
+    // in favour of the LLM classifier, which sees the conversation.
+    const complexity = await (c as any).determineComplexity('3', '/dummy', history, 'Complex');
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(complexity).toBe('Simple');
+  });
+
+  it('still honours an on-device hint for a normal prompt', async () => {
+    const c = new Cascade(baseConfig, process.cwd());
+    const generate = vi.fn();
+    (c as any).router = { generate };
+    const complexity = await (c as any).determineComplexity(
+      'refactor the auth flow to use sessions', '/dummy', [], 'Moderate',
+    );
+    expect(generate).not.toHaveBeenCalled(); // hint used, no classifier round-trip
+    expect(complexity).toBe('Moderate');
   });
 });
 

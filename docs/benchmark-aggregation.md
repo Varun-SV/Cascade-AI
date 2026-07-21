@@ -54,10 +54,14 @@ because another model was added to (or dropped from) a capture.
 For each `family × task`, gather the normalized values from every source that covers it,
 then:
 
-- **`min` (default)** — take the single lowest. Strict quality-to-cost.
-- **`robust`** — when **≥ 3** sources cover the cell, drop the single lowest as a
-  possible mis-capture and take the next-lowest; with fewer than 3, fall back to `min`.
-  Select with `BENCHMARK_AGG_MODE=robust`.
+- **`robust` (default for the refresh)** — when **≥ 3** sources cover the cell, drop
+  the single lowest as a possible mis-capture and take the next-lowest; with fewer than
+  3, fall back to `min`. Guards against one bad number tanking a model.
+- **`min`** — take the single lowest. Strictest quality-to-cost. Force with
+  `BENCHMARK_AGG_MODE=min`.
+
+(The pure `buildFamilies` engine still defaults to `min`; the refresh script opts into
+`robust` unless `BENCHMARK_AGG_MODE=min` is set.)
 
 Any cell **no source covers** keeps its committed baseline value, so partial coverage
 never blanks a score. A family is only emitted once it has all four task scores (from

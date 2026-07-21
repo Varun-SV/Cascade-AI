@@ -808,7 +808,13 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     res.json({ ok: true, usedBytes: store.sumUserFileBytes(userId) });
   });
 
-  // ── Delete a chat + import chats/memories ──
+  // ── Delete a chat / all chats + import chats/memories ──
+  // Register the collection route before the ':id' route so "all" isn't parsed
+  // as a conversation id.
+  app.delete('/api/conversations', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    res.json({ deleted: store.deleteAllConversations(req.session!.userId) });
+  });
+
   app.delete('/api/conversations/:id', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
     const id = req.params['id'];
     if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid id' }); return; }

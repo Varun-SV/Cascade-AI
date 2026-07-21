@@ -119,6 +119,22 @@ describe('CloudStore', () => {
     expect(store.getMessages(conv.id)).toHaveLength(0);
   });
 
+  it('clears all conversations for one user without touching another user', () => {
+    const alice = store.upsertUser({ provider: 'dev', providerId: 'ca', email: null, name: null, avatar: null });
+    const bob = store.upsertUser({ provider: 'dev', providerId: 'cb', email: null, name: null, avatar: null });
+    const a1 = store.createConversation(alice.id, 'A1');
+    store.addMessage({ conversationId: a1.id, role: 'user', content: 'hi' });
+    store.createConversation(alice.id, 'A2');
+    const b1 = store.createConversation(bob.id, 'B1');
+
+    expect(store.deleteAllConversations(alice.id)).toBe(2);
+    expect(store.listConversations(alice.id)).toHaveLength(0);
+    expect(store.getMessages(a1.id)).toHaveLength(0);
+    // Bob's data is untouched.
+    expect(store.getConversation(b1.id, bob.id)).not.toBeNull();
+    expect(store.deleteAllConversations(alice.id)).toBe(0); // idempotent
+  });
+
   it('increments per-day usage counters independently per user', () => {
     const alice = store.upsertUser({ provider: 'github', providerId: 'alice', email: null, name: null, avatar: null });
     const bob = store.upsertUser({ provider: 'github', providerId: 'bob', email: null, name: null, avatar: null });

@@ -24,6 +24,7 @@ interface AdvancedSettings {
   benchmarksLive: boolean;
   dynamicToolSandbox: 'isolate' | 'worker' | 'auto';
   factsExtraction: boolean;
+  rememberSessions: boolean;
   enableToolCreation: boolean;
   persistDynamicTools: boolean;
   telemetryEnabled: boolean;
@@ -43,6 +44,7 @@ const ADVANCED_DEFAULTS: AdvancedSettings = {
   benchmarksLive: true,
   dynamicToolSandbox: 'auto',
   factsExtraction: true,
+  rememberSessions: false,
   enableToolCreation: true,
   persistDynamicTools: true,
   telemetryEnabled: false,
@@ -645,6 +647,7 @@ export function SettingsView({ socket }: Props) {
               <AdvGroup title="Sandbox & knowledge">
                 <AdvSelect label="Dynamic-tool sandbox" hint="isolate = hard V8 isolate (no Node globals); worker = thread sandbox; auto = isolate when available" value={adv.dynamicToolSandbox} options={['auto', 'isolate', 'worker']} onChange={(v) => setAdvField('dynamicToolSandbox', v as AdvancedSettings['dynamicToolSandbox'])} />
                 <AdvToggle label="Facts extraction" hint="Distill worker outputs into the queryable project knowledge graph" value={adv.factsExtraction} onChange={(v) => setAdvField('factsExtraction', v)} />
+                <AdvToggle label="Remember sessions" hint="Opt-in: after a run, distill the whole conversation into durable project knowledge (undoable from Insights → Knowledge). Off by default." value={adv.rememberSessions} onChange={(v) => setAdvField('rememberSessions', v)} />
                 <AdvToggle label="Tool creation" hint="Let workers generate new tools at runtime when none fits" value={adv.enableToolCreation} onChange={(v) => setAdvField('enableToolCreation', v)} />
                 <AdvToggle label="Persist dynamic tools" hint="Reload created tools next run (always as untrusted)" value={adv.persistDynamicTools} onChange={(v) => setAdvField('persistDynamicTools', v)} />
               </AdvGroup>
@@ -706,6 +709,30 @@ export function SettingsView({ socket }: Props) {
                 </button>
               </div>
               {dataStatus && <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: 0, wordBreak: 'break-all' }}>{dataStatus}</p>}
+
+              <div style={{ borderTop: '1px solid var(--border)', marginTop: 4, paddingTop: 12 }}>
+                <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: '0 0 8px', lineHeight: 1.5 }}>
+                  Permanently delete <b>every</b> chat session and its messages from this machine. Project knowledge
+                  (facts) and settings are kept — clear those from the Insights → Knowledge tab. This can’t be undone;
+                  export first if you want a copy.
+                </p>
+                <button onClick={async () => {
+                  if (!window.confirm('Delete ALL chat sessions on this machine? This cannot be undone.')) return;
+                  setDataStatus('Deleting all sessions…');
+                  try {
+                    const res = await fetch(`http://localhost:${backendPort}/api/sessions`, {
+                      method: 'DELETE',
+                      headers: { Authorization: `Bearer ${authToken}` },
+                    });
+                    if (!res.ok) throw new Error(`delete failed (HTTP ${res.status})`);
+                    setDataStatus('All chat sessions deleted.');
+                  } catch (err) {
+                    setDataStatus(err instanceof Error ? err.message : String(err));
+                  }
+                }} style={{ background: 'var(--danger-soft, rgba(239,68,68,0.1))', border: '1px solid var(--danger)', borderRadius: 6, color: 'var(--danger)', padding: '9px 12px', fontSize: 12, cursor: 'pointer', fontWeight: 600 }}>
+                  Clear all chat history…
+                </button>
+              </div>
             </>
           )}
         </div>

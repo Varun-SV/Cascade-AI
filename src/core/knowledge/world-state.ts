@@ -72,6 +72,44 @@ export class WorldStateDB {
         PRIMARY KEY (entity, relation)
       )
     `);
+
+    // world-state v3: history-preserving writes. Before a fact is overwritten,
+    // deleted, or cleared, its outgoing value is appended here (still encrypted
+    // with the SAME key — value never leaves the AES-256-GCM envelope) so a bad
+    // extraction can be inspected and undone. The current `facts` table stays
+    // the single source of truth for reads, so planning is unchanged.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS facts_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity TEXT NOT NULL,
+        relation TEXT NOT NULL,
+        encrypted_value TEXT NOT NULL,
+        source_worker TEXT NOT NULL,
+        valid_from TEXT NOT NULL,
+        valid_to TEXT NOT NULL,
+        change TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS facts_history_key
+        ON facts_history(entity, relation, valid_to DESC);
+    `);
+  }
+
+  /**
+   * Append the CURRENTLY-stored fact for (e, r) to the history ledger before it
+   * is overwritten/deleted, timestamped [its recorded time → now]. No-op when
+   * there is no current row. The value stays encrypted with the same key.
+   */
+  private archiveCurrentFact(e: string, r: string, change: string, validTo: string): void {
+    const row = this.db
+      .prepare('SELECT encrypted_value, source_worker, timestamp FROM facts WHERE entity = ? AND relation = ?')
+      .get(e, r) as { encrypted_value: string; source_worker: string; timestamp: string } | undefined;
+    if (!row) return;
+    this.db
+      .prepare(
+        `INSERT INTO facts_history (entity, relation, encrypted_value, source_worker, valid_from, valid_to, change)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(e, r, row.encrypted_value, row.source_worker, row.timestamp, validTo, change);
   }
 
   private initEncryptionKey(): void {
@@ -164,8 +202,9 @@ export class WorldStateDB {
     const v = value.trim();
     if (!e || !r || !v) return;
 
+    const now = timestamp ?? new Date().toISOString();
     const encrypted = this.encrypt(JSON.stringify({ value: v }));
-    const stmt = this.db.prepare(`
+    const upsert = this.db.prepare(`
       INSERT INTO facts (entity, relation, encrypted_value, source_worker, timestamp)
       VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(entity, relation) DO UPDATE SET
@@ -173,7 +212,20 @@ export class WorldStateDB {
         source_worker   = excluded.source_worker,
         timestamp       = excluded.timestamp
     `);
-    stmt.run(e, r, encrypted, sourceWorker, timestamp ?? new Date().toISOString());
+    // Archive the outgoing value first — but only when it ACTUALLY changes, so
+    // re-observing the same fact doesn't bloat history. All-or-nothing.
+    const tx = this.db.transaction(() => {
+      const current = this.db
+        .prepare('SELECT encrypted_value FROM facts WHERE entity = ? AND relation = ?')
+        .get(e, r) as { encrypted_value: string } | undefined;
+      if (current) {
+        let prevValue: string | null = null;
+        try { prevValue = JSON.parse(this.decrypt(current.encrypted_value)).value; } catch { prevValue = null; }
+        if (prevValue !== v) this.archiveCurrentFact(e, r, 'update', now);
+      }
+      upsert.run(e, r, encrypted, sourceWorker, now);
+    });
+    tx();
     this.dumpDebugIfNeeded();
   }
 
@@ -248,13 +300,86 @@ export class WorldStateDB {
     const e = normalizeKey(entity);
     const r = normalizeKey(relation);
     if (!e || !r) return false;
-    const result = this.db.prepare('DELETE FROM facts WHERE entity = ? AND relation = ?').run(e, r);
-    return result.changes > 0;
+    // Archive the value before removing it so a deletion is recoverable.
+    const now = new Date().toISOString();
+    const tx = this.db.transaction(() => {
+      this.archiveCurrentFact(e, r, 'delete', now);
+      return this.db.prepare('DELETE FROM facts WHERE entity = ? AND relation = ?').run(e, r);
+    });
+    return tx().changes > 0;
   }
 
-  /** Delete every fact. Returns how many were removed. */
+  /** Delete every fact. Returns how many were removed. History is preserved. */
   public clearFacts(): number {
-    return this.db.prepare('DELETE FROM facts').run().changes;
+    const now = new Date().toISOString();
+    const tx = this.db.transaction(() => {
+      const rows = this.db
+        .prepare('SELECT entity, relation, encrypted_value, source_worker, timestamp FROM facts')
+        .all() as Array<{ entity: string; relation: string; encrypted_value: string; source_worker: string; timestamp: string }>;
+      const archive = this.db.prepare(
+        `INSERT INTO facts_history (entity, relation, encrypted_value, source_worker, valid_from, valid_to, change)
+         VALUES (?, ?, ?, ?, ?, ?, 'clear')`,
+      );
+      for (const row of rows) {
+        archive.run(row.entity, row.relation, row.encrypted_value, row.source_worker, row.timestamp, now);
+      }
+      return this.db.prepare('DELETE FROM facts').run().changes;
+    });
+    return tx();
+  }
+
+  // ── History + restore (undo) ──────────────────
+
+  /**
+   * Prior values for one (entity, relation), newest-first — the durable trail of
+   * what this fact used to be before it was overwritten or deleted. Decrypted
+   * here (the ciphertext never leaves this process).
+   */
+  public getFactHistory(entity: string, relation: string): Array<{
+    value: string; sourceWorker: string; validFrom: string; validTo: string; change: string;
+  }> {
+    const e = normalizeKey(entity);
+    const r = normalizeKey(relation);
+    if (!e || !r) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT encrypted_value, source_worker, valid_from, valid_to, change
+         FROM facts_history WHERE entity = ? AND relation = ? ORDER BY valid_to DESC, id DESC`,
+      )
+      .all(e, r) as Array<{ encrypted_value: string; source_worker: string; valid_from: string; valid_to: string; change: string }>;
+    return rows.map((row) => {
+      let value: string;
+      try { value = JSON.parse(this.decrypt(row.encrypted_value)).value; } catch { value = '[Decryption Failed]'; }
+      return { value, sourceWorker: row.source_worker, validFrom: row.valid_from, validTo: row.valid_to, change: row.change };
+    });
+  }
+
+  /**
+   * Restore a historical value for (entity, relation) as the current fact. The
+   * value currently in place (if any) is itself archived first, so restore is
+   * undoable. When `validFrom` is given, restores that exact historical entry;
+   * otherwise restores the most recent one. Returns whether anything was restored.
+   */
+  public restoreFact(entity: string, relation: string, validFrom?: string): boolean {
+    const e = normalizeKey(entity);
+    const r = normalizeKey(relation);
+    if (!e || !r) return false;
+    const row = (validFrom
+      ? this.db.prepare(
+          `SELECT encrypted_value, source_worker FROM facts_history
+           WHERE entity = ? AND relation = ? AND valid_from = ? ORDER BY id DESC LIMIT 1`,
+        ).get(e, r, validFrom)
+      : this.db.prepare(
+          `SELECT encrypted_value, source_worker FROM facts_history
+           WHERE entity = ? AND relation = ? ORDER BY valid_to DESC, id DESC LIMIT 1`,
+        ).get(e, r)) as { encrypted_value: string; source_worker: string } | undefined;
+    if (!row) return false;
+    let value: string;
+    try { value = JSON.parse(this.decrypt(row.encrypted_value)).value; } catch { return false; }
+    // Route through upsertFact so the current value is archived and normal
+    // change-detection applies (a no-op restore of the same value is harmless).
+    this.upsertFact(e, r, value, `${row.source_worker} (restored)`);
+    return true;
   }
 
   // ── Export / Import ──────────────────────────

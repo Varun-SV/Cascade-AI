@@ -10,6 +10,8 @@ const TIER_PARAMS_KEY = 'cascade-cloud-tier-params';
 const EXT_CONTEXT_KEY = 'cascade-cloud-ext-context';
 const SHARE_LEARNING_KEY = 'cascade-cloud-share-learning';
 const MAX_TOKENS_RUN_KEY = 'cascade-cloud-max-tokens-run';
+const MAX_COST_RUN_KEY = 'cascade-cloud-max-cost-run';
+const REMEMBER_SESSIONS_KEY = 'cascade-cloud-remember-sessions';
 const DEFAULT_ROUTING_KEY = 'cascade-cloud-default-routing';
 const DEFAULT_WEB_KEY = 'cascade-cloud-default-web';
 
@@ -71,6 +73,26 @@ export function setMaxTokensPerRun(v: number): void {
   try { if (v > 0) localStorage.setItem(MAX_TOKENS_RUN_KEY, String(Math.floor(v))); else localStorage.removeItem(MAX_TOKENS_RUN_KEY); }
   catch { /* storage unavailable */ }
 }
+
+/**
+ * Hard per-run cost cap in USD. 0 = use the server's default safety rail. The
+ * server clamps to [0.05, 25]; we keep the same bounds here so the input can't
+ * send a value the server would reject.
+ */
+export function maxCostPerRunUsd(): number {
+  try { const v = Number(localStorage.getItem(MAX_COST_RUN_KEY)); return Number.isFinite(v) && v > 0 ? v : 0; }
+  catch { return 0; }
+}
+export function setMaxCostPerRunUsd(v: number): void {
+  try {
+    if (v > 0) localStorage.setItem(MAX_COST_RUN_KEY, String(Math.min(25, Math.max(0.05, v))));
+    else localStorage.removeItem(MAX_COST_RUN_KEY);
+  } catch { /* storage unavailable */ }
+}
+
+/** Opt-in: distill finished chats into persistent memories. Off by default. */
+export const rememberSessions = () => readBool(REMEMBER_SESSIONS_KEY, false);
+export const setRememberSessions = (v: boolean) => writeBool(REMEMBER_SESSIONS_KEY, v);
 
 /** Default response bias seeded into each new chat session. */
 export const defaultRoutingBias = () => readString(DEFAULT_ROUTING_KEY, ['auto', 'quality', 'fast'] as const, 'auto');

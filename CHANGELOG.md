@@ -5,6 +5,53 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.39.0 - 2026-07-21
+
+### Fixed
+- **A bare "hi" no longer spins up a full multi-agent run (or a phantom
+  `report.md`).** In hosted chat the routing heuristics never saw your actual
+  message — the file-delivery guidance and memories were prepended first, so even
+  "hi" read as a long, "Complex" prompt and was handed to a real T3 worker that
+  then echoed the guidance's example as a spurious file card. Now:
+  - The run carries a separate **`routingPrompt`** (your real text) for the
+    complexity decision + task analysis, while the model still gets the full
+    context. Pure small talk ("hi", "who are you") takes the direct
+    single-model path — no workers, no classifier (gated by `fastAnswer.autoSimple`,
+    on by default).
+  - The **file-delivery guidance is reworded** (no echo-able example fence, "do
+    this ONLY when explicitly asked") and **only injected when the request
+    actually looks file-shaped** (`wantsFileDelivery`), so ordinary chat never
+    produces a file.
+  - A terse option reply like **"3"** no longer gets mis-classified: a context-free
+    on-device hint for it is ignored and the classifier reads the conversation.
+- **The per-run cost cap is now yours to set.** Hosted runs were silently capped
+  at a hidden **$0.50** server default that overrode your generous token limits.
+  Add **"Per-run cost cap (USD)"** in Settings → Advanced (range $0.05–$25; blank =
+  the $0.50 default). Clarified that per-tier "Max tokens" is a **per-call** output
+  limit, not a whole-run budget.
+- **You can delete chats.** Cloud web: the per-chat trash is always visible, plus
+  **"Clear all chats"** (with `DELETE /api/conversations`). Desktop: the per-session
+  trash is discoverable without hovering, and **Settings → Data → "Clear all chat
+  history"** wipes every session.
+
+### Added
+- **History-preserving project knowledge (undo a bad fact).** The world-state fact
+  store no longer destroys a value when it changes — the prior value is archived
+  (still AES-256-GCM encrypted) on every overwrite, delete, clear, and cross-machine
+  import. The desktop **Insights → Knowledge** tab gains a per-fact **history** view
+  with **Restore**, so one noisy extraction can't permanently clobber a correct fact.
+- **Distinct GPT-5 point releases in routing.** `gpt-5.5` ("Spud", the current
+  SWE-bench leader at 88.7%), `gpt-5.4`, and `gpt-5.4-mini` now route as their **own**
+  families with their own benchmark scores + pricing (Azure deployments too) instead
+  of folding into `gpt-5` — so Cascade Auto stops treating a 5.4 deployment like a
+  5.4-mini. The benchmark aggregator now defaults to **robust** mode (drops one low
+  outlier when ≥3 sources cover a cell).
+- **Remember chats as Memory (opt-in).** Off by default. When enabled, a finished
+  chat is distilled into durable memories/facts your future runs will see — cloud
+  (Settings → Privacy → "Remember chats in Memory") and desktop (Settings → Advanced
+  → "Remember sessions"). Distilled facts are undoable from the Knowledge tab, and
+  you prune cloud memories from the Memory panel as usual.
+
 ## 0.38.0 - 2026-07-21
 
 ### Added

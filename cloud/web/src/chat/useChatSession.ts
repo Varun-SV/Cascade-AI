@@ -3,7 +3,7 @@ import type { Socket } from 'socket.io-client';
 import type { ProviderConfig, WhyReport } from '../lib/types.js';
 import {
   localModelEnabled, fastAnswerModel, tierParams, extendedContext, shareLearning,
-  maxTokensPerRun, defaultRoutingBias, defaultWebSearch,
+  maxTokensPerRun, maxCostPerRunUsd, rememberSessions, defaultRoutingBias, defaultWebSearch,
 } from '../lib/prefs.js';
 import { detectLocalModelCapability } from '../lib/localModel/capability.js';
 import { warmLocalModel } from '../lib/localModel/engine.js';
@@ -302,6 +302,10 @@ export function useChatSession(
             shareLearning: shareLearning(),
             // Hard per-run token ceiling (0 = server/SDK default).
             maxTokensPerRun: maxTokensPerRun() || undefined,
+            // Hard per-run cost cap in USD (0 = server default safety rail).
+            maxCostPerRunUsd: maxCostPerRunUsd() || undefined,
+            // Opt-in: distill this chat into persistent memories after the run.
+            rememberSession: rememberSessions() || undefined,
           },
           onAck,
         );
@@ -350,12 +354,18 @@ export function useChatSession(
       // degrades the run. A pinned tier (forceTier) makes the hint moot, so skip.
       // A fast answer is a single direct call — no need to classify complexity.
       if (!fast && forceTier === 'auto' && localModelEnabled() && detectLocalModelCapability().supported) {
-        void classifyLocalComplexity(text).then((hint) => emitRun(hint ?? undefined)).catch(() => emitRun());
+        // Give the tiny on-device model the last assistant turn as context —
+        // a terse follow-up like "3" is meaningless in a vacuum, and a
+        // context-free verdict routed one-character replies into full builds.
+        const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+        void classifyLocalComplexity(text, lastAssistant?.content)
+          .then((hint) => emitRun(hint ?? undefined))
+          .catch(() => emitRun());
       } else {
         emitRun();
       }
     },
-    [socket, busy, conversationId, providers, skillId, routingMode, forceTier, webSearch, webSearchConfig],
+    [socket, busy, conversationId, providers, skillId, routingMode, forceTier, webSearch, webSearchConfig, messages],
   );
 
   const send = useCallback((input: SendInput) => runChat(input.prompt, input.attachments, true, input.fast), [runChat]);

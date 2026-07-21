@@ -15,13 +15,18 @@ const DEFAULT_AZURE_API_VERSION = '2024-12-01-preview';
 /**
  * Best-effort guess of the canonical base model an Azure deployment backs, from
  * its (arbitrary) deployment name. Ordered most-specific → least so "gpt-5-mini"
- * doesn't match the "gpt-5" base, and point releases (gpt-5.4) fold into gpt-5.
+ * doesn't match the "gpt-5" base. Distinct point releases (gpt-5.5, gpt-5.4,
+ * gpt-5.4-mini) resolve to their OWN base so their real economics + benchmark
+ * scores apply — only unrecognised gpt-5.x fold into the gpt-5 base.
  * Returns null when the name gives no signal (e.g. "prod-fast") — the caller
  * then keeps neutral defaults, or the user can set an explicit base model.
  */
 export function inferAzureBaseModel(deploymentName: string): string | null {
   const n = deploymentName.toLowerCase();
   const rules: Array<[RegExp, string]> = [
+    [/gpt-?5\.5/, 'gpt-5.5'],
+    [/gpt-?5\.4.*mini/, 'gpt-5.4-mini'],
+    [/gpt-?5\.4/, 'gpt-5.4'],
     [/gpt-?5.*nano/, 'gpt-5-nano'],
     [/gpt-?5.*mini/, 'gpt-5-mini'],
     [/gpt-?5/, 'gpt-5'],

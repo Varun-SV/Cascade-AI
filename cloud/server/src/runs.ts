@@ -11,6 +11,7 @@
 import {
   createCascade, Retriever, chunkText, embedderFromProviders,
   LLMReranker, chatCompleterFromProviders, planRetrieval,
+  distillSessionFacts, buildSessionTranscript, sessionWorthRemembering,
 } from '#cascade-ai';
 import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ProviderConfig } from '#cascade-ai';
 import fs from 'node:fs/promises';
@@ -94,6 +95,13 @@ const ChatRunPayloadSchema = z.object({
   // Hard per-run token ceiling — stops a runaway multi-agent run. Bounded so a
   // client can't ask for an absurd budget; the per-run COST cap still applies.
   maxTokensPerRun: z.number().int().min(1_000).max(2_000_000).optional(),
+  // Hard per-run cost ceiling in USD (the user pays with their own keys). When
+  // set, overrides the server's default safety rail. Bounded so a typo can't
+  // disable the guard entirely or set an absurd ceiling.
+  maxCostPerRunUsd: z.number().min(0.05).max(25).optional(),
+  // Opt-in: after the run, distill the conversation into durable memories that
+  // future runs will see. Off unless the user turns it on (privacy + cost).
+  rememberSession: z.boolean().optional(),
   webSearch: z.boolean().optional(),
   // Optional web-search backend the user configured (browser-held, like keys).
   // Whichever field is set is used — SearXNG → Brave → Tavily priority in the
@@ -320,13 +328,44 @@ export function buildRunPrompt(
   return preamble.length ? `${preamble.join('\n\n')}\n\n---\n\n${userPrompt}` : userPrompt;
 }
 
-/** Steers a hosted run (no disk tools) to deliver files as downloadable blocks. */
-const FILE_DELIVERY_GUIDANCE =
-  'File delivery: you cannot write files to disk in this environment. When the user asks you to '
-  + 'create a file or document (a report, a code file, data, etc.), output its FULL contents in a '
-  + 'fenced code block whose info string is `file:<filename.ext>` — for example:\n'
-  + '```file:report.md\n# Title\n…\n```\n'
-  + 'Use one block per file with a sensible filename and extension. The user can download or save each one.';
+/**
+ * Steers a hosted run (no disk tools) to deliver files as downloadable blocks.
+ * Deliberately contains NO fenced example — small models echoed the literal
+ * example block (a phantom `report.md`) into replies to unrelated prompts —
+ * and is only injected when the request actually looks file-shaped
+ * (see wantsFileDelivery).
+ */
+export const FILE_DELIVERY_GUIDANCE =
+  'File delivery: you cannot write files to disk in this environment. ONLY when the user explicitly '
+  + 'asks for a file, document or export (a report, a code file, a CSV, etc.), output its FULL contents '
+  + 'in a fenced code block whose info string is `file:<filename.ext>` — i.e. the opening fence line '
+  + 'reads file:report.md for a file named report.md. Use one block per file with a sensible filename '
+  + 'and extension; the user can download or save each one. For every other request, answer in plain '
+  + 'prose or ordinary code blocks — never emit a file: block the user did not ask for.';
+
+/**
+ * Should this turn carry the file-delivery guidance? True when the user's own
+ * text (or the active skill) plausibly asks for a file/document/export, or when
+ * the previous assistant turn already delivered a `file:` block (so follow-up
+ * edits like "change the title" keep the format). Reads ONLY the raw user
+ * prompt + skill — never memories or the augmented prompt, which would
+ * re-trigger it forever after one file-ish memory.
+ */
+export function wantsFileDelivery(
+  userPrompt: string,
+  skillSystemPrompt?: string,
+  history?: Array<{ role: string; content: unknown }>,
+): boolean {
+  const FILEISH =
+    /\b(files?|documents?|reports?|export(?:ed|able)?|csv|spreadsheet|pdf|docx?|xlsx?|markdown|download(?:able)?|save (?:it|this|that|as)|write (?:up|out|to)|deliverable)\b|\.(?:md|txt|csv|json|pdf|html?|docx?|xlsx?)\b/i;
+  if (FILEISH.test(userPrompt)) return true;
+  if (skillSystemPrompt && FILEISH.test(skillSystemPrompt)) return true;
+  const lastAssistant = [...(history ?? [])].reverse().find((m) => m.role === 'assistant');
+  if (lastAssistant && typeof lastAssistant.content === 'string' && lastAssistant.content.includes('```file:')) {
+    return true;
+  }
+  return false;
+}
 
 /** Below this total document size, inject everything (CAG); above it, retrieve. */
 const DOC_CAG_CHAR_BUDGET = 24_000; // ~6k tokens
@@ -493,9 +532,14 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   if (userSkill) store.incrementSkillUsage(userSkill.id, userId);
   const skillSystemPrompt = builtinSkill?.systemPrompt || userSkill?.systemPrompt || undefined;
   const memories = store.listMemories(userId).map((m) => m.content);
-  // A hosted run can't write files to disk; steer it to deliver any file/document
-  // as a `file:`-tagged fenced block so the web can turn it into a download.
-  const systemGuidance = [FILE_DELIVERY_GUIDANCE, skillSystemPrompt].filter(Boolean).join('\n\n');
+  // A hosted run can't write files to disk; when the request actually looks
+  // file-shaped, steer it to deliver files as `file:`-tagged fenced blocks so
+  // the web can turn them into downloads. Injecting this on EVERY turn made
+  // small models echo the guidance as phantom files on a bare "hi".
+  const fileGuidance = wantsFileDelivery(payload.prompt, skillSystemPrompt, conversationHistory)
+    ? FILE_DELIVERY_GUIDANCE
+    : undefined;
+  const systemGuidance = [fileGuidance, skillSystemPrompt].filter(Boolean).join('\n\n');
   const runPrompt = buildRunPrompt(payload.prompt, systemGuidance, memories, documents);
 
   const scratchDir = tenantScratchDir(env, userId);
@@ -514,7 +558,10 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // no orchestration/tools, so skip MCP there.
   const mcpServers = payload.fastAnswer ? [] : await resolveRunMcpServers(store, userId, env.SESSION_SECRET);
 
-  const config = buildCloudConfig(payload.providers as ProviderConfig[], env.MAX_COST_PER_RUN_USD, {
+  // The user can raise/lower the per-run cost cap (their own keys pay); fall
+  // back to the server's safety-rail default when they haven't set one.
+  const costCap = payload.maxCostPerRunUsd ?? env.MAX_COST_PER_RUN_USD;
+  const config = buildCloudConfig(payload.providers as ProviderConfig[], costCap, {
     routingMode: payload.routingMode,
     forceTier: payload.forceTier,
     webSearch: payload.webSearch,
@@ -580,6 +627,9 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   try {
     const result = await cascade.run({
       prompt: runPrompt,
+      // Routing must see the user's actual message, not the augmented prompt —
+      // otherwise the prepended guidance/memories make even "hi" read Complex.
+      routingPrompt: payload.prompt,
       images: images.length ? images : undefined,
       conversationHistory,
       workspacePath: scratchDir,
@@ -634,6 +684,27 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     const cancelled = signal?.aborted ?? false;
     socket.emit('run:why', { conversationId: conversation.id, messageId: assistantMessage.id, ...why });
     socket.emit('session:complete', { conversationId: conversation.id, result, cancelled });
+
+    // Opt-in session → memory: distill the conversation into durable memories the
+    // user's future runs will see (they're injected via buildRunPrompt). Best-
+    // effort and non-blocking; skips trivial exchanges. The user manages/prunes
+    // these from the Memory panel exactly like hand-added ones.
+    if (payload.rememberSession && !cancelled && sessionWorthRemembering(conversationHistory, payload.prompt, result.output)) {
+      void (async () => {
+        try {
+          const transcript = buildSessionTranscript(conversationHistory, payload.prompt, result.output);
+          const facts = await distillSessionFacts(transcript, async (p) => {
+            const r = await cascade.getRouter().generate('T3', { messages: [{ role: 'user', content: p }], maxTokens: 300, temperature: 0 });
+            return r.content;
+          });
+          const existing = new Set(store.listMemories(userId).map((m) => m.content));
+          for (const f of facts) {
+            const content = `${f.entity} ${f.relation} ${f.value}`.slice(0, 2000);
+            if (!existing.has(content)) { store.addMemory(userId, content, 'session'); existing.add(content); }
+          }
+        } catch { /* best-effort — never affects the run */ }
+      })();
+    }
     return {
       conversationId: conversation.id,
       output: result.output,

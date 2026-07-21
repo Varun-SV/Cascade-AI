@@ -1,6 +1,7 @@
 // world-state v2 — queryable fact store + T1 consumption.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { WorldStateDB } from './world-state.js';
@@ -99,6 +100,63 @@ describe('WorldStateDB v2 — facts', () => {
     expect(db.clearFacts()).toBe(2);
     expect(db.getAllFacts()).toHaveLength(0);
     expect(db.clearFacts()).toBe(0);
+  });
+});
+
+describe('WorldStateDB v3 — history-preserving writes + undo', () => {
+  it('archives the prior value when a fact is overwritten', () => {
+    db.upsertFact('user', 'prefers_theme', 'light', 't3-a');
+    db.upsertFact('user', 'prefers_theme', 'dark', 't3-b');
+    // Current read is unchanged — only the newest value is "current".
+    expect(db.getAllFacts()).toHaveLength(1);
+    expect(db.getFactsForEntities(['user'])[0]!.value).toBe('dark');
+    // History has the superseded value.
+    const hist = db.getFactHistory('user', 'prefers_theme');
+    expect(hist).toHaveLength(1);
+    expect(hist[0]).toMatchObject({ value: 'light', change: 'update' });
+  });
+
+  it('does NOT archive when the same value is re-observed', () => {
+    db.upsertFact('svc', 'runtime', 'node', 't3');
+    db.upsertFact('svc', 'runtime', 'node', 't3'); // identical
+    expect(db.getFactHistory('svc', 'runtime')).toHaveLength(0);
+  });
+
+  it('archives on delete and on clear', () => {
+    db.upsertFact('a', 'r', 'one', 't3');
+    expect(db.deleteFact('a', 'r')).toBe(true);
+    expect(db.getFactHistory('a', 'r')).toMatchObject([{ value: 'one', change: 'delete' }]);
+
+    db.upsertFact('b', 'r', 'two', 't3');
+    db.clearFacts();
+    expect(db.getFactHistory('b', 'r')).toMatchObject([{ value: 'two', change: 'clear' }]);
+  });
+
+  it('covers the importKnowledge newer-wins overwrite path', () => {
+    db.upsertFact('doc', 'status', 'draft', 't3', '2026-01-01T00:00:00Z');
+    db.importKnowledge({ facts: [{ entity: 'doc', relation: 'status', value: 'final', timestamp: '2026-06-01T00:00:00Z' }] });
+    expect(db.getFactsForEntities(['doc'])[0]!.value).toBe('final');
+    expect(db.getFactHistory('doc', 'status')).toMatchObject([{ value: 'draft' }]);
+  });
+
+  it('restoreFact brings back a prior value and is itself undoable', () => {
+    db.upsertFact('user', 'city', 'Chennai', 't3');
+    db.upsertFact('user', 'city', 'Bangalore', 't3'); // a bad extraction
+    expect(db.restoreFact('user', 'city')).toBe(true);
+    expect(db.getFactsForEntities(['user'])[0]!.value).toBe('Chennai');
+    // The wrong value (Bangalore) is now itself in history, so the undo is undoable.
+    expect(db.getFactHistory('user', 'city').some((h) => h.value === 'Bangalore')).toBe(true);
+  });
+
+  it('keeps history values encrypted at rest (no plaintext in the DB file)', () => {
+    db.upsertFact('secret', 'token', 'HUNTER2', 't3');
+    db.upsertFact('secret', 'token', 'ROTATED', 't3');
+    db.close();
+    // Read the raw SQLite bytes — the archived value must not appear in plaintext.
+    const raw = readFileSync(path.join(ws, '.cascade', 'world_state.db'));
+    expect(raw.includes(Buffer.from('HUNTER2'))).toBe(false);
+    // Re-open for afterEach's close() to succeed.
+    db = new WorldStateDB(ws);
   });
 });
 

@@ -804,8 +804,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     let currentStreamBuffer = '';
     let streamThrottleTimeout: NodeJS.Timeout | null = null;
     const flushStream = () => { if (currentStreamBuffer) { dispatch({ type: 'APPEND_STREAM', text: currentStreamBuffer }); currentStreamBuffer = ''; } streamThrottleTimeout = null; };
-    const onStream = ({ text, tierId }: { text: string; tierId: string }) => {
-      if (tierId !== rootTierIdRef.current) return; // Hide non-root streams from main chat
+    const onStream = ({ text, tierId, primary }: { text: string; tierId: string; primary?: boolean }) => {
+      // Hide non-root streams from main chat — except tokens the orchestrator
+      // marks primary (the fast-answer path streams as 'fast', never as root).
+      if (tierId !== rootTierIdRef.current && primary !== true) return;
       currentStreamBuffer += (text ?? '');
       if (!streamThrottleTimeout) streamThrottleTimeout = setTimeout(flushStream, 50);
     };

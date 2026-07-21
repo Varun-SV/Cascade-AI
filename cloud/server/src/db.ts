@@ -809,6 +809,22 @@ export class CloudStore {
     return true;
   }
 
+  /** Delete every conversation for a user (owner-scoped). Returns the count removed. */
+  deleteAllConversations(userId: string): number {
+    const before = this.db.prepare('SELECT COUNT(*) AS n FROM conversations WHERE user_id = ?').get(userId) as { n: number };
+    const tx = this.db.transaction(() => {
+      this.db.prepare(
+        'DELETE FROM attachments WHERE message_id IN (SELECT m.id FROM messages m JOIN conversations c ON m.conversation_id = c.id WHERE c.user_id = ?)',
+      ).run(userId);
+      this.db.prepare(
+        'DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id = ?)',
+      ).run(userId);
+      this.db.prepare('DELETE FROM conversations WHERE user_id = ?').run(userId);
+    });
+    tx();
+    return before.n;
+  }
+
   private deserializeFile(row: DbFileRow): CloudFile {
     return {
       id: row.id,

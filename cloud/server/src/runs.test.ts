@@ -38,6 +38,19 @@ describe('buildCloudConfig', () => {
     expect(config.budget?.maxCostPerRunUsd).toBe(1.23);
   });
 
+  it('accepts a client-supplied cost cap within bounds and rejects out-of-range values', () => {
+    // A user-set cap flows through parse → buildCloudConfig.
+    const ok = parseChatRunPayload({
+      prompt: 'hi', maxCostPerRunUsd: 5,
+      providers: [{ type: 'openai', apiKey: 'k' }],
+    });
+    expect(ok.maxCostPerRunUsd).toBe(5);
+    expect(buildCloudConfig([], ok.maxCostPerRunUsd!).budget?.maxCostPerRunUsd).toBe(5);
+    // Bounds: below the floor and above the ceiling are rejected.
+    expect(() => parseChatRunPayload({ prompt: 'hi', maxCostPerRunUsd: 0.01, providers: [{ type: 'openai', apiKey: 'k' }] })).toThrow();
+    expect(() => parseChatRunPayload({ prompt: 'hi', maxCostPerRunUsd: 999, providers: [{ type: 'openai', apiKey: 'k' }] })).toThrow();
+  });
+
   it('registers NO tools when webSearch is off (pure chat)', () => {
     const config = buildCloudConfig([], 0.5, { webSearch: false });
     const registry = new ToolRegistry(config.tools as ConstructorParameters<typeof ToolRegistry>[0], '/tmp');
@@ -276,8 +289,9 @@ describe('runChatTurn (stub-provider integration)', () => {
     const user = store.upsertUser({ provider: 'dev', providerId: 'tester', email: null, name: 'Tester', avatar: null });
     const socket = new FakeSocket();
 
-    // "hello" hits Cascade's casual-greeting heuristic and routes straight to
-    // T3 with no classifier call — keeps this test to a single stub round trip.
+    // "hello" is pure small talk: the server passes routingPrompt (the bare
+    // user text, not the augmented prompt), the small-talk gate fires, and the
+    // whole turn is ONE direct model call — no workers, no classifier.
     const payload = parseChatRunPayload({
       prompt: 'hello',
       providers: [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }],
@@ -301,6 +315,9 @@ describe('runChatTurn (stub-provider integration)', () => {
     // confirms the run actually went through the real provider HTTP client.
     expect(stub.requestLog.some((r) => r.includes('models'))).toBe(true);
     expect(stub.requestLog.some((r) => r.includes('chat/completions'))).toBe(true);
+    // Small talk must stay a single direct call — a second completion means a
+    // worker/classifier snuck back into the greeting path.
+    expect(stub.requestLog.filter((r) => r.includes('chat/completions')).length).toBe(1);
   }, 30_000);
 
   it('marks the run cancelled and still persists partial output when the signal aborts', async () => {

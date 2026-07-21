@@ -7,6 +7,9 @@
   "scale": "index0-100",
   "note": "Artificial Analysis publishes a 0-100 Intelligence Index; these per-category values are maintainer-approximated SEED numbers (the site blocks automated fetch, so capture is manual) and should be replaced with real reads from the cited URL. Values are on a 0-100 quality scale, used as-is.",
   "models": {
+    "gpt-5.5":          { "code": 97, "analysis": 96, "creative": 94, "data": 95 },
+    "gpt-5.4":          { "code": 94, "analysis": 94, "creative": 92, "data": 92 },
+    "gpt-5.4-mini":     { "code": 86, "analysis": 85, "creative": 85, "data": 83 },
     "claude-opus":      { "code": 95, "analysis": 93, "creative": 90, "data": 89 },
     "claude-sonnet":    { "code": 93, "analysis": 89, "creative": 88, "data": 86 },
     "claude-haiku":     { "code": 81, "analysis": 76, "creative": 77, "data": 73 },

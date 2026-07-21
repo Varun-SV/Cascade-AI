@@ -153,7 +153,10 @@ async function main() {
   if (process.env.BENCHMARK_AGG !== 'off') {
     const sources = await loadSources();
     if (sources.length > 0) {
-      const mode = process.env.BENCHMARK_AGG_MODE === 'robust' ? 'robust' : 'min';
+      // Default 'robust' (drop one low outlier when ≥3 sources cover a cell) so a
+      // single mis-captured number can't tank a model; BENCHMARK_AGG_MODE=min
+      // forces the stricter pure-lowest.
+      const mode = process.env.BENCHMARK_AGG_MODE === 'min' ? 'min' : 'robust';
       const { families, trace } = buildFamilies(sources, { mode, base: currentFamilies });
       nextFamilies = families;
       usedAggregator = true;

@@ -5,7 +5,12 @@ import type { ModelInfo } from '../types.js';
 
 describe('inferAzureBaseModel', () => {
   it('maps deployment names to canonical base models, most-specific first', () => {
-    expect(inferAzureBaseModel('gpt-5.4')).toBe('gpt-5');
+    // Distinct point releases resolve to their OWN base (no longer folded).
+    expect(inferAzureBaseModel('gpt-5.5')).toBe('gpt-5.5');
+    expect(inferAzureBaseModel('gpt-5.4')).toBe('gpt-5.4');
+    expect(inferAzureBaseModel('gpt-5.4-mini')).toBe('gpt-5.4-mini');
+    // An unrecognised point release still folds into the gpt-5 base.
+    expect(inferAzureBaseModel('gpt-5.3')).toBe('gpt-5');
     expect(inferAzureBaseModel('gpt-5-mini')).toBe('gpt-5-mini');
     expect(inferAzureBaseModel('gpt5nano-prod')).toBe('gpt-5-nano');
     expect(inferAzureBaseModel('my-gpt-4o-deploy')).toBe('gpt-4o');
@@ -20,14 +25,23 @@ describe('inferAzureBaseModel', () => {
 describe('azureModelForDeployment — base-model economics', () => {
   it('inherits the inferred base model economics but keeps the deployment id', () => {
     const m = azureModelForDeployment({ type: 'azure', deploymentName: 'gpt-5.4', label: 'Prod' })!;
-    const base = MODELS['gpt-5']!;
-    expect(m.id).toBe('gpt-5.4');        // still callable by deployment name
-    expect(m.baseModelId).toBe('gpt-5'); // real identity for benchmark + pricing
+    const base = MODELS['gpt-5.4']!;
+    expect(m.id).toBe('gpt-5.4');          // still callable by deployment name
+    expect(m.baseModelId).toBe('gpt-5.4'); // resolves to its OWN base now
     expect(m.provider).toBe('azure');
     expect(m.contextWindow).toBe(base.contextWindow);
     expect(m.inputCostPer1kTokens).toBe(base.inputCostPer1kTokens);
     expect(m.outputCostPer1kTokens).toBe(base.outputCostPer1kTokens);
     expect(m.isVisionCapable).toBe(base.isVisionCapable);
+  });
+
+  it('distinguishes gpt-5.4 from gpt-5.4-mini (the reported mis-route)', () => {
+    const full = azureModelForDeployment({ type: 'azure', deploymentName: 'gpt-5.4', label: 'Full' })!;
+    const mini = azureModelForDeployment({ type: 'azure', deploymentName: 'gpt-5.4-mini', label: 'Mini' })!;
+    expect(full.baseModelId).toBe('gpt-5.4');
+    expect(mini.baseModelId).toBe('gpt-5.4-mini');
+    // The full model must be the pricier (more capable) of the two.
+    expect(full.outputCostPer1kTokens).toBeGreaterThan(mini.outputCostPer1kTokens);
   });
 
   it('lets an explicit cfg.model override the inference', () => {

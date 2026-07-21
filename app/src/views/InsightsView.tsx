@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   BarChart3, CalendarClock, ShieldCheck, RefreshCcw, Plus, Trash2, Play, Pause,
   Coins, Cpu, MessageSquare, ListChecks, Table2, ShieldAlert, ChevronDown, ChevronRight,
-  Brain, Search, X,
+  Brain, Search, X, History, RotateCcw,
 } from 'lucide-react';
 import { useAppSelector } from '../store/index.js';
 import { HelpButton } from '../help/HelpButton.js';
@@ -636,6 +636,8 @@ function KnowledgeTab() {
   const [query, setQuery] = useState('');
   const [confirmClear, setConfirmClear] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [historyKey, setHistoryKey] = useState<string | null>(null);
+  const [history, setHistory] = useState<Array<{ value: string; sourceWorker: string; validFrom: string; validTo: string; change: string }>>([]);
 
   const load = useCallback(() => {
     api('/api/knowledge')
@@ -664,6 +666,31 @@ function KnowledgeTab() {
       setFacts([]);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const toggleHistory = async (f: WorldFact) => {
+    const key = `${f.entity}|${f.relation}`;
+    if (historyKey === key) { setHistoryKey(null); setHistory([]); return; }
+    try {
+      const d = await api(`/api/knowledge/fact/history?entity=${encodeURIComponent(f.entity)}&relation=${encodeURIComponent(f.relation)}`);
+      setHistory((d as unknown as { history: typeof history }).history ?? []);
+      setHistoryKey(key);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const restore = async (f: WorldFact, validFrom: string) => {
+    setBusyKey(`${f.entity}|${f.relation}`);
+    try {
+      await api('/api/knowledge/fact/restore', { method: 'POST', body: JSON.stringify({ entity: f.entity, relation: f.relation, validFrom }) });
+      setHistoryKey(null); setHistory([]);
+      load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyKey(null);
     }
   };
 
@@ -728,24 +755,59 @@ function KnowledgeTab() {
         <div style={{ border: '1px solid var(--border)', borderRadius: 10, overflow: 'hidden' }}>
           {visible.map((f) => {
             const key = `${f.entity}|${f.relation}`;
+            const open = historyKey === key;
             return (
-              <div key={key} style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '8px 12px', borderBottom: '1px solid var(--border)', background: 'var(--bg-surface)', fontSize: 12 }}>
-                <span style={{ fontWeight: 600, color: 'var(--t1)', flexShrink: 0, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={f.entity}>{f.entity}</span>
-                <span style={{ color: 'var(--text-dim)', flexShrink: 0, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={f.relation}>{f.relation}</span>
-                <span style={{ color: 'var(--text)', flex: 1, minWidth: 0, wordBreak: 'break-word' }}>{f.value}</span>
-                <span style={{ color: 'var(--text-dim)', fontSize: 10, flexShrink: 0 }} title={`${f.sourceWorker} · ${new Date(f.timestamp).toLocaleString()}`}>
-                  {new Date(f.timestamp).toLocaleDateString()}
-                </span>
-                <button
-                  onClick={() => void removeFact(f)}
-                  disabled={busyKey === key}
-                  title="Delete this fact"
-                  style={{ background: 'none', border: 'none', cursor: busyKey === key ? 'wait' : 'pointer', color: 'var(--text-dim)', padding: 2, display: 'flex', flexShrink: 0, alignSelf: 'center' }}
-                  onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--danger)'; }}
-                  onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text-dim)'; }}
-                >
-                  <X size={12} />
-                </button>
+              <div key={key} style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '8px 12px', fontSize: 12 }}>
+                  <span style={{ fontWeight: 600, color: 'var(--t1)', flexShrink: 0, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={f.entity}>{f.entity}</span>
+                  <span style={{ color: 'var(--text-dim)', flexShrink: 0, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={f.relation}>{f.relation}</span>
+                  <span style={{ color: 'var(--text)', flex: 1, minWidth: 0, wordBreak: 'break-word' }}>{f.value}</span>
+                  <span style={{ color: 'var(--text-dim)', fontSize: 10, flexShrink: 0 }} title={`${f.sourceWorker} · ${new Date(f.timestamp).toLocaleString()}`}>
+                    {new Date(f.timestamp).toLocaleDateString()}
+                  </span>
+                  <button
+                    onClick={() => void toggleHistory(f)}
+                    title="View change history / restore a prior value"
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: open ? 'var(--accent)' : 'var(--text-dim)', padding: 2, display: 'flex', flexShrink: 0, alignSelf: 'center' }}
+                    onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--accent)'; }}
+                    onMouseLeave={(e) => { if (!open) (e.currentTarget as HTMLElement).style.color = 'var(--text-dim)'; }}
+                  >
+                    <History size={12} />
+                  </button>
+                  <button
+                    onClick={() => void removeFact(f)}
+                    disabled={busyKey === key}
+                    title="Delete this fact"
+                    style={{ background: 'none', border: 'none', cursor: busyKey === key ? 'wait' : 'pointer', color: 'var(--text-dim)', padding: 2, display: 'flex', flexShrink: 0, alignSelf: 'center' }}
+                    onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--danger)'; }}
+                    onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text-dim)'; }}
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+                {open && (
+                  <div style={{ padding: '4px 12px 10px 20px', background: 'var(--bg)', fontSize: 11 }}>
+                    {history.length === 0 ? (
+                      <div style={{ color: 'var(--text-dim)', padding: '4px 0' }}>No prior values — this fact has never changed.</div>
+                    ) : history.map((h, i) => (
+                      <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', borderBottom: i < history.length - 1 ? '1px solid var(--border)' : 'none' }}>
+                        <span style={{ color: 'var(--text-dim)', fontSize: 9.5, width: 46, flexShrink: 0, textTransform: 'uppercase' }}>{h.change}</span>
+                        <span style={{ color: 'var(--text-muted)', flex: 1, minWidth: 0, wordBreak: 'break-word', textDecoration: 'line-through' }}>{h.value}</span>
+                        <span style={{ color: 'var(--text-dim)', fontSize: 9.5, flexShrink: 0 }} title={`until ${new Date(h.validTo).toLocaleString()}`}>{new Date(h.validTo).toLocaleDateString()}</span>
+                        <button
+                          onClick={() => void restore(f, h.validFrom)}
+                          disabled={busyKey === key}
+                          title="Restore this value as the current fact"
+                          style={{ display: 'flex', alignItems: 'center', gap: 4, background: 'none', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text-muted)', padding: '2px 7px', fontSize: 10, cursor: busyKey === key ? 'wait' : 'pointer', flexShrink: 0 }}
+                          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--accent)'; }}
+                          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text-muted)'; }}
+                        >
+                          <RotateCcw size={10} /> Restore
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             );
           })}

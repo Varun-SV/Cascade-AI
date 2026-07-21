@@ -10,7 +10,9 @@ import {
   localModelEnabled, setLocalModelEnabled, reduceMotionEnabled, setReduceMotionEnabled,
   fastAnswerModel, setFastAnswerModel, tierParams, setTierParams,
   extendedContext, setExtendedContext, shareLearning, setShareLearning,
-  maxTokensPerRun, setMaxTokensPerRun, defaultRoutingBias, setDefaultRoutingBias,
+  rememberSessions, setRememberSessions,
+  maxTokensPerRun, setMaxTokensPerRun, maxCostPerRunUsd, setMaxCostPerRunUsd,
+  defaultRoutingBias, setDefaultRoutingBias,
   defaultWebSearch, setDefaultWebSearch,
   type ThemeMode, type Density, type UiMode, type TierParams, type TierParam, type ExtendedContextPref, type RoutingBias,
 } from '../lib/prefs.js';
@@ -162,7 +164,9 @@ export default function SettingsModal({
   const [params, setParams] = useState<TierParams>(() => tierParams());
   const [extCtx, setExtCtx] = useState<ExtendedContextPref>(() => extendedContext());
   const [share, setShare] = useState<boolean>(() => shareLearning());
+  const [remember, setRemember] = useState<boolean>(() => rememberSessions());
   const [maxRunTokens, setMaxRunTokens] = useState<number>(() => maxTokensPerRun());
+  const [maxRunCost, setMaxRunCost] = useState<number>(() => maxCostPerRunUsd());
   const [routingBias, setRoutingBias] = useState<RoutingBias>(() => defaultRoutingBias());
   const [webDefault, setWebDefault] = useState<boolean>(() => defaultWebSearch());
   const isPro = user.plan === 'pro';
@@ -373,13 +377,14 @@ export default function SettingsModal({
               <SlidersHorizontal size={12} /> Model parameters
             </p>
             <p className="mb-1 text-xs text-ink-400">
-              Per-tier output limit and sampling temperature. Blank = the model's default.
-              Applied to that tier's calls across the orchestration.
+              Per-tier limit on a <strong>single model call</strong> (its output ceiling) and sampling
+              temperature. Blank = the model's default. This is not a whole-run budget — for that,
+              see "Max tokens per run" and "Per-run cost cap" below.
             </p>
             <div className="rounded-lg border border-elev/10 bg-elev/[0.03] px-3 py-2">
               <div className="flex items-center gap-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-ink-500">
                 <span className="w-16">Tier</span>
-                <span className="w-24">Max tokens</span>
+                <span className="w-24">Max tokens/call</span>
                 <span className="w-24">Temperature</span>
               </div>
               {TIERS.map((t) => (
@@ -438,32 +443,66 @@ export default function SettingsModal({
                 />
               }
             />
+
+            <Row
+              icon={<Gauge size={15} />}
+              title="Per-run cost cap (USD)"
+              subtitle="A single run stops once its estimated spend reaches this, so a runaway multi-agent run can't drain your API budget. You pay providers directly with your own keys. Blank = the default ($0.50). Range $0.05–$25."
+              right={
+                <input
+                  type="number" min={0.05} max={25} step={0.05} inputMode="decimal"
+                  aria-label="Per-run cost cap in USD"
+                  value={maxRunCost || ''}
+                  onChange={(e) => {
+                    const v = e.target.value.trim() === '' ? 0 : Math.max(0, Number(e.target.value));
+                    setMaxRunCost(v);
+                    setMaxCostPerRunUsd(v);
+                  }}
+                  placeholder="0.50"
+                  className="w-28 shrink-0 rounded-md border border-elev/10 bg-elev/[0.04] px-2.5 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-500 focus:border-accent-500/40"
+                />
+              }
+            />
           </>
         )}
 
         {tab === 'privacy' && (
-          <Row
-            icon={<LineChart size={15} />}
-            title="Improve routing for everyone"
-            subtitle={
-              isPro
-                ? 'Contribute anonymous outcome stats (model, task type, success/failure, size) so Cascade routes smarter over time. No prompts or content are ever stored.'
-                : 'Anonymous outcome stats (model, task type, success/failure, size) help Cascade route smarter over time. No prompts or content are stored. Included on the free plan; upgrade to Pro to opt out.'
-            }
-            right={
-              isPro ? (
+          <>
+            <Row
+              icon={<Brain size={15} />}
+              title="Remember chats in Memory"
+              subtitle="Opt-in: after a chat, Cascade distills durable facts (your preferences, project details) into Memory so future chats remember them. Off by default — you manage and delete these in the Memory panel."
+              right={
                 <Toggle
-                  on={share}
-                  onChange={(v) => { setShare(v); setShareLearning(v); }}
-                  label="Share anonymous performance data"
+                  on={remember}
+                  onChange={(v) => { setRemember(v); setRememberSessions(v); }}
+                  label="Remember chats in Memory"
                 />
-              ) : (
-                <span className="shrink-0 rounded bg-elev/[0.06] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-400">
-                  Always on
-                </span>
-              )
-            }
-          />
+              }
+            />
+            <Row
+              icon={<LineChart size={15} />}
+              title="Improve routing for everyone"
+              subtitle={
+                isPro
+                  ? 'Contribute anonymous outcome stats (model, task type, success/failure, size) so Cascade routes smarter over time. No prompts or content are ever stored.'
+                  : 'Anonymous outcome stats (model, task type, success/failure, size) help Cascade route smarter over time. No prompts or content are stored. Included on the free plan; upgrade to Pro to opt out.'
+              }
+              right={
+                isPro ? (
+                  <Toggle
+                    on={share}
+                    onChange={(v) => { setShare(v); setShareLearning(v); }}
+                    label="Share anonymous performance data"
+                  />
+                ) : (
+                  <span className="shrink-0 rounded bg-elev/[0.06] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-400">
+                    Always on
+                  </span>
+                )
+              }
+            />
+          </>
         )}
       </div>
     </Modal>

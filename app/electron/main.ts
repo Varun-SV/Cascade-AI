@@ -486,6 +486,7 @@ function registerIPC(): void {
       benchmarksLive: cascadeConfig?.benchmarks?.live,
       dynamicToolSandbox: cascadeConfig?.tools?.dynamicToolSandbox,
       factsExtraction: cascadeConfig?.knowledge?.factsExtraction,
+      rememberSessions: cascadeConfig?.memory?.rememberSessions,
       enableToolCreation: cascadeConfig?.enableToolCreation,
       persistDynamicTools: cascadeConfig?.persistDynamicTools,
       telemetryEnabled: cascadeConfig?.telemetry?.enabled,
@@ -646,6 +647,7 @@ function registerIPC(): void {
         if (typeof a['benchmarksLive'] === 'boolean') cascadeConfig.benchmarks = { ...(cascadeConfig.benchmarks ?? {}), live: a['benchmarksLive'] };
         if (['isolate', 'worker', 'auto'].includes(a['dynamicToolSandbox'] as string)) cascadeConfig.tools = { ...(cascadeConfig.tools ?? {}), dynamicToolSandbox: a['dynamicToolSandbox'] };
         if (typeof a['factsExtraction'] === 'boolean') cascadeConfig.knowledge = { ...(cascadeConfig.knowledge ?? {}), factsExtraction: a['factsExtraction'] };
+        if (typeof a['rememberSessions'] === 'boolean') cascadeConfig.memory = { ...(cascadeConfig.memory ?? {}), rememberSessions: a['rememberSessions'] };
         if (typeof a['enableToolCreation'] === 'boolean') cascadeConfig.enableToolCreation = a['enableToolCreation'];
         if (typeof a['persistDynamicTools'] === 'boolean') cascadeConfig.persistDynamicTools = a['persistDynamicTools'];
         if (typeof a['telemetryEnabled'] === 'boolean') cascadeConfig.telemetry = { ...(cascadeConfig.telemetry ?? {}), enabled: a['telemetryEnabled'] };
