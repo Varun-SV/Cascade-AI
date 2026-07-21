@@ -696,6 +696,51 @@ export class CloudStore {
     return (rows as Array<{ id: string }>).map((r) => r.id);
   }
 
+  /**
+   * Persist a locally-executed turn (from a native desktop/CLI run) into the
+   * conversation tree, applying the same branch resolution as the hosted run
+   * pipeline: a normal turn appends at the active leaf; an edit forks a sibling
+   * of the edited user turn (server-derived parent — null → a new root branch);
+   * a regenerate re-answers an existing user turn, saving the reply as a sibling
+   * of the previous answer with no new user message. Returns the new active
+   * path, or null when the conversation isn't the user's. Owner-scoped.
+   */
+  appendTurn(
+    conversationId: string,
+    userId: string,
+    input: {
+      userContent: string;
+      assistant: { content: string; model?: string | null; tier?: string | null; why?: string | null; costUsd?: number | null };
+      editOfMessageId?: string | null;
+      regenerateFromUserMessageId?: string | null;
+    },
+  ): CloudMessage[] | null {
+    const convo = this.getConversation(conversationId, userId);
+    if (!convo) return null;
+
+    const ownedUserTurn = (id?: string | null) => {
+      if (!id) return null;
+      const m = this.getMessageById(id);
+      return m && m.conversationId === conversationId && m.role === 'user' ? m : null;
+    };
+    const regen = ownedUserTurn(input.regenerateFromUserMessageId);
+    const edited = regen ? null : ownedUserTurn(input.editOfMessageId);
+    const branchParentId = regen ? regen.parentId : edited ? edited.parentId : convo.activeLeafId;
+
+    const tx = this.db.transaction(() => {
+      const userMsg = regen ?? this.addMessage({
+        conversationId, role: 'user', content: input.userContent, parentId: branchParentId,
+      });
+      this.addMessage({
+        conversationId, role: 'assistant', content: input.assistant.content, parentId: userMsg.id,
+        model: input.assistant.model ?? null, tier: input.assistant.tier ?? null,
+        why: input.assistant.why ?? null, costUsd: input.assistant.costUsd ?? null,
+      });
+    });
+    tx();
+    return this.getActivePath(conversationId);
+  }
+
   /** Follow the newest child at each step from `messageId` down to a leaf. */
   private descendToNewestLeaf(messageId: string): string {
     let cur = messageId;

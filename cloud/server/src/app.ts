@@ -38,6 +38,8 @@ const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 const MAX_MEMORY_LEN = 2000;
 const MAX_MEMORY_CATEGORY_LEN = 32;
 const MAX_TITLE_LEN = 120;
+/** Upper bound on a persisted message (well above any real turn; a light DoS rail). */
+const MAX_MESSAGE_LEN = 500_000;
 const MAX_SKILL_NAME_LEN = 60;
 const MAX_SKILL_DESC_LEN = 200;
 const MAX_SKILL_PROMPT_LEN = 8000;
@@ -431,6 +433,47 @@ export function createApp(env: CloudEnv, store: CloudStore) {
   app.get('/api/conversations', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
     const conversations = store.listConversations(req.session!.userId);
     res.json({ conversations });
+  });
+
+  // Create an empty conversation — native surfaces (desktop/CLI) open a cloud-
+  // backed session here, then persist locally-executed turns via /turns below.
+  app.post('/api/conversations', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const raw = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+    const title = raw ? raw.slice(0, MAX_TITLE_LEN) : null;
+    const conversation = store.createConversation(req.session!.userId, title);
+    res.json({ conversation: { id: conversation.id, title: conversation.title, skillId: conversation.skillId } });
+  });
+
+  // Persist a locally-executed turn into the conversation tree. The run itself
+  // ran on the client (its own keys + tools); we only store the resulting user +
+  // assistant messages, honouring the branch params (edit / regenerate). Returns
+  // the new active path so the client re-renders with authoritative sibling data.
+  app.post('/api/conversations/:id/turns', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const id = req.params['id'];
+    const body = req.body as {
+      userContent?: unknown;
+      assistant?: { content?: unknown; model?: unknown; tier?: unknown; why?: unknown; costUsd?: unknown };
+      editOfMessageId?: unknown;
+      regenerateFromUserMessageId?: unknown;
+    };
+    if (typeof id !== 'string' || typeof body?.userContent !== 'string' || typeof body?.assistant?.content !== 'string') {
+      res.status(400).json({ error: 'userContent and assistant.content are required' }); return;
+    }
+    const str = (v: unknown) => (typeof v === 'string' && v ? v : null);
+    const path = store.appendTurn(id, req.session!.userId, {
+      userContent: body.userContent.slice(0, MAX_MESSAGE_LEN),
+      assistant: {
+        content: body.assistant.content.slice(0, MAX_MESSAGE_LEN),
+        model: str(body.assistant.model),
+        tier: str(body.assistant.tier),
+        why: str(body.assistant.why),
+        costUsd: typeof body.assistant.costUsd === 'number' ? body.assistant.costUsd : null,
+      },
+      editOfMessageId: str(body.editOfMessageId),
+      regenerateFromUserMessageId: str(body.regenerateFromUserMessageId),
+    });
+    if (!path) { res.status(404).json({ error: 'Not found' }); return; }
+    res.json({ messages: serializeActivePath(id) });
   });
 
   // Rename a conversation — used by the opt-in in-browser titler and manual edits.

@@ -102,6 +102,63 @@ describe('cloud/server app', () => {
     expect(missing.status).toBe(404);
   });
 
+  it('native write API: create a cloud conversation, append turns, branch, and delete', async () => {
+    const alice = await login('Alice');
+    const bob = await login('Bob');
+    const j = { 'Content-Type': 'application/json' };
+
+    // Create a cloud-backed session.
+    const created = (await (await fetch(`${baseUrl}/api/conversations`, {
+      method: 'POST', headers: { ...j, Cookie: alice }, body: JSON.stringify({ title: 'From the CLI' }),
+    })).json()) as { conversation: { id: string; title: string } };
+    const cid = created.conversation.id;
+    expect(created.conversation.title).toBe('From the CLI');
+
+    // Append a locally-executed turn.
+    const append = (msg: Record<string, unknown>) =>
+      fetch(`${baseUrl}/api/conversations/${cid}/turns`, { method: 'POST', headers: { ...j, Cookie: alice }, body: JSON.stringify(msg) });
+    const t1 = (await (await append({ userContent: 'q1', assistant: { content: 'a1', tier: 'T3' } })).json()) as {
+      messages: Array<{ id: string; role: string; content: string; parentId: string | null; siblingIds: string[] }>;
+    };
+    expect(t1.messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+    const u1 = t1.messages[0]!;
+
+    // Edit q1 → a sibling branch; original preserved, active path shows the edit.
+    const t2 = (await (await append({ userContent: 'q1 edited', assistant: { content: 'a1b' }, editOfMessageId: u1.id })).json()) as {
+      messages: Array<{ id: string; content: string; siblingIds: string[] }>;
+    };
+    expect(t2.messages.map((m) => m.content)).toEqual(['q1 edited', 'a1b']);
+    expect(t2.messages[0]!.siblingIds).toHaveLength(2);
+
+    // Switch back to the original branch via select-branch.
+    const back = (await (await fetch(`${baseUrl}/api/conversations/${cid}/select-branch`, {
+      method: 'POST', headers: { ...j, Cookie: alice }, body: JSON.stringify({ messageId: u1.id }),
+    })).json()) as { messages: Array<{ content: string }> };
+    expect(back.messages.map((m) => m.content)).toEqual(['q1', 'a1']);
+
+    // Delete the original subtree → only the edited branch remains.
+    const del = await fetch(`${baseUrl}/api/conversations/${cid}/messages/${u1.id}`, { method: 'DELETE', headers: { Cookie: alice } });
+    const delBody = (await del.json()) as { messages: Array<{ content: string }> };
+    expect(delBody.messages.map((m) => m.content)).toEqual(['q1 edited', 'a1b']);
+
+    // Owner-scoping: Bob cannot append to Alice's conversation.
+    const bobAppend = await fetch(`${baseUrl}/api/conversations/${cid}/turns`, {
+      method: 'POST', headers: { ...j, Cookie: bob }, body: JSON.stringify({ userContent: 'x', assistant: { content: 'y' } }),
+    });
+    expect(bobAppend.status).toBe(404);
+  });
+
+  it('native write API: rejects a turn missing user or assistant content', async () => {
+    const alice = await login('Alice');
+    const created = (await (await fetch(`${baseUrl}/api/conversations`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice }, body: JSON.stringify({}),
+    })).json()) as { conversation: { id: string } };
+    const bad = await fetch(`${baseUrl}/api/conversations/${created.conversation.id}/turns`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice }, body: JSON.stringify({ userContent: 'q' }),
+    });
+    expect(bad.status).toBe(400);
+  });
+
   it('GET /api/billing reports not-configured when Razorpay env is absent', async () => {
     const alice = await login('Alice');
     const body = (await (await fetch(`${baseUrl}/api/billing`, { headers: { Cookie: alice } })).json()) as {

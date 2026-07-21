@@ -33,13 +33,37 @@ export interface DeviceStart {
 export interface CloudConversation {
   id: string;
   title: string;
+  /** Branching: leaf of the currently-selected path (null for an empty chat). */
+  activeLeafId?: string | null;
+  skillId?: string | null;
   createdAt?: number;
   updatedAt?: number;
 }
 
 export interface CloudMessage {
+  /** Present on messages read from the server; absent on minimal echoes. */
+  id?: string;
+  /** Branching: the message this replies to (null = a root turn). */
+  parentId?: string | null;
   role: string;
   content: string;
+  tier?: string | null;
+  model?: string | null;
+  costUsd?: number | null;
+  /** JSON-encoded run-explorer report, or null. */
+  why?: string | null;
+  /** Branching: ids of this message + its siblings, oldest first (for < n/m >). */
+  siblingIds?: string[];
+}
+
+/** A locally-executed turn to persist into the cloud conversation tree. */
+export interface CloudTurnInput {
+  userContent: string;
+  assistant: { content: string; tier?: string | null; model?: string | null; costUsd?: number | null; why?: string | null };
+  /** Fork a sibling of this edited user turn (server derives the parent). */
+  editOfMessageId?: string;
+  /** Re-answer this user turn (reply saved as a sibling; no new user message). */
+  regenerateFromUserMessageId?: string;
 }
 
 interface TokenResponse {
@@ -266,6 +290,57 @@ export class CloudClient {
   async getMessages(conversationId: string): Promise<CloudMessage[]> {
     const b = await this.authedGet<{ messages: CloudMessage[] }>(`/api/conversations/${encodeURIComponent(conversationId)}/messages`);
     return b.messages ?? [];
+  }
+
+  // ── Write API (cloud-backed sessions for desktop + CLI) ───
+  // Native surfaces execute runs LOCALLY (their own keys + shell/file/git tools)
+  // and persist each finished turn into the shared cloud conversation tree, so
+  // web, desktop, and CLI all show the same sessions and branching works across
+  // every surface.
+
+  /** Start a new cloud conversation and return it. */
+  async createConversation(title?: string): Promise<CloudConversation> {
+    const b = await this.authed<{ conversation: CloudConversation }>('/api/conversations', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: title ?? null }),
+    });
+    return b.conversation;
+  }
+
+  /** Persist a locally-executed turn; returns the new active path (with siblings). */
+  async appendTurn(conversationId: string, turn: CloudTurnInput): Promise<CloudMessage[]> {
+    const b = await this.authed<{ messages: CloudMessage[] }>(
+      `/api/conversations/${encodeURIComponent(conversationId)}/turns`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(turn) },
+    );
+    return b.messages ?? [];
+  }
+
+  /** Branching: switch the active path to a sibling; returns the new path. */
+  async selectBranch(conversationId: string, messageId: string): Promise<CloudMessage[]> {
+    const b = await this.authed<{ messages: CloudMessage[] }>(
+      `/api/conversations/${encodeURIComponent(conversationId)}/select-branch`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messageId }) },
+    );
+    return b.messages ?? [];
+  }
+
+  /** Branching: delete a message and its subtree; returns the new path. */
+  async deleteMessage(conversationId: string, messageId: string): Promise<CloudMessage[]> {
+    const b = await this.authed<{ messages: CloudMessage[] }>(
+      `/api/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}`,
+      { method: 'DELETE' },
+    );
+    return b.messages ?? [];
+  }
+
+  async renameConversation(conversationId: string, title: string): Promise<void> {
+    await this.authed(`/api/conversations/${encodeURIComponent(conversationId)}/title`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title }),
+    });
+  }
+
+  async deleteConversation(conversationId: string): Promise<void> {
+    await this.authed(`/api/conversations/${encodeURIComponent(conversationId)}`, { method: 'DELETE' });
   }
 
   // ── Key sync (E2E-encrypted settings relay) ───

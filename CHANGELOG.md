@@ -5,6 +5,21 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.41.1 - 2026-07-21
+
+### Added
+- **Cloud write API — the foundation for shared sessions on desktop & CLI.** The
+  `CloudClient` gained a write surface (`createConversation`, `appendTurn`,
+  `selectBranch`, `deleteMessage`, `renameConversation`, `deleteConversation`) and
+  the cloud server gained the matching native-authed routes (`POST
+  /api/conversations`, `POST /api/conversations/:id/turns`). This lets a desktop
+  or CLI client — which executes runs **locally** with your own keys and tools —
+  persist each finished turn into the **shared cloud conversation tree**, so the
+  same sessions (and message branching) can appear on web, desktop, and CLI. The
+  append route applies the same branch resolution as hosted runs (normal / edit →
+  sibling / regenerate → sibling) and is owner-scoped. No user-facing surface
+  changes yet; the desktop and CLI wiring land next.
+
 ## 0.41.0 - 2026-07-21
 
 ### Added

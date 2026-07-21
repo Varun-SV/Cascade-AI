@@ -74,6 +74,30 @@ function startStubServer() {
       if (!auth?.startsWith('Bearer ')) return send(401, { error: 'no' });
       return send(200, { conversations: [{ id: 'c1', title: 'First chat' }, { id: 'c2', title: 'Second' }] });
     }
+    // Create a cloud conversation (native write API).
+    if (req.method === 'POST' && url === '/api/conversations') {
+      if (!auth?.startsWith('Bearer ')) return send(401, { error: 'no' });
+      const body = await readBody(req);
+      return send(200, { conversation: { id: 'c-new', title: body.title ?? null } });
+    }
+    // Append a locally-executed turn; echo it back as a two-message active path.
+    if (req.method === 'POST' && url.endsWith('/turns')) {
+      if (!auth?.startsWith('Bearer ')) return send(401, { error: 'no' });
+      const body = await readBody(req);
+      return send(200, { messages: [
+        { id: 'm1', role: 'user', content: body.userContent, parentId: null, siblingIds: ['m1'] },
+        { id: 'm2', role: 'assistant', content: body.assistant?.content, parentId: 'm1', siblingIds: ['m2'] },
+      ] });
+    }
+    if (req.method === 'POST' && url.endsWith('/select-branch')) {
+      if (!auth?.startsWith('Bearer ')) return send(401, { error: 'no' });
+      const body = await readBody(req);
+      return send(200, { messages: [{ id: body.messageId, role: 'user', content: 'switched', siblingIds: [body.messageId] }] });
+    }
+    if (req.method === 'DELETE' && url.includes('/messages/')) {
+      if (!auth?.startsWith('Bearer ')) return send(401, { error: 'no' });
+      return send(200, { messages: [] });
+    }
     if (req.method === 'GET' && url.startsWith('/api/conversations/')) {
       if (!auth?.startsWith('Bearer ')) return send(401, { error: 'no' });
       return send(200, { messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'hello' }] });
@@ -134,6 +158,27 @@ describe('CloudClient', () => {
     const msgs = await client.getMessages('c1');
     expect(msgs).toHaveLength(2);
     expect(msgs[0]!.role).toBe('user');
+  });
+
+  it('creates a conversation and appends a locally-executed turn (cloud-backed sessions)', async () => {
+    const client = new CloudClient(stub.url, dir);
+    await client.runDeviceLogin(() => {});
+    const convo = await client.createConversation('From the CLI');
+    expect(convo.id).toBe('c-new');
+    expect(convo.title).toBe('From the CLI');
+    const path = await client.appendTurn(convo.id, { userContent: 'q', assistant: { content: 'a', tier: 'T3' } });
+    expect(path.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(path[0]!.content).toBe('q');
+    expect(path[1]!.parentId).toBe('m1');
+  });
+
+  it('drives the branch operations (select-branch, delete) against the tree API', async () => {
+    const client = new CloudClient(stub.url, dir);
+    await client.runDeviceLogin(() => {});
+    const switched = await client.selectBranch('c1', 'sib-2');
+    expect(switched[0]!.id).toBe('sib-2');
+    const afterDelete = await client.deleteMessage('c1', 'm1');
+    expect(afterDelete).toEqual([]);
   });
 
   it('refreshes a near-expired access token and rotates the refresh token', async () => {
