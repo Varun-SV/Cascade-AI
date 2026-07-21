@@ -232,7 +232,7 @@ export function useChatSession(
         const verb = e.reranked ? 'reranked to the' : 'pulled the';
         setKnowledgeNotice(`Searched ${docs} and ${verb} ${e.passages ?? 0} most relevant passages.`);
       } else if (e.mode === 'nokey') {
-        setKnowledgeNotice('Attached documents are large. Add an OpenAI-compatible key to search them; used a truncated view for now.');
+        setKnowledgeNotice('These documents are very large. The full text was still included — to retrieve just the most relevant parts of files this big, add an embeddings-capable key (OpenAI, an OpenAI-compatible endpoint, or a local Ollama).');
       }
     };
     socket.on('stream:token', onToken);

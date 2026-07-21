@@ -62,3 +62,42 @@ describe('CascadeRouter — OpenAI-compatible discovery', () => {
     expect(router.getAvailableModels().some((m) => m.provider === 'openai-compatible')).toBe(false);
   });
 });
+
+describe('CascadeRouter — Azure deployment trust (probe-independent)', () => {
+  it('a single configured deployment fills EVERY tier even when the probe reports nothing available', async () => {
+    // The reported bug: setting an Azure deployment other than one that happens
+    // to collide with a catalog id gave "No model available for tier T1". Root
+    // cause: registration + tier-fill were gated on the flaky isAvailable()
+    // probe. A user who entered an endpoint, key, and deployment name has told
+    // us the deployment exists — one deployment must serve all three tiers.
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set()); // probe finds nothing (cold start / 429 / filtered ping)
+
+    await router.init(makeConfig({
+      providers: [{
+        type: 'azure',
+        deploymentName: 'my-company-gpt', // opaque name — collides with no catalog id
+        apiKey: 'sk-azure-test',
+        baseUrl: 'https://example.openai.azure.com',
+      }],
+    }));
+
+    // The deployment is registered under its callable name…
+    expect(router.getAvailableModels().some((m) => m.id === 'my-company-gpt' && m.provider === 'azure')).toBe(true);
+    // …and every tier resolves to it, so no tier can hard-fail at generate time.
+    for (const tier of ['T1', 'T2', 'T3'] as const) {
+      expect(router.getModelForTier(tier)?.id).toBe('my-company-gpt');
+    }
+  });
+
+  it('does not register azure when no deployment name is configured', async () => {
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set());
+
+    await router.init(makeConfig({ providers: [{ type: 'azure', apiKey: 'sk-x', baseUrl: 'https://x.openai.azure.com' }] }));
+
+    expect(router.getAvailableModels().some((m) => m.provider === 'azure')).toBe(false);
+  });
+});

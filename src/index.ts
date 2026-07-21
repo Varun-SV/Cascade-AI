@@ -27,7 +27,7 @@ export type { McpOAuthStore, McpOAuthState, OAuthTokens, OAuthClientInformationM
 export {
   Retriever, reciprocalRankFusion, SqliteVectorStore, OpenAICompatibleEmbedder,
   embedderFromProviders, chunkText, LLMReranker, chatCompleterFromProviders,
-  parseRankOrder, planRetrieval, chunkCode, heuristicCodeChunker,
+  parseRankOrder, planRetrieval, cagCharBudget, CHARS_PER_TOKEN, chunkCode, heuristicCodeChunker,
   buildManifest, diffManifest, hashContent, WorkspaceIndex, GraphRetriever,
 } from './retrieval/index.js';
 export type {
@@ -50,6 +50,11 @@ export * from './types.js';
 export * from './constants.js';
 export { CascadeCancelledError, CascadeToolError } from './utils/retry.js';
 export { nodeHttpFetch, preferIpv4Host } from './utils/net.js';
+
+// Azure deployment → ModelInfo (deployment name is the model; carries the
+// resolved base model's real context window + economics). Reused by the cloud
+// to size the document context budget from the user's actual window.
+export { azureModelForDeployment, inferAzureBaseModel } from './providers/azure.js';
 
 // Native cloud login (CLI + desktop reuse the same client).
 export { CloudClient, DEFAULT_CLOUD_URL } from './cloud/client.js';

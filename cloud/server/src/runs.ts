@@ -10,8 +10,9 @@
 
 import {
   createCascade, Retriever, chunkText, embedderFromProviders,
-  LLMReranker, chatCompleterFromProviders, planRetrieval,
+  LLMReranker, chatCompleterFromProviders, planRetrieval, cagCharBudget,
   distillSessionFacts, buildSessionTranscript, sessionWorthRemembering,
+  azureModelForDeployment, DEFAULT_CONTEXT_LIMIT, MODELS,
 } from '#cascade-ai';
 import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ProviderConfig } from '#cascade-ai';
 import fs from 'node:fs/promises';
@@ -367,10 +368,32 @@ export function wantsFileDelivery(
   return false;
 }
 
-/** Below this total document size, inject everything (CAG); above it, retrieve. */
-const DOC_CAG_CHAR_BUDGET = 24_000; // ~6k tokens
 /** Passages to inject when retrieving. */
 const RAG_TOP_K = 8;
+
+/**
+ * The context window (in tokens) this run can rely on, taken conservatively as
+ * the smallest window among the models the user has actually pinned — Azure
+ * deployments (the deployment name IS the model) and any explicit fast-answer
+ * model. Unpinned cloud providers fall back to the SDK's default window. The
+ * document budget is derived from this, so a big-window setup injects big docs
+ * in full while a small one retrieves sooner — no fixed byte cliff.
+ */
+export function runContextWindowTokens(providers: ProviderConfig[], fastAnswerModel?: string): number {
+  const windows: number[] = [];
+  for (const p of providers) {
+    if (p.type === 'azure') {
+      const m = azureModelForDeployment(p);
+      if (m?.contextWindow) windows.push(m.contextWindow);
+    }
+  }
+  if (fastAnswerModel) {
+    const id = fastAnswerModel.includes(':') ? fastAnswerModel.split(':').slice(1).join(':') : fastAnswerModel;
+    const cw = MODELS[id]?.contextWindow;
+    if (cw) windows.push(cw);
+  }
+  return windows.length ? Math.min(...windows) : DEFAULT_CONTEXT_LIMIT;
+}
 
 /**
  * Decide how attached documents enter the run. Small total → inject in full
@@ -391,17 +414,26 @@ async function resolveDocuments(
   const full = (): RunDocument[] => docSources.map((d) => ({ filename: d.filename, text: d.text }));
 
   // Adaptive decision: none / CAG (inject in full) / RAG (retrieve passages).
+  // The CAG budget is derived from the run's real context window, so ordinary
+  // documents (a 52 KB file is only ~13k tokens) are injected in full and never
+  // pushed to retrieval — retrieval is reserved for corpora that genuinely
+  // wouldn't fit the window.
   const totalChars = docSources.reduce((n, d) => n + d.text.length, 0);
+  const windowTokens = runContextWindowTokens(payload.providers as ProviderConfig[], payload.fastAnswerModel);
   const plan = planRetrieval({
     sourceCount: docSources.length,
     totalChars,
-    cagCharBudget: DOC_CAG_CHAR_BUDGET,
+    cagCharBudget: cagCharBudget(windowTokens),
     fastAnswer: payload.fastAnswer,
   });
   if (plan.mode !== 'rag') return full();
 
   const embedder = embedderFromProviders(payload.providers as ProviderConfig[]);
   if (!embedder) {
+    // Only reached for a corpus too large for the window AND no embeddings-
+    // capable key. We still inject the whole document — nothing is silently
+    // trimmed here — so the notice reflects that honestly and points at every
+    // provider that would unlock passage retrieval, not just OpenAI.
     socket.emit('knowledge:retrieved', { conversationId, mode: 'nokey', docCount: docSources.length });
     return full();
   }

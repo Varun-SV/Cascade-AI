@@ -28,6 +28,28 @@ export interface RetrievalPlan {
   reason: string;
 }
 
+/** Rough characters-per-token, the standard ~4:1 approximation for English text. */
+export const CHARS_PER_TOKEN = 4;
+
+/**
+ * The character budget below which attached documents are injected in full
+ * (CAG) rather than retrieved (RAG) — derived from the model context window
+ * instead of a fixed byte cliff. Reserve most of the window for the system
+ * prompt, conversation history, and the model's own output, and let attached
+ * documents occupy up to `docFraction` of what the window can hold. A larger
+ * window therefore admits larger documents in full; retrieval only kicks in
+ * for corpora that genuinely wouldn't fit. (A 52 KB doc is ~13k tokens — it
+ * fits comfortably in any modern window, so it should never be forced to RAG.)
+ */
+export function cagCharBudget(
+  contextWindowTokens: number,
+  opts: { docFraction?: number; charsPerToken?: number } = {},
+): number {
+  const docFraction = opts.docFraction ?? 0.5;
+  const charsPerToken = opts.charsPerToken ?? CHARS_PER_TOKEN;
+  return Math.max(0, Math.floor(contextWindowTokens * docFraction * charsPerToken));
+}
+
 /**
  * Choose the retrieval mode for a run. Pure and deterministic so it's unit-
  * testable and reusable across cloud, desktop, and CLI.
