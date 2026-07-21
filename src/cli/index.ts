@@ -17,7 +17,11 @@ import { Cascade } from '../core/cascade.js';
 import { initCommand } from './commands/init.js';
 import { doctorCommand } from './commands/doctor.js';
 import { indexCommand } from './commands/index-cmd.js';
-import { loginCommand, logoutCommand, whoamiCommand, sessionsCommand, sessionShowCommand, syncPushCommand, syncPullCommand } from './commands/cloud.js';
+import {
+  loginCommand, logoutCommand, whoamiCommand, sessionsCommand, sessionShowCommand,
+  sessionBranchCommand, sessionRemoveMessageCommand, sessionRenameCommand, sessionDeleteCommand,
+  syncPushCommand, syncPullCommand,
+} from './commands/cloud.js';
 import { mcpConnectCommand, mcpListCommand, mcpRemoveCommand } from './commands/mcp.js';
 import { updateCommand } from './commands/update.js';
 import { dashboardCommand } from './commands/dashboard.js';
@@ -172,9 +176,37 @@ const sessions = program
 
 sessions
   .command('show <id>')
-  .description('Print a cloud chat transcript (id or its first characters)')
+  .description('Print a cloud chat transcript, with branch markers ‹i/n› + message ids')
   .action(async (id: string) => {
     await sessionShowCommand(id);
+  });
+
+sessions
+  .command('branch <chat> <message>')
+  .description('Switch a cloud chat to another branch (edit/regenerate alternative)')
+  .action(async (chat: string, message: string) => {
+    await sessionBranchCommand(chat, message);
+  });
+
+sessions
+  .command('rm <chat> <message>')
+  .description('Delete a message and its whole subtree from a cloud chat')
+  .action(async (chat: string, message: string) => {
+    await sessionRemoveMessageCommand(chat, message);
+  });
+
+sessions
+  .command('rename <chat> <title>')
+  .description('Rename a cloud chat')
+  .action(async (chat: string, title: string) => {
+    await sessionRenameCommand(chat, title);
+  });
+
+sessions
+  .command('delete <chat>')
+  .description('Delete a cloud chat entirely')
+  .action(async (chat: string) => {
+    await sessionDeleteCommand(chat);
   });
 
 const sync = program

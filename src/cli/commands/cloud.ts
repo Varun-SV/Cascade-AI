@@ -9,7 +9,7 @@
 import chalk from 'chalk';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
-import { CloudClient, DEFAULT_CLOUD_URL } from '../../cloud/client.js';
+import { CloudClient, DEFAULT_CLOUD_URL, type CloudMessage } from '../../cloud/client.js';
 import { encryptJSON, decryptJSON } from '../../cloud/keysync-crypto.js';
 import { gatherSyncBundle, applySyncBundle, type SyncBundle } from '../../cloud/keysync.js';
 import { ConfigManager } from '../../config/index.js';
@@ -104,20 +104,120 @@ export async function sessionsCommand(): Promise<void> {
   }
 }
 
+/** Short, copy-pasteable id (first 8 chars) for targeting branch/delete ops. */
+function shortId(id: string | undefined): string {
+  return (id ?? '').slice(0, 8);
+}
+
+/**
+ * Render a cloud conversation's active path for the terminal. Pure so it's
+ * unit-testable. Each turn shows its role, a short id (to target with `branch` /
+ * `rm`), and — when the turn has alternatives — a `‹i/n›` marker so branches are
+ * visible even in a plain terminal.
+ */
+export function formatCloudTranscript(messages: CloudMessage[]): string {
+  const lines: string[] = [];
+  for (const m of messages) {
+    const n = m.siblingIds?.length ?? 1;
+    const i = m.siblingIds && m.id ? m.siblingIds.indexOf(m.id) + 1 : 1;
+    const branch = n > 1 ? chalk.yellow(` ‹${i}/${n}›`) : '';
+    const tag = m.id ? chalk.dim(` [${shortId(m.id)}]`) : '';
+    const who = m.role === 'user' ? chalk.bold.cyan('You') : chalk.bold.magenta('Cascade');
+    lines.push(`  ${who}${tag}${branch}`);
+    lines.push('  ' + m.content.replace(/\n/g, '\n  ') + '\n');
+  }
+  return lines.join('\n');
+}
+
+/** Resolve a conversation by exact id or a unique-enough prefix. */
+async function resolveConversation(client: CloudClient, idOrPrefix: string) {
+  const convos = await client.listConversations();
+  return convos.find((c) => c.id === idOrPrefix) ?? convos.find((c) => c.id.startsWith(idOrPrefix));
+}
+
 export async function sessionShowCommand(idOrPrefix: string): Promise<void> {
   const client = CloudClient.fromSession();
   if (!client) return notSignedIn();
   try {
-    // Resolve a full id from a prefix so users can copy the short form we print.
-    const convos = await client.listConversations();
-    const match = convos.find((c) => c.id === idOrPrefix) ?? convos.find((c) => c.id.startsWith(idOrPrefix));
+    const match = await resolveConversation(client, idOrPrefix);
     if (!match) { console.log(chalk.red(`\n  No chat matching "${idOrPrefix}".\n`)); process.exitCode = 1; return; }
     const msgs = await client.getMessages(match.id);
     console.log(chalk.magenta(`\n  ◈ ${match.title?.trim() || '(untitled)'}\n`));
-    for (const m of msgs) {
-      console.log(m.role === 'user' ? chalk.bold.cyan('  You') : chalk.bold.magenta('  Cascade'));
-      console.log('  ' + m.content.replace(/\n/g, '\n  ') + '\n');
+    console.log(formatCloudTranscript(msgs));
+    if (msgs.some((m) => (m.siblingIds?.length ?? 1) > 1)) {
+      console.log(chalk.dim('  cascade sessions branch <chat> <message>   switch to another version'));
     }
+    console.log(chalk.dim('  cascade sessions rm <chat> <message>       delete a message + its replies\n'));
+  } catch (err) {
+    console.log(chalk.red(`\n  ${err instanceof Error ? err.message : String(err)}\n`));
+    process.exitCode = 1;
+  }
+}
+
+/** Resolve a message id (or prefix) within an active path to a full id. */
+function resolveMessage(msgs: CloudMessage[], idOrPrefix: string): string | undefined {
+  return msgs.find((m) => m.id === idOrPrefix)?.id ?? msgs.find((m) => m.id?.startsWith(idOrPrefix))?.id;
+}
+
+export async function sessionBranchCommand(chat: string, message: string): Promise<void> {
+  const client = CloudClient.fromSession();
+  if (!client) return notSignedIn();
+  try {
+    const match = await resolveConversation(client, chat);
+    if (!match) { console.log(chalk.red(`\n  No chat matching "${chat}".\n`)); process.exitCode = 1; return; }
+    // The target message may be on an inactive branch, so resolve against ALL
+    // messages, not just the active path (getMessages returns the active path).
+    const active = await client.getMessages(match.id);
+    const targetId = resolveMessage(active, message) ?? message;
+    const next = await client.selectBranch(match.id, targetId);
+    console.log(chalk.magenta(`\n  ◈ Switched branch — ${match.title?.trim() || '(untitled)'}\n`));
+    console.log(formatCloudTranscript(next));
+  } catch (err) {
+    console.log(chalk.red(`\n  ${err instanceof Error ? err.message : String(err)}\n`));
+    process.exitCode = 1;
+  }
+}
+
+export async function sessionRemoveMessageCommand(chat: string, message: string): Promise<void> {
+  const client = CloudClient.fromSession();
+  if (!client) return notSignedIn();
+  try {
+    const match = await resolveConversation(client, chat);
+    if (!match) { console.log(chalk.red(`\n  No chat matching "${chat}".\n`)); process.exitCode = 1; return; }
+    const active = await client.getMessages(match.id);
+    const targetId = resolveMessage(active, message) ?? message;
+    const next = await client.deleteMessage(match.id, targetId);
+    console.log(chalk.green('\n  ✓ Deleted that message and its replies.\n'));
+    if (next.length) console.log(formatCloudTranscript(next));
+    else console.log(chalk.dim('  (the conversation is now empty)\n'));
+  } catch (err) {
+    console.log(chalk.red(`\n  ${err instanceof Error ? err.message : String(err)}\n`));
+    process.exitCode = 1;
+  }
+}
+
+export async function sessionRenameCommand(chat: string, title: string): Promise<void> {
+  const client = CloudClient.fromSession();
+  if (!client) return notSignedIn();
+  try {
+    const match = await resolveConversation(client, chat);
+    if (!match) { console.log(chalk.red(`\n  No chat matching "${chat}".\n`)); process.exitCode = 1; return; }
+    await client.renameConversation(match.id, title);
+    console.log(chalk.green(`\n  ✓ Renamed to "${title}".\n`));
+  } catch (err) {
+    console.log(chalk.red(`\n  ${err instanceof Error ? err.message : String(err)}\n`));
+    process.exitCode = 1;
+  }
+}
+
+export async function sessionDeleteCommand(chat: string): Promise<void> {
+  const client = CloudClient.fromSession();
+  if (!client) return notSignedIn();
+  try {
+    const match = await resolveConversation(client, chat);
+    if (!match) { console.log(chalk.red(`\n  No chat matching "${chat}".\n`)); process.exitCode = 1; return; }
+    await client.deleteConversation(match.id);
+    console.log(chalk.green(`\n  ✓ Deleted "${match.title?.trim() || '(untitled)'}".\n`));
   } catch (err) {
     console.log(chalk.red(`\n  ${err instanceof Error ? err.message : String(err)}\n`));
     process.exitCode = 1;

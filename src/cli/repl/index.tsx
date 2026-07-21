@@ -26,6 +26,7 @@ import type {
 import { CASCADE_DB_FILE, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE } from '../../constants.js';
 import { Cascade, type DecisionLogEntry } from '../../core/cascade.js';
 import { MemoryStore } from '../../memory/store.js';
+import { CloudClient } from '../../cloud/client.js';
 import { ModelSelector } from '../../core/router/selector.js';
 import { OpenAIProvider } from '../../providers/openai.js';
 import { GeminiProvider } from '../../providers/gemini.js';
@@ -334,6 +335,36 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     storeRef.current?.addMessage({ id: randomUUID(), sessionId: sessionIdRef.current, role, content, timestamp });
   }, []);
 
+  // Cloud session mirror. When signed in to a Cascade account, each finished turn
+  // is appended to a SHARED cloud conversation so this CLI chat also shows up on
+  // web + desktop. The run still executes locally (your keys + tools) — we only
+  // store the resulting messages. The conversation is created lazily on the first
+  // turn, and the whole thing is best-effort: it never blocks or breaks a run,
+  // and `CASCADE_NO_CLOUD_SYNC=1` opts out.
+  const cloudMirrorRef = useRef<{ client: CloudClient; convId: string | null } | null>(null);
+  const mirrorTurnToCloud = useCallback(async (userContent: string, assistant: { content: string; costUsd?: number }) => {
+    const mirror = cloudMirrorRef.current;
+    if (!mirror || process.env['CASCADE_NO_CLOUD_SYNC']) return;
+    try {
+      if (!mirror.convId) {
+        const convo = await mirror.client.createConversation(userContent.slice(0, 72));
+        mirror.convId = convo.id;
+        dispatch({
+          type: 'ADD_MESSAGE',
+          message: {
+            id: randomUUID(), role: 'system',
+            content: `☁ Synced to your Cascade account — this chat is on web + desktop too (id ${convo.id.slice(0, 8)}).`,
+            timestamp: new Date().toISOString(),
+          },
+        });
+      }
+      await mirror.client.appendTurn(mirror.convId, {
+        userContent,
+        assistant: { content: assistant.content, costUsd: assistant.costUsd ?? null },
+      });
+    } catch { /* best-effort mirror — offline, revoked token, etc. Local run is unaffected. */ }
+  }, []);
+
   /**
    * Apply a selection from the interactive model picker:
    *   - update the in-memory CascadeConfig.models[tier]
@@ -453,6 +484,12 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     loadCache();
     store.createSession({ id: sessionIdRef.current, title: 'Cascade Session', createdAt: startedAtRef.current, updatedAt: startedAtRef.current, identityId: config.defaultIdentityId ?? 'default', workspacePath, messages: [], metadata: { totalTokens: 0, totalCostUsd: 0, modelsUsed: [], toolsUsed: [], taskCount: 0 } });
     persistRuntimeSession('ACTIVE');
+    // Signed in? Prepare to mirror finished turns into a shared cloud session
+    // (created lazily on the first turn). Best-effort — never blocks startup.
+    try {
+      const cloud = CloudClient.fromSession();
+      if (cloud) cloudMirrorRef.current = { client: cloud, convId: null };
+    } catch { /* not signed in — CLI stays fully local */ }
     cascadeRef.current = new Cascade(config, workspacePath);
     cascadeRef.current.init().catch(err => setStartupWarning(`Init failed: ${err.message}`));
     validateConfiguredModels(config).then(setStartupWarning);
@@ -928,6 +965,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier, costByFeature: stats.costByFeature, savedUsd: savings.savedUsd, savedPct: savings.savedPct });
       dispatch({ type: 'COMMIT_STREAM', finalText: result.output, timestamp: new Date().toISOString() });
       persistMessage('assistant', result.output, new Date().toISOString());
+      // Mirror the finished turn into the shared cloud session (best-effort).
+      void mirrorTurnToCloud(trimmed, { content: result.output, costUsd: stats.totalCostUsd });
       // One-line run receipt — the delegation economics in scrollback.
       const receipt = formatRunReceipt(result, stats.totalCostUsd, savings);
       if (receipt) {
