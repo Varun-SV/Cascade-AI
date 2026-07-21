@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Plug, Trash2, Plus, Github, Slack, Globe, ShieldCheck, Loader2, ExternalLink, LogIn } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Plug, Trash2, Plus, Github, Slack, Globe, ShieldCheck, Loader2, ExternalLink, LogIn, Search, Zap } from 'lucide-react';
 import Modal from './Modal.js';
 import {
   fetchConnectors, fetchMcpServers, addMcpServer, setMcpServerEnabled, deleteMcpServer, startMcpOAuth,
@@ -23,10 +23,23 @@ function Toggle({ on, onChange, disabled }: { on: boolean; onChange: (v: boolean
   );
 }
 
-function ConnectorIcon({ id }: { id: string | null }) {
+function ConnectorIcon({ id, color, name }: { id: string | null; color?: string; name?: string }) {
   if (id === 'github') return <Github size={16} className="text-ink-200" />;
   if (id === 'slack') return <Slack size={16} className="text-ink-200" />;
   if (id === 'google') return <Globe size={16} className="text-ink-200" />;
+  // Brand letter-badge for the rest (no lucide brand icon), tinted with the
+  // connector's colour so the directory reads at a glance.
+  if (id && name) {
+    const c = color || '#8b8b8b';
+    return (
+      <span
+        className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[10px] font-bold"
+        style={{ background: `${c}22`, color: c }}
+      >
+        {name.charAt(0).toUpperCase()}
+      </span>
+    );
+  }
   return <Plug size={16} className="text-ink-200" />;
 }
 
@@ -41,6 +54,16 @@ export default function ConnectorsModal({ onClose }: { onClose: () => void }) {
   // The connector being configured (token/url form), or 'custom', or null.
   const [adding, setAdding] = useState<ConnectorEntry | 'custom' | null>(null);
   const [form, setForm] = useState({ name: '', url: '', token: '' });
+  // A hosted OAuth connector mid one-click redirect (shows a spinner on its card).
+  const [connectingId, setConnectingId] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+
+  const connectorById = useMemo(() => new Map(connectors.map((c) => [c.id, c])), [connectors]);
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return connectors;
+    return connectors.filter((c) => c.name.toLowerCase().includes(q) || c.description.toLowerCase().includes(q));
+  }, [connectors, query]);
 
   function refresh() {
     return fetchMcpServers().then((r) => setServers(r.servers)).catch(() => setServers([]));
@@ -86,6 +109,44 @@ export default function ConnectorsModal({ onClose }: { onClose: () => void }) {
       url: target === 'custom' ? '' : target.url ?? '',
       token: '',
     });
+  }
+
+  // Directory click. A hosted OAuth connector goes STRAIGHT to sign-in (no form,
+  // no URL, no token) — the Claude-style one-click. Everything else (token-based
+  // like GitHub, or "bring your URL" like Slack/Google) opens the config form.
+  async function pickConnector(c: ConnectorEntry) {
+    if (connectingId) return;
+    // Public, no-auth hosted server → add it directly, one click, no form.
+    if (c.url && !c.requiresUrl && !c.oauth && !c.tokenLabel) {
+      setConnectingId(c.id);
+      setError(null);
+      try {
+        await addMcpServer({ connectorId: c.id });
+        await refresh();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Could not add that connector.');
+        startAdd(c);
+      } finally {
+        setConnectingId(null);
+      }
+      return;
+    }
+    if (c.oauth && c.url && !c.requiresUrl) {
+      setConnectingId(c.id);
+      setError(null);
+      try {
+        const r = await startMcpOAuth({ connectorId: c.id });
+        if (r.oauth && r.authorizeUrl) { window.location.href = r.authorizeUrl; return; }
+        startAdd(c); // server didn't offer OAuth after all — fall back to the form
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Could not start sign-in.');
+        startAdd(c);
+      } finally {
+        setConnectingId(null);
+      }
+    } else {
+      startAdd(c);
+    }
   }
 
   async function submitAdd() {
@@ -150,7 +211,7 @@ export default function ConnectorsModal({ onClose }: { onClose: () => void }) {
                 <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-400">Your connections</p>
                 {servers.map((s) => (
                   <div key={s.id} className="flex items-center gap-3 rounded-xl border border-elev/10 bg-elev/[0.04] px-3 py-2.5">
-                    <ConnectorIcon id={s.connectorId} />
+                    <ConnectorIcon id={s.connectorId} color={s.connectorId ? connectorById.get(s.connectorId)?.color : undefined} name={s.connectorId ? connectorById.get(s.connectorId)?.name : undefined} />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <span className="truncate text-sm font-medium text-ink-100">{s.name}</span>
@@ -180,7 +241,7 @@ export default function ConnectorsModal({ onClose }: { onClose: () => void }) {
             {adding ? (
               <div className="flex flex-col gap-3 rounded-xl border border-accent-500/20 bg-accent-500/[0.04] p-3">
                 <div className="flex items-center gap-2 text-sm font-medium text-ink-100">
-                  <ConnectorIcon id={adding === 'custom' ? null : adding.id} />
+                  <ConnectorIcon id={adding === 'custom' ? null : adding.id} color={adding === 'custom' ? undefined : adding.color} name={adding === 'custom' ? undefined : adding.name} />
                   {adding === 'custom' ? 'Custom MCP server' : `Connect ${adding.name}`}
                 </div>
                 {adding !== 'custom' && adding.docsUrl && (
@@ -244,27 +305,52 @@ export default function ConnectorsModal({ onClose }: { onClose: () => void }) {
               </div>
             ) : (
               <div className="flex flex-col gap-2">
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-400">Add a connector</p>
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-400">Add a connector</p>
+                  <div className="relative">
+                    <Search size={12} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-ink-500" />
+                    <input
+                      value={query}
+                      onChange={(e) => setQuery(e.target.value)}
+                      placeholder="Search…"
+                      className="w-36 rounded-lg border border-elev/10 bg-elev/[0.06] py-1 pl-6 pr-2 text-xs text-ink-100 outline-none placeholder:text-ink-500 focus:w-44"
+                    />
+                  </div>
+                </div>
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  {connectors.map((c) => (
-                    <button
-                      key={c.id}
-                      type="button"
-                      onClick={() => startAdd(c)}
-                      className="flex items-start gap-2.5 rounded-xl border border-elev/10 bg-elev/[0.04] p-3 text-left transition-colors hover:border-accent-500/30 hover:bg-accent-500/[0.05]"
-                    >
-                      <ConnectorIcon id={c.id} />
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5 text-sm font-medium text-ink-100">
-                          {c.name}
-                          {configuredConnectorIds.has(c.id) && (
-                            <span className="rounded bg-ink-700/60 px-1 py-px text-[9px] text-ink-300">added</span>
-                          )}
+                  {filtered.map((c) => {
+                    const oneClick = !!c.url && !c.requiresUrl && (!!c.oauth || !c.tokenLabel);
+                    return (
+                      <button
+                        key={c.id}
+                        type="button"
+                        onClick={() => pickConnector(c)}
+                        disabled={!!connectingId}
+                        className="flex items-start gap-2.5 rounded-xl border border-elev/10 bg-elev/[0.04] p-3 text-left transition-colors hover:border-accent-500/30 hover:bg-accent-500/[0.05] disabled:opacity-60"
+                      >
+                        {connectingId === c.id
+                          ? <Loader2 size={16} className="mt-px shrink-0 animate-spin text-accent-300" />
+                          : <ConnectorIcon id={c.id} color={c.color} name={c.name} />}
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 text-sm font-medium text-ink-100">
+                            {c.name}
+                            {configuredConnectorIds.has(c.id) && (
+                              <span className="rounded bg-ink-700/60 px-1 py-px text-[9px] text-ink-300">added</span>
+                            )}
+                            {oneClick && (
+                              <span className="inline-flex items-center gap-0.5 rounded bg-accent-500/12 px-1 py-px text-[9px] font-medium text-accent-300">
+                                <Zap size={8} /> 1-click
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[11px] leading-snug text-ink-500">{c.description}</div>
                         </div>
-                        <div className="text-[11px] leading-snug text-ink-500">{c.description}</div>
-                      </div>
-                    </button>
-                  ))}
+                      </button>
+                    );
+                  })}
+                  {filtered.length === 0 && (
+                    <p className="col-span-full px-1 py-3 text-center text-[11px] text-ink-500">No connectors match “{query}”.</p>
+                  )}
                   <button
                     type="button"
                     onClick={() => startAdd('custom')}

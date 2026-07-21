@@ -278,6 +278,10 @@ export interface ConnectorEntry {
   tokenLabel: string;
   docsUrl: string;
   requiresUrl: boolean;
+  /** Hosted server speaks OAuth 2.1 — one-click "Connect", no token to paste. */
+  oauth?: boolean;
+  /** Brand colour for the UI badge (hex). */
+  color?: string;
 }
 
 export interface McpServer {

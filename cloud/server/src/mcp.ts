@@ -26,13 +26,25 @@ export interface ConnectorCatalogEntry {
   docsUrl: string;
   /** True when the user must provide the MCP server URL themselves. */
   requiresUrl: boolean;
+  /** The hosted server speaks OAuth 2.1 — the client can one-click "Connect"
+   *  (browser sign-in) with no token to paste. Discovery/DCR happens at connect
+   *  time; a token remains available as a fallback. */
+  oauth?: boolean;
+  /** Brand colour for the UI badge (hex). Optional. */
+  color?: string;
 }
 
-// Curated connectors. GitHub publishes a universal hosted MCP server, so its
-// URL is fixed and a Personal Access Token is all that's needed. Slack/Google
-// don't expose a single token-based endpoint, so they're "bring your MCP URL"
-// presets — the framework is identical, the user just supplies the endpoint of
-// the MCP bridge they run for that app.
+// Curated connector directory. Each entry maps an app onto a *known* hosted
+// remote MCP endpoint so the user never types a URL — exactly how Claude's
+// connector directory feels. The ones with `oauth: true` need no token at all:
+// click Connect → the provider's sign-in page → done (OAuth 2.1 + PKCE, with
+// discovery/DCR handled by our MCP OAuth stack). URLs are the services' own
+// documented hosted endpoints; if one ever changes, the connect fails gracefully
+// and the user can still fall back to the "Custom MCP server" option.
+//
+// Only services that publish a single public hosted endpoint are one-click.
+// Slack/Google have no universal hosted MCP server yet, so they stay "bring your
+// MCP URL" — the friction there is an ecosystem gap, not ours.
 export const CONNECTOR_CATALOG: ConnectorCatalogEntry[] = [
   {
     id: 'github',
@@ -44,6 +56,86 @@ export const CONNECTOR_CATALOG: ConnectorCatalogEntry[] = [
     tokenLabel: 'GitHub Personal Access Token (fine-grained)',
     docsUrl: 'https://github.com/settings/personal-access-tokens',
     requiresUrl: false,
+    oauth: true,
+    color: '#f0f6fc',
+  },
+  {
+    id: 'notion',
+    name: 'Notion',
+    description: 'Read & write pages, databases and blocks in your workspace.',
+    url: 'https://mcp.notion.com/mcp',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    tokenLabel: 'Notion integration token',
+    docsUrl: 'https://www.notion.com/help/mcp-connections-for-custom-agents',
+    requiresUrl: false,
+    oauth: true,
+    color: '#e6e6e6',
+  },
+  {
+    id: 'linear',
+    name: 'Linear',
+    description: 'Issues, projects and cycles from your Linear workspace.',
+    url: 'https://mcp.linear.app/mcp',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    tokenLabel: 'Linear API key',
+    docsUrl: 'https://linear.app/docs/mcp',
+    requiresUrl: false,
+    oauth: true,
+    color: '#5e6ad2',
+  },
+  {
+    id: 'sentry',
+    name: 'Sentry',
+    description: 'Errors, issues and releases from your Sentry projects.',
+    url: 'https://mcp.sentry.dev/mcp',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    tokenLabel: 'Sentry auth token',
+    docsUrl: 'https://docs.sentry.io/product/sentry-mcp/',
+    requiresUrl: false,
+    oauth: true,
+    color: '#6559c6',
+  },
+  {
+    id: 'atlassian',
+    name: 'Jira & Confluence',
+    description: 'Atlassian’s official server for Jira, Confluence & more.',
+    url: 'https://mcp.atlassian.com/v1/mcp',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    tokenLabel: 'Atlassian API token',
+    docsUrl: 'https://www.atlassian.com/platform/remote-mcp-server',
+    requiresUrl: false,
+    oauth: true,
+    color: '#0c66e4',
+  },
+  {
+    id: 'stripe',
+    name: 'Stripe',
+    description: 'Query and manage payments, customers and products.',
+    url: 'https://mcp.stripe.com',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    tokenLabel: 'Stripe restricted API key',
+    docsUrl: 'https://docs.stripe.com/mcp',
+    requiresUrl: false,
+    oauth: true,
+    color: '#635bff',
+  },
+  {
+    id: 'cloudflare-docs',
+    name: 'Cloudflare Docs',
+    description: 'Search Cloudflare’s documentation. Public — no sign-in needed.',
+    url: 'https://docs.mcp.cloudflare.com/mcp',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    tokenLabel: '',
+    docsUrl: 'https://developers.cloudflare.com/agents/model-context-protocol/',
+    requiresUrl: false,
+    oauth: false,
+    color: '#f6821f',
   },
   {
     id: 'slack',
@@ -54,6 +146,7 @@ export const CONNECTOR_CATALOG: ConnectorCatalogEntry[] = [
     tokenLabel: 'Slack Bot/User OAuth token',
     docsUrl: 'https://api.slack.com/apps',
     requiresUrl: true,
+    color: '#611f69',
   },
   {
     id: 'google',
@@ -64,6 +157,7 @@ export const CONNECTOR_CATALOG: ConnectorCatalogEntry[] = [
     tokenLabel: 'Google OAuth access token',
     docsUrl: 'https://console.cloud.google.com/apis/credentials',
     requiresUrl: true,
+    color: '#4285f4',
   },
 ];
 
