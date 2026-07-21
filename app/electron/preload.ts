@@ -1,5 +1,25 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
+/** A message on a cloud conversation's active path (with branching data). */
+interface CloudMsg {
+  id?: string;
+  parentId?: string | null;
+  role: string;
+  content: string;
+  tier?: string | null;
+  model?: string | null;
+  costUsd?: number | null;
+  siblingIds?: string[];
+}
+
+/** A locally-executed turn to persist into the shared cloud conversation. */
+interface CloudTurn {
+  userContent: string;
+  assistant: { content: string; tier?: string | null; model?: string | null; costUsd?: number | null };
+  editOfMessageId?: string;
+  regenerateFromUserMessageId?: string;
+}
+
 contextBridge.exposeInMainWorld('cascade', {
   // Synchronous platform string for first-paint layout (e.g. title-bar insets)
   platform: process.platform,
@@ -142,8 +162,24 @@ contextBridge.exposeInMainWorld('cascade', {
     messages: (id: string) => ipcRenderer.invoke('cloud:messages', id) as Promise<{
       ok: boolean;
       error?: string;
-      messages: Array<{ role: string; content: string }>;
+      messages: CloudMsg[];
     }>,
+    // Cloud-backed sessions: write a locally-executed turn + branch operations,
+    // so desktop chats join the shared cloud session tree (web + CLI too).
+    createConversation: (title?: string) => ipcRenderer.invoke('cloud:createConversation', title) as Promise<{
+      ok: boolean; error?: string; conversation?: { id: string; title: string | null };
+    }>,
+    appendTurn: (id: string, turn: CloudTurn) => ipcRenderer.invoke('cloud:appendTurn', id, turn) as Promise<{
+      ok: boolean; error?: string; messages: CloudMsg[];
+    }>,
+    selectBranch: (id: string, messageId: string) => ipcRenderer.invoke('cloud:selectBranch', id, messageId) as Promise<{
+      ok: boolean; error?: string; messages: CloudMsg[];
+    }>,
+    deleteMessage: (id: string, messageId: string) => ipcRenderer.invoke('cloud:deleteMessage', id, messageId) as Promise<{
+      ok: boolean; error?: string; messages: CloudMsg[];
+    }>,
+    renameConversation: (id: string, title: string) => ipcRenderer.invoke('cloud:renameConversation', id, title) as Promise<{ ok: boolean; error?: string }>,
+    deleteConversation: (id: string) => ipcRenderer.invoke('cloud:deleteConversation', id) as Promise<{ ok: boolean; error?: string }>,
     // Key sync (E2E-encrypted): passphrase stays in the main process; only
     // ciphertext leaves the machine.
     syncPush: (passphrase: string) => ipcRenderer.invoke('cloud:syncPush', passphrase) as Promise<{ ok: boolean; error?: string; version?: number }>,

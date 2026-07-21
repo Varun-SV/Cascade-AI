@@ -39,13 +39,39 @@ interface SessionStore {
 
 interface EncBlob { ciphertext: string; salt: string; iv: string }
 
+/** A message on the active path of a cloud conversation (with branching data). */
+interface CloudMsg {
+  id?: string;
+  parentId?: string | null;
+  role: string;
+  content: string;
+  tier?: string | null;
+  model?: string | null;
+  costUsd?: number | null;
+  siblingIds?: string[];
+}
+
+/** A locally-executed turn to persist into the shared cloud conversation. */
+interface CloudTurn {
+  userContent: string;
+  assistant: { content: string; tier?: string | null; model?: string | null; costUsd?: number | null };
+  editOfMessageId?: string;
+  regenerateFromUserMessageId?: string;
+}
+
 interface CloudClientLike {
   runLoopbackLogin(
     openUrl: (url: string) => void | Promise<void>,
     opts: { provider?: 'google' | 'github'; signal?: AbortSignal; timeoutMs?: number },
   ): Promise<CloudSession>;
   listConversations(): Promise<Array<{ id: string; title: string; updatedAt?: number }>>;
-  getMessages(id: string): Promise<Array<{ role: string; content: string }>>;
+  getMessages(id: string): Promise<CloudMsg[]>;
+  createConversation(title?: string): Promise<{ id: string; title: string | null }>;
+  appendTurn(id: string, turn: CloudTurn): Promise<CloudMsg[]>;
+  selectBranch(id: string, messageId: string): Promise<CloudMsg[]>;
+  deleteMessage(id: string, messageId: string): Promise<CloudMsg[]>;
+  renameConversation(id: string, title: string): Promise<void>;
+  deleteConversation(id: string): Promise<void>;
   pullSecrets(): Promise<{ blob: EncBlob | null; version?: number; updatedAt?: number }>;
   pushSecrets(blob: EncBlob): Promise<{ version: number; updatedAt: number }>;
   logout(): Promise<void>;
@@ -199,6 +225,37 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
   ipcMain.handle('cloud:messages', async (_e, id: unknown) => {
     try { return { ok: true, messages: await client().getMessages(String(id)) }; }
     catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'Could not load that chat.', messages: [] }; }
+  });
+
+  // ── Cloud-backed sessions: write + branch ops (shared with web + CLI) ──
+  ipcMain.handle('cloud:createConversation', async (_e, title: unknown) => {
+    try { return { ok: true, conversation: await client().createConversation(typeof title === 'string' ? title : undefined) }; }
+    catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'Could not create a cloud chat.' }; }
+  });
+
+  ipcMain.handle('cloud:appendTurn', async (_e, id: unknown, turn: unknown) => {
+    try { return { ok: true, messages: await client().appendTurn(String(id), turn as CloudTurn) }; }
+    catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'Could not save that turn.', messages: [] }; }
+  });
+
+  ipcMain.handle('cloud:selectBranch', async (_e, id: unknown, messageId: unknown) => {
+    try { return { ok: true, messages: await client().selectBranch(String(id), String(messageId)) }; }
+    catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'Could not switch branch.', messages: [] }; }
+  });
+
+  ipcMain.handle('cloud:deleteMessage', async (_e, id: unknown, messageId: unknown) => {
+    try { return { ok: true, messages: await client().deleteMessage(String(id), String(messageId)) }; }
+    catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'Could not delete that message.', messages: [] }; }
+  });
+
+  ipcMain.handle('cloud:renameConversation', async (_e, id: unknown, title: unknown) => {
+    try { await client().renameConversation(String(id), String(title)); return { ok: true }; }
+    catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'Could not rename that chat.' }; }
+  });
+
+  ipcMain.handle('cloud:deleteConversation', async (_e, id: unknown) => {
+    try { await client().deleteConversation(String(id)); return { ok: true }; }
+    catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'Could not delete that chat.' }; }
   });
 
   // ── Key sync (E2E-encrypted settings) ──

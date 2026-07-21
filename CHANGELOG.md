@@ -5,6 +5,23 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.41.3 - 2026-07-21
+
+### Added
+- **Desktop: cloud-backed sessions + branch navigation.** When signed in, the
+  desktop now **mirrors each finished chat turn into a shared cloud conversation**
+  (created lazily on the first turn), so a chat you run in the app also appears on
+  web + CLI. Runs still execute **locally** (your keys + shell/file/git tools);
+  only the resulting messages are stored. Best-effort — it never blocks or breaks
+  a run — and opt-out via `localStorage['cascade.noCloudSync'] = '1'`.
+- **Branch navigation in *Continue elsewhere → Cloud chats*.** Opening a shared
+  cloud chat now shows its active path with a **`‹ i/n ›` version switcher** on any
+  turn that has alternatives (edits/regenerations), a **delete** control that
+  removes a message and its whole subtree, and a **"Bring this branch here"** to
+  continue the selected branch locally. Backed by a new cloud write IPC surface
+  (`createConversation`, `appendTurn`, `selectBranch`, `deleteMessage`,
+  `renameConversation`, `deleteConversation`).
+
 ## 0.41.2 - 2026-07-21
 
 ### Added
