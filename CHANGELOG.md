@@ -5,6 +5,21 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.40.1 - 2026-07-21
+
+### Fixed
+- **The chat "Context" meter now means what it says — and survives a refresh.**
+  It previously showed the *last run's* total token throughput (input + output
+  summed across every tier) against a hard-coded 100k soft cap, so a heavy
+  multi-agent run read "Context is getting full" regardless of the model's real
+  window or your "Max tokens per run" / "Extended context" settings — and it
+  vanished on reload because it was held in memory from the last run. It now
+  estimates the **current conversation's** size (from its messages) against the
+  **active model's real context window** (gpt-5 400k, Claude 200k, Gemini 1M, …),
+  so it's accurate, matches expectations, and is recomputed from the loaded chat
+  on refresh. The heavy-run figure is still shown, clearly labelled "Last run used
+  ~N tok across all tiers."
+
 ## 0.40.0 - 2026-07-21
 
 ### Added

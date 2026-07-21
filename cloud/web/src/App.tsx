@@ -226,6 +226,8 @@ export default function App() {
       user={user}
       conversations={conversations}
       activeConversationId={chat.conversationId}
+      contextTokens={chat.contextTokens}
+      contextWindow={chat.contextWindow}
       lastTokens={chat.lastTokens}
       usageRefreshSignal={chat.busy}
       onSelect={(id) => { void selectConversation(id); if (window.innerWidth < 768) setSidebarOpen(false); }}
