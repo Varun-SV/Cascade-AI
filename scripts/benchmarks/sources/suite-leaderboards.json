@@ -13,6 +13,9 @@
   },
   "note": "Raw accuracy percentages from public task leaderboards (SWE-bench Verified -> code, MMLU/GPQA -> analysis, writing/IF evals -> creative, MATH/GSM8K -> data). Raw benchmark % are NOT a 0-100 quality scale (SWE-bench Verified tops out near ~75% even for frontier coders), so each task is calibrated against a documented reference-max via the band above. Maintainer-approximated SEED numbers; replace with real reads from the cited URLs.",
   "models": {
+    "gpt-5.5":          { "code": 73, "analysis": 91, "creative": 87, "data": 93 },
+    "gpt-5.4":          { "code": 70, "analysis": 89, "creative": 85, "data": 90 },
+    "gpt-5.4-mini":     { "code": 64, "analysis": 81, "creative": 78, "data": 81 },
     "claude-opus":      { "code": 70, "analysis": 87, "creative": 82, "data": 85 },
     "claude-sonnet":    { "code": 68, "analysis": 83, "creative": 80, "data": 83 },
     "claude-haiku":     { "code": 58, "analysis": 71, "creative": 70, "data": 70 },

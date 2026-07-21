@@ -86,6 +86,10 @@ export function deleteConversation(id: string): Promise<{ ok: boolean }> {
   return json(fetch(`/api/conversations/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' }));
 }
 
+export function deleteAllConversations(): Promise<{ deleted: number }> {
+  return json(fetch('/api/conversations', { method: 'DELETE', credentials: 'include' }));
+}
+
 export function importMemories(memories: Array<string | { content: string; category?: string }>): Promise<{ imported: number }> {
   return json(fetch('/api/memories/import', {
     method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ memories }),

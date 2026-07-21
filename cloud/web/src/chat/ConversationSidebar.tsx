@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 import { MessageSquarePlus, Settings, Trash2, Upload } from 'lucide-react';
 import UsageMeter from './UsageMeter.js';
 import TierMix from './TierMix.js';
-import { deleteConversation, importConversation, importMemories } from '../lib/api.js';
+import { deleteConversation, deleteAllConversations, importConversation, importMemories } from '../lib/api.js';
 import type { CloudConversation, CloudUser } from '../lib/types.js';
 
 interface Props {
@@ -32,6 +32,19 @@ export default function ConversationSidebar({
   async function remove(id: string, e: React.MouseEvent) {
     e.stopPropagation();
     try { await deleteConversation(id); onDeleted(id); } catch { /* stays in list */ }
+  }
+
+  async function clearAll() {
+    if (!conversations.length) return;
+    if (!window.confirm(`Delete all ${conversations.length} chats? This can't be undone.`)) return;
+    try {
+      const ids = conversations.map((c) => c.id);
+      await deleteAllConversations();
+      ids.forEach((id) => onDeleted(id));
+      setNote('All chats deleted.');
+    } catch {
+      setNote('Could not delete all chats.');
+    }
   }
 
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -114,13 +127,22 @@ export default function ConversationSidebar({
                 type="button"
                 aria-label="Delete chat"
                 onClick={(e) => remove(c.id, e)}
-                className="mr-1 shrink-0 rounded p-1 text-ink-500 opacity-0 transition-opacity hover:bg-danger-500/10 hover:text-danger-300 focus:opacity-100 group-hover:opacity-100"
+                className="mr-1 shrink-0 rounded p-1 text-ink-500/70 transition-colors hover:bg-danger-500/10 hover:text-danger-300 focus:text-danger-300 group-hover:text-ink-400"
               >
                 <Trash2 size={13} />
               </button>
             </div>
           );
         })}
+        {conversations.length > 0 && (
+          <button
+            type="button"
+            onClick={clearAll}
+            className="mt-1 flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-xs text-ink-500 hover:bg-danger-500/10 hover:text-danger-300"
+          >
+            <Trash2 size={13} /> Clear all chats
+          </button>
+        )}
       </div>
 
       <div className="flex flex-col gap-1 border-t border-elev/10 p-3">

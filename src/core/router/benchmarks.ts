@@ -42,7 +42,11 @@ const FAMILY_BENCHMARKS: Record<string, BenchmarkProfile> = {
   'claude-sonnet':     { code: 93, analysis: 88, creative: 87, data: 85 },
   'claude-haiku':      { code: 80, analysis: 75, creative: 76, data: 72 },
   // OpenAI GPT-5 family — current flagship; strongest all-round. Offline
-  // baseline (the live fetch refreshes these); point releases (gpt-5.x) fold in.
+  // baseline (the live fetch refreshes these). Distinct point releases carry
+  // their own scores: gpt-5.5 "Spud" leads SWE-bench (88.7%); gpt-5.4 ~80%.
+  'gpt-5.5':           { code: 97, analysis: 96, creative: 94, data: 95 },
+  'gpt-5.4':           { code: 94, analysis: 94, creative: 92, data: 92 },
+  'gpt-5.4-mini':      { code: 86, analysis: 85, creative: 85, data: 83 },
   'gpt-5':             { code: 96, analysis: 95, creative: 93, data: 93 },
   'gpt-5-mini':        { code: 88, analysis: 86, creative: 86, data: 84 },
   'gpt-5-nano':        { code: 78, analysis: 75, creative: 78, data: 73 },
@@ -74,8 +78,12 @@ const FAMILY_MATCHERS: Array<[RegExp, string]> = [
   [/opus/i, 'claude-opus'],
   [/sonnet/i, 'claude-sonnet'],
   [/haiku/i, 'claude-haiku'],
-  // GPT-5 family — ordered most-specific first (nano/mini before the base, and
-  // point releases like gpt-5.4 fold into the gpt-5 base).
+  // GPT-5 family — ordered most-specific first. Distinct point releases
+  // (gpt-5.5, gpt-5.4, gpt-5.4-mini) match their own family; nano/mini before
+  // the base; unrecognised gpt-5.x still fold into the gpt-5 base.
+  [/gpt-?5\.5/i, 'gpt-5.5'],
+  [/gpt-?5\.4.*mini/i, 'gpt-5.4-mini'],
+  [/gpt-?5\.4/i, 'gpt-5.4'],
   [/gpt-?5.*nano/i, 'gpt-5-nano'],
   [/gpt-?5.*mini/i, 'gpt-5-mini'],
   [/gpt-?5/i, 'gpt-5'],

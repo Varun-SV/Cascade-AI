@@ -530,6 +530,8 @@ export interface CascadeConfig {
   maxReplanPasses?: number;
   /** Reflection / self-critique: goal-alignment critique + revise after self-test. Off by default. */
   reflection?: { enabled?: boolean; maxRounds?: number };
+  /** Fast answer behaviour. `autoSimple`: pure small talk skips orchestration for a direct single-model reply. Default: true. */
+  fastAnswer?: { autoSimple?: boolean };
   /** T3 wave execution: 'auto' (sequential for local, parallel for cloud), or force one. Default: 'auto'. */
   t3Execution?: 'auto' | 'parallel' | 'sequential';
   /** T3→T2 reinforcement: let a worker ask its manager to spawn sibling workers. Off by default. */
@@ -652,6 +654,13 @@ export interface MemoryConfig {
   maxSessionMessages: number;
   autoSummarizeAt: number;   // token threshold
   retentionDays: number;
+  /**
+   * Opt-in: after a run completes, distill durable facts from the session into
+   * the project knowledge store (undoable per-fact from the Knowledge tab).
+   * Off by default — session content stays out of long-term memory unless the
+   * user chooses otherwise.
+   */
+  rememberSessions?: boolean;
 }
 
 export interface ExtendedContextConfig {
@@ -917,6 +926,14 @@ export interface CascadeRunOptions {
    * and cost. The reply still streams and is persisted like a normal turn.
    */
   fastAnswer?: boolean;
+  /**
+   * The user's ACTUAL message, for routing decisions only, when `prompt` has
+   * been augmented by the host (system guidance, memories, documents). The
+   * complexity heuristics/classifier and task-type analysis read this instead
+   * of the augmented prompt, so a bare "hi" still routes as small talk. The
+   * model still receives the full `prompt`. Defaults to `prompt` when unset.
+   */
+  routingPrompt?: string;
   /**
    * Optional model id to use for a fast answer (e.g. 'gpt-4o-mini'). When unset,
    * a validated mid-tier model is auto-selected. Ignored unless `fastAnswer`.

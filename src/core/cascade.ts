@@ -26,6 +26,7 @@ import { T3Worker } from './tiers/t3-worker.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { McpClient } from '../mcp/client.js';
 import { fileOAuthProvider } from '../mcp/oauth.js';
+import { distillSessionFacts, buildSessionTranscript, sessionWorthRemembering } from './knowledge/session-memory.js';
 import { AuditLogger } from '../audit/log.js';
 import { AuditLogger as EncryptedAuditLogger } from './audit/audit-logger.js';
 import { MemoryStore } from '../memory/store.js';
@@ -678,6 +679,36 @@ export class Cascade extends EventEmitter {
     return casual;
   }
 
+  /**
+   * Pure small talk that a single tool-less model answers best: greetings,
+   * acknowledgements and self-identity questions. Deliberately NARROWER than
+   * looksLikeConversational — "what is X" / "show me Y" / "list Z" need tools
+   * or real lookup and stay on the worker path. Bare confirmations ("yes",
+   * "ok") in an ongoing conversation are task input, not small talk.
+   */
+  private looksLikeSmallTalk(prompt: string, history: ConversationMessage[] = []): boolean {
+    const p = prompt.trim();
+    if (this.isCasualGreeting(p)) return true;
+    if (/^(?:who|what)\b.*\byou\b/i.test(p) || /^what can you\b/i.test(p)) {
+      return p.split(/\s+/).length <= 12;
+    }
+    // Greeting-led openers ("hey there!", "hello cascade") with nothing else.
+    if (history.length === 0 && /^(?:hi|hello|hey|greetings)\b[\s,!.]*\w*[!.]*$/i.test(p)) return true;
+    return false;
+  }
+
+  /**
+   * A terse option/menu selection ("3", "b)", "option 2") replying to an
+   * ongoing conversation. These inherit the prior turn's intent — they are
+   * usually an ACTION choice, so they must not be short-circuited to a
+   * tool-less direct answer, and a context-free on-device hint about them
+   * is noise (the hint classifier never saw the conversation).
+   */
+  private looksLikeTerseOptionReply(prompt: string): boolean {
+    const p = prompt.trim();
+    return /^\(?(?:\d{1,2}|[a-d])[.)]?$/i.test(p) || /^(?:option|choice)\s+\d{1,2}$/i.test(p);
+  }
+
   private looksLikeSimpleArtifactTask(prompt: string): boolean {
     return /create .*\.(txt|md|json|csv)\b/i.test(prompt)
       && !/(research|compare|thorough|pdf|report|analy[sz]e|architecture|multi-agent)/i.test(prompt);
@@ -821,8 +852,18 @@ export class Cascade extends EventEmitter {
     // skip the classifier LLM round-trip entirely. Apply the SAME heuristic
     // floors as the classifier path so a small model under-rating clearly
     // multi-step work can't strand it below the tier it needs.
+    // Exception: a terse option reply ("3") carries no signal on its own — the
+    // on-device classifier never saw the conversation, so its verdict is noise.
+    // Fall through to the LLM classifier, which reads the recent history.
     if (hint) {
-      return this.floorComplexity(prompt, hint, 'on-device hint');
+      if (this.looksLikeTerseOptionReply(prompt) && conversationHistory.length > 0) {
+        this.recordDecision(
+          'complexity',
+          `terse option reply — on-device hint "${hint}" ignored; classifying with conversation context`,
+        );
+      } else {
+        return this.floorComplexity(prompt, hint, 'on-device hint');
+      }
     }
 
     // Quick workspace scout (cached for 30s)
@@ -942,6 +983,22 @@ ${prompt}`
       return this.runFastAnswer(options, startMs, taskId);
     }
 
+    // Auto fast answer for pure small talk: hosts often augment the prompt
+    // (memories, delivery guidance, documents), so the routing decision reads
+    // `routingPrompt` — the user's actual message — when the host provides it.
+    // Without this, "hi" spun up a real T3 worker whose synthesized assignment
+    // carried the augmentation, which small models echoed as phantom artifacts.
+    const routingPrompt = options.routingPrompt ?? options.prompt;
+    const pinnedTier = ['T1', 'T2', 'T3'].includes(this.config.routing?.forceTier ?? '');
+    if (
+      this.config.fastAnswer?.autoSimple !== false &&
+      !pinnedTier &&
+      this.looksLikeSmallTalk(routingPrompt, options.conversationHistory)
+    ) {
+      this.recordDecision('complexity', 'Simple — heuristic: small talk → direct answer (no worker, no classifier call)');
+      return this.runFastAnswer(options, startMs, taskId, { auto: true });
+    }
+
     // Extended context: compact an over-budget history/input to fit the model
     // window before any tier sees it (no-op unless enabled + something overflows).
     options = await this.applyExtendedContext(options);
@@ -998,7 +1055,7 @@ ${prompt}`
       this.recordDecision('complexity', `${forced} — manually forced via routing.forceTier=${forceTier}`);
     } else {
       complexity = await this.determineComplexity(
-        options.prompt,
+        routingPrompt,
         options.workspacePath || process.cwd(),
         options.conversationHistory,
         options.complexityHint,
@@ -1025,7 +1082,9 @@ ${prompt}`
         const tierKey = tier.toLowerCase() as 't1' | 't2' | 't3';
         if (this.config.models?.[tierKey]) return;
         try {
-          const model = await this.taskAnalyzer!.selectModel(options.prompt, tier, this.router.getSelector());
+          // Analyze the user's actual request, not the host-augmented prompt —
+          // delivery guidance/memories would poison the task-type profile.
+          const model = await this.taskAnalyzer!.selectModel(routingPrompt, tier, this.router.getSelector());
           if (model) {
             this.router.overrideTierModel(tier, model);
             const taskType = this.taskAnalyzer!.getLastProfile()?.type ?? 'mixed';
@@ -1324,6 +1383,13 @@ ${prompt}`
     const stats = this.router.getStats();
     const durationMs = Date.now() - startMs;
 
+    // Opt-in: distill this finished session into durable project knowledge so
+    // future runs remember it. Fire-and-forget after the result is ready — it
+    // must never delay or fail the run, and it's undoable from the Knowledge tab.
+    if (!runError && this.config.memory?.rememberSessions) {
+      void this.rememberSession(options, finalOutput).catch(() => { /* best-effort */ });
+    }
+
     return {
       output: finalOutput,
       sessionId: options.sessionId ?? '',
@@ -1349,7 +1415,12 @@ ${prompt}`
    * answered by one mid-tier model, streamed as the primary output and shaped
    * into the normal CascadeRunResult so persistence + the run receipt still work.
    */
-  private async runFastAnswer(options: CascadeRunOptions, startMs: number, taskId: string): Promise<CascadeRunResult> {
+  private async runFastAnswer(
+    options: CascadeRunOptions,
+    startMs: number,
+    taskId: string,
+    { auto = false }: { auto?: boolean } = {},
+  ): Promise<CascadeRunResult> {
     const tier: TierRole = 'T2'; // mid quality/cost
     const selector = this.router.getSelector();
     const model = options.fastAnswerModel
@@ -1358,8 +1429,21 @@ ${prompt}`
     if (!model) {
       throw new Error('No model is available for a fast answer — add a provider API key first.');
     }
-    this.recordDecision('model', `Fast answer → ${model.provider}:${model.id} — direct single-model reply (no orchestration)`);
+    this.recordDecision(
+      'model',
+      `Fast answer${auto ? ' (auto)' : ''} → ${model.provider}:${model.id} — direct single-model reply (no orchestration)`,
+    );
     this.emit('tier:status', { tierId: 'fast', role: tier, status: 'ACTIVE', model: `${model.provider}:${model.id}` });
+
+    // Persona parity with the worker path: an active identity speaks here too.
+    let identityPrompt = '';
+    if (this.store) {
+      const identityId = options.identityId || this.config.defaultIdentityId;
+      if (identityId) {
+        const identity = this.store.listIdentities().find((i) => i.id === identityId);
+        if (identity?.systemPrompt) identityPrompt = identity.systemPrompt + '\n\n';
+      }
+    }
 
     const history = (options.conversationHistory ?? []).slice(-10);
     const userContent: ConversationMessage['content'] = options.images?.length
@@ -1370,22 +1454,56 @@ ${prompt}`
       : options.prompt;
     const messages: ConversationMessage[] = [...history, { role: 'user', content: userContent }];
     const systemPrompt =
+      identityPrompt +
       'You are Cascade in fast mode. Answer the user directly, accurately and concisely. ' +
       'You have no tools and cannot run code, browse, or create files — do not claim to.';
 
     let streamed = '';
     // With an image, let the router pick a vision-capable model instead of pinning.
     const requireVision = !!options.images?.length;
-    const result = await this.router.generate(
-      tier,
-      { messages, systemPrompt, maxTokens: 2048, ...(requireVision ? {} : { model }) },
-      (chunk) => {
-        streamed += chunk.text;
-        this.emit('stream:token', { tierId: 'fast', text: chunk.text, primary: true });
-        options.streamCallback?.({ text: chunk.text, finishReason: null });
-      },
-      requireVision,
-    );
+    let result: Awaited<ReturnType<CascadeRouter['generate']>> | undefined;
+    try {
+      result = await this.router.generate(
+        tier,
+        { messages, systemPrompt, maxTokens: 2048, ...(requireVision ? {} : { model }) },
+        (chunk) => {
+          streamed += chunk.text;
+          this.emit('stream:token', { tierId: 'fast', text: chunk.text, primary: true });
+          options.streamCallback?.({ text: chunk.text, finishReason: null });
+        },
+        requireVision,
+      );
+    } catch (err) {
+      // Mirror the orchestrated path: a cancel resolves (with whatever streamed)
+      // rather than rejecting, so the host can flag the turn cancelled.
+      if (err instanceof CascadeCancelledError || options.signal?.aborted) {
+        this.emit('run:cancelled', { taskId, reason: err instanceof Error ? err.message : 'Task cancelled' });
+        this.emit('tier:status', { tierId: 'fast', role: tier, status: 'COMPLETED', model: `${model.provider}:${model.id}` });
+        const stats = this.router.getStats();
+        return {
+          output: streamed,
+          sessionId: options.sessionId ?? '',
+          taskId,
+          usage: {
+            inputTokens: 0,
+            outputTokens: 0,
+            totalTokens: stats.totalTokens,
+            estimatedCostUsd: stats.totalCostUsd,
+          },
+          t2Results: [],
+          durationMs: Date.now() - startMs,
+          costByTier: stats.costByTier,
+          tokensByTier: stats.tokensByTier,
+          costByFeature: stats.costByFeature,
+          costPercentByTier: this.router.getTierCostPercentages(),
+        };
+      }
+      throw err;
+    } finally {
+      // The orchestrated path clears the run signal in its own teardown; this
+      // path returns early, so detach it here or the next run leaks listeners.
+      this.router.setRunSignal(undefined);
+    }
     this.emit('tier:status', { tierId: 'fast', role: tier, status: 'COMPLETED', model: `${model.provider}:${model.id}` });
 
     const stats = this.router.getStats();
@@ -1406,6 +1524,28 @@ ${prompt}`
       costByFeature: stats.costByFeature,
       costPercentByTier: this.router.getTierCostPercentages(),
     };
+  }
+
+  /**
+   * Distill a completed session into durable facts and store them in the
+   * project knowledge graph (opt-in via memory.rememberSessions). Best-effort:
+   * skips trivial exchanges, uses one cheap T3 call, and swallows all errors.
+   */
+  private async rememberSession(options: CascadeRunOptions, output: string): Promise<void> {
+    const db = this.router.getWorldStateDB?.();
+    if (!db) return;
+    const history = options.conversationHistory ?? [];
+    if (!sessionWorthRemembering(history, options.prompt, output)) return;
+    const transcript = buildSessionTranscript(history, options.prompt, output);
+    const facts = await distillSessionFacts(transcript, async (prompt) => {
+      const res = await this.router.generate('T3', {
+        messages: [{ role: 'user', content: prompt }],
+        maxTokens: 300,
+        temperature: 0,
+      });
+      return res.content;
+    });
+    for (const f of facts) db.upsertFact(f.entity, f.relation, f.value, 'session-memory');
   }
 
   getRouter(): CascadeRouter {

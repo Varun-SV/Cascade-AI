@@ -9,6 +9,9 @@
   "eloCeil": 1500,
   "note": "Chatbot Arena publishes category Elo ratings (coding -> code, hard-prompts -> analysis, creative-writing -> creative, math -> data). These are maintainer-approximated SEED Elos, normalized to 0-100 via the eloFloor..eloCeil band; replace with real reads from the cited URL. Arena Elo depends on the current model pool, so re-anchor the band if the pool shifts.",
   "models": {
+    "gpt-5.5":          { "code": 1480, "analysis": 1475, "creative": 1465, "data": 1470 },
+    "gpt-5.4":          { "code": 1465, "analysis": 1465, "creative": 1455, "data": 1455 },
+    "gpt-5.4-mini":     { "code": 1425, "analysis": 1420, "creative": 1425, "data": 1410 },
     "claude-opus":      { "code": 1445, "analysis": 1455, "creative": 1450, "data": 1435 },
     "claude-sonnet":    { "code": 1435, "analysis": 1440, "creative": 1445, "data": 1425 },
     "claude-haiku":     { "code": 1395, "analysis": 1375, "creative": 1390, "data": 1365 },

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildRunPrompt, parseChatRunPayload } from './runs.js';
+import { buildRunPrompt, parseChatRunPayload, wantsFileDelivery, FILE_DELIVERY_GUIDANCE } from './runs.js';
 import { getSkill, skillCatalog } from './skills.js';
 
 describe('buildRunPrompt', () => {
@@ -42,6 +42,44 @@ describe('buildRunPrompt', () => {
     ]);
     expect(out).toContain('2 documents');
     expect(out).toContain('filename="a&quot;b.txt"');
+  });
+});
+
+describe('wantsFileDelivery (file-guidance gate)', () => {
+  it('fires for prompts that explicitly ask for a file/document/export', () => {
+    expect(wantsFileDelivery('write a report and save it as report.md')).toBe(true);
+    expect(wantsFileDelivery('export this as CSV')).toBe(true);
+    expect(wantsFileDelivery('make me a word document about pandas')).toBe(true);
+    expect(wantsFileDelivery('generate a config.json for this')).toBe(true);
+    expect(wantsFileDelivery('can you give me a downloadable summary?')).toBe(true);
+  });
+
+  it('stays quiet for conversation and ordinary questions', () => {
+    expect(wantsFileDelivery('hello')).toBe(false);
+    expect(wantsFileDelivery('hi')).toBe(false);
+    expect(wantsFileDelivery('3')).toBe(false);
+    expect(wantsFileDelivery('what is a monad')).toBe(false);
+    expect(wantsFileDelivery('explain this code to me')).toBe(false);
+  });
+
+  it('fires when the active skill is file-oriented', () => {
+    expect(wantsFileDelivery('summarize our chat', 'You produce a structured report document.')).toBe(true);
+  });
+
+  it('keeps guidance for follow-ups to an already-delivered file', () => {
+    const history = [
+      { role: 'user', content: 'make a csv of the results' },
+      { role: 'assistant', content: 'Here you go:\n```file:results.csv\na,b\n1,2\n```' },
+      { role: 'user', content: 'now change the header row' },
+    ];
+    expect(wantsFileDelivery('now change the header row', undefined, history)).toBe(true);
+  });
+
+  it('guidance text is echo-proof and intent-gated', () => {
+    // No fenced example a small model could echo verbatim…
+    expect(FILE_DELIVERY_GUIDANCE).not.toContain('```');
+    // …and the instruction is explicitly conditional.
+    expect(FILE_DELIVERY_GUIDANCE).toContain('ONLY');
   });
 });
 

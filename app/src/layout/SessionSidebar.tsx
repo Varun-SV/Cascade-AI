@@ -131,22 +131,26 @@ function SessionRow({
             >
               <RotateCcw size={10} />
             </button>
-            <button
-              onClick={handleDelete}
-              title="Delete session"
-              style={{
-                background: 'none', border: 'none', cursor: 'pointer',
-                color: 'var(--text-dim)', padding: 2, borderRadius: 3,
-                display: 'flex', alignItems: 'center',
-                transition: 'color var(--dur) var(--ease)',
-              }}
-              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--danger)'; }}
-              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text-dim)'; }}
-            >
-              <Trash2 size={10} />
-            </button>
           </>
         )}
+        {/* Delete stays ALWAYS visible (dimmed) so the affordance is discoverable
+            without hovering — the export/review/rollback actions remain on hover. */}
+        <button
+          onClick={handleDelete}
+          title="Delete session"
+          style={{
+            background: 'none', border: 'none', cursor: 'pointer',
+            color: hovered ? 'var(--text-dim)' : 'var(--text-faint, var(--text-dim))',
+            opacity: hovered ? 1 : 0.55,
+            padding: 2, borderRadius: 3,
+            display: 'flex', alignItems: 'center',
+            transition: 'color var(--dur) var(--ease), opacity var(--dur) var(--ease)',
+          }}
+          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--danger)'; }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text-dim)'; }}
+        >
+          <Trash2 size={10} />
+        </button>
         {!hovered && (
           <span style={{ fontSize: 9, color: 'var(--text-dim)', flexShrink: 0 }}>
             {relativeTime(session.updatedAt)}

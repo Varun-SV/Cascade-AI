@@ -1402,6 +1402,45 @@ export class DashboardServer {
       }
     });
 
+    // Prior values for one fact (history-preserving world-state). Powers the
+    // Knowledge tab's per-fact history/restore — a bad extraction is recoverable.
+    this.app.get('/api/knowledge/fact/history', auth, (req: Request, res: Response) => {
+      const entity = req.query['entity'];
+      const relation = req.query['relation'];
+      if (typeof entity !== 'string' || typeof relation !== 'string') {
+        res.status(400).json({ error: 'entity and relation are required' });
+        return;
+      }
+      try {
+        const ws = new WorldStateDB(this.workspacePath);
+        try {
+          res.json({ history: ws.getFactHistory(entity, relation) });
+        } finally {
+          ws.close();
+        }
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
+    this.app.post('/api/knowledge/fact/restore', auth, mutationLimiter, (req: Request, res: Response) => {
+      const body = req.body as { entity?: string; relation?: string; validFrom?: string };
+      if (!body.entity || !body.relation) {
+        res.status(400).json({ error: 'entity and relation are required' });
+        return;
+      }
+      try {
+        const ws = new WorldStateDB(this.workspacePath);
+        try {
+          res.json({ ok: true, restored: ws.restoreFact(body.entity, body.relation, body.validFrom) });
+        } finally {
+          ws.close();
+        }
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+
     // ── Tamper-evident audit chain ──────────────
     // Pages through the encrypted hash-chained AuditLogger (newest first).
     // Distinct from /api/audit/:sessionId, which reads the per-session

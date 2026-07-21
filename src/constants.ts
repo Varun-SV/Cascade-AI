@@ -206,6 +206,45 @@ export const MODELS: Record<string, ModelInfo> = {
     supportsStreaming: true,
     isLocal: false,
   },
+  // GPT-5 point releases — genuinely distinct capability, so they route as their
+  // own families (not folded into gpt-5). Offline baseline pricing; live fetch
+  // keeps it current. gpt-5.5 "Spud" (Apr 2026) is the current SWE-bench leader.
+  'gpt-5.5': {
+    id: 'gpt-5.5',
+    name: 'GPT-5.5',
+    provider: 'openai',
+    contextWindow: 400_000,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.0025,
+    outputCostPer1kTokens: 0.02,
+    maxOutputTokens: 128_000,
+    supportsStreaming: true,
+    isLocal: false,
+  },
+  'gpt-5.4': {
+    id: 'gpt-5.4',
+    name: 'GPT-5.4',
+    provider: 'openai',
+    contextWindow: 400_000,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.00125,
+    outputCostPer1kTokens: 0.01,
+    maxOutputTokens: 128_000,
+    supportsStreaming: true,
+    isLocal: false,
+  },
+  'gpt-5.4-mini': {
+    id: 'gpt-5.4-mini',
+    name: 'GPT-5.4 Mini',
+    provider: 'openai',
+    contextWindow: 400_000,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.00025,
+    outputCostPer1kTokens: 0.002,
+    maxOutputTokens: 128_000,
+    supportsStreaming: true,
+    isLocal: false,
+  },
   // Google
   'gemini-2.0-flash': {
     id: 'gemini-2.0-flash',
@@ -334,6 +373,8 @@ for (const _m of Object.values(MODELS)) {
 // ── Tier Model Priority Chains ─────────────────
 
 export const T1_MODEL_PRIORITY: string[] = [
+  'gpt-5.5',
+  'gpt-5.4',
   'gpt-5',
   'claude-opus-4',
   'claude-sonnet-4',
@@ -344,6 +385,7 @@ export const T1_MODEL_PRIORITY: string[] = [
 ];
 
 export const T2_MODEL_PRIORITY: string[] = [
+  'gpt-5.4-mini',
   'gpt-5-mini',
   'claude-sonnet-4',
   'claude-haiku-4-5',

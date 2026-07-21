@@ -43,6 +43,19 @@ describe('benchmarkScore01', () => {
       .toBeLessThan(benchmarkScore01(MODELS['gpt-5']!, 'code'));
   });
 
+  it('scores distinct gpt-5 point releases (5.5 > 5.4 > 5.4-mini)', () => {
+    const v55 = benchmarkScore01(MODELS['gpt-5.5']!, 'code');
+    const v54 = benchmarkScore01(MODELS['gpt-5.4']!, 'code');
+    const v54mini = benchmarkScore01(MODELS['gpt-5.4-mini']!, 'code');
+    expect(v55).toBeGreaterThan(v54);
+    expect(v54).toBeGreaterThan(v54mini);
+    // The reported mis-route: an Azure gpt-5.4 deployment must NOT resolve to
+    // the (weaker) gpt-5.4-mini family.
+    const azure54 = { id: 'gpt-5.4', name: 'gpt-5.4', provider: 'azure', baseModelId: 'gpt-5.4' } as ModelInfo;
+    const azure54mini = { id: 'gpt-5.4-mini', name: 'gpt-5.4-mini', provider: 'azure', baseModelId: 'gpt-5.4-mini' } as ModelInfo;
+    expect(benchmarkScore01(azure54, 'code')).toBeGreaterThan(benchmarkScore01(azure54mini, 'code'));
+  });
+
   it('produces an in-range score for the mixed task type', () => {
     const s = benchmarkScore01(MODELS['claude-sonnet-4']!, 'mixed');
     expect(s).toBeGreaterThan(0);

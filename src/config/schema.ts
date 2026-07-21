@@ -114,6 +114,8 @@ export const MemoryConfigSchema = z.object({
   maxSessionMessages: z.number().default(1000),
   autoSummarizeAt: z.number().default(150_000),
   retentionDays: z.number().default(90),
+  /** Opt-in session→knowledge distillation after each run. Default: false. */
+  rememberSessions: z.boolean().default(false),
 });
 
 export const TierLimitsSchema = z.object({
@@ -228,6 +230,14 @@ export const CascadeConfigSchema = z.object({
    */
   knowledge: z.object({
     factsExtraction: z.boolean().default(true),
+  }).default({}),
+  /**
+   * Fast answer behaviour. `autoSimple`: pure small talk ("hi", "who are you")
+   * skips the T1/T2/T3 machinery for a direct single-model reply — same cost
+   * shape as the explicit fast-answer toggle, applied automatically.
+   */
+  fastAnswer: z.object({
+    autoSimple: z.boolean().default(true),
   }).default({}),
   /**
    * Workspace code index (Phase 3). Opt-in. When enabled, Cascade registers a
