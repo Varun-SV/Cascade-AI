@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Copy, Check, ArrowRight, Loader2, RefreshCw, Send, Download, Globe, X,
-  Cloud, LogOut, Github, MessageSquare, ShieldCheck, ChevronRight,
+  Cloud, LogOut, Github, MessageSquare, ShieldCheck, ChevronRight, ChevronLeft, Trash2,
   UploadCloud, DownloadCloud, KeyRound,
 } from 'lucide-react';
 import { useAppDispatch, useAppSelector, setShowContinue } from '../store/index.js';
-import type { CloudUser } from '../App.js';
+import type { CloudUser, CloudMsg } from '../App.js';
 import { fetchSessionTranscript } from '../utils/sessionLoad.js';
 import { createCloudHandoff, fetchCloudHandoff } from '../lib/cloudHandoff.js';
 
@@ -301,8 +301,7 @@ function CloudChatsTab({ signedIn, backendPort, authToken, onDone }: {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [convos, setConvos] = useState<Array<{ id: string; title: string }>>([]);
-  const [importingId, setImportingId] = useState<string | null>(null);
-  const [imported, setImported] = useState<string | null>(null);
+  const [open, setOpen] = useState<{ id: string; title: string } | null>(null);
 
   const load = useCallback(async () => {
     const api = window.cascade?.cloud;
@@ -322,25 +321,6 @@ function CloudChatsTab({ signedIn, backendPort, authToken, onDone }: {
 
   useEffect(() => { if (signedIn) void load(); }, [signedIn, load]);
 
-  async function continueChat(c: { id: string; title: string }) {
-    const api = window.cascade?.cloud;
-    if (!api || importingId) return;
-    setImportingId(c.id);
-    setError(null);
-    try {
-      const r = await api.messages(c.id);
-      if (!r.ok) throw new Error(r.error || 'Could not load that chat.');
-      const messages = r.messages.filter((m) => m.content.trim());
-      if (messages.length === 0) throw new Error('That chat has no messages yet.');
-      await importTranscript(backendPort, authToken, c.title?.trim() || 'Cloud chat', messages);
-      setImported(c.title?.trim() || 'Cloud chat');
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not bring that chat here.');
-    } finally {
-      setImportingId(null);
-    }
-  }
-
   if (!signedIn) {
     return (
       <p style={{ padding: '20px 12px', textAlign: 'center', fontSize: 11.5, color: 'var(--text-dim)', border: '1px dashed var(--border)', borderRadius: 8 }}>
@@ -349,20 +329,15 @@ function CloudChatsTab({ signedIn, backendPort, authToken, onDone }: {
     );
   }
 
-  if (imported) {
+  if (open) {
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, alignItems: 'center', padding: '8px 0' }}>
-        <Check size={26} style={{ color: 'var(--success)' }} />
-        <p style={{ fontSize: 12, color: 'var(--text)', textAlign: 'center', lineHeight: 1.5 }}>
-          Imported <b>{imported}</b>. It’s in your sidebar as <b>“{imported} (imported)”</b> — open it to continue.
-        </p>
-        <div style={{ display: 'flex', gap: 8, width: '100%' }}>
-          <button style={{ ...primaryBtn, flex: 1 }} onClick={onDone}>Done</button>
-          <button onClick={() => setImported(null)} style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '9px 12px', fontSize: 12, fontWeight: 500, borderRadius: 7, cursor: 'pointer', background: 'var(--bg-raised)', color: 'var(--text)', border: '1px solid var(--border)' }}>
-            Bring another
-          </button>
-        </div>
-      </div>
+      <CloudChatViewer
+        conversation={open}
+        backendPort={backendPort}
+        authToken={authToken}
+        onBack={() => { setOpen(null); void load(); }}
+        onImported={onDone}
+      />
     );
   }
 
@@ -370,7 +345,7 @@ function CloudChatsTab({ signedIn, backendPort, authToken, onDone }: {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         <p style={{ flex: 1, margin: 0, fontSize: 11.5, lineHeight: 1.5, color: 'var(--text-muted)' }}>
-          Pick a chat from the web to bring here as a new session you can continue.
+          Your shared cloud chats — the same ones on web + CLI. Open one to read it, navigate its branches, or bring it here to continue.
         </p>
         <button onClick={load} disabled={loading} title="Refresh" style={{ display: 'flex', background: 'none', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-muted)', padding: 5, cursor: 'pointer', opacity: loading ? 0.5 : 1 }}>
           <RefreshCw size={12} className={loading ? 'spin' : undefined} />
@@ -385,26 +360,164 @@ function CloudChatsTab({ signedIn, backendPort, authToken, onDone }: {
         </div>
       ) : convos.length === 0 ? (
         <p style={{ padding: '20px 12px', textAlign: 'center', fontSize: 11.5, color: 'var(--text-dim)', border: '1px dashed var(--border)', borderRadius: 8 }}>
-          No cloud chats yet. Start one on the web and it’ll show up here.
+          No cloud chats yet. Start one on the web, desktop, or CLI and it’ll show up here.
         </p>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 5, maxHeight: 300, overflowY: 'auto' }}>
           {convos.map((c) => (
             <button
               key={c.id}
-              onClick={() => continueChat(c)}
-              disabled={!!importingId}
-              style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', textAlign: 'left', padding: '9px 10px', borderRadius: 7, cursor: importingId ? 'default' : 'pointer', background: 'var(--bg-raised)', border: '1px solid var(--border)', color: 'var(--text)', opacity: importingId && importingId !== c.id ? 0.5 : 1 }}
+              onClick={() => setOpen(c)}
+              style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', textAlign: 'left', padding: '9px 10px', borderRadius: 7, cursor: 'pointer', background: 'var(--bg-raised)', border: '1px solid var(--border)', color: 'var(--text)' }}
             >
               <MessageSquare size={13} style={{ flexShrink: 0, color: 'var(--text-dim)' }} />
               <span style={{ flex: 1, minWidth: 0, fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                 {c.title?.trim() || 'Untitled chat'}
               </span>
-              {importingId === c.id ? <Loader2 size={13} className="spin" style={{ color: 'var(--accent)' }} /> : <ChevronRight size={14} style={{ color: 'var(--text-dim)' }} />}
+              <ChevronRight size={14} style={{ color: 'var(--text-dim)' }} />
             </button>
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Cloud chat viewer — read the active path, navigate branches (‹ i/n ›),
+//    delete a message + its subtree, or bring the chat here to continue. ──
+
+function CloudChatViewer({ conversation, backendPort, authToken, onBack, onImported }: {
+  conversation: { id: string; title: string };
+  backendPort: number;
+  authToken: string;
+  onBack: () => void;
+  onImported: () => void;
+}) {
+  const [msgs, setMsgs] = useState<CloudMsg[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [imported, setImported] = useState(false);
+
+  const load = useCallback(async () => {
+    const api = window.cascade?.cloud;
+    if (!api) return;
+    setLoading(true); setError(null);
+    try {
+      const r = await api.messages(conversation.id);
+      if (!r.ok) { setError(r.error || 'Could not load that chat.'); return; }
+      setMsgs(r.messages);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not load that chat.');
+    } finally { setLoading(false); }
+  }, [conversation.id]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function switchBranch(messageId: string) {
+    const api = window.cascade?.cloud;
+    if (!api || busy) return;
+    setBusy(true); setError(null);
+    try {
+      const r = await api.selectBranch(conversation.id, messageId);
+      if (!r.ok) { setError(r.error || 'Could not switch branch.'); return; }
+      setMsgs(r.messages);
+    } finally { setBusy(false); }
+  }
+
+  async function removeMessage(messageId: string) {
+    const api = window.cascade?.cloud;
+    if (!api || busy) return;
+    if (!window.confirm('Delete this message and everything below it? This can’t be undone.')) return;
+    setBusy(true); setError(null);
+    try {
+      const r = await api.deleteMessage(conversation.id, messageId);
+      if (!r.ok) { setError(r.error || 'Could not delete that message.'); return; }
+      setMsgs(r.messages);
+    } finally { setBusy(false); }
+  }
+
+  async function bringHere() {
+    if (busy) return;
+    setBusy(true); setError(null);
+    try {
+      const messages = msgs.filter((m) => m.content.trim()).map((m) => ({ role: m.role, content: m.content }));
+      if (messages.length === 0) throw new Error('That chat has no messages yet.');
+      await importTranscript(backendPort, authToken, conversation.title?.trim() || 'Cloud chat', messages);
+      setImported(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not bring that chat here.');
+    } finally { setBusy(false); }
+  }
+
+  if (imported) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, alignItems: 'center', padding: '8px 0' }}>
+        <Check size={26} style={{ color: 'var(--success)' }} />
+        <p style={{ fontSize: 12, color: 'var(--text)', textAlign: 'center', lineHeight: 1.5 }}>
+          Imported into your sidebar as <b>“{conversation.title?.trim() || 'Cloud chat'} (imported)”</b> — open it to continue.
+        </p>
+        <button style={primaryBtn} onClick={onImported}>Done</button>
+      </div>
+    );
+  }
+
+  const iconBtn: React.CSSProperties = { display: 'flex', background: 'none', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text-muted)', padding: 3, cursor: 'pointer' };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <button onClick={onBack} title="Back" style={iconBtn}><ChevronLeft size={14} /></button>
+        <span style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 600, color: 'var(--text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {conversation.title?.trim() || 'Untitled chat'}
+        </span>
+        <button onClick={load} disabled={loading || busy} title="Refresh" style={{ ...iconBtn, opacity: loading || busy ? 0.5 : 1 }}>
+          <RefreshCw size={12} className={loading ? 'spin' : undefined} />
+        </button>
+      </div>
+
+      {error && <p style={{ margin: 0, fontSize: 11.5, color: 'var(--danger)' }}>{error}</p>}
+
+      {loading ? (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '24px 0', color: 'var(--text-dim)', fontSize: 11.5 }}>
+          <Loader2 size={14} className="spin" /> Loading…
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 320, overflowY: 'auto' }}>
+          {msgs.map((m, idx) => {
+            const sibs = m.siblingIds ?? [];
+            const pos = m.id ? sibs.indexOf(m.id) : -1;
+            const hasBranches = sibs.length > 1 && pos >= 0;
+            return (
+              <div key={m.id ?? idx} style={{ borderRadius: 7, background: 'var(--bg-raised)', border: '1px solid var(--border)', padding: '8px 10px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                  <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.04em', color: m.role === 'user' ? 'var(--accent)' : 'var(--text-muted)' }}>
+                    {m.role === 'user' ? 'YOU' : 'CASCADE'}
+                  </span>
+                  {hasBranches && (
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 2, fontSize: 10.5, color: 'var(--text-dim)' }}>
+                      <button onClick={() => sibs[pos - 1] && switchBranch(sibs[pos - 1]!)} disabled={busy || pos === 0} title="Previous version" style={{ ...iconBtn, padding: 1, opacity: pos === 0 ? 0.3 : 1 }}><ChevronLeft size={11} /></button>
+                      <span style={{ fontFamily: 'var(--font-mono)' }}>{pos + 1}/{sibs.length}</span>
+                      <button onClick={() => sibs[pos + 1] && switchBranch(sibs[pos + 1]!)} disabled={busy || pos === sibs.length - 1} title="Next version" style={{ ...iconBtn, padding: 1, opacity: pos === sibs.length - 1 ? 0.3 : 1 }}><ChevronRight size={11} /></button>
+                    </span>
+                  )}
+                  <span style={{ flex: 1 }} />
+                  <button onClick={() => m.id && removeMessage(m.id)} disabled={busy || !m.id} title="Delete this message and its replies" style={{ ...iconBtn, border: 'none', color: 'var(--text-dim)' }}>
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+                <div style={{ fontSize: 11.5, lineHeight: 1.5, color: 'var(--text)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  {m.content.length > 600 ? m.content.slice(0, 600) + '…' : m.content}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <button style={{ ...primaryBtn, opacity: busy || loading ? 0.5 : 1 }} onClick={bringHere} disabled={busy || loading}>
+        {busy ? <Loader2 size={14} className="spin" /> : <ArrowRight size={14} />} Bring this branch here to continue
+      </button>
     </div>
   );
 }

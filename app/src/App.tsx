@@ -30,6 +30,26 @@ import { ChangesModal } from './components/ChangesModal.js';
 import { ContinueModal } from './components/ContinueModal.js';
 import { useThemeSync } from './theme/useTheme.js';
 
+/** A message on a cloud conversation's active path (with branching data). */
+export interface CloudMsg {
+  id?: string;
+  parentId?: string | null;
+  role: string;
+  content: string;
+  tier?: string | null;
+  model?: string | null;
+  costUsd?: number | null;
+  siblingIds?: string[];
+}
+
+/** A locally-executed turn to persist into the shared cloud conversation. */
+export interface CloudTurn {
+  userContent: string;
+  assistant: { content: string; tier?: string | null; model?: string | null; costUsd?: number | null };
+  editOfMessageId?: string;
+  regenerateFromUserMessageId?: string;
+}
+
 declare global {
   interface Window {
     cascade?: {
@@ -81,7 +101,13 @@ declare global {
         cancelLogin(): Promise<{ ok: boolean }>;
         logout(): Promise<{ ok: boolean; signedIn?: boolean }>;
         sessions(): Promise<{ ok: boolean; error?: string; conversations: Array<{ id: string; title: string; updatedAt?: number }> }>;
-        messages(id: string): Promise<{ ok: boolean; error?: string; messages: Array<{ role: string; content: string }> }>;
+        messages(id: string): Promise<{ ok: boolean; error?: string; messages: CloudMsg[] }>;
+        createConversation(title?: string): Promise<{ ok: boolean; error?: string; conversation?: { id: string; title: string | null } }>;
+        appendTurn(id: string, turn: CloudTurn): Promise<{ ok: boolean; error?: string; messages: CloudMsg[] }>;
+        selectBranch(id: string, messageId: string): Promise<{ ok: boolean; error?: string; messages: CloudMsg[] }>;
+        deleteMessage(id: string, messageId: string): Promise<{ ok: boolean; error?: string; messages: CloudMsg[] }>;
+        renameConversation(id: string, title: string): Promise<{ ok: boolean; error?: string }>;
+        deleteConversation(id: string): Promise<{ ok: boolean; error?: string }>;
         syncPush(passphrase: string): Promise<{ ok: boolean; error?: string; version?: number }>;
         syncPull(passphrase: string): Promise<{ ok: boolean; error?: string; empty?: boolean; applied?: boolean }>;
       };
