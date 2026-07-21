@@ -370,6 +370,36 @@ describe('CloudStore — message branching (conversation tree)', () => {
     expect(store.getMessageById(u1)).not.toBeNull();
   });
 
+  it('appendTurn persists a normal turn at the tip, and edit/regenerate as siblings', () => {
+    // Normal turn → user + assistant appended at the (empty) root.
+    const p1 = store.appendTurn(convId, userId, { userContent: 'q1', assistant: { content: 'a1', tier: 'T3' } })!;
+    expect(p1.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(p1[1]!.tier).toBe('T3');
+    const u1 = p1[0]!;
+
+    // Follow-up appends under the previous assistant (the active leaf).
+    const p2 = store.appendTurn(convId, userId, { userContent: 'q2', assistant: { content: 'a2' } })!;
+    expect(p2.map((m) => m.content)).toEqual(['q1', 'a1', 'q2', 'a2']);
+
+    // Edit q1 → a NEW root branch; the original path is no longer active.
+    const p3 = store.appendTurn(convId, userId, { userContent: 'q1 edited', assistant: { content: 'a1b' }, editOfMessageId: u1.id })!;
+    expect(p3.map((m) => m.content)).toEqual(['q1 edited', 'a1b']);
+    expect(store.getSiblingIds(u1.id)).toHaveLength(2); // original + edited roots
+    const u1b = p3[0]!;
+
+    // Regenerate under the edited turn → assistant sibling, no new user message.
+    const p4 = store.appendTurn(convId, userId, { userContent: 'q1 edited', assistant: { content: 'a1c' }, regenerateFromUserMessageId: u1b.id })!;
+    expect(p4.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(p4[0]!.id).toBe(u1b.id);
+    expect(store.getSiblingIds(p4[1]!.id)).toHaveLength(2);
+  });
+
+  it('appendTurn is owner-scoped', () => {
+    const otherId = store.upsertUser({ provider: 'github', providerId: 'b3', email: null, name: null, avatar: null }).id;
+    expect(store.appendTurn(convId, otherId, { userContent: 'x', assistant: { content: 'y' } })).toBeNull();
+    expect(store.getActivePath(convId)).toEqual([]);
+  });
+
   it('imported transcripts form a single linear branch', () => {
     const convo = store.importConversation(userId, 'Imported', null, [
       { role: 'user', content: 'u1' },

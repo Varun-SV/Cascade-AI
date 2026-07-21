@@ -59,7 +59,7 @@ export { azureModelForDeployment, inferAzureBaseModel } from './providers/azure.
 // Native cloud login (CLI + desktop reuse the same client).
 export { CloudClient, DEFAULT_CLOUD_URL } from './cloud/client.js';
 export type {
-  CloudConversation, CloudMessage, DeviceStart, NativeProvider, CloudSessionStore,
+  CloudConversation, CloudMessage, CloudTurnInput, DeviceStart, NativeProvider, CloudSessionStore,
 } from './cloud/client.js';
 export type { CloudSession, CloudUser } from './cloud/session-store.js';
 // Key sync: E2E crypto (byte-compatible with the web KeyVault) + bundle helpers.
