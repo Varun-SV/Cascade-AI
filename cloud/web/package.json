@@ -18,12 +18,16 @@
     "@mlc-ai/web-llm": "^0.2.84",
     "clsx": "^2.1.1",
     "framer-motion": "^12.0.0",
+    "katex": "^0.16.11",
     "lucide-react": "^0.460.0",
+    "mermaid": "^11.4.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-markdown": "^9.0.1",
     "rehype-highlight": "^7.0.1",
+    "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
     "socket.io-client": "^4.8.0"
   },
   "devDependencies": {
