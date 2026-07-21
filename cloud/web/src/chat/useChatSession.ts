@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 import type { ProviderConfig, WhyReport } from '../lib/types.js';
+import { estimateConversationTokens, contextWindowFor } from '../lib/tokens.js';
 import {
   localModelEnabled, fastAnswerModel, tierParams, extendedContext, shareLearning,
   maxTokensPerRun, maxCostPerRunUsd, rememberSessions, defaultRoutingBias, defaultWebSearch,
@@ -400,8 +401,21 @@ export function useChatSession(
     runChat(lastUser.content, lastUser.attachments, false);
   }, [busy, messages, runChat]);
 
+  // Context meter inputs, derived from the LOADED conversation (not the last
+  // run's throughput) so they're accurate and survive a page refresh. The
+  // window comes from the most recent assistant model that actually served this
+  // chat, defaulting conservatively when unknown.
+  const contextTokens = useMemo(() => estimateConversationTokens(messages), [messages]);
+  const contextWindow = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i]!.role === 'assistant' && messages[i]!.model) return contextWindowFor(messages[i]!.model);
+    }
+    return contextWindowFor(undefined);
+  }, [messages]);
+
   return {
     messages, send, stop, regenerate, busy, error, status, lastTokens, lastSaved, conversationId, loadMessages, setConversationId,
+    contextTokens, contextWindow,
     routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, approval,
     contextApproval, resolveContextApproval, compactionNotice, knowledgeNotice, activity,
   };

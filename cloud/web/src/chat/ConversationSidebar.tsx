@@ -11,6 +11,8 @@ interface Props {
   user: CloudUser;
   conversations: CloudConversation[];
   activeConversationId: string | undefined;
+  contextTokens: number;
+  contextWindow: number;
   lastTokens: number;
   usageRefreshSignal: unknown;
   onSelect: (id: string) => void;
@@ -23,7 +25,7 @@ interface Props {
 }
 
 export default function ConversationSidebar({
-  user, conversations, activeConversationId, lastTokens, usageRefreshSignal,
+  user, conversations, activeConversationId, contextTokens, contextWindow, lastTokens, usageRefreshSignal,
   onSelect, onNewChat, onOpenSettings, onDeleted, onImported,
 }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
@@ -146,7 +148,7 @@ export default function ConversationSidebar({
       </div>
 
       <div className="flex flex-col gap-1 border-t border-elev/10 p-3">
-        <UsageMeter lastTokens={lastTokens} refreshSignal={usageRefreshSignal} />
+        <UsageMeter contextTokens={contextTokens} contextWindow={contextWindow} lastRunTokens={lastTokens} refreshSignal={usageRefreshSignal} />
         <TierMix refreshSignal={usageRefreshSignal} />
         <motion.button
           type="button"
