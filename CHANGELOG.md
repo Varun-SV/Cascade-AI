@@ -5,6 +5,32 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.38.0 - 2026-07-21
+
+### Added
+- **Benchmark aggregator — conservative, multi-source routing scores.** The
+  quality scores Cascade Auto routes on (`benchmark-data.json`) are now produced
+  by aggregating **multiple benchmark sources** instead of a single hand-curated
+  table. Each source in `scripts/benchmarks/sources/` (Artificial Analysis,
+  LMArena/Chatbot Arena, public suite leaderboards) is **normalized onto a common
+  0–100 quality scale**, then the **conservative (lowest) value per family/task**
+  is taken across the sources that cover it — being strict about the
+  quality-to-cost trade-off (SWE-bench 80 + Arena 77 → **77**).
+  - **Normalization** handles incompatible native scales: a 0–100 index is used
+    as-is, Elo maps through a fixed reference band, and a raw benchmark % is
+    calibrated against a documented reference-max (SWE-bench Verified tops out
+    ~75% even for frontier coders, so it isn't treated as "75/100").
+  - **Modes**: `min` (default) or `robust` (drops one low outlier when ≥3 sources
+    cover a cell). Cells no source covers keep the prior baseline, so partial
+    coverage never blanks a score.
+  - **Auditable**: `node scripts/refresh-benchmarks.mjs --explain` prints which
+    source set each score and what every source reported. The snapshot now
+    carries `gpt-5` / `gpt-5-mini` / `gpt-5-nano` families too.
+  - The weekly refresh workflow re-aggregates the committed sources; editing a
+    source file and pushing is enough to propose a data-only update. Design +
+    the honesty rules for source data in
+    [`docs/benchmark-aggregation.md`](docs/benchmark-aggregation.md).
+
 ## 0.37.0 - 2026-07-21
 
 ### Added

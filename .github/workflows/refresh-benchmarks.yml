@@ -1,7 +1,9 @@
 # Refreshes the public-benchmark snapshot that Cascade Auto routes on.
-# Runs weekly (and on demand). Opens a PR ONLY when the data actually changed.
-# The PR touches data only (no version bump), so merging it does NOT trigger
-# the release workflow.
+# Re-aggregates the per-source files in scripts/benchmarks/sources/ (normalize
+# each to 0-100, take the conservative lowest per family/task) — see
+# docs/benchmark-aggregation.md. Runs weekly (and on demand). Opens a PR ONLY
+# when the data actually changed. The PR touches data only (no version bump),
+# so merging it does NOT trigger the release workflow.
 name: Refresh benchmark snapshot
 
 on:
@@ -60,6 +62,6 @@ jobs:
           git push --force-with-lease origin "$BRANCH"
           gh pr create \
             --title "chore(data): refresh benchmark snapshot ($DATE)" \
-            --body "Automated refresh of \`src/core/router/benchmark-data.json\` (Cascade Auto routing scores). Data-only — no version bump, so this does not trigger a release." \
+            --body "Automated refresh of \`src/core/router/benchmark-data.json\` (Cascade Auto routing scores), re-aggregated from \`scripts/benchmarks/sources/\` — each source normalized to 0-100, conservative (lowest) value per family/task. See \`docs/benchmark-aggregation.md\`. Data-only — no version bump, so this does not trigger a release." \
             --base main \
             --head "$BRANCH" || echo "PR may already exist for $BRANCH"

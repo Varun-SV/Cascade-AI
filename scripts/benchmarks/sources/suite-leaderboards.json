@@ -1,0 +1,29 @@
+{
+  "source": "suite-leaderboards",
+  "label": "Public suite leaderboards (SWE-bench Verified, MMLU/GPQA, writing evals, MATH/GSM8K)",
+  "url": "https://www.swebench.com/ , https://klu.ai/leaderboards , paperswithcode",
+  "capturedAt": "2026-07-21",
+  "provenance": "seed-approximation",
+  "scale": "percent",
+  "calibration": {
+    "code": { "min": 0, "max": 75 },
+    "analysis": { "min": 0, "max": 95 },
+    "creative": { "min": 0, "max": 92 },
+    "data": { "min": 0, "max": 98 }
+  },
+  "note": "Raw accuracy percentages from public task leaderboards (SWE-bench Verified -> code, MMLU/GPQA -> analysis, writing/IF evals -> creative, MATH/GSM8K -> data). Raw benchmark % are NOT a 0-100 quality scale (SWE-bench Verified tops out near ~75% even for frontier coders), so each task is calibrated against a documented reference-max via the band above. Maintainer-approximated SEED numbers; replace with real reads from the cited URLs.",
+  "models": {
+    "claude-opus":      { "code": 70, "analysis": 87, "creative": 82, "data": 85 },
+    "claude-sonnet":    { "code": 68, "analysis": 83, "creative": 80, "data": 83 },
+    "claude-haiku":     { "code": 58, "analysis": 71, "creative": 70, "data": 70 },
+    "gpt-5":            { "code": 72, "analysis": 90, "creative": 85, "data": 90 },
+    "gpt-5-mini":       { "code": 64, "analysis": 81, "creative": 78, "data": 81 },
+    "gpt-5-nano":       { "code": 55, "analysis": 70, "creative": 71, "data": 70 },
+    "gpt-4.1":          { "code": 65, "analysis": 84, "creative": 83, "data": 84 },
+    "gpt-4o":           { "code": 60, "analysis": 80, "creative": 82, "data": 80 },
+    "gemini-2.5-pro":   { "code": 66, "analysis": 89, "creative": 79, "data": 90 },
+    "gemini-2.5-flash": { "code": 59, "analysis": 78, "creative": 73, "data": 79 },
+    "deepseek":         { "code": 59, "analysis": 68, "creative": 62, "data": 70 },
+    "qwen":             { "code": 57, "analysis": 69, "creative": 66, "data": 70 }
+  }
+}

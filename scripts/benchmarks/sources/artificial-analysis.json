@@ -1,0 +1,23 @@
+{
+  "source": "artificial-analysis",
+  "label": "Artificial Analysis — Intelligence Index (per category)",
+  "url": "https://artificialanalysis.ai/models",
+  "capturedAt": "2026-07-21",
+  "provenance": "seed-approximation",
+  "scale": "index0-100",
+  "note": "Artificial Analysis publishes a 0-100 Intelligence Index; these per-category values are maintainer-approximated SEED numbers (the site blocks automated fetch, so capture is manual) and should be replaced with real reads from the cited URL. Values are on a 0-100 quality scale, used as-is.",
+  "models": {
+    "claude-opus":      { "code": 95, "analysis": 93, "creative": 90, "data": 89 },
+    "claude-sonnet":    { "code": 93, "analysis": 89, "creative": 88, "data": 86 },
+    "claude-haiku":     { "code": 81, "analysis": 76, "creative": 77, "data": 73 },
+    "gpt-5":            { "code": 96, "analysis": 96, "creative": 93, "data": 94 },
+    "gpt-5-mini":       { "code": 89, "analysis": 87, "creative": 86, "data": 85 },
+    "gpt-5-nano":       { "code": 79, "analysis": 76, "creative": 78, "data": 74 },
+    "gpt-4.1":          { "code": 90, "analysis": 90, "creative": 91, "data": 88 },
+    "gpt-4o":           { "code": 86, "analysis": 85, "creative": 90, "data": 84 },
+    "gemini-2.5-pro":   { "code": 91, "analysis": 94, "creative": 87, "data": 93 },
+    "gemini-2.5-flash": { "code": 83, "analysis": 84, "creative": 81, "data": 83 },
+    "deepseek":         { "code": 81, "analysis": 74, "creative": 69, "data": 76 },
+    "qwen":             { "code": 79, "analysis": 74, "creative": 73, "data": 75 }
+  }
+}

@@ -7,23 +7,34 @@
 //  scores (per model family, per task type) that Cascade Auto routes on and that
 //  LiveDataProvider.fetchSnapshot() pulls live from GitHub raw at runtime.
 //
+//  Two ways it can update the families, applied in this order:
+//
+//    1. AGGREGATOR (default): read scripts/benchmarks/sources/*.json — one file
+//       per benchmarking site (Artificial Analysis, LMArena, suite leaderboards)
+//       in that site's native scale — normalise each onto a common 0–100 quality
+//       scale, then take the CONSERVATIVE (lowest) value per family × task across
+//       the sources that cover it (strict quality-to-cost). See scripts/benchmarks/.
+//       Any cell no source covers keeps its committed baseline. Mode is 'min'
+//       (default) or 'robust' (drop one low outlier when ≥3 sources); set via
+//       BENCHMARK_AGG_MODE. Disable entirely with BENCHMARK_AGG=off.
+//
+//    2. BENCHMARK_SOURCE_URL (optional override): fetch a pre-normalised families
+//       map / snapshot and merge it over the aggregated result (per task-type
+//       override). Lets an external pre-computed feed win for specific families.
+//
 //  Invoked by .github/workflows/refresh-benchmarks.yml (weekly + on demand).
-//  Contract that workflow relies on: this script writes the file ONLY when the
+//  Contract the workflow relies on: this script writes the file ONLY when the
 //  family scores actually change, so a no-op run produces no git diff and the
 //  workflow opens no PR.
-//
-//    • BENCHMARK_SOURCE_URL set → fetch it, validate, clamp 0–100, merge over the
-//      current families (per task-type override).
-//    • unset → families are left untouched (the committed snapshot stays the
-//      offline baseline) → no write → no PR.
 //
 //  Pure Node built-ins (global fetch on Node 18+); no dependencies.
 
 import { readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { TASK_KEYS, buildFamilies } from './benchmarks/aggregate.mjs';
+import { loadSources } from './benchmarks/sources.mjs';
 
-const TASK_KEYS = ['code', 'analysis', 'creative', 'data'];
 const FETCH_TIMEOUT_MS = 8_000;
 
 const dataFile = path.resolve(
@@ -115,24 +126,59 @@ function canonicalFamilies(families) {
   return JSON.stringify(sortedFamilies);
 }
 
+/** Print the per-cell provenance trace (which source set each score). */
+function printTrace(trace) {
+  for (const family of Object.keys(trace).sort()) {
+    console.log(`\n${family}`);
+    for (const task of TASK_KEYS) {
+      const cell = trace[family][task];
+      if (!cell) continue;
+      const from = cell.contributors.length
+        ? cell.contributors.map((c) => `${c.source}=${c.value}`).join(', ')
+        : cell.mode;
+      console.log(`  ${task.padEnd(9)} ${String(cell.value).padStart(3)}  [${cell.mode}]  ${from}`);
+    }
+  }
+}
+
 async function main() {
+  const explain = process.argv.includes('--explain') || process.env.BENCHMARK_EXPLAIN === '1';
   const current = JSON.parse(await readFile(dataFile, 'utf-8'));
   const currentFamilies = current.families ?? {};
 
-  const sourceUrl = process.env.BENCHMARK_SOURCE_URL?.trim();
   let nextFamilies = { ...currentFamilies };
+  let usedAggregator = false;
 
+  // 1. Aggregator over the committed per-source files (unless disabled).
+  if (process.env.BENCHMARK_AGG !== 'off') {
+    const sources = await loadSources();
+    if (sources.length > 0) {
+      const mode = process.env.BENCHMARK_AGG_MODE === 'robust' ? 'robust' : 'min';
+      const { families, trace } = buildFamilies(sources, { mode, base: currentFamilies });
+      nextFamilies = families;
+      usedAggregator = true;
+      console.log(
+        `Aggregated ${sources.length} source(s) [${sources.map((s) => s.source).join(', ')}] ` +
+        `in '${mode}' mode → ${Object.keys(families).length} families.`,
+      );
+      if (explain) printTrace(trace);
+    } else {
+      console.log('No benchmark sources found — keeping the committed snapshot as the baseline.');
+    }
+  } else {
+    console.log('BENCHMARK_AGG=off — skipping the source aggregator.');
+  }
+
+  // 2. Optional external pre-normalised feed, merged over the aggregate.
+  const sourceUrl = process.env.BENCHMARK_SOURCE_URL?.trim();
   if (sourceUrl) {
     console.log(`Fetching external benchmark source: ${sourceUrl}`);
     const fetched = await fetchExternal(sourceUrl);
     if (fetched) {
-      // Override task scores per family; keep families the source omits.
       for (const [family, profile] of Object.entries(fetched)) {
         nextFamilies[family] = { ...nextFamilies[family], ...profile };
       }
     }
-  } else {
-    console.log('BENCHMARK_SOURCE_URL not set — keeping the committed snapshot as-is.');
   }
 
   if (canonicalFamilies(nextFamilies) === canonicalFamilies(currentFamilies)) {
@@ -143,7 +189,7 @@ async function main() {
   const next = {
     ...current,
     generatedAt: new Date().toISOString(),
-    source: sourceUrl ? 'external' : current.source,
+    source: sourceUrl ? 'external+aggregate' : (usedAggregator ? 'aggregate' : current.source),
     families: nextFamilies,
   };
   await writeFile(dataFile, serialize(next), 'utf-8');

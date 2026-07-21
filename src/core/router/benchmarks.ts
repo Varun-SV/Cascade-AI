@@ -13,6 +13,12 @@
 //
 //  These are deliberately editable knobs, not gospel — they only set the
 //  *relative* preference between available models for a given task type.
+//
+//  This bundled table is the OFFLINE fallback. The live/cached snapshot
+//  (benchmark-data.json) is produced by the aggregator: each benchmark source
+//  in scripts/benchmarks/sources/ is normalized to a common 0–100 quality scale,
+//  then the conservative (lowest) value per family/task is taken across covering
+//  sources. See docs/benchmark-aggregation.md.
 
 import type { ModelInfo } from '../../types.js';
 import type { TaskType } from './task-analyzer.js';
