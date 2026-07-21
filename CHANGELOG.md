@@ -5,6 +5,26 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.41.2 - 2026-07-21
+
+### Added
+- **CLI: cloud-backed sessions + branch management.** When you're signed in
+  (`cascade login`), the interactive REPL now **mirrors each finished turn into a
+  shared cloud conversation**, so a chat you run in the terminal also shows up on
+  the web and desktop — same session, everywhere. Runs still execute **locally**
+  (your own keys + shell/file/git tools); only the resulting messages are stored.
+  It's best-effort (never blocks or breaks a run) and opt-out via
+  `CASCADE_NO_CLOUD_SYNC=1`.
+- **`cascade sessions` is now a full cloud-session manager**, with the message
+  tree exposed for terminal branching:
+  - `cascade sessions` — list your cloud chats.
+  - `cascade sessions show <chat>` — print the active path, with `‹i/n›` markers
+    on turns that have alternatives and a short `[id]` on every message to target.
+  - `cascade sessions branch <chat> <message>` — switch to another branch (an
+    edit's or regeneration's alternative).
+  - `cascade sessions rm <chat> <message>` — delete a message and its whole subtree.
+  - `cascade sessions rename <chat> <title>` and `cascade sessions delete <chat>`.
+
 ## 0.41.1 - 2026-07-21
 
 ### Added
