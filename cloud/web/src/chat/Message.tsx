@@ -3,14 +3,70 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Copy, Check, RotateCcw, ChevronDown, FileText } from 'lucide-react';
-import { uploadUrl } from '../lib/api.js';
+import { Copy, Check, RotateCcw, ChevronDown, FileText, Download, UploadCloud, Loader2 } from 'lucide-react';
+import { uploadUrl, saveFile } from '../lib/api.js';
 import type { ChatMessage } from './useChatSession.js';
 import type { WhyReport } from '../lib/types.js';
 
 // Compact "12k chars" / "980 chars" label for a document attachment's size.
 function formatChars(n: number): string {
   return n >= 1000 ? `${Math.round(n / 1000)}k chars` : `${n} chars`;
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+interface GeneratedFile { name: string; content: string }
+
+// A hosted run delivers files as ```file:<name>``` fenced blocks (it has no disk
+// tools). Pull them out so we can render download/save cards instead of raw code.
+function extractGeneratedFiles(md: string): { files: GeneratedFile[]; rest: string } {
+  const files: GeneratedFile[] = [];
+  const rest = md.replace(/```file:([^\n`]+)\n([\s\S]*?)```/g, (_m, name: string, content: string) => {
+    files.push({ name: name.trim().slice(0, 200), content: content.replace(/\n$/, '') });
+    return '';
+  });
+  return { files, rest: rest.replace(/\n{3,}/g, '\n\n').trim() };
+}
+
+/** Free browser download (client Blob) + optional metered save to Cascade files. */
+function GeneratedFileCard({ file }: { file: GeneratedFile }) {
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const size = new Blob([file.content]).size;
+
+  function download() {
+    const url = URL.createObjectURL(new Blob([file.content], { type: 'text/plain;charset=utf-8' }));
+    const a = document.createElement('a');
+    a.href = url; a.download = file.name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  async function save() {
+    if (busy || saved) return;
+    setBusy(true); setError(null);
+    try { await saveFile({ name: file.name, content: file.content }); setSaved(true); window.dispatchEvent(new CustomEvent('cascade:files-changed')); }
+    catch (e) { setError(e instanceof Error ? e.message : 'Could not save.'); }
+    finally { setBusy(false); }
+  }
+  return (
+    <div className="flex items-center gap-3 rounded-xl border border-elev/10 bg-elev/[0.05] px-3 py-2.5">
+      <FileText size={16} className="shrink-0 text-accent-300" />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-medium text-ink-100">{file.name}</div>
+        <div className="truncate text-[11px] text-ink-500">{formatBytes(size)}{error ? ` · ${error}` : ''}</div>
+      </div>
+      <button type="button" onClick={download} className="flex items-center gap-1 rounded-lg border border-elev/10 px-2.5 py-1 text-xs text-ink-200 hover:bg-elev/[0.06]">
+        <Download size={13} /> Download
+      </button>
+      <button type="button" onClick={save} disabled={busy || saved} className="flex items-center gap-1 rounded-lg bg-accent-600 px-2.5 py-1 text-xs text-white hover:bg-accent-500 disabled:opacity-60">
+        {busy ? <Loader2 size={13} className="animate-spin" /> : saved ? <Check size={13} /> : <UploadCloud size={13} />} {saved ? 'Saved' : 'Save'}
+      </button>
+    </div>
+  );
 }
 
 // Tier accent colors match the run-explorer design (T1 green / T2 amber /
@@ -200,17 +256,33 @@ export default function Message({ message, onRegenerate }: Props) {
       </AnimatePresence>
       {message.streaming && !message.content ? (
         <span className="shimmer-text text-sm">Composing a response…</span>
-      ) : (
-        <div className="prose prose-invert prose-sm max-w-none text-ink-100">
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
-            components={{ pre: ({ children }) => <CodeBlock>{children}</CodeBlock> }}
-          >
-            {message.content}
-          </ReactMarkdown>
-        </div>
-      )}
+      ) : (() => {
+        // Only pull out file blocks once the message is complete — a partial
+        // fence mid-stream would render half a file.
+        const { files, rest } = message.streaming
+          ? { files: [] as GeneratedFile[], rest: message.content }
+          : extractGeneratedFiles(message.content);
+        return (
+          <>
+            {rest && (
+              <div className="prose prose-invert prose-sm max-w-none text-ink-100">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+                  components={{ pre: ({ children }) => <CodeBlock>{children}</CodeBlock> }}
+                >
+                  {rest}
+                </ReactMarkdown>
+              </div>
+            )}
+            {files.length > 0 && (
+              <div className="mt-1 flex flex-col gap-2">
+                {files.map((f, i) => <GeneratedFileCard key={`${f.name}-${i}`} file={f} />)}
+              </div>
+            )}
+          </>
+        );
+      })()}
       {!message.streaming && message.content && (
         <div className="flex items-center gap-2 pt-0.5 text-ink-400 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
           <CopyButton getText={() => message.content} />

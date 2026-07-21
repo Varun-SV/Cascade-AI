@@ -232,6 +232,11 @@ export function buildCloudConfig(
       : {}),
     knowledge: { factsExtraction: false },
     telemetry: { enabled: false },
+    // A hosted run has no shell/file tools; leaving runtime tool-creation on made
+    // the worker synthesize a phantom write_file, call it, produce nothing, and
+    // fail. Off — the worker delivers files via the `file:` fence instead.
+    enableToolCreation: false,
+    persistDynamicTools: false,
     budget: { warnAtPct: 80, maxCostPerRunUsd, ...(controls.maxTokensPerRun ? { maxTokensPerRun: controls.maxTokensPerRun } : {}) },
   };
 }
@@ -314,6 +319,14 @@ export function buildRunPrompt(
   }
   return preamble.length ? `${preamble.join('\n\n')}\n\n---\n\n${userPrompt}` : userPrompt;
 }
+
+/** Steers a hosted run (no disk tools) to deliver files as downloadable blocks. */
+const FILE_DELIVERY_GUIDANCE =
+  'File delivery: you cannot write files to disk in this environment. When the user asks you to '
+  + 'create a file or document (a report, a code file, data, etc.), output its FULL contents in a '
+  + 'fenced code block whose info string is `file:<filename.ext>` — for example:\n'
+  + '```file:report.md\n# Title\n…\n```\n'
+  + 'Use one block per file with a sensible filename and extension. The user can download or save each one.';
 
 /** Below this total document size, inject everything (CAG); above it, retrieve. */
 const DOC_CAG_CHAR_BUDGET = 24_000; // ~6k tokens
@@ -480,7 +493,10 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   if (userSkill) store.incrementSkillUsage(userSkill.id, userId);
   const skillSystemPrompt = builtinSkill?.systemPrompt || userSkill?.systemPrompt || undefined;
   const memories = store.listMemories(userId).map((m) => m.content);
-  const runPrompt = buildRunPrompt(payload.prompt, skillSystemPrompt, memories, documents);
+  // A hosted run can't write files to disk; steer it to deliver any file/document
+  // as a `file:`-tagged fenced block so the web can turn it into a download.
+  const systemGuidance = [FILE_DELIVERY_GUIDANCE, skillSystemPrompt].filter(Boolean).join('\n\n');
+  const runPrompt = buildRunPrompt(payload.prompt, systemGuidance, memories, documents);
 
   const scratchDir = tenantScratchDir(env, userId);
   // Shared learning pool: one anonymous model-outcome dataset on the same

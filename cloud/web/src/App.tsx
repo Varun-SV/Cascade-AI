@@ -6,6 +6,7 @@ import Modal from './components/Modal.js';
 import UpgradeModal from './components/UpgradeModal.js';
 import MemoryModal from './components/MemoryModal.js';
 import ConnectorsModal from './components/ConnectorsModal.js';
+import FilesPanel from './components/FilesPanel.js';
 import SkillsModal from './components/SkillsModal.js';
 import SettingsModal from './components/SettingsModal.js';
 import ConversationSidebar from './chat/ConversationSidebar.js';
@@ -56,6 +57,7 @@ export default function App() {
   const [showSkills, setShowSkills] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showContinue, setShowContinue] = useState(false);
+  const [showFiles, setShowFiles] = useState(false);
   const [reduceMotion, setReduceMotion] = useState(() => reduceMotionEnabled());
   const [theme, setTheme] = useState<ThemeMode>(() => themeMode());
   const [densityMode, setDensityMode] = useState<Density>(() => density());
@@ -229,6 +231,8 @@ export default function App() {
       onSelect={(id) => { void selectConversation(id); if (window.innerWidth < 768) setSidebarOpen(false); }}
       onNewChat={() => { newChat(); if (window.innerWidth < 768) setSidebarOpen(false); }}
       onOpenSettings={() => setShowSettings(true)}
+      onDeleted={(id) => { setConversations((prev) => prev.filter((c) => c.id !== id)); if (chat.conversationId === id) newChat(); refreshConversations(); }}
+      onImported={refreshConversations}
     />
   );
 
@@ -279,6 +283,7 @@ export default function App() {
           onToggleSidebar={toggleSidebar}
           saved={chat.lastSaved}
           onContinueElsewhere={() => setShowContinue(true)}
+          onOpenFiles={() => setShowFiles(true)}
         />
         <div className="min-h-0 flex-1">
           <ChatPanel
@@ -350,6 +355,7 @@ export default function App() {
         )}
         {showMemory && <MemoryModal onClose={() => setShowMemory(false)} />}
         {showConnectors && <ConnectorsModal onClose={() => setShowConnectors(false)} />}
+        {showFiles && <FilesPanel onClose={() => setShowFiles(false)} onUpgrade={() => { setShowFiles(false); setShowUpgrade(true); }} />}
         {showSkills && (
           <SkillsModal skills={skills} onClose={() => setShowSkills(false)} onChange={refreshSkills} />
         )}

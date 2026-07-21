@@ -21,7 +21,7 @@ import {
 } from './auth/session.js';
 import { NativeAuthStore, isLoopbackRedirect, hashRefreshToken } from './native-auth.js';
 import { githubAuthUrl, exchangeGithubCode, googleAuthUrl, exchangeGoogleCode, type OAuthProfile } from './auth/oauth.js';
-import { limitsForPlan, todayKey } from './entitlements.js';
+import { limitsForPlan, todayKey, checkStorageQuota } from './entitlements.js';
 import { skillCatalog } from './skills.js';
 import { tenantScratchDir } from './paths.js';
 import {
@@ -127,8 +127,11 @@ export function createApp(env: CloudEnv, store: CloudStore) {
   // The Razorpay webhook signature is an HMAC of the RAW request body, so that
   // route needs the unparsed bytes — capture them and skip the JSON parser.
   const webhookRaw = express.raw({ type: '*/*', limit: '1mb' });
+  // Routes that accept large bodies (file saves, chat/memory imports) run their
+  // own 16mb parser; keep them off the tight 100kb default.
+  const rawBodyRoutes = new Set(['/api/uploads', '/api/billing/webhook', '/api/files', '/api/memories/import']);
   app.use((req, res, next) => {
-    if (req.path === '/api/uploads' || req.path === '/api/billing/webhook') { next(); return; }
+    if (rawBodyRoutes.has(req.path)) { next(); return; }
     express.json()(req, res, next);
   });
 
@@ -739,6 +742,92 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     if (!att) { res.status(404).json({ error: 'Not found' }); return; }
     res.type(att.mime);
     fs.createReadStream(att.path).on('error', () => res.status(404).end()).pipe(res);
+  });
+
+  // ── Cascade Files (saved generated files) ──
+  const MAX_SINGLE_FILE_BYTES = 5 * 1024 * 1024;
+  const filesDir = (userId: string) => path.join(tenantScratchDir(env, userId), 'files');
+  const MIME_BY_EXT: Record<string, string> = {
+    md: 'text/markdown', txt: 'text/plain', json: 'application/json', csv: 'text/csv',
+    html: 'text/html', xml: 'application/xml', yml: 'text/yaml', yaml: 'text/yaml',
+    js: 'text/javascript', ts: 'text/typescript', py: 'text/x-python', sh: 'text/x-sh',
+    css: 'text/css', sql: 'text/plain', log: 'text/plain',
+  };
+  const mimeForFileName = (name: string): string => MIME_BY_EXT[name.split('.').pop()?.toLowerCase() ?? ''] ?? 'text/plain';
+
+  app.get('/api/files', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const userId = req.session!.userId;
+    const plan = store.getUserById(userId)?.plan ?? 'free';
+    res.json({
+      files: store.listFiles(userId),
+      usedBytes: store.sumUserFileBytes(userId),
+      limitBytes: limitsForPlan(plan).storageBytes,
+      plan,
+    });
+  });
+
+  app.post('/api/files', sessionMiddleware(env.SESSION_SECRET), uploadJson, (req: AuthedRequest, res) => {
+    const userId = req.session!.userId;
+    const body = req.body ?? {};
+    const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 200) : '';
+    const content = typeof body.content === 'string' ? body.content : '';
+    const conversationId = typeof body.conversationId === 'string' ? body.conversationId : null;
+    if (!name) { res.status(400).json({ error: 'A file name is required.' }); return; }
+    const bytes = Buffer.from(content, 'utf-8');
+    if (bytes.length === 0) { res.status(400).json({ error: 'Nothing to save.' }); return; }
+    if (bytes.length > MAX_SINGLE_FILE_BYTES) { res.status(413).json({ error: `A single file must be ≤ ${MAX_SINGLE_FILE_BYTES / (1024 * 1024)} MB.` }); return; }
+    const plan = store.getUserById(userId)?.plan ?? 'free';
+    try {
+      checkStorageQuota(store.sumUserFileBytes(userId), bytes.length, plan);
+    } catch (err) {
+      res.status(413).json({ error: err instanceof Error ? err.message : 'Storage full.' });
+      return;
+    }
+    fs.mkdirSync(filesDir(userId), { recursive: true });
+    const file = store.addFile({ userId, conversationId, name, mime: mimeForFileName(name), size: bytes.length });
+    fs.writeFileSync(path.join(filesDir(userId), file.id), bytes);
+    res.json({ file, usedBytes: store.sumUserFileBytes(userId), limitBytes: limitsForPlan(plan).storageBytes });
+  });
+
+  app.get('/api/files/:id', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const id = req.params['id'];
+    if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid file id' }); return; }
+    const file = store.getFile(id, req.session!.userId);
+    if (!file) { res.status(404).json({ error: 'Not found' }); return; }
+    res.type(file.mime);
+    res.setHeader('Content-Disposition', `attachment; filename="${file.name.replace(/[^\w.\- ]/g, '_')}"`);
+    fs.createReadStream(path.join(filesDir(req.session!.userId), file.id)).on('error', () => res.status(404).end()).pipe(res);
+  });
+
+  app.delete('/api/files/:id', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const id = req.params['id'];
+    if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid file id' }); return; }
+    const userId = req.session!.userId;
+    const file = store.getFile(id, userId);
+    if (file) { try { fs.rmSync(path.join(filesDir(userId), file.id)); } catch { /* already gone */ } store.deleteFile(id, userId); }
+    res.json({ ok: true, usedBytes: store.sumUserFileBytes(userId) });
+  });
+
+  // ── Delete a chat + import chats/memories ──
+  app.delete('/api/conversations/:id', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const id = req.params['id'];
+    if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid id' }); return; }
+    res.json({ ok: store.deleteConversation(id, req.session!.userId) });
+  });
+
+  app.post('/api/memories/import', sessionMiddleware(env.SESSION_SECRET), uploadJson, (req: AuthedRequest, res) => {
+    const userId = req.session!.userId;
+    const items = Array.isArray(req.body?.memories) ? req.body.memories : [];
+    const existing = new Set(store.listMemories(userId).map((m) => m.content.trim()));
+    let imported = 0;
+    for (const it of items.slice(0, 500)) {
+      const content = typeof it === 'string' ? it.trim() : (typeof it?.content === 'string' ? it.content.trim() : '');
+      if (!content || content.length > MAX_MEMORY_LEN || existing.has(content)) continue;
+      store.addMemory(userId, content, parseCategory(it?.category));
+      existing.add(content);
+      imported++;
+    }
+    res.json({ imported });
   });
 
   app.get('/api/usage', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {

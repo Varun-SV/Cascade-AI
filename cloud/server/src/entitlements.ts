@@ -11,15 +11,29 @@ import type { CloudStore } from './db.js';
 export interface PlanLimits {
   dailyRuns: number;
   maxConcurrentRuns: number;
+  /** Cascade Files storage cap (bytes). Pro is a generous metered cap, not "unlimited". */
+  storageBytes: number;
 }
 
+const MB = 1024 * 1024;
 const PLAN_LIMITS: Record<string, PlanLimits> = {
-  free: { dailyRuns: 20, maxConcurrentRuns: 1 },
-  pro: { dailyRuns: 200, maxConcurrentRuns: 3 },
+  free: { dailyRuns: 20, maxConcurrentRuns: 1, storageBytes: 10 * MB },
+  pro: { dailyRuns: 200, maxConcurrentRuns: 3, storageBytes: 1024 * MB },
 };
 
 export function limitsForPlan(plan: string): PlanLimits {
   return PLAN_LIMITS[plan] ?? PLAN_LIMITS['free']!;
+}
+
+/** Throw when saving `incomingBytes` would exceed the plan's storage cap. */
+export function checkStorageQuota(usedBytes: number, incomingBytes: number, plan: string): void {
+  const limit = limitsForPlan(plan).storageBytes;
+  if (usedBytes + incomingBytes > limit) {
+    throw new EntitlementError(
+      `Storage full — you've used ${(usedBytes / MB).toFixed(1)} MB of your ${(limit / MB).toFixed(0)} MB `
+      + `${plan === 'pro' ? 'Pro' : 'free'} limit. Delete some files${plan === 'pro' ? '' : ' or upgrade to Pro'} to save more.`,
+    );
+  }
 }
 
 export class EntitlementError extends Error {}

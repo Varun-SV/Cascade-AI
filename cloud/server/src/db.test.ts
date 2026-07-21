@@ -89,6 +89,36 @@ describe('CloudStore', () => {
     expect(store.getUserSecrets(alice.id)).toBeNull();
   });
 
+  it('tracks Cascade Files per user with correct storage accounting', () => {
+    const alice = store.upsertUser({ provider: 'github', providerId: 'fa', email: null, name: null, avatar: null });
+    const bob = store.upsertUser({ provider: 'github', providerId: 'fb', email: null, name: null, avatar: null });
+
+    const f1 = store.addFile({ userId: alice.id, name: 'a.md', mime: 'text/markdown', size: 100 });
+    store.addFile({ userId: alice.id, name: 'b.txt', mime: 'text/plain', size: 250 });
+    store.addFile({ userId: bob.id, name: 'c.md', mime: 'text/markdown', size: 999 });
+
+    expect(store.sumUserFileBytes(alice.id)).toBe(350);
+    expect(store.sumUserFileBytes(bob.id)).toBe(999);
+    expect(store.listFiles(alice.id).map((f) => f.name)).toEqual(['b.txt', 'a.md']); // newest-first
+
+    // Scoped delete frees only that user's quota; can't touch another user's file.
+    expect(store.getFile(f1.id, bob.id)).toBeNull();
+    expect(store.deleteFile(f1.id, alice.id)).toBe(true);
+    expect(store.sumUserFileBytes(alice.id)).toBe(250);
+  });
+
+  it('deletes a conversation with its messages, owner-scoped', () => {
+    const alice = store.upsertUser({ provider: 'dev', providerId: 'da', email: null, name: null, avatar: null });
+    const bob = store.upsertUser({ provider: 'dev', providerId: 'db', email: null, name: null, avatar: null });
+    const conv = store.createConversation(alice.id, 'Doomed');
+    store.addMessage({ conversationId: conv.id, role: 'user', content: 'hi' });
+
+    expect(store.deleteConversation(conv.id, bob.id)).toBe(false); // not the owner
+    expect(store.deleteConversation(conv.id, alice.id)).toBe(true);
+    expect(store.getConversation(conv.id, alice.id)).toBeNull();
+    expect(store.getMessages(conv.id)).toHaveLength(0);
+  });
+
   it('increments per-day usage counters independently per user', () => {
     const alice = store.upsertUser({ provider: 'github', providerId: 'alice', email: null, name: null, avatar: null });
     const bob = store.upsertUser({ provider: 'github', providerId: 'bob', email: null, name: null, avatar: null });

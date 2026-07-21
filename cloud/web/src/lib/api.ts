@@ -57,6 +57,41 @@ export function startMcpOAuth(payload: { connectorId?: string; name?: string; ur
   }));
 }
 
+// ── Cascade Files (saved generated files) ──
+
+export interface CloudFile { id: string; name: string; mime: string; size: number; createdAt: number; conversationId: string | null }
+
+export function fetchFiles(): Promise<{ files: CloudFile[]; usedBytes: number; limitBytes: number; plan: string }> {
+  return json(fetch('/api/files', { credentials: 'include' }));
+}
+
+export function saveFile(input: { name: string; content: string; conversationId?: string | null }): Promise<{ file: CloudFile; usedBytes: number; limitBytes: number }> {
+  return json(fetch('/api/files', {
+    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  }));
+}
+
+export function deleteFile(id: string): Promise<{ ok: boolean; usedBytes: number }> {
+  return json(fetch(`/api/files/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' }));
+}
+
+/** Absolute path for a file download (browser navigates/anchors to it). */
+export function fileDownloadUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}`;
+}
+
+// ── Data management: delete + import ──
+
+export function deleteConversation(id: string): Promise<{ ok: boolean }> {
+  return json(fetch(`/api/conversations/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' }));
+}
+
+export function importMemories(memories: Array<string | { content: string; category?: string }>): Promise<{ imported: number }> {
+  return json(fetch('/api/memories/import', {
+    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ memories }),
+  }));
+}
+
 export function devLogin(name: string): Promise<{ user: CloudUser }> {
   return json(
     fetch('/auth/dev-login', {
