@@ -1,0 +1,25 @@
+{
+  "source": "lmarena",
+  "label": "LMArena / Chatbot Arena — category Elo",
+  "url": "https://lmarena.ai/leaderboard",
+  "capturedAt": "2026-07-21",
+  "provenance": "seed-approximation",
+  "scale": "elo",
+  "eloFloor": 1000,
+  "eloCeil": 1500,
+  "note": "Chatbot Arena publishes category Elo ratings (coding -> code, hard-prompts -> analysis, creative-writing -> creative, math -> data). These are maintainer-approximated SEED Elos, normalized to 0-100 via the eloFloor..eloCeil band; replace with real reads from the cited URL. Arena Elo depends on the current model pool, so re-anchor the band if the pool shifts.",
+  "models": {
+    "claude-opus":      { "code": 1445, "analysis": 1455, "creative": 1450, "data": 1435 },
+    "claude-sonnet":    { "code": 1435, "analysis": 1440, "creative": 1445, "data": 1425 },
+    "claude-haiku":     { "code": 1395, "analysis": 1375, "creative": 1390, "data": 1365 },
+    "gpt-5":            { "code": 1465, "analysis": 1470, "creative": 1460, "data": 1460 },
+    "gpt-5-mini":       { "code": 1435, "analysis": 1430, "creative": 1435, "data": 1420 },
+    "gpt-5-nano":       { "code": 1385, "analysis": 1375, "creative": 1390, "data": 1365 },
+    "gpt-4.1":          { "code": 1440, "analysis": 1445, "creative": 1460, "data": 1435 },
+    "gpt-4o":           { "code": 1425, "analysis": 1425, "creative": 1455, "data": 1420 },
+    "gemini-2.5-pro":   { "code": 1445, "analysis": 1470, "creative": 1430, "data": 1465 },
+    "gemini-2.5-flash": { "code": 1410, "analysis": 1415, "creative": 1400, "data": 1410 },
+    "deepseek":         { "code": 1395, "analysis": 1355, "creative": 1330, "data": 1365 },
+    "qwen":             { "code": 1385, "analysis": 1360, "creative": 1355, "data": 1365 }
+  }
+}

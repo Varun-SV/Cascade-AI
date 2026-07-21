@@ -27,6 +27,8 @@ scripts/*
 !scripts/refresh-benchmarks.mjs
 !scripts/publish-release.sh
 !scripts/publish-release.ps1
+# Benchmark aggregator: engine, tests, and per-source data (CI reads these).
+!scripts/benchmarks/
 
 # AI tools & generated analysis artefacts
 Cascade-AI TUI Standalone.html
