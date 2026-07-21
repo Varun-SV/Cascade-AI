@@ -320,6 +320,47 @@ describe('runChatTurn (stub-provider integration)', () => {
     expect(stub.requestLog.filter((r) => r.includes('chat/completions')).length).toBe(1);
   }, 30_000);
 
+  it('edits and regenerations create sibling branches, not overwrites', async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-runs-'));
+    store = new CloudStore(path.join(dir, 'cloud.db'));
+    stub = await startStubOpenAIServer();
+    const env: CloudEnv = {
+      PORT: 0, SESSION_SECRET: 'x'.repeat(20), DATA_DIR: dir, WEB_ORIGIN: 'http://localhost:5173',
+      OAUTH_REDIRECT_BASE_URL: 'http://localhost:8787', GITHUB_CLIENT_ID: undefined, GITHUB_CLIENT_SECRET: undefined,
+      GOOGLE_CLIENT_ID: undefined, GOOGLE_CLIENT_SECRET: undefined, CLOUD_DEV_BYPASS: false, MAX_COST_PER_RUN_USD: 1,
+    };
+    const user = store.upsertUser({ provider: 'dev', providerId: 'tester', email: null, name: 'Tester', avatar: null });
+    const providers = [{ type: 'openai-compatible' as const, baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }];
+    const run = (extra: Record<string, unknown>) =>
+      runChatTurn(parseChatRunPayload({ providers, ...extra }), {
+        env: env!, store: store!, userId: user.id, socket: new FakeSocket() as unknown as import('socket.io').Socket,
+      });
+
+    // 1. Initial turn → u1 + a1.
+    const first = await run({ prompt: 'first prompt' });
+    const cid = first.conversationId;
+    const path1 = store.getActivePath(cid);
+    expect(path1.map((m) => m.role)).toEqual(['user', 'assistant']);
+    const [u1, a1] = path1;
+
+    // 2. Edit u1 → a NEW sibling branch (u1b + a2). The original stays on disk.
+    await run({ prompt: 'edited prompt', conversationId: cid, editOfMessageId: u1!.id });
+    const path2 = store.getActivePath(cid);
+    expect(path2.map((m) => m.content)).toEqual(['edited prompt', expect.stringContaining('Hello from the stub model.')]);
+    expect(store.getSiblingIds(u1!.id)).toHaveLength(2); // original + edited, both roots
+    expect(store.getMessageById(u1!.id)).not.toBeNull();  // original prompt preserved
+    expect(store.getMessageById(a1!.id)).not.toBeNull();  // original answer preserved
+    const u1b = path2[0]!;
+
+    // 3. Regenerate the reply under the edited turn → assistant sibling a3.
+    await run({ prompt: 'edited prompt', conversationId: cid, regenerateFromUserMessageId: u1b.id });
+    const path3 = store.getActivePath(cid);
+    // Still exactly one user turn on this branch, with a fresh (regenerated) reply.
+    expect(path3.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(path3[0]!.id).toBe(u1b.id);                 // no new user message was created
+    expect(store.getSiblingIds(path3[1]!.id)).toHaveLength(2); // two answers under the edited turn
+  }, 30_000);
+
   it('marks the run cancelled and still persists partial output when the signal aborts', async () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-runs-'));
     store = new CloudStore(path.join(dir, 'cloud.db'));

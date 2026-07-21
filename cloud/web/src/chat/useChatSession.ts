@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 import type { ProviderConfig, WhyReport } from '../lib/types.js';
+import { getMessages, selectBranch as apiSelectBranch, deleteMessage as apiDeleteMessage } from '../lib/api.js';
 import { estimateConversationTokens, contextWindowFor } from '../lib/tokens.js';
 import {
   localModelEnabled, fastAnswerModel, tierParams, extendedContext, shareLearning,
@@ -32,6 +33,32 @@ export interface ChatMessage {
   model?: string | null;
   why?: WhyReport | null;
   cancelled?: boolean;
+  /** Branching: the message this replies to (null = a root turn). */
+  parentId?: string | null;
+  /** Branching: ids of this message + its siblings, oldest first (for < n/m >). */
+  siblingIds?: string[];
+}
+
+/** Map a server message (active-path row) into the client's ChatMessage shape. */
+export function toChatMessage(m: {
+  id: string; role: string; content: string; parentId?: string | null; siblingIds?: string[];
+  costUsd?: number | null; tier?: string | null; model?: string | null; why?: string | null;
+  attachments?: Array<{ id: string; mime: string }>;
+}): ChatMessage {
+  let why: WhyReport | null = null;
+  if (m.why) { try { why = JSON.parse(m.why) as WhyReport; } catch { why = null; } }
+  return {
+    id: m.id,
+    role: m.role === 'user' ? 'user' : 'assistant',
+    content: m.content,
+    parentId: m.parentId ?? null,
+    siblingIds: m.siblingIds,
+    costUsd: m.costUsd,
+    tier: m.tier,
+    model: m.model,
+    why,
+    attachments: m.attachments?.map((a) => ({ id: a.id, mime: a.mime })),
+  };
 }
 
 export interface SendInput {
@@ -259,10 +286,27 @@ export function useChatSession(
     setStatus(null);
   }, []);
 
-  // Shared run path for a fresh send and for regenerate. `appendUser` is false
-  // when regenerating (the user message already exists in the transcript).
+  // Re-fetch the conversation's active path from the server (the authoritative
+  // tree). Used after any run or branch operation so the transcript, message
+  // ids, and per-message sibling counts (< n/m >) always match the server.
+  const reloadActivePath = useCallback(async (cid: string) => {
+    try {
+      const { messages: rows } = await getMessages(cid);
+      setMessages(rows.map(toChatMessage));
+    } catch { /* keep the optimistic transcript on a transient fetch error */ }
+  }, []);
+
+  // Shared run path for a fresh send, an edit (new branch), and a regenerate.
+  // `appendUser` is false when regenerating (no new user turn is created). The
+  // `branch` params tell the server where to attach the new turn in the tree.
   const runChat = useCallback(
-    (prompt: string, attachments: ChatAttachment[] | undefined, appendUser: boolean, fast = false) => {
+    (
+      prompt: string,
+      attachments: ChatAttachment[] | undefined,
+      appendUser: boolean,
+      fast = false,
+      branch?: { editOfMessageId?: string; regenerateFromUserMessageId?: string },
+    ) => {
       const text = prompt.trim();
       if (!socket || busy || !text) return;
       setBusy(true);
@@ -307,6 +351,10 @@ export function useChatSession(
             maxCostPerRunUsd: maxCostPerRunUsd() || undefined,
             // Opt-in: distill this chat into persistent memories after the run.
             rememberSession: rememberSessions() || undefined,
+            // Branching: fork from an edited turn, or regenerate a reply as a
+            // sibling. Omitted for a normal send (append at the active leaf).
+            editOfMessageId: branch?.editOfMessageId,
+            regenerateFromUserMessageId: branch?.regenerateFromUserMessageId,
           },
           onAck,
         );
@@ -345,6 +393,10 @@ export function useChatSession(
               },
             ];
           });
+          // Reconcile with the server tree so message ids, parents, and sibling
+          // counts are authoritative (a < n/m > navigator appears after an edit
+          // or regenerate). The optimistic bubble above avoids any flash.
+          if (ack.conversationId) void reloadActivePath(ack.conversationId);
       };
 
       // Classify complexity on-device first when the opt-in model is enabled,
@@ -366,7 +418,7 @@ export function useChatSession(
         emitRun();
       }
     },
-    [socket, busy, conversationId, providers, skillId, routingMode, forceTier, webSearch, webSearchConfig, messages],
+    [socket, busy, conversationId, providers, skillId, routingMode, forceTier, webSearch, webSearchConfig, messages, reloadActivePath],
   );
 
   const send = useCallback((input: SendInput) => runChat(input.prompt, input.attachments, true, input.fast), [runChat]);
@@ -388,18 +440,57 @@ export function useChatSession(
     setContextApproval(null);
   }, [socket]);
 
-  const regenerate = useCallback(() => {
+  // Regenerate a reply as a NEW sibling of the given assistant turn (or the last
+  // one). The original answer stays on disk under < n/m >.
+  const regenerate = useCallback((assistantId?: string) => {
     if (busy) return;
-    const lastUser = [...messages].reverse().find((m) => m.role === 'user');
-    if (!lastUser) return;
-    // Drop the trailing assistant reply(ies) so the regenerated one replaces it.
-    setMessages((prev) => {
-      const copy = [...prev];
-      while (copy.length && copy[copy.length - 1]?.role === 'assistant') copy.pop();
-      return copy;
-    });
-    runChat(lastUser.content, lastUser.attachments, false);
+    const assistant = assistantId
+      ? messages.find((m) => m.id === assistantId && m.role === 'assistant')
+      : [...messages].reverse().find((m) => m.role === 'assistant');
+    if (!assistant) return;
+    const userMsg = assistant.parentId
+      ? messages.find((m) => m.id === assistant.parentId)
+      : [...messages].reverse().find((m) => m.role === 'user');
+    if (!userMsg) return;
+    // Optimistic: show the path up to & including the user turn, then stream.
+    const idx = messages.findIndex((m) => m.id === userMsg.id);
+    setMessages(messages.slice(0, idx + 1));
+    runChat(userMsg.content, userMsg.attachments, false, false, { regenerateFromUserMessageId: userMsg.id });
   }, [busy, messages, runChat]);
+
+  // Edit a user turn: fork a new branch (a sibling of the edited turn) and
+  // re-run, so the original prompt + its answer survive under < n/m >.
+  const editMessage = useCallback((messageId: string, newText: string) => {
+    if (busy || !newText.trim()) return;
+    const idx = messages.findIndex((m) => m.id === messageId);
+    const target = messages[idx];
+    if (!target || target.role !== 'user') return;
+    // Optimistic: keep everything BEFORE the edited turn, then add the new one.
+    setMessages(messages.slice(0, idx));
+    runChat(newText, target.attachments, true, false, { editOfMessageId: target.id });
+  }, [busy, messages, runChat]);
+
+  // Delete a message and its entire subtree. The server relocates the active
+  // path and returns it; an unsaved optimistic message just drops locally.
+  const deleteMessageById = useCallback(async (messageId: string) => {
+    if (!conversationId) {
+      setMessages((prev) => prev.filter((m) => m.id !== messageId));
+      return;
+    }
+    try {
+      const { messages: rows } = await apiDeleteMessage(conversationId, messageId);
+      setMessages(rows.map(toChatMessage));
+    } catch { /* leave the transcript as-is on failure */ }
+  }, [conversationId]);
+
+  // Switch the active path to a sibling branch (the < n/m > arrows).
+  const selectSibling = useCallback(async (messageId: string) => {
+    if (!conversationId || busy) return;
+    try {
+      const { messages: rows } = await apiSelectBranch(conversationId, messageId);
+      setMessages(rows.map(toChatMessage));
+    } catch { /* keep the current path on failure */ }
+  }, [conversationId, busy]);
 
   // Context meter inputs, derived from the LOADED conversation (not the last
   // run's throughput) so they're accurate and survive a page refresh. The
@@ -414,7 +505,8 @@ export function useChatSession(
   }, [messages]);
 
   return {
-    messages, send, stop, regenerate, busy, error, status, lastTokens, lastSaved, conversationId, loadMessages, setConversationId,
+    messages, send, stop, regenerate, editMessage, deleteMessage: deleteMessageById, selectSibling,
+    busy, error, status, lastTokens, lastSaved, conversationId, loadMessages, setConversationId,
     contextTokens, contextWindow,
     routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, approval,
     contextApproval, resolveContextApproval, compactionNotice, knowledgeNotice, activity,
