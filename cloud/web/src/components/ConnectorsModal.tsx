@@ -188,6 +188,12 @@ export default function ConnectorsModal({ onClose }: { onClose: () => void }) {
   // Which catalog connectors aren't configured yet (dedupe by connectorId).
   const configuredConnectorIds = new Set(servers.map((s) => s.connectorId).filter(Boolean));
 
+  // Only show the "Sign in with OAuth" button when it can actually work: a custom
+  // server (unknown — the user may point at an OAuth-speaking endpoint) or a
+  // connector we know speaks OAuth. Token-only connectors like GitHub (no DCR)
+  // just get the token field — no button that would only error.
+  const showOAuth = adding === 'custom' || (!!adding && adding.oauth === true);
+
   return (
     <Modal title="Connectors & MCP" onClose={onClose} maxWidth="max-w-lg">
       <div className="flex flex-col gap-5 p-4">
@@ -270,17 +276,21 @@ export default function ConnectorsModal({ onClose }: { onClose: () => void }) {
                     className="rounded-lg border border-elev/10 bg-elev/[0.06] px-3 py-2 text-sm text-ink-100 outline-none placeholder:text-ink-500"
                   />
                 )}
-                <button
-                  type="button"
-                  onClick={connectOAuth}
-                  disabled={oauthBusy || busy}
-                  className="accent-grad flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
-                >
-                  {oauthBusy ? <Loader2 size={14} className="animate-spin" /> : <LogIn size={14} />} Sign in with OAuth
-                </button>
-                <div className="flex items-center gap-2 text-[10px] uppercase tracking-wide text-ink-500">
-                  <span className="h-px flex-1 bg-elev/10" /> or paste a token <span className="h-px flex-1 bg-elev/10" />
-                </div>
+                {showOAuth && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={connectOAuth}
+                      disabled={oauthBusy || busy}
+                      className="accent-grad flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+                    >
+                      {oauthBusy ? <Loader2 size={14} className="animate-spin" /> : <LogIn size={14} />} Sign in with OAuth
+                    </button>
+                    <div className="flex items-center gap-2 text-[10px] uppercase tracking-wide text-ink-500">
+                      <span className="h-px flex-1 bg-elev/10" /> or paste a token <span className="h-px flex-1 bg-elev/10" />
+                    </div>
+                  </>
+                )}
                 <input
                   type="password"
                   value={form.token}

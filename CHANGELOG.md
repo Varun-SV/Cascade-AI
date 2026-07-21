@@ -5,6 +5,19 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.42.1 - 2026-07-21
+
+### Fixed
+- **GitHub connector no longer offers a "Sign in with OAuth" button that only
+  errors.** GitHub was marked one-click OAuth in 0.42.0, but GitHub's OAuth has
+  no Dynamic Client Registration, so our DCR-based flow can't self-register —
+  clicking *Sign in with OAuth* returned *"This server doesn't offer OAuth
+  sign-in."* GitHub is now correctly a **token** connector: picking it opens the
+  form straight to its **Personal Access Token** field (with a link to create
+  one). The OAuth button is now shown **only** for connectors that actually speak
+  OAuth (Notion, Linear, Sentry, Stripe, Atlassian) or a Custom MCP server —
+  token-only connectors show just the token field.
+
 ## 0.42.0 - 2026-07-21
 
 ### Added

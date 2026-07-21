@@ -8,6 +8,11 @@ describe('connector catalog', () => {
     expect(gh!.url).toMatch(/^https:\/\//);
     expect(gh!.requiresUrl).toBe(false);
   });
+  it('treats github as token-based, not one-click OAuth (no DCR support)', () => {
+    const gh = getConnector('github');
+    expect(gh!.oauth).toBeFalsy();          // GitHub OAuth has no Dynamic Client Registration
+    expect(gh!.tokenLabel.trim().length).toBeGreaterThan(0); // → a PAT the user pastes
+  });
   it('marks byo-url connectors as requiring a url', () => {
     expect(getConnector('slack')!.requiresUrl).toBe(true);
     expect(getConnector('google')!.requiresUrl).toBe(true);
