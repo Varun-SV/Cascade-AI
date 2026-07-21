@@ -5,6 +5,27 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.41.0 - 2026-07-21
+
+### Added
+- **Message branching in hosted chat (edit, regenerate, copy, delete).** A
+  conversation is now a **tree** rather than a flat list, so you can explore
+  alternatives without losing anything:
+  - **Edit a prompt** → it forks a **new branch** and re-runs; your original
+    prompt and its answer stay on disk.
+  - **Regenerate a reply** → produces a **sibling** answer under the same prompt.
+  - A **`< n/m >` navigator** appears on any turn that has siblings, stepping the
+    view between the versions (switching descends to that branch's latest reply).
+  - **Copy** any message, and **delete** a message to remove it **and its whole
+    subtree** (the view then falls back to the nearest surviving turn).
+
+  Under the hood: messages gained a `parent_id` and each conversation tracks an
+  **active leaf**; run history follows that path up from the leaf, so only one
+  branch is "live" at a time while every alternative is retained. A one-time
+  migration back-fills existing chats into a single linear branch (nothing to do
+  — your old conversations just work). Cloud web + server for now; desktop/CLI can
+  adopt the same model later.
+
 ## 0.40.2 - 2026-07-21
 
 ### Fixed

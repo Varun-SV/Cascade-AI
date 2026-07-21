@@ -447,18 +447,51 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     res.json({ ok: true, title });
   });
 
+  // Serialise the currently-selected path through the conversation tree, adding
+  // per-message sibling ids so the client can render the < n/m > branch navigator
+  // and jump between alternative edits/regenerations.
+  const serializeActivePath = (conversationId: string) =>
+    store.getActivePath(conversationId).map((m) => ({
+      ...m,
+      siblingIds: store.getSiblingIds(m.id),
+      attachments: store.getAttachmentsForMessage(m.id).map((a) => ({
+        id: a.id, mime: a.mime, kind: a.kind, filename: a.filename, charCount: a.charCount,
+      })),
+    }));
+
   app.get('/api/conversations/:id/messages', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
     const id = req.params['id'];
     if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid conversation id' }); return; }
     const conversation = store.getConversation(id, req.session!.userId);
     if (!conversation) { res.status(404).json({ error: 'Not found' }); return; }
-    const messages = store.getMessages(conversation.id).map((m) => ({
-      ...m,
-      attachments: store.getAttachmentsForMessage(m.id).map((a) => ({
-        id: a.id, mime: a.mime, kind: a.kind, filename: a.filename, charCount: a.charCount,
-      })),
-    }));
-    res.json({ conversation: { id: conversation.id, title: conversation.title, skillId: conversation.skillId }, messages });
+    res.json({
+      conversation: { id: conversation.id, title: conversation.title, skillId: conversation.skillId },
+      messages: serializeActivePath(conversation.id),
+    });
+  });
+
+  // Branching: switch the active path to a chosen sibling (the < n/m > arrows).
+  app.post('/api/conversations/:id/select-branch', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const id = req.params['id'];
+    const messageId = (req.body as { messageId?: unknown })?.messageId;
+    if (typeof id !== 'string' || typeof messageId !== 'string') {
+      res.status(400).json({ error: 'Invalid conversation or message id' }); return;
+    }
+    const path = store.selectBranch(id, req.session!.userId, messageId);
+    if (!path) { res.status(404).json({ error: 'Not found' }); return; }
+    res.json({ messages: serializeActivePath(id) });
+  });
+
+  // Branching: delete a message and its entire subtree; returns the new path.
+  app.delete('/api/conversations/:id/messages/:messageId', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const id = req.params['id'];
+    const messageId = req.params['messageId'];
+    if (typeof id !== 'string' || typeof messageId !== 'string') {
+      res.status(400).json({ error: 'Invalid conversation or message id' }); return;
+    }
+    const path = store.deleteMessageSubtree(id, req.session!.userId, messageId);
+    if (!path) { res.status(404).json({ error: 'Not found' }); return; }
+    res.json({ messages: serializeActivePath(id) });
   });
 
   // ── Run explorer: tier mix for today ──

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import Database from 'better-sqlite3';
 import { CloudStore } from './db.js';
 
 describe('CloudStore', () => {
@@ -272,5 +273,152 @@ describe('CloudStore', () => {
 
     // Namespace isolation.
     expect(vs.denseSearch([1, 0, 0], { namespace: 'other', k: 5 })).toHaveLength(0);
+  });
+});
+
+describe('CloudStore — message branching (conversation tree)', () => {
+  let dir: string;
+  let store: CloudStore;
+  let userId: string;
+  let convId: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-branch-'));
+    store = new CloudStore(path.join(dir, 'cloud.db'));
+    userId = store.upsertUser({ provider: 'github', providerId: 'b1', email: null, name: null, avatar: null }).id;
+    convId = store.createConversation(userId, 'Branch test').id;
+  });
+
+  afterEach(async () => {
+    store.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  // A helper to add a message under a parent and return its id.
+  const add = (role: string, content: string, parentId: string | null = null) =>
+    store.addMessage({ conversationId: convId, role, content, parentId }).id;
+
+  it('addMessage chains parents and moves the active leaf to the new tip', () => {
+    const u1 = add('user', 'hello');
+    const a1 = add('assistant', 'hi there', u1);
+    expect(store.getMessageById(u1)?.parentId).toBeNull();
+    expect(store.getMessageById(a1)?.parentId).toBe(u1);
+    // Active path follows the leaf up to the root, oldest first.
+    expect(store.getActivePath(convId).map((m) => m.id)).toEqual([u1, a1]);
+    expect(store.getConversation(convId, userId)?.activeLeafId).toBe(a1);
+  });
+
+  it('editing a prompt forks a sibling branch; both survive and the active path shows the newest', () => {
+    const u1 = add('user', 'first prompt');
+    add('assistant', 'first answer', u1);
+    // Edit u1 → a sibling user turn (same parent: null) + its own answer.
+    const u1b = add('user', 'edited prompt', null);
+    const a2 = add('assistant', 'second answer', u1b);
+
+    // u1 and u1b are siblings (both roots).
+    expect(store.getSiblingIds(u1)).toEqual([u1, u1b]);
+    // Active path now runs through the edited branch.
+    expect(store.getActivePath(convId).map((m) => m.content)).toEqual(['edited prompt', 'second answer']);
+
+    // Switching back to the original branch descends to its newest leaf.
+    const back = store.selectBranch(convId, userId, u1)!;
+    expect(back.map((m) => m.content)).toEqual(['first prompt', 'first answer']);
+    expect(store.getConversation(convId, userId)?.activeLeafId).toBe(store.getActivePath(convId).at(-1)?.id);
+    // Restoring the edited branch descends to a2.
+    store.selectBranch(convId, userId, u1b);
+    expect(store.getConversation(convId, userId)?.activeLeafId).toBe(a2);
+  });
+
+  it('regenerating produces an assistant sibling under the same user turn', () => {
+    const u1 = add('user', 'q');
+    const a1 = add('assistant', 'answer A', u1);
+    const a2 = add('assistant', 'answer B', u1); // regenerate → sibling of a1
+    expect(store.getSiblingIds(a1)).toEqual([a1, a2]);
+    // The newest reply is active.
+    expect(store.getActivePath(convId).at(-1)?.id).toBe(a2);
+  });
+
+  it('deleting a message removes its entire subtree and relocates the active leaf', () => {
+    const u1 = add('user', 'root');
+    const a1 = add('assistant', 'a1', u1);
+    const u2 = add('user', 'follow-up', a1);
+    const a2 = add('assistant', 'a2', u2); // active leaf here
+
+    // Delete the follow-up turn: u2 + a2 vanish; active leaf falls back to a1.
+    const path = store.deleteMessageSubtree(convId, userId, u2)!;
+    expect(path.map((m) => m.id)).toEqual([u1, a1]);
+    expect(store.getMessageById(u2)).toBeNull();
+    expect(store.getMessageById(a2)).toBeNull();
+    expect(store.getConversation(convId, userId)?.activeLeafId).toBe(a1);
+  });
+
+  it('deleting the whole root subtree empties the conversation', () => {
+    const u1 = add('user', 'only');
+    add('assistant', 'reply', u1);
+    const path = store.deleteMessageSubtree(convId, userId, u1)!;
+    expect(path).toEqual([]);
+    expect(store.getActivePath(convId)).toEqual([]);
+    expect(store.getConversation(convId, userId)?.activeLeafId).toBeNull();
+  });
+
+  it('branch operations are owner-scoped', () => {
+    const u1 = add('user', 'mine');
+    const otherId = store.upsertUser({ provider: 'github', providerId: 'b2', email: null, name: null, avatar: null }).id;
+    expect(store.selectBranch(convId, otherId, u1)).toBeNull();
+    expect(store.deleteMessageSubtree(convId, otherId, u1)).toBeNull();
+    // The message is untouched.
+    expect(store.getMessageById(u1)).not.toBeNull();
+  });
+
+  it('imported transcripts form a single linear branch', () => {
+    const convo = store.importConversation(userId, 'Imported', null, [
+      { role: 'user', content: 'u1' },
+      { role: 'assistant', content: 'a1' },
+      { role: 'user', content: 'u2' },
+    ]);
+    const path = store.getActivePath(convo.id);
+    expect(path.map((m) => m.content)).toEqual(['u1', 'a1', 'u2']);
+    // Each turn is the parent of the next (a valid single path).
+    expect(path[0]!.parentId).toBeNull();
+    expect(path[1]!.parentId).toBe(path[0]!.id);
+    expect(path[2]!.parentId).toBe(path[1]!.id);
+  });
+});
+
+describe('CloudStore — branching back-fill migration', () => {
+  it('upgrades a pre-branching (flat) database into a linear tree', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-migrate-'));
+    const dbPath = path.join(dir, 'legacy.db');
+
+    // Seed a legacy database: the messages/conversations schema BEFORE parent_id
+    // and active_leaf_id existed, with a flat run of messages.
+    const legacy = new Database(dbPath);
+    legacy.exec(`
+      CREATE TABLE users (id TEXT PRIMARY KEY, provider TEXT, provider_id TEXT, email TEXT, name TEXT, avatar TEXT, plan TEXT, created_at INTEGER);
+      CREATE TABLE conversations (id TEXT PRIMARY KEY, user_id TEXT, title TEXT, created_at INTEGER, updated_at INTEGER);
+      CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT, role TEXT, content TEXT, created_at INTEGER);
+    `);
+    legacy.prepare('INSERT INTO users VALUES (?,?,?,?,?,?,?,?)').run('u', 'github', '1', null, null, null, 'free', 1);
+    legacy.prepare('INSERT INTO conversations VALUES (?,?,?,?,?)').run('c', 'u', 'Legacy', 1, 1);
+    const ins = legacy.prepare('INSERT INTO messages VALUES (?,?,?,?,?)');
+    ins.run('m1', 'c', 'user', 'first', 10);
+    ins.run('m2', 'c', 'assistant', 'reply', 20);
+    ins.run('m3', 'c', 'user', 'again', 30);
+    legacy.close();
+
+    // Opening the store runs migrate(), which adds the columns and back-fills.
+    const store = new CloudStore(dbPath);
+    try {
+      const pathMsgs = store.getActivePath('c');
+      expect(pathMsgs.map((m) => m.id)).toEqual(['m1', 'm2', 'm3']);
+      // The flat run is now a linear chain, and the last message is the active leaf.
+      expect(pathMsgs[0]!.parentId).toBeNull();
+      expect(pathMsgs[1]!.parentId).toBe('m1');
+      expect(pathMsgs[2]!.parentId).toBe('m2');
+      expect(store.getConversation('c', 'u')?.activeLeafId).toBe('m3');
+    } finally {
+      store.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 });

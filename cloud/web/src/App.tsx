@@ -15,7 +15,7 @@ import ChatTopBar from './chat/ChatTopBar.js';
 import ContinueModal from './chat/ContinueModal.js';
 import ContextApprovalDialog from './chat/ContextApprovalDialog.js';
 import KeyVault from './keys/KeyVault.js';
-import { useChatSession } from './chat/useChatSession.js';
+import { useChatSession, toChatMessage } from './chat/useChatSession.js';
 import { useAutoTitler } from './chat/useAutoTitler.js';
 import { loadKeys, saveKeys } from './keys/store.js';
 import { loadWebSearch, saveWebSearch, webSearchPayload } from './keys/webSearch.js';
@@ -27,20 +27,10 @@ import {
 import { initTheme, applyTheme, applyDensity } from './lib/theme.js';
 import { fetchConfig, fetchMe, fetchSkills, getMessages, listConversations, logout, type CloudConfig } from './lib/api.js';
 import { closeSocket, getSocket } from './lib/socket.js';
-import type { CloudConversation, CloudUser, ProviderConfig, Skill, WhyReport } from './lib/types.js';
+import type { CloudConversation, CloudUser, ProviderConfig, Skill } from './lib/types.js';
 
 const SIDEBAR_OPEN_KEY = 'cascade-cloud-sidebar-open';
 const DEFAULT_SKILL = 'general';
-
-/** Parse a persisted /why JSON blob back into a WhyReport (null on absent/bad JSON). */
-function parseWhy(raw: string | null): WhyReport | null {
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as WhyReport;
-  } catch {
-    return null;
-  }
-}
 
 export default function App() {
   const [config, setConfig] = useState<CloudConfig | null>(null);
@@ -156,18 +146,7 @@ export default function App() {
     const { conversation, messages } = await getMessages(id);
     chat.setConversationId(id);
     if (conversation?.skillId) setSkillId(conversation.skillId);
-    chat.loadMessages(
-      messages.map((m) => ({
-        id: m.id,
-        role: m.role === 'user' ? 'user' : 'assistant',
-        content: m.content,
-        costUsd: m.costUsd,
-        tier: m.tier,
-        model: m.model,
-        why: parseWhy(m.why),
-        attachments: m.attachments?.map((a) => ({ id: a.id, mime: a.mime })),
-      })),
-    );
+    chat.loadMessages(messages.map(toChatMessage));
   }
 
   function newChat() {
@@ -300,6 +279,9 @@ export default function App() {
             onSend={chat.send}
             onStop={chat.stop}
             onRegenerate={chat.regenerate}
+            onEditMessage={chat.editMessage}
+            onDeleteMessage={chat.deleteMessage}
+            onSelectSibling={chat.selectSibling}
             routingMode={chat.routingMode}
             onRoutingModeChange={chat.setRoutingMode}
             forceTier={chat.forceTier}

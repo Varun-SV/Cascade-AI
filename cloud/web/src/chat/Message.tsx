@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Copy, Check, RotateCcw, ChevronDown, FileText, Download, UploadCloud, Loader2, Eye } from 'lucide-react';
+import { Copy, Check, RotateCcw, ChevronDown, ChevronLeft, ChevronRight, Pencil, Trash2, FileText, Download, UploadCloud, Loader2, Eye } from 'lucide-react';
 import { uploadUrl, saveFile } from '../lib/api.js';
 import Markdown from '../components/Markdown.js';
 import FileViewerModal from '../components/FileViewerModal.js';
@@ -165,20 +165,72 @@ function CopyButton({ getText, className }: { getText: () => string; className?:
   );
 }
 
-interface Props {
-  message: ChatMessage;
-  onRegenerate?: () => void;
+// The < n/m > branch navigator — shown on any message that has siblings (an
+// edited prompt or a regenerated reply), stepping the active path between them.
+function SiblingNav({ message, onSelect }: { message: ChatMessage; onSelect?: (id: string) => void }) {
+  const ids = message.siblingIds;
+  if (!ids || ids.length < 2 || !onSelect) return null;
+  const idx = ids.indexOf(message.id);
+  if (idx < 0) return null;
+  const prev = ids[idx - 1];
+  const next = ids[idx + 1];
+  return (
+    <span className="flex items-center gap-0.5 text-[11px] text-ink-500">
+      <button
+        type="button"
+        aria-label="Previous version"
+        disabled={!prev}
+        onClick={() => prev && onSelect(prev)}
+        className="rounded p-0.5 hover:text-ink-200 disabled:opacity-30"
+      >
+        <ChevronLeft size={13} />
+      </button>
+      <span className="tabular-nums">{idx + 1}/{ids.length}</span>
+      <button
+        type="button"
+        aria-label="Next version"
+        disabled={!next}
+        onClick={() => next && onSelect(next)}
+        className="rounded p-0.5 hover:text-ink-200 disabled:opacity-30"
+      >
+        <ChevronRight size={13} />
+      </button>
+    </span>
+  );
 }
 
-export default function Message({ message, onRegenerate }: Props) {
+interface Props {
+  message: ChatMessage;
+  /** A run is in flight — gates edit/regenerate submission. */
+  busy?: boolean;
+  /** Regenerate this assistant reply as a new sibling. */
+  onRegenerate?: () => void;
+  /** Edit this user turn: forks a new branch and re-runs. */
+  onEdit?: (newText: string) => void;
+  /** Delete this message and its whole subtree. */
+  onDelete?: () => void;
+  /** Switch the active path to a sibling (the < n/m > arrows). */
+  onSelectSibling?: (messageId: string) => void;
+}
+
+export default function Message({ message, busy, onRegenerate, onEdit, onDelete, onSelectSibling }: Props) {
   const attachments = message.attachments ?? [];
   const images = attachments.filter((a) => a.mime.startsWith('image/'));
   const docs = attachments.filter((a) => a.kind === 'document' || (!a.mime.startsWith('image/') && !!a.filename));
   const [whyOpen, setWhyOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(message.content);
+
+  function submitEdit() {
+    const text = draft.trim();
+    if (!text || busy) return;
+    onEdit?.(text);
+    setEditing(false);
+  }
 
   if (message.role === 'user') {
     return (
-      <div data-role="user" className="flex flex-col items-end gap-2">
+      <div data-role="user" className="group flex flex-col items-end gap-2">
         {images.length > 0 && (
           <div className="flex flex-wrap justify-end gap-2">
             {images.map((a) => (
@@ -207,9 +259,63 @@ export default function Message({ message, onRegenerate }: Props) {
             ))}
           </div>
         )}
-        {message.content && (
-          <div className="accent-grad max-w-[80%] whitespace-pre-wrap rounded-2xl rounded-br-md px-4 py-2 font-medium text-white shadow-lg shadow-accent-700/20">
-            {message.content}
+        {editing ? (
+          <div className="w-full max-w-[80%]">
+            <textarea
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitEdit(); }
+                if (e.key === 'Escape') { setEditing(false); setDraft(message.content); }
+              }}
+              rows={Math.min(10, draft.split('\n').length + 1)}
+              autoFocus
+              className="w-full resize-y rounded-2xl border border-accent-500/30 bg-elev/[0.06] px-4 py-2 text-sm text-ink-100 focus:outline-none focus:ring-1 focus:ring-accent-500"
+            />
+            <div className="mt-1.5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => { setEditing(false); setDraft(message.content); }}
+                className="rounded-lg px-3 py-1 text-xs text-ink-400 hover:text-ink-200"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={submitEdit}
+                disabled={busy || !draft.trim()}
+                className="rounded-lg bg-accent-600 px-3 py-1 text-xs text-white hover:bg-accent-500 disabled:opacity-60"
+              >
+                Save &amp; submit
+              </button>
+            </div>
+          </div>
+        ) : (
+          message.content && (
+            <div className="accent-grad max-w-[80%] whitespace-pre-wrap rounded-2xl rounded-br-md px-4 py-2 font-medium text-white shadow-lg shadow-accent-700/20">
+              {message.content}
+            </div>
+          )
+        )}
+        {!editing && (message.content || (message.siblingIds?.length ?? 0) > 1) && (
+          <div className="flex items-center gap-1.5 text-ink-400 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
+            <SiblingNav message={message} onSelect={onSelectSibling} />
+            <CopyButton getText={() => message.content} />
+            {onEdit && (
+              <button
+                type="button"
+                aria-label="Edit"
+                onClick={() => { setDraft(message.content); setEditing(true); }}
+                className="hover:text-ink-100"
+              >
+                <Pencil size={14} />
+              </button>
+            )}
+            {onDelete && (
+              <button type="button" aria-label="Delete" onClick={onDelete} className="hover:text-danger-300">
+                <Trash2 size={14} />
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -277,10 +383,16 @@ export default function Message({ message, onRegenerate }: Props) {
       })()}
       {!message.streaming && message.content && (
         <div className="flex items-center gap-2 pt-0.5 text-ink-400 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
+          <SiblingNav message={message} onSelect={onSelectSibling} />
           <CopyButton getText={() => message.content} />
           {onRegenerate && (
             <button type="button" aria-label="Regenerate" onClick={onRegenerate} className="hover:text-ink-100">
               <RotateCcw size={14} />
+            </button>
+          )}
+          {onDelete && (
+            <button type="button" aria-label="Delete" onClick={onDelete} className="hover:text-danger-300">
+              <Trash2 size={14} />
             </button>
           )}
           {typeof message.costUsd === 'number' && message.costUsd > 0 && (

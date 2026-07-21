@@ -52,6 +52,15 @@ const TierParamSchema = z
 const ChatRunPayloadSchema = z.object({
   conversationId: z.string().optional(),
   prompt: z.string().min(1).max(20_000),
+  // Branching: editing an existing user turn. The new (edited) user message is
+  // saved as a SIBLING of this one — same parent, a fresh branch — so the
+  // original prompt and its answer aren't overwritten. The server derives the
+  // parent (null → a new root branch); the client only names the edited message.
+  editOfMessageId: optionalNonEmptyString,
+  // Branching: regenerate a reply for an existing user message. When set, no new
+  // user message is created — the run re-answers that user turn and the reply is
+  // saved as a sibling of the previous answer. `prompt` still carries its text.
+  regenerateFromUserMessageId: optionalNonEmptyString,
   // Ids of images/documents the client already uploaded via POST /api/uploads.
   // Loaded and ownership-checked server-side; unknown/foreign ids are ignored.
   attachmentIds: z.array(z.string()).max(8).optional(),
@@ -509,8 +518,36 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     : store.createConversation(userId, payload.prompt.slice(0, 80));
   if (!conversation) throw new Error('Conversation not found');
 
-  const conversationHistory: ConversationMessage[] = store
-    .getMessages(conversation.id)
+  // ── Branch resolution (conversation tree) ──
+  // A conversation is a tree; a run appends to ONE path through it. Any client-
+  // supplied branch target is looked up and confirmed to belong to THIS
+  // conversation (and to be a user turn), so a foreign id can never splice
+  // another chat's history into the run — anything invalid falls back to a
+  // normal append at the tip.
+  const ownedUserTurn = (id: string | null | undefined) => {
+    if (!id) return null;
+    const m = store.getMessageById(id);
+    return m && m.conversationId === conversation.id && m.role === 'user' ? m : null;
+  };
+
+  // Regenerate: re-answer an existing user turn, saving the reply as a sibling of
+  // the previous answer (no new user message).
+  const regenUserMsg = ownedUserTurn(payload.regenerateFromUserMessageId);
+  const isRegenerate = regenUserMsg !== null;
+  // Edit: the new user turn becomes a sibling of the edited one (same parent).
+  const editedMsg = isRegenerate ? null : ownedUserTurn(payload.editOfMessageId);
+
+  // The message the new user turn hangs under (its parent). Regenerate stops just
+  // above the re-answered turn; an edit forks from the edited turn's own parent
+  // (null → a new root branch); a normal send appends at the active leaf.
+  const branchParentId = isRegenerate
+    ? regenUserMsg!.parentId
+    : editedMsg ? editedMsg.parentId
+    : conversation.activeLeafId;
+
+  // History = the path from the root down to the branch point (excludes the
+  // current user turn, which rides in as the prompt).
+  const conversationHistory: ConversationMessage[] = (branchParentId ? store.getPathToMessage(branchParentId) : [])
     .slice(-MAX_HISTORY_MESSAGES)
     .map((m) => ({ role: m.role as ConversationMessage['role'], content: m.content }));
 
@@ -550,10 +587,16 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     docSources, payload, store, userId, conversation.id, socket,
   );
 
-  // Persist the user's ORIGINAL text (not the skill/memory-augmented prompt),
-  // then link its attachments so the transcript re-renders them on reload.
-  const userMessage = store.addMessage({ conversationId: conversation.id, role: 'user', content: payload.prompt });
-  for (const att of loadedAttachments) store.linkAttachmentToMessage(att.id, userId, userMessage.id);
+  // Persist the user's ORIGINAL text (not the skill/memory-augmented prompt) as
+  // a child of the branch point, then link its attachments so the transcript
+  // re-renders them on reload. On a regenerate there's no new user turn — the
+  // reply attaches to the EXISTING user message being re-answered.
+  const userMessage = isRegenerate
+    ? regenUserMsg!
+    : store.addMessage({ conversationId: conversation.id, role: 'user', content: payload.prompt, parentId: branchParentId });
+  if (!isRegenerate) {
+    for (const att of loadedAttachments) store.linkAttachmentToMessage(att.id, userId, userMessage.id);
+  }
   if (payload.skillId !== undefined) store.setConversationSkill(conversation.id, userId, payload.skillId ?? null);
 
   // A skillId resolves to either a built-in preset or one of the user's own
@@ -707,6 +750,10 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
       conversationId: conversation.id,
       role: 'assistant',
       content: result.output,
+      // Reply hangs under the user turn — a fresh answer for a normal/edited turn,
+      // or a sibling of the previous answer when regenerating. This also moves the
+      // conversation's active leaf onto this new branch.
+      parentId: userMessage.id,
       model,
       tier,
       why: JSON.stringify(why),

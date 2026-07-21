@@ -37,6 +37,8 @@ export interface CloudConversation {
   userId: string;
   title: string | null;
   skillId: string | null;
+  /** Branching: leaf of the currently-selected path (null for an empty chat). */
+  activeLeafId: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -44,6 +46,8 @@ export interface CloudConversation {
 export interface CloudMessage {
   id: string;
   conversationId: string;
+  /** Branching: the message this replies to (null = a root turn). */
+  parentId: string | null;
   role: string;
   content: string;
   model: string | null;
@@ -111,6 +115,7 @@ interface DbConversationRow {
   user_id: string;
   title: string | null;
   skill_id: string | null;
+  active_leaf_id: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -197,6 +202,7 @@ interface DbFileRow {
 interface DbMessageRow {
   id: string;
   conversation_id: string;
+  parent_id: string | null;
   role: string;
   content: string;
   model: string | null;
@@ -249,6 +255,9 @@ export class CloudStore {
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         title TEXT,
+        -- Message branching: the leaf of the currently-selected path through the
+        -- conversation tree. Rendering + history follow parent_id up from here.
+        active_leaf_id TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -258,6 +267,10 @@ export class CloudStore {
       CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
         conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        -- Branching: the message this one replies to (NULL = a root turn).
+        -- Editing a prompt or regenerating a reply creates a *sibling* (same
+        -- parent) instead of overwriting, so old and new answers both survive.
+        parent_id TEXT,
         role TEXT NOT NULL,
         content TEXT NOT NULL,
         model TEXT,
@@ -386,6 +399,44 @@ export class CloudStore {
     if (!hasCol('users', 'subscription_current_end')) this.db.exec('ALTER TABLE users ADD COLUMN subscription_current_end INTEGER');
     // MCP OAuth: the server's encrypted OAuth state (tokens + client reg + AS url).
     if (!hasCol('mcp_servers', 'oauth_json')) this.db.exec('ALTER TABLE mcp_servers ADD COLUMN oauth_json TEXT');
+
+    // Message branching (conversation tree). Introduced together — back-fill runs
+    // exactly once, when parent_id first appears, over the pre-existing flat data:
+    // every message's parent becomes its predecessor in the same conversation (a
+    // linear chain), and each conversation's active leaf becomes its last message.
+    // Guarding on the column's absence makes this a one-shot, idempotent step.
+    if (!hasCol('messages', 'parent_id')) {
+      this.db.exec('ALTER TABLE messages ADD COLUMN parent_id TEXT');
+      this.db.exec(`
+        WITH ordered AS (
+          SELECT id, LAG(id) OVER (
+            PARTITION BY conversation_id ORDER BY created_at ASC, rowid ASC
+          ) AS prev
+          FROM messages
+        )
+        UPDATE messages SET parent_id = ordered.prev
+        FROM ordered
+        WHERE ordered.id = messages.id AND messages.parent_id IS NULL;
+      `);
+    }
+    if (!hasCol('conversations', 'active_leaf_id')) {
+      this.db.exec('ALTER TABLE conversations ADD COLUMN active_leaf_id TEXT');
+      this.db.exec(`
+        WITH last AS (
+          SELECT conversation_id, id, ROW_NUMBER() OVER (
+            PARTITION BY conversation_id ORDER BY created_at DESC, rowid DESC
+          ) AS rn
+          FROM messages
+        )
+        UPDATE conversations SET active_leaf_id = last.id
+        FROM last
+        WHERE last.conversation_id = conversations.id AND last.rn = 1
+          AND conversations.active_leaf_id IS NULL;
+      `);
+    }
+    // Index the branching pointer once the column is guaranteed to exist (fresh
+    // installs get it from CREATE TABLE, upgrades from the ALTER above).
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id)');
   }
 
   // ── Users ─────────────────────────────────────
@@ -458,7 +509,7 @@ export class CloudStore {
 
   createConversation(userId: string, title: string | null = null): CloudConversation {
     const now = Date.now();
-    const row: DbConversationRow = { id: randomUUID(), user_id: userId, title, skill_id: null, created_at: now, updated_at: now };
+    const row: DbConversationRow = { id: randomUUID(), user_id: userId, title, skill_id: null, active_leaf_id: null, created_at: now, updated_at: now };
     this.db
       .prepare('INSERT INTO conversations (id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
       .run(row.id, row.user_id, row.title, row.created_at, row.updated_at);
@@ -485,10 +536,13 @@ export class CloudStore {
     const insert = this.db.transaction(() => {
       const convo = this.createConversation(userId, title);
       if (skillId) this.setConversationSkill(convo.id, userId, skillId);
+      // Chain the imported turns into a linear branch (each replies to the last)
+      // so the transcript is a valid single path in the conversation tree.
+      let parentId: string | null = null;
       for (const m of messages) {
         if (m.role !== 'user' && m.role !== 'assistant') continue;
         if (typeof m.content !== 'string' || !m.content) continue;
-        this.addMessage({ conversationId: convo.id, role: m.role, content: m.content });
+        parentId = this.addMessage({ conversationId: convo.id, role: m.role, content: m.content, parentId }).id;
       }
       return convo;
     });
@@ -534,6 +588,8 @@ export class CloudStore {
     conversationId: string;
     role: string;
     content: string;
+    /** Branching: the message this replies to. Omit for a root turn. */
+    parentId?: string | null;
     model?: string | null;
     tier?: string | null;
     why?: string | null;
@@ -542,6 +598,7 @@ export class CloudStore {
     const row: DbMessageRow = {
       id: randomUUID(),
       conversation_id: input.conversationId,
+      parent_id: input.parentId ?? null,
       role: input.role,
       content: input.content,
       model: input.model ?? null,
@@ -552,10 +609,12 @@ export class CloudStore {
     };
     this.db
       .prepare(
-        `INSERT INTO messages (id, conversation_id, role, content, model, tier, why_json, cost_usd, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages (id, conversation_id, parent_id, role, content, model, tier, why_json, cost_usd, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(row.id, row.conversation_id, row.role, row.content, row.model, row.tier, row.why_json, row.cost_usd, row.created_at);
+      .run(row.id, row.conversation_id, row.parent_id, row.role, row.content, row.model, row.tier, row.why_json, row.cost_usd, row.created_at);
+    // The newly appended message becomes the tip of the active path.
+    this.db.prepare('UPDATE conversations SET active_leaf_id = ? WHERE id = ?').run(row.id, input.conversationId);
     this.touchConversation(input.conversationId);
     return this.deserializeMessage(row);
   }
@@ -582,6 +641,145 @@ export class CloudStore {
       .prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC')
       .all(conversationId) as DbMessageRow[];
     return rows.map((r) => this.deserializeMessage(r));
+  }
+
+  // ── Message branching (conversation tree) ─────
+  //
+  // A conversation is a tree: each message has a parent (NULL = root), and the
+  // conversation tracks an active leaf. Rendering and run history follow
+  // parent_id up from that leaf, so only one path is "live" at a time while
+  // every sibling branch stays on disk for < n/m > navigation.
+
+  getMessageById(id: string): CloudMessage | null {
+    const row = this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as DbMessageRow | undefined;
+    return row ? this.deserializeMessage(row) : null;
+  }
+
+  /** The messages along the currently-selected path, root → active leaf. */
+  getActivePath(conversationId: string): CloudMessage[] {
+    const convo = this.db
+      .prepare('SELECT active_leaf_id FROM conversations WHERE id = ?')
+      .get(conversationId) as { active_leaf_id: string | null } | undefined;
+    if (!convo?.active_leaf_id) return [];
+    return this.getPathToMessage(convo.active_leaf_id);
+  }
+
+  /** The messages from the root down to `messageId` (inclusive), oldest first. */
+  getPathToMessage(messageId: string): CloudMessage[] {
+    const rows = this.db
+      .prepare(
+        `WITH RECURSIVE path(id) AS (
+           SELECT id FROM messages WHERE id = ?
+           UNION ALL
+           SELECT m.parent_id FROM messages m JOIN path p ON m.id = p.id WHERE m.parent_id IS NOT NULL
+         )
+         SELECT msg.* FROM messages msg JOIN path ON msg.id = path.id
+         ORDER BY msg.created_at ASC, msg.rowid ASC`,
+      )
+      .all(messageId) as DbMessageRow[];
+    return rows.map((r) => this.deserializeMessage(r));
+  }
+
+  /** Ids of `messageId` and its siblings (same parent), oldest first. */
+  getSiblingIds(messageId: string): string[] {
+    const m = this.db
+      .prepare('SELECT conversation_id, parent_id FROM messages WHERE id = ?')
+      .get(messageId) as { conversation_id: string; parent_id: string | null } | undefined;
+    if (!m) return [];
+    const rows = m.parent_id === null
+      ? this.db
+          .prepare('SELECT id FROM messages WHERE conversation_id = ? AND parent_id IS NULL ORDER BY created_at ASC, rowid ASC')
+          .all(m.conversation_id)
+      : this.db
+          .prepare('SELECT id FROM messages WHERE parent_id = ? ORDER BY created_at ASC, rowid ASC')
+          .all(m.parent_id);
+    return (rows as Array<{ id: string }>).map((r) => r.id);
+  }
+
+  /** Follow the newest child at each step from `messageId` down to a leaf. */
+  private descendToNewestLeaf(messageId: string): string {
+    let cur = messageId;
+    for (;;) {
+      const child = this.db
+        .prepare('SELECT id FROM messages WHERE parent_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1')
+        .get(cur) as { id: string } | undefined;
+      if (!child) return cur;
+      cur = child.id;
+    }
+  }
+
+  /**
+   * Point the active path at `messageId` (owner-scoped), descending to the
+   * newest leaf beneath it so switching to a sibling shows its latest
+   * continuation. Returns the new active path, or null when the conversation
+   * isn't the user's or the message isn't in it.
+   */
+  selectBranch(conversationId: string, userId: string, messageId: string): CloudMessage[] | null {
+    if (!this.getConversation(conversationId, userId)) return null;
+    const inConvo = this.db
+      .prepare('SELECT id FROM messages WHERE id = ? AND conversation_id = ?')
+      .get(messageId, conversationId) as { id: string } | undefined;
+    if (!inConvo) return null;
+    const leaf = this.descendToNewestLeaf(messageId);
+    this.db.prepare('UPDATE conversations SET active_leaf_id = ? WHERE id = ?').run(leaf, conversationId);
+    return this.getPathToMessage(leaf);
+  }
+
+  /**
+   * Delete a message and its entire subtree (owner-scoped). When the active
+   * leaf was inside the deleted subtree, the active path relocates to the newest
+   * leaf beneath the deleted message's parent (or another remaining leaf, or
+   * empty for a fully-cleared conversation). Returns the new active path, or
+   * null when the conversation/message isn't the user's.
+   */
+  deleteMessageSubtree(conversationId: string, userId: string, messageId: string): CloudMessage[] | null {
+    if (!this.getConversation(conversationId, userId)) return null;
+    const target = this.db
+      .prepare('SELECT id, parent_id FROM messages WHERE id = ? AND conversation_id = ?')
+      .get(messageId, conversationId) as { id: string; parent_id: string | null } | undefined;
+    if (!target) return null;
+
+    const tx = this.db.transaction(() => {
+      // The subtree = target + all descendants.
+      const ids = (this.db
+        .prepare(
+          `WITH RECURSIVE sub(id) AS (
+             SELECT id FROM messages WHERE id = ?
+             UNION ALL
+             SELECT m.id FROM messages m JOIN sub ON m.parent_id = sub.id
+           )
+           SELECT id FROM sub`,
+        )
+        .all(messageId) as Array<{ id: string }>).map((r) => r.id);
+
+      const convo = this.db
+        .prepare('SELECT active_leaf_id FROM conversations WHERE id = ?')
+        .get(conversationId) as { active_leaf_id: string | null };
+      const activeInSubtree = convo.active_leaf_id !== null && ids.includes(convo.active_leaf_id);
+
+      // Attachment rows cascade via FK (foreign_keys = ON).
+      this.db.prepare(`DELETE FROM messages WHERE id IN (${ids.map(() => '?').join(',')})`).run(...ids);
+
+      if (activeInSubtree) {
+        let newLeaf: string | null = null;
+        if (target.parent_id) {
+          newLeaf = this.descendToNewestLeaf(target.parent_id);
+        } else {
+          // Removed a root subtree — fall back to the newest remaining leaf.
+          const remaining = this.db
+            .prepare(
+              `SELECT id FROM messages WHERE conversation_id = ?
+                 AND id NOT IN (SELECT parent_id FROM messages WHERE parent_id IS NOT NULL AND conversation_id = ?)
+               ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+            )
+            .get(conversationId, conversationId) as { id: string } | undefined;
+          newLeaf = remaining?.id ?? null;
+        }
+        this.db.prepare('UPDATE conversations SET active_leaf_id = ? WHERE id = ?').run(newLeaf, conversationId);
+      }
+    });
+    tx();
+    return this.getActivePath(conversationId);
   }
 
   // ── Usage / entitlements ──────────────────────
@@ -930,6 +1128,7 @@ export class CloudStore {
       userId: row.user_id,
       title: row.title,
       skillId: row.skill_id ?? null,
+      activeLeafId: row.active_leaf_id ?? null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -939,6 +1138,7 @@ export class CloudStore {
     return {
       id: row.id,
       conversationId: row.conversation_id,
+      parentId: row.parent_id ?? null,
       role: row.role,
       content: row.content,
       model: row.model,

@@ -20,7 +20,13 @@ interface Props {
   onSkillChange: (id: string) => void;
   onSend: (input: SendInput) => void;
   onStop: () => void;
-  onRegenerate: () => void;
+  onRegenerate: (assistantId?: string) => void;
+  /** Branching: edit a user turn (forks a new branch and re-runs). */
+  onEditMessage: (messageId: string, newText: string) => void;
+  /** Branching: delete a message and its whole subtree. */
+  onDeleteMessage: (messageId: string) => void;
+  /** Branching: switch the active path to a sibling (the < n/m > arrows). */
+  onSelectSibling: (messageId: string) => void;
   routingMode: RoutingMode;
   onRoutingModeChange: (m: RoutingMode) => void;
   forceTier: ForceTier;
@@ -36,12 +42,12 @@ interface Props {
 
 export default function ChatPanel({
   messages, busy, error, status, hasProviders, skills, skillId, onSkillChange, onSend, onStop, onRegenerate,
+  onEditMessage, onDeleteMessage, onSelectSibling,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange, uiMode, approval,
   compactionNotice, knowledgeNotice, activity,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [activityOpen, setActivityOpen] = useState(false);
-  const lastAssistantId = [...messages].reverse().find((m) => m.role === 'assistant' && !m.streaming)?.id;
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -79,7 +85,14 @@ export default function ChatPanel({
                 exit={{ opacity: 0 }}
                 transition={{ type: 'spring', stiffness: 420, damping: 34 }}
               >
-                <Message message={m} onRegenerate={m.id === lastAssistantId ? onRegenerate : undefined} />
+                <Message
+                  message={m}
+                  busy={busy}
+                  onRegenerate={m.role === 'assistant' && !m.streaming ? () => onRegenerate(m.id) : undefined}
+                  onEdit={m.role === 'user' ? (text) => onEditMessage(m.id, text) : undefined}
+                  onDelete={!m.streaming ? () => onDeleteMessage(m.id) : undefined}
+                  onSelectSibling={onSelectSibling}
+                />
               </motion.div>
             ))}
           </AnimatePresence>

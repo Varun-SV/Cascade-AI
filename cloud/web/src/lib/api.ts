@@ -124,6 +124,28 @@ export function getMessages(
   return json(fetch(`/api/conversations/${encodeURIComponent(conversationId)}/messages`, { credentials: 'include' }));
 }
 
+/** Branching: switch the active path to a chosen sibling; returns the new path. */
+export function selectBranch(conversationId: string, messageId: string): Promise<{ messages: CloudMessage[] }> {
+  return json(
+    fetch(`/api/conversations/${encodeURIComponent(conversationId)}/select-branch`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messageId }),
+    }),
+  );
+}
+
+/** Branching: delete a message and its entire subtree; returns the new path. */
+export function deleteMessage(conversationId: string, messageId: string): Promise<{ messages: CloudMessage[] }> {
+  return json(
+    fetch(`/api/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    }),
+  );
+}
+
 export function renameConversation(id: string, title: string): Promise<{ ok: boolean; title: string }> {
   return json(
     fetch(`/api/conversations/${encodeURIComponent(id)}/title`, {

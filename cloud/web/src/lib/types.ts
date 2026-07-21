@@ -47,6 +47,8 @@ export interface MessageAttachment {
 export interface CloudMessage {
   id: string;
   conversationId: string;
+  /** Branching: the message this replies to (null = a root turn). */
+  parentId: string | null;
   role: string;
   content: string;
   model: string | null;
@@ -56,6 +58,8 @@ export interface CloudMessage {
   costUsd: number | null;
   createdAt: number;
   attachments?: MessageAttachment[];
+  /** Branching: ids of this message and its siblings, oldest first (for < n/m >). */
+  siblingIds?: string[];
 }
 
 export interface Skill {
