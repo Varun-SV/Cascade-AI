@@ -5,6 +5,37 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.40.2 - 2026-07-21
+
+### Fixed
+- **"No model available for tier T1" with any Azure deployment.** Setting an Azure
+  deployment whose name didn't happen to collide with a bundled catalog id (e.g.
+  a `gpt-5.4-mini` or a custom name) could fail the run with *"No model available
+  for tier T1"*. The deployment was only registered — and only made available to
+  fill the tiers — if a startup availability *probe* succeeded, and that probe is
+  a live network call that can fail for reasons that say nothing about the
+  deployment (a cold start, a transient 429, a content-filtered "ping"). A single
+  deployment the user explicitly configured (endpoint + key + deployment name) is
+  now **trusted regardless of the probe** and registered directly, so one
+  deployment correctly serves all three tiers; the probe result is now only
+  advisory. A generate-time fallback also resolves any tier that was somehow left
+  unfilled to the best available model instead of hard-failing. A genuinely
+  unreachable deployment still fails with the provider's own concrete error at
+  call time, which is far more actionable than a blanket "no model" at startup.
+- **Large attached documents (~52 KB) no longer show a misleading "truncated /
+  add an OpenAI key" notice.** The cache-vs-retrieve threshold for attached
+  documents was a fixed 24 KB (~6k tokens), so an ordinary ~52 KB file (only
+  ~13k tokens — trivially within any modern context window) was pushed to
+  passage retrieval; users without an embeddings-capable key then saw *"Add an
+  OpenAI-compatible key… used a truncated view"* even though the whole document
+  was in fact injected. The threshold is now **derived from the run's real
+  context window** (via the models the user configured) instead of a fixed byte
+  cliff, so normal documents are injected in full and never routed to retrieval.
+  Retrieval is now reserved for corpora that genuinely wouldn't fit the window,
+  and the notice for that case is honest ("the full text was still included") and
+  points at every provider that unlocks retrieval (OpenAI, an OpenAI-compatible
+  endpoint, or a local Ollama) — not just OpenAI.
+
 ## 0.40.1 - 2026-07-21
 
 ### Fixed

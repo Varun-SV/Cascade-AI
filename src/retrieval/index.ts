@@ -11,7 +11,7 @@ export {
   LLMReranker, chatCompleterFromProviders, parseRankOrder,
   type Reranker, type CompleteFn,
 } from './rerank.js';
-export { planRetrieval, type RetrievalMode, type RetrievalPlan, type RetrievalContext } from './plan.js';
+export { planRetrieval, cagCharBudget, CHARS_PER_TOKEN, type RetrievalMode, type RetrievalPlan, type RetrievalContext } from './plan.js';
 export { chunkCode, heuristicCodeChunker, type CodeChunker, type CodeChunkOptions } from './code-chunk.js';
 export {
   buildManifest, diffManifest, hashContent, type FileManifest, type ManifestDiff,

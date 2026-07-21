@@ -222,11 +222,25 @@ export class CascadeRouter extends EventEmitter {
     // address them by deployment name. Previously azure existed only as a
     // synthesized seed model with the literal id 'azure', so configured
     // deployments never showed up anywhere.
-    if (availableProviders.has('azure')) {
-      for (const cfg of config.providers) {
-        const model = azureModelForDeployment(cfg);
-        if (model) this.selector.addDynamicModel(model);
-      }
+    //
+    // Trust the explicit configuration rather than gating registration on the
+    // isAvailable() probe. A user who has entered an endpoint, API key, and
+    // deployment name has told us this deployment exists; a flaky or slow probe
+    // (cold start, a transient 429, a content-filtered "ping") must not erase
+    // their only model and surface downstream as "No model available for tier
+    // T1". The probe result stays advisory — a genuinely bad deployment still
+    // fails loudly at generate time with the provider's own concrete error,
+    // which is far more actionable than a blanket "no model" at startup. This
+    // mirrors the openai-compatible discovery above, which likewise derives
+    // availability from configuration instead of a separate probe request.
+    const azureDeployments = config.providers
+      .map((cfg) => azureModelForDeployment(cfg))
+      .filter((m): m is ModelInfo => m !== null);
+    if (azureDeployments.length > 0) {
+      for (const model of azureDeployments) this.selector.addDynamicModel(model);
+      // Same shared Set the selector holds — marks azure usable for tier-fill
+      // and the "any available model" fallback below.
+      availableProviders.add('azure');
     }
 
     // Validate the official cloud providers against their own model list, so
@@ -272,13 +286,10 @@ export class CascadeRouter extends EventEmitter {
     // available" deployment to every tier. Instead, rank the configured
     // deployments by an inferred capability score from their names and spread
     // them across tiers — strongest to T1, cheapest to T3 — so a multi-deployment
-    // Azure setup actually uses each deployment.
-    const azureRanked = availableProviders.has('azure')
-      ? config.providers
-          .map((cfg) => azureModelForDeployment(cfg))
-          .filter((m): m is ModelInfo => m !== null)
-          .sort((a, b) => inferModelCapability(b.id) - inferModelCapability(a.id))
-      : [];
+    // Azure setup actually uses each deployment. A single deployment ranks alone,
+    // so it correctly fills all three tiers.
+    const azureRanked = [...azureDeployments]
+      .sort((a, b) => inferModelCapability(b.id) - inferModelCapability(a.id));
 
     // Fill any tiers without explicit overrides.
     for (const tier of ['T1', 'T2', 'T3'] as TierRole[]) {
@@ -506,9 +517,13 @@ export class CascadeRouter extends EventEmitter {
     if (options.model && !requireVision) {
       this.ensureProvider(options.model, this.config.providers);
     }
+    // Resolve the model for this call. When a tier was never filled during init
+    // (e.g. an availability probe was inconclusive at startup), fall back to the
+    // selector's live "any available model" pick rather than hard-failing — a
+    // single configured deployment should be able to serve every tier.
     let model = requireVision
       ? this.selector.selectVisionModel()
-      : (options.model ?? this.tierModels.get(tier));
+      : (options.model ?? this.tierModels.get(tier) ?? this.selector.selectForTier(tier) ?? undefined);
 
     // Privacy tier: a local-only subtask must NEVER reach a cloud provider.
     // Swap to a private model when the resolved one isn't; hard-error rather
