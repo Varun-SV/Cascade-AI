@@ -5,6 +5,34 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.37.0 - 2026-07-21
+
+### Added
+- **File generation & Cascade Files.** Hosted runs can now produce files you can
+  **download for free** (your browser makes the file) or **save to Cascade**,
+  metered by plan — plus data management (import chats & memories, delete chats).
+  - **Delivery**: the worker returns a file's contents in a ```` ```file:name.ext ````
+    fenced block; the web renders **file cards** with **Download** (client-side
+    Blob, free, nothing stored) and **Save to Cascade files**.
+  - **Storage**: saved files live on the per-tenant Railway volume, tracked in a
+    new `files` table. Free = **10 MB**, Pro = **1 GB** (a generous metered cap,
+    not "unlimited"). Over the cap → a 413 with a "delete or upgrade" message.
+  - **Files panel**: a right-hand drawer lists saved files with a storage usage
+    bar, per-file download + delete, and an upgrade prompt at the cap.
+  - **Data management**: delete a chat (trash in the sidebar), and **import chats
+    or memories** from an exported JSON bundle.
+  - Endpoints: `GET/POST/DELETE /api/files`, `GET /api/files/:id`,
+    `DELETE /api/conversations/:id`, `POST /api/memories/import`. Design +
+    security in [`docs/file-generation.md`](docs/file-generation.md).
+
+### Fixed
+- **Hosted runs no longer waste turns on a phantom `write_file`.** A hosted run
+  has no disk tools, but runtime **tool creation** was left on — the worker would
+  synthesize a `write_file`/`dynamic_write_file`, call it, produce nothing, and
+  the run failed ("execution failed to produce any output"). Tool creation is now
+  disabled for hosted runs, and the worker is steered to deliver files via the
+  `file:` fence instead.
+
 ## 0.36.0 - 2026-07-20
 
 ### Added

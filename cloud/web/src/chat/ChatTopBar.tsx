@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { PanelLeftClose, PanelLeftOpen, TrendingDown, MonitorSmartphone } from 'lucide-react';
+import { PanelLeftClose, PanelLeftOpen, TrendingDown, MonitorSmartphone, HardDrive } from 'lucide-react';
 
 interface Props {
   title: string | undefined;
@@ -7,9 +7,10 @@ interface Props {
   onToggleSidebar: () => void;
   saved?: { usd: number; pct: number } | null;
   onContinueElsewhere: () => void;
+  onOpenFiles: () => void;
 }
 
-export default function ChatTopBar({ title, sidebarOpen, onToggleSidebar, saved, onContinueElsewhere }: Props) {
+export default function ChatTopBar({ title, sidebarOpen, onToggleSidebar, saved, onContinueElsewhere, onOpenFiles }: Props) {
   return (
     <div className="flex h-12 shrink-0 items-center gap-3 border-b border-elev/10 px-3">
       <motion.button
@@ -23,6 +24,17 @@ export default function ChatTopBar({ title, sidebarOpen, onToggleSidebar, saved,
         {sidebarOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
       </motion.button>
       <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-200">{title ?? 'New chat'}</span>
+      <motion.button
+        type="button"
+        aria-label="Your files"
+        title="Files"
+        onClick={onOpenFiles}
+        whileHover={{ scale: 1.08 }}
+        whileTap={{ scale: 0.92 }}
+        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-ink-400 hover:bg-elev/10 hover:text-ink-100"
+      >
+        <HardDrive size={16} />
+      </motion.button>
       <motion.button
         type="button"
         aria-label="Continue this chat on another device"

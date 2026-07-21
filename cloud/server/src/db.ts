@@ -174,6 +174,26 @@ interface DbMcpServerRow {
   oauth_json?: string | null;
 }
 
+export interface CloudFile {
+  id: string;
+  userId: string;
+  conversationId: string | null;
+  name: string;
+  mime: string;
+  size: number;
+  createdAt: number;
+}
+
+interface DbFileRow {
+  id: string;
+  user_id: string;
+  conversation_id: string | null;
+  name: string;
+  mime: string;
+  size: number;
+  created_at: number;
+}
+
 interface DbMessageRow {
   id: string;
   conversation_id: string;
@@ -329,6 +349,20 @@ export class CloudStore {
         version INTEGER NOT NULL DEFAULT 1,
         updated_at INTEGER NOT NULL
       );
+
+      -- Cascade Files: content the user chose to save from a run, on the
+      -- per-tenant volume. The bytes live at <tenant>/files/<id>; this row is the
+      -- source of truth for quota accounting.
+      CREATE TABLE IF NOT EXISTS files (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        conversation_id TEXT,
+        name TEXT NOT NULL,
+        mime TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_files_user ON files(user_id);
     `);
 
     // Additive columns — ALTER ... ADD COLUMN throws if the column already
@@ -722,6 +756,69 @@ export class CloudStore {
   deleteMcpServer(id: string, userId: string): boolean {
     const info = this.db.prepare('DELETE FROM mcp_servers WHERE id = ? AND user_id = ?').run(id, userId);
     return info.changes > 0;
+  }
+
+  // ── Cascade Files (saved generated files) ──
+
+  addFile(input: { userId: string; conversationId?: string | null; name: string; mime: string; size: number }): CloudFile {
+    const row: DbFileRow = {
+      id: randomUUID(),
+      user_id: input.userId,
+      conversation_id: input.conversationId ?? null,
+      name: input.name,
+      mime: input.mime,
+      size: input.size,
+      created_at: Date.now(),
+    };
+    this.db
+      .prepare('INSERT INTO files (id, user_id, conversation_id, name, mime, size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(row.id, row.user_id, row.conversation_id, row.name, row.mime, row.size, row.created_at);
+    return this.deserializeFile(row);
+  }
+
+  listFiles(userId: string): CloudFile[] {
+    return (this.db.prepare('SELECT * FROM files WHERE user_id = ? ORDER BY created_at DESC, rowid DESC').all(userId) as DbFileRow[])
+      .map((r) => this.deserializeFile(r));
+  }
+
+  getFile(id: string, userId: string): CloudFile | null {
+    const row = this.db.prepare('SELECT * FROM files WHERE id = ? AND user_id = ?').get(id, userId) as DbFileRow | undefined;
+    return row ? this.deserializeFile(row) : null;
+  }
+
+  deleteFile(id: string, userId: string): boolean {
+    return this.db.prepare('DELETE FROM files WHERE id = ? AND user_id = ?').run(id, userId).changes > 0;
+  }
+
+  /** Total bytes the user has saved — the authority for quota checks. */
+  sumUserFileBytes(userId: string): number {
+    const row = this.db.prepare('SELECT COALESCE(SUM(size), 0) AS total FROM files WHERE user_id = ?').get(userId) as { total: number };
+    return row.total;
+  }
+
+  /** Delete a conversation (owner-scoped) with its messages + attachment rows. */
+  deleteConversation(id: string, userId: string): boolean {
+    const owned = this.db.prepare('SELECT id FROM conversations WHERE id = ? AND user_id = ?').get(id, userId);
+    if (!owned) return false;
+    const tx = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE conversation_id = ?)').run(id);
+      this.db.prepare('DELETE FROM messages WHERE conversation_id = ?').run(id);
+      this.db.prepare('DELETE FROM conversations WHERE id = ? AND user_id = ?').run(id, userId);
+    });
+    tx();
+    return true;
+  }
+
+  private deserializeFile(row: DbFileRow): CloudFile {
+    return {
+      id: row.id,
+      userId: row.user_id,
+      conversationId: row.conversation_id ?? null,
+      name: row.name,
+      mime: row.mime,
+      size: row.size,
+      createdAt: row.created_at,
+    };
   }
 
   // ── Native refresh tokens (desktop/CLI) ──
