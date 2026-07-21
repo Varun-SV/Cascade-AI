@@ -5,6 +5,31 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.40.0 - 2026-07-21
+
+### Added
+- **Rich rendering in hosted chat: Mermaid diagrams + LaTeX math.** Assistant
+  replies already rendered markdown, GFM tables, and syntax-highlighted code; now
+  they also render **```mermaid** fenced blocks as diagrams (lazy-loaded so the
+  library stays out of the initial bundle, `securityLevel: 'strict'`, falls back
+  to source on a parse error) and **LaTeX math** — `$inline$` and `$$block$$` — via
+  KaTeX. Raw HTML in model output is still never rendered.
+- **In-app file viewer for generated & saved files.** A new **View** button on
+  every generated-file card and every saved file in the Files panel opens a preview
+  that renders by type: markdown (full rich renderer — math, mermaid, code), CSV/TSV
+  as a **table**, highlighted **code**, images, and **HTML/SVG in a sandboxed iframe**
+  (scripts off by default, opt-in per view, never same-origin) with a source toggle.
+  Download and Save-to-Cascade are available right from the viewer.
+
+## 0.39.1 - 2026-07-21
+
+### Fixed
+- **Railway deploy unblocked: cloud image now builds on Node 22.** `Dockerfile.cloud`
+  pinned `node:20-slim` (build + runtime) and the `engines` fields required Node ≥20 —
+  Node 20 is now deprecated, which was stalling the Railway build queue. Bumped the
+  cloud Docker image to `node:22-slim` and `engines.node` to `>=22.0.0` (CI already ran
+  Node 22). No code changes; all deps support Node 22.
+
 ## 0.39.0 - 2026-07-21
 
 ### Fixed

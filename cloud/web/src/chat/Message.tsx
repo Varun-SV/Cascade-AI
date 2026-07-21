@@ -1,10 +1,9 @@
-import { useRef, useState, type ReactNode } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import rehypeHighlight from 'rehype-highlight';
+import { useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Copy, Check, RotateCcw, ChevronDown, FileText, Download, UploadCloud, Loader2 } from 'lucide-react';
+import { Copy, Check, RotateCcw, ChevronDown, FileText, Download, UploadCloud, Loader2, Eye } from 'lucide-react';
 import { uploadUrl, saveFile } from '../lib/api.js';
+import Markdown from '../components/Markdown.js';
+import FileViewerModal from '../components/FileViewerModal.js';
 import type { ChatMessage } from './useChatSession.js';
 import type { WhyReport } from '../lib/types.js';
 
@@ -32,11 +31,12 @@ function extractGeneratedFiles(md: string): { files: GeneratedFile[]; rest: stri
   return { files, rest: rest.replace(/\n{3,}/g, '\n\n').trim() };
 }
 
-/** Free browser download (client Blob) + optional metered save to Cascade files. */
+/** View + free browser download (client Blob) + optional metered save to Cascade. */
 function GeneratedFileCard({ file }: { file: GeneratedFile }) {
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [viewing, setViewing] = useState(false);
   const size = new Blob([file.content]).size;
 
   function download() {
@@ -53,18 +53,33 @@ function GeneratedFileCard({ file }: { file: GeneratedFile }) {
     finally { setBusy(false); }
   }
   return (
-    <div className="flex items-center gap-3 rounded-xl border border-elev/10 bg-elev/[0.05] px-3 py-2.5">
+    <div className="flex items-center gap-2.5 rounded-xl border border-elev/10 bg-elev/[0.05] px-3 py-2.5">
       <FileText size={16} className="shrink-0 text-accent-300" />
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-medium text-ink-100">{file.name}</div>
         <div className="truncate text-[11px] text-ink-500">{formatBytes(size)}{error ? ` · ${error}` : ''}</div>
       </div>
+      <button type="button" onClick={() => setViewing(true)} className="flex items-center gap-1 rounded-lg border border-elev/10 px-2.5 py-1 text-xs text-ink-200 hover:bg-elev/[0.06]">
+        <Eye size={13} /> View
+      </button>
       <button type="button" onClick={download} className="flex items-center gap-1 rounded-lg border border-elev/10 px-2.5 py-1 text-xs text-ink-200 hover:bg-elev/[0.06]">
         <Download size={13} /> Download
       </button>
       <button type="button" onClick={save} disabled={busy || saved} className="flex items-center gap-1 rounded-lg bg-accent-600 px-2.5 py-1 text-xs text-white hover:bg-accent-500 disabled:opacity-60">
         {busy ? <Loader2 size={13} className="animate-spin" /> : saved ? <Check size={13} /> : <UploadCloud size={13} />} {saved ? 'Saved' : 'Save'}
       </button>
+      {viewing && (
+        <FileViewerModal
+          name={file.name}
+          content={file.content}
+          onClose={() => setViewing(false)}
+          actions={
+            <button type="button" onClick={save} disabled={busy || saved} className="flex shrink-0 items-center gap-1 rounded-lg bg-accent-600 px-2 py-1 text-xs text-white hover:bg-accent-500 disabled:opacity-60">
+              {busy ? <Loader2 size={12} className="animate-spin" /> : saved ? <Check size={12} /> : <UploadCloud size={12} />} {saved ? 'Saved' : 'Save'}
+            </button>
+          }
+        />
+      )}
     </div>
   );
 }
@@ -147,23 +162,6 @@ function CopyButton({ getText, className }: { getText: () => string; className?:
     >
       {copied ? <Check size={14} className="text-success-500" /> : <Copy size={14} />}
     </button>
-  );
-}
-
-// Wraps every fenced code block with a copy button. rehype-highlight has
-// already coloured the inner <code>; we only add the affordance + chrome.
-function CodeBlock({ children }: { children?: ReactNode }) {
-  const ref = useRef<HTMLPreElement>(null);
-  return (
-    <div className="group relative">
-      <CopyButton
-        getText={() => ref.current?.innerText ?? ''}
-        className="absolute right-2 top-2 rounded-md border border-elev/10 bg-elev/10 p-1.5 text-ink-200 opacity-100 backdrop-blur transition-opacity hover:text-ink-50 sm:opacity-0 sm:group-hover:opacity-100"
-      />
-      <pre ref={ref} className="overflow-x-auto rounded-xl border border-elev/10 bg-black/40 p-3 text-sm shadow-inner">
-        {children}
-      </pre>
-    </div>
   );
 }
 
@@ -266,13 +264,7 @@ export default function Message({ message, onRegenerate }: Props) {
           <>
             {rest && (
               <div className="prose prose-invert prose-sm max-w-none text-ink-100">
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
-                  components={{ pre: ({ children }) => <CodeBlock>{children}</CodeBlock> }}
-                >
-                  {rest}
-                </ReactMarkdown>
+                <Markdown>{rest}</Markdown>
               </div>
             )}
             {files.length > 0 && (

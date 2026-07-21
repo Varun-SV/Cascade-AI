@@ -1,6 +1,8 @@
 import { useEffect, useState, useCallback } from 'react';
-import { X, FileText, Download, Trash2, Loader2, HardDrive } from 'lucide-react';
-import { fetchFiles, deleteFile, fileDownloadUrl, type CloudFile } from '../lib/api.js';
+import { X, FileText, Download, Trash2, Loader2, HardDrive, Eye } from 'lucide-react';
+import { fetchFiles, deleteFile, fileDownloadUrl, fetchFileText, type CloudFile } from '../lib/api.js';
+import FileViewerModal from './FileViewerModal.js';
+import { fileKind } from '../lib/fileKind.js';
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -42,6 +44,16 @@ export default function FilesPanel({ onClose, onUpgrade }: { onClose: () => void
     setFiles((prev) => prev.filter((f) => f.id !== id));
     try { const r = await deleteFile(id); setUsed(r.usedBytes); } catch { void load(); }
   }
+
+  // The file being previewed. Images are shown by URL; text kinds are fetched.
+  const [viewing, setViewing] = useState<CloudFile | null>(null);
+  const [viewText, setViewText] = useState<string | null>(null);
+  const openViewer = useCallback(async (f: CloudFile) => {
+    setViewing(f);
+    if (fileKind(f.name, f.mime) === 'image') { setViewText(null); return; }
+    setViewText(null);
+    try { setViewText(await fetchFileText(f.id)); } catch { setViewText(''); }
+  }, []);
 
   const pct = limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
   const nearFull = pct >= 90;
@@ -90,6 +102,7 @@ export default function FilesPanel({ onClose, onUpgrade }: { onClose: () => void
                     <div className="truncate text-[13px] font-medium text-ink-100">{f.name}</div>
                     <div className="text-[10.5px] text-ink-500">{formatBytes(f.size)} · {new Date(f.createdAt).toLocaleDateString()}</div>
                   </div>
+                  <button onClick={() => void openViewer(f)} className="rounded-md p-1 text-ink-400 hover:bg-elev/[0.06] hover:text-ink-100" title="View"><Eye size={14} /></button>
                   <a href={fileDownloadUrl(f.id)} className="rounded-md p-1 text-ink-400 hover:bg-elev/[0.06] hover:text-ink-100" title="Download" download><Download size={14} /></a>
                   <button onClick={() => remove(f.id)} className="rounded-md p-1 text-ink-500 hover:bg-danger-500/10 hover:text-danger-300" title="Delete"><Trash2 size={14} /></button>
                 </div>
@@ -98,6 +111,19 @@ export default function FilesPanel({ onClose, onUpgrade }: { onClose: () => void
           )}
         </div>
       </div>
+
+      {viewing && (
+        // Stop viewer clicks from bubbling to the panel backdrop (which closes it).
+        <div onClick={(e) => e.stopPropagation()}>
+          <FileViewerModal
+            name={viewing.name}
+            mime={viewing.mime}
+            content={fileKind(viewing.name, viewing.mime) === 'image' ? undefined : (viewText ?? '')}
+            src={fileKind(viewing.name, viewing.mime) === 'image' ? fileDownloadUrl(viewing.id) : undefined}
+            onClose={() => { setViewing(null); setViewText(null); }}
+          />
+        </div>
+      )}
     </div>
   );
 }

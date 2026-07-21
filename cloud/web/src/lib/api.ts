@@ -80,6 +80,13 @@ export function fileDownloadUrl(id: string): string {
   return `/api/files/${encodeURIComponent(id)}`;
 }
 
+/** Fetch a saved file's raw text (owner-scoped) for the in-app viewer. */
+export async function fetchFileText(id: string): Promise<string> {
+  const res = await fetch(`/api/files/${encodeURIComponent(id)}`, { credentials: 'include' });
+  if (!res.ok) throw new Error(`Could not load file (HTTP ${res.status})`);
+  return res.text();
+}
+
 // ── Data management: delete + import ──
 
 export function deleteConversation(id: string): Promise<{ ok: boolean }> {
