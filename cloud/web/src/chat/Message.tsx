@@ -4,6 +4,8 @@ import { Copy, Check, RotateCcw, ChevronDown, ChevronLeft, ChevronRight, Pencil,
 import { uploadUrl, saveFile } from '../lib/api.js';
 import Markdown from '../components/Markdown.js';
 import FileViewerModal from '../components/FileViewerModal.js';
+import { fileExt } from '../lib/fileKind.js';
+import { isExportableExt, renderExport, exportLabel, sourceHint } from '../lib/exporters.js';
 import type { ChatMessage } from './useChatSession.js';
 import type { WhyReport } from '../lib/types.js';
 
@@ -31,19 +33,34 @@ function extractGeneratedFiles(md: string): { files: GeneratedFile[]; rest: stri
   return { files, rest: rest.replace(/\n{3,}/g, '\n\n').trim() };
 }
 
-/** View + free browser download (client Blob) + optional metered save to Cascade. */
+/** View + free browser download (client Blob) + optional metered save to Cascade.
+ *  For Office/PDF names (.pdf/.xlsx) the model's Markdown/CSV source is rendered
+ *  into the real binary in the browser on download. */
 function GeneratedFileCard({ file }: { file: GeneratedFile }) {
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState(false);     // metered save
   const [saved, setSaved] = useState(false);
+  const [dl, setDl] = useState(false);          // binary render + download
   const [error, setError] = useState<string | null>(null);
   const [viewing, setViewing] = useState(false);
+  const ext = fileExt(file.name);
+  const exportable = isExportableExt(ext);
   const size = new Blob([file.content]).size;
 
-  function download() {
-    const url = URL.createObjectURL(new Blob([file.content], { type: 'text/plain;charset=utf-8' }));
+  function saveBlob(blob: Blob, name: string) {
+    const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = file.name; document.body.appendChild(a); a.click(); a.remove();
+    a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  async function download() {
+    if (exportable) {
+      setDl(true); setError(null);
+      try { saveBlob(await renderExport(ext, file.content, file.name), file.name); }
+      catch (e) { setError(e instanceof Error ? e.message : `Could not generate the ${exportLabel(ext)}.`); }
+      finally { setDl(false); }
+      return;
+    }
+    saveBlob(new Blob([file.content], { type: 'text/plain;charset=utf-8' }), file.name);
   }
   async function save() {
     if (busy || saved) return;
@@ -56,18 +73,33 @@ function GeneratedFileCard({ file }: { file: GeneratedFile }) {
     <div className="flex items-center gap-2.5 rounded-xl border border-elev/10 bg-elev/[0.05] px-3 py-2.5">
       <FileText size={16} className="shrink-0 text-accent-300" />
       <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-medium text-ink-100">{file.name}</div>
-        <div className="truncate text-[11px] text-ink-500">{formatBytes(size)}{error ? ` · ${error}` : ''}</div>
+        <div className="flex items-center gap-1.5">
+          <span className="truncate text-sm font-medium text-ink-100">{file.name}</span>
+          {exportable && (
+            <span className="shrink-0 rounded bg-accent-500/12 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-accent-300">
+              {exportLabel(ext)}
+            </span>
+          )}
+        </div>
+        <div className="truncate text-[11px] text-ink-500">
+          {exportable ? `${exportLabel(ext)} document ${sourceHint(ext)}` : formatBytes(size)}{error ? ` · ${error}` : ''}
+        </div>
       </div>
-      <button type="button" onClick={() => setViewing(true)} className="flex items-center gap-1 rounded-lg border border-elev/10 px-2.5 py-1 text-xs text-ink-200 hover:bg-elev/[0.06]">
-        <Eye size={13} /> View
+      {/* Office/PDF cards are download-only for now: preview + metered save of a
+          binary are a follow-up; the text formats keep View + Save. */}
+      {!exportable && (
+        <button type="button" onClick={() => setViewing(true)} className="flex items-center gap-1 rounded-lg border border-elev/10 px-2.5 py-1 text-xs text-ink-200 hover:bg-elev/[0.06]">
+          <Eye size={13} /> View
+        </button>
+      )}
+      <button type="button" onClick={download} disabled={dl} className="flex items-center gap-1 rounded-lg border border-elev/10 px-2.5 py-1 text-xs text-ink-200 hover:bg-elev/[0.06] disabled:opacity-60">
+        {dl ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />} Download
       </button>
-      <button type="button" onClick={download} className="flex items-center gap-1 rounded-lg border border-elev/10 px-2.5 py-1 text-xs text-ink-200 hover:bg-elev/[0.06]">
-        <Download size={13} /> Download
-      </button>
-      <button type="button" onClick={save} disabled={busy || saved} className="flex items-center gap-1 rounded-lg bg-accent-600 px-2.5 py-1 text-xs text-white hover:bg-accent-500 disabled:opacity-60">
-        {busy ? <Loader2 size={13} className="animate-spin" /> : saved ? <Check size={13} /> : <UploadCloud size={13} />} {saved ? 'Saved' : 'Save'}
-      </button>
+      {!exportable && (
+        <button type="button" onClick={save} disabled={busy || saved} className="flex items-center gap-1 rounded-lg bg-accent-600 px-2.5 py-1 text-xs text-white hover:bg-accent-500 disabled:opacity-60">
+          {busy ? <Loader2 size={13} className="animate-spin" /> : saved ? <Check size={13} /> : <UploadCloud size={13} />} {saved ? 'Saved' : 'Save'}
+        </button>
+      )}
       {viewing && (
         <FileViewerModal
           name={file.name}

@@ -5,6 +5,24 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.46.2 - 2026-07-22
+
+### Added
+- **Generate real PDF and Excel files from chat.** Ask for a report as a PDF or
+  a table as a spreadsheet and Cascade now hands back a genuine `.pdf` or
+  `.xlsx` — not just text. Because a run streams text, the model writes the
+  *source* (Markdown for a PDF, CSV for a spreadsheet) in a `file:` block and
+  the **browser renders the real binary on download**: a small Markdown→PDF
+  layout engine produces selectable-text PDFs (headings, lists, tables, code,
+  blockquotes, rules, with word-wrap and page breaks), and CSV is turned into a
+  proper `.xlsx` workbook. The rendering libraries are lazy-loaded, so they only
+  download the first time you export one of these formats and never enter the
+  base bundle, and your content never leaves the browser. Office/PDF cards are
+  download-only for now (inline preview and metered save of the binary are a
+  follow-up); ordinary text files keep View + Download + Save. The hosted
+  file-delivery guidance now tells the model how to target these formats, still
+  only when you explicitly ask for a file.
+
 ## 0.46.1 - 2026-07-22
 
 ### Fixed
