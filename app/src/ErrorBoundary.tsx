@@ -34,7 +34,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
         <button
           onClick={() => window.location.reload()}
           style={{
-            background: 'linear-gradient(135deg, var(--accent, #8b7cf9), var(--accent-2, #3ec9d6))', border: 'none', borderRadius: 8,
+            background: 'linear-gradient(135deg, var(--accent, #4c8dff), var(--accent-2, #2dd4bf))', border: 'none', borderRadius: 8,
             color: '#fff', padding: '9px 22px', fontSize: 13, fontWeight: 600, cursor: 'pointer',
             boxShadow: 'var(--shadow-1)',
           }}

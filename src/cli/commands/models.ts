@@ -30,9 +30,9 @@ export async function modelsCommand(options: { verbose?: boolean } = {}): Promis
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const tiers: Array<{ tier: 'T1' | 'T2' | 'T3'; label: string; color: any }> = [
-    { tier: 'T1', label: 'T1 Administrator', color: chalk.hex('#7C6AF7') },
-    { tier: 'T2', label: 'T2 Manager',       color: chalk.hex('#5AB4E8') },
-    { tier: 'T3', label: 'T3 Worker',         color: chalk.hex('#5AE8A4') },
+    { tier: 'T1', label: 'T1 Administrator', color: chalk.hex('#4C8DFF') },
+    { tier: 'T2', label: 'T2 Manager',       color: chalk.hex('#38B0DE') },
+    { tier: 'T3', label: 'T3 Worker',         color: chalk.hex('#2DD4BF') },
   ];
 
   let anyMissing = false;

@@ -24,20 +24,20 @@
   --c-ink-900: 15 18 28;
   --c-ink-950: 8 10 18;
 
-  /* Cascade violet — primary brand / action. */
-  --c-accent-300: 183 166 252;
-  --c-accent-400: 149 117 249;
-  --c-accent-500: 124 106 247;
-  --c-accent-600: 99 71 240;
-  --c-accent-700: 83 52 220;
+  /* Cascade azure — primary brand / action. */
+  --c-accent-300: 143 182 255;
+  --c-accent-400: 107 160 255;
+  --c-accent-500: 76 141 255;
+  --c-accent-600: 47 116 238;
+  --c-accent-700: 32 95 208;
 
   /* Elevation tint: white overlays in dark. */
   --c-elev: 255 255 255;
 
-  /* Orchestration tiers: amber / violet / cyan. */
-  --c-t1: 247 184 75;
-  --c-t2: 169 139 255;
-  --c-t3: 66 211 231;
+  /* Orchestration tiers flow with the cascade: azure → sky → teal. */
+  --c-t1: 76 141 255;
+  --c-t2: 56 176 222;
+  --c-t3: 45 212 191;
 
   --c-success-300: 167 240 209;
   --c-success-500: 61 220 151;
@@ -82,17 +82,17 @@
   --c-ink-900: 255 255 255;
   --c-ink-950: 236 239 245;
 
-  --c-accent-300: 124 106 247;
-  --c-accent-400: 104 87 217;
-  --c-accent-500: 99 71 240;
-  --c-accent-600: 83 52 220;
-  --c-accent-700: 58 39 150;
+  --c-accent-300: 76 141 255;
+  --c-accent-400: 59 125 240;
+  --c-accent-500: 47 111 230;
+  --c-accent-600: 36 86 196;
+  --c-accent-700: 27 65 151;
 
   --c-elev: 24 27 46;
 
-  --c-t1: 168 100 8;
-  --c-t2: 104 87 217;
-  --c-t3: 8 127 145;
+  --c-t1: 47 111 230;
+  --c-t2: 44 147 199;
+  --c-t3: 18 165 148;
 
   --c-success-300: 6 106 74;
   --c-success-500: 22 163 116;
@@ -142,11 +142,15 @@ body {
 :root { font-size: 16px; }
 :root[data-density='compact'] { font-size: 14.5px; }
 
-/* Native <select> popups are OS-drawn; color-scheme keeps their option list
-   legible in whichever theme is active. */
-select,
+/* Native <select> popups are OS-drawn. Pin the colour-scheme per theme AND set
+   explicit option colours — some platforms ignore color-scheme and render a
+   white popup with near-invisible faint text otherwise. Tokens flip with the
+   theme, so one rule stays legible in both. */
+select { color-scheme: dark; }
+:root[data-theme='light'] select { color-scheme: light; }
 select option {
-  color-scheme: inherit;
+  background: rgb(var(--c-ink-900));
+  color: rgb(var(--c-ink-100));
 }
 
 /* Appearance → "Reduce motion": neutralize CSS transitions/animations. Framer
@@ -165,17 +169,17 @@ select option {
 body {
   @apply text-ink-100;
   background:
-    radial-gradient(1100px 620px at 12% -12%, rgba(124, 106, 247, 0.16), transparent 55%),
-    radial-gradient(1000px 700px at 100% 0%, rgba(66, 211, 231, 0.08), transparent 52%),
-    radial-gradient(900px 700px at 50% 120%, rgba(247, 184, 75, 0.06), transparent 55%),
+    radial-gradient(1100px 620px at 12% -12%, rgba(76, 141, 255, 0.16), transparent 55%),
+    radial-gradient(1000px 700px at 100% 0%, rgba(45, 212, 191, 0.09), transparent 52%),
+    radial-gradient(900px 700px at 50% 120%, rgba(56, 176, 222, 0.05), transparent 55%),
     var(--page-bg);
   background-attachment: fixed;
 }
 :root[data-theme='light'] body {
   background:
-    radial-gradient(1100px 620px at 12% -12%, rgba(124, 106, 247, 0.1), transparent 55%),
-    radial-gradient(1000px 700px at 100% 0%, rgba(66, 180, 231, 0.06), transparent 52%),
-    radial-gradient(900px 700px at 50% 120%, rgba(247, 165, 60, 0.05), transparent 55%),
+    radial-gradient(1100px 620px at 12% -12%, rgba(47, 111, 230, 0.1), transparent 55%),
+    radial-gradient(1000px 700px at 100% 0%, rgba(44, 147, 199, 0.06), transparent 52%),
+    radial-gradient(900px 700px at 50% 120%, rgba(18, 165, 148, 0.05), transparent 55%),
     var(--page-bg);
   background-attachment: fixed;
 }
@@ -200,9 +204,9 @@ body {
     @apply bg-elev/[0.06];
     box-shadow: inset 0 0 0 1px rgb(var(--c-elev) / 0.06);
   }
-  /* Cascade violet gradient used on primary actions. */
+  /* The cascade gradient (azure → teal) used on primary actions. */
   .accent-grad {
-    background-image: linear-gradient(135deg, #9575f9 0%, #7c6af7 45%, #6347f0 100%);
+    background-image: linear-gradient(135deg, #4c8dff 0%, #38b0de 52%, #2dd4bf 100%);
   }
 }
 

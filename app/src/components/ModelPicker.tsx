@@ -28,7 +28,7 @@ export const MODELS: ModelOption[] = [
 ];
 
 const PROVIDER_COLORS: Record<string, string> = {
-  auto:                '#7c6af7',
+  auto:                '#4c8dff',
   anthropic:           '#e8784b',
   openai:              '#74aa9c',
   gemini:              '#4285f4',

@@ -5,6 +5,28 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.45.0 - 2026-07-22
+
+### Changed
+- **One unified Cascade identity across the CLI, desktop app, and web.** The
+  brand is now a single system built on the product itself: intelligence flows
+  down the tiers and the colour flows with it — **azure (T1) → sky (T2) → teal
+  (T3)** — replacing the old violet/amber/cyan mix. A shared **cascade mark**
+  (three tiers stepping down) is the favicon/app icon, and the CLI's start-up
+  banner is now that mark in truecolour. Applied from each surface's token
+  source: web Tailwind CSS variables, the desktop theme (light/dark/midnight),
+  and the CLI's default `midnight`/`cascade` theme + `cascade models` tiers.
+  The alternative desktop/CLI themes (Aurora, Ember, Tide, Bloom, Daybreak) are
+  unchanged.
+
+### Fixed
+- **Dropdown menus were nearly unreadable.** Native `<select>` option lists are
+  OS-drawn, and on some platforms rendered as faint, near-invisible text on a
+  mismatched (often white) popup — the provider and skill pickers were the worst
+  hit. Both the web and desktop apps now pin the popup's colour-scheme to the
+  active theme **and** set explicit option colours, so the list is always
+  legible in light and dark.
+
 ## 0.44.1 - 2026-07-22
 
 ### Fixed

@@ -460,11 +460,12 @@ async function runHeadless(prompt: string, options: {
 
 function printBanner(): void {
   if (process.stdout.columns < 60) return;
+  // The cascade mark: three tiers stepping down, azure → sky → teal — the same
+  // brand as the desktop and web apps.
   console.log();
-  console.log(chalk.hex('#7C6AF7').bold('  ╔═══════════════════════════════╗'));
-  console.log(chalk.hex('#7C6AF7').bold('  ║') + chalk.white.bold('  ◈ CASCADE AI') + chalk.gray(' v' + CASCADE_VERSION + '         ') + chalk.hex('#7C6AF7').bold('║'));
-  console.log(chalk.hex('#7C6AF7').bold('  ║') + chalk.gray('  Multi-Tier Orchestration      ') + chalk.hex('#7C6AF7').bold('║'));
-  console.log(chalk.hex('#7C6AF7').bold('  ╚═══════════════════════════════╝'));
+  console.log('  ' + chalk.hex('#4C8DFF').bold('███████'));
+  console.log('  ' + chalk.hex('#38B0DE').bold('  ███████') + '   ' + chalk.white.bold('CASCADE') + chalk.gray('  v' + CASCADE_VERSION));
+  console.log('  ' + chalk.hex('#2DD4BF').bold('    ██████') + '   ' + chalk.hex('#8A93A8')('multi-tier orchestration'));
   console.log();
 }
 
