@@ -28,6 +28,20 @@ describe('benchmarkScore01', () => {
     expect(gpt).toBeGreaterThan(gemFlash);
   });
 
+  it('scores a newer Gemini model discovered live (not in the table) by its class', () => {
+    const g35Flash: ModelInfo = {
+      id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash', provider: 'gemini',
+      contextWindow: 1_000_000, isVisionCapable: true,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0,
+      maxOutputTokens: 8_000, supportsStreaming: true, isLocal: false,
+    };
+    // Generic gemini→flash fallback ⇒ a real score, not the neutral 0.5 default.
+    expect(benchmarkScore01(g35Flash, 'code')).toBeGreaterThan(0.5);
+    // A pro variant should out-score a flash variant of the same generation.
+    const g3Pro: ModelInfo = { ...g35Flash, id: 'gemini-3-pro', name: 'Gemini 3 Pro' };
+    expect(benchmarkScore01(g3Pro, 'analysis')).toBeGreaterThan(benchmarkScore01(g35Flash, 'analysis'));
+  });
+
   it('returns a neutral 0.5 for a model with no benchmark profile', () => {
     const unknown = { id: 'mystery-model-x', name: 'Mystery', provider: 'openai' } as ModelInfo;
     expect(benchmarkScore01(unknown, 'code')).toBe(0.5);

@@ -146,6 +146,13 @@ export class CascadeRouter extends EventEmitter {
   };
 
   private tierModels: Map<TierRole, ModelInfo> = new Map();
+  /**
+   * Tiers the user pinned to a specific model in config (`models.tX` !== 'auto').
+   * An explicit pin always wins over Cascade Auto — selectModelForSubtask never
+   * re-selects a pinned tier per subtask. (tierModels is also filled with
+   * auto-picked defaults, so it alone can't distinguish "pinned" from "default".)
+   */
+  private explicitTierModels: Set<TierRole> = new Set();
   private config!: CascadeConfig;
   private sessionCostUsd = 0;
   // Per-run accounting for the hard per-task cap. Reset by beginRun() at the
@@ -278,6 +285,7 @@ export class CascadeRouter extends EventEmitter {
       }
 
       this.tierModels.set(tier, model);
+      this.explicitTierModels.add(tier);
       this.ensureProvider(model, config.providers);
     }
 
@@ -844,6 +852,9 @@ export class CascadeRouter extends EventEmitter {
    * Pure heuristic — no extra LLM call.
    */
   async selectModelForSubtask(tier: TierRole, text: string, opts?: { requiresToolUse?: boolean }): Promise<ModelInfo | null> {
+    // An explicit per-tier pin always wins over Cascade Auto — the user chose
+    // that exact model for this tier, so never re-select it per subtask.
+    if (this.explicitTierModels.has(tier)) return this.tierModels.get(tier) ?? null;
     if (!this.config?.cascadeAuto || !this.taskAnalyzer || !text.trim()) return null;
     try {
       return await this.taskAnalyzer.selectModel(text, tier, this.selector, opts);

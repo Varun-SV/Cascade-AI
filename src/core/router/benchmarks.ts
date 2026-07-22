@@ -97,6 +97,14 @@ const FAMILY_MATCHERS: Array<[RegExp, string]> = [
   [/gemini-?1\.5-pro/i, 'gemini-1.5-pro'],
   [/gemini-?2\.0-flash-lite/i, 'gemini-flash-lite'],
   [/gemini-?2\.0-flash/i, 'gemini-2.0-flash'],
+  // Generic Gemini fallbacks — a model released after this table was written
+  // (e.g. a Gemini 3.x flash discovered live from the provider) still gets a
+  // sensible score by its class instead of a neutral 0.5, so it can compete in
+  // AUTO ranking. Ordered after the specific rows above; most-specific first.
+  [/gemini.*flash.?lite/i, 'gemini-flash-lite'],
+  [/gemini.*pro/i, 'gemini-2.5-pro'],
+  [/gemini.*flash/i, 'gemini-2.5-flash'],
+  [/gemini/i, 'gemini-2.5-flash'],
   [/codellama|code-llama|starcoder|stable-code/i, 'codellama'],
   [/deepseek/i, 'deepseek'],
   [/qwen/i, 'qwen'],
