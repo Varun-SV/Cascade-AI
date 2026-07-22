@@ -30,10 +30,11 @@ a transition; that is not the case here.
    **Cloudflare** (free), which can. **Remove** any old apex A-records that
    pointed `cascadeai.in` at GitHub Pages.
 
-3. **GitHub Pages — retire it.** In the repo's Pages settings, remove
-   `cascadeai.in` as the custom domain (the landing now lives in the app). The
-   `CNAME` line is already dropped from `.github/workflows/static.yml` in this
-   change, so a Pages deploy won't re-claim the apex.
+3. **GitHub Pages — retire it.** The landing now lives in the app, so the
+   standalone Pages site is gone: the `static.yml` workflow and the root
+   `index.html` have been removed, so nothing publishes to Pages anymore. Finish
+   the one-click part in the repo's **Settings → Pages → Source: None** to
+   unpublish the `github.io` site.
 
 4. **OAuth consoles — point callbacks at the host:**
    - **GitHub OAuth App** → Authorization callback URL:
