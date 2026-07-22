@@ -56,7 +56,10 @@ export const CONNECTOR_CATALOG: ConnectorCatalogEntry[] = [
     tokenLabel: 'GitHub Personal Access Token (fine-grained)',
     docsUrl: 'https://github.com/settings/personal-access-tokens',
     requiresUrl: false,
-    oauth: true,
+    // Token, NOT one-click OAuth: GitHub's OAuth has no Dynamic Client
+    // Registration, so our DCR-based flow can't self-register — auth is a
+    // Personal Access Token pasted into the form.
+    oauth: false,
     color: '#f0f6fc',
   },
   {
