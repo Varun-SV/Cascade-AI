@@ -31,7 +31,7 @@ export function cloudBaseUrl(): string {
   }
   const g = (globalThis as { __CASCADE_CLOUD_URL__?: string }).__CASCADE_CLOUD_URL__;
   if (g && /^https?:\/\//.test(g)) return g.replace(/\/+$/, '');
-  return 'https://app.cascadeai.in';
+  return 'https://cascadeai.in';
 }
 
 async function errorMessage(res: Response, fallback: string): Promise<string> {

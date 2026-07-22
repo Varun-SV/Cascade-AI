@@ -1,73 +1,66 @@
-# Domain move — `cascadeai.in` → the cloud app (+ `/docs`)
+# Domain setup — one host: `cascadeai.in`
 
-Goal: serve the **cloud app at the apex `cascadeai.in`** and the **docs at
-`cascadeai.in/docs`**, while keeping **`app.cascadeai.in` working** so already-
-installed CLIs and desktop apps (which point at `https://app.cascadeai.in`) keep
-signing in.
+Everything lives under a **single host**: the app at `/` (a marketing landing
+when logged out, the chat when logged in), the docs at `/docs`, and the API +
+OAuth under `/api` + `/auth`. There is **no `app.` subdomain** and **no GitHub
+Pages site** — one clean URL to remember, one surface to secure.
 
-> Ops runbook. The code side is done (a `/docs` route lives in the cloud server);
-> the rest is DNS / Railway / OAuth-console config that must be done by the
-> account owner. No secrets in this file.
+> Ops runbook. The code side is done in-repo — the app, landing and `/docs` are
+> served by the cloud server, and the CLI/desktop default (`DEFAULT_CLOUD_URL`)
+> already points at `https://cascadeai.in`. The rest is DNS / Railway / OAuth-
+> console config the account owner runs. No secrets in this file.
 
-## Current state
+## Why this is clean (no alias needed)
 
-| Host | Serves | How |
-| --- | --- | --- |
-| `cascadeai.in` (apex) | Landing page | GitHub Pages, pinned by `.github/workflows/static.yml` writing a `CNAME` |
-| `app.cascadeai.in` | Cloud app (SPA + API) | Railway |
-
-The cloud server reads two env vars that drive everything domain-specific:
-- **`WEB_ORIGIN`** — CORS origin + where OAuth bounces the browser back + the
-  `/activate` verification URL.
-- **`OAUTH_REDIRECT_BASE_URL`** — the base used to build the provider callback
-  URLs (`/auth/github/callback`, `/auth/google/callback`, MCP callback).
-
-So the cutover is mostly **config**, not code.
+The CLI and desktop are **pre-launch** — nothing is installed in the wild
+pointing at an old `app.cascadeai.in`, so that host never has to exist. New
+CLI/desktop builds target `cascadeai.in` directly. If you were ever mid-launch
+with installed clients, you'd instead keep the old host answering the API during
+a transition; that is not the case here.
 
 ## Steps (in order)
 
-1. **Railway — attach the apex.** In the cloud service's Settings → Networking,
-   add the custom domain `cascadeai.in` **alongside** `app.cascadeai.in` (keep
-   both attached to the same service). Railway shows the DNS target to use.
+1. **Railway — attach the apex.** Cloud service → Settings → Networking → add
+   the custom domain `cascadeai.in`. Railway shows the DNS target to point at.
 
-2. **DNS — point the apex at Railway.** At the registrar, point `cascadeai.in`
-   at the Railway target (apex needs an `ALIAS`/`ANAME`, or the registrar's
-   flattened `CNAME`, per provider). **Remove** the existing apex records that
-   pointed it at GitHub Pages. Leave the `app` CNAME as-is.
+2. **DNS — point the apex at Railway.** At the registrar, point the root
+   `cascadeai.in` at Railway's target. A root domain needs an **ALIAS/ANAME**
+   record (or Cloudflare's CNAME-flattening) — a plain root `CNAME` is not valid
+   DNS. If your registrar can't do ALIAS at the root, put the domain on
+   **Cloudflare** (free), which can. **Remove** any old apex A-records that
+   pointed `cascadeai.in` at GitHub Pages.
 
-3. **GitHub Pages — release the apex.** The apex can no longer be a Pages custom
-   domain. In `.github/workflows/static.yml`, stop writing `cascadeai.in` to
-   `_site/CNAME` (or retire the Pages deploy). The marketing landing's new home
-   is the app's logged-out page (a follow-up); until then, `cascadeai.in` shows
-   the app sign-in.
+3. **GitHub Pages — retire it.** In the repo's Pages settings, remove
+   `cascadeai.in` as the custom domain (the landing now lives in the app). The
+   `CNAME` line is already dropped from `.github/workflows/static.yml` in this
+   change, so a Pages deploy won't re-claim the apex.
 
-4. **OAuth consoles — add the new host** (keep the `app.` entries too):
-   - **GitHub OAuth App** → Authorization callback URL: add
-     `https://cascadeai.in/auth/github/callback`.
-   - **Google OAuth client** → Authorized redirect URIs: add
+4. **OAuth consoles — point callbacks at the host:**
+   - **GitHub OAuth App** → Authorization callback URL:
+     `https://cascadeai.in/auth/github/callback` (one app, one callback — no
+     second OAuth app needed).
+   - **Google OAuth client** → Authorized redirect URIs:
      `https://cascadeai.in/auth/google/callback`; Authorized JavaScript origins:
-     add `https://cascadeai.in`.
+     `https://cascadeai.in`.
 
 5. **Railway — set the env vars** on the cloud service, then redeploy:
    - `WEB_ORIGIN=https://cascadeai.in`
    - `OAUTH_REDIRECT_BASE_URL=https://cascadeai.in`
 
 6. **Verify:**
-   - `https://cascadeai.in` loads the app; `https://cascadeai.in/docs` loads the
-     docs page.
-   - GitHub and Google sign-in complete the round-trip on the apex.
-   - `https://app.cascadeai.in` still loads and signs in (installed clients).
+   - `https://cascadeai.in` loads the app (landing when logged out).
+   - `https://cascadeai.in/docs` loads the docs.
+   - `https://cascadeai.in/health` returns `{"ok":true}`.
+   - GitHub and Google sign-in complete the round-trip.
 
-## Keep `app.cascadeai.in` alive
+## Clients
 
-`DEFAULT_CLOUD_URL` is baked into the SDK (`src/cloud/client.ts`) and desktop
-(`app/src/lib/cloudHandoff.ts`) as `https://app.cascadeai.in`. Leaving that host
-attached to the same Railway service means existing installs keep working with
-no update. A future desktop/CLI release can flip the default to
-`https://cascadeai.in` — that is a client change and needs a **version bump**.
+`DEFAULT_CLOUD_URL` (SDK `src/cloud/client.ts`, desktop
+`app/src/lib/cloudHandoff.ts`) is `https://cascadeai.in`, so freshly built
+CLI/desktop apps talk to the one host. A local dev server is still targetable via
+`--server` / `CASCADE_CLOUD_URL` / the `cascade-cloud-url` localStorage override.
 
 ## Rollback
 
-Revert the two env vars to their previous values and restore the apex DNS
-records to GitHub Pages. Nothing is destructive; `app.cascadeai.in` is unaffected
-throughout.
+Nothing here is destructive: revert the two env vars and restore the apex DNS to
+its previous target. The database on the `/data` volume is untouched throughout.

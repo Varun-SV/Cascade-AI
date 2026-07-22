@@ -778,7 +778,7 @@ web/
 | ✓ | Session rollback button (desktop) + `/rollback` (CLI) |
 | ✓ | Cost-per-feature attribution (`costByFeature` in results, CLI cost panel, desktop chat) |
 | ✓ | Project world state (encrypted local log feeding T1 planning) |
-| ✓ | Cascade Cloud (hosted chat — GitHub/Google login, bring-your-own-key, `app.cascadeai.in`) |
+| ✓ | Cascade Cloud (hosted chat — GitHub/Google login, bring-your-own-key, `cascadeai.in`) |
 | 🔜 | VSCode extension (`cascade-vscode`) — see [docs/ROADMAP.md](docs/ROADMAP.md) |
 | 🔜 | JetBrains extension (`cascade-jetbrains`) — see [docs/ROADMAP.md](docs/ROADMAP.md) |
 | 🔜 | WASM/isolate sandboxing for tool execution — see [docs/ROADMAP.md](docs/ROADMAP.md) |
