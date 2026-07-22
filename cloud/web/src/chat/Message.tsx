@@ -199,6 +199,53 @@ function SiblingNav({ message, onSelect }: { message: ChatMessage; onSelect?: (i
   );
 }
 
+// Reasoning-tuned models (Anthropic thinking, OpenAI reasoning, and local GGUF
+// models that emit it natively) surface their chain-of-thought as literal
+// `<think>…</think>` markup inline in the text (see src/providers/anthropic.ts
+// and openai.ts). Split it out so it renders as a collapsed "Thoughts" block
+// instead of leaking into the answer. An unterminated trailing `<think>` means
+// the model is still thinking — everything after it is in-progress reasoning,
+// not answer text. Mirrors the desktop app's ChatPanel.
+function splitThinking(content: string): { thinking: string; answer: string; thinkingOpen: boolean } {
+  let thinking = '';
+  let answer = content.replace(/<think>([\s\S]*?)<\/think>\s*/g, (_m, inner: string) => {
+    thinking += (thinking ? '\n\n' : '') + inner.trim();
+    return '';
+  });
+  let thinkingOpen = false;
+  const openIdx = answer.indexOf('<think>');
+  if (openIdx !== -1) {
+    thinkingOpen = true;
+    thinking += (thinking ? '\n\n' : '') + answer.slice(openIdx + '<think>'.length).trim();
+    answer = answer.slice(0, openIdx);
+  }
+  return { thinking: thinking.trim(), answer: answer.trim(), thinkingOpen };
+}
+
+function ThinkingBlock({ text, streaming }: { text: string; streaming?: boolean }) {
+  const [open, setOpen] = useState(false);
+  if (!text) return null;
+  return (
+    <div className="rounded-lg border border-elev/10 bg-elev/[0.03]">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium text-ink-500 hover:text-ink-300"
+        aria-expanded={open}
+      >
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        <span>{streaming ? 'Thinking…' : 'Thoughts'}</span>
+        {streaming && <span className="accent-grad h-1.5 w-1.5 animate-pulse rounded-full" />}
+      </button>
+      {open && (
+        <div className="prose prose-invert prose-sm max-w-none border-t border-elev/10 px-3 py-2 text-ink-400">
+          <Markdown>{text}</Markdown>
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface Props {
   message: ChatMessage;
   /** A run is in flight — gates edit/regenerate submission. */
@@ -361,13 +408,16 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
       {message.streaming && !message.content ? (
         <span className="shimmer-text text-sm">Composing a response…</span>
       ) : (() => {
-        // Only pull out file blocks once the message is complete — a partial
-        // fence mid-stream would render half a file.
+        // Reasoning (<think>…</think>) renders as a collapsed "Thoughts" block,
+        // never inline in the answer. Files are pulled from the answer only once
+        // complete — a partial fence mid-stream would render half a file.
+        const { thinking, answer, thinkingOpen } = splitThinking(message.content);
         const { files, rest } = message.streaming
-          ? { files: [] as GeneratedFile[], rest: message.content }
-          : extractGeneratedFiles(message.content);
+          ? { files: [] as GeneratedFile[], rest: answer }
+          : extractGeneratedFiles(answer);
         return (
           <>
+            {thinking && <ThinkingBlock text={thinking} streaming={message.streaming && thinkingOpen} />}
             {rest && (
               <div className="prose prose-invert prose-sm max-w-none text-ink-100">
                 <Markdown>{rest}</Markdown>
@@ -384,7 +434,7 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
       {!message.streaming && message.content && (
         <div className="flex items-center gap-2 pt-0.5 text-ink-400 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
           <SiblingNav message={message} onSelect={onSelectSibling} />
-          <CopyButton getText={() => message.content} />
+          <CopyButton getText={() => splitThinking(message.content).answer || message.content} />
           {onRegenerate && (
             <button type="button" aria-label="Regenerate" onClick={onRegenerate} className="hover:text-ink-100">
               <RotateCcw size={14} />
