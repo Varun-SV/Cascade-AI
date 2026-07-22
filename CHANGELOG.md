@@ -5,6 +5,18 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.46.1 - 2026-07-22
+
+### Fixed
+- **Reasoning models no longer leak `<think>…</think>` into the web answer.**
+  Reasoning-tuned models (and local llama.cpp / gpt-oss GGUFs) emit their
+  chain-of-thought as `<think>…</think>` inline in the content — the desktop
+  app already split this into a collapsible block, but the **web** rendered it
+  verbatim as part of the reply. The web message view now pulls reasoning out
+  into a collapsed **"Thoughts"** section (labelled "Thinking…" with a pulse
+  while it streams), shows only the clean answer, and copies just the answer —
+  matching the desktop behaviour.
+
 ## 0.46.0 - 2026-07-22
 
 ### Fixed

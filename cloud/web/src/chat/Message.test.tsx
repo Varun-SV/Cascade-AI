@@ -63,4 +63,22 @@ describe('Message — branching affordances', () => {
     expect(onRegenerate).toHaveBeenCalledTimes(1);
     expect(screen.getByLabelText('Delete')).toBeInTheDocument();
   });
+
+  it('renders <think> reasoning as a collapsed Thoughts block, not inline in the answer', () => {
+    render(
+      <Message
+        message={base({ id: 'a2', role: 'assistant', content: '<think>secret reasoning here</think>The visible answer.' })}
+        onRegenerate={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    // The answer is shown; the reasoning is NOT leaked into it.
+    expect(screen.getByText('The visible answer.')).toBeInTheDocument();
+    expect(screen.queryByText(/secret reasoning here/)).not.toBeInTheDocument();
+    // …but a Thoughts toggle exists and reveals the reasoning when expanded.
+    const toggle = screen.getByText('Thoughts');
+    expect(toggle).toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(screen.getByText(/secret reasoning here/)).toBeInTheDocument();
+  });
 });
