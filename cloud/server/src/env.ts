@@ -29,6 +29,13 @@ const EnvSchema = z.object({
   GITHUB_CLIENT_SECRET: z.string().optional(),
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
+  // "Connect" broker — our OWN registered OAuth apps, per provider. The secret is
+  // held here server-side and never shipped to the browser; when both halves are
+  // set the matching connector becomes one-click OAuth instead of paste-a-token.
+  // GitHub is the first: it has no Dynamic Client Registration, so a pre-registered
+  // OAuth App is the only way to make it one-click. Unset → token-paste fallback.
+  CONNECT_GITHUB_CLIENT_ID: z.string().optional(),
+  CONNECT_GITHUB_CLIENT_SECRET: z.string().optional(),
   CLOUD_DEV_BYPASS: z
     .string()
     .optional()

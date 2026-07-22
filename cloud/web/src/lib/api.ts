@@ -57,6 +57,12 @@ export function startMcpOAuth(payload: { connectorId?: string; name?: string; ur
   }));
 }
 
+/** Begin a brokered one-click connect (our own OAuth app). Returns the provider's
+ *  authorize URL to send the browser to; the callback stores the token server-side. */
+export function startBrokerConnect(provider: string): Promise<{ authorizeUrl: string }> {
+  return json(fetch(`/api/connect/${provider}/start`, { method: 'POST', credentials: 'include' }));
+}
+
 // ── Cascade Files (saved generated files) ──
 
 export interface CloudFile { id: string; name: string; mime: string; size: number; createdAt: number; conversationId: string | null }
@@ -280,6 +286,9 @@ export interface ConnectorEntry {
   requiresUrl: boolean;
   /** Hosted server speaks OAuth 2.1 — one-click "Connect", no token to paste. */
   oauth?: boolean;
+  /** Our own registered OAuth app is configured for this connector (server-side
+   *  secret) → one-click "Connect" even without Dynamic Client Registration. */
+  broker?: boolean;
   /** Brand colour for the UI badge (hex). */
   color?: string;
 }

@@ -32,6 +32,10 @@ import { HandoffStore, parseHandoffBody } from './handoff.js';
 import { MAX_DOCUMENT_BYTES, parseDocument, resolveDocumentMime } from './documents.js';
 import { connectorCatalog, getConnector, validateRemoteMcpUrl } from './mcp.js';
 import { McpOAuthFlows, encodeOAuthBlob } from './mcp-oauth.js';
+import {
+  BrokerFlows, getBrokerProvider, brokerConfigured, brokeredConnectorIds,
+  brokerAuthorizeUrl, brokerExchangeCode,
+} from './connect-broker.js';
 
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
@@ -657,7 +661,10 @@ export function createApp(env: CloudEnv, store: CloudStore) {
   // stored server-side and never returned. Adding validates the URL (https +
   // no private/loopback hosts) so the hosted server can't be used for SSRF.
   app.get('/api/mcp/connectors', sessionMiddleware(env.SESSION_SECRET, false), (_req: AuthedRequest, res) => {
-    res.json({ connectors: connectorCatalog() });
+    // Flag connectors whose broker OAuth app is configured, so the UI can offer a
+    // one-click "Connect" (our own app) for providers that can't self-register.
+    const brokered = new Set(brokeredConnectorIds(env));
+    res.json({ connectors: connectorCatalog().map((c) => ({ ...c, broker: brokered.has(c.id) })) });
   });
 
   app.get('/api/mcp/servers', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
@@ -746,6 +753,50 @@ export function createApp(env: CloudEnv, store: CloudStore) {
       store.addMcpServer({
         userId: done.userId, name: done.name, url: done.serverUrl,
         connectorId: done.connectorId, oauthJson: encodeOAuthBlob(done.stored, env.SESSION_SECRET),
+      });
+      res.redirect(`${backTo}?mcp=connected`);
+    } catch {
+      res.redirect(`${backTo}?mcp=error`);
+    }
+  });
+
+  // ── "Connect" broker (our own OAuth apps) ──
+  // For providers without Dynamic Client Registration (GitHub), run the
+  // authorization-code flow with OUR registered OAuth app — client_id/secret held
+  // server-side. Env-gated: a connector with no app configured returns 400 here
+  // and the UI falls back to token paste. See docs/connectors-broker.md.
+  const brokerFlows = new BrokerFlows();
+
+  app.post('/api/connect/:provider/start', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const providerId = String(req.params['provider'] ?? '');
+    const provider = getBrokerProvider(providerId);
+    if (!provider) { res.status(404).json({ error: 'Unknown connector' }); return; }
+    if (!brokerConfigured(env, providerId)) {
+      res.status(400).json({ error: 'This connector is not set up for one-click sign-in yet.' });
+      return;
+    }
+    const state = brokerFlows.create(req.session!.userId, providerId);
+    res.json({ authorizeUrl: brokerAuthorizeUrl(env, provider, state) });
+  });
+
+  // Top-level browser redirect back from the provider. `state` (minted at /start
+  // under the session) is the CSRF + lookup key AND binds the token to the user;
+  // it must match the provider it was issued for. No session cookie required here.
+  app.get('/api/connect/:provider/callback', async (req, res) => {
+    const backTo = `${env.WEB_ORIGIN.replace(/\/$/, '')}/`;
+    const providerId = String(req.params['provider'] ?? '');
+    const code = typeof req.query['code'] === 'string' ? req.query['code'] : '';
+    const state = typeof req.query['state'] === 'string' ? req.query['state'] : '';
+    const provider = getBrokerProvider(providerId);
+    if (!provider || !code || !state) { res.redirect(`${backTo}?mcp=error`); return; }
+    const flow = brokerFlows.take(state);
+    if (!flow || flow.providerId !== providerId) { res.redirect(`${backTo}?mcp=error`); return; }
+    try {
+      const tokens = await brokerExchangeCode(env, provider, code);
+      const stored = { tokens, ...(tokens.expires_in ? { expiresAt: Date.now() + tokens.expires_in * 1000 } : {}) };
+      store.addMcpServer({
+        userId: flow.userId, name: provider.name, url: provider.mcpUrl,
+        connectorId: provider.id, oauthJson: encodeOAuthBlob(stored, env.SESSION_SECRET),
       });
       res.redirect(`${backTo}?mcp=connected`);
     } catch {
