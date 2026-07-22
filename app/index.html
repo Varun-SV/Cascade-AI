@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect x='5' y='9' width='27' height='8' rx='4' fill='%234C8DFF'/%3E%3Crect x='11' y='20' width='27' height='8' rx='4' fill='%2338B0DE'/%3E%3Crect x='17' y='31' width='26' height='8' rx='4' fill='%232DD4BF'/%3E%3C/svg%3E" />
     <title>Cascade AI</title>
     <style>
       *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -39,20 +40,20 @@
         --text-dim:       #9aa0aa;
 
         /* Primary accent — Fleet/Xcode blue, single restrained hue */
-        --accent:         #2f6fed;
-        --accent-hover:   #295fd0;
+        --accent:         #2f6fe6;
+        --accent-hover:   #2456c4;
         --accent-dim:     #d6e2fb;
-        --accent-soft:    rgba(47, 111, 237, 0.12);
-        --accent-2:       #6a5cff;          /* soft indigo — calm gradient pair */
-        --accent-2-soft:  rgba(106, 92, 255, 0.12);
+        --accent-soft:    rgba(47, 111, 230, 0.12);
+        --accent-2:       #12a594;          /* teal — the cascade gradient pair */
+        --accent-2-soft:  rgba(18, 165, 148, 0.12);
 
-        /* Per-tier identity (kept distinct but desaturated) */
-        --t1:             #c0801c;
-        --t1-soft:        rgba(192, 128, 28, 0.13);
-        --t2:             #7a4fd0;
-        --t2-soft:        rgba(122, 79, 208, 0.13);
-        --t3:             #1f8fa0;
-        --t3-soft:        rgba(31, 143, 160, 0.13);
+        /* Per-tier identity: the cascade flows azure → sky → teal */
+        --t1:             #2f6fe6;
+        --t1-soft:        rgba(47, 111, 230, 0.13);
+        --t2:             #2c93c7;
+        --t2-soft:        rgba(44, 147, 199, 0.13);
+        --t3:             #12a594;
+        --t3-soft:        rgba(18, 165, 148, 0.13);
 
         /* Semantic */
         --success:        #1f9d57;
@@ -108,19 +109,19 @@
         --text-muted:     #9ba0a8;
         --text-dim:       #686d75;
 
-        --accent:         #4f8cff;
-        --accent-hover:   #6a9dff;
+        --accent:         #4c8dff;
+        --accent-hover:   #6ba0ff;
         --accent-dim:     #20304f;
-        --accent-soft:    rgba(79, 140, 255, 0.16);
-        --accent-2:       #8a7bff;
-        --accent-2-soft:  rgba(138, 123, 255, 0.16);
+        --accent-soft:    rgba(76, 141, 255, 0.16);
+        --accent-2:       #2dd4bf;
+        --accent-2-soft:  rgba(45, 212, 191, 0.16);
 
-        --t1:             #e0a458;
-        --t1-soft:        rgba(224, 164, 88, 0.15);
-        --t2:             #b08cff;
-        --t2-soft:        rgba(176, 140, 255, 0.15);
-        --t3:             #56b6c2;
-        --t3-soft:        rgba(86, 182, 194, 0.15);
+        --t1:             #4c8dff;
+        --t1-soft:        rgba(76, 141, 255, 0.15);
+        --t2:             #38b0de;
+        --t2-soft:        rgba(56, 176, 222, 0.15);
+        --t3:             #2dd4bf;
+        --t3-soft:        rgba(45, 212, 191, 0.15);
 
         --success:        #4caf72;
         --success-soft:   rgba(76, 175, 114, 0.16);
@@ -139,7 +140,7 @@
       :root[data-theme="midnight"] {
         color-scheme: dark;
 
-        /* Midnight — deep navy + violet (Cascade design palette) */
+        /* Midnight — deep navy + the cascade (azure → teal), the Cascade brand */
         --bg-base:        #06080f;
         --bg-surface:     #0f1117;
         --bg-raised:      #131520;
@@ -154,32 +155,32 @@
         --text-muted:     #a6adc8;
         --text-dim:       #6e738d;
 
-        --accent:         #7c6af7;
-        --accent-hover:   #8f80ff;
-        --accent-dim:     #241b54;
-        --accent-soft:    rgba(124, 106, 247, 0.16);
-        --accent-2:       #b87fff;
-        --accent-2-soft:  rgba(184, 127, 255, 0.16);
+        --accent:         #4c8dff;
+        --accent-hover:   #6ba0ff;
+        --accent-dim:     #16233f;
+        --accent-soft:    rgba(76, 141, 255, 0.16);
+        --accent-2:       #2dd4bf;
+        --accent-2-soft:  rgba(45, 212, 191, 0.16);
 
-        --t1:             #7c6af7;
-        --t1-soft:        rgba(124, 106, 247, 0.15);
-        --t2:             #00d4e8;
-        --t2-soft:        rgba(0, 212, 232, 0.15);
-        --t3:             #22d47a;
-        --t3-soft:        rgba(34, 212, 122, 0.15);
+        --t1:             #4c8dff;
+        --t1-soft:        rgba(76, 141, 255, 0.15);
+        --t2:             #38b0de;
+        --t2-soft:        rgba(56, 176, 222, 0.15);
+        --t3:             #2dd4bf;
+        --t3-soft:        rgba(45, 212, 191, 0.15);
 
         --success:        #22d47a;
         --success-soft:   rgba(34, 212, 122, 0.16);
         --warn:           #f5a623;
         --warn-soft:      rgba(245, 166, 35, 0.16);
-        --danger:         #ff4d6a;
-        --danger-soft:    rgba(255, 77, 106, 0.16);
-        --info:           #7c6af7;
+        --danger:         #f76d6d;
+        --danger-soft:    rgba(247, 109, 109, 0.16);
+        --info:           #4c8dff;
 
         --shadow-1:       0 1px 2px rgba(0,0,0,0.50), 0 1px 3px rgba(0,0,0,0.38);
         --shadow-2:       0 8px 28px rgba(0,0,0,0.55);
         --shadow-3:       0 24px 64px rgba(0,0,0,0.70);
-        --glow-accent:    0 0 0 1px var(--accent-soft), 0 4px 20px rgba(124,106,247,0.28);
+        --glow-accent:    0 0 0 1px var(--accent-soft), 0 4px 20px rgba(76,141,255,0.28);
       }
 
       html, body, #root { height: 100%; overflow: hidden; }
@@ -199,6 +200,11 @@
 
       /* Selection + focus polish */
       ::selection { background: var(--accent-soft); color: var(--text); }
+      /* Native <select> option lists are OS-drawn — pin explicit colours so the
+         options never render as faint, near-invisible text on a mismatched
+         popup. color-scheme follows the active theme's :root value. */
+      select { color-scheme: inherit; }
+      select option { background: var(--bg-overlay); color: var(--text); }
       :focus-visible {
         outline: 2px solid var(--accent);
         outline-offset: 1px;

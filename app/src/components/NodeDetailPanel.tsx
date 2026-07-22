@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import { X } from 'lucide-react';
 import { useAppDispatch, useAppSelector, selectNode } from '../store/index.js';
 
-const TIER_COLORS: Record<string, string> = { T1: '#f5a623', T2: '#b87fff', T3: '#00d4e8' };
+const TIER_COLORS: Record<string, string> = { T1: '#4c8dff', T2: '#38b0de', T3: '#2dd4bf' };
 const STATUS_LABEL: Record<string, string> = {
   ACTIVE: 'running', COMPLETED: 'done', FAILED: 'failed', ESCALATED: 'escalated', IDLE: 'idle',
 };
@@ -26,7 +26,7 @@ export function NodeDetailPanel() {
 
   if (!selectedId || !node) return null;
 
-  const color = TIER_COLORS[node.tier] ?? '#b87fff';
+  const color = TIER_COLORS[node.tier] ?? '#4c8dff';
   const nodePeers = peerEdges.filter((e) => e.fromId === node.id || e.toId === node.id).slice(-8).reverse();
 
   return (

@@ -8,16 +8,16 @@ import 'reactflow/dist/style.css';
 import { useAppDispatch, useAppSelector, selectNode, type AgentNode } from '../store/index.js';
 
 const TIER_COLORS: Record<string, string> = {
-  T1: '#f5a623',
-  T2: '#b87fff',
-  T3: '#00d4e8',
+  T1: '#4c8dff',
+  T2: '#38b0de',
+  T3: '#2dd4bf',
 };
 
 const STATUS_COLORS: Record<string, string> = {
-  ACTIVE: '#b87fff',
+  ACTIVE: '#4c8dff',
   COMPLETED: '#22d47a',
   FAILED: '#f0506e',
-  ESCALATED: '#f5a623',
+  ESCALATED: '#f5b54b',
   IDLE: '#3a3a46',
 };
 
@@ -30,7 +30,7 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 function AgentNodeCard({ data }: { data: AgentNode }) {
-  const tierColor = TIER_COLORS[data.tier] ?? '#b87fff';
+  const tierColor = TIER_COLORS[data.tier] ?? '#4c8dff';
   const statusColor = STATUS_COLORS[data.status] ?? STATUS_COLORS.IDLE;
   const isActive = data.status === 'ACTIVE';
   return (
@@ -111,7 +111,7 @@ export function AgentGraph({ agents }: { agents: AgentNode[] }) {
         id: `${a.parentId}-${a.id}`,
         source: a.parentId!,
         target: a.id,
-        style: { stroke: TIER_COLORS[a.tier] ?? '#b87fff', strokeWidth: 1.5, opacity: 0.6 },
+        style: { stroke: TIER_COLORS[a.tier] ?? '#4c8dff', strokeWidth: 1.5, opacity: 0.6 },
         animated: a.status === 'ACTIVE',
       }));
     // Transient peer edges (T3↔T3 / T2↔T2). Broadcasts (toId '*') are skipped

@@ -8,11 +8,13 @@ function defineTheme(name: CascadeThemeName, colors: ThemeColors): Theme {
   return { name, colors };
 }
 
+// The canonical Cascade brand palette: intelligence flows down the tiers and
+// the colour flows with it — azure (T1) → sky (T2) → teal (T3).
 export const midnightTheme = defineTheme('midnight', {
-  primary: '#8B7CF9', secondary: '#B7AEFF', accent: '#42D3E7',
-  success: '#3DDC97', warning: '#F7B84B', error: '#FF6685', info: '#67A8FF',
-  muted: '#7C819B', background: '#080A12', foreground: '#EDF0FA', border: '#292D42',
-  t1Color: '#F7B84B', t2Color: '#A98BFF', t3Color: '#42D3E7',
+  primary: '#4C8DFF', secondary: '#38B0DE', accent: '#2DD4BF',
+  success: '#3DD68C', warning: '#F5B54B', error: '#F76D6D', info: '#4C8DFF',
+  muted: '#8A93A8', background: '#0A0E1A', foreground: '#E8ECF6', border: '#202A3E',
+  t1Color: '#4C8DFF', t2Color: '#38B0DE', t3Color: '#2DD4BF',
 });
 
 export const auroraTheme = defineTheme('aurora', {

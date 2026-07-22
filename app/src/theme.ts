@@ -17,8 +17,8 @@ export interface DesktopTheme {
 
 export const DESKTOP_THEMES: DesktopTheme[] = [
   {
-    id: 'midnight', label: 'Midnight', description: 'Cascade violet over deep navy', dark: true,
-    colors: { bgBase: '#080a12', bgSurface: '#0f121c', bgRaised: '#151927', bgOverlay: '#1b2031', bgHover: '#232940', bgActive: '#2d3450', border: '#20263a', borderStrong: '#323a56', text: '#edf0fa', textMuted: '#8c93ae', textDim: '#555d78', accent: '#8b7cf9', accentHover: '#a095ff', accentDim: '#2d285d', accent2: '#42d3e7', t1: '#f7b84b', t2: '#a98bff', t3: '#42d3e7', success: '#3ddc97', warn: '#f7b84b', danger: '#ff6685', info: '#67a8ff' },
+    id: 'midnight', label: 'Midnight', description: 'The cascade — azure to teal over deep navy', dark: true,
+    colors: { bgBase: '#0a0e1a', bgSurface: '#0f121c', bgRaised: '#151927', bgOverlay: '#1b2031', bgHover: '#232940', bgActive: '#2d3450', border: '#202a3e', borderStrong: '#323a56', text: '#e8ecf6', textMuted: '#8a93a8', textDim: '#555d78', accent: '#4c8dff', accentHover: '#6ba0ff', accentDim: '#16233f', accent2: '#2dd4bf', t1: '#4c8dff', t2: '#38b0de', t3: '#2dd4bf', success: '#3dd68c', warn: '#f5b54b', danger: '#f76d6d', info: '#4c8dff' },
   },
   {
     id: 'aurora', label: 'Aurora', description: 'Cool indigo and mint', dark: true,
