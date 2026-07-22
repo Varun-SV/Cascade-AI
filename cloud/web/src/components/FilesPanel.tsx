@@ -2,7 +2,15 @@ import { useEffect, useState, useCallback } from 'react';
 import { X, FileText, Download, Trash2, Loader2, HardDrive, Eye } from 'lucide-react';
 import { fetchFiles, deleteFile, fileDownloadUrl, fetchFileText, type CloudFile } from '../lib/api.js';
 import FileViewerModal from './FileViewerModal.js';
-import { fileKind } from '../lib/fileKind.js';
+import { fileKind, fileExt } from '../lib/fileKind.js';
+
+// Kinds we preview from the served URL rather than by fetching text: images,
+// PDFs (iframe), and Office binaries (download prompt).
+const BINARY_EXTS = new Set(['xlsx', 'docx', 'pptx']);
+function isBinaryPreview(f: CloudFile): boolean {
+  const k = fileKind(f.name, f.mime);
+  return k === 'image' || k === 'pdf' || BINARY_EXTS.has(fileExt(f.name));
+}
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -50,8 +58,8 @@ export default function FilesPanel({ onClose, onUpgrade }: { onClose: () => void
   const [viewText, setViewText] = useState<string | null>(null);
   const openViewer = useCallback(async (f: CloudFile) => {
     setViewing(f);
-    if (fileKind(f.name, f.mime) === 'image') { setViewText(null); return; }
     setViewText(null);
+    if (isBinaryPreview(f)) return; // shown by URL, no text fetch
     try { setViewText(await fetchFileText(f.id)); } catch { setViewText(''); }
   }, []);
 
@@ -118,8 +126,8 @@ export default function FilesPanel({ onClose, onUpgrade }: { onClose: () => void
           <FileViewerModal
             name={viewing.name}
             mime={viewing.mime}
-            content={fileKind(viewing.name, viewing.mime) === 'image' ? undefined : (viewText ?? '')}
-            src={fileKind(viewing.name, viewing.mime) === 'image' ? fileDownloadUrl(viewing.id) : undefined}
+            content={isBinaryPreview(viewing) ? undefined : (viewText ?? '')}
+            src={isBinaryPreview(viewing) ? fileDownloadUrl(viewing.id) : undefined}
             onClose={() => { setViewing(null); setViewText(null); }}
           />
         </div>

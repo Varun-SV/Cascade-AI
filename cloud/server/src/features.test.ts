@@ -52,6 +52,9 @@ describe('wantsFileDelivery (file-guidance gate)', () => {
     expect(wantsFileDelivery('make me a word document about pandas')).toBe(true);
     expect(wantsFileDelivery('generate a config.json for this')).toBe(true);
     expect(wantsFileDelivery('can you give me a downloadable summary?')).toBe(true);
+    expect(wantsFileDelivery('turn this into a PowerPoint deck')).toBe(true);
+    expect(wantsFileDelivery('put the numbers in an Excel spreadsheet')).toBe(true);
+    expect(wantsFileDelivery('build a slide presentation on Q3')).toBe(true);
   });
 
   it('stays quiet for conversation and ordinary questions', () => {

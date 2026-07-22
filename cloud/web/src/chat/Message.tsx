@@ -33,18 +33,33 @@ function extractGeneratedFiles(md: string): { files: GeneratedFile[]; rest: stri
   return { files, rest: rest.replace(/\n{3,}/g, '\n\n').trim() };
 }
 
+/** base64 (no data: prefix) of a Blob, for the metered binary save. */
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result).split(',')[1] ?? '');
+    fr.onerror = () => reject(fr.error);
+    fr.readAsDataURL(blob);
+  });
+}
+
 /** View + free browser download (client Blob) + optional metered save to Cascade.
- *  For Office/PDF names (.pdf/.xlsx) the model's Markdown/CSV source is rendered
- *  into the real binary in the browser on download. */
+ *  For Office/PDF names (.pdf/.xlsx/.docx/.pptx) the model's Markdown/CSV source
+ *  is rendered into the real binary in the browser: View previews it (PDF inline,
+ *  Office as its source), Download and Save produce the binary. */
 function GeneratedFileCard({ file }: { file: GeneratedFile }) {
   const [busy, setBusy] = useState(false);     // metered save
   const [saved, setSaved] = useState(false);
   const [dl, setDl] = useState(false);          // binary render + download
+  const [vw, setVw] = useState(false);          // rendering the PDF for preview
   const [error, setError] = useState<string | null>(null);
   const [viewing, setViewing] = useState(false);
+  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const ext = fileExt(file.name);
   const exportable = isExportableExt(ext);
   const size = new Blob([file.content]).size;
+  // How to preview an Office export's *source* (the fenced body the model wrote).
+  const sourceKind = ext === 'xlsx' ? 'csv' : ext === 'docx' || ext === 'pptx' ? 'markdown' : undefined;
 
   function saveBlob(blob: Blob, name: string) {
     const url = URL.createObjectURL(blob);
@@ -62,13 +77,40 @@ function GeneratedFileCard({ file }: { file: GeneratedFile }) {
     }
     saveBlob(new Blob([file.content], { type: 'text/plain;charset=utf-8' }), file.name);
   }
+  async function view() {
+    setError(null);
+    if (ext === 'pdf') { // render the real PDF and preview it inline
+      setVw(true);
+      try { setPdfUrl(URL.createObjectURL(await renderExport('pdf', file.content, file.name))); setViewing(true); }
+      catch (e) { setError(e instanceof Error ? e.message : 'Could not render the PDF.'); }
+      finally { setVw(false); }
+      return;
+    }
+    setViewing(true); // text files, and Office source previews
+  }
+  function closeView() {
+    setViewing(false);
+    if (pdfUrl) { URL.revokeObjectURL(pdfUrl); setPdfUrl(null); }
+  }
   async function save() {
     if (busy || saved) return;
     setBusy(true); setError(null);
-    try { await saveFile({ name: file.name, content: file.content }); setSaved(true); window.dispatchEvent(new CustomEvent('cascade:files-changed')); }
-    catch (e) { setError(e instanceof Error ? e.message : 'Could not save.'); }
+    try {
+      if (exportable) {
+        const b64 = await blobToBase64(await renderExport(ext, file.content, file.name));
+        await saveFile({ name: file.name, content: b64, encoding: 'base64' });
+      } else {
+        await saveFile({ name: file.name, content: file.content });
+      }
+      setSaved(true); window.dispatchEvent(new CustomEvent('cascade:files-changed'));
+    } catch (e) { setError(e instanceof Error ? e.message : 'Could not save.'); }
     finally { setBusy(false); }
   }
+  const saveButton = (small: boolean) => (
+    <button type="button" onClick={save} disabled={busy || saved} className={`flex ${small ? 'shrink-0 ' : ''}items-center gap-1 rounded-lg bg-accent-600 px-2.5 py-1 text-xs text-white hover:bg-accent-500 disabled:opacity-60`}>
+      {busy ? <Loader2 size={small ? 12 : 13} className="animate-spin" /> : saved ? <Check size={small ? 12 : 13} /> : <UploadCloud size={small ? 12 : 13} />} {saved ? 'Saved' : 'Save'}
+    </button>
+  );
   return (
     <div className="flex items-center gap-2.5 rounded-xl border border-elev/10 bg-elev/[0.05] px-3 py-2.5">
       <FileText size={16} className="shrink-0 text-accent-300" />
@@ -85,31 +127,22 @@ function GeneratedFileCard({ file }: { file: GeneratedFile }) {
           {exportable ? `${exportLabel(ext)} document ${sourceHint(ext)}` : formatBytes(size)}{error ? ` · ${error}` : ''}
         </div>
       </div>
-      {/* Office/PDF cards are download-only for now: preview + metered save of a
-          binary are a follow-up; the text formats keep View + Save. */}
-      {!exportable && (
-        <button type="button" onClick={() => setViewing(true)} className="flex items-center gap-1 rounded-lg border border-elev/10 px-2.5 py-1 text-xs text-ink-200 hover:bg-elev/[0.06]">
-          <Eye size={13} /> View
-        </button>
-      )}
+      <button type="button" onClick={view} disabled={vw} className="flex items-center gap-1 rounded-lg border border-elev/10 px-2.5 py-1 text-xs text-ink-200 hover:bg-elev/[0.06] disabled:opacity-60">
+        {vw ? <Loader2 size={13} className="animate-spin" /> : <Eye size={13} />} View
+      </button>
       <button type="button" onClick={download} disabled={dl} className="flex items-center gap-1 rounded-lg border border-elev/10 px-2.5 py-1 text-xs text-ink-200 hover:bg-elev/[0.06] disabled:opacity-60">
         {dl ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />} Download
       </button>
-      {!exportable && (
-        <button type="button" onClick={save} disabled={busy || saved} className="flex items-center gap-1 rounded-lg bg-accent-600 px-2.5 py-1 text-xs text-white hover:bg-accent-500 disabled:opacity-60">
-          {busy ? <Loader2 size={13} className="animate-spin" /> : saved ? <Check size={13} /> : <UploadCloud size={13} />} {saved ? 'Saved' : 'Save'}
-        </button>
-      )}
+      {saveButton(false)}
       {viewing && (
         <FileViewerModal
           name={file.name}
-          content={file.content}
-          onClose={() => setViewing(false)}
-          actions={
-            <button type="button" onClick={save} disabled={busy || saved} className="flex shrink-0 items-center gap-1 rounded-lg bg-accent-600 px-2 py-1 text-xs text-white hover:bg-accent-500 disabled:opacity-60">
-              {busy ? <Loader2 size={12} className="animate-spin" /> : saved ? <Check size={12} /> : <UploadCloud size={12} />} {saved ? 'Saved' : 'Save'}
-            </button>
-          }
+          mime={ext === 'pdf' ? 'application/pdf' : undefined}
+          content={exportable ? (ext === 'pdf' ? undefined : file.content) : file.content}
+          src={ext === 'pdf' ? (pdfUrl ?? undefined) : undefined}
+          kindOverride={exportable ? (ext === 'pdf' ? 'pdf' : sourceKind) : undefined}
+          onClose={closeView}
+          actions={saveButton(true)}
         />
       )}
     </div>

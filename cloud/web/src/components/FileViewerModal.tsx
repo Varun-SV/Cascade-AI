@@ -1,23 +1,29 @@
 import { useEffect, useState } from 'react';
 import { X, Download, Code2, Eye, Play, ShieldAlert } from 'lucide-react';
 import Markdown from './Markdown.js';
-import { fileKind, codeLanguage, parseDelimited, type FileKind } from '../lib/fileKind.js';
+import { fileKind, fileExt, codeLanguage, parseDelimited, type FileKind } from '../lib/fileKind.js';
 
 interface Props {
   name: string;
   mime?: string;
   /** Text content — for generated files and text-kind saved files. */
   content?: string;
-  /** URL for binary/image saved files (served by /api/files/:id). */
+  /** URL for binary/image/pdf saved files (served by /api/files/:id or an object URL). */
   src?: string;
+  /** Force how the body renders, overriding the name/mime guess (e.g. preview an
+   *  Office export's Markdown/CSV source). */
+  kindOverride?: FileKind;
   onClose: () => void;
   /** Optional actions rendered in the header (e.g. Save to Cascade). */
   actions?: React.ReactNode;
 }
 
 const KIND_LABEL: Record<FileKind, string> = {
-  markdown: 'Markdown', code: 'Code', csv: 'Table', html: 'HTML', svg: 'SVG', image: 'Image', text: 'Text',
+  markdown: 'Markdown', code: 'Code', csv: 'Table', html: 'HTML', svg: 'SVG', image: 'Image', pdf: 'PDF', text: 'Text',
 };
+
+/** Office binaries have no in-browser preview — offer a download instead. */
+const OFFICE_EXTS = new Set(['xlsx', 'docx', 'pptx']);
 
 /**
  * A modal that previews a generated/saved file by type: markdown (with the same
@@ -26,8 +32,8 @@ const KIND_LABEL: Record<FileKind, string> = {
  * Untrusted content never touches the app DOM — HTML/SVG go through `srcdoc` in a
  * `sandbox`ed frame, and markdown does not render raw HTML.
  */
-export default function FileViewerModal({ name, mime, content, src, onClose, actions }: Props) {
-  const kind = fileKind(name, mime);
+export default function FileViewerModal({ name, mime, content, src, kindOverride, onClose, actions }: Props) {
+  const kind = kindOverride ?? fileKind(name, mime);
   const [showSource, setShowSource] = useState(false);
   const [runScripts, setRunScripts] = useState(false);
 
@@ -95,6 +101,23 @@ function Body({
 }) {
   if (kind === 'image' && src) {
     return <div className="flex justify-center p-4"><img src={src} alt={name} className="max-h-full max-w-full rounded-lg" /></div>;
+  }
+
+  if (kind === 'pdf') {
+    if (!src) return <Empty />;
+    return <iframe title={name} src={src} className="min-h-[72vh] w-full flex-1 bg-white" />;
+  }
+
+  // Office binaries (a saved .xlsx/.docx/.pptx) can't be previewed in-browser.
+  if (src && OFFICE_EXTS.has(fileExt(name))) {
+    return (
+      <div className="flex flex-col items-center gap-3 p-10 text-center">
+        <p className="text-sm text-ink-300">No in-browser preview for this format.</p>
+        <a href={src} download={name} className="flex items-center gap-1.5 rounded-lg bg-accent-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-500">
+          <Download size={13} /> Download to open
+        </a>
+      </div>
+    );
   }
 
   const text = content ?? '';

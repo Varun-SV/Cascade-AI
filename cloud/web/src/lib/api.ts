@@ -71,7 +71,7 @@ export function fetchFiles(): Promise<{ files: CloudFile[]; usedBytes: number; l
   return json(fetch('/api/files', { credentials: 'include' }));
 }
 
-export function saveFile(input: { name: string; content: string; conversationId?: string | null }): Promise<{ file: CloudFile; usedBytes: number; limitBytes: number }> {
+export function saveFile(input: { name: string; content: string; conversationId?: string | null; encoding?: 'base64' }): Promise<{ file: CloudFile; usedBytes: number; limitBytes: number }> {
   return json(fetch('/api/files', {
     method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
   }));
