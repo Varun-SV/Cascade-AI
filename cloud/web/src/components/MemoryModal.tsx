@@ -81,7 +81,7 @@ export default function MemoryModal({ onClose }: { onClose: () => void }) {
           </div>
         )}
 
-        <div className="flex max-h-[45vh] flex-col gap-2 overflow-y-auto">
+        <div className="flex max-h-[45dvh] flex-col gap-2 overflow-y-auto">
           {memories.length === 0 && (
             <p className="rounded-md border border-dashed border-elev/10 px-3 py-4 text-center text-xs text-ink-400">
               No memories yet. Add something Cascade should remember about you.

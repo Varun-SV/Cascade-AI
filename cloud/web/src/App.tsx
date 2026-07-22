@@ -172,7 +172,7 @@ export default function App() {
 
   if (user === undefined || config === null) {
     return (
-      <div className="flex h-screen items-center justify-center text-ink-400">
+      <div className="flex h-dvh items-center justify-center text-ink-400">
         <motion.span
           className="shimmer-text text-sm font-medium"
           initial={{ opacity: 0 }}
@@ -219,7 +219,7 @@ export default function App() {
 
   return (
     <MotionConfig reducedMotion={reduceMotion ? 'always' : 'user'}>
-    <div className="relative flex h-screen gap-0 overflow-hidden md:gap-3 md:p-3">
+    <div className="relative flex h-dvh gap-0 overflow-hidden md:gap-3 md:p-3">
       {/* Desktop: collapsible floating glass panel */}
       <div
         className={clsx(

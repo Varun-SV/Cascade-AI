@@ -20,7 +20,7 @@ export default function Modal({ title, onClose, maxWidth = 'max-w-md', children 
       onClick={onClose}
     >
       <motion.div
-        className={`glass-strong flex max-h-[90vh] w-full ${maxWidth} flex-col overflow-hidden rounded-2xl`}
+        className={`glass-strong flex max-h-[90dvh] w-full ${maxWidth} flex-col overflow-hidden rounded-2xl`}
         initial={{ opacity: 0, scale: 0.94, y: 12 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.96, y: 8 }}
