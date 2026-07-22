@@ -5,6 +5,20 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.48.0 - 2026-07-22
+
+### Fixed
+- **Providers no longer offer models that can't hold a conversation.** Every
+  provider's model list (`generativelanguage`/OpenAI `/v1/models`/Anthropic/
+  Ollama/OpenAI-compatible) returns *all* of its models — including embeddings,
+  text-to-speech, speech-to-text, image/video generation, moderation and
+  legacy completion-only base models. One of those (e.g. Gemini's
+  `gemini-2.5-pro-preview-tts`, which only emits AUDIO) could be discovered and
+  routed to for a normal turn, failing the run with a 400. A new shared
+  `isChatModel` filter (`src/providers/model-filter.ts`) is applied across all
+  providers so only real text-chat models enter the router's candidate pool.
+  Ollama's family allowlist also no longer includes the `nomic-embed` embedder.
+
 ## 0.47.1 - 2026-07-22
 
 ### Removed

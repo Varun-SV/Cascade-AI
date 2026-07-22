@@ -14,6 +14,7 @@ import type {
 } from '../types.js';
 import { MODELS } from '../constants.js';
 import { BaseProvider } from './base.js';
+import { isChatModel } from './model-filter.js';
 
 // Anthropic extended thinking — only the 4.x reasoning models (Opus 4 / Sonnet 4)
 // support it. budget_tokens must be >= 1024 and < max_tokens; we cap well under
@@ -157,7 +158,7 @@ export class AnthropicProvider extends BaseProvider {
         return Object.values(MODELS).filter((m) => m.provider === 'anthropic');
       }
 
-      return data.data.map((m) => {
+      return data.data.filter((m) => isChatModel(m.id)).map((m) => {
         const known = Object.values(MODELS).find((km) => km.id === m.id && km.provider === 'anthropic');
         if (known) return known;
 
