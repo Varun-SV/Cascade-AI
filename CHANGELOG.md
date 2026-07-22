@@ -5,6 +5,21 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.46.4 - 2026-07-22
+
+### Added
+- **Public docs at `/docs`.** The cloud server now serves a self-contained,
+  brand-styled documentation page (What is Cascade, quick start, providers &
+  keys, tier routing, file exports, privacy) at `/docs`, registered ahead of the
+  SPA catch-all. This is the docs destination for the planned
+  `cascadeai.in/docs`. The page is hand-written user-facing content — the repo's
+  `docs/*.md` are internal design specs and are deliberately not served publicly.
+- **Domain-move runbook** (`docs/domain-move.md`) — the exact DNS / Railway /
+  OAuth-console / env steps to point the apex `cascadeai.in` at the cloud app
+  while keeping `app.cascadeai.in` working for already-installed CLIs and desktop
+  apps. The app side (a `/docs` route) is in place; the rest is config the
+  account owner runs.
+
 ## 0.46.3 - 2026-07-22
 
 ### Added
