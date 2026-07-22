@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import clsx from 'clsx';
 import { AnimatePresence, MotionConfig, motion } from 'framer-motion';
-import LoginGate from './components/LoginGate.js';
+import LandingPage from './components/LandingPage.js';
 import Modal from './components/Modal.js';
 import UpgradeModal from './components/UpgradeModal.js';
 import MemoryModal from './components/MemoryModal.js';
@@ -185,7 +185,7 @@ export default function App() {
   }
 
   if (!user) {
-    return <LoginGate config={config} onDevLogin={refreshMe} />;
+    return <LandingPage config={config} onDevLogin={refreshMe} />;
   }
 
   const activeTitle = conversations.find((c) => c.id === chat.conversationId)?.title ?? undefined;

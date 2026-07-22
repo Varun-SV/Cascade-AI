@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## 0.46.4 - 2026-07-22
 
 ### Added
+- **A real landing page** is now the logged-out home of the web app (replacing
+  the bare sign-in card), so the apex `cascadeai.in` has a proper homepage after
+  the domain move: hero ("Agents that cascade"), the three-tier explainer, a
+  feature grid, and sign-in (GitHub/Google) plus "Download desktop app" and
+  "Docs" CTAs — all from the existing brand (cascade gradient + three-bar mark).
 - **Public docs at `/docs`.** The cloud server now serves a self-contained,
   brand-styled documentation page (What is Cascade, quick start, providers &
   keys, tier routing, file exports, privacy) at `/docs`, registered ahead of the
