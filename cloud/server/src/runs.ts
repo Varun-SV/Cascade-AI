@@ -350,8 +350,11 @@ export const FILE_DELIVERY_GUIDANCE =
   + 'asks for a file, document or export (a report, a code file, a CSV, etc.), output its FULL contents '
   + 'in a fenced code block whose info string is `file:<filename.ext>` — i.e. the opening fence line '
   + 'reads file:report.md for a file named report.md. Use one block per file with a sensible filename '
-  + 'and extension; the user can download or save each one. For every other request, answer in plain '
-  + 'prose or ordinary code blocks — never emit a file: block the user did not ask for.';
+  + 'and extension; the user can download or save each one. '
+  + 'For an Office/PDF document, write the SOURCE and name the block with the target extension — Cascade '
+  + 'renders the real binary on download: a file:<name>.pdf block whose body is Markdown becomes a PDF; '
+  + 'a file:<name>.xlsx block whose body is CSV becomes an Excel spreadsheet. For every other request, '
+  + 'answer in plain prose or ordinary code blocks — never emit a file: block the user did not ask for.';
 
 /**
  * Should this turn carry the file-delivery guidance? True when the user's own

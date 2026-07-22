@@ -36,6 +36,29 @@ download button as a fallback (filename inferred). From a card you can:
 - **Save to Cascade files** — uploads the content to per-user storage on the
   Railway volume, metered by plan (below).
 
+## Office / PDF exports (browser renders the binary)
+
+A run streams text, so it can never emit a binary directly. For **PDF** and
+**Excel** the model instead writes the *source* and names the block with the
+target extension; the browser turns it into the real binary on **Download**:
+
+- `file:report.pdf` whose body is **Markdown** → a genuine `.pdf`. A small
+  Markdown layout engine (`cloud/web/src/lib/exporters.ts`, using `jsPDF`) lays
+  out headings, paragraphs, bullet/number lists, code fences, blockquotes,
+  tables and rules with word-wrap and page breaks, producing **selectable
+  text** (not a rasterised image).
+- `file:data.xlsx` whose body is **CSV** → a proper `.xlsx` workbook (SheetJS
+  `aoa_to_sheet`, reusing the same `parseDelimited` CSV parser as the viewer).
+
+The heavy libraries are loaded with dynamic `import()`, so they ship as separate
+chunks that download only the first time a user exports one of these formats and
+never enter the base bundle; rendering happens entirely client-side, so the
+content never leaves the browser. Office/PDF cards are **download-only** for now
+— inline preview and metered save of the binary are a follow-up — while ordinary
+text/code/data files keep View + Download + Save. The hosted guidance
+(`FILE_DELIVERY_GUIDANCE`) tells the model how to target these formats, still
+only when the user explicitly asks for a file.
+
 The worker is steered (a hosted system instruction) to use the `file:` fence —
 but only on turns whose request actually looks file-shaped (`wantsFileDelivery`:
 the user's own text or the active skill mentions a file/document/export, or the
