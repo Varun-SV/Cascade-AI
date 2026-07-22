@@ -365,7 +365,7 @@ export default function Composer({
         )}
       </div>
       <p className="mx-auto mt-1.5 max-w-3xl px-1 text-[11px] text-ink-400">
-        Attach images &amp; documents (PDF, Word, text) · file generation &amp; download coming soon.
+        Attach images &amp; documents (PDF, Word, text) · ask for a report and download it as PDF, Word, Excel or PowerPoint.
       </p>
     </div>
   );

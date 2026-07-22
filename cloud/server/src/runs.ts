@@ -352,8 +352,10 @@ export const FILE_DELIVERY_GUIDANCE =
   + 'reads file:report.md for a file named report.md. Use one block per file with a sensible filename '
   + 'and extension; the user can download or save each one. '
   + 'For an Office/PDF document, write the SOURCE and name the block with the target extension — Cascade '
-  + 'renders the real binary on download: a file:<name>.pdf block whose body is Markdown becomes a PDF; '
-  + 'a file:<name>.xlsx block whose body is CSV becomes an Excel spreadsheet. For every other request, '
+  + 'renders the real binary on download: a file:<name>.pdf or file:<name>.docx block whose body is Markdown '
+  + 'becomes a PDF or a Word document; a file:<name>.xlsx block whose body is CSV becomes an Excel spreadsheet; '
+  + 'a file:<name>.pptx block whose body is Markdown becomes a PowerPoint deck — separate slides with a --- rule '
+  + 'and start each slide with a heading for its title. For every other request, '
   + 'answer in plain prose or ordinary code blocks — never emit a file: block the user did not ask for.';
 
 /**
@@ -370,7 +372,7 @@ export function wantsFileDelivery(
   history?: Array<{ role: string; content: unknown }>,
 ): boolean {
   const FILEISH =
-    /\b(files?|documents?|reports?|export(?:ed|able)?|csv|spreadsheet|pdf|docx?|xlsx?|markdown|download(?:able)?|save (?:it|this|that|as)|write (?:up|out|to)|deliverable)\b|\.(?:md|txt|csv|json|pdf|html?|docx?|xlsx?)\b/i;
+    /\b(files?|documents?|reports?|export(?:ed|able)?|csv|spreadsheet|excel|workbook|pdf|docx?|xlsx?|pptx?|powerpoint|presentations?|slides?|deck|markdown|download(?:able)?|save (?:it|this|that|as)|write (?:up|out|to)|deliverable)\b|\.(?:md|txt|csv|json|pdf|html?|docx?|xlsx?|pptx?)\b/i;
   if (FILEISH.test(userPrompt)) return true;
   if (skillSystemPrompt && FILEISH.test(skillSystemPrompt)) return true;
   const lastAssistant = [...(history ?? [])].reverse().find((m) => m.role === 'assistant');

@@ -879,6 +879,10 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     html: 'text/html', xml: 'application/xml', yml: 'text/yaml', yaml: 'text/yaml',
     js: 'text/javascript', ts: 'text/typescript', py: 'text/x-python', sh: 'text/x-sh',
     css: 'text/css', sql: 'text/plain', log: 'text/plain',
+    pdf: 'application/pdf',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   };
   const mimeForFileName = (name: string): string => MIME_BY_EXT[name.split('.').pop()?.toLowerCase() ?? ''] ?? 'text/plain';
 
@@ -899,8 +903,11 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 200) : '';
     const content = typeof body.content === 'string' ? body.content : '';
     const conversationId = typeof body.conversationId === 'string' ? body.conversationId : null;
+    // Client renders binary formats (PDF/Office) and sends them base64-encoded;
+    // text files are stored as UTF-8 as before.
+    const encoding: BufferEncoding = body.encoding === 'base64' ? 'base64' : 'utf-8';
     if (!name) { res.status(400).json({ error: 'A file name is required.' }); return; }
-    const bytes = Buffer.from(content, 'utf-8');
+    const bytes = Buffer.from(content, encoding);
     if (bytes.length === 0) { res.status(400).json({ error: 'Nothing to save.' }); return; }
     if (bytes.length > MAX_SINGLE_FILE_BYTES) { res.status(413).json({ error: `A single file must be ≤ ${MAX_SINGLE_FILE_BYTES / (1024 * 1024)} MB.` }); return; }
     const plan = store.getUserById(userId)?.plan ?? 'free';

@@ -38,26 +38,35 @@ download button as a fallback (filename inferred). From a card you can:
 
 ## Office / PDF exports (browser renders the binary)
 
-A run streams text, so it can never emit a binary directly. For **PDF** and
-**Excel** the model instead writes the *source* and names the block with the
-target extension; the browser turns it into the real binary on **Download**:
+A run streams text, so it can never emit a binary directly. For **PDF**,
+**Excel**, **Word** and **PowerPoint** the model instead writes the *source* and
+names the block with the target extension; the browser turns it into the real
+binary. All four are laid out in `cloud/web/src/lib/exporters.ts`, which parses a
+small Markdown subset once into a shared block model:
 
-- `file:report.pdf` whose body is **Markdown** → a genuine `.pdf`. A small
-  Markdown layout engine (`cloud/web/src/lib/exporters.ts`, using `jsPDF`) lays
-  out headings, paragraphs, bullet/number lists, code fences, blockquotes,
-  tables and rules with word-wrap and page breaks, producing **selectable
-  text** (not a rasterised image).
+- `file:report.pdf` whose body is **Markdown** → a genuine `.pdf` via `jsPDF`
+  (headings, paragraphs, bullet/number lists, code fences, blockquotes, tables
+  and rules with word-wrap and page breaks), producing **selectable text** (not
+  a rasterised image).
 - `file:data.xlsx` whose body is **CSV** → a proper `.xlsx` workbook (SheetJS
   `aoa_to_sheet`, reusing the same `parseDelimited` CSV parser as the viewer).
+- `file:report.docx` whose body is **Markdown** → a Word document (`docx`
+  library) with styled inline runs, bullet/numbered lists, code, quotes, tables.
+- `file:deck.pptx` whose body is **Markdown** → a PowerPoint deck (`pptxgenjs`):
+  slides split on `---` rules (or top-level headings), each slide's heading is
+  the title and its bullets/lines become the body.
 
 The heavy libraries are loaded with dynamic `import()`, so they ship as separate
 chunks that download only the first time a user exports one of these formats and
 never enter the base bundle; rendering happens entirely client-side, so the
-content never leaves the browser. Office/PDF cards are **download-only** for now
-— inline preview and metered save of the binary are a follow-up — while ordinary
-text/code/data files keep View + Download + Save. The hosted guidance
-(`FILE_DELIVERY_GUIDANCE`) tells the model how to target these formats, still
-only when the user explicitly asks for a file.
+content never leaves the browser. Office/PDF cards offer **View + Download +
+Save** like text files: **View** previews a real PDF inline (an object-URL
+iframe) and previews Excel/Word/PowerPoint as their Markdown/CSV source (there is
+no in-browser Office renderer); **Save** stores the actual rendered binary — the
+metered `/api/files` store accepts a base64 body (`encoding: 'base64'`), and the
+Files panel previews a saved PDF inline and offers "download to open" for Office
+binaries. The hosted guidance (`FILE_DELIVERY_GUIDANCE`) tells the model how to
+target these formats, still only when the user explicitly asks for a file.
 
 The worker is steered (a hosted system instruction) to use the `file:` fence —
 but only on turns whose request actually looks file-shaped (`wantsFileDelivery`:

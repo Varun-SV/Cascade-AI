@@ -5,6 +5,27 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.46.3 - 2026-07-22
+
+### Added
+- **Word and PowerPoint join PDF and Excel exports.** Ask for a report as a
+  `.docx` or a deck as a `.pptx` and Cascade renders the real Office binary in
+  the browser: Markdown becomes a Word document (headings, styled runs, bullet
+  and numbered lists, code, quotes, tables, rules), and a Markdown deck — slides
+  separated by `---`, each led by a heading — becomes a PowerPoint presentation.
+  Like the PDF/Excel path, the `docx`/`pptxgenjs` libraries are lazy-loaded (own
+  chunks, out of the base bundle) and everything renders client-side.
+
+### Changed
+- **Generated Office/PDF cards now have View and Save, not just Download.** The
+  first cut shipped these cards as download-only; they now match text files:
+  **View** previews the result (a real PDF inline in the viewer; Excel/Word/
+  PowerPoint show the Markdown/CSV source that produces them), and **Save** keeps
+  the actual rendered binary in your Cascade files (the metered store now accepts
+  base64 binaries, and the Files panel previews a saved PDF inline and offers a
+  clean download for Office formats). The composer hint no longer says file
+  generation is "coming soon".
+
 ## 0.46.2 - 2026-07-22
 
 ### Added

@@ -1,7 +1,7 @@
 // How a generated/saved file should be previewed. Pure helpers so they're unit
 // testable and shared between the in-message card viewer and the Files panel.
 
-export type FileKind = 'markdown' | 'code' | 'csv' | 'html' | 'svg' | 'image' | 'text';
+export type FileKind = 'markdown' | 'code' | 'csv' | 'html' | 'svg' | 'image' | 'pdf' | 'text';
 
 const EXT_KIND: Record<string, FileKind> = {
   md: 'markdown', markdown: 'markdown', mdx: 'markdown',
@@ -9,6 +9,7 @@ const EXT_KIND: Record<string, FileKind> = {
   html: 'html', htm: 'html',
   svg: 'svg',
   png: 'image', jpg: 'image', jpeg: 'image', gif: 'image', webp: 'image', avif: 'image', bmp: 'image', ico: 'image',
+  pdf: 'pdf',
   txt: 'text', log: 'text',
 };
 
@@ -39,6 +40,7 @@ export function fileKind(name: string, mime?: string): FileKind {
     if (mime === 'text/markdown') return 'markdown';
     if (mime === 'text/html') return 'html';
     if (mime === 'text/csv' || mime === 'text/tab-separated-values') return 'csv';
+    if (mime === 'application/pdf') return 'pdf';
     if (mime.startsWith('text/')) return 'text';
     if (mime === 'application/json') return 'code';
   }

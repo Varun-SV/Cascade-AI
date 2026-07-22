@@ -21,6 +21,8 @@ describe('exporters — client-side binary generation', () => {
   it('recognises the formats we render into binaries', () => {
     expect(isExportableExt('pdf')).toBe(true);
     expect(isExportableExt('xlsx')).toBe(true);
+    expect(isExportableExt('docx')).toBe(true);
+    expect(isExportableExt('pptx')).toBe(true);
     expect(isExportableExt('txt')).toBe(false);
     expect(isExportableExt('md')).toBe(false);
     expect(isExportableExt('csv')).toBe(false);
@@ -29,8 +31,11 @@ describe('exporters — client-side binary generation', () => {
   it('labels the formats and hints the source they render from', () => {
     expect(exportLabel('xlsx')).toBe('Excel');
     expect(exportLabel('pdf')).toBe('PDF');
+    expect(exportLabel('docx')).toBe('Word');
+    expect(exportLabel('pptx')).toBe('PowerPoint');
     expect(sourceHint('xlsx')).toBe('from CSV');
     expect(sourceHint('pdf')).toBe('from Markdown');
+    expect(sourceHint('pptx')).toBe('from Markdown slides');
   });
 
   it('renders CSV source into a real .xlsx blob', async () => {
@@ -50,6 +55,26 @@ describe('exporters — client-side binary generation', () => {
     // PDF files begin with the "%PDF" magic bytes.
     const head = (await readBytes(blob)).subarray(0, 4);
     expect(String.fromCharCode(...head)).toBe('%PDF');
+  });
+
+  it('renders Markdown source into a real .docx blob', async () => {
+    const md = '# Title\n\nHello **world**.\n\n1. first\n2. second\n\n> a quote\n';
+    const blob = await renderExport('docx', md, 'doc.docx');
+    expect(blob.type).toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    expect(blob.size).toBeGreaterThan(0);
+    // A .docx is a ZIP archive — "PK" signature.
+    const head = (await readBytes(blob)).subarray(0, 2);
+    expect(String.fromCharCode(head[0]!, head[1]!)).toBe('PK');
+  });
+
+  it('renders a Markdown deck into a real .pptx blob', async () => {
+    const md = '# Slide one\n\n- point A\n- point B\n\n---\n\n# Slide two\n\n- another\n';
+    const blob = await renderExport('pptx', md, 'deck.pptx');
+    expect(blob.type).toBe('application/vnd.openxmlformats-officedocument.presentationml.presentation');
+    expect(blob.size).toBeGreaterThan(0);
+    // A .pptx is a ZIP archive — "PK" signature.
+    const head = (await readBytes(blob)).subarray(0, 2);
+    expect(String.fromCharCode(head[0]!, head[1]!)).toBe('PK');
   });
 
   it('falls back to a plain-text blob for a non-exportable extension', async () => {
