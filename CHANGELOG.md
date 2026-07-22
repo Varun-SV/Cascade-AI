@@ -5,6 +5,25 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.44.0 - 2026-07-22
+
+### Added
+- **One-click "Connect" for GitHub — no token to paste (cloud).** GitHub's
+  hosted MCP server can't be reached by our automatic OAuth flow because GitHub
+  has no Dynamic Client Registration (which is why picking GitHub previously
+  dropped you into a "paste a Personal Access Token" form). New **connect
+  broker**: the server runs the OAuth handshake with *our own* registered GitHub
+  OAuth App, whose secret lives only on the server (`CONNECT_GITHUB_CLIENT_ID` /
+  `CONNECT_GITHUB_CLIENT_SECRET`) and never touches the browser. Click **GitHub →
+  GitHub's sign-in page → done**; the user-scoped token is stored encrypted and
+  injected into runs through the existing MCP path. New routes
+  `POST /api/connect/:provider/start` and `GET /api/connect/:provider/callback`.
+  Fully **env-gated**: with no OAuth App configured the connector still shows the
+  token-paste form exactly as before, so nothing breaks without setup. The
+  already-one-click connectors (Notion, Linear, Sentry, Stripe, Atlassian) are
+  unchanged — they self-register via DCR and never needed a broker. See
+  `docs/connectors-broker.md`.
+
 ## 0.43.0 - 2026-07-22
 
 ### Fixed

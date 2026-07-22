@@ -3,7 +3,7 @@ import { Plug, Trash2, Plus, Github, Slack, Globe, ShieldCheck, Loader2, Externa
 import Modal from './Modal.js';
 import {
   fetchConnectors, fetchMcpServers, addMcpServer, setMcpServerEnabled, deleteMcpServer, startMcpOAuth,
-  type ConnectorEntry, type McpServer,
+  startBrokerConnect, type ConnectorEntry, type McpServer,
 } from '../lib/api.js';
 
 // Small on/off pill (mirrors the Toggle used elsewhere, kept local to avoid a
@@ -126,6 +126,23 @@ export default function ConnectorsModal({ onClose }: { onClose: () => void }) {
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Could not add that connector.');
         startAdd(c);
+      } finally {
+        setConnectingId(null);
+      }
+      return;
+    }
+    // Brokered one-click: our own registered OAuth app (e.g. GitHub, which can't
+    // self-register). Straight to the provider's consent page — no token to paste.
+    if (c.broker) {
+      setConnectingId(c.id);
+      setError(null);
+      try {
+        const r = await startBrokerConnect(c.id);
+        window.location.href = r.authorizeUrl;
+        return;
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Could not start sign-in.');
+        startAdd(c); // configuration issue — fall back to the token form
       } finally {
         setConnectingId(null);
       }
@@ -329,7 +346,7 @@ export default function ConnectorsModal({ onClose }: { onClose: () => void }) {
                 </div>
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   {filtered.map((c) => {
-                    const oneClick = !!c.url && !c.requiresUrl && (!!c.oauth || !c.tokenLabel);
+                    const oneClick = !!c.broker || (!!c.url && !c.requiresUrl && (!!c.oauth || !c.tokenLabel));
                     return (
                       <button
                         key={c.id}
