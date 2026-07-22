@@ -5,6 +5,27 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.46.0 - 2026-07-22
+
+### Fixed
+- **An explicit per-tier model now actually sticks.** Pinning a specific model
+  for a tier in Settings (e.g. T3 → a local `openai-compatible` GGUF) was
+  silently ignored when Cascade Auto was on: the per-subtask router re-ranked
+  and picked a different model (often Gemini) anyway. A pin is now authoritative
+  — a tier the user set to a specific model always uses it; Auto only applies to
+  tiers left on **Auto**.
+
+### Changed
+- **Cascade Auto now sees newly released models, not just the bundled catalog.**
+  Auto ranked models only from a static priority list, so a model your provider
+  reported live (a newer Gemini flash, say) was registered but never considered
+  — Auto stayed stuck on older catalog entries. Live-discovered models a
+  provider actually serves now compete in Auto ranking for the tiers that route
+  to that provider. Newer **Gemini** models that aren't in the benchmark table
+  yet are scored by their class (a `…-flash` scores like the current flash, a
+  `…-pro` like the current pro) instead of a neutral default, so a better-value
+  new model can win instead of being invisible until the catalog is hand-edited.
+
 ## 0.45.0 - 2026-07-22
 
 ### Changed

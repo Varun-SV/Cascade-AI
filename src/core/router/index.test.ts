@@ -101,3 +101,25 @@ describe('CascadeRouter — Azure deployment trust (probe-independent)', () => {
     expect(router.getAvailableModels().some((m) => m.provider === 'azure')).toBe(false);
   });
 });
+
+describe('CascadeRouter — explicit per-tier pin overrides Cascade Auto', () => {
+  it('uses the pinned model for a pinned tier instead of re-selecting per subtask', async () => {
+    // Reported bug: T3 pinned to a local openai-compatible model in Settings,
+    // but with Cascade Auto ON the per-subtask router re-selected (e.g. Gemini)
+    // and ignored the pin. An explicit pin must always win.
+    const router = new CascadeRouter();
+    const pinned = {
+      id: 'C:\\llama\\models\\gpt-oss-20b-F16.gguf', name: 'GPT-OSS 20B', provider: 'openai-compatible',
+      contextWindow: 32_000, isVisionCapable: false, inputCostPer1kTokens: 0, outputCostPer1kTokens: 0,
+      maxOutputTokens: 4_000, supportsStreaming: true, isLocal: false,
+    };
+    const internals = router as unknown as Record<string, unknown>;
+    internals['config'] = { cascadeAuto: true };
+    internals['tierModels'] = new Map([['T3', pinned]]);
+    internals['explicitTierModels'] = new Set(['T3']);
+
+    const chosen = await router.selectModelForSubtask('T3', 'Design and implement a new image format');
+    expect(chosen?.id).toBe(pinned.id);
+    expect(chosen?.provider).toBe('openai-compatible');
+  });
+});

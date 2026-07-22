@@ -27,6 +27,14 @@ export class ModelSelector {
    * Absent for a provider ⇒ no validation ran ⇒ behave exactly as before.
    */
   private validatedIds = new Map<ProviderType, Set<string>>();
+  /**
+   * Normalized ids that were added via discovery/registration but aren't in the
+   * bundled catalog — i.e. genuinely new models the provider reported (a Gemini
+   * flash released after the catalog was last hand-updated, an Ollama tag, etc.).
+   * getCandidatesForTier lets these compete in AUTO ranking so a newer,
+   * better-value model isn't invisible until someone edits constants.ts.
+   */
+  private discovered = new Set<string>();
 
   constructor(availableProviders: Set<ProviderType>) {
     this.availableProviders = availableProviders;
@@ -35,6 +43,7 @@ export class ModelSelector {
 
   addDynamicModel(model: ModelInfo): void {
     this.availableModels.set(model.id, model);
+    if (!(model.id in MODELS)) this.discovered.add(normalizeModelId(model.id));
   }
 
   /** Record the ids a provider's API actually serves (discovery). Empty ⇒ ignored. */
@@ -158,6 +167,20 @@ export class ModelSelector {
       const model = this.availableModels.get(key);
       if (model && this.isUsable(model)) {
         candidates.push(model);
+      }
+    }
+    // Live-discovered models the provider actually serves but that aren't in the
+    // static priority chain (e.g. a newly released Gemini flash) — include them
+    // for the providers this tier already routes to, so AUTO ranking can pick a
+    // newer, better-value model instead of only ever seeing the bundled catalog.
+    if (this.discovered.size) {
+      const tierProviders = new Set<ProviderType>();
+      for (const key of priority) { const m = MODELS[key]; if (m) tierProviders.add(m.provider); }
+      const have = new Set(candidates.map((c) => c.id));
+      for (const model of this.availableModels.values()) {
+        if (have.has(model.id)) continue;
+        if (!this.discovered.has(normalizeModelId(model.id))) continue;
+        if (tierProviders.has(model.provider) && this.isUsable(model)) candidates.push(model);
       }
     }
     // Local-only tier: when the only available provider is Ollama, widen the

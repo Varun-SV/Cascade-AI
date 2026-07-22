@@ -124,4 +124,15 @@ describe('ModelSelector — provider model validation (discovery)', () => {
     selector.setValidatedModels('gemini', []); // discovery returned nothing → ignore
     expect(selector.selectForTier('T3')).not.toBeNull();
   });
+
+  it('lets a live-discovered non-catalog model compete in AUTO tier candidates', () => {
+    const selector = new ModelSelector(new Set(['gemini']));
+    // Previously invisible to AUTO ranking: getCandidatesForTier only walked the
+    // static priority chain, so a model the provider reported that isn't in the
+    // bundled catalog never got scored. It should now be a candidate for a tier
+    // that routes to its provider.
+    expect(selector.getCandidatesForTier('T3').some((m) => m.id === 'gemini-3.5-flash')).toBe(false);
+    selector.addDynamicModel(geminiModel('gemini-3.5-flash'));
+    expect(selector.getCandidatesForTier('T3').some((m) => m.id === 'gemini-3.5-flash')).toBe(true);
+  });
 });
