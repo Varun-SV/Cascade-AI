@@ -49,7 +49,7 @@ export default function FileViewerModal({ name, mime, content, src, onClose, act
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
       <div
-        className="glass relative flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-elev/10 shadow-2xl"
+        className="glass relative flex max-h-[88dvh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-elev/10 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2 border-b border-elev/10 px-4 py-3">

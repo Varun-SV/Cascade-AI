@@ -127,6 +127,15 @@ html, body, #root {
   height: 100%;
 }
 
+/* The app shell sizes itself with 100dvh and owns its own scroll regions (the
+   message list, modals). Lock the document so mobile browsers can't scroll the
+   *whole* UI when the URL/toolbar chrome makes 100vh taller than the visible
+   viewport — the exact "I have to scroll the page itself on mobile" bug. */
+body {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
 /* Density: Tailwind spacing is rem-based, so scaling the root font-size scales
    spacing AND type together — a genuine, global comfort/compact control with
    no per-component work. Default (comfortable) is the browser 16px. */

@@ -5,6 +5,19 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.44.1 - 2026-07-22
+
+### Fixed
+- **The web app no longer overflows on mobile — the whole page used to scroll.**
+  The app shell was sized with `h-screen` (`100vh`), which on mobile browsers
+  includes the area behind the address/toolbar chrome, so the layout ran taller
+  than the visible viewport and the composer sat below the fold — you had to
+  scroll the entire UI to reach it. The shell now uses **`100dvh`** (dynamic
+  viewport height) and the document itself is locked from scrolling
+  (`overflow: hidden`, no overscroll), so only the message list scrolls and the
+  composer stays pinned in view. Modals/drawers now cap at `dvh` too, so a tall
+  dialog fits the visible screen and scrolls internally. Desktop is unchanged.
+
 ## 0.44.0 - 2026-07-22
 
 ### Added

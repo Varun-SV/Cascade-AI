@@ -226,7 +226,7 @@ export default function SettingsModal({
         ))}
       </div>
 
-      <div className="flex max-h-[60vh] flex-col gap-1 overflow-y-auto p-4 text-sm text-ink-100">
+      <div className="flex max-h-[60dvh] flex-col gap-1 overflow-y-auto p-4 text-sm text-ink-100">
         {tab === 'general' && (
           <>
             {/* Account */}
