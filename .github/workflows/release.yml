@@ -48,10 +48,23 @@ jobs:
         if: steps.check.outputs.exists == 'false'
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
-          # Pull the section between "## [VERSION]" and the next "## [" header.
+          # Pull the section for this version up to the next "## " header.
+          # Accepts both changelog header shapes: the old "## [VERSION]" and the
+          # current "## VERSION - date" (the header must start with the version
+          # at a word boundary, so "0.4" never matches "0.43.0").
           awk -v ver="$VERSION" '
-            index($0, "## [" ver "]") == 1 { flag=1; next }
-            flag && index($0, "## [") == 1 { flag=0 }
+            function isheader(line) { return substr(line, 1, 3) == "## " }
+            {
+              if (isheader($0)) {
+                t = substr($0, 4)          # drop "## "
+                sub(/^\[/, "", t)          # drop an optional leading "["
+                if (substr(t, 1, length(ver)) == ver) {
+                  b = substr(t, length(ver) + 1, 1)   # boundary char after version
+                  if (b == "" || b == "]" || b == " " || b == "\t") { flag = 1; next }
+                }
+                if (flag) flag = 0         # any other header ends the section
+              }
+            }
             flag { print }
           ' CHANGELOG.md > RELEASE_NOTES.md || true
           # Fall back to a stub if the changelog has no matching section.

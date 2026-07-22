@@ -5,6 +5,26 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.43.0 - 2026-07-22
+
+### Fixed
+- **Desktop installers are built again — the release version had drifted from
+  the changelog.** The release workflow keys the desktop build off the root
+  `package.json` version: it publishes a GitHub Release (and the native
+  macOS/Windows/Linux installers) only when that version has no release yet.
+  `package.json` had stalled at **0.20.3** (the last cut release) while this
+  changelog raced ahead to 0.42.1, so several merges — including the desktop
+  **cloud-backed sessions + branch navigation** feature — landed on `main`
+  without ever bumping the release version, and their installers were never
+  produced. Root and `app/package.json` are realigned to the changelog line at
+  **0.43.0**, which cuts a fresh release and rebuilds the desktop app with all
+  the accumulated desktop work packaged in. Going forward, changes that touch
+  the desktop app or CLI must bump the root version so this build actually runs.
+- **Release notes on the GitHub Release are populated again.** The notes
+  extractor only matched the old `## [x.y.z]` changelog header shape; the
+  current entries are written as `## x.y.z - date`, so recent releases fell back
+  to a bare "Release vX" stub. The extractor now accepts both header shapes.
+
 ## 0.42.1 - 2026-07-21
 
 ### Fixed
