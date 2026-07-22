@@ -7,7 +7,7 @@ const baseEnv: CloudEnv = {
   SESSION_SECRET: 'x'.repeat(20),
   DATA_DIR: './data',
   WEB_ORIGIN: 'http://localhost:5173',
-  OAUTH_REDIRECT_BASE_URL: 'https://app.cascadeai.in',
+  OAUTH_REDIRECT_BASE_URL: 'https://cascadeai.in',
   GITHUB_CLIENT_ID: 'gh-client-id',
   GITHUB_CLIENT_SECRET: 'gh-client-secret',
   GOOGLE_CLIENT_ID: 'gg-client-id',
@@ -21,7 +21,7 @@ describe('auth URL builders', () => {
     const url = new URL(githubAuthUrl('state123', baseEnv));
     expect(url.origin + url.pathname).toBe('https://github.com/login/oauth/authorize');
     expect(url.searchParams.get('client_id')).toBe('gh-client-id');
-    expect(url.searchParams.get('redirect_uri')).toBe('https://app.cascadeai.in/auth/github/callback');
+    expect(url.searchParams.get('redirect_uri')).toBe('https://cascadeai.in/auth/github/callback');
     expect(url.searchParams.get('state')).toBe('state123');
   });
 
@@ -29,7 +29,7 @@ describe('auth URL builders', () => {
     const url = new URL(googleAuthUrl('state456', baseEnv));
     expect(url.origin + url.pathname).toBe('https://accounts.google.com/o/oauth2/v2/auth');
     expect(url.searchParams.get('client_id')).toBe('gg-client-id');
-    expect(url.searchParams.get('redirect_uri')).toBe('https://app.cascadeai.in/auth/google/callback');
+    expect(url.searchParams.get('redirect_uri')).toBe('https://cascadeai.in/auth/google/callback');
     expect(url.searchParams.get('state')).toBe('state456');
     expect(url.searchParams.get('response_type')).toBe('code');
   });

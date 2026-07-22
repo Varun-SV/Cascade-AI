@@ -16,7 +16,7 @@ import {
 } from './session-store.js';
 import type { EncryptedBlob } from './keysync-crypto.js';
 
-export const DEFAULT_CLOUD_URL = 'https://app.cascadeai.in';
+export const DEFAULT_CLOUD_URL = 'https://cascadeai.in';
 /** Providers the loopback flow can start (must match the server's `/auth/native/:provider`). */
 export type NativeProvider = 'google' | 'github';
 /** Refresh the access token when it's within this window of expiring. */

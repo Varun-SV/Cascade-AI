@@ -36,7 +36,9 @@ jobs:
         run: |
           mkdir -p _site
           cp index.html _site/index.html
-          echo "cascadeai.in" > _site/CNAME
+          # No CNAME: cascadeai.in is served by the cloud app on Railway, not
+          # Pages. This deploy only publishes the legacy index.html to the
+          # project's github.io URL as an archived copy.
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact

@@ -5,6 +5,36 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.47.0 - 2026-07-22
+
+### Changed
+- **One clean domain: `cascadeai.in`.** The hosted app, its landing page and the
+  docs now all live under a single host — the app at `/`, the docs at `/docs` —
+  with **no `app.` subdomain**. The CLI and desktop default cloud endpoint
+  (`DEFAULT_CLOUD_URL`) now points at `https://cascadeai.in`, so freshly built
+  clients talk to the one host (a local dev server is still targetable via
+  `--server` / `CASCADE_CLOUD_URL` / the `cascade-cloud-url` override). The
+  deploy guide (`cloud/DEPLOY.md`) and domain runbook (`docs/domain-move.md`)
+  now describe the single-host setup, and the GitHub Pages `CNAME` is dropped so
+  Pages no longer claims the apex.
+
+## 0.46.4 - 2026-07-22
+
+### Added
+- **A real landing page** is now the logged-out home of the web app (replacing
+  the bare sign-in card), so the apex `cascadeai.in` has a proper homepage:
+  hero ("Agents that cascade"), the three-tier explainer, a feature grid, and
+  sign-in (GitHub/Google) plus "Download desktop app" and "Docs" CTAs — all from
+  the existing brand (cascade gradient + three-bar mark).
+- **Public docs at `/docs`.** The cloud server now serves a self-contained,
+  brand-styled documentation page (What is Cascade, quick start, providers &
+  keys, tier routing, file exports, privacy) at `/docs`, registered ahead of the
+  SPA catch-all. The page is hand-written user-facing content — the repo's
+  `docs/*.md` are internal design specs and are deliberately not served publicly.
+- **Domain-move runbook** (`docs/domain-move.md`) — the DNS / Railway /
+  OAuth-console / env steps to bring `cascadeai.in` up as the single host. The
+  app side is in place; the rest is config the account owner runs.
+
 ## 0.46.3 - 2026-07-22
 
 ### Added

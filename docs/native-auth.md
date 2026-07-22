@@ -112,7 +112,7 @@ Token-paste remains the fallback for servers without OAuth.
 2. **CLI** — `login` / `logout` / `whoami` / `sessions` (+ `sessions show <id>`).
    Device flow; access + rotating refresh token stored at
    `~/.cascade-ai/cloud-session.json` (0600). Server URL via `--server` /
-   `CASCADE_CLOUD_URL` (default `app.cascadeai.in`). ✅ implemented.
+   `CASCADE_CLOUD_URL` (default `cascadeai.in`). ✅ implemented.
    *Follow-up (2b): resume a pulled cloud chat live in the REPL.*
 3. **Desktop** — sign-in (loopback flow) + browse/continue cloud chats. ✅
    implemented. The Electron **main process** runs the loopback dance via the

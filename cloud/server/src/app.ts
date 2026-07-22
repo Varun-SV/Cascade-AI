@@ -23,6 +23,7 @@ import { NativeAuthStore, isLoopbackRedirect, hashRefreshToken } from './native-
 import { githubAuthUrl, exchangeGithubCode, googleAuthUrl, exchangeGoogleCode, type OAuthProfile } from './auth/oauth.js';
 import { limitsForPlan, todayKey, checkStorageQuota } from './entitlements.js';
 import { skillCatalog } from './skills.js';
+import { renderDocsPage } from './docs.js';
 import { tenantScratchDir } from './paths.js';
 import {
   billingConfig, makeRazorpay, createSubscription, cancelSubscription,
@@ -1117,6 +1118,16 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     const convo = store.importConversation(req.session!.userId, parsed.title, parsed.skillId, parsed.messages);
     res.json({ conversation: { id: convo.id, title: convo.title, skillId: convo.skillId } });
   });
+
+  // ── Public docs site (cascadeai.in/docs) ─────
+  // Registered before the SPA catch-all so /docs serves the documentation page
+  // rather than the app shell. Self-contained HTML; safe to cache briefly.
+  app.get(['/docs', '/docs/'], (_req, res) => {
+    res.set('Cache-Control', 'public, max-age=300');
+    res.type('html').send(renderDocsPage());
+  });
+  // Any deeper /docs/* path (there are no sub-pages yet) redirects to the index.
+  app.get('/docs/*', (_req, res) => res.redirect(302, '/docs'));
 
   // ── Serve the built SPA ──────────────────────
   // In dev, cloud/web runs its own Vite server (proxying /api, /auth,
