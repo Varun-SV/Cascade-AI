@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { GeminiProvider } from './gemini.js';
 import type { ModelInfo } from '../types.js';
 
@@ -76,4 +76,29 @@ describe('GeminiProvider — part extraction', () => {
     const result = await provider.generateStream({ messages: [{ role: 'user', content: 'hi' }] }, () => {});
     expect(result.content).toBe('');
   });
+});
+
+describe('GeminiProvider — model listing filters out non-text models', () => {
+  it('listModels drops TTS/embedding models the API returns', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        models: [
+          { name: 'models/gemini-2.5-flash', displayName: 'Gemini 2.5 Flash', inputTokenLimit: 1000000, outputTokenLimit: 8192, supportedGenerationMethods: ['generateContent'] },
+          { name: 'models/gemini-2.5-pro-preview-tts', displayName: 'Gemini 2.5 Pro TTS', inputTokenLimit: 8000, outputTokenLimit: 16000, supportedGenerationMethods: ['countTokens', 'generateContent'] },
+          { name: 'models/text-embedding-004', displayName: 'Text Embedding 004', inputTokenLimit: 2048, outputTokenLimit: 1, supportedGenerationMethods: ['embedContent'] },
+        ],
+      }),
+    })) as unknown as typeof fetch;
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider = new GeminiProvider({ type: 'gemini', apiKey: 'test' }, MODEL);
+    const models = await provider.listModels();
+    const ids = models.map((m) => m.id);
+    expect(ids).toContain('gemini-2.5-flash');
+    expect(ids).not.toContain('gemini-2.5-pro-preview-tts');
+    expect(ids).not.toContain('text-embedding-004');
+  });
+
+  afterEach(() => vi.unstubAllGlobals());
 });

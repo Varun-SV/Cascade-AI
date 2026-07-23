@@ -14,6 +14,7 @@ import type {
 } from '../types.js';
 import { MODELS } from '../constants.js';
 import { BaseProvider } from './base.js';
+import { isChatModel } from './model-filter.js';
 
 /**
  * Reasoning-family models (o1/o3/o4, gpt-5*) reject the classic `max_tokens`
@@ -190,7 +191,7 @@ export class OpenAIProvider extends BaseProvider {
   async listModels(): Promise<ModelInfo[]> {
     try {
       const response = await this.client.models.list();
-      return response.data.map((m) => {
+      return response.data.filter((m) => isChatModel(m.id)).map((m) => {
         const known = Object.values(MODELS).find((km) => km.id === m.id && km.provider === 'openai');
         if (known) return known;
 

@@ -5,6 +5,7 @@
 import OpenAI from 'openai';
 import type { ModelInfo, ProviderConfig } from '../types.js';
 import { OpenAIProvider } from './openai.js';
+import { isChatModel } from './model-filter.js';
 import { preferIpv4Host, nodeHttpFetch } from '../utils/net.js';
 
 export class OpenAICompatibleProvider extends OpenAIProvider {
@@ -55,7 +56,11 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
       })
       .filter((x): x is string => typeof x === 'string' && x.length > 0);
     if (ids.length === 0) return [this.model];
-    return ids.map((id) => ({
+    // Drop obvious non-chat models (embedders, TTS, …). But don't wipe a custom
+    // endpoint's list to empty if everything got filtered — fall back to the raw
+    // ids so an unusually-named single-model server still works.
+    const chatIds = ids.filter((id) => isChatModel(id));
+    return (chatIds.length ? chatIds : ids).map((id) => ({
       id,
       name: id,
       provider: 'openai-compatible' as const,

@@ -14,6 +14,7 @@ import type {
 import { OLLAMA_BASE_URL } from '../constants.js';
 import { preferIpv4Host } from '../utils/net.js';
 import { BaseProvider } from './base.js';
+import { isChatModel } from './model-filter.js';
 
 // ── Ollama API types ───────────────────────────
 
@@ -229,10 +230,12 @@ export class OllamaProvider extends BaseProvider {
       const response = await fetch(`${this.baseUrl}/api/tags`);
       if (!response.ok) return [];
       const data = await response.json() as { models: OllamaModelEntry[] };
-      const supportedKeywords = ['llama3', 'llama2', 'gemma', 'mistral', 'mixtral', 'qwen', 'phi3', 'codellama', 'deepseek', 'llava', 'starcoder', 'stable-code', 'nomic-embed'];
+      const supportedKeywords = ['llama3', 'llama2', 'gemma', 'mistral', 'mixtral', 'qwen', 'phi3', 'codellama', 'deepseek', 'llava', 'starcoder', 'stable-code'];
       const entries = data.models.filter((m) => {
         const name = m.name.toLowerCase();
-        return supportedKeywords.some((k) => name.includes(k));
+        // Family allowlist AND not a non-chat model (drops embedders like
+        // nomic-embed-text that would otherwise slip through on a family match).
+        return supportedKeywords.some((k) => name.includes(k)) && isChatModel(name);
       });
       // Capability lookups run concurrently against the local server (cheap);
       // any that fail fall back to the family-name heuristics.

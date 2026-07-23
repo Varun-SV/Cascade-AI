@@ -22,6 +22,7 @@ import type {
 } from '../types.js';
 import { MODELS } from '../constants.js';
 import { BaseProvider } from './base.js';
+import { isChatModel } from './model-filter.js';
 
 export class GeminiProvider extends BaseProvider {
   private client: GoogleGenAI;
@@ -145,13 +146,16 @@ export class GeminiProvider extends BaseProvider {
           displayName: string;
           inputTokenLimit: number;
           outputTokenLimit: number;
+          supportedGenerationMethods?: string[];
         }>;
       };
       if (!Array.isArray(data?.models)) {
         return Object.values(MODELS).filter((m) => m.provider === 'gemini');
       }
 
-      return data.models.map((m) => {
+      return data.models
+        .filter((m) => isChatModel(m.name.replace('models/', ''), m.supportedGenerationMethods))
+        .map((m) => {
         const id = m.name.replace('models/', '');
         const known = Object.values(MODELS).find(
           (km) => km.id === id && km.provider === 'gemini',
