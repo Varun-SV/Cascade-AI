@@ -71,9 +71,18 @@ cookie, so every existing authed route serves native clients unchanged.
 | `POST /api/native/refresh` | refresh token | Rotate → fresh tokens |
 | `POST /api/native/logout` | refresh token | Revoke the presented refresh token |
 
-Ephemeral artifacts (pending loopback state, one-time codes, device codes) live
-in an in-memory, self-expiring store (like `handoff.ts`). Refresh tokens persist
-in SQLite, hashed.
+Ephemeral artifacts live in a self-expiring store, swept on access. The two
+**loopback** artifacts — the pending `state` and the one-time code — are also
+written through to SQLite (`native_auth_flows`), because they must outlive a
+process restart: a redeploy between the browser finishing OAuth and the desktop
+app redeeming its code otherwise strands the user on an `invalid_grant`. Memory
+stays the fast path and the durable copy is the fallback; both are deleted on
+consumption, and `takeAuthFlow` reads-and-deletes in one transaction so a code
+can never be redeemed twice.
+
+**Device codes are still memory-only** — unlike the loopback pair, their records
+mutate in place (approval, poll throttling), so a `cascade login` interrupted by
+a restart must be retried. Refresh tokens persist in SQLite, hashed.
 
 ## Security
 

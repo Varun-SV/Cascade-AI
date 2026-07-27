@@ -244,7 +244,8 @@ export function createApp(env: CloudEnv, store: CloudStore) {
   // — never against Google/GitHub directly — so no OAuth secret ships in a
   // native app. Loopback flow for the desktop, device-code flow for the CLI.
   // See docs/native-auth.md.
-  const nativeStore = new NativeAuthStore();
+  // Backed by the DB so an in-flight sign-in survives a restart/redeploy.
+  const nativeStore = new NativeAuthStore(() => Date.now(), store);
   const NATIVE_REFRESH_TTL_MS = 60 * 24 * 60 * 60 * 1000; // 60 days
 
   function issueNativeTokens(userId: string) {

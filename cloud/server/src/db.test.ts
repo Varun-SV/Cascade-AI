@@ -452,3 +452,53 @@ describe('CloudStore — branching back-fill migration', () => {
     }
   });
 });
+
+describe('CloudStore — native auth flow artifacts (real SQLite)', () => {
+  let dir: string;
+  let store: CloudStore;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-authflow-'));
+    store = new CloudStore(path.join(dir, 'test.db'));
+  });
+  afterEach(async () => {
+    store.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('round-trips an artifact and survives reopening the database', () => {
+    store.saveAuthFlow('code', 'k1', '{"userId":"u1"}', Date.now() + 60_000);
+    store.close();
+    // A new process against the same file — the redeploy case.
+    store = new CloudStore(path.join(dir, 'test.db'));
+    expect(store.takeAuthFlow('code', 'k1')).toBe('{"userId":"u1"}');
+  });
+
+  it('take is single-use', () => {
+    store.saveAuthFlow('code', 'k2', 'payload', Date.now() + 60_000);
+    expect(store.takeAuthFlow('code', 'k2')).toBe('payload');
+    expect(store.takeAuthFlow('code', 'k2')).toBeNull();
+  });
+
+  it('refuses an expired artifact and still removes it', () => {
+    store.saveAuthFlow('code', 'k3', 'stale', Date.now() - 1);
+    expect(store.takeAuthFlow('code', 'k3')).toBeNull();
+    expect(store.takeAuthFlow('code', 'k3')).toBeNull();
+  });
+
+  it('keeps the two kinds in separate namespaces', () => {
+    store.saveAuthFlow('code', 'same', 'from-code', Date.now() + 60_000);
+    store.saveAuthFlow('pending', 'same', 'from-pending', Date.now() + 60_000);
+    expect(store.takeAuthFlow('pending', 'same')).toBe('from-pending');
+    // Taking one kind leaves the other intact.
+    expect(store.takeAuthFlow('code', 'same')).toBe('from-code');
+  });
+
+  it('sweeps only what has expired', () => {
+    store.saveAuthFlow('code', 'old', 'x', Date.now() - 1000);
+    store.saveAuthFlow('code', 'new', 'y', Date.now() + 60_000);
+    store.sweepAuthFlows(Date.now());
+    expect(store.takeAuthFlow('code', 'old')).toBeNull();
+    expect(store.takeAuthFlow('code', 'new')).toBe('y');
+  });
+});
