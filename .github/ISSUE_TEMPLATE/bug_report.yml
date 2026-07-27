@@ -1,0 +1,59 @@
+name: Bug report
+description: Something isn't working the way it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Please redact any API keys** from logs you paste.
+        Security issue? Report it privately instead: https://github.com/Varun-SV/Cascade-AI/security/advisories/new
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run `cascade "..."`
+        2. ...
+        3. See error
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where did this happen?
+      options: [CLI, Desktop app, Web (cascadeai.in), SDK]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Cascade version
+      placeholder: "0.48.0 (`cascade --version`, or Settings → About)"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: "macOS 15.3 / Windows 11 / Ubuntu 24.04"
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Provider & tier setup
+      description: Which providers are configured, and what each tier is set to (Auto or a pinned model).
+      placeholder: "T1 Auto, T2 Auto, T3 pinned to a local llama.cpp model; keys for OpenAI + Gemini"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / error output
+      description: Keys redacted, please.
+      render: shell

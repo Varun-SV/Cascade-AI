@@ -5,7 +5,7 @@
 
 [![npm](https://img.shields.io/npm/v/cascade-ai?color=aaff00&label=npm)](https://www.npmjs.com/package/cascade-ai)
 [![license](https://img.shields.io/badge/license-MIT-aaff00.svg)](LICENSE)
-[![node](https://img.shields.io/badge/node-%E2%89%A520-5AB4E8.svg)](#installation)
+[![node](https://img.shields.io/badge/node-%E2%89%A522-5AB4E8.svg)](#installation)
 [![providers](https://img.shields.io/badge/providers-6-a78bff.svg)](#ai-providers)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-f5a623.svg)](CONTRIBUTING.md)
 
@@ -227,7 +227,7 @@ User prompt
 npm install -g cascade-ai
 ```
 
-> Requires **Node.js ≥ 20**.
+> Requires **Node.js ≥ 22**.
 
 ---
 
@@ -797,7 +797,7 @@ web/
 
 | Tool | Required Version |
 |------|-----------------|
-| Node.js | ≥ 20.x |
+| Node.js | ≥ 22.x |
 | npm | ≥ 10.x |
 
 ### Setup

@@ -5,6 +5,25 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.48.1 - 2026-07-23
+
+### Fixed
+- **Node version requirement now says the same thing everywhere.** The README
+  (badge, install note, requirements table) advertised Node ≥ 20 while
+  `package.json` `engines` requires ≥ 22 — new contributors hit a failed install
+  after following the README. All now say **≥ 22**.
+
+### Added
+- **`SECURITY.md`** — private disclosure policy: how to report a vulnerability
+  (GitHub private advisories, never a public issue), response targets, what's in
+  and out of scope, and supported versions.
+- **`CONTRIBUTING.md`** — setup, the monorepo layout, the verify-before-push
+  checklist, and when a change needs a version bump (SDK/CLI/desktop yes,
+  cloud-only no).
+- **Issue and pull-request templates** plus **`CODEOWNERS`** — structured bug
+  reports (surface, version, provider/tier setup) and feature requests, with
+  security reports routed to the private advisory form.
+
 ## 0.48.0 - 2026-07-22
 
 ### Fixed
