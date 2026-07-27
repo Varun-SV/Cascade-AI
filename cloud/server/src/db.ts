@@ -352,6 +352,21 @@ export class CloudStore {
 
       CREATE INDEX IF NOT EXISTS idx_refresh_user ON native_refresh_tokens(user_id);
 
+      -- In-flight native sign-in artifacts (the loopback state and the one-time
+      -- code). Short-lived and create-once/consume-once, but they must outlive a
+      -- process restart: a redeploy between the browser finishing OAuth and the
+      -- desktop app redeeming its code used to drop them, failing sign-in with
+      -- an invalid_grant. Rows are deleted on consumption and swept when expired.
+      CREATE TABLE IF NOT EXISTS native_auth_flows (
+        kind TEXT NOT NULL,
+        key TEXT NOT NULL,
+        data TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        PRIMARY KEY (kind, key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_native_flows_expiry ON native_auth_flows(expires_at);
+
       -- Key sync: one end-to-end-encrypted settings envelope per user. The blob
       -- is opaque ciphertext ({ciphertext,salt,iv} base64) encrypted on the
       -- user's device with a passphrase we never see; the server is a relay and
@@ -1078,6 +1093,36 @@ export class CloudStore {
       size: row.size,
       createdAt: row.created_at,
     };
+  }
+
+  // ── In-flight native sign-in artifacts ──
+  // Backs NativeAuthPersistence so a redeploy mid-sign-in doesn't strand the
+  // user. Both artifact kinds are create-once/consume-once, so `take` is a
+  // read-and-delete in one transaction (a code can never be redeemed twice,
+  // even with two requests racing).
+
+  saveAuthFlow(kind: string, key: string, data: string, expiresAt: number): void {
+    this.db
+      .prepare('INSERT OR REPLACE INTO native_auth_flows (kind, key, data, expires_at) VALUES (?, ?, ?, ?)')
+      .run(kind, key, data, expiresAt);
+  }
+
+  /** Atomically read + delete an artifact. Null when unknown or expired. */
+  takeAuthFlow(kind: string, key: string): string | null {
+    const take = this.db.transaction((k: string, key2: string): string | null => {
+      const row = this.db
+        .prepare('SELECT data, expires_at FROM native_auth_flows WHERE kind = ? AND key = ?')
+        .get(k, key2) as { data: string; expires_at: number } | undefined;
+      this.db.prepare('DELETE FROM native_auth_flows WHERE kind = ? AND key = ?').run(k, key2);
+      if (!row || row.expires_at <= Date.now()) return null;
+      return row.data;
+    });
+    return take(kind, key);
+  }
+
+  /** Drop everything past its TTL (called opportunistically, not on a timer). */
+  sweepAuthFlows(now: number): void {
+    this.db.prepare('DELETE FROM native_auth_flows WHERE expires_at <= ?').run(now);
   }
 
   // ── Native refresh tokens (desktop/CLI) ──

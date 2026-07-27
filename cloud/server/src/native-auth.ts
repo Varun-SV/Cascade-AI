@@ -79,8 +79,32 @@ export type DevicePoll =
   | { status: 'approved'; userId: string };
 
 /**
- * In-memory registry of in-flight native-auth artifacts. Single-process (like
- * handoff.ts); everything self-expires and is swept on access.
+ * Durable backing for the two loopback artifacts. Both are
+ * create-once/consume-once, so `take` must read and delete atomically — a code
+ * can never be redeemed twice, even if two requests race.
+ */
+export interface NativeAuthPersistence {
+  saveAuthFlow(kind: string, key: string, data: string, expiresAt: number): void;
+  takeAuthFlow(kind: string, key: string): string | null;
+  sweepAuthFlows(now: number): void;
+}
+
+/**
+ * Registry of in-flight native-auth artifacts. Everything self-expires and is
+ * swept on access.
+ *
+ * The loopback artifacts (`state` and the one-time code) are additionally
+ * written through to `persistence` when one is supplied, because they have to
+ * survive a process restart: a redeploy between the browser finishing OAuth and
+ * the desktop app redeeming its code used to strand the user on an
+ * `invalid_grant`. Memory stays the fast path; the store falls back to the
+ * durable copy on a miss. Without a `persistence` (unit tests) the behaviour is
+ * exactly as before — purely in-memory.
+ *
+ * The device flow is deliberately NOT persisted yet: unlike the loopback pair
+ * its records mutate in place (approval, poll throttling), so it needs more
+ * than create/consume semantics. A CLI `cascade login` interrupted by a
+ * redeploy still has to be restarted.
  */
 export class NativeAuthStore {
   private pending = new Map<string, PendingLoopback>();
@@ -88,36 +112,58 @@ export class NativeAuthStore {
   private devices = new Map<string, DeviceRecord>();
   private userCodeIndex = new Map<string, string>(); // normalized user_code → device_code
 
-  constructor(private now: () => number = () => Date.now()) {}
+  constructor(
+    private now: () => number = () => Date.now(),
+    private persistence?: NativeAuthPersistence,
+  ) {}
 
   // ── Loopback ──
   createPendingLoopback(state: string, data: { challenge: string; redirect: string; appState: string }): void {
     this.sweep();
-    this.pending.set(state, { ...data, expiresAt: this.now() + PENDING_LOOPBACK_TTL_MS });
+    const rec = { ...data, expiresAt: this.now() + PENDING_LOOPBACK_TTL_MS };
+    this.pending.set(state, rec);
+    this.persist('pending', state, rec);
   }
 
   consumePendingLoopback(state: string): PendingLoopback | null {
-    const rec = this.pending.get(state);
-    if (!rec) return null;
+    const rec = this.pending.get(state) ?? this.restore<PendingLoopback>('pending', state);
     this.pending.delete(state);
+    this.persistence?.takeAuthFlow('pending', state);
+    if (!rec) return null;
     return rec.expiresAt > this.now() ? rec : null;
   }
 
   createLoopbackCode(data: { userId: string; challenge: string; redirect: string }): string {
     this.sweep();
     const code = opaqueToken();
-    this.codes.set(code, { ...data, expiresAt: this.now() + LOOPBACK_CODE_TTL_MS });
+    const rec = { ...data, expiresAt: this.now() + LOOPBACK_CODE_TTL_MS };
+    this.codes.set(code, rec);
+    this.persist('code', code, rec);
     return code;
   }
 
   /** Redeem a one-time loopback code with its PKCE verifier. Single-use. */
   consumeLoopbackCode(code: string, verifier: string): { userId: string } | null {
-    const rec = this.codes.get(code);
+    // One-time: drop both copies up front, whatever the outcome.
+    const rec = this.codes.get(code) ?? this.restore<LoopbackCode>('code', code);
+    this.codes.delete(code);
+    this.persistence?.takeAuthFlow('code', code);
     if (!rec) return null;
-    this.codes.delete(code); // one-time — remove regardless of outcome
     if (rec.expiresAt <= this.now()) return null;
     if (!verifyPkce(verifier, rec.challenge)) return null;
     return { userId: rec.userId };
+  }
+
+  private persist(kind: 'pending' | 'code', key: string, rec: { expiresAt: number }): void {
+    // Never let a storage hiccup break a sign-in that memory can still serve.
+    try { this.persistence?.saveAuthFlow(kind, key, JSON.stringify(rec), rec.expiresAt); } catch { /* best effort */ }
+  }
+
+  private restore<T>(kind: 'pending' | 'code', key: string): T | null {
+    try {
+      const raw = this.persistence?.takeAuthFlow(kind, key);
+      return raw ? (JSON.parse(raw) as T) : null;
+    } catch { return null; }
   }
 
   // ── Device ──
@@ -158,6 +204,7 @@ export class NativeAuthStore {
 
   private sweep(): void {
     const t = this.now();
+    try { this.persistence?.sweepAuthFlows(t); } catch { /* best effort */ }
     for (const [k, v] of this.pending) if (v.expiresAt <= t) this.pending.delete(k);
     for (const [k, v] of this.codes) if (v.expiresAt <= t) this.codes.delete(k);
     for (const [k, v] of this.devices) {

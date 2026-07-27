@@ -5,6 +5,21 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.48.2 - 2026-07-27
+
+### Fixed
+- **Desktop sign-in now survives a server redeploy.** The one-time loopback code
+  (and the pending sign-in state) were held only in the server's memory, so a
+  restart in the seconds between the browser finishing OAuth and the app
+  redeeming its code threw the code away — the app failed with `invalid_grant`
+  through no fault of the user, which is exactly what a deploy-on-merge cadence
+  produces. Both artifacts are now written through to SQLite and restored on a
+  miss, so an in-flight sign-in completes across a restart. They remain strictly
+  single-use: the read-and-delete happens in one transaction, so a code can't be
+  redeemed twice even if two requests race, and PKCE verification and expiry are
+  unchanged. (Device-flow codes for the CLI are still memory-only — their records
+  mutate in place, so that flow needs more than create/consume semantics.)
+
 ## 0.48.1 - 2026-07-27
 
 ### Fixed
