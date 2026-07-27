@@ -6,11 +6,11 @@
 # so merging it does NOT trigger the release workflow.
 name: Refresh benchmark snapshot
 
+# Manual only. The weekly refresh is driven by a Claude scheduled task, which
+# researches and normalizes sources that each benchmark differently — judgement
+# a fixed script can't apply. This stays as an on-demand way to re-run the
+# aggregator over whatever is already in scripts/benchmarks/sources/.
 on:
-  schedule:
-    # Tuesdays 05:00 IST — which is Monday 23:30 UTC (IST = UTC+5:30), so the
-    # PR is waiting for review first thing Tuesday morning.
-    - cron: "30 23 * * 1"
   workflow_dispatch: {}
 
 permissions:
@@ -25,42 +25,21 @@ jobs:
   refresh:
     runs-on: ubuntu-latest
     steps:
-      # cron has no "start on this date" — it just recurs. This gate holds the
-      # first scheduled run until START_DATE so the schedule can be committed
-      # ahead of time. A manual `workflow_dispatch` always runs, so the pipeline
-      # stays testable before then. Remove the gate once it's in steady state.
-      - name: Hold until the scheduled start date
-        id: gate
-        env:
-          START_DATE: "2026-08-03"
-        run: |
-          TODAY=$(date -u +%F)
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "$TODAY" \< "$START_DATE" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Scheduled runs begin $START_DATE (today is $TODAY) — skipping."
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Checkout
-        if: steps.gate.outputs.skip == 'false'
         uses: actions/checkout@v4
 
       - name: Setup Node
-        if: steps.gate.outputs.skip == 'false'
         uses: actions/setup-node@v4
         with:
           node-version: "22"
 
       - name: Refresh snapshot
-        if: steps.gate.outputs.skip == 'false'
         env:
           # Optional: set as a repo variable to merge an external quality source.
           BENCHMARK_SOURCE_URL: ${{ vars.BENCHMARK_SOURCE_URL }}
         run: node scripts/refresh-benchmarks.mjs
 
       - name: Detect changes
-        if: steps.gate.outputs.skip == 'false'
         id: diff
         run: |
           if git diff --quiet -- src/core/router/benchmark-data.json; then
@@ -71,7 +50,7 @@ jobs:
           fi
 
       - name: Open pull request
-        if: steps.gate.outputs.skip == 'false' && steps.diff.outputs.changed == 'true'
+        if: steps.diff.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
