@@ -189,12 +189,23 @@ export class CloudClient {
       );
       await openUrl(authorizeUrl);
       const code = await listener.waitForCode;
-      const res = await fetch(this.url('/api/native/token'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code, code_verifier: verifier }),
-      });
-      if (!res.ok) throw new Error('Sign-in could not be completed. Please try again.');
+      let res: Response;
+      try {
+        res = await fetch(this.url('/api/native/token'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code, code_verifier: verifier }),
+        });
+      } catch (err) {
+        // The browser half already succeeded, so a failure here is the app not
+        // reaching the server at all (offline, DNS, wrong --server).
+        throw new Error(
+          `Signed in, but could not reach Cascade at ${this.serverUrl} to finish. `
+          + `Check your connection and that the server URL is correct. `
+          + `(${err instanceof Error ? err.message : String(err)})`,
+        );
+      }
+      if (!res.ok) throw new Error(await loginFailureMessage(res, this.serverUrl));
       const tokens = (await res.json()) as TokenResponse;
       return await this.finishLogin(tokens);
     } finally {
@@ -384,6 +395,32 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     const t = setTimeout(resolve, ms);
     signal?.addEventListener('abort', () => { clearTimeout(t); reject(new Error('aborted')); }, { once: true });
   });
+}
+
+/**
+ * Turn a failed loopback token exchange into something the user can act on.
+ * The browser half of the flow already succeeded by this point, so the generic
+ * "please try again" hid the two failures that actually happen: the one-time
+ * code no longer being redeemable (the server issues them in memory, so a
+ * deploy/restart mid-sign-in drops them), and the request not reaching the
+ * Cascade API at all (a stale DNS record or wrong --server serving something
+ * else, where the body is HTML rather than our JSON error).
+ */
+export async function loginFailureMessage(res: Response, serverUrl: string): Promise<string> {
+  const body = await res.text().catch(() => '');
+  let apiError = '';
+  try { apiError = String((JSON.parse(body) as { error?: unknown }).error ?? ''); } catch { /* not our JSON */ }
+
+  if (apiError === 'invalid_grant') {
+    return 'Sign-in expired before it completed — the code is single-use and short-lived, '
+      + 'and restarting the server during sign-in also invalidates it. Please try again.';
+  }
+  if (apiError) return `Sign-in failed: ${apiError} (HTTP ${res.status}).`;
+  if (res.status === 404 || /<html/i.test(body)) {
+    return `Signed in, but ${serverUrl} did not answer the Cascade API (HTTP ${res.status}). `
+      + 'If this host was recently pointed at a new server, DNS may still be propagating.';
+  }
+  return `Sign-in could not be completed (HTTP ${res.status}). Please try again.`;
 }
 
 // ── PKCE (RFC 7636, S256) ───────────────────────

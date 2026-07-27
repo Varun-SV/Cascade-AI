@@ -8,7 +8,9 @@ name: Refresh benchmark snapshot
 
 on:
   schedule:
-    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+    # Tuesdays 05:00 IST — which is Monday 23:30 UTC (IST = UTC+5:30), so the
+    # PR is waiting for review first thing Tuesday morning.
+    - cron: "30 23 * * 1"
   workflow_dispatch: {}
 
 permissions:
