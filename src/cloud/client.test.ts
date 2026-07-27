@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { CloudClient } from './client.js';
+import { CloudClient, loginFailureMessage } from './client.js';
 import { loadCloudSession } from './session-store.js';
 
 // A minimal stub of the cloud native-auth + read API. The device grant returns
@@ -197,5 +197,36 @@ describe('CloudClient', () => {
     await client.logout();
     expect(loadCloudSession(dir)).toBeNull();
     expect(CloudClient.fromSession(dir)).toBeNull();
+  });
+});
+
+describe('loginFailureMessage — diagnosable loopback sign-in failures', () => {
+  it('explains an expired/consumed one-time code (the server restart case)', async () => {
+    const res = new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 });
+    const msg = await loginFailureMessage(res, 'https://cascadeai.in');
+    expect(msg).toMatch(/expired/i);
+    expect(msg).toMatch(/try again/i);
+    // Doesn't leak the raw API code as the whole message.
+    expect(msg).not.toBe('invalid_grant');
+  });
+
+  it('flags a host that answered but is not the Cascade API (stale DNS)', async () => {
+    const res = new Response('<html><body>404 not found</body></html>', { status: 404 });
+    const msg = await loginFailureMessage(res, 'https://cascadeai.in');
+    expect(msg).toContain('https://cascadeai.in');
+    expect(msg).toMatch(/DNS/i);
+  });
+
+  it('surfaces any other API error code with its status', async () => {
+    const res = new Response(JSON.stringify({ error: 'server_error' }), { status: 500 });
+    const msg = await loginFailureMessage(res, 'https://cascadeai.in');
+    expect(msg).toContain('server_error');
+    expect(msg).toContain('500');
+  });
+
+  it('falls back to a plain message for an unrecognised failure', async () => {
+    const res = new Response('', { status: 502 });
+    const msg = await loginFailureMessage(res, 'https://cascadeai.in');
+    expect(msg).toContain('502');
   });
 });

@@ -5,6 +5,39 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.48.1 - 2026-07-27
+
+### Fixed
+- **Desktop sign-in now says what actually went wrong.** Signing in could leave
+  the app on "Sign-in could not be completed. Please try again." while the
+  browser showed success — because the browser half *had* succeeded and the
+  failure was the app's follow-up code exchange, whose real error was thrown
+  away. The message now distinguishes the cases that actually occur: the
+  one-time code no longer being redeemable (it's single-use and short-lived, and
+  a server restart mid-sign-in drops it, since codes are held in memory), the
+  host answering but not as the Cascade API (a stale DNS record after a domain
+  move), and being unable to reach the server at all.
+- **Node version requirement now says the same thing everywhere.** The README
+  (badge, install note, requirements table) advertised Node ≥ 20 while
+  `package.json` `engines` requires ≥ 22 — new contributors hit a failed install
+  after following the README. All now say **≥ 22**.
+
+### Changed
+- **The weekly benchmark refresh now runs Tuesday mornings** (05:00 IST) instead
+  of Monday, so the PR is waiting for review at the start of the week. It still
+  opens a PR only when the aggregated data actually changed.
+
+### Added
+- **`SECURITY.md`** — private disclosure policy: how to report a vulnerability
+  (GitHub private advisories, never a public issue), response targets, what's in
+  and out of scope, and supported versions.
+- **`CONTRIBUTING.md`** — setup, the monorepo layout, the verify-before-push
+  checklist, and when a change needs a version bump (SDK/CLI/desktop yes,
+  cloud-only no).
+- **Issue and pull-request templates** plus **`CODEOWNERS`** — structured bug
+  reports (surface, version, provider/tier setup) and feature requests, with
+  security reports routed to the private advisory form.
+
 ## 0.48.0 - 2026-07-22
 
 ### Fixed
