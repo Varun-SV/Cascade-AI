@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## 0.48.2 - 2026-07-27
 
+### Changed
+- **The weekly benchmark refresh holds its first scheduled run until 3 Aug
+  2026.** cron only recurs — it has no start date — so the schedule can now be
+  committed ahead of time without firing early. A manual run
+  (`workflow_dispatch`) always executes, so the pipeline stays testable in the
+  meantime.
+
 ### Fixed
 - **Desktop sign-in now survives a server redeploy.** The one-time loopback code
   (and the pending sign-in state) were held only in the server's memory, so a
