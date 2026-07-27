@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## 0.48.2 - 2026-07-27
 
+### Changed
+- **The weekly benchmark refresh is now driven by a scheduled Claude task, not
+  a cron workflow** (first run 3 Aug 2026, then weekly). Public leaderboards
+  each measure differently, so the refresh needs to research sources, normalize
+  *within* each one, and judge what's comparable — which a fixed script can't
+  do. It will cover every modality Cascade plans to orchestrate (text, vision,
+  image/video/audio generation, embeddings) and open a PR for review. The
+  GitHub workflow remains as a manual (`workflow_dispatch`) way to re-run the
+  aggregator over the checked-in sources.
+
 ### Fixed
 - **Desktop sign-in now survives a server redeploy.** The one-time loopback code
   (and the pending sign-in state) were held only in the server's memory, so a

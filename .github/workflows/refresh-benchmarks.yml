@@ -6,11 +6,11 @@
 # so merging it does NOT trigger the release workflow.
 name: Refresh benchmark snapshot
 
+# Manual only. The weekly refresh is driven by a Claude scheduled task, which
+# researches and normalizes sources that each benchmark differently — judgement
+# a fixed script can't apply. This stays as an on-demand way to re-run the
+# aggregator over whatever is already in scripts/benchmarks/sources/.
 on:
-  schedule:
-    # Tuesdays 05:00 IST — which is Monday 23:30 UTC (IST = UTC+5:30), so the
-    # PR is waiting for review first thing Tuesday morning.
-    - cron: "30 23 * * 1"
   workflow_dispatch: {}
 
 permissions:
