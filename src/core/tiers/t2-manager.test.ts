@@ -332,6 +332,37 @@ describe('T2Manager', () => {
       expect(result.userSkipped).toBe(true);
     });
 
+    it('does NOT set userSkipped when the skip was automatic — nobody actually reviewed it', async () => {
+      // Same escalating section as above, but the callback returns the shape
+      // Cascade's own SDK produces when nobody is listening (autonomy: 'auto',
+      // no listener, an aborted run) — see EscalationDecision.automatic. T1's
+      // reviewer must still be free to correct this section since no human
+      // ever saw it.
+      const router = {
+        generate: vi.fn(async (_tier, options) => {
+          const latest = options.messages[options.messages.length - 1];
+          const content = typeof latest?.content === 'string' ? latest.content : '';
+          if (content.startsWith('Self-test this output')) {
+            return makeResult('{"completeness":"fail","correctness":"fail","compliance":"fail","notes":"needs more"}');
+          }
+          return makeResult('draft output');
+        }),
+        getModelForTier: () => undefined,
+      } as unknown as CascadeRouter;
+
+      const assignment = makeAssignment();
+      assignment.t3Subtasks = [assignment.t3Subtasks[0]!];
+      assignment.t3Subtasks[0]!.dependsOn = [];
+
+      const manager = new T2Manager(router, makeToolRegistry(), 't1-root');
+      manager.setEscalationCallback(async () => ({ action: 'skip', automatic: true }));
+
+      const result = await manager.execute(assignment, 'task-auto-skip');
+
+      expect(result.status).toBe('PARTIAL'); // work is still kept
+      expect(result.userSkipped).toBeUndefined(); // but not attributed to a human decision
+    });
+
     it('does NOT set userSkipped for an ordinary completed section', async () => {
       const router = {
         generate: vi.fn(async (_tier, options) => {

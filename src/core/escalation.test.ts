@@ -58,15 +58,17 @@ describe('escalation gate', () => {
   it('skips when nobody is listening, rather than hanging', async () => {
     // No listener means no host UI can answer. Skipping keeps whatever the
     // section produced; waiting would stall a run nobody can rescue.
+    // `automatic: true` — the SDK decided this, not a person; see
+    // EscalationDecision.automatic and its userSkipped consequence in T2.
     const c = new Cascade(config, '/tmp');
-    await expect(gateOf(c)(ctx('a'), 'task-1')).resolves.toEqual({ action: 'skip' });
+    await expect(gateOf(c)(ctx('a'), 'task-1')).resolves.toEqual({ action: 'skip', automatic: true });
   });
 
   it('skips in autonomous mode without emitting anything', async () => {
     const c = new Cascade({ ...config, autonomy: 'auto' }, '/tmp');
     const seen = vi.fn();
     c.on('escalation:decision-required', seen);
-    await expect(gateOf(c)(ctx('a'), 'task-1')).resolves.toEqual({ action: 'skip' });
+    await expect(gateOf(c)(ctx('a'), 'task-1')).resolves.toEqual({ action: 'skip', automatic: true });
     expect(seen).not.toHaveBeenCalled();
   });
 
@@ -146,6 +148,7 @@ describe('escalation gate', () => {
 
   it('unparks the run when the user hits Stop', async () => {
     // Skip, not timeout: an abort is the user leaving, not the section failing.
+    // `automatic: true` — pressing Stop is not a per-section review decision.
     const c = new Cascade(config, '/tmp');
     c.on('escalation:decision-required', () => { /* parked */ });
     const ac = new AbortController();
@@ -154,7 +157,7 @@ describe('escalation gate', () => {
     await Promise.resolve();
     ac.abort();
 
-    await expect(parked).resolves.toEqual({ action: 'skip' });
+    await expect(parked).resolves.toEqual({ action: 'skip', automatic: true });
   });
 
   it('does not even ask when the run was already aborted', async () => {
@@ -164,7 +167,7 @@ describe('escalation gate', () => {
     const ac = new AbortController();
     ac.abort();
 
-    await expect(gateOf(c)(ctx('alpha'), 'task-1', ac.signal)).resolves.toEqual({ action: 'skip' });
+    await expect(gateOf(c)(ctx('alpha'), 'task-1', ac.signal)).resolves.toEqual({ action: 'skip', automatic: true });
     expect(seen).not.toHaveBeenCalled();
   });
 
@@ -180,7 +183,7 @@ describe('escalation gate', () => {
     c.resolveEscalation('retry', undefined, requestId);
 
     // First settle wins; the late retry must not re-resolve an settled promise.
-    await expect(parked).resolves.toEqual({ action: 'skip' });
+    await expect(parked).resolves.toEqual({ action: 'skip', automatic: true });
   });
 
   // ── Timeout ───────────────────────────────────

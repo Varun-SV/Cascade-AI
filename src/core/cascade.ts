@@ -401,9 +401,12 @@ export class Cascade extends EventEmitter {
   ): Promise<EscalationDecision> {
     // Autonomous runs have nobody to ask; skipping keeps whatever the section
     // did produce rather than discarding it over an unanswerable question.
-    if (this.config.autonomy === 'auto') return { action: 'skip' };
-    if (this.listenerCount('escalation:decision-required') === 0) return { action: 'skip' };
-    if (signal?.aborted) return { action: 'skip' };
+    // `automatic: true` marks these as the SYSTEM's choice, not a person's —
+    // T2 must not read this as the user having reviewed and accepted the
+    // section (see EscalationDecision.automatic).
+    if (this.config.autonomy === 'auto') return { action: 'skip', automatic: true };
+    if (this.listenerCount('escalation:decision-required') === 0) return { action: 'skip', automatic: true };
+    if (signal?.aborted) return { action: 'skip', automatic: true };
 
     const requestId = randomUUID();
 
@@ -424,7 +427,9 @@ export class Cascade extends EventEmitter {
       // aborted run sits here holding resources until the full timeout — the
       // user pressed Stop and watched nothing stop. Skip (not timeout) because
       // an abort is not a failure of the section, it is the user leaving.
-      const onAbort = () => settle({ action: 'skip' });
+      // `automatic: true` — pressing Stop ends the whole run, it is not the
+      // user reviewing and accepting THIS section's partial output.
+      const onAbort = () => settle({ action: 'skip', automatic: true });
       signal?.addEventListener('abort', onAbort, { once: true });
 
       timeout = setTimeout(() => {
@@ -464,9 +469,14 @@ export class Cascade extends EventEmitter {
     if (!oldest.done) this.pendingEscalations.get(oldest.value)?.(decision);
   }
 
-  /** Release every parked escalation — run teardown, so none outlive the run. */
+  /**
+   * Release every parked escalation — run teardown, so none outlive the run.
+   * `automatic: true`: teardown resolving a section nobody answered is the
+   * same system-decided case as the early-return skips above, not a person
+   * reviewing and accepting that section's output.
+   */
   private releasePendingEscalations(action: EscalationDecision['action'] = 'skip'): void {
-    for (const settle of Array.from(this.pendingEscalations.values())) settle({ action });
+    for (const settle of Array.from(this.pendingEscalations.values())) settle({ action, automatic: true });
   }
 
   /**

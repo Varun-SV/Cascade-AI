@@ -135,6 +135,46 @@ describe('ConfigManager — MCP server name disambiguation on load', () => {
     expect(config.tools.mcpTrusted).toContain(second!.name);
   });
 
+  it('grants trust to BOTH renamed identities when two different rows share the same raw name', async () => {
+    // Mixed collision shape: `foo bar` and `foo@bar` collide with each other
+    // via sanitizing, AND there are two separate `foo@bar` rows. All three
+    // sanitize-collide, so `foo bar` survives untouched and BOTH `foo@bar`
+    // rows get renamed to distinct identities. Processing renames one `from`
+    // at a time (instead of grouped) drops the second `foo@bar` rename: the
+    // first rename's own processing already removes `foo@bar` from the
+    // trusted list, so the second rename (same `from`) sees it gone and
+    // silently skips granting trust to its renamed identity.
+    const workspace = await makeTempWorkspace();
+    const globalDir = await makeTempWorkspace();
+    const configPath = path.join(workspace, CASCADE_CONFIG_FILE);
+    await fs.mkdir(path.dirname(configPath), { recursive: true });
+    await fs.writeFile(configPath, JSON.stringify({
+      tools: {
+        mcpServers: [
+          { name: 'foo bar', url: 'https://a.example.com/mcp' },
+          { name: 'foo@bar', url: 'https://b.example.com/mcp' },
+          { name: 'foo@bar', url: 'https://c.example.com/mcp' },
+        ],
+        mcpTrusted: ['foo bar', 'foo@bar'],
+      },
+    }), 'utf-8');
+
+    const manager = new ConfigManager(workspace, globalDir);
+    await manager.load();
+
+    const config = manager.getConfig();
+    const [first, second, third] = config.tools.mcpServers!;
+    expect(first!.name).toBe('foo bar'); // survivor, untouched
+    expect(second!.name).not.toBe('foo@bar');
+    expect(third!.name).not.toBe('foo@bar');
+    expect(second!.name).not.toBe(third!.name); // each renamed to a distinct identity
+
+    expect(config.tools.mcpTrusted).toContain('foo bar');
+    expect(config.tools.mcpTrusted).toContain(second!.name);
+    expect(config.tools.mcpTrusted).toContain(third!.name);
+    expect(config.tools.mcpTrusted).not.toContain('foo@bar');
+  });
+
   it('leaves disabledTools alone — the survivor keeps the entry, by design', async () => {
     // A denial stored at the shared prefix was ambiguous BEFORE the rename —
     // there is no way to tell which of the two servers it was meant for.

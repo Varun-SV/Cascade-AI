@@ -226,6 +226,19 @@ export interface EscalationDecision {
   action: 'retry' | 'skip' | 'guidance' | 'timeout';
   /** Required for 'guidance' — the instruction the retry must follow. */
   note?: string;
+  /**
+   * Set when the SDK produced `action: 'skip'` itself — no listener wired,
+   * `autonomy: 'auto'`, or the run was aborted — rather than a person
+   * answering the prompt. `resolveEscalation()`, the one path a human
+   * response reaches, never sets this.
+   *
+   * A skip decided by the system is not the same fact as a skip a user
+   * chose: T2's `userSkipped` marker (which tells T1's reviewer "accept this
+   * as satisfied, not a gap") must NOT be set for the automatic case — a
+   * section nobody ever looked at is exactly the case a corrective pass
+   * exists to catch.
+   */
+  automatic?: boolean;
 }
 
 export interface ToolExecuteOptions {
@@ -372,6 +385,10 @@ export interface T2Result {
    * without this flag it cannot tell "the model gave up" from "the user
    * decided this was good enough" and would generate a correction plan that
    * redoes exactly the work the user just chose to keep as-is.
+   *
+   * NOT set when the 'skip' came from `EscalationDecision.automatic` — no
+   * listener wired, `autonomy: 'auto'`, or an aborted run. Nobody reviewed
+   * that section, so it must stay eligible for the corrective pass.
    */
   userSkipped?: boolean;
 }

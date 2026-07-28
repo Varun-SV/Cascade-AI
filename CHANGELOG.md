@@ -52,14 +52,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   app's escalation prompt could be painted over by any of the other modals
   (API keys, Connectors, Memory…) or the tool-approval dialog, since they all
   shared one stacking layer and whichever mounted last won. The escalation
-  prompt now sits strictly above every other overlay.
+  prompt now sits strictly above every other overlay. The desktop app had the
+  same class of bug on its own separate escalation modal: it sat below the
+  command palette (⌘K) and the Help panel, so opening either while a run was
+  parked waiting for an answer could cover the prompt entirely, with the
+  section quietly running out its five-minute clock behind an unrelated
+  window. It now sits above both.
 
   Choosing **skip** could also cause T1's own quality reviewer to reject the
   kept output and generate a correction plan that redid exactly the work you
   just chose to stop — the reviewer only ever sees the section's summary text,
   with nothing distinguishing "the pipeline fell short" from "the user decided
   this was good enough". A skipped section is now flagged through to that
-  review, which is told to accept it as-is rather than treat it as a gap.
+  review, which is told to accept it as-is rather than treat it as a gap. That
+  flag was reaching the reviewer for a skip nobody actually chose, too: when
+  nothing is listening, autonomy is `auto`, or a run is aborted, the SDK
+  itself resolves the escalation as a skip so the run doesn't hang — and that
+  system-produced skip was being read as the same "the user reviewed this and
+  accepted it" signal as a real answer, so a section nobody ever looked at
+  could still slip past the corrective pass. The SDK now marks which skips are
+  its own rather than a person's, and only a person's answer sets the flag.
 
 ### Added
 - **Choose exactly which MCP tools a run can use.** A connected server usually
@@ -123,7 +135,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bit-for-bit the same name (from a hand edit, not merely a colliding one)
   share a single trust entry, and moving it onto the renamed one instead of
   granting it to both left the untouched original without trust. It's granted
-  to both now.
+  to both now. That fix itself had a gap when THREE rows collided in a mixed
+  shape — two rows sharing one identical raw name, both renamed away because a
+  third row collides with both by sanitizing: processing the renames one at a
+  time let the first rename's own bookkeeping erase the shared name from the
+  trust list before the second rename (for the same original name) ever got
+  to look, so it silently granted trust to only one of the two renamed
+  connections. Renames sharing an original name are now grouped and settled
+  together in a single pass, so every renamed identity gets trust, not just
+  whichever ran first.
 
 - **The desktop browser now opens reliably on the first paint.** A fractional
   display-scaling factor makes the page's on-screen rectangle land on

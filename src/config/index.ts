@@ -212,6 +212,19 @@ export class ConfigManager {
    *   leave the survivor untrusted. The entry must be kept for the survivor
    *   AND granted to the renamed identity, not moved.
    *
+   * Renames are grouped by `from` before either treatment is applied, and
+   * each group is settled in one step. Two DIFFERENT rows can start out with
+   * the exact same raw name and BOTH get renamed away (e.g. three servers
+   * named `foo bar`, `foo@bar`, `foo@bar` — the two `foo@bar` rows collide
+   * with `foo bar` and with each other, so both are renamed to distinct
+   * identities while `foo bar` survives untouched). Processing renames one at
+   * a time in that shape drops coverage: the first rename's REPLACE branch
+   * would erase `from` from `trusted` entirely, so the guard on the second
+   * rename with the same `from` sees it already gone and silently skips —
+   * granting trust to only one of the two renamed identities. Grouping first
+   * means every renamed identity that shares a `from` is added or substituted
+   * together, in the one pass that still sees the original entry.
+   *
    * `tools.disabledTools` deliberately gets no equivalent treatment. It's
    * matched by sanitized PREFIX, and a prefix collision is exactly what made
    * an existing entry ambiguous between the two servers in the first place —
@@ -227,12 +240,20 @@ export class ConfigManager {
     const tools = this.config.tools;
     if (!tools?.mcpTrusted?.length || !renames.length) return;
     const currentNames = new Set((tools.mcpServers ?? []).map((s) => s.name));
-    let trusted = tools.mcpTrusted;
+
+    const byFrom = new Map<string, string[]>();
     for (const { from, to } of renames) {
+      const tos = byFrom.get(from);
+      if (tos) tos.push(to);
+      else byFrom.set(from, [to]);
+    }
+
+    let trusted = tools.mcpTrusted;
+    for (const [from, tos] of byFrom) {
       if (!trusted.includes(from)) continue;
       trusted = currentNames.has(from)
-        ? [...trusted, to] // a survivor still holds `from` — ADD, don't move
-        : trusted.map((n) => (n === from ? to : n)); // `from` is now unused — follow it
+        ? [...trusted, ...tos] // a survivor still holds `from` — ADD every renamed identity
+        : [...trusted.filter((n) => n !== from), ...tos]; // `from` is now unused — replace with ALL renamed identities
     }
     tools.mcpTrusted = Array.from(new Set(trusted));
   }

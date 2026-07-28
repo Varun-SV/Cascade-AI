@@ -69,7 +69,12 @@ export function EscalationModal({ socket }: { socket: Socket | null }) {
   });
 
   return (
-    <div style={{ position: 'fixed', inset: 0, zIndex: 400, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+    // zIndex 600: strictly above the command palette and Help panel (both
+    // 500). The run is PARKED waiting on this decision — if either of those
+    // can cover it, the user has no way to see the buttons and answer, and
+    // the section fails on the escalation timeout with nothing having ever
+    // appeared to go wrong.
+    <div style={{ position: 'fixed', inset: 0, zIndex: 600, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <div style={{ width: 520, maxWidth: '94vw', maxHeight: '86vh', overflow: 'auto', background: 'var(--bg-surface)', border: '1px solid var(--border-strong)', borderRadius: 12, boxShadow: 'var(--shadow-3)', padding: 20 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 4 }}>
           <AlertTriangle size={18} style={{ color: 'var(--warn)', flexShrink: 0 }} />

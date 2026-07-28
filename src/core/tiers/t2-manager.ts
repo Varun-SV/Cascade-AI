@@ -282,10 +282,13 @@ export class T2Manager extends BaseTier {
         .flatMap((r) => r.issues);
 
       let overallStatus = this.determineStatus(t3Results);
-      // Set only by the explicit 'skip' branch below — carried onto the
-      // returned T2Result so T1's reviewer pass can tell "the user chose to
-      // keep this as-is" from an ordinary shortfall (see userSkipped on the
-      // T2Result type).
+      // Set only by the explicit 'skip' branch below, and only when that skip
+      // was a genuine human answer — carried onto the returned T2Result so
+      // T1's reviewer pass can tell "the user chose to keep this as-is" from
+      // an ordinary shortfall (see userSkipped on the T2Result type). A skip
+      // the SDK produced itself (no listener, autonomy: 'auto', an aborted
+      // run — see EscalationDecision.automatic) is not that: nobody reviewed
+      // the section, so it must stay eligible for T1's corrective pass.
       let userSkipped = false;
 
       // Ask whenever ANY worker escalated — not only when the whole section
@@ -346,7 +349,7 @@ export class T2Manager extends BaseTier {
           // exists, it just is not finished.
           summary = await this.aggregateResults(assignment, t3Results, { includeEscalated: true });
           overallStatus = settledEscalationStatus(t3Results);
-          userSkipped = true;
+          userSkipped = decision.automatic !== true;
         } else if (decision.action === 'retry' || decision.action === 'guidance') {
           // Bounded to a single attempt: an escalation loop that can re-ask
           // forever is how a run burns a budget on a question that never
