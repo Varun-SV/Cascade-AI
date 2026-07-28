@@ -896,6 +896,17 @@ function McpConnectorsPanel() {
   async function remove(n: string) {
     if (!api) return;
     setServers((prev) => prev.filter((s) => s.name !== n));
+    // Drop the removed server's discovered tools too. Left behind, its section
+    // keeps rendering with live checkboxes — the main-process handler accepts
+    // any registered name — so toggling one would re-add a denial that removal
+    // had just cleared, for a connector that is no longer there.
+    setToolsByServer((prev) => (prev ? prev.filter((s) => s.server !== n) : prev));
+    setExpanded((prev) => {
+      if (!prev.has(n)) return prev;
+      const next = new Set(prev);
+      next.delete(n);
+      return next;
+    });
     try { await api.remove(n); } catch { void refresh(); }
   }
 

@@ -15,6 +15,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   MCP_TOOL_PREFIX,
+  createMcpToolNamer,
   isMcpToolName,
   isProviderSafeToolName,
   mcpServerPrefix,
@@ -101,5 +102,52 @@ describe('the whole built-in tool surface is provider-safe', () => {
     for (const name of names) {
       expect(isProviderSafeToolName(name), `tool "${name}" would be rejected by OpenAI/Azure`).toBe(true);
     }
+  });
+});
+
+// Sanitising is lossy on purpose, so two raw names can land on one string.
+// Harmless as display, fatal as identity: ToolRegistry keys by name, so the
+// second wrapper silently replaces the first and one checkbox controls two
+// tools — or denies a tool the user never touched.
+describe('createMcpToolNamer', () => {
+  it('leaves non-colliding names exactly as mcpToolName builds them', () => {
+    const name = createMcpToolNamer();
+    expect(name('github', 'get_me')).toBe(mcpToolName('github', 'get_me'));
+    expect(name('github', 'list_repos')).toBe(mcpToolName('github', 'list_repos'));
+  });
+
+  it('suffixes a tool whose raw name sanitizes onto one already taken', () => {
+    const name = createMcpToolNamer();
+    expect(name('srv', 'list files')).toBe('mcp__srv__list_files');
+    expect(name('srv', 'list@files')).toBe('mcp__srv__list_files_2');
+    expect(name('srv', 'list/files')).toBe('mcp__srv__list_files_3');
+  });
+
+  it('gives the FIRST claimant the clean name', () => {
+    // A selection made before the colliding tool appeared has to keep matching;
+    // renaming the incumbent would silently move the user's denial.
+    const name = createMcpToolNamer();
+    const first = name('srv', 'delete repo');
+    name('srv', 'delete@repo');
+    expect(first).toBe('mcp__srv__delete_repo');
+  });
+
+  it('separates servers whose names fold together', () => {
+    const name = createMcpToolNamer();
+    expect(name('my server', 'run')).toBe('mcp__my_server__run');
+    expect(name('my-server', 'run')).toBe('mcp__my-server__run');   // distinct already
+    expect(name('my@server', 'run')).toBe('mcp__my_server__run_2'); // folds onto the first
+  });
+
+  it('keeps every issued name provider-safe', () => {
+    const name = createMcpToolNamer();
+    for (const raw of ['a b', 'a@b', 'a/b', 'a.b']) {
+      expect(isProviderSafeToolName(name('srv', raw))).toBe(true);
+    }
+  });
+
+  it('is independent per namer, so one pass cannot leak into the next', () => {
+    expect(createMcpToolNamer()('srv', 'x')).toBe('mcp__srv__x');
+    expect(createMcpToolNamer()('srv', 'x')).toBe('mcp__srv__x');
   });
 });

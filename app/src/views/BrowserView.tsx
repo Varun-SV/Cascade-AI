@@ -74,6 +74,10 @@ export function BrowserView() {
   // covering it gets out of the way. Collapse it while an error is showing;
   // the next navigation clears the error and brings the page straight back.
   const hidePage = blocked || !!state.error;
+  // Read by the mount effect below, which must not re-run when visibility
+  // changes — it only needs to know whether the page may be shown *right now*.
+  const hidePageRef = useRef(hidePage);
+  hidePageRef.current = hidePage;
 
   useEffect(() => {
     if (!api) return;
@@ -95,14 +99,22 @@ export function BrowserView() {
 
     const el = pageRef.current;
     const r = el?.getBoundingClientRect();
-    void api
-      .open(undefined, r ? { x: r.left, y: r.top, width: r.width, height: r.height } : { x: 0, y: 0, width: 0, height: 0 })
-      .then((res) => {
-        if (res?.state) {
-          setState(res.state);
-          if (!editingRef.current) setAddress(res.state.url);
-        }
-      });
+    // Mounting with an overlay already up — the Why panel is open and the user
+    // picks Browser from the activity bar — must NOT open the page. This effect
+    // runs after the visibility effect above, so an unconditional open here
+    // would be the last IPC call and would put the native view straight back on
+    // top of the panel it was just hidden for. Read the state instead; the
+    // visibility effect opens the page the moment the overlay clears.
+    void (hidePageRef.current
+      ? api.state()
+      : api
+        .open(undefined, r ? { x: r.left, y: r.top, width: r.width, height: r.height } : { x: 0, y: 0, width: 0, height: 0 })
+        .then((res) => res?.state)
+    ).then((s) => {
+      if (!s) return;
+      setState(s);
+      if (!editingRef.current) setAddress(s.url);
+    });
 
     // The native view does not participate in layout, so every way the
     // rectangle can move has to be reported explicitly.

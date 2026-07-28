@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { CascadeConfig } from '../types.js';
 import { gatherSyncBundle, applySyncBundle } from './keysync.js';
+import { mcpServerPrefix } from '../tools/tool-name.js';
 
 // A minimal config stub — only the fields key-sync touches matter here.
 function cfg(over: Partial<CascadeConfig> = {}): CascadeConfig {
@@ -144,5 +145,61 @@ describe('keysync — MCP per-tool selections', () => {
       local,
     );
     expect(next.tools.disabledTools).toEqual(['mcp__notion__delete_page']);
+  });
+
+  it('separates servers whose names fold to the same tool prefix on merge', () => {
+    // Each device's connection-time uniqueness guard only ever sees its OWN
+    // list, so `foo bar` here and `foo@bar` there are both individually valid —
+    // the collision only comes into existence at the merge. Left alone, one
+    // server's tools overwrite the other's in the registry and a single deny
+    // entry silently applies to both.
+    const local = cfg({
+      tools: { mcpServers: [{ name: 'foo bar', url: 'https://a.example.com/mcp' }] },
+    } as Partial<CascadeConfig>);
+    const next = applySyncBundle(
+      { v: 2, mcpServers: [{ name: 'foo@bar', url: 'https://b.example.com/mcp' }] },
+      local,
+    );
+    const names = (next.tools.mcpServers ?? []).map((m) => m.name);
+    expect(names).toHaveLength(2);
+    expect(names[0]).toBe('foo bar');            // the local name is never rewritten
+    expect(names[1]).not.toBe('foo@bar');        // the incoming one is suffixed
+    // The point of the rename: distinct registered tool prefixes.
+    const prefixes = new Set(names.map((n) => mcpServerPrefix(n)));
+    expect(prefixes.size).toBe(2);
+  });
+
+  it('carries a renamed server\'s deny entries over to its new prefix', () => {
+    const local = cfg({
+      tools: {
+        mcpServers: [{ name: 'foo bar', url: 'https://a.example.com/mcp' }],
+        disabledTools: ['mcp__foo_bar__local_only'],
+      },
+    } as Partial<CascadeConfig>);
+    const next = applySyncBundle(
+      {
+        v: 2,
+        mcpServers: [{ name: 'foo@bar', url: 'https://b.example.com/mcp' }],
+        disabledTools: ['mcp__foo_bar__delete_everything'],
+      },
+      local,
+    );
+    const renamed = (next.tools.mcpServers ?? [])[1]!.name;
+    // The incoming denial follows its server; the local one stays put, because
+    // the bundle never actually mentioned the local server.
+    expect(next.tools.disabledTools).toContain(`${mcpServerPrefix(renamed)}delete_everything`);
+    expect(next.tools.disabledTools).toContain('mcp__foo_bar__local_only');
+  });
+
+  it('still updates in place when the raw name matches exactly', () => {
+    const local = cfg({
+      tools: { mcpServers: [{ name: 'github', url: 'https://old.example.com/mcp' }] },
+    } as Partial<CascadeConfig>);
+    const next = applySyncBundle(
+      { v: 2, mcpServers: [{ name: 'github', url: 'https://new.example.com/mcp' }] },
+      local,
+    );
+    expect(next.tools.mcpServers).toHaveLength(1);
+    expect(next.tools.mcpServers![0]!.url).toBe('https://new.example.com/mcp');
   });
 });

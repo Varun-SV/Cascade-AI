@@ -40,6 +40,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  */
 const ORPHANED_ESCALATION_GRACE_MS = 30_000;
 
+/** A prompt a run is parked on, held so a late or reconnecting client can get it. */
+interface PendingEscalationEntry {
+  payload: Record<string, unknown>;
+  requestId: string;
+  /** Server clock when raised — the replayed `timeoutMs` is measured from here. */
+  raisedAt: number;
+  graceTimer?: NodeJS.Timeout;
+}
+
 export class DashboardServer {
   private app: express.Application;
   private httpServer: ReturnType<typeof createServer>;
@@ -81,7 +90,7 @@ export class DashboardServer {
    * the payload lets `join:session` replay it, and lets a run with no reachable
    * client be settled instead of parked (see ORPHANED_ESCALATION_GRACE_MS).
    */
-  private pendingEscalations = new Map<string, { payload: Record<string, unknown>; requestId: string; graceTimer?: NodeJS.Timeout }>();
+  private pendingEscalations = new Map<string, PendingEscalationEntry>();
   /**
    * The orchestration decision trail ("why") of each session's most recent
    * run — captured when the run ends so the desktop's Why panel can show it
@@ -669,7 +678,7 @@ export class DashboardServer {
     const requestId = typeof event.requestId === 'string' ? event.requestId : '';
     const payload = { sessionId, ...event };
     this.clearPendingEscalation(sessionId);
-    const entry: { payload: Record<string, unknown>; requestId: string; graceTimer?: NodeJS.Timeout } = { payload, requestId };
+    const entry: PendingEscalationEntry = { payload, requestId, raisedAt: Date.now() };
     this.pendingEscalations.set(sessionId, entry);
 
     if (this.hasResponder(sessionId, socketId)) {
@@ -684,12 +693,23 @@ export class DashboardServer {
     }, ORPHANED_ESCALATION_GRACE_MS);
   }
 
-  /** Replay a parked prompt to a client that just subscribed to the session. */
+  /**
+   * Replay a parked prompt to a client that just subscribed to the session.
+   *
+   * `timeoutMs` is recomputed as the time actually LEFT, because the SDK's timer
+   * has been running since the prompt was raised. Sent verbatim, a client
+   * reconnecting four minutes in would show a fresh five-minute countdown and
+   * then watch the section fail with four of those minutes still on the clock.
+   * A remaining duration is used rather than an absolute deadline so the two
+   * sides never have to agree on a wall clock.
+   */
   private replayEscalation(sessionId: string, socketId: string): void {
     const entry = this.pendingEscalations.get(sessionId);
     if (!entry) return;
     if (entry.graceTimer) { clearTimeout(entry.graceTimer); entry.graceTimer = undefined; }
-    this.socket.emitToSocket(socketId, 'escalation:decision-required', entry.payload);
+    const originalTimeout = typeof entry.payload.timeoutMs === 'number' ? entry.payload.timeoutMs : 0;
+    const remaining = Math.max(0, originalTimeout - (Date.now() - entry.raisedAt));
+    this.socket.emitToSocket(socketId, 'escalation:decision-required', { ...entry.payload, timeoutMs: remaining });
   }
 
   /** Forget a session's parked prompt (answered, timed out, or the run ended). */

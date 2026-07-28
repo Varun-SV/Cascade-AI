@@ -15,6 +15,7 @@ const ignore: (opts?: unknown) => Ignore =
 import type { ToolDefinition, ToolExecuteOptions, ToolsConfig } from '../types.js';
 import { DEFAULT_APPROVAL_REQUIRED } from '../constants.js';
 import type { BaseTool } from './base.js';
+import { createMcpToolNamer } from './tool-name.js';
 import { ShellTool } from './shell.js';
 import { FileReadTool, FileWriteTool, FileEditTool, FileDeleteTool, FileListTool } from './file.js';
 import { GitTool } from './git.js';
@@ -140,6 +141,9 @@ export class ToolRegistry extends EventEmitter {
    */
   registerMcpTools(mcpClient: McpClient, isAllowed?: (registeredName: string) => boolean): void {
     const definitions = mcpClient.getToolDefinitions();
+    // One namer for the whole pass: `register()` keys by name, so two tools
+    // whose raw names sanitise onto the same string would silently become one.
+    const nameFor = createMcpToolNamer();
     for (const def of definitions) {
       // Definitions from McpClient.getToolDefinitions() are prefixed as
       // `mcp::<serverName>::<toolName>` — three parts, not four. Previously
@@ -155,6 +159,7 @@ export class ToolRegistry extends EventEmitter {
         toolName,
         def.description.replace(`[MCP:${serverName}] `, ''),
         def.inputSchema,
+        nameFor(serverName, toolName),
       );
       if (isAllowed && !isAllowed(wrapper.name)) continue;
       wrapper.setWorkspaceRoot(this.workspaceRoot);

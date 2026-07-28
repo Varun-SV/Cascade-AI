@@ -15,7 +15,7 @@
 import type { McpServerConfig } from '../types.js';
 import { McpClient } from './client.js';
 import { fileOAuthProvider } from './oauth.js';
-import { mcpToolName } from '../tools/tool-name.js';
+import { createMcpToolNamer } from '../tools/tool-name.js';
 
 /** One tool a server advertises, named exactly as it is registered at run time. */
 export interface DiscoveredMcpTool {
@@ -54,13 +54,17 @@ export async function discoverMcpTools(servers: McpServerConfig[]): Promise<McpD
     try {
       const authProvider = server.oauthStore ? fileOAuthProvider(server.oauthStore) : undefined;
       await client.connect(server, authProvider ? { authProvider } : {});
+      // Same namer, same order as ToolRegistry.registerMcpTools — a checkbox
+      // must carry the name the run will actually register, and two raw tool
+      // names can sanitise onto one (see createMcpToolNamer).
+      const nameFor = createMcpToolNamer();
       const tools = client.getToolDefinitions().flatMap((def): DiscoveredMcpTool[] => {
         const [, serverName, toolName] = def.name.split('::');
         if (!serverName || !toolName) return [];
         return [{
           server: serverName,
           tool: toolName,
-          name: mcpToolName(serverName, toolName),
+          name: nameFor(serverName, toolName),
           description: def.description.replace(`[MCP:${serverName}] `, ''),
         }];
       });

@@ -66,6 +66,36 @@ export function isMcpToolName(name: string): boolean {
 }
 
 /**
+ * Hand out a UNIQUE registered name per tool, suffixing folded collisions.
+ *
+ * Sanitising is lossy by design, so two raw names can land on one: a server
+ * advertising `list files` and `list@files` yields `mcp__srv__list_files`
+ * twice. That is harmless as display and fatal as identity — `ToolRegistry`
+ * keys by name, so the second wrapper silently replaces the first, and a picker
+ * keyed by the same value shows two checkboxes that control one tool.
+ *
+ * The first claimant keeps the clean name, so a selection made before a
+ * colliding tool appeared still matches. Later ones get `_2`, `_3`, …
+ *
+ * Deterministic in the order names are requested. Discovery and registration
+ * both walk `McpClient.getToolDefinitions()` in that order, which is what makes
+ * the name shown in Settings the same name the run registers — if they used
+ * separate schemes, a checkbox would deny a tool that never existed.
+ */
+export function createMcpToolNamer(): (serverName: string, toolName: string) => string {
+  const taken = new Set<string>();
+  return (serverName, toolName) => {
+    const base = mcpToolName(serverName, toolName);
+    if (!taken.has(base)) { taken.add(base); return base; }
+    let n = 2;
+    while (taken.has(`${base}_${n}`)) n++;
+    const unique = `${base}_${n}`;
+    taken.add(unique);
+    return unique;
+  };
+}
+
+/**
  * Prefix matching every tool from one server, for filtering.
  *
  * Also lets a host drop a server's per-tool selections when the server itself
