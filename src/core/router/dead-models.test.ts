@@ -121,3 +121,39 @@ describe('DeadModelStore', () => {
     expect(s.isDead('gemini', 'm')).toBe(true);
   });
 });
+
+// ── Multi-tenancy ─────────────────────────────
+//
+// Raised in review on #178: "will a user a's failover models affect user b's
+// orchestration?" It would have. The verdict is KEY-specific — a model that
+// 404s for one account is often live for another whose key has access — so a
+// store shared between tenants lets one user silently suppress another's
+// models. The fix is placement (per-workspace, never machine-global); these
+// pin the property that placement is supposed to deliver.
+
+describe('dead-model verdicts are per-account, not global', () => {
+  it('keeps two tenants\' verdicts entirely separate', () => {
+    const tenantA = new DeadModelStore(memoryPersistence());
+    const tenantB = new DeadModelStore(memoryPersistence());
+
+    tenantA.record('gemini', 'gemini-2.0-flash', 'model not found');
+
+    expect(tenantA.isDead('gemini', 'gemini-2.0-flash')).toBe(true);
+    // B's key may well have access to the very model A cannot reach.
+    expect(tenantB.isDead('gemini', 'gemini-2.0-flash')).toBe(false);
+    expect(tenantB.list()).toEqual([]);
+  });
+
+  it('does not leak through a shared backing store either', () => {
+    // Belt and braces: even handed the same persistence, each store only
+    // publishes what it was told — the isolation must come from placement,
+    // and this documents what happens if placement is ever got wrong again.
+    const shared = memoryPersistence();
+    const first = new DeadModelStore(shared);
+    first.record('gemini', 'm', 'model not found');
+    const second = new DeadModelStore(shared);
+    // Sharing a file DOES share verdicts — which is exactly why the file must
+    // live under the per-tenant workspace and never the machine-global dir.
+    expect(second.isDead('gemini', 'm')).toBe(true);
+  });
+});

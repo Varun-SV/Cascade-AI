@@ -62,3 +62,4 @@ cloud/server/vendor/
 cloud/web/test-results/
 cloud/web/playwright-report/
 
+.cascade/dead-models.json
