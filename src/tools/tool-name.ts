@@ -66,7 +66,59 @@ export function isMcpToolName(name: string): boolean {
 }
 
 /**
- * Hand out a UNIQUE registered name per tool, suffixing folded collisions.
+ * A name for a NEW MCP server connection that won't collide, on its sanitized
+ * tool prefix, with any name already in use.
+ *
+ * Compared by prefix, not by the raw name: `foo bar` and `foo@bar` are
+ * different strings but both register as `mcp__foo_bar__…`, so a check against
+ * raw names would accept a pair that still collides downstream — the exact gap
+ * that let two connectors' tools overwrite each other in the registry.
+ *
+ * Mirrored on the cloud side (`cloud/server/src/db.ts` `uniqueMcpServerName`,
+ * DB-backed instead of array-backed) — kept in sync by hand since the two sides
+ * don't share a runtime, but the algorithm and suffix format must match or a
+ * name that's unique on one side could still collide on the other after a sync
+ * pull (see `mergeMcpServers` in `src/cloud/keysync.ts`, which performs the
+ * same comparison for that reason).
+ */
+export function uniqueMcpServerName(desired: string, existingNames: string[]): string {
+  const taken = new Set(existingNames.map(mcpServerPrefix));
+  if (!taken.has(mcpServerPrefix(desired))) return desired;
+  for (let n = 2; n < 1000; n++) {
+    const candidate = `${desired} (${n})`;
+    if (!taken.has(mcpServerPrefix(candidate))) return candidate;
+  }
+  return `${desired} (${Math.random().toString(36).slice(2, 10)})`;
+}
+
+/**
+ * Rename pre-existing entries whose sanitized prefixes collide.
+ *
+ * For config loaded from disk (desktop and CLI share one config file), rather
+ * than a fresh connection — `uniqueMcpServerName` only guards a NEW entry, so a
+ * file that already contains a colliding pair (hand-edited, or written by a
+ * CLI version that predates the check) stays broken until something touches it.
+ * The FIRST entry of each colliding group keeps its name, since that connection
+ * is presumably already working; later ones are suffixed exactly as
+ * `uniqueMcpServerName` would have produced had they been added after this
+ * existed. A no-op when nothing collides, so callers can run it unconditionally
+ * on every load without needing a one-time migration flag.
+ */
+export function disambiguateMcpServerNames<T extends { name: string }>(servers: T[]): T[] {
+  const seenNames: string[] = [];
+  let changed = false;
+  const result = servers.map((s) => {
+    const name = uniqueMcpServerName(s.name, seenNames);
+    seenNames.push(name);
+    if (name === s.name) return s;
+    changed = true;
+    return { ...s, name };
+  });
+  return changed ? result : servers;
+}
+
+/**
+ * Assign a UNIQUE registered name to every tool in one set, suffixing collisions.
  *
  * Sanitising is lossy by design, so two raw names can land on one: a server
  * advertising `list files` and `list@files` yields `mcp__srv__list_files`
@@ -74,25 +126,48 @@ export function isMcpToolName(name: string): boolean {
  * keys by name, so the second wrapper silently replaces the first, and a picker
  * keyed by the same value shows two checkboxes that control one tool.
  *
- * The first claimant keeps the clean name, so a selection made before a
- * colliding tool appeared still matches. Later ones get `_2`, `_3`, …
+ * Batch, not streaming, and the result does not depend on the order the tools
+ * arrive in. That matters because these names are PERSISTED: a user's deny list
+ * stores them, discovery and the run are separate live connections, and MCP does
+ * not promise a stable order for `tools/list`. An arrival-order counter would
+ * hand the unsuffixed key to a different raw tool between two runs, so a saved
+ * denial would silently move to a tool the user never switched off.
  *
- * Deterministic in the order names are requested. Discovery and registration
- * both walk `McpClient.getToolDefinitions()` in that order, which is what makes
- * the name shown in Settings the same name the run registers — if they used
- * separate schemes, a checkbox would deny a tool that never existed.
+ * Within a colliding group the clean name goes to the pair that needs no
+ * folding at all (server AND tool both already legal), because a legal raw
+ * identity can never be displaced by a folded one added later. Failing that,
+ * the lexicographically first `server::tool` pair wins — comparing the pair,
+ * not just the tool name, so two DIFFERENT servers that collided on their own
+ * sanitised prefix (see the account-merge case in keysync.ts) still break the
+ * tie deterministically even when they happen to share a tool name. The rest
+ * get `_2`, `_3`, … in that same order.
  */
-export function createMcpToolNamer(): (serverName: string, toolName: string) => string {
-  const taken = new Set<string>();
-  return (serverName, toolName) => {
-    const base = mcpToolName(serverName, toolName);
-    if (!taken.has(base)) { taken.add(base); return base; }
-    let n = 2;
-    while (taken.has(`${base}_${n}`)) n++;
-    const unique = `${base}_${n}`;
-    taken.add(unique);
-    return unique;
-  };
+export function assignMcpToolNames(tools: Array<{ server: string; tool: string }>): string[] {
+  const names: string[] = new Array(tools.length);
+  const groups = new Map<string, number[]>();
+  for (let i = 0; i < tools.length; i++) {
+    const base = mcpToolName(tools[i]!.server, tools[i]!.tool);
+    names[i] = base;
+    const g = groups.get(base);
+    if (g) g.push(i); else groups.set(base, [i]);
+  }
+
+  for (const [base, idx] of groups) {
+    if (idx.length === 1) continue;
+    const raw = (i: number) => `${tools[i]!.server}::${tools[i]!.tool}`;
+    const isClean = (i: number) => sanitizeToolNameSegment(tools[i]!.server) === tools[i]!.server
+      && sanitizeToolNameSegment(tools[i]!.tool) === tools[i]!.tool;
+    const ordered = [...idx].sort((a, b) => {
+      const la = isClean(a) ? 0 : 1;
+      const lb = isClean(b) ? 0 : 1;
+      if (la !== lb) return la - lb;
+      const ra = raw(a);
+      const rb = raw(b);
+      return ra < rb ? -1 : ra > rb ? 1 : 0;
+    });
+    ordered.forEach((i, rank) => { names[i] = rank === 0 ? base : `${base}_${rank + 1}`; });
+  }
+  return names;
 }
 
 /**

@@ -43,6 +43,8 @@ const ORPHANED_ESCALATION_GRACE_MS = 30_000;
 /** A prompt a run is parked on, held so a late or reconnecting client can get it. */
 interface PendingEscalationEntry {
   payload: Record<string, unknown>;
+  /** Which run it belongs to — the map is keyed by requestId, not session. */
+  sessionId: string;
   requestId: string;
   /** Server clock when raised — the replayed `timeoutMs` is measured from here. */
   raisedAt: number;
@@ -223,7 +225,8 @@ export class DashboardServer {
         this.raiseEscalation(sessionId, socketId, e as Record<string, unknown>);
       });
       cascade.on('escalation:timeout', (e: unknown) => {
-        this.clearPendingEscalation(sessionId);
+        const ev = e as { requestId?: string };
+        if (ev.requestId) this.clearPendingEscalation(ev.requestId);
         this.emitToSessionClients(socketId, sessionId, 'escalation:timeout', { sessionId, ...(e as object) });
       });
 
@@ -257,7 +260,7 @@ export class DashboardServer {
         this.activeSessions.delete(sessionId);
         this.activeControllers.delete(sessionId);
         this.denyPendingApprovals(sessionId);
-        this.clearPendingEscalation(sessionId);
+        this.clearSessionEscalations(sessionId);
       }
     });
 
@@ -274,14 +277,18 @@ export class DashboardServer {
     // requestEscalationDecision until this lands (or its timeout fires and
     // fails the section).
     this.socket.onEscalationDecision(({ sessionId, requestId, action, note }) => {
-      this.clearPendingEscalation(sessionId);
+      // Clear the one that was answered. Without a requestId (an older client)
+      // the SDK resolves the oldest gate, so clear the session's oldest here too
+      // rather than leaving a stale entry that would be replayed on reconnect.
+      if (requestId) this.clearPendingEscalation(requestId);
+      else this.clearOldestSessionEscalation(sessionId);
       this.activeSessions.get(sessionId)?.resolveEscalation(action, note, requestId);
     });
 
-    // A client (re)subscribed. If its run is parked on a prompt it never saw —
-    // raised during a reconnect, or before this client joined — hand it over now.
+    // A client (re)subscribed. Hand over every prompt its run is parked on —
+    // raised during a reconnect, or before this client joined.
     this.socket.onJoinSession((sessionId, socketId) => {
-      this.replayEscalation(sessionId, socketId);
+      this.replayEscalations(sessionId, socketId);
     });
 
     this.socket.onSessionHalt((sessionId) => {
@@ -293,7 +300,7 @@ export class DashboardServer {
       this.activeSessions.get(sessionId)?.resolvePlanApproval(false);
       // Same for a section parked on an escalation: skip keeps whatever the
       // section already produced, which is the right shape for a halt.
-      this.clearPendingEscalation(sessionId);
+      this.clearSessionEscalations(sessionId);
       this.activeSessions.get(sessionId)?.resolveEscalation('skip');
     });
 
@@ -666,8 +673,12 @@ export class DashboardServer {
   /**
    * Raise an escalation prompt, and make sure it can still be answered.
    *
-   * Held in `pendingEscalations` so a client that joins late (or rejoins after
-   * a reconnect) gets it replayed. If nobody is reachable at all, the gate is
+   * Held in `pendingEscalations` — keyed by requestId, because a Complex wave
+   * dispatches sections concurrently and two can be parked at once — so a
+   * client that joins late (or rejoins after a reconnect) gets every waiting
+   * prompt replayed. Keying by session would drop the first of a pair: its
+   * grace timer would be cleared by the second, leaving it parked for the full
+   * timeout with nobody able to answer it. If nobody is reachable at all, the gate is
    * settled as `skip` after a short grace period rather than parked for the
    * full timeout: that matches the SDK's policy when no listener exists, and
    * five minutes of a held run is a real cost for a REST caller who has already
@@ -675,26 +686,29 @@ export class DashboardServer {
    * mistaken for an absent user.
    */
   private raiseEscalation(sessionId: string, socketId: string | undefined, event: Record<string, unknown>): void {
-    const requestId = typeof event.requestId === 'string' ? event.requestId : '';
+    const requestId = typeof event.requestId === 'string' && event.requestId ? event.requestId : randomUUID();
     const payload = { sessionId, ...event };
-    this.clearPendingEscalation(sessionId);
-    const entry: PendingEscalationEntry = { payload, requestId, raisedAt: Date.now() };
-    this.pendingEscalations.set(sessionId, entry);
+    const entry: PendingEscalationEntry = { payload, sessionId, requestId, raisedAt: Date.now() };
+    this.pendingEscalations.set(requestId, entry);
 
     if (this.hasResponder(sessionId, socketId)) {
       this.emitToSessionClients(socketId, sessionId, 'escalation:decision-required', payload);
       return;
     }
     entry.graceTimer = setTimeout(() => {
-      if (this.pendingEscalations.get(sessionId) !== entry) return;
+      if (this.pendingEscalations.get(requestId) !== entry) return;
       if (this.hasResponder(sessionId, socketId)) return; // replayed on join
-      this.pendingEscalations.delete(sessionId);
+      this.pendingEscalations.delete(requestId);
       this.activeSessions.get(sessionId)?.resolveEscalation('skip', 'No client was connected to answer.', requestId);
     }, ORPHANED_ESCALATION_GRACE_MS);
   }
 
   /**
-   * Replay a parked prompt to a client that just subscribed to the session.
+   * Replay EVERY parked prompt to a client that just subscribed to the session.
+   *
+   * Plural because a Complex run dispatches sections concurrently, so a wave can
+   * leave more than one waiting at the same time — the same reason the SDK keys
+   * its gates and the clients queue theirs.
    *
    * `timeoutMs` is recomputed as the time actually LEFT, because the SDK's timer
    * has been running since the prompt was raised. Sent verbatim, a client
@@ -703,21 +717,45 @@ export class DashboardServer {
    * A remaining duration is used rather than an absolute deadline so the two
    * sides never have to agree on a wall clock.
    */
-  private replayEscalation(sessionId: string, socketId: string): void {
-    const entry = this.pendingEscalations.get(sessionId);
-    if (!entry) return;
-    if (entry.graceTimer) { clearTimeout(entry.graceTimer); entry.graceTimer = undefined; }
-    const originalTimeout = typeof entry.payload.timeoutMs === 'number' ? entry.payload.timeoutMs : 0;
-    const remaining = Math.max(0, originalTimeout - (Date.now() - entry.raisedAt));
-    this.socket.emitToSocket(socketId, 'escalation:decision-required', { ...entry.payload, timeoutMs: remaining });
+  private replayEscalations(sessionId: string, socketId: string): void {
+    for (const entry of this.pendingEscalations.values()) {
+      if (entry.sessionId !== sessionId) continue;
+      if (entry.graceTimer) { clearTimeout(entry.graceTimer); entry.graceTimer = undefined; }
+      const originalTimeout = typeof entry.payload.timeoutMs === 'number' ? entry.payload.timeoutMs : 0;
+      const remaining = Math.max(0, originalTimeout - (Date.now() - entry.raisedAt));
+      this.socket.emitToSocket(socketId, 'escalation:decision-required', { ...entry.payload, timeoutMs: remaining });
+    }
   }
 
-  /** Forget a session's parked prompt (answered, timed out, or the run ended). */
-  private clearPendingEscalation(sessionId: string): void {
-    const entry = this.pendingEscalations.get(sessionId);
+  /** Forget ONE parked prompt — the one that was answered or timed out. */
+  private clearPendingEscalation(requestId: string): void {
+    const entry = this.pendingEscalations.get(requestId);
     if (!entry) return;
     if (entry.graceTimer) clearTimeout(entry.graceTimer);
-    this.pendingEscalations.delete(sessionId);
+    this.pendingEscalations.delete(requestId);
+  }
+
+  /**
+   * Forget the session's OLDEST prompt — for a client that answered without a
+   * requestId, which is exactly the gate `resolveEscalation` will settle.
+   * Insertion order makes `values()` oldest-first.
+   */
+  private clearOldestSessionEscalation(sessionId: string): void {
+    for (const [id, entry] of this.pendingEscalations) {
+      if (entry.sessionId !== sessionId) continue;
+      if (entry.graceTimer) clearTimeout(entry.graceTimer);
+      this.pendingEscalations.delete(id);
+      return;
+    }
+  }
+
+  /** Forget every prompt a session was parked on (run ended, or halted). */
+  private clearSessionEscalations(sessionId: string): void {
+    for (const [id, entry] of this.pendingEscalations) {
+      if (entry.sessionId !== sessionId) continue;
+      if (entry.graceTimer) clearTimeout(entry.graceTimer);
+      this.pendingEscalations.delete(id);
+    }
   }
 
   /** Deny + clear any approvals still pending for a session (run end / abort). */
@@ -1330,7 +1368,8 @@ export class DashboardServer {
             this.raiseEscalation(sessionId, undefined, e as Record<string, unknown>);
           });
           cascade.on('escalation:timeout', (e: unknown) => {
-            this.clearPendingEscalation(sessionId);
+            const ev = e as { requestId?: string };
+            if (ev.requestId) this.clearPendingEscalation(ev.requestId);
             this.socket.broadcastToRoom(`session:${sessionId}`, 'escalation:timeout', { sessionId, ...(e as object) });
           });
         }
@@ -1362,7 +1401,7 @@ export class DashboardServer {
         } finally {
           this.activeSessions.delete(sessionId);
           this.denyPendingApprovals(sessionId);
-          this.clearPendingEscalation(sessionId);
+          this.clearSessionEscalations(sessionId);
         }
       })();
     });

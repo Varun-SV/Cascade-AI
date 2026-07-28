@@ -32,6 +32,60 @@ describe('ConfigManager', () => {
   });
 });
 
+// Desktop and CLI share this one config file, and only the desktop's OAuth
+// connect flow ever checked for a colliding sanitized MCP tool prefix — a file
+// hand-edited, imported, or written by `cascade mcp connect` (which had no
+// check of its own) could reach disk already containing a collision. Fixed on
+// EVERY load, not gated on a migration flag, since it's a no-op when nothing
+// collides.
+describe('ConfigManager — MCP server name disambiguation on load', () => {
+  it('renames a pre-existing colliding pair and persists the fix', async () => {
+    const workspace = await makeTempWorkspace();
+    const globalDir = await makeTempWorkspace();
+    const configPath = path.join(workspace, CASCADE_CONFIG_FILE);
+    await fs.mkdir(path.dirname(configPath), { recursive: true });
+    await fs.writeFile(configPath, JSON.stringify({
+      tools: {
+        mcpServers: [
+          { name: 'foo bar', url: 'https://a.example.com/mcp' },
+          { name: 'foo@bar', url: 'https://b.example.com/mcp' }, // collides: mcp__foo_bar__…
+        ],
+      },
+    }), 'utf-8');
+
+    const manager = new ConfigManager(workspace, globalDir);
+    await manager.load();
+
+    const servers = manager.getConfig().tools.mcpServers!;
+    expect(servers[0]!.name).toBe('foo bar');       // first entry untouched
+    expect(servers[1]!.name).not.toBe('foo@bar');   // renamed to break the collision
+    expect(servers[1]!.url).toBe('https://b.example.com/mcp'); // other fields preserved
+
+    // Persisted, not just fixed in memory — a second process reading the same
+    // file must see the same, already-disambiguated names.
+    const onDisk = JSON.parse(await fs.readFile(configPath, 'utf-8')) as { tools: { mcpServers: Array<{ name: string }> } };
+    expect(onDisk.tools.mcpServers[1]!.name).toBe(servers[1]!.name);
+  });
+
+  it('does not rewrite the file when nothing collides', async () => {
+    const workspace = await makeTempWorkspace();
+    const globalDir = await makeTempWorkspace();
+    const configPath = path.join(workspace, CASCADE_CONFIG_FILE);
+    await fs.mkdir(path.dirname(configPath), { recursive: true });
+    await fs.writeFile(configPath, JSON.stringify({
+      tools: { mcpServers: [{ name: 'github', url: 'https://a' }, { name: 'notion', url: 'https://b' }] },
+    }), 'utf-8');
+    const before = (await fs.stat(configPath)).mtimeMs;
+
+    const manager = new ConfigManager(workspace, globalDir);
+    await manager.load();
+
+    expect(manager.getConfig().tools.mcpServers!.map((s) => s.name)).toEqual(['github', 'notion']);
+    const after = (await fs.stat(configPath)).mtimeMs;
+    expect(after).toBe(before);
+  });
+});
+
 describe('hasUsableProvider (CLI re-init bug fix)', () => {
   it('returns false with no providers configured', () => {
     expect(hasUsableProvider(undefined)).toBe(false);

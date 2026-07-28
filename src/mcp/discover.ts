@@ -14,8 +14,8 @@
 
 import type { McpServerConfig } from '../types.js';
 import { McpClient } from './client.js';
-import { fileOAuthProvider } from './oauth.js';
-import { createMcpToolNamer } from '../tools/tool-name.js';
+import { fileOAuthProvider, withOAuthStoreLock } from './oauth.js';
+import { assignMcpToolNames } from '../tools/tool-name.js';
 
 /** One tool a server advertises, named exactly as it is registered at run time. */
 export interface DiscoveredMcpTool {
@@ -53,21 +53,27 @@ export async function discoverMcpTools(servers: McpServerConfig[]): Promise<McpD
     const client = new McpClient({ trustedServers: [server.name] });
     try {
       const authProvider = server.oauthStore ? fileOAuthProvider(server.oauthStore) : undefined;
-      await client.connect(server, authProvider ? { authProvider } : {});
-      // Same namer, same order as ToolRegistry.registerMcpTools — a checkbox
-      // must carry the name the run will actually register, and two raw tool
-      // names can sanitise onto one (see createMcpToolNamer).
-      const nameFor = createMcpToolNamer();
-      const tools = client.getToolDefinitions().flatMap((def): DiscoveredMcpTool[] => {
+      const connect = () => client.connect(server, authProvider ? { authProvider } : {});
+      // A run connecting to the same server can be refreshing its token at
+      // this exact moment (see withOAuthStoreLock) — serialize on the store a
+      // server's OAuth state actually lives in, not on discovery in general.
+      await (server.oauthStore ? withOAuthStoreLock(server.oauthStore, connect) : connect());
+      const parsed = client.getToolDefinitions().flatMap((def) => {
         const [, serverName, toolName] = def.name.split('::');
-        if (!serverName || !toolName) return [];
-        return [{
-          server: serverName,
-          tool: toolName,
-          name: nameFor(serverName, toolName),
-          description: def.description.replace(`[MCP:${serverName}] `, ''),
-        }];
+        return serverName && toolName ? [{ def, server: serverName, tool: toolName }] : [];
       });
+      // Same assignment ToolRegistry.registerMcpTools makes — a checkbox has to
+      // carry the name the run will actually register. Order-independent (see
+      // assignMcpToolNames): `tools/list` makes no ordering promise, so a
+      // counter keyed to arrival order could hand the persisted, unsuffixed key
+      // to a different raw tool between this discovery and the run.
+      const names = assignMcpToolNames(parsed);
+      const tools: DiscoveredMcpTool[] = parsed.map(({ def, server: s, tool }, i) => ({
+        server: s,
+        tool,
+        name: names[i]!,
+        description: def.description.replace(`[MCP:${s}] `, ''),
+      }));
       results.push({ server: server.name, tools });
     } catch (err) {
       results.push({

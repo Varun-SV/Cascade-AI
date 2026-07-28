@@ -13,6 +13,7 @@ import { loadCascadeMd, type CascadeMdContent } from './cascade-md.js';
 import { MemoryStore } from '../memory/store.js';
 import { validateConfig } from './validate.js';
 import { loadGlobalCredentials, mergeGlobalCredentials, saveGlobalCredentials } from './global-credentials.js';
+import { disambiguateMcpServerNames } from '../tools/tool-name.js';
 import {
   CASCADE_CONFIG_FILE,
   CASCADE_DB_FILE,
@@ -49,6 +50,19 @@ export class ConfigManager {
 
   async load(): Promise<void> {
     this.config = await this.loadConfig();
+    // Desktop and CLI share this one config file, and only the desktop's OAuth
+    // connect flow ever checked for a colliding sanitized tool prefix —
+    // `cascade mcp connect` did not, and a file that already contains a
+    // colliding pair (hand-edited, imported, or written before that check
+    // existed) stays broken until something fixes the names. Run on every
+    // load rather than gating on a migration flag: disambiguateMcpServerNames
+    // is a no-op when nothing collides, so the cost of checking is one pass
+    // over a short list, and it also catches a collision introduced by an
+    // import or a hand edit between two loads, not only a fresh install.
+    const servers = this.config.tools?.mcpServers;
+    const disambiguated = servers?.length ? disambiguateMcpServerNames(servers) : servers;
+    const mcpNamesChanged = !!servers && disambiguated !== servers;
+    if (mcpNamesChanged && this.config.tools) this.config.tools.mcpServers = disambiguated;
     this.ignore = new CascadeIgnore();
     await this.ignore.load(this.workspacePath);
     this.cascadeMd = await loadCascadeMd(this.workspacePath);
@@ -62,6 +76,10 @@ export class ConfigManager {
     // carries its own key still wins (per-project override).
     this.config.providers = mergeGlobalCredentials(this.config.providers, loadGlobalCredentials(this.globalDir));
     await this.ensureDefaultIdentity();
+    // Persist the rename so it sticks — otherwise the fix applies for this
+    // process only and the file on disk (and the next process to read it)
+    // still has the collision.
+    if (mcpNamesChanged) await this.save();
   }
 
   getConfig(): CascadeConfig {

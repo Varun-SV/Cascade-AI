@@ -93,6 +93,8 @@ interface CoreExports {
   connectMcpWithLoopbackOAuth: (opts: { serverUrl: string; store: McpFileStore; openUrl: (u: string) => void; clientName?: string }) => Promise<unknown>;
   FileMcpOAuthStore: new (path: string) => McpFileStore;
   mcpServerPrefix: (serverName: string) => string;
+  uniqueMcpServerName: (desired: string, existingNames: string[]) => string;
+  disambiguateMcpServerNames: <T extends { name: string }>(servers: T[]) => T[];
   discoverMcpTools: (servers: unknown[]) => Promise<Array<{
     server: string;
     tools: Array<{ server: string; tool: string; name: string; description: string }>;
@@ -330,27 +332,11 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
   const safeName = (name: string) => name.replace(/[^a-z0-9._-]/gi, '_').slice(0, 64) || 'server';
   const hostnameOf = (url: string) => { try { return new URL(url).hostname; } catch { return 'mcp-server'; } };
 
-  /**
-   * A name whose SANITIZED prefix no other configured server already holds.
-   *
-   * Tools register as `mcp__<sanitized name>__<tool>`, so `foo bar` and
-   * `foo@bar` are different display names that collapse to the same registered
-   * names: the registry keeps one of each pair, and the single global
-   * disabledTools list cannot tell the two connections apart — switching a tool
-   * off for one silently does it for both. The OAuth store path collapses the
-   * same way, so two such servers would also share their token file.
-   * Cloud enforces this in addMcpServer; the desktop needs its own guard.
-   */
-  const uniqueServerName = (desired: string, existing: Array<{ name: string }>): string => {
-    const { mcpServerPrefix } = core();
-    const taken = new Set(existing.map((s) => mcpServerPrefix(s.name)));
-    if (!taken.has(mcpServerPrefix(desired))) return desired;
-    for (let n = 2; n < 1000; n++) {
-      const candidate = `${desired} (${n})`;
-      if (!taken.has(mcpServerPrefix(candidate))) return candidate;
-    }
-    return `${desired} (${Date.now().toString(36)})`;
-  };
+  // `uniqueMcpServerName` / `disambiguateMcpServerNames` live in the SDK
+  // (src/tools/tool-name.ts) rather than duplicated here, so this guard and the
+  // one `ConfigManager.load()` runs against a hand-edited or CLI-written config
+  // can never drift onto different suffix formats — which would itself produce
+  // a collision the two disagree about.
 
   ipcMain.handle('mcp:list', () => {
     const cfg = hooks.getConfig();
@@ -379,7 +365,7 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
     const existingIdx = servers.findIndex((s) => s.name === name);
     const finalName = existingIdx >= 0
       ? name
-      : uniqueServerName(name, servers);
+      : core().uniqueMcpServerName(name, servers.map((s) => s.name));
     const storePath = join(app.getPath('userData'), 'mcp-oauth', `${safeName(finalName)}.json`);
     try {
       await connectMcpWithLoopbackOAuth({

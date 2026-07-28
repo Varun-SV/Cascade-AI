@@ -39,6 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   genuinely nobody is there to answer, the section is skipped after half a
   minute instead of holding the run for the full five.
 
+  The host side of that fix tracked one prompt per session, so a second section
+  escalating in the same wave silently displaced the first — it lost its replay
+  on reconnect and its own 30-second orphan check. Every waiting prompt is now
+  tracked and replayed independently, addressed by its own request rather than
+  by the session it belongs to.
+
 ### Added
 - **Choose exactly which MCP tools a run can use.** A connected server usually
   brings dozens of tools and most are irrelevant to any given workspace — but
@@ -65,6 +71,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as "nothing is switched off" would re-enable a destructive connector tool on
   an ordinary pull, so the bundle is versioned: an older bundle leaves your
   selections alone, and only one that knows about them can change them.
+
+  The same colliding-name problem existed on the desktop and the CLI's
+  `cascade mcp connect`, which had no uniqueness check of its own — a config
+  file could already contain the collision from a hand edit, an older CLI
+  version, or `cascade mcp connect`. It's now checked and, if needed, fixed on
+  every load, not gated behind a one-time migration. Two servers whose raw
+  tool names collide within one connector are also disambiguated now, and the
+  choice of which keeps its plain name no longer depends on which order the
+  server happened to list them in — so a saved denial can't silently move to a
+  different tool between two runs. Refreshing an expired OAuth token for a
+  connector is also serialized against expanding that same connector's tool
+  list in Settings, closing the same kind of race the account-wide fix above
+  closes for the hosted app.
 
 - **The loading circle is now the Cascade mark.** Three arcs falling, widest at
   the top, lit in turn from T1 down to T3 — the wait shows the shape of what is

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { McpOAuthProvider, type McpOAuthState, type McpOAuthStore } from './oauth.js';
+import { McpOAuthProvider, withOAuthStoreLock, type McpOAuthState, type McpOAuthStore } from './oauth.js';
 
 /** An in-memory store to observe what the provider persists. */
 function memStore(initial?: McpOAuthState) {
@@ -66,5 +66,45 @@ describe('McpOAuthProvider', () => {
     const p = new McpOAuthProvider({ redirectUrl: 'https://x/cb', store, redirect: () => {}, state: 'fixed-state' });
     expect(p.state()).toBe('fixed-state');
     expect(p.oauthState).toBe('fixed-state');
+  });
+});
+
+describe('withOAuthStoreLock', () => {
+  it('runs operations on the SAME store path one at a time, in order', async () => {
+    const order: string[] = [];
+    let inFlight = 0;
+    let maxConcurrent = 0;
+    const op = (label: string, ms: number) => withOAuthStoreLock('/tmp/srv.json', async () => {
+      inFlight++;
+      maxConcurrent = Math.max(maxConcurrent, inFlight);
+      await new Promise((r) => setTimeout(r, ms));
+      order.push(label);
+      inFlight--;
+    });
+    await Promise.all([op('discovery', 20), op('run', 5)]);
+    expect(maxConcurrent).toBe(1);
+    // 'discovery' started first and held the lock, so it finishes first too —
+    // this is the actual guarantee: a run's connect never overlaps discovery's.
+    expect(order).toEqual(['discovery', 'run']);
+  });
+
+  it('lets DIFFERENT store paths run fully in parallel', async () => {
+    let concurrent = 0;
+    let maxConcurrent = 0;
+    const op = (path: string) => withOAuthStoreLock(path, async () => {
+      concurrent++;
+      maxConcurrent = Math.max(maxConcurrent, concurrent);
+      await new Promise((r) => setTimeout(r, 15));
+      concurrent--;
+    });
+    await Promise.all([op('/tmp/a.json'), op('/tmp/b.json')]);
+    expect(maxConcurrent).toBe(2);
+  });
+
+  it('releases the lock when an operation throws, so the next caller still runs', async () => {
+    const first = withOAuthStoreLock('/tmp/c.json', async () => { throw new Error('refresh failed'); });
+    await expect(first).rejects.toThrow('refresh failed');
+    const second = await withOAuthStoreLock('/tmp/c.json', async () => 'ok');
+    expect(second).toBe('ok');
   });
 });

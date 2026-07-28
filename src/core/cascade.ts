@@ -37,7 +37,7 @@ import { RunBreaker } from './run-breaker.js';
 import { T3Worker } from './tiers/t3-worker.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { McpClient } from '../mcp/client.js';
-import { fileOAuthProvider } from '../mcp/oauth.js';
+import { fileOAuthProvider, withOAuthStoreLock } from '../mcp/oauth.js';
 import { distillSessionFacts, buildSessionTranscript, sessionWorthRemembering } from './knowledge/session-memory.js';
 import { AuditLogger } from '../audit/log.js';
 import { AuditLogger as EncryptedAuditLogger } from './audit/audit-logger.js';
@@ -822,7 +822,11 @@ export class Cascade extends EventEmitter {
         for (const server of this.config.tools.mcpServers) {
           try {
             const authProvider = server.oauthStore ? fileOAuthProvider(server.oauthStore) : undefined;
-            await this.mcpClient.connect(server, authProvider ? { authProvider } : {});
+            const connect = () => this.mcpClient.connect(server, authProvider ? { authProvider } : {});
+            // Settings expanding this same connector's tool list can be
+            // refreshing its token at this exact moment — serialize on the
+            // store, not the connect call in general (see withOAuthStoreLock).
+            await (server.oauthStore ? withOAuthStoreLock(server.oauthStore, connect) : connect());
             // Per-tool selection: a connected server usually brings dozens of
             // tools, most irrelevant to any given workspace. `disabledTools`
             // names the ones the user switched off in Settings; they are left
