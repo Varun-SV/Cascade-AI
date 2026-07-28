@@ -8,7 +8,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AZURE_BASE_MODELS } from '#cascade-ai';
+import { AZURE_BASE_MODELS, discoverMcpTools } from '#cascade-ai';
 import type { CloudEnv } from './env.js';
 import type { CloudStore, OAuthProvider } from './db.js';
 import {
@@ -33,7 +33,7 @@ import {
 import { HandoffStore, parseHandoffBody } from './handoff.js';
 import { MAX_DOCUMENT_BYTES, parseDocument, resolveDocumentMime } from './documents.js';
 import { connectorCatalog, getConnector, validateRemoteMcpUrl } from './mcp.js';
-import { McpOAuthFlows, encodeOAuthBlob } from './mcp-oauth.js';
+import { McpOAuthFlows, encodeOAuthBlob, resolveRunMcpServers } from './mcp-oauth.js';
 import {
   BrokerFlows, getBrokerProvider, brokerConfigured, brokeredConnectorIds,
   brokerAuthorizeUrl, brokerExchangeCode,
@@ -745,10 +745,62 @@ export function createApp(env: CloudEnv, store: CloudStore) {
   app.patch('/api/mcp/servers/:id', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
     const id = req.params['id'];
     if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid server id' }); return; }
-    if (typeof req.body?.enabled !== 'boolean') { res.status(400).json({ error: 'enabled (boolean) is required' }); return; }
-    const ok = store.setMcpServerEnabled(id, req.session!.userId, req.body.enabled);
+    const userId = req.session!.userId;
+
+    // Per-tool selection. Sent as the complete deny list for this server so the
+    // write is idempotent — a toggle that raced another tab can't half-apply.
+    const hasTools = Array.isArray(req.body?.disabledTools);
+    const hasEnabled = typeof req.body?.enabled === 'boolean';
+    if (!hasTools && !hasEnabled) {
+      res.status(400).json({ error: 'enabled (boolean) or disabledTools (string[]) is required' });
+      return;
+    }
+
+    let ok = true;
+    if (hasTools) {
+      const names = (req.body.disabledTools as unknown[])
+        .filter((t): t is string => typeof t === 'string' && t.length > 0 && t.length <= 200)
+        .slice(0, 500);
+      ok = store.setMcpServerDisabledTools(id, userId, names) && ok;
+    }
+    if (hasEnabled) ok = store.setMcpServerEnabled(id, userId, req.body.enabled) && ok;
+
     if (!ok) { res.status(404).json({ error: 'Not found' }); return; }
     res.json({ ok: true });
+  });
+
+  // What a connected server actually offers. Settings cannot present a per-tool
+  // choice over a list it has never seen, which is exactly the reported gap:
+  // with GitHub connected there was no way to fine-tune which tools were
+  // reachable. Live connect-list-disconnect rather than a cache, because the
+  // list changes when a connector is re-authorised or the vendor ships new
+  // endpoints — a stale list would hide tools the user does have.
+  app.get('/api/mcp/servers/:id/tools', sessionMiddleware(env.SESSION_SECRET), async (req: AuthedRequest, res) => {
+    const id = req.params['id'];
+    if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid server id' }); return; }
+    const userId = req.session!.userId;
+    const server = store.listMcpServers(userId).find((s) => s.id === id);
+    if (!server) { res.status(404).json({ error: 'Not found' }); return; }
+
+    try {
+      // Reuse the run-wiring resolver so an OAuth server's token is refreshed
+      // and injected the same way it would be for a real run — otherwise
+      // discovery would 401 on exactly the connectors this feature is for.
+      const wired = await resolveRunMcpServers(store, userId, env.SESSION_SECRET);
+      const match = wired.find((s) => s.name === server.name);
+      if (!match) {
+        res.json({ tools: [], disabledTools: server.disabledTools, error: 'This server is turned off.' });
+        return;
+      }
+      const [result] = await discoverMcpTools([match]);
+      res.json({
+        tools: result?.tools ?? [],
+        disabledTools: server.disabledTools,
+        ...(result?.error ? { error: result.error } : {}),
+      });
+    } catch (err) {
+      res.status(502).json({ error: err instanceof Error ? err.message : 'Could not reach the server.' });
+    }
   });
 
   app.delete('/api/mcp/servers/:id', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {

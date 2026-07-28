@@ -192,6 +192,20 @@ contextBridge.exposeInMainWorld('cascade', {
     list: () => ipcRenderer.invoke('mcp:list') as Promise<{ servers: Array<{ name: string; target: string; kind: 'oauth' | 'token' | 'local' | 'open' }> }>,
     connectOAuth: (url: string, name?: string) => ipcRenderer.invoke('mcp:connectOAuth', { url, name }) as Promise<{ ok: boolean; error?: string; name?: string }>,
     remove: (name: string) => ipcRenderer.invoke('mcp:remove', name) as Promise<{ ok: boolean }>,
+    // Live discovery so Settings can offer per-tool selection; `disabled` is the
+    // persisted deny list, so a server that gains tools later exposes them by
+    // default rather than staying frozen at its shape on the day this last ran.
+    tools: () => ipcRenderer.invoke('mcp:tools') as Promise<{
+      servers: Array<{
+        server: string;
+        tools: Array<{ server: string; tool: string; name: string; description: string }>;
+        error?: string;
+      }>;
+      disabled: string[];
+      error?: string;
+    }>,
+    setToolEnabled: (name: string, enabled: boolean) =>
+      ipcRenderer.invoke('mcp:setToolEnabled', { name, enabled }) as Promise<{ ok: boolean; disabled?: string[] }>,
   },
 
   // File system (safe subset)

@@ -26,6 +26,7 @@ import type { ToolCreator } from '../../tools/tool-creator.js';
 import { RunBreaker } from '../run-breaker.js';
 import type { EscalationDecision } from '../../types.js';
 import { RedactionLayer } from '../audit/redaction.js';
+import { sectionNeedsDecision, settledEscalationStatus } from './escalation-policy.js';
 
 // Built per-run so the peer-coordination hint only appears when the
 // peer_message tool is actually registered. On a restricted host (e.g. cloud
@@ -66,6 +67,13 @@ export class T2Manager extends BaseTier {
   private escalationCallback?: (
     ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string },
   ) => Promise<EscalationDecision>;
+
+  /**
+   * The one allowed retry has been spent. Retrying is bounded because an
+   * escalation loop that can re-ask forever burns a budget on a question that
+   * is not resolving; a second escalation is terminal instead.
+   */
+  private escalationRetryUsed = false;
 
   /** Optional boardroom gate (Moderate / root-T2 runs) — pauses after decomposition. */
   private planApprovalCallback?: (
@@ -275,10 +283,37 @@ export class T2Manager extends BaseTier {
 
       let overallStatus = this.determineStatus(t3Results);
 
+      // Ask whenever ANY worker escalated — not only when the whole section
+      // came back ESCALATED. determineStatus checks `some(COMPLETED)` first, so
+      // a section with one finished worker and one that stopped on a question
+      // reports PARTIAL, and gating on the aggregate status skipped the prompt
+      // entirely: the question was never asked, and the escalated worker's
+      // output was dropped by the COMPLETED-only aggregation on the way past.
+      const hasEscalated = sectionNeedsDecision(t3Results);
+
+      // Keep the work and settle on a status T1 will act on correctly. Its
+      // compile filter is `status !== 'FAILED'`, so leaving a section ESCALATED
+      // lets it through as if it were finished — the exact dead end this
+      // feature exists to remove.
+      const settleEscalated = async (reason?: string) => {
+        if (reason) issues.push(reason);
+        summary = await this.aggregateResults(assignment, t3Results, { includeEscalated: true });
+        overallStatus = settledEscalationStatus(t3Results);
+      };
+
       // An escalated section means a worker hit something it could not decide.
       // Until now that was the end of the line — the status said "needs a
       // decision" and nobody was ever asked for one. Ask, and act on the answer.
-      if (overallStatus === 'ESCALATED' && this.escalationCallback) {
+      if (hasEscalated && this.escalationCallback && this.escalationRetryUsed) {
+        // The one allowed retry already ran and escalated again. Asking a second
+        // time is how a run burns its budget on a question that is not
+        // resolving, so this is terminal — but the work is still kept.
+        await settleEscalated('Escalated again after the retry — no further attempts were made.');
+      } else if (hasEscalated && !this.escalationCallback) {
+        // Nothing can ask (a bare T2Manager, or a host that never wired the
+        // gate). Settle rather than leaking ESCALATED past T1's filter.
+        await settleEscalated();
+      } else if (hasEscalated && this.escalationCallback) {
         this.sendStatusUpdate({
           progressPct: 95,
           currentAction: 'Escalated — waiting for your decision',
@@ -305,8 +340,15 @@ export class T2Manager extends BaseTier {
           // section past T1's filter, and it is also the honest status — work
           // exists, it just is not finished.
           summary = await this.aggregateResults(assignment, t3Results, { includeEscalated: true });
-          overallStatus = 'PARTIAL';
+          overallStatus = settledEscalationStatus(t3Results);
         } else if (decision.action === 'retry' || decision.action === 'guidance') {
+          // Bounded to a single attempt: an escalation loop that can re-ask
+          // forever is how a run burns a budget on a question that never
+          // resolves. Recorded as a flag rather than by clearing the callback,
+          // because clearing it made the gate silently vanish on the retry —
+          // a second escalation then returned status ESCALATED unasked, which
+          // T1 compiles as though the section had finished.
+          this.escalationRetryUsed = true;
           const guided = decision.action === 'guidance' && decision.note?.trim()
             ? {
                 ...assignment,
@@ -319,10 +361,9 @@ export class T2Manager extends BaseTier {
                 t3Subtasks: [],
               }
             : assignment;
-          // Re-run the section once with the answer applied. Bounded to a single
-          // attempt: an escalation loop that can re-ask forever is how a run
-          // burns a budget waiting on a decision that never resolves it.
-          this.escalationCallback = undefined;
+          // Re-run the section with the answer applied. The retry keeps its
+          // callback so a second escalation still reaches the terminal branch
+          // above instead of slipping through as an unasked ESCALATED.
           return await this.execute(guided, taskId, signal);
         } else {
           // 'timeout' — nobody answered. Fail with the reason attached rather

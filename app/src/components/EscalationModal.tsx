@@ -31,7 +31,16 @@ export function EscalationModal({ socket }: { socket: Socket | null }) {
     return () => clearInterval(id);
   }, [pending?.sectionId, pending?.taskId, pending]);
 
-  if (!pending) return null;
+  // Close at the local deadline instead of only relabelling. `escalation:timeout`
+  // is not replayed on reconnect, so a socket that dropped at the wrong moment
+  // left this full-screen modal up forever with three live buttons, every one of
+  // them answering a request the server had already abandoned.
+  const expired = !!pending && Date.now() - pending.receivedAt >= pending.timeoutMs;
+  useEffect(() => {
+    if (expired) dispatch(setPendingEscalation(null));
+  }, [expired, dispatch]);
+
+  if (!pending || expired) return null;
 
   // Counting from receivedAt rather than mount keeps the deadline honest if the
   // user switches views and comes back.
@@ -124,9 +133,7 @@ export function EscalationModal({ socket }: { socket: Socket | null }) {
         </div>
 
         <div style={{ fontSize: 11, color: urgent ? 'var(--danger)' : 'var(--text-dim)' }}>
-          {seconds > 0
-            ? `Waiting ${mm}:${ss} — if nobody answers, this section fails and the rest of the run continues.`
-            : 'Timed out — this section has been failed.'}
+          Waiting {mm}:{ss} — if nobody answers, this section fails and the rest of the run continues.
         </div>
       </div>
     </div>

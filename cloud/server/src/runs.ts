@@ -177,6 +177,8 @@ export interface RunControls {
   maxTokensPerRun?: number;
   /** Remote MCP servers (with auth headers) to attach as tool sources. */
   mcpServers?: Array<{ name: string; url: string; headers?: Record<string, string> }>;
+  /** Registered MCP tool names the user switched off in Settings. */
+  disabledTools?: string[];
 }
 
 // Maps the UI's routing mode to Cascade Auto's bias. Cascade Auto stays ON for
@@ -244,6 +246,10 @@ export function buildCloudConfig(
       ...(controls.mcpServers?.length
         ? { mcpServers: controls.mcpServers, mcpTrusted: controls.mcpServers.map((s) => s.name) }
         : {}),
+      // Per-tool selection. Deselected tools are left UNREGISTERED rather than
+      // refused at call time, so the model never sees them and can't propose a
+      // tool the user has turned off.
+      ...(controls.disabledTools?.length ? { disabledTools: controls.disabledTools } : {}),
     },
     ...(webSearchOn && hasBackend
       ? { webSearch: { searxngUrl: wsc!.searxngUrl, braveApiKey: wsc!.braveApiKey, tavilyApiKey: wsc!.tavilyApiKey } }
@@ -687,6 +693,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     benchmarksCacheFile,
     maxTokensPerRun: payload.maxTokensPerRun,
     mcpServers: mcpServers.length ? mcpServers : undefined,
+    disabledTools: payload.fastAnswer ? [] : store.listDisabledMcpTools(userId),
   });
   const cascade: Cascade = createCascade(config, scratchDir);
 

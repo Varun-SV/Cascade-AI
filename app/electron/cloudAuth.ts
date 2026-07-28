@@ -92,6 +92,11 @@ interface CoreExports {
   decryptSyncBlob: (blob: EncBlob, passphrase: string) => Promise<unknown>;
   connectMcpWithLoopbackOAuth: (opts: { serverUrl: string; store: McpFileStore; openUrl: (u: string) => void; clientName?: string }) => Promise<unknown>;
   FileMcpOAuthStore: new (path: string) => McpFileStore;
+  discoverMcpTools: (servers: unknown[]) => Promise<Array<{
+    server: string;
+    tools: Array<{ server: string; tool: string; name: string; description: string }>;
+    error?: string;
+  }>>;
 }
 
 /** Live config access, so a pulled bundle takes effect without a backend restart. */
@@ -358,6 +363,45 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : 'Could not connect.' };
     }
+  });
+
+  // ── Per-tool selection ──
+  //
+  // A connected server usually brings dozens of tools and most are irrelevant
+  // to any given workspace. Reported as: with GitHub connected, "in settings as
+  // well i can not fine tune on what tools to be accessible and selection" —
+  // you cannot select from a list you have never been shown. Discovery is a
+  // live connect-list-disconnect rather than a cache, because a server's tool
+  // list changes when a connector is re-authorised or the vendor ships new
+  // endpoints, and a stale list would hide tools the user does have.
+  ipcMain.handle('mcp:tools', async () => {
+    const cfg = hooks.getConfig();
+    const servers = (cfg?.tools?.mcpServers ?? []) as unknown[];
+    if (!servers.length) return { servers: [], disabled: [] };
+    try {
+      const results = await core().discoverMcpTools(servers);
+      return { servers: results, disabled: (cfg?.tools?.disabledTools ?? []) as string[] };
+    } catch (err) {
+      return { servers: [], disabled: [], error: err instanceof Error ? err.message : 'Could not list tools.' };
+    }
+  });
+
+  // Stored as a DENY list, not an allow list: a server that adds a tool later
+  // should make it available by default, the same as one connected today.
+  // An allow list would silently freeze each connector at the shape it had on
+  // the day the user last opened this panel.
+  ipcMain.handle('mcp:setToolEnabled', async (_e, arg: unknown) => {
+    const a = (arg ?? {}) as { name?: string; enabled?: boolean };
+    const name = String(a.name ?? '').trim();
+    if (!name) return { ok: false };
+    const cfg = hooks.getConfig();
+    if (!cfg) return { ok: false };
+    cfg.tools = cfg.tools ?? {};
+    const disabled = new Set((cfg.tools.disabledTools ?? []) as string[]);
+    if (a.enabled) disabled.delete(name); else disabled.add(name);
+    cfg.tools.disabledTools = Array.from(disabled);
+    await hooks.persistConfig();
+    return { ok: true, disabled: cfg.tools.disabledTools };
   });
 
   ipcMain.handle('mcp:remove', async (_e, name: unknown) => {

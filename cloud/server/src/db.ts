@@ -172,6 +172,17 @@ interface DbAttachmentRow {
 }
 
 /** A remote MCP server / app connector, as exposed to the client (auth redacted). */
+/** A stored JSON array of strings, tolerant of null/garbage from older rows. */
+function parseStringArray(json: string | null | undefined): string[] {
+  if (!json) return [];
+  try {
+    const v: unknown = JSON.parse(json);
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 export interface CloudMcpServer {
   id: string;
   userId: string;
@@ -183,6 +194,10 @@ export interface CloudMcpServer {
   connectorId: string | null;
   enabled: boolean;
   createdAt: number;
+  /** Registered tool names (`mcp__server__tool`) the user switched OFF for this
+   *  server. A DENY list, so tools the server adds later are available by
+   *  default rather than frozen at the shape it had when last inspected. */
+  disabledTools: string[];
 }
 
 interface DbMcpServerRow {
@@ -195,6 +210,7 @@ interface DbMcpServerRow {
   enabled: number;
   created_at: number;
   oauth_json?: string | null;
+  disabled_tools_json?: string | null;
 }
 
 export interface CloudFile {
@@ -454,6 +470,8 @@ export class CloudStore {
     if (!hasCol('users', 'subscription_current_end')) this.db.exec('ALTER TABLE users ADD COLUMN subscription_current_end INTEGER');
     // MCP OAuth: the server's encrypted OAuth state (tokens + client reg + AS url).
     if (!hasCol('mcp_servers', 'oauth_json')) this.db.exec('ALTER TABLE mcp_servers ADD COLUMN oauth_json TEXT');
+    // Per-tool selection: which of this server's tools the user switched off.
+    if (!hasCol('mcp_servers', 'disabled_tools_json')) this.db.exec('ALTER TABLE mcp_servers ADD COLUMN disabled_tools_json TEXT');
 
     // Message branching (conversation tree). Introduced together — back-fill runs
     // exactly once, when parent_id first appears, over the pre-existing flat data:
@@ -1118,6 +1136,23 @@ export class CloudStore {
     return this.db.prepare('UPDATE mcp_servers SET oauth_json = ? WHERE id = ? AND user_id = ?').run(oauthJson, id, userId).changes > 0;
   }
 
+  /** Replace this server's per-tool deny list. Owner-scoped by the WHERE. */
+  setMcpServerDisabledTools(id: string, userId: string, disabledTools: string[]): boolean {
+    const json = JSON.stringify(Array.from(new Set(disabledTools.filter((t) => typeof t === 'string' && t))));
+    return this.db
+      .prepare('UPDATE mcp_servers SET disabled_tools_json = ? WHERE id = ? AND user_id = ?')
+      .run(json, id, userId).changes > 0;
+  }
+
+  /** Every tool this user has switched off, across all their servers — the
+   *  shape `tools.disabledTools` wants when wiring a run. */
+  listDisabledMcpTools(userId: string): string[] {
+    const rows = this.db
+      .prepare('SELECT disabled_tools_json FROM mcp_servers WHERE user_id = ?')
+      .all(userId) as Array<{ disabled_tools_json: string | null }>;
+    return Array.from(new Set(rows.flatMap((r) => parseStringArray(r.disabled_tools_json))));
+  }
+
   setMcpServerEnabled(id: string, userId: string, enabled: boolean): boolean {
     const info = this.db
       .prepare('UPDATE mcp_servers SET enabled = ? WHERE id = ? AND user_id = ?')
@@ -1307,6 +1342,7 @@ export class CloudStore {
       connectorId: row.connector_id ?? null,
       enabled: !!row.enabled,
       createdAt: row.created_at,
+      disabledTools: parseStringArray(row.disabled_tools_json),
     };
   }
 

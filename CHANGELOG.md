@@ -26,6 +26,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   holds server resources while it waits, so hanging indefinitely isn't free
   either. The countdown is shown, so the failure never looks arbitrary.
 
+  This works on the **desktop** as well as the web. Sections in a Complex run
+  are dispatched concurrently, so more than one can be waiting at once; each
+  prompt is tracked separately and your answer goes to the section that asked.
+  Pressing **Stop** unparks a waiting section immediately rather than leaving
+  the run held until the timeout.
+
+### Added
+- **Choose exactly which MCP tools a run can use.** A connected server usually
+  brings dozens of tools and most are irrelevant to any given workspace — but
+  there was no way to see the list, let alone choose from it. Settings (desktop)
+  and Connectors (web) now expand each connection into its live tool list with a
+  checkbox per tool.
+
+  A tool you switch off is left **unregistered**, not refused at call time: the
+  model never sees it, so it cannot be proposed, it costs nothing in the tool
+  list, and there is no refusal to explain. Selections are stored as a deny
+  list, so tools a server adds later are available by default instead of frozen
+  at the shape it had when you last looked. In the hosted app the list is
+  per-account and per-server.
+
 ## 0.54.0 - 2026-07-28
 
 ### Fixed

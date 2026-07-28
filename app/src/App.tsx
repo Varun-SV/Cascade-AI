@@ -18,7 +18,7 @@ import {
   setConnected, setReconnecting, setBackendError, setMeta, updateCost, upsertAgent, updateLastMessage,
   setSessions, removeSession, setOnboardingDone,
   enqueueApproval, clearApprovals, appendAgentStream, addPeerEdge, expirePeerEdges, runEnded, finalizeLastMessage,
-  setPendingPlan, setPendingEscalation, setWhyReport, appendCommsEvent,
+  setPendingPlan, setPendingEscalation, clearEscalationForSession, setWhyReport, appendCommsEvent,
   type RuntimeSession, type PendingPlan, type PendingEscalation, type WhyReport,
 } from './store/index.js';
 import { SettingsView } from './views/SettingsView.js';
@@ -116,6 +116,16 @@ declare global {
         list(): Promise<{ servers: Array<{ name: string; target: string; kind: 'oauth' | 'token' | 'local' | 'open' }> }>;
         connectOAuth(url: string, name?: string): Promise<{ ok: boolean; error?: string; name?: string }>;
         remove(name: string): Promise<{ ok: boolean }>;
+        tools(): Promise<{
+          servers: Array<{
+            server: string;
+            tools: Array<{ server: string; tool: string; name: string; description: string }>;
+            error?: string;
+          }>;
+          disabled: string[];
+          error?: string;
+        }>;
+        setToolEnabled(name: string, enabled: boolean): Promise<{ ok: boolean; disabled?: string[] }>;
       };
     };
   }
@@ -308,7 +318,7 @@ export function App() {
       dispatch(setBackendError(data?.error ? `Run failed: ${data.error}` : 'Run failed — check your model/key and try again.'));
       dispatch(clearApprovals());
       dispatch(setPendingPlan(null));
-      dispatch(setPendingEscalation(null));
+      dispatch(clearEscalationForSession(data?.sessionId));
       // Only end/finalize if this event belongs to the run/session actually
       // being tracked right now — otherwise a background session finishing
       // (or erroring) clobbered the Stop control and transcript of whatever
@@ -320,7 +330,11 @@ export function App() {
       dispatch(setBackendError(null));
       dispatch(clearApprovals());
       dispatch(setPendingPlan(null));
-      dispatch(setPendingEscalation(null));
+      // Only for the session that finished. A background session completing
+      // used to wipe the prompt belonging to a DIFFERENT run that was still
+      // parked — taking away the only way to answer it, so that section then
+      // waited out its full timeout and failed.
+      dispatch(clearEscalationForSession(data?.sessionId));
       if (!data?.sessionId || data.sessionId === runSessionIdRef.current) dispatch(runEnded());
       if (!data?.sessionId || data.sessionId === sessionIdRef.current) dispatch(finalizeLastMessage({ finalOutput: data?.result?.output }));
     });

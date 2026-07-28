@@ -252,6 +252,52 @@ describe('CloudStore', () => {
     expect(store.listMcpServers(bob.id)).toHaveLength(0);
   });
 
+  it('keeps per-tool MCP selections per user and per server', () => {
+    // A connected server brings dozens of tools, most irrelevant to any given
+    // chat. Stored as a DENY list so a tool the server adds later is available
+    // by default — an allow list would freeze each connector at the shape it
+    // had when the user last opened Settings.
+    const alice = store.upsertUser({ provider: 'dev', providerId: 'tools-a', email: null, name: null, avatar: null });
+    const bob = store.upsertUser({ provider: 'dev', providerId: 'tools-b', email: null, name: null, avatar: null });
+
+    const gh = store.addMcpServer({ userId: alice.id, name: 'github', url: 'https://mcp.example.com/gh' });
+    const notion = store.addMcpServer({ userId: alice.id, name: 'notion', url: 'https://mcp.example.com/nt' });
+    const bobsGh = store.addMcpServer({ userId: bob.id, name: 'github', url: 'https://mcp.example.com/gh' });
+
+    // Nothing switched off to begin with — every tool is live by default.
+    expect(store.listMcpServers(alice.id).every((s) => s.disabledTools.length === 0)).toBe(true);
+    expect(store.listDisabledMcpTools(alice.id)).toEqual([]);
+
+    expect(store.setMcpServerDisabledTools(gh.id, alice.id, ['mcp__github__delete_repo', 'mcp__github__merge_pr'])).toBe(true);
+    expect(store.setMcpServerDisabledTools(notion.id, alice.id, ['mcp__notion__delete_page'])).toBe(true);
+
+    const listed = store.listMcpServers(alice.id);
+    expect(listed.find((s) => s.id === gh.id)!.disabledTools).toEqual([
+      'mcp__github__delete_repo', 'mcp__github__merge_pr',
+    ]);
+
+    // Run wiring wants one flat list across every server the user owns.
+    expect(store.listDisabledMcpTools(alice.id).sort()).toEqual([
+      'mcp__github__delete_repo', 'mcp__github__merge_pr', 'mcp__notion__delete_page',
+    ]);
+
+    // Alice's choices must not reach Bob, even though both connected 'github'.
+    expect(store.listDisabledMcpTools(bob.id)).toEqual([]);
+    expect(store.listMcpServers(bob.id).find((s) => s.id === bobsGh.id)!.disabledTools).toEqual([]);
+
+    // Writes are owner-scoped and idempotent (the whole list is replaced, so two
+    // tabs racing a toggle converge instead of half-applying).
+    expect(store.setMcpServerDisabledTools(gh.id, bob.id, ['mcp__github__anything'])).toBe(false);
+    expect(store.listDisabledMcpTools(alice.id)).toHaveLength(3);
+
+    expect(store.setMcpServerDisabledTools(gh.id, alice.id, [])).toBe(true);
+    expect(store.listDisabledMcpTools(alice.id)).toEqual(['mcp__notion__delete_page']);
+
+    // Removing a server takes its selections with it.
+    store.deleteMcpServer(notion.id, alice.id);
+    expect(store.listDisabledMcpTools(alice.id)).toEqual([]);
+  });
+
   it('exposes a working hybrid vector store over the tenant DB', () => {
     const vs = store.getVectorStore();
     // Two chunks with hand-made 3-d vectors under one namespace/source.

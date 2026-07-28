@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Plug, Trash2, Plus, Github, Slack, Globe, ShieldCheck, Loader2, ExternalLink, LogIn, Search, Zap } from 'lucide-react';
+import { Plug, Trash2, Plus, Github, Slack, Globe, ShieldCheck, Loader2, ExternalLink, LogIn, Search, Zap, ChevronDown, ChevronRight, Wrench } from 'lucide-react';
 import Modal from './Modal.js';
 import {
   fetchConnectors, fetchMcpServers, addMcpServer, setMcpServerEnabled, deleteMcpServer, startMcpOAuth,
+  fetchMcpServerTools, setMcpServerDisabledTools, type McpToolEntry,
   startBrokerConnect, type ConnectorEntry, type McpServer,
 } from '../lib/api.js';
 
@@ -57,6 +58,10 @@ export default function ConnectorsModal({ onClose }: { onClose: () => void }) {
   // A hosted OAuth connector mid one-click redirect (shows a spinner on its card).
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
+  // Per-tool selection: which server rows are expanded, and the discovered
+  // tools per server (fetched on first expand, refreshable).
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [toolsFor, setToolsFor] = useState<Record<string, { tools: McpToolEntry[]; loading?: boolean; error?: string }>>({});
 
   const connectorById = useMemo(() => new Map(connectors.map((c) => [c.id, c])), [connectors]);
   const filtered = useMemo(() => {
@@ -193,6 +198,51 @@ export default function ConnectorsModal({ onClose }: { onClose: () => void }) {
     }
   }
 
+  // ── Per-tool selection ──
+  //
+  // A connected server usually brings dozens of tools, most irrelevant to any
+  // given chat. Reported as: with GitHub connected there was no way to "fine
+  // tune on what tools to be accessible and selection" — you cannot choose from
+  // a list you have never been shown. Discovery is a live round trip (not a
+  // cache), because the list changes when a connector is re-authorised.
+  async function loadTools(s: McpServer) {
+    if (toolsFor[s.id]?.loading) return;
+    setToolsFor((prev) => ({ ...prev, [s.id]: { ...(prev[s.id] ?? { tools: [] }), loading: true, error: undefined } }));
+    try {
+      const r = await fetchMcpServerTools(s.id);
+      setToolsFor((prev) => ({ ...prev, [s.id]: { tools: r.tools, loading: false, error: r.error } }));
+      setServers((prev) => prev.map((x) => (x.id === s.id ? { ...x, disabledTools: r.disabledTools ?? [] } : x)));
+    } catch (e) {
+      setToolsFor((prev) => ({
+        ...prev,
+        [s.id]: { tools: [], loading: false, error: e instanceof Error ? e.message : 'Could not reach that server.' },
+      }));
+    }
+  }
+
+  function toggleExpanded(s: McpServer) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(s.id)) next.delete(s.id);
+      else { next.add(s.id); if (!toolsFor[s.id]) void loadTools(s); }
+      return next;
+    });
+  }
+
+  // The whole deny list is sent each time, so the write is idempotent — two
+  // tabs racing a toggle converge instead of half-applying.
+  async function toggleTool(s: McpServer, toolName: string, enable: boolean) {
+    const next = enable
+      ? s.disabledTools.filter((t) => t !== toolName)
+      : Array.from(new Set([...s.disabledTools, toolName]));
+    setServers((prev) => prev.map((x) => (x.id === s.id ? { ...x, disabledTools: next } : x)));
+    try {
+      await setMcpServerDisabledTools(s.id, next);
+    } catch {
+      await refresh();
+    }
+  }
+
   async function remove(s: McpServer) {
     setServers((prev) => prev.filter((x) => x.id !== s.id));
     try {
@@ -232,31 +282,97 @@ export default function ConnectorsModal({ onClose }: { onClose: () => void }) {
             {servers.length > 0 && (
               <div className="flex flex-col gap-2">
                 <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-400">Your connections</p>
-                {servers.map((s) => (
-                  <div key={s.id} className="flex items-center gap-3 rounded-xl border border-elev/10 bg-elev/[0.04] px-3 py-2.5">
-                    <ConnectorIcon id={s.connectorId} color={s.connectorId ? connectorById.get(s.connectorId)?.color : undefined} name={s.connectorId ? connectorById.get(s.connectorId)?.name : undefined} />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="truncate text-sm font-medium text-ink-100">{s.name}</span>
-                        {s.hasAuth && (
-                          <span className="inline-flex items-center gap-0.5 rounded bg-emerald-500/10 px-1 py-px text-[10px] font-medium text-emerald-400">
-                            <ShieldCheck size={9} /> auth
-                          </span>
-                        )}
+                {servers.map((s) => {
+                  const isOpen = expanded.has(s.id);
+                  const state = toolsFor[s.id];
+                  const offCount = state ? state.tools.filter((t) => s.disabledTools.includes(t.name)).length : 0;
+                  return (
+                    <div key={s.id} className="rounded-xl border border-elev/10 bg-elev/[0.04]">
+                      <div className="flex items-center gap-3 px-3 py-2.5">
+                        <ConnectorIcon id={s.connectorId} color={s.connectorId ? connectorById.get(s.connectorId)?.color : undefined} name={s.connectorId ? connectorById.get(s.connectorId)?.name : undefined} />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="truncate text-sm font-medium text-ink-100">{s.name}</span>
+                            {s.hasAuth && (
+                              <span className="inline-flex items-center gap-0.5 rounded bg-emerald-500/10 px-1 py-px text-[10px] font-medium text-emerald-400">
+                                <ShieldCheck size={9} /> auth
+                              </span>
+                            )}
+                          </div>
+                          <div className="truncate text-[11px] text-ink-500">{s.url}</div>
+                        </div>
+                        <button
+                          type="button"
+                          aria-label={`${isOpen ? 'Hide' : 'Show'} tools for ${s.name}`}
+                          title="Choose which tools this connection can use"
+                          onClick={() => toggleExpanded(s)}
+                          disabled={!s.enabled}
+                          className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-ink-400 hover:bg-elev/10 hover:text-ink-200 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          <Wrench size={12} />
+                          {state && !state.loading && !state.error
+                            ? `${state.tools.length - offCount}/${state.tools.length}`
+                            : 'tools'}
+                          {isOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                        </button>
+                        <Toggle on={s.enabled} onChange={() => toggle(s)} />
+                        <button
+                          type="button"
+                          aria-label={`Remove ${s.name}`}
+                          onClick={() => remove(s)}
+                          className="rounded-md p-1 text-ink-500 hover:bg-danger-500/10 hover:text-danger-300"
+                        >
+                          <Trash2 size={14} />
+                        </button>
                       </div>
-                      <div className="truncate text-[11px] text-ink-500">{s.url}</div>
+
+                      {isOpen && (
+                        <div className="border-t border-elev/10 px-3 py-2">
+                          {state?.loading && (
+                            <div className="flex items-center gap-2 py-1 text-xs text-ink-400">
+                              <Loader2 size={12} className="animate-spin" /> Asking {s.name} what it offers…
+                            </div>
+                          )}
+                          {state?.error && <p className="py-1 text-xs text-danger-300">{state.error}</p>}
+                          {state && !state.loading && !state.error && state.tools.length === 0 && (
+                            <p className="py-1 text-xs text-ink-400">This server advertises no tools.</p>
+                          )}
+                          {state && !state.loading && state.tools.length > 0 && (
+                            <>
+                              <p className="pb-1.5 text-[11px] leading-relaxed text-ink-500">
+                                A tool you switch off is left unregistered — the model never sees it, so it
+                                can&apos;t be proposed or called.
+                              </p>
+                              <div className="flex flex-col">
+                                {state.tools.map((t) => {
+                                  const on = !s.disabledTools.includes(t.name);
+                                  return (
+                                    <label key={t.name} className="flex cursor-pointer items-start gap-2.5 rounded-md px-1 py-1.5 hover:bg-elev/[0.05]">
+                                      <input
+                                        type="checkbox"
+                                        checked={on}
+                                        onChange={(e) => void toggleTool(s, t.name, e.target.checked)}
+                                        className="mt-0.5 cursor-pointer"
+                                      />
+                                      <span className="min-w-0 flex-1">
+                                        <span className={`block truncate text-xs font-medium ${on ? 'text-ink-100' : 'text-ink-500'}`}>{t.tool}</span>
+                                        {t.description && (
+                                          <span className="block text-[11px] leading-snug text-ink-500">
+                                            {t.description.length > 140 ? `${t.description.slice(0, 140)}…` : t.description}
+                                          </span>
+                                        )}
+                                      </span>
+                                    </label>
+                                  );
+                                })}
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      )}
                     </div>
-                    <Toggle on={s.enabled} onChange={() => toggle(s)} />
-                    <button
-                      type="button"
-                      aria-label={`Remove ${s.name}`}
-                      onClick={() => remove(s)}
-                      className="rounded-md p-1 text-ink-500 hover:bg-danger-500/10 hover:text-danger-300"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
 

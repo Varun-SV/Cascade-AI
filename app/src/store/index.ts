@@ -474,6 +474,17 @@ const appSlice = createSlice({
     setPendingEscalation(state, action: PayloadAction<PendingEscalation | null>) {
       state.pendingEscalation = action.payload;
     },
+    /**
+     * Clear the prompt only if it belongs to the session that just ended.
+     * An undefined sessionId means "unattributed event" — clear regardless,
+     * matching how the run-lifecycle handlers treat the same case. Runs can
+     * proceed in the background, so an unconditional clear took away the only
+     * way to answer a DIFFERENT run's still-parked question.
+     */
+    clearEscalationForSession(state, action: PayloadAction<string | undefined>) {
+      const id = action.payload;
+      if (!id || state.pendingEscalation?.sessionId === id) state.pendingEscalation = null;
+    },
     // Why panel (run inspector)
     setWhyReport(state, action: PayloadAction<WhyReport>) {
       state.whyBySession[action.payload.sessionId] = action.payload;
@@ -521,7 +532,7 @@ export const {
   appendAgentStream, selectNode, dismissCompletedNodes, addPeerEdge, expirePeerEdges, setForceTier, runStarted, runEnded,
   openTab, closeTab, setActiveTab, setTabDirty,
   setOnboardingDone,
-  setPendingPlan, setPendingEscalation, setWhyReport, setShowWhyPanel,
+  setPendingPlan, setPendingEscalation, clearEscalationForSession, setWhyReport, setShowWhyPanel,
   appendCommsEvent, clearCommsEvents, setBottomTab, openBottomTab,
   setShowPalette, setChangesSessionId, setShowContinue,
 } = appSlice.actions;

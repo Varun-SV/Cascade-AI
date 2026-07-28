@@ -121,3 +121,63 @@ describe('ToolRegistry enabledTools allowlist', () => {
     expect(reg.hasTool('browser')).toBe(true);
   });
 });
+
+// ── Per-tool MCP selection ────────────────────
+//
+// A connected server usually brings dozens of tools and most are irrelevant to
+// any given workspace. Deselected tools are left UNREGISTERED rather than
+// refused at call time, so the model never sees them: it cannot propose one,
+// they cost no tokens in the tool list, and there is no refusal to explain.
+
+describe('ToolRegistry MCP per-tool selection', () => {
+  /** Minimal stand-in for McpClient — only getToolDefinitions is read here. */
+  function fakeClient(names: Array<[server: string, tool: string]>) {
+    return {
+      getToolDefinitions: () => names.map(([server, tool]) => ({
+        name: `mcp::${server}::${tool}`,
+        description: `[MCP:${server}] does ${tool}`,
+        inputSchema: { type: 'object', properties: {} },
+      })),
+    } as unknown as Parameters<ToolRegistry['registerMcpTools']>[0];
+  }
+
+  it('registers every advertised tool when no filter is supplied', () => {
+    const reg = new ToolRegistry(toolsConfig, '/tmp');
+    reg.registerMcpTools(fakeClient([['github', 'get_me'], ['github', 'delete_repo']]));
+    expect(reg.hasTool('mcp__github__get_me')).toBe(true);
+    expect(reg.hasTool('mcp__github__delete_repo')).toBe(true);
+  });
+
+  it('leaves a deselected tool out of the registry entirely', () => {
+    const reg = new ToolRegistry(toolsConfig, '/tmp');
+    const denied = new Set(['mcp__github__delete_repo']);
+    reg.registerMcpTools(
+      fakeClient([['github', 'get_me'], ['github', 'delete_repo']]),
+      (name) => !denied.has(name),
+    );
+    expect(reg.hasTool('mcp__github__get_me')).toBe(true);
+    expect(reg.hasTool('mcp__github__delete_repo')).toBe(false);
+    // And it is absent from what the model is shown, not merely unusable.
+    const shown = reg.getToolDefinitions().map((d) => d.name);
+    expect(shown).toContain('mcp__github__get_me');
+    expect(shown).not.toContain('mcp__github__delete_repo');
+  });
+
+  it('filters on the REGISTERED name, which is what the user selects by', () => {
+    // The deny list stores `mcp__server__tool`, not the bare vendor name — two
+    // servers can both advertise a tool called "search".
+    const reg = new ToolRegistry(toolsConfig, '/tmp');
+    reg.registerMcpTools(
+      fakeClient([['github', 'search'], ['notion', 'search']]),
+      (name) => name !== 'mcp__notion__search',
+    );
+    expect(reg.hasTool('mcp__github__search')).toBe(true);
+    expect(reg.hasTool('mcp__notion__search')).toBe(false);
+  });
+
+  it('can deselect everything a server offers without removing the server', () => {
+    const reg = new ToolRegistry(toolsConfig, '/tmp');
+    reg.registerMcpTools(fakeClient([['github', 'a'], ['github', 'b']]), () => false);
+    expect(reg.getToolDefinitions().some((d) => d.name.startsWith('mcp__'))).toBe(false);
+  });
+});
