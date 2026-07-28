@@ -322,9 +322,24 @@ export class T3Worker extends BaseTier {
       output = result.output;
       toolCalls = result.toolCalls;
 
-      this.sendStatusUpdate({ progressPct: 65, currentAction: 'Verifying required artifacts', status: 'IN_PROGRESS' });
+      // Only demand a file when this worker could actually have written one.
+      // `requiresArtifact()` already gates the PROMPT side (see the artifact
+      // instructions below) — but this verification ran unconditionally, so a
+      // worker with no file tools was told not to write files and then failed
+      // for not having written them. The check regex-matches filenames out of
+      // the subtask description, so a research plan that merely mentions
+      // "report.md" produced an unsatisfiable requirement: correctOutput ran, the
+      // re-check failed again, and the subtask ESCALATED with the model's
+      // perfectly good prose attached. That is the "successful node marked
+      // failed" case.
+      const mustProduceArtifact = this.requiresArtifact();
+      if (mustProduceArtifact) {
+        this.sendStatusUpdate({ progressPct: 65, currentAction: 'Verifying required artifacts', status: 'IN_PROGRESS' });
+      }
 
-      const artifactCheck = await this.verifyArtifacts(assignment);
+      const artifactCheck = mustProduceArtifact
+        ? await this.verifyArtifacts(assignment)
+        : { ok: true, issues: [] };
       if (!artifactCheck.ok) {
         correctionAttempts = 1;
         issues.push(...artifactCheck.issues);
@@ -730,6 +745,9 @@ export class T3Worker extends BaseTier {
         tierId: this.id,
         sessionId: this.taskId,
         requireApproval: false,
+        // Media generation can run for a minute; without this a cancelled run
+        // still pays for an image nobody will see.
+        ...(this.signal ? { signal: this.signal } : {}),
         saveSnapshot: async (path, content) => {
           this.store?.addFileSnapshot(this.taskId, path, content);
         },
@@ -786,6 +804,7 @@ export class T3Worker extends BaseTier {
           tierId: this.id,
           sessionId: this.taskId,
           requireApproval: false,
+          ...(this.signal ? { signal: this.signal } : {}),
         });
         const str = typeof result === 'string' ? result : JSON.stringify(result);
         if (!str.startsWith('Tool error:') && !str.startsWith('Error:')) {
@@ -809,6 +828,7 @@ export class T3Worker extends BaseTier {
             tierId: this.id,
             sessionId: this.taskId,
             requireApproval: false,
+            ...(this.signal ? { signal: this.signal } : {}),
           });
           const str = typeof result === 'string' ? result : JSON.stringify(result);
           if (!str.startsWith('Tool error:')) return `[Synthesized ${newToolName}]: ${str}`;

@@ -217,6 +217,12 @@ export interface ToolExecuteOptions {
   tierId: string;
   sessionId: string;
   requireApproval: boolean;
+  /**
+   * Cancels a long-running tool call. Media generation can take a minute or
+   * more, so a cancelled run must be able to stop one mid-flight rather than
+   * paying it out and discarding the result.
+   */
+  signal?: AbortSignal;
   saveSnapshot?: (filePath: string, content: string) => Promise<void>;
   sendPeerSync?: (
     to: string,
@@ -730,6 +736,11 @@ export interface BudgetConfig {
   maxTokensPerRun?: number;
   /** Optional hard per-task cost ceiling (USD). */
   maxCostPerRunUsd?: number;
+  /**
+   * Consecutive systemic failures against one model before the run stops
+   * launching work certain to fail the same way. Default 3.
+   */
+  failureThreshold?: number;
   warnAtPct: number; // 0-100, default 80
 }
 

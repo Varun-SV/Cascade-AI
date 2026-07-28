@@ -28,6 +28,7 @@ import { FailoverManager } from './failover.js';
 import { TpmLimiter } from './tpm-limiter.js';
 import { LocalRequestQueue } from './local-queue.js';
 import type { TaskAnalyzer } from './task-analyzer.js';
+import type { FeedbackSource } from './feedback-prior.js';
 import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
 import { buildTokenUsage } from '../../utils/cost.js';
 import { withTimeout, CascadeCancelledError } from '../../utils/retry.js';
@@ -182,6 +183,7 @@ export class CascadeRouter extends EventEmitter {
   private tpmLimiter!: TpmLimiter;
   private localQueue!: LocalRequestQueue;
   private taskAnalyzer?: TaskAnalyzer;
+  private pendingFeedbackSource?: FeedbackSource;
   private worldStateDB?: WorldStateDB;
   private privacyPaths?: PrivacyPaths;
   private guidanceQueue?: GuidanceQueue;
@@ -811,8 +813,21 @@ export class CascadeRouter extends EventEmitter {
   }
 
   /** Wire the Cascade Auto task analyzer used for per-subtask model routing. */
+  /**
+   * Feed per-model thumbs counts into Auto routing. Forwarded to the analyzer
+   * because that is where the public benchmark score is combined; the prior
+   * adjusts that number rather than sitting anywhere else in the pipeline.
+   */
+  setFeedbackSource(source: FeedbackSource): void {
+    this.taskAnalyzer?.setFeedbackSource(source);
+    this.pendingFeedbackSource = source;
+  }
+
   setTaskAnalyzer(analyzer: TaskAnalyzer): void {
     this.taskAnalyzer = analyzer;
+    // Ordering between setFeedbackSource and setTaskAnalyzer is not guaranteed
+    // by callers, so a source supplied first is applied on arrival.
+    if (this.pendingFeedbackSource) analyzer.setFeedbackSource(this.pendingFeedbackSource);
   }
 
   setWorldStateDB(db: WorldStateDB | undefined): void {
