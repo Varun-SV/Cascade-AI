@@ -147,7 +147,13 @@ export function normalizeForPricing(id: string): string {
   s = s.replace(/^models\//, '');
   const slash = s.lastIndexOf('/');
   if (slash !== -1) s = s.slice(slash + 1);
-  s = s.replace(/[:@].*$/, '');
+  // Drop an Ollama tag or an "@version" suffix ("llama3.2:3b" → "llama3.2").
+  // A scan, not `/[:@].*$/`: that pattern backtracks quadratically on an id
+  // containing a newline, because `.` can't cross it and `$` can't match, so
+  // the engine retries from every later ':'. Model ids are short enough that
+  // this was never a live DoS, but a linear scan is both safe and clearer.
+  const tag = s.search(/[:@]/);
+  if (tag !== -1) s = s.slice(0, tag);
   s = s.replace(/-latest$/, '');
   s = s.replace(/-preview(?:-\d{2}-\d{2})?$/, '');
   s = s.replace(/-\d{4}-\d{2}-\d{2}$/, '');

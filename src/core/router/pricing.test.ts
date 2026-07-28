@@ -377,6 +377,17 @@ describe('model id normalisation', () => {
     expect(normalizeForPricing(input)).toBe(expected);
   });
 
+  it('strips a tag suffix in linear time, even on a pathological id', () => {
+    // The tag strip used to be /[:@].*$/, which backtracks quadratically when
+    // the id holds a newline: `.` can't cross it, `$` can't match, so the
+    // engine retries from every later ':'. Model ids come off a provider's
+    // /models response, so the shape isn't ours to guarantee.
+    const nasty = `${':'.repeat(60_000)}\n`;
+    const started = Date.now();
+    expect(normalizeForPricing(nasty)).toBe('');
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
   it('has no entry for gemini-3-pro-flash, which is not a real model', () => {
     // Pricing a model id that does not exist is exactly how the zero-cost path
     // fired: no catalogue hit, no live hit, $0 recorded, reported as free.
