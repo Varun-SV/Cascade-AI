@@ -24,6 +24,7 @@ import { MODELS } from '../constants.js';
 import { BaseProvider } from './base.js';
 import { withResolvedPricing } from '../core/router/pricing.js';
 import { isChatModel } from './model-filter.js';
+import { toGeminiParameters } from './gemini-schema.js';
 
 export class GeminiProvider extends BaseProvider {
   private client: GoogleGenAI;
@@ -323,7 +324,12 @@ export class GeminiProvider extends BaseProvider {
     return {
       name: tool.name,
       description: tool.description,
-      parameters: tool.inputSchema as FunctionDeclaration['parameters'],
+      // Convert, never cast. Gemini's parameters field is an OpenAPI subset
+      // that 400s on unknown keys, and MCP servers ship schemas carrying their
+      // own extensions (GitHub's adds `x-mcp-header` to every header-bound
+      // property). Casting sent those through verbatim and every request failed
+      // before the model saw it. See providers/gemini-schema.ts.
+      parameters: toGeminiParameters(tool.inputSchema) as FunctionDeclaration['parameters'],
     };
   }
 }

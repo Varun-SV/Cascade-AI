@@ -5,6 +5,65 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.51.0 - 2026-07-28
+
+### Fixed
+- **Gemini + any MCP server no longer fails every single request.** Cascade
+  passed a tool's JSON Schema straight to Gemini's `function_declarations`,
+  which is not JSON Schema — it is a narrow OpenAPI subset that rejects unknown
+  fields outright. Real MCP servers ship extensions: GitHub's annotates
+  properties with `x-mcp-header`. The result was an immediate HTTP 400,
+  repeated once per offending property, **before the model ever saw the
+  message** — so every prompt failed identically, whether it asked for an image,
+  a code review, or said "hi". Tool schemas are now converted rather than cast,
+  through an allowlist of the fields Gemini documents, so the next extension
+  nobody has met yet is dropped for free instead of causing the next outage.
+  Non-string `enum` values (also rejected) are stringified rather than dropped,
+  which keeps the constraint instead of silently widening the parameter.
+
+- **A worker with no file tools is no longer failed for not writing a file.**
+  The artifact check ran unconditionally, while the prompt side correctly
+  skipped artifact instructions when no file-writing tool existed. A worker was
+  told not to write files and then failed for not having written them. Because
+  the check regex-matches filenames out of the subtask description, a research
+  plan that merely mentioned `report.md` produced a requirement nothing could
+  satisfy: the correction pass ran, the re-check failed again, and the subtask
+  escalated with its perfectly good prose attached. That is the "successful node
+  marked failed" case.
+
+### Added
+- **Image, speech and transcription generation.** Models that can't hold a text
+  conversation were filtered out of the chat pool — correct, but it left
+  Cascade unable to draw a picture with an image model sitting in the account
+  whose key it already had. They are now a capability registry instead, and
+  `generate_image`, `generate_speech` and `transcribe_audio` are registered
+  **only for modalities your configured providers can actually serve**, so a
+  tool never exists that cannot run.
+
+  Selection works like tier routing: quality first where quality is genuinely
+  known, unit price as the tiebreak, and the reason is stated. Where no
+  defensible public ranking exists — image generation, today — Cascade says the
+  choice was made on cost and does not imply a judgement nobody made. Prices
+  come from the same audited dataset the chat tiers use.
+
+  Two things it will not pretend to do: **video** (Veo is a long-running
+  submit-poll-fetch operation and is listed as present-but-not-callable rather
+  than wired to a tool that would fail), and **music** (no supported provider
+  exposes a music API at all). Both are stated to the planner outright, so it
+  cannot write a step that could never run.
+
+- **Your ratings now influence Auto routing.** Thumbs-up/down adjust a model's
+  public benchmark score by at most ±0.05, shrunk toward zero by sample size —
+  one vote moves it by 0.005, twenty consistent votes by 0.033. Enough to break
+  a near-tie, never enough to overturn a real capability gap. This is
+  deliberately conservative: the data is tiny, self-selected (people rate bad
+  answers far more readily than good ones), and trivially gamed. `/why` states
+  the sample size alongside any adjustment.
+
+### Changed
+- The run breaker's failure threshold is now configurable via
+  `budget.failureThreshold` (default 3, unchanged).
+
 ## 0.50.0 - 2026-07-28
 
 ### Fixed

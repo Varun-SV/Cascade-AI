@@ -10,6 +10,7 @@ import type { TierRole, ModelInfo } from '../../types.js';
 import type { ModelSelector } from './selector.js';
 import type { ModelPerformanceTracker } from './model-performance-tracker.js';
 import { benchmarkScore01 } from './benchmarks.js';
+import { applyFeedback, type FeedbackSource } from './feedback-prior.js';
 import { BLENDED_COST_CEILING, blendedCostPer1k } from './pricing.js';
 
 export type TaskType = 'code' | 'analysis' | 'creative' | 'data' | 'mixed';
@@ -129,6 +130,8 @@ const TASK_TYPE_TAGS: Record<TaskType, string[]> = {
 
 export class TaskAnalyzer {
   private tracker?: ModelPerformanceTracker;
+  /** Per-model thumbs counts, when the host collects them. */
+  private feedback?: FeedbackSource;
   private bias: AutoBias;
   private lastProfile: TaskProfile | null = null;
   private lastSelectedModels = new Map<TierRole, ModelInfo>();
@@ -136,6 +139,15 @@ export class TaskAnalyzer {
   constructor(tracker?: ModelPerformanceTracker, bias: AutoBias = 'balanced') {
     this.tracker = tracker;
     this.bias = bias;
+  }
+
+  /**
+   * Supply per-model rating counts. Optional by design: a host that collects no
+   * feedback (the CLI, a fresh install) scores exactly as it did before, since
+   * feedbackAdjustment returns 0 for an empty record.
+   */
+  setFeedbackSource(source: FeedbackSource): void {
+    this.feedback = source;
   }
 
   setTracker(tracker: ModelPerformanceTracker): void {
@@ -247,7 +259,15 @@ export class TaskAnalyzer {
     // coding subtask prefers Claude, a writing one GPT/Gemini, etc.) while cost
     // efficiency still breaks ties on trivial work. The 0.3 floor keeps a
     // benchmark-unknown model competitive rather than zeroing it out.
-    const benchmark = 0.3 + 0.7 * benchmarkScore01(model, profile.type);
+    // Your ratings adjust the public score — they never replace it. The
+    // adjustment is capped at ±0.05 and shrunk toward zero by sample size, so a
+    // couple of thumbs cannot outweigh a real benchmark gap but sustained
+    // agreement can break a near-tie. See router/feedback-prior.ts for why the
+    // data deserves exactly that much weight and no more.
+    const rated = this.feedback?.(model.id);
+    const publicScore = benchmarkScore01(model, profile.type);
+    const adjusted = rated ? applyFeedback(publicScore, rated) : publicScore;
+    const benchmark = 0.3 + 0.7 * adjusted;
 
     // autoBias reshapes the same factors:
     //   balanced — quality × cost-efficiency (default; unchanged behavior).

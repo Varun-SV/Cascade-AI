@@ -690,6 +690,15 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   });
   const cascade: Cascade = createCascade(config, scratchDir);
 
+  // Your thumbs-up/down verdicts, folded into Auto routing as a bounded,
+  // sample-size-shrunk adjustment to the public benchmark score. Read once per
+  // run and closed over: routing decisions inside a run must not shift halfway
+  // through because a vote landed mid-flight.
+  const feedbackTotals = new Map(
+    store.modelFeedbackTotals(userId).map((r) => [r.model, { good: r.good, bad: r.bad }]),
+  );
+  if (feedbackTotals.size) cascade.setFeedbackSource((modelId) => feedbackTotals.get(modelId));
+
   // Accumulate which model served each tier — the model rides on every
   // tier:status event (base.ts setServingModel), and there's no post-run
   // getter for a tier→model map, so we build it from the stream.

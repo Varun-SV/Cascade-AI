@@ -22,6 +22,9 @@ import { CascadeRouter } from './router/index.js';
 import { T1Administrator, type PlanApprovalDecision, type TaskPlan } from './tiers/t1-administrator.js';
 import { calculateCost } from '../utils/cost.js';
 import { T2Manager } from './tiers/t2-manager.js';
+import { MultimodalRegistry } from './multimodal/registry.js';
+import type { FeedbackSource } from './router/feedback-prior.js';
+import { buildMediaTools } from '../tools/generate-media.js';
 import { RunBreaker } from './run-breaker.js';
 import { T3Worker } from './tiers/t3-worker.js';
 import { ToolRegistry } from '../tools/registry.js';
@@ -89,6 +92,7 @@ ${prompt}`;
 export class Cascade extends EventEmitter {
   private router: CascadeRouter;
   private toolRegistry: ToolRegistry;
+  private multimodal: MultimodalRegistry;
   private mcpClient: McpClient;
   private codeIndex?: WorkspaceIndex;
   private config: CascadeConfig;
@@ -131,6 +135,15 @@ export class Cascade extends EventEmitter {
       },
     });
     this.toolRegistry = new ToolRegistry(this.config.tools, workspacePath);
+    // Generation models (image / speech / transcription) were filtered out of
+    // the CHAT pool because a text turn routed to them fails — but that left
+    // them unreachable entirely, even with the key already configured. The
+    // registry turns them back into callable tools, and only for the providers
+    // this config actually has, so a tool never exists that cannot run.
+    this.multimodal = new MultimodalRegistry(
+      (this.config.providers ?? []).map((p) => p.type),
+    );
+    this.registerMediaTools(workspacePath);
     this.telemetry = config.telemetry?.enabled
       ? new Telemetry(config.telemetry, config.telemetry.distinctId ?? 'anonymous')
       : noopTelemetry;
@@ -454,6 +467,62 @@ export class Cascade extends EventEmitter {
     const t1 = new T1Administrator(this.router, this.toolRegistry, this.config);
     if (this.store) t1.setStore(this.store);
     return t1.previewPlan(prompt);
+  }
+
+  /**
+   * Register image / speech / transcription tools for the modalities this
+   * config can actually serve.
+   *
+   * The sink writes bytes into the workspace, because that is what a desktop or
+   * CLI run wants and it keeps a generated asset indistinguishable from any
+   * other file the run produced. A host with different storage (the cloud
+   * server stores a file row) constructs the tools itself via buildMediaTools
+   * with its own sink.
+   */
+  private registerMediaTools(workspacePath: string): void {
+    const allowlist = this.config.tools?.enabledTools;
+    const permitted = (name: string): boolean => !allowlist || allowlist.includes(name);
+
+    const tools = buildMediaTools(
+      {
+        registry: this.multimodal,
+        lookupProvider: (provider) => (this.config.providers ?? []).find((p) => p.type === provider),
+        sink: async (asset) => {
+          const fsp = await import('node:fs/promises');
+          const nodePath = await import('node:path');
+          const dir = nodePath.join(workspacePath, 'generated');
+          await fsp.mkdir(dir, { recursive: true });
+          const dest = nodePath.join(dir, asset.filename);
+          await fsp.writeFile(dest, asset.data);
+          return nodePath.relative(workspacePath, dest);
+        },
+      },
+      async (p) => {
+        const fsp = await import('node:fs/promises');
+        return fsp.readFile(p);
+      },
+    );
+
+    for (const tool of tools) {
+      // `enabledTools` is the single off-switch for the whole tool surface, and
+      // a restricted embed must not gain new tools just because it has an
+      // OpenAI key.
+      if (!permitted(tool.name)) continue;
+      tool.setWorkspaceRoot(workspacePath);
+      this.toolRegistry.register(tool);
+    }
+  }
+
+  /**
+   * Supply per-model thumbs-up/down counts so Auto routing can weigh how models
+   * have actually performed for this user, on top of public benchmarks.
+   *
+   * Optional everywhere: with no source, or an empty record, scoring is
+   * byte-identical to before. The adjustment is capped and sample-size shrunk —
+   * see core/router/feedback-prior.ts.
+   */
+  setFeedbackSource(source: FeedbackSource): void {
+    this.router.setFeedbackSource(source);
   }
 
   /** True when a task stopped at the budget cap and can be resumed via /continue. */
@@ -1125,7 +1194,7 @@ ${prompt}`
     // is failing every call — dead key, wrong id, exhausted quota — costs the
     // run a handful of calls to discover instead of one per subtask plus a
     // retry each.
-    const runBreaker = new RunBreaker();
+    const runBreaker = new RunBreaker(this.config.budget?.failureThreshold);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let t2Results: any[] = [];
     let runError: unknown = null;

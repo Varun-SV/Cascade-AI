@@ -160,6 +160,14 @@ export const BudgetConfigSchema = z.object({
   maxTokensPerRun:  z.number().int().positive().default(200_000),
   /** Optional hard per-task cost ceiling (USD). Unset = only the token cap applies. */
   maxCostPerRunUsd: z.number().positive().optional(),
+  /**
+   * Consecutive systemic failures against ONE model before the run stops
+   * launching work that would fail the same way (dead key, wrong model id,
+   * exhausted quota). Lower reacts sooner and wastes less; higher absorbs a
+   * longer transient before giving up. Only failures that will certainly repeat
+   * are counted — see core/run-breaker.ts.
+   */
+  failureThreshold: z.number().int().min(1).max(20).default(3),
   warnAtPct:        z.number().default(80),
 });
 
