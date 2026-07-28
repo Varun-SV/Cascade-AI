@@ -15,6 +15,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   MCP_TOOL_PREFIX,
+  MAX_MCP_TOOL_NAME_LENGTH,
   assignMcpToolNames,
   disambiguateMcpServerNames,
   isMcpToolName,
@@ -273,5 +274,76 @@ describe('removeMcpServerDenials', () => {
     // stale denials forever.
     const denials = ['mcp__foo_bar__delete_everything'];
     expect(removeMcpServerDenials(denials, 'foo@bar')).toEqual([]);
+  });
+});
+
+describe('mcpToolName / mcpServerPrefix — bounded length', () => {
+  it('never exceeds the provider limit, even for long server and tool names', () => {
+    // Cloud accepts connector names up to 80 characters — well past what
+    // OpenAI/Azure's 64-char function.name budget can hold once the tool
+    // name is appended. Sanitizing alone (folding the alphabet) says nothing
+    // about length.
+    const longServer = 'a'.repeat(80);
+    const longTool = 'b'.repeat(80);
+    const name = mcpToolName(longServer, longTool);
+    expect(name.length).toBeLessThanOrEqual(MAX_MCP_TOOL_NAME_LENGTH);
+    expect(isProviderSafeToolName(name)).toBe(true);
+  });
+
+  it('mcpServerPrefix alone stays within budget for a long connector name', () => {
+    const prefix = mcpServerPrefix('c'.repeat(80));
+    expect(prefix.length).toBeLessThanOrEqual(MAX_MCP_TOOL_NAME_LENGTH);
+  });
+
+  it('leaves a short name byte-identical to the unbounded encoding', () => {
+    // No behavior change for the overwhelmingly common case.
+    expect(mcpToolName('github', 'get_me')).toBe('mcp__github__get_me');
+  });
+
+  it('is deterministic and collision-resistant for two long names sharing a prefix', () => {
+    // A naive slice would make these collide — both share their first 24
+    // characters. The hash tail has to differ, or ToolRegistry (keyed by
+    // name) silently keeps only one wrapper.
+    const a = mcpToolName('srv', `${'x'.repeat(40)}-alpha`);
+    const b = mcpToolName('srv', `${'x'.repeat(40)}-beta`);
+    expect(a).not.toBe(b);
+    expect(a.length).toBeLessThanOrEqual(MAX_MCP_TOOL_NAME_LENGTH);
+    expect(b.length).toBeLessThanOrEqual(MAX_MCP_TOOL_NAME_LENGTH);
+  });
+
+  it('is stable across calls — the same input always produces the same truncated name', () => {
+    const long = 'z'.repeat(90);
+    expect(mcpToolName('srv', long)).toBe(mcpToolName('srv', long));
+  });
+
+  it('leaves headroom for a collision suffix from assignMcpToolNames', () => {
+    const name = mcpToolName('a'.repeat(80), 'b'.repeat(80));
+    expect(`${name}_999`.length).toBeLessThanOrEqual(MAX_MCP_TOOL_NAME_LENGTH);
+  });
+});
+
+describe('assignMcpToolNames — suffix must not collide with an existing base', () => {
+  it('never re-derives a name that is already someone else\'s base, in a 3-way case', () => {
+    // foo bar / foo@bar collide and would naturally suffix the loser to
+    // "..._2" — but a THIRD, distinct tool "foo bar 2" on the same server
+    // already owns that exact string as its own (non-colliding) base.
+    const names = assignMcpToolNames([
+      { server: 'srv', tool: 'foo bar' },
+      { server: 'srv', tool: 'foo@bar' },
+      { server: 'srv', tool: 'foo bar 2' },
+    ]);
+    expect(new Set(names).size).toBe(3); // all three distinct
+    expect(names[2]).toBe('mcp__srv__foo_bar_2'); // the singleton's own base, untouched
+    expect(names.filter((n) => n === 'mcp__srv__foo_bar_2')).toHaveLength(1); // not shared
+  });
+
+  it('skips past a whole chain of pre-taken suffixes', () => {
+    const names = assignMcpToolNames([
+      { server: 'srv', tool: 'foo bar' },   // collides with foo@bar
+      { server: 'srv', tool: 'foo@bar' },   // → would want "_2"
+      { server: 'srv', tool: 'foo_bar_2' }, // already owns "_2"
+      { server: 'srv', tool: 'foo_bar_3' }, // already owns "_3" too
+    ]);
+    expect(new Set(names).size).toBe(4);
   });
 });

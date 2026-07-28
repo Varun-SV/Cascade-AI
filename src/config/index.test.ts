@@ -99,6 +99,42 @@ describe('ConfigManager — MCP server name disambiguation on load', () => {
     expect(config.tools.mcpTrusted).not.toContain('foo@bar');
   });
 
+  it('keeps the SURVIVOR trusted when two rows share the exact same raw name', async () => {
+    // A different shape from the "foo bar" / "foo@bar" case above: here BOTH
+    // rows are literally named "foo", so there was only ONE trust entry for
+    // both (mcpTrusted is deduplicated). The first row keeps "foo" untouched;
+    // the second is renamed to "foo (2)". A naive rewrite (replace "foo" with
+    // "foo (2)" everywhere) would move the one trust entry entirely onto the
+    // renamed row and leave the untouched survivor — which is STILL named
+    // "foo" — without trust, so its next connection re-prompts or fails
+    // headless.
+    const workspace = await makeTempWorkspace();
+    const globalDir = await makeTempWorkspace();
+    const configPath = path.join(workspace, CASCADE_CONFIG_FILE);
+    await fs.mkdir(path.dirname(configPath), { recursive: true });
+    await fs.writeFile(configPath, JSON.stringify({
+      tools: {
+        mcpServers: [
+          { name: 'foo', url: 'https://a.example.com/mcp' },
+          { name: 'foo', url: 'https://b.example.com/mcp' },
+        ],
+        mcpTrusted: ['foo'],
+      },
+    }), 'utf-8');
+
+    const manager = new ConfigManager(workspace, globalDir);
+    await manager.load();
+
+    const config = manager.getConfig();
+    const [first, second] = config.tools.mcpServers!;
+    expect(first!.name).toBe('foo');           // survivor, untouched
+    expect(second!.name).not.toBe('foo');       // renamed
+
+    // Both are now trusted — the entry was ADDED to, not moved from.
+    expect(config.tools.mcpTrusted).toContain('foo');
+    expect(config.tools.mcpTrusted).toContain(second!.name);
+  });
+
   it('leaves disabledTools alone — the survivor keeps the entry, by design', async () => {
     // A denial stored at the shared prefix was ambiguous BEFORE the rename —
     // there is no way to tell which of the two servers it was meant for.

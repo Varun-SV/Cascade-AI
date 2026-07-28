@@ -107,6 +107,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with nothing on screen explaining why. It now clears them on removal,
   matching what the desktop UI already did.
 
+  Two more edges in the registered-name scheme: nothing bounded a name's
+  length, and a connector name or a vendor tool name long enough — cloud
+  alone accepts connector names up to 80 characters — could exceed OpenAI and
+  Azure's 64-character limit on its own, failing every request that included
+  the tool's definition. Long names are now shortened with a short hash of
+  the original appended, so two different long names that happen to share a
+  prefix still land on different registered names. Separately, when two
+  colliding tool names needed suffixing AND a third, unrelated tool on the
+  same server already happened to own the exact string a suffix would have
+  produced, the suffix logic could still hand out that already-taken name —
+  every possible name is now reserved up front, closing that gap.
+
+  And the trust-list fix above missed one shape: two connections that are
+  bit-for-bit the same name (from a hand edit, not merely a colliding one)
+  share a single trust entry, and moving it onto the renamed one instead of
+  granting it to both left the untouched original without trust. It's granted
+  to both now.
+
 - **The desktop browser now opens reliably on the first paint.** A fractional
   display-scaling factor makes the page's on-screen rectangle land on
   fractional pixel coordinates, which Electron's native view rejects — the

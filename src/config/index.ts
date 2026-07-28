@@ -196,8 +196,21 @@ export class ConfigManager {
   /**
    * Follow a disambiguation rename into `tools.mcpTrusted`.
    *
-   * `mcpTrusted` is matched by EXACT name (`McpClient.connect()`), so a rename
-   * unambiguously invalidates the old entry — the fix here is a plain rewrite.
+   * `mcpTrusted` is matched by EXACT name (`McpClient.connect()`). Two shapes
+   * of rename reach here, and they need OPPOSITE treatment:
+   *
+   * - Distinct raw names that only collide via sanitizing (`foo bar` /
+   *   `foo@bar`): each had its OWN trust entry, and the old string now belongs
+   *   to nothing — the server that used it moved away, so the entry has to
+   *   move with it. A plain rewrite is correct here.
+   * - Literally identical names (a hand-edited or duplicated config: two rows
+   *   both named `foo`): there is only ONE trust entry for both, since
+   *   `mcpTrusted` itself is deduplicated. `this.config.tools.mcpServers` has
+   *   already been updated to the disambiguated list by the time this runs
+   *   (see `load()`), so the untouched survivor is STILL named `foo` — a plain
+   *   rewrite would move the one entry entirely onto the renamed row and
+   *   leave the survivor untrusted. The entry must be kept for the survivor
+   *   AND granted to the renamed identity, not moved.
    *
    * `tools.disabledTools` deliberately gets no equivalent treatment. It's
    * matched by sanitized PREFIX, and a prefix collision is exactly what made
@@ -213,8 +226,15 @@ export class ConfigManager {
   private renameMcpServerReferences(renames: McpServerRename[]): void {
     const tools = this.config.tools;
     if (!tools?.mcpTrusted?.length || !renames.length) return;
-    const byOldName = new Map(renames.map((r) => [r.from, r.to]));
-    tools.mcpTrusted = tools.mcpTrusted.map((n) => byOldName.get(n) ?? n);
+    const currentNames = new Set((tools.mcpServers ?? []).map((s) => s.name));
+    let trusted = tools.mcpTrusted;
+    for (const { from, to } of renames) {
+      if (!trusted.includes(from)) continue;
+      trusted = currentNames.has(from)
+        ? [...trusted, to] // a survivor still holds `from` — ADD, don't move
+        : trusted.map((n) => (n === from ? to : n)); // `from` is now unused — follow it
+    }
+    tools.mcpTrusted = Array.from(new Set(trusted));
   }
 
   private async ensureDefaultIdentity(): Promise<void> {

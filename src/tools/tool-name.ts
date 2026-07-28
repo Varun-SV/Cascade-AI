@@ -23,13 +23,56 @@
 //  wrapper holds server and tool as separate fields — so this is a display and
 //  wire identity only.
 
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 
 /** Prefix marking a tool that came from an MCP server. */
 export const MCP_TOOL_PREFIX = 'mcp__';
 
 /** The alphabet OpenAI and Azure accept. Gemini and Anthropic are laxer. */
 const LEGAL_NAME = /^[a-zA-Z0-9_-]+$/;
+
+/**
+ * OpenAI and Azure cap a tool's `function.name` at 64 characters — the
+ * alphabet check above says nothing about length. Cloud alone accepts
+ * connector display names up to 80 characters, so a real connector name can
+ * already exceed the WHOLE budget before a tool name is even appended.
+ */
+export const MAX_MCP_TOOL_NAME_LENGTH = 64;
+
+/**
+ * Ceiling for ONE segment (server or tool), chosen so the assembled name
+ * always fits `MAX_MCP_TOOL_NAME_LENGTH` even at the worst case — both
+ * segments maxed out, plus room for a `_2`..`_999`-style collision suffix:
+ * `mcp__`(5) + 24 + `__`(2) + 24 + `_999`(4) = 59 ≤ 64.
+ */
+const MAX_SEGMENT_LENGTH = 24;
+
+/** Hex characters of a raw-segment hash appended when a segment is truncated. */
+const SEGMENT_HASH_LENGTH = 8;
+
+/**
+ * Fold a raw name onto the legal alphabet AND bound its length.
+ *
+ * `sanitizeToolNameSegment` alone can still produce an arbitrarily long
+ * result — a legal alphabet says nothing about how LONG a name is allowed to
+ * be. A naive slice to fit the budget would make two different long names
+ * that happen to share their first `MAX_SEGMENT_LENGTH` characters collide
+ * silently, so a truncated segment gets a short hash of the FULL raw string
+ * appended: deterministic (discovery and the run agree on the same name) and
+ * collision-resistant against exactly the tail the slice would otherwise
+ * discard.
+ */
+function boundedSegment(raw: string): string {
+  const clean = sanitizeToolNameSegment(raw);
+  if (clean.length <= MAX_SEGMENT_LENGTH) return clean;
+  const hash = createHash('sha256').update(raw, 'utf8').digest('hex').slice(0, SEGMENT_HASH_LENGTH);
+  return `${clean.slice(0, MAX_SEGMENT_LENGTH - SEGMENT_HASH_LENGTH - 1)}_${hash}`;
+}
+
+/** True when a raw segment needed neither character folding nor truncation. */
+function isStableSegment(raw: string): boolean {
+  return sanitizeToolNameSegment(raw) === raw && raw.length <= MAX_SEGMENT_LENGTH;
+}
 
 /**
  * Fold one path segment onto the legal alphabet.
@@ -58,9 +101,9 @@ export function sanitizeToolNameSegment(segment: string): string {
   return cleaned.slice(start, end) || '_';
 }
 
-/** Provider-safe name for a tool exposed by an MCP server. */
+/** Provider-safe name for a tool exposed by an MCP server. Bounded — see MAX_MCP_TOOL_NAME_LENGTH. */
 export function mcpToolName(serverName: string, toolName: string): string {
-  return `${MCP_TOOL_PREFIX}${sanitizeToolNameSegment(serverName)}__${sanitizeToolNameSegment(toolName)}`;
+  return `${MCP_TOOL_PREFIX}${boundedSegment(serverName)}__${boundedSegment(toolName)}`;
 }
 
 export function isMcpToolName(name: string): boolean {
@@ -155,29 +198,38 @@ export function disambiguateMcpServerNames<T extends { name: string }>(
  * denial would silently move to a tool the user never switched off.
  *
  * Within a colliding group the clean name goes to the pair that needs no
- * folding at all (server AND tool both already legal), because a legal raw
- * identity can never be displaced by a folded one added later. Failing that,
- * the lexicographically first `server::tool` pair wins — comparing the pair,
- * not just the tool name, so two DIFFERENT servers that collided on their own
- * sanitised prefix (see the account-merge case in keysync.ts) still break the
- * tie deterministically even when they happen to share a tool name. The rest
- * get `_2`, `_3`, … in that same order.
+ * folding or truncation at all (server AND tool both already legal AND within
+ * the length budget), because a stable raw identity can never be displaced by
+ * a folded or shortened one added later. Failing that, the lexicographically
+ * first `server::tool` pair wins — comparing the pair, not just the tool name,
+ * so two DIFFERENT servers that collided on their own sanitised prefix (see
+ * the account-merge case in keysync.ts) still break the tie deterministically
+ * even when they happen to share a tool name. The rest get `_2`, `_3`, … in
+ * that same order.
+ *
+ * Every base — including one belonging to a group of exactly one, which never
+ * enters the loop below — is reserved up front. Without that, a colliding
+ * group's generated suffix can land on an UNRELATED tool's own base: `foo bar`
+ * and `foo@bar` collide and the loser would naturally suffix to `..._2`, but
+ * if a third, distinct tool `foo bar 2` also happens to be on this server, its
+ * base already equals that exact suffixed string, and `ToolRegistry` (which
+ * keys by name) would silently keep only one of the two.
  */
 export function assignMcpToolNames(tools: Array<{ server: string; tool: string }>): string[] {
   const names: string[] = new Array(tools.length);
+  const bases: string[] = tools.map((t) => mcpToolName(t.server, t.tool));
   const groups = new Map<string, number[]>();
-  for (let i = 0; i < tools.length; i++) {
-    const base = mcpToolName(tools[i]!.server, tools[i]!.tool);
-    names[i] = base;
+  bases.forEach((base, i) => {
     const g = groups.get(base);
     if (g) g.push(i); else groups.set(base, [i]);
-  }
+  });
+
+  const used = new Set(bases);
 
   for (const [base, idx] of groups) {
-    if (idx.length === 1) continue;
+    if (idx.length === 1) { names[idx[0]!] = base; continue; }
     const raw = (i: number) => `${tools[i]!.server}::${tools[i]!.tool}`;
-    const isClean = (i: number) => sanitizeToolNameSegment(tools[i]!.server) === tools[i]!.server
-      && sanitizeToolNameSegment(tools[i]!.tool) === tools[i]!.tool;
+    const isClean = (i: number) => isStableSegment(tools[i]!.server) && isStableSegment(tools[i]!.tool);
     const ordered = [...idx].sort((a, b) => {
       const la = isClean(a) ? 0 : 1;
       const lb = isClean(b) ? 0 : 1;
@@ -186,7 +238,18 @@ export function assignMcpToolNames(tools: Array<{ server: string; tool: string }
       const rb = raw(b);
       return ra < rb ? -1 : ra > rb ? 1 : 0;
     });
-    ordered.forEach((i, rank) => { names[i] = rank === 0 ? base : `${base}_${rank + 1}`; });
+
+    // The winner's base is already its own reservation — nothing else can
+    // hold that exact string, since it's this entry's literal base.
+    names[ordered[0]!] = base;
+    let n = 2;
+    for (let rank = 1; rank < ordered.length; rank++) {
+      let candidate = `${base}_${n}`;
+      while (used.has(candidate)) { n++; candidate = `${base}_${n}`; }
+      names[ordered[rank]!] = candidate;
+      used.add(candidate);
+      n++;
+    }
   }
   return names;
 }
@@ -199,7 +262,7 @@ export function assignMcpToolNames(tools: Array<{ server: string; tool: string }
  * same connector is added back, with nothing on screen explaining why.
  */
 export function mcpServerPrefix(serverName: string): string {
-  return `${MCP_TOOL_PREFIX}${sanitizeToolNameSegment(serverName)}__`;
+  return `${MCP_TOOL_PREFIX}${boundedSegment(serverName)}__`;
 }
 
 /**
