@@ -54,7 +54,7 @@ export { nodeHttpFetch, preferIpv4Host } from './utils/net.js';
 // Azure deployment → ModelInfo (deployment name is the model; carries the
 // resolved base model's real context window + economics). Reused by the cloud
 // to size the document context budget from the user's actual window.
-export { azureModelForDeployment, inferAzureBaseModel } from './providers/azure.js';
+export { AZURE_BASE_MODELS, azureModelForDeployment, inferAzureBaseModel } from './providers/azure.js';
 
 // Native cloud login (CLI + desktop reuse the same client).
 export { CloudClient, DEFAULT_CLOUD_URL } from './cloud/client.js';

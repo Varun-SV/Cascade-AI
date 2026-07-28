@@ -5,6 +5,43 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.53.0 - 2026-07-28
+
+### Fixed
+- **An MCP server plus an OpenAI or Azure model no longer fails every request.**
+  Cascade named MCP tools `mcp::<server>::<tool>`, but OpenAI and Azure validate
+  tool names against `^[a-zA-Z0-9_-]+$` and reject the whole request when one
+  doesn't match:
+
+      400 Invalid 'tools[2].function.name': string does not match pattern
+          '^[a-zA-Z0-9_-]+$'
+
+  Colons are illegal, so with the GitHub connector enabled and Azure selected,
+  every message failed — whatever it asked for. This is the same shape as the
+  Gemini `x-mcp-header` bug fixed in 0.51.0: MCP metadata reaching a provider
+  that validates what others ignore. Anthropic accepts colons, which is why it
+  went unnoticed there.
+
+  Names are now built provider-safe at the source (`mcp__<server>__<tool>`,
+  with illegal characters folded), rather than patched per provider — there is
+  one legal alphabet, and encoding to it once beats three sanitisers that can
+  disagree. Execution never parses the name back, so the encoding is free to be
+  lossy. A test now holds the *entire* registered tool surface to that alphabet,
+  so the next tool with a colon or a space in its name fails in CI instead of in
+  someone's chat.
+
+- **The Azure base-model picker was missing every model added since gpt-5.**
+  The cloud web app kept its own hand-copied list, which went stale the moment a
+  family was added: gpt-5.4, gpt-5.4-mini and gpt-5.5 existed in routing and
+  pricing but never appeared in the dropdown, so a deployment of any of them got
+  scored and priced as whatever the stale list guessed instead.
+
+  The list is now served from the SDK's own `AZURE_BASE_MODELS` via
+  `/api/config`, and the SDK derives both that list and its deployment-name
+  inference from one table — so the picker cannot drift from what routing
+  actually knows. The web keeps a fallback array purely so the control still
+  renders before the request lands.
+
 ## 0.52.0 - 2026-07-28
 
 ### Fixed

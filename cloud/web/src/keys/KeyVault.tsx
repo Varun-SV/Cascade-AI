@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { KeyRound, Plus, Trash2, ShieldCheck, Globe } from 'lucide-react';
 import type { ProviderConfig, ProviderType, WebSearchSettings } from '../lib/types.js';
+import { fetchConfig } from '../lib/api.js';
 import AccountSyncPanel from './AccountSyncPanel.js';
 
 // Local LLMs (Ollama) are out of v1 scope — a hosted page cannot reach a
@@ -16,12 +17,21 @@ const SELECTABLE_TYPES: { value: Exclude<ProviderType, 'ollama'>; label: string 
 // Known base models an Azure deployment can back — powers the "Base model"
 // picker so a deployment gets the right benchmark scores + pricing. Mirrors the
 // SDK's inference (providers/azure.ts) for the auto-detected default.
-const AZURE_BASE_MODELS = ['gpt-5', 'gpt-5-mini', 'gpt-5-nano', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano', 'gpt-4o', 'gpt-4o-mini'];
+// Fallback only. The live list comes from /api/config, which serves the SDK's
+// own AZURE_BASE_MODELS — this array exists solely so the picker still renders
+// if that request hasn't landed yet, and is deliberately not maintained as a
+// second source of truth. It went stale here once already: gpt-5.4 and gpt-5.5
+// shipped in routing and pricing while this list still ended at gpt-5.
+const FALLBACK_AZURE_BASE_MODELS = [
+  'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5', 'gpt-5-mini', 'gpt-5-nano',
+  'gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano', 'gpt-4o', 'gpt-4o-mini',
+];
 
 /** Best-effort guess of the base model from an Azure deployment name. */
 function inferAzureBaseModel(deploymentName: string): string {
   const n = (deploymentName || '').toLowerCase();
   const rules: Array<[RegExp, string]> = [
+    [/gpt-?5\.5/, 'gpt-5.5'], [/gpt-?5\.4.*mini/, 'gpt-5.4-mini'], [/gpt-?5\.4/, 'gpt-5.4'],
     [/gpt-?5.*nano/, 'gpt-5-nano'], [/gpt-?5.*mini/, 'gpt-5-mini'], [/gpt-?5/, 'gpt-5'],
     [/gpt-?4\.1-nano/, 'gpt-4.1-nano'], [/gpt-?4\.1-mini/, 'gpt-4.1-mini'], [/gpt-?4\.1/, 'gpt-4.1'],
     [/gpt-?4o-mini/, 'gpt-4o-mini'], [/gpt-?4o/, 'gpt-4o'],
@@ -130,6 +140,16 @@ interface Props {
 }
 
 export default function KeyVault({ keys, onChange, webSearch, onWebSearchChange, syncEnabled }: Props) {
+  // Fetched rather than bundled, so the picker always offers exactly what
+  // routing and pricing know about. Falls back to the local list only while the
+  // request is in flight or if it fails.
+  const [azureBaseModels, setAzureBaseModels] = useState<string[]>(FALLBACK_AZURE_BASE_MODELS);
+  useEffect(() => {
+    fetchConfig()
+      .then((c) => { if (c.azureBaseModels?.length) setAzureBaseModels(c.azureBaseModels); })
+      .catch(() => { /* keep the fallback — a stale picker beats an empty one */ });
+  }, []);
+
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState<ProviderConfig>({ type: 'anthropic' });
 
@@ -286,7 +306,7 @@ export default function KeyVault({ keys, onChange, webSearch, onWebSearchChange,
                   placeholder="auto-detected from the deployment name"
                 />
                 <datalist id="azure-base-models">
-                  {AZURE_BASE_MODELS.map((m) => <option key={m} value={m} />)}
+                  {azureBaseModels.map((m) => <option key={m} value={m} />)}
                 </datalist>
                 <span className="text-[11px] text-ink-500">Which base model this deployment runs. Auto-detected from the name — edit if wrong (e.g. a deployment named “prod-fast”).</span>
               </label>

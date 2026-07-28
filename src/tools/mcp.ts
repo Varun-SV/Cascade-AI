@@ -5,6 +5,7 @@
 import type { ToolDefinition, ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
 import { McpClient } from '../mcp/client.js';
+import { mcpToolName } from './tool-name.js';
 
 /**
  * A wrapper for a single tool exposed by an MCP server.
@@ -29,7 +30,11 @@ export class McpToolWrapper extends BaseTool {
     this.mcpClient = mcpClient;
     this.serverName = serverName;
     this.toolName = toolName;
-    this.name = `mcp::${serverName}::${toolName}`;
+    // Provider-safe by construction — OpenAI and Azure reject a name with
+    // colons in it, and used to reject the entire request along with it.
+    // Execution uses the serverName/toolName fields above, never this string,
+    // so the encoding is free to be lossy.
+    this.name = mcpToolName(serverName, toolName);
     this.description = `[MCP:${serverName}] ${description}`;
     this.inputSchema = inputSchema;
   }
