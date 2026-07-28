@@ -24,6 +24,7 @@ import { PeerBus } from '../peer/bus.js';
 import type { PermissionEscalator } from '../permissions/escalator.js';
 import type { ToolCreator } from '../../tools/tool-creator.js';
 import { RunBreaker } from '../run-breaker.js';
+import type { EscalationDecision } from '../../types.js';
 import { RedactionLayer } from '../audit/redaction.js';
 
 // Built per-run so the peer-coordination hint only appears when the
@@ -56,6 +57,16 @@ export class T2Manager extends BaseTier {
   private t2PeerBus?: PeerBus;
   private permissionEscalator?: PermissionEscalator;
   private toolCreator?: ToolCreator;
+  /**
+   * Asked when a section ends ESCALATED — i.e. a worker hit something it could
+   * not decide alone. Without this the escalation was a dead end: the status
+   * said "needs a decision" and no decision was ever requested, so an MCP run
+   * that legitimately needed input just stopped there.
+   */
+  private escalationCallback?: (
+    ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string },
+  ) => Promise<EscalationDecision>;
+
   /** Optional boardroom gate (Moderate / root-T2 runs) — pauses after decomposition. */
   private planApprovalCallback?: (
     subtasks: ReadonlyArray<{ subtaskId: string; subtaskTitle: string; description: string }>,
@@ -117,6 +128,13 @@ export class T2Manager extends BaseTier {
 
   setToolCreator(creator: ToolCreator): void {
     this.toolCreator = creator;
+  }
+
+  /** Ask the user what to do when a section escalates. */
+  setEscalationCallback(
+    cb: (ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string }) => Promise<EscalationDecision>,
+  ): void {
+    this.escalationCallback = cb;
   }
 
   /** Boardroom gate for Moderate (root-T2) runs: pause after decomposition. */
@@ -254,7 +272,47 @@ export class T2Manager extends BaseTier {
         .filter((r) => r.status !== 'COMPLETED')
         .flatMap((r) => r.issues);
 
-      const overallStatus = this.determineStatus(t3Results);
+      let overallStatus = this.determineStatus(t3Results);
+
+      // An escalated section means a worker hit something it could not decide.
+      // Until now that was the end of the line — the status said "needs a
+      // decision" and nobody was ever asked for one. Ask, and act on the answer.
+      if (overallStatus === 'ESCALATED' && this.escalationCallback) {
+        this.sendStatusUpdate({
+          progressPct: 95,
+          currentAction: 'Escalated — waiting for your decision',
+          status: 'ESCALATING',
+        });
+        const decision = await this.escalationCallback({
+          sectionId: assignment.sectionId,
+          sectionTitle: assignment.sectionTitle,
+          issues,
+          summary,
+        });
+        this.log(`Escalation decision for "${assignment.sectionTitle}": ${decision.action}`);
+
+        if (decision.action === 'skip') {
+          // Accept what was produced and move on. PARTIAL rather than COMPLETED
+          // so the final compile still knows this section is incomplete.
+          overallStatus = t3Results.some((r) => r.status === 'COMPLETED') ? 'PARTIAL' : 'FAILED';
+        } else if (decision.action === 'retry' || decision.action === 'guidance') {
+          const guided = decision.action === 'guidance' && decision.note?.trim()
+            ? { ...assignment, description: `${assignment.description}\n\nGuidance (must be followed): ${decision.note.trim()}` }
+            : assignment;
+          // Re-run the section once with the answer applied. Bounded to a single
+          // attempt: an escalation loop that can re-ask forever is how a run
+          // burns a budget waiting on a decision that never resolves it.
+          this.escalationCallback = undefined;
+          return await this.execute(guided, taskId, signal);
+        } else {
+          // 'timeout' — nobody answered. Fail with the reason attached rather
+          // than hanging: in cloud the run is holding server resources, and a
+          // silent stall is indistinguishable from a crash.
+          issues.push('Escalated, but no decision was received in time.');
+          overallStatus = 'FAILED';
+        }
+      }
+
       const isOk = overallStatus === 'COMPLETED' || overallStatus === 'PARTIAL';
       this.setStatus(isOk ? 'COMPLETED' : 'FAILED', summary);
 

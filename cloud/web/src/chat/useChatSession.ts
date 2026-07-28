@@ -152,6 +152,24 @@ export interface ContextApprovalInfo {
 
 /** A boardroom plan Cascade produced for this run — surfaced read-only (the
  *  hosted run auto-proceeds; this just shows what it decided to do). */
+/**
+ * A section that could not decide something on its own, and is asking.
+ *
+ * Unlike the plan-approval notice (which the server auto-approves and shows for
+ * information), this one is BLOCKING: the run is parked until an answer arrives
+ * or `timeoutMs` elapses, at which point the section fails. So the UI has to
+ * actually let the user answer, not merely inform them.
+ */
+export interface EscalationRequest {
+  conversationId: string;
+  taskId: string;
+  sectionId: string;
+  sectionTitle: string;
+  issues: string[];
+  summary: string;
+  timeoutMs: number;
+}
+
 export interface PlanApproval {
   taskId?: string;
   summary?: string;
@@ -189,6 +207,7 @@ export function useChatSession(
   // The boardroom plan for the in-flight run, if Cascade produced one. Shown
   // read-only; cleared when the next run starts or the current one settles.
   const [approval, setApproval] = useState<PlanApproval | null>(null);
+  const [escalation, setEscalation] = useState<EscalationRequest | null>(null);
   // Extended context: a pending "process this huge input?" confirm, and a
   // transient notice once a compaction actually happened.
   const [contextApproval, setContextApproval] = useState<ContextApprovalInfo | null>(null);
@@ -246,6 +265,10 @@ export function useChatSession(
     };
     const onWhy = (r: WhyReport) => { pendingWhyRef.current = r; };
     const onPlan = (e: PlanApproval) => setApproval(e);
+    const onEscalation = (e: EscalationRequest) => setEscalation(e);
+    // The window closed without an answer — clear the prompt so a stale modal
+    // can't be answered into a run that has already moved on.
+    const onEscalationTimeout = () => setEscalation(null);
     const onContextApproval = (e: ContextApprovalInfo) => setContextApproval(e);
     const onCompacted = (e: { kind?: string; chunks?: number; foldedTurns?: number; truncated?: boolean }) => {
       setContextApproval(null);
@@ -268,6 +291,8 @@ export function useChatSession(
     socket.on('tier:status', onStatus);
     socket.on('run:why', onWhy);
     socket.on('plan:approval-required', onPlan);
+    socket.on('escalation:decision-required', onEscalation);
+    socket.on('escalation:timeout', onEscalationTimeout);
     socket.on('context:approval-required', onContextApproval);
     socket.on('context:compacted', onCompacted);
     socket.on('knowledge:retrieved', onKnowledge);
@@ -276,6 +301,8 @@ export function useChatSession(
       socket.off('tier:status', onStatus);
       socket.off('run:why', onWhy);
       socket.off('plan:approval-required', onPlan);
+      socket.off('escalation:decision-required', onEscalation);
+      socket.off('escalation:timeout', onEscalationTimeout);
       socket.off('context:approval-required', onContextApproval);
       socket.off('context:compacted', onCompacted);
       socket.off('knowledge:retrieved', onKnowledge);
@@ -444,6 +471,31 @@ export function useChatSession(
     setStatus('Stopping…');
   }, [socket, busy]);
 
+  /**
+   * Answer a section that escalated.
+   *
+   *   retry    — run the section again unchanged (the worker may have hit a
+   *              transient problem).
+   *   guidance — run it again with an instruction it must follow.
+   *   skip     — accept whatever the section did produce and move on.
+   *
+   * Cleared optimistically: the run is parked waiting on this, so leaving the
+   * modal up after answering would invite a second answer that has nowhere to go.
+   */
+  const resolveEscalation = useCallback(
+    (action: 'retry' | 'skip' | 'guidance', note?: string) => {
+      if (!socket || !escalation) return;
+      socket.emit('escalation:decide', {
+        conversationId: escalation.conversationId,
+        action,
+        ...(note ? { note } : {}),
+      });
+      setEscalation(null);
+      setStatus(action === 'skip' ? 'Skipping section…' : 'Retrying section…');
+    },
+    [socket, escalation],
+  );
+
   // Answer the extended-context confirm: proceed with (or skip) compacting the
   // oversized input. Either way the run continues — skip just means the model
   // handles the raw input (truncating naturally).
@@ -521,6 +573,7 @@ export function useChatSession(
     busy, error, status, lastTokens, lastSaved, conversationId, loadMessages, setConversationId,
     contextTokens, contextWindow,
     routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, approval,
+    escalation, resolveEscalation,
     contextApproval, resolveContextApproval, compactionNotice, knowledgeNotice, activity,
   };
 }

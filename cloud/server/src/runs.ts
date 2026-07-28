@@ -765,6 +765,27 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   cascade.on('context:compacted', onCompacted);
   socket.on('context:decision', onContextDecision);
 
+  // A section that escalated is asking a real question, and until now nobody
+  // was ever asked it — the run just stopped at "needs a decision" having spent
+  // a full orchestration. Unlike plan approval above (which auto-proceeds,
+  // because the plan is already the model's considered proposal), this WAITS:
+  // an escalation exists precisely because a worker was not confident, so
+  // proceeding unattended is the option most likely to be wrong.
+  const onEscalation = (e: unknown) =>
+    socket.emit('escalation:decision-required', { conversationId: conversation.id, ...(e as object) });
+  const onEscalationTimeout = (e: unknown) =>
+    socket.emit('escalation:timeout', { conversationId: conversation.id, ...(e as object) });
+  const onEscalationDecision = (d: { conversationId?: string; action?: string; note?: string }) => {
+    // One socket can carry several conversations; only answer for this run.
+    if (d?.conversationId && d.conversationId !== conversation.id) return;
+    if (d?.action === 'retry' || d?.action === 'skip' || d?.action === 'guidance') {
+      cascade.resolveEscalation(d.action, typeof d.note === 'string' ? d.note : undefined);
+    }
+  };
+  cascade.on('escalation:decision-required', onEscalation);
+  cascade.on('escalation:timeout', onEscalationTimeout);
+  socket.on('escalation:decide', onEscalationDecision);
+
   cascade.on('stream:token', onToken);
   cascade.on('tier:status', onStatus);
   cascade.on('plan:approval-required', onPlan);
@@ -881,6 +902,9 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     cascade.off('context:approval-required', onContextApproval);
     cascade.off('context:compacted', onCompacted);
     socket.off('context:decision', onContextDecision);
+    cascade.off('escalation:decision-required', onEscalation);
+    cascade.off('escalation:timeout', onEscalationTimeout);
+    socket.off('escalation:decide', onEscalationDecision);
     try { await cascade.close(); } catch { /* non-critical */ }
   }
 }

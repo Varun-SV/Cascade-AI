@@ -20,6 +20,7 @@ import type { ToolRegistry } from '../../tools/registry.js';
 import { BaseTier } from './base.js';
 import { T2Manager } from './t2-manager.js';
 import { RunBreaker } from '../run-breaker.js';
+import type { EscalationDecision } from '../../types.js';
 import { MemoryStore } from '../../memory/store.js';
 import { COMPLEXITY_T2_COUNT } from '../../constants.js';
 import { PeerBus } from '../peer/bus.js';
@@ -119,6 +120,9 @@ export class T1Administrator extends BaseTier {
   private escalations: EscalationPayload[] = [];
   private store?: MemoryStore;
   private runBreaker?: RunBreaker;
+  private escalationCallback?: (
+    ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string },
+  ) => Promise<EscalationDecision>;
   private t2PeerBus: PeerBus = new PeerBus();
   private permissionEscalator?: PermissionEscalator;
   private toolCreator?: ToolCreator;
@@ -133,6 +137,13 @@ export class T1Administrator extends BaseTier {
     this.router = router;
     this.toolRegistry = toolRegistry;
     this.config = config;
+  }
+
+  /** Ask the user what to do when any section escalates. */
+  setEscalationCallback(
+    cb: (ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string }) => Promise<EscalationDecision>,
+  ): void {
+    this.escalationCallback = cb;
   }
 
   /** Share the run-wide circuit breaker with every section manager. */
@@ -597,6 +608,7 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
       // per-section breaker would never reach its threshold and every section
       // would pay to rediscover it.
       if (this.runBreaker) manager.setRunBreaker(this.runBreaker);
+      if (this.escalationCallback) manager.setEscalationCallback(this.escalationCallback);
       manager.setHierarchyContext(`You are a T2 Manager for the section "${section.sectionTitle}". You are part of a COMPLEX task overseen by T1 Administrator.`);
       if (this.store) {
         manager.setStore(this.store);

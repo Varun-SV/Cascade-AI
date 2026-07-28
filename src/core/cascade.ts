@@ -4,7 +4,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import Database from 'better-sqlite3';
 import { glob } from 'glob';
-import type {
+import type { EscalationDecision,
   ApprovalRequest,
   ApprovalResponse,
   CascadeConfig,
@@ -25,6 +25,13 @@ import { T2Manager } from './tiers/t2-manager.js';
 import { MultimodalRegistry } from './multimodal/registry.js';
 import type { FeedbackSource } from './router/feedback-prior.js';
 import { DeadModelStore, fileDeadModelPersistence } from './router/dead-models.js';
+
+/**
+ * How long an escalation waits for an answer. Long enough that someone who
+ * stepped away for a coffee still gets to decide; short enough that a hosted
+ * run doesn't hold a worker slot all afternoon.
+ */
+const ESCALATION_DECISION_TIMEOUT_MS = 5 * 60_000;
 import { buildMediaTools, type AssetSink } from '../tools/generate-media.js';
 import { RunBreaker } from './run-breaker.js';
 import { T3Worker } from './tiers/t3-worker.js';
@@ -359,6 +366,60 @@ export class Cascade extends EventEmitter {
         summary,
       });
     });
+  }
+
+  // ── Escalation decisions ────────────────────────────────────────────
+  //
+  // A section that ends ESCALATED used to be a dead end: the Cockpit showed
+  // "Section escalated — needs a decision" and no decision was ever requested,
+  // so the run stopped there having spent a full orchestration. This is the
+  // same round-trip shape as plan approval, with one deliberate difference —
+  // an unanswered escalation FAILS the section instead of proceeding.
+  //
+  // That direction is the safe one here. Plan approval defaults to "yes" on
+  // timeout because the plan is already the model's considered proposal;
+  // an escalation exists precisely BECAUSE the worker was not confident, so
+  // acting unattended is the option most likely to be wrong. And in cloud a
+  // waiting run holds server resources, so hanging is not free either.
+
+  private pendingEscalation?: (decision: EscalationDecision) => void;
+
+  private async requestEscalationDecision(
+    ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string },
+    taskId: string,
+  ): Promise<EscalationDecision> {
+    // Autonomous runs have nobody to ask; skipping keeps whatever the section
+    // did produce rather than discarding it over an unanswerable question.
+    if (this.config.autonomy === 'auto') return { action: 'skip' };
+    if (this.listenerCount('escalation:decision-required') === 0) return { action: 'skip' };
+
+    return await new Promise<EscalationDecision>((resolve) => {
+      const timeout = setTimeout(() => {
+        if (this.pendingEscalation) {
+          this.pendingEscalation = undefined;
+          this.emit('escalation:timeout', { taskId, sectionId: ctx.sectionId });
+          resolve({ action: 'timeout' });
+        }
+      }, ESCALATION_DECISION_TIMEOUT_MS);
+      this.pendingEscalation = (decision) => {
+        clearTimeout(timeout);
+        this.pendingEscalation = undefined;
+        resolve(decision);
+      };
+      this.emit('escalation:decision-required', {
+        taskId,
+        sectionId: ctx.sectionId,
+        sectionTitle: ctx.sectionTitle,
+        issues: ctx.issues,
+        summary: ctx.summary,
+        timeoutMs: ESCALATION_DECISION_TIMEOUT_MS,
+      });
+    });
+  }
+
+  /** Resolve a pending escalation from a REPL / dashboard / cloud listener. */
+  resolveEscalation(action: EscalationDecision['action'], note?: string): void {
+    this.pendingEscalation?.({ action, ...(note ? { note } : {}) });
   }
 
   /**
@@ -1334,6 +1395,7 @@ ${prompt}`
     } else if (complexity === 'Moderate') {
       const t2 = new T2Manager(this.router, this.toolRegistry, 'root');
       t2.setRunBreaker(runBreaker);
+      t2.setEscalationCallback((ctx) => this.requestEscalationDecision(ctx, taskId));
       t2.setPresenter(true); // Moderate run: T2's aggregated synthesis is the answer — stream it.
       t2.setHierarchyContext('You are the ROOT Manager for this task. There is no T1 Administrator involved in this run. You are responsible for decomposing the task and managing T3 workers directly.');
       if (identityPrompt) {
@@ -1406,6 +1468,7 @@ ${prompt}`
     } else {
       const t1 = new T1Administrator(this.router, this.toolRegistry, this.config);
       t1.setRunBreaker(runBreaker);
+      t1.setEscalationCallback((ctx) => this.requestEscalationDecision(ctx, taskId));
       t1.setPresenter(true); // Complex run: T1's final compile is the answer — stream it.
       t1.setHierarchyContext('You are the top-level Administrator. You are responsible for the overall plan and supervising multiple T2 Managers.');
       if (identityPrompt) {

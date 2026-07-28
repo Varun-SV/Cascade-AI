@@ -213,6 +213,21 @@ export interface ToolResult {
   isError: boolean;
 }
 
+/**
+ * What to do about a section that escalated — a worker hit something it could
+ * not decide alone.
+ *
+ * `timeout` is a real outcome, not an error: a cloud run holds server resources
+ * while it waits, so an unanswered escalation fails the section rather than
+ * hanging indefinitely. The section reports WHY it failed, so an unattended run
+ * is diagnosable rather than merely dead.
+ */
+export interface EscalationDecision {
+  action: 'retry' | 'skip' | 'guidance' | 'timeout';
+  /** Required for 'guidance' — the instruction the retry must follow. */
+  note?: string;
+}
+
 export interface ToolExecuteOptions {
   tierId: string;
   sessionId: string;

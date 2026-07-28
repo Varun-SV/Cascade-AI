@@ -5,6 +5,27 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.55.0 - 2026-07-28
+
+### Fixed
+- **An escalated section now actually asks you.** "Section escalated — needs a
+  decision" was a dead end: the status was emitted and nobody was ever asked for
+  the decision, so a run that legitimately needed input just stopped there having
+  spent a full orchestration. This is why MCP runs so reliably ended that way.
+
+  You now get a prompt with three answers — **retry as-is**, **retry with
+  guidance** (your instruction is folded into the section and it runs again), or
+  **skip** (keep what the section did produce and move on). The retry is bounded
+  to one attempt, so an escalation cannot loop.
+
+  If nobody answers within 5 minutes the section **fails**, with the reason
+  recorded. That direction is deliberate and differs from plan approval, which
+  auto-proceeds on timeout: a plan is already the model's considered proposal,
+  whereas an escalation exists precisely *because* a worker wasn't confident — so
+  acting unattended is the option most likely to be wrong. A hosted run also
+  holds server resources while it waits, so hanging indefinitely isn't free
+  either. The countdown is shown, so the failure never looks arbitrary.
+
 ## 0.54.0 - 2026-07-28
 
 ### Fixed
