@@ -13,18 +13,31 @@ describe('buildRunPrompt', () => {
     expect(out.endsWith('review this')).toBe(true);
   });
 
-  it('injects memories as a bulleted fact list', () => {
-    const out = buildRunPrompt('hi', undefined, ['Prefers TypeScript', 'Based in India']);
-    expect(out).toContain('Persistent facts about the user');
+  it('injects memories as markdown, split by how long each fact should hold', () => {
+    const out = buildRunPrompt('hi', undefined, [
+      { content: 'Prefers TypeScript', durability: 'permanent' },
+      { content: 'Migrating the billing service this sprint', durability: 'volatile' },
+    ]);
+    expect(out).toContain('## Stable facts');
     expect(out).toContain('- Prefers TypeScript');
-    expect(out).toContain('- Based in India');
+    expect(out).toContain('## Current context');
+    expect(out).toContain('- Migrating the billing service this sprint');
+    // A durable fact must not be filed under the heading that tells the model
+    // to distrust it when the user says otherwise.
+    expect(out.indexOf('Prefers TypeScript')).toBeLessThan(out.indexOf('## Current context'));
     expect(out.endsWith('hi')).toBe(true);
   });
 
+  it('omits a durability heading entirely when nothing falls under it', () => {
+    const out = buildRunPrompt('hi', undefined, [{ content: 'Prefers TypeScript', durability: 'permanent' }]);
+    expect(out).toContain('## Stable facts');
+    expect(out).not.toContain('## Current context');
+  });
+
   it('combines skill and memories, keeping the user text last', () => {
-    const out = buildRunPrompt('do it', 'Be terse.', ['Likes brevity']);
-    expect(out.indexOf('Be terse.')).toBeLessThan(out.indexOf('Persistent facts'));
-    expect(out.indexOf('Persistent facts')).toBeLessThan(out.indexOf('do it'));
+    const out = buildRunPrompt('do it', 'Be terse.', [{ content: 'Likes brevity', durability: 'permanent' }]);
+    expect(out.indexOf('Be terse.')).toBeLessThan(out.indexOf('What you know about this user'));
+    expect(out.indexOf('What you know about this user')).toBeLessThan(out.indexOf('do it'));
   });
 
   it('injects attached document text before the user prompt', () => {

@@ -599,6 +599,12 @@ export function createApp(env: CloudEnv, store: CloudStore) {
   });
 
   // ── Memory (per-user persistent facts) ──
+  // Anything that isn't literally 'volatile' is permanent. Defaulting the
+  // unknown case to permanent is the safe direction: a fact wrongly kept is a
+  // stale line in a prompt, a fact wrongly dropped is silent data loss.
+  const parseDurability = (v: unknown): 'permanent' | 'volatile' =>
+    v === 'volatile' ? 'volatile' : 'permanent';
+
   app.get('/api/memories', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
     res.json({ memories: store.listMemories(req.session!.userId) });
   });
@@ -607,7 +613,7 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     const content = typeof req.body?.content === 'string' ? req.body.content.trim() : '';
     if (!content) { res.status(400).json({ error: 'Memory content is required' }); return; }
     if (content.length > MAX_MEMORY_LEN) { res.status(400).json({ error: `Memory must be ≤ ${MAX_MEMORY_LEN} characters` }); return; }
-    res.json({ memory: store.addMemory(req.session!.userId, content, parseCategory(req.body?.category)) });
+    res.json({ memory: store.addMemory(req.session!.userId, content, parseCategory(req.body?.category), parseDurability(req.body?.durability)) });
   });
 
   app.put('/api/memories/:id', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
@@ -616,7 +622,7 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid memory id' }); return; }
     if (!content) { res.status(400).json({ error: 'Memory content is required' }); return; }
     if (content.length > MAX_MEMORY_LEN) { res.status(400).json({ error: `Memory must be ≤ ${MAX_MEMORY_LEN} characters` }); return; }
-    const memory = store.updateMemory(id, req.session!.userId, content, parseCategory(req.body?.category));
+    const memory = store.updateMemory(id, req.session!.userId, content, parseCategory(req.body?.category), parseDurability(req.body?.durability));
     if (!memory) { res.status(404).json({ error: 'Not found' }); return; }
     res.json({ memory });
   });
@@ -625,6 +631,35 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     const id = req.params['id'];
     if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid memory id' }); return; }
     res.json({ ok: store.deleteMemory(id, req.session!.userId) });
+  });
+
+  // ── Message feedback (thumbs up / down) ──────
+
+  app.get('/api/conversations/:id/feedback', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const id = req.params['id'];
+    if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid conversation id' }); return; }
+    res.json({ feedback: store.listConversationFeedback(req.session!.userId, id) });
+  });
+
+  app.put('/api/messages/:id/feedback', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const id = req.params['id'];
+    const verdict = req.body?.verdict;
+    if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid message id' }); return; }
+    if (verdict !== 'good' && verdict !== 'bad') { res.status(400).json({ error: "verdict must be 'good' or 'bad'" }); return; }
+    // 404 covers both "no such message" and "not yours" — the store scopes the
+    // lookup through conversations.user_id, and the two must stay
+    // indistinguishable so this can't be used to probe for message ids.
+    if (!store.setMessageFeedback(req.session!.userId, id, verdict)) {
+      res.status(404).json({ error: 'Not found' });
+      return;
+    }
+    res.json({ ok: true, verdict });
+  });
+
+  app.delete('/api/messages/:id/feedback', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const id = req.params['id'];
+    if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid message id' }); return; }
+    res.json({ ok: store.clearMessageFeedback(req.session!.userId, id) });
   });
 
   // ── Key sync (E2E-encrypted settings relay) ──

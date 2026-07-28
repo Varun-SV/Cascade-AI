@@ -5,6 +5,57 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.50.0 - 2026-07-28
+
+### Fixed
+- **A run no longer pays to rediscover the same dead model on every subtask.**
+  When a tier's model was unreachable — expired key, wrong model id, exhausted
+  quota — every worker failed the same way, each got its own retry, and the
+  workers queued behind them were still scheduled. A six-subtask plan could
+  spend twelve worker calls plus the full planning overhead to learn one thing:
+  the key is dead. Then it apologised. Cascade now stops after three
+  consecutive systemic failures against the same model and marks the remaining
+  work skipped, with the reason attached.
+
+  The threshold only counts failures that will repeat — rate limits, auth
+  errors, missing models, exhausted quota. A safety refusal or an over-long
+  prompt is a property of one subtask, so those are still retried normally, and
+  anything unrecognised is treated as per-task rather than stopping the run.
+  The count is per model, so one dead tier can't abort work a healthy tier is
+  doing fine.
+
+- **"The research and analysis process failed due to a series of system-level
+  errors" now says what the error was.** The provider's own message was being
+  discarded, leaving a final answer nobody could act on. A stopped run now
+  leads with the real cause — the model, the failure kind, and the provider's
+  verbatim text — plus what to do about it: lower the parallelism, check
+  billing, re-check the key in Settings, or pick a different model.
+
+- **A failed section no longer reports "Section complete".** The status text
+  was emitted unconditionally, two lines after computing a status that may well
+  have been FAILED, so a section whose every worker died still announced
+  completion — and the Cockpit showed a failure badge beside the word
+  "complete", because the badge and the text came from different variables.
+
+### Added
+- **Thumbs up / down on cloud replies.** Rate any assistant message; pressing
+  the active thumb again withdraws the vote rather than casting the opposite
+  one. Verdicts persist with the conversation and record which model earned
+  them, captured at vote time because routing changes between runs. Only the
+  verdict and the model are stored — never the message text.
+
+  Worth being clear about what this is for: it shapes future routing, slowly.
+  It cannot stop a run that is already failing from costing money — that is
+  what the circuit breaker above does.
+
+- **Memories can be marked "Always true" or "Current context".** Stable facts
+  ("I write TypeScript") and in-flight ones ("migrating billing this sprint")
+  want opposite handling: the first should carry indefinitely, the second is a
+  snapshot that is probably already stale. Memories now render into the prompt
+  as a small markdown document under those two headings, and the model is told
+  to prefer what you say now over anything filed as current context. Existing
+  memories back-fill as permanent.
+
 ## 0.49.0 - 2026-07-27
 
 ### Fixed

@@ -19,6 +19,7 @@ import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import { BaseTier } from './base.js';
 import { T2Manager } from './t2-manager.js';
+import { RunBreaker } from '../run-breaker.js';
 import { MemoryStore } from '../../memory/store.js';
 import { COMPLEXITY_T2_COUNT } from '../../constants.js';
 import { PeerBus } from '../peer/bus.js';
@@ -117,6 +118,7 @@ export class T1Administrator extends BaseTier {
   private t2Managers: Map<string, T2Manager> = new Map();
   private escalations: EscalationPayload[] = [];
   private store?: MemoryStore;
+  private runBreaker?: RunBreaker;
   private t2PeerBus: PeerBus = new PeerBus();
   private permissionEscalator?: PermissionEscalator;
   private toolCreator?: ToolCreator;
@@ -131,6 +133,11 @@ export class T1Administrator extends BaseTier {
     this.router = router;
     this.toolRegistry = toolRegistry;
     this.config = config;
+  }
+
+  /** Share the run-wide circuit breaker with every section manager. */
+  setRunBreaker(breaker: RunBreaker): void {
+    this.runBreaker = breaker;
   }
 
   setStore(store: MemoryStore): void {
@@ -585,6 +592,11 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
 
     const managers: T2Manager[] = sections.map((section) => {
       const manager = new T2Manager(this.router, this.toolRegistry, this.id);
+      // One breaker for the whole run. Three sections each failing once against
+      // a dead model is the same fact as one section failing three times — a
+      // per-section breaker would never reach its threshold and every section
+      // would pay to rediscover it.
+      if (this.runBreaker) manager.setRunBreaker(this.runBreaker);
       manager.setHierarchyContext(`You are a T2 Manager for the section "${section.sectionTitle}". You are part of a COMPLEX task overseen by T1 Administrator.`);
       if (this.store) {
         manager.setStore(this.store);

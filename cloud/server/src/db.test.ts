@@ -502,3 +502,106 @@ describe('CloudStore — native auth flow artifacts (real SQLite)', () => {
     expect(store.takeAuthFlow('code', 'new')).toBe('y');
   });
 });
+
+// ── Message feedback + memory durability ──────
+
+describe('CloudStore — message feedback', () => {
+  let dir: string;
+  let store: CloudStore;
+  let userId: string;
+  let otherId: string;
+  let messageId: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-fb-'));
+    store = new CloudStore(path.join(dir, 'cloud.db'));
+    userId = store.upsertUser({ provider: 'github', providerId: 'u1', email: null, name: null, avatar: null }).id;
+    otherId = store.upsertUser({ provider: 'github', providerId: 'u2', email: null, name: null, avatar: null }).id;
+    const convo = store.createConversation(userId, 'c');
+    messageId = store.addMessage({
+      conversationId: convo.id, role: 'assistant', content: 'hi',
+      model: 'gemini-2.0-flash', tier: 'T3',
+    }).id;
+  });
+
+  afterEach(async () => {
+    store.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('records a verdict and reads it back for the conversation', () => {
+    expect(store.setMessageFeedback(userId, messageId, 'good')).toBe(true);
+    const convoId = store.listConversations(userId)[0]!.id;
+    expect(store.listConversationFeedback(userId, convoId)[messageId]).toBe('good');
+  });
+
+  it('replaces rather than stacks when the user changes their mind', () => {
+    // Thumbs-down after thumbs-up is a correction, not a second data point —
+    // otherwise one indecisive click pair would double-count in the totals.
+    store.setMessageFeedback(userId, messageId, 'good');
+    store.setMessageFeedback(userId, messageId, 'bad');
+    const totals = store.modelFeedbackTotals(userId);
+    expect(totals).toEqual([{ model: 'gemini-2.0-flash', good: 0, bad: 1 }]);
+  });
+
+  it('captures the model that earned the rating, since routing changes later', () => {
+    store.setMessageFeedback(userId, messageId, 'bad');
+    expect(store.modelFeedbackTotals(userId)[0]!.model).toBe('gemini-2.0-flash');
+  });
+
+  it('refuses a vote on another tenant\'s message', () => {
+    // Must be indistinguishable from "no such message" so this can't be used
+    // to probe for valid ids.
+    expect(store.setMessageFeedback(otherId, messageId, 'good')).toBe(false);
+    expect(store.setMessageFeedback(otherId, 'no-such-id', 'good')).toBe(false);
+  });
+
+  it('withdraws a verdict without touching anyone else\'s', () => {
+    store.setMessageFeedback(userId, messageId, 'good');
+    expect(store.clearMessageFeedback(otherId, messageId)).toBe(false);
+    expect(store.clearMessageFeedback(userId, messageId)).toBe(true);
+    expect(store.modelFeedbackTotals(userId)).toEqual([]);
+  });
+});
+
+describe('CloudStore — memory durability', () => {
+  let dir: string;
+  let store: CloudStore;
+  let userId: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-mem-'));
+    store = new CloudStore(path.join(dir, 'cloud.db'));
+    userId = store.upsertUser({ provider: 'github', providerId: 'u1', email: null, name: null, avatar: null }).id;
+  });
+
+  afterEach(async () => {
+    store.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('defaults a new memory to permanent', () => {
+    expect(store.addMemory(userId, 'Prefers TypeScript').durability).toBe('permanent');
+  });
+
+  it('round-trips a volatile memory', () => {
+    const m = store.addMemory(userId, 'Migrating billing this sprint', null, 'volatile');
+    expect(m.durability).toBe('volatile');
+    expect(store.listMemories(userId)[0]!.durability).toBe('volatile');
+  });
+
+  it('lets a fact be re-typed as it settles or goes stale', () => {
+    const m = store.addMemory(userId, 'Working on auth', null, 'volatile');
+    expect(store.updateMemory(m.id, userId, 'Owns auth', null, 'permanent')!.durability).toBe('permanent');
+  });
+
+  it('reads a pre-migration row (NULL durability) as permanent', () => {
+    // Existing memories were typed by hand by someone who did not expect them
+    // to expire — dropping them from the prompt would be silent data loss.
+    const m = store.addMemory(userId, 'Old fact');
+    const raw = new Database(path.join(dir, 'cloud.db'));
+    raw.prepare('UPDATE memories SET durability = NULL WHERE id = ?').run(m.id);
+    raw.close();
+    expect(store.listMemories(userId)[0]!.durability).toBe('permanent');
+  });
+});

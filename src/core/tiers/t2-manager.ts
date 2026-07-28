@@ -23,6 +23,7 @@ import { MemoryStore } from '../../memory/store.js';
 import { PeerBus } from '../peer/bus.js';
 import type { PermissionEscalator } from '../permissions/escalator.js';
 import type { ToolCreator } from '../../tools/tool-creator.js';
+import { RunBreaker } from '../run-breaker.js';
 import { RedactionLayer } from '../audit/redaction.js';
 
 // Built per-run so the peer-coordination hint only appears when the
@@ -50,6 +51,7 @@ export class T2Manager extends BaseTier {
   private escalations: EscalationPayload[] = [];
   private peerSyncBuffer: Array<{ fromId: string; content: unknown; timestamp: string }> = [];
   private store?: MemoryStore;
+  private runBreaker?: RunBreaker;
   private t3PeerBus: PeerBus = new PeerBus();   // ← T3↔T3 bus (local to this T2)
   private t2PeerBus?: PeerBus;
   private permissionEscalator?: PermissionEscalator;
@@ -88,6 +90,16 @@ export class T2Manager extends BaseTier {
     super('T2', undefined, parentId);
     this.router = router;
     this.toolRegistry = toolRegistry;
+  }
+
+  /**
+   * Share the run-wide circuit breaker. Every T2 in a run gets the SAME
+   * instance: three sections each failing once against a dead model is the
+   * same fact as one section failing three times, and a per-section breaker
+   * would never see it.
+   */
+  setRunBreaker(breaker: RunBreaker): void {
+    this.runBreaker = breaker;
   }
 
   setStore(store: MemoryStore): void {
@@ -246,7 +258,17 @@ export class T2Manager extends BaseTier {
       const isOk = overallStatus === 'COMPLETED' || overallStatus === 'PARTIAL';
       this.setStatus(isOk ? 'COMPLETED' : 'FAILED', summary);
 
-      this.sendStatusUpdate({ progressPct: 100, currentAction: 'Section complete', status: 'IN_PROGRESS', output: summary });
+      // Say what actually happened. This read "Section complete" unconditionally
+      // — two lines after computing a status that may well be FAILED — so a
+      // section whose every worker died still announced completion. The node
+      // badge was right (it comes from this.status, set just above); only this
+      // text disagreed with it, which is why the Cockpit showed a failure icon
+      // next to the word "complete".
+      const sectionAction = overallStatus === 'COMPLETED' ? 'Section complete'
+        : overallStatus === 'PARTIAL' ? 'Section partially complete — some subtasks failed'
+        : overallStatus === 'ESCALATED' ? 'Section escalated — needs a decision'
+        : 'Section failed — no subtask completed';
+      this.sendStatusUpdate({ progressPct: 100, currentAction: sectionAction, status: 'IN_PROGRESS', output: summary });
 
       // ── Build result first, then publish to peers ──
       const result: T2Result = {
@@ -484,6 +506,30 @@ Return ONLY the JSON array.`;
     let reinforcementsAdded = 0;
 
     while (remaining.size > 0) {
+      // The breaker is open: the model these workers would use is failing every
+      // call, so launching them buys nothing but latency and spend. Mark the
+      // rest skipped — with the reason — instead of running them to watch them
+      // fail. This is the whole point of the breaker: pay once to learn the key
+      // is dead, not once per subtask.
+      if (this.runBreaker?.isOpen()) {
+        const why = this.runBreaker.skipMessage();
+        this.log(`Run breaker open — skipping ${remaining.size} remaining subtask(s)`);
+        for (const id of remaining) {
+          this.t3PeerBus.publish(this.id, id, why, 'FAILED');
+          resultMap.set(id, {
+            subtaskId: id,
+            status: 'FAILED',
+            output: why,
+            testResults: { checksRun: [], passed: [], failed: [] },
+            issues: [why],
+            peerSyncsUsed: [],
+            correctionAttempts: 0,
+          });
+        }
+        remaining.clear();
+        break;
+      }
+
       // Collect all runnable tasks this wave
       const runnableIds = [...remaining].filter((id) => (inDegree.get(id) ?? 0) === 0);
 
@@ -623,8 +669,38 @@ Return ONLY the JSON array.`;
 
         const r = waveResults[i]!;
         if (r.status === 'rejected') {
-          this.log(`T3 worker ${id} failed: ${r.reason instanceof Error ? r.reason.message : String(r.reason)} — retrying once`);
+          // Tell the breaker before deciding to retry. A systemic failure —
+          // dead key, wrong model id, exhausted quota — will fail the retry the
+          // same way and every worker after it, so past the threshold we stop
+          // paying to confirm it.
           const assignment = sanitizedAssignments.find((a) => a.subtaskId === id)!;
+          const failedModel = workerMap.get(id)?.getServingModel();
+          const tripped = this.runBreaker?.record(r.reason, failedModel);
+          if (tripped) {
+            this.log(`Run breaker opened: ${tripped.failures} consecutive ${tripped.kind} failures on ${tripped.modelId} — stopping`);
+            this.emit('run:breaker', tripped);
+          }
+
+          if (this.runBreaker?.isOpen()) {
+            const why = this.runBreaker.skipMessage();
+            this.log(`T3 worker ${id} failed and the run breaker is open — not retrying`);
+            this.t3PeerBus.publish(this.id, id, why, 'FAILED');
+            resultMap.set(id, {
+              subtaskId: id,
+              status: 'FAILED',
+              output: why,
+              testResults: { checksRun: [], passed: [], failed: [] },
+              issues: [why],
+              peerSyncsUsed: [],
+              correctionAttempts: 0,
+            });
+            for (const dependent of adj.get(id) ?? []) {
+              inDegree.set(dependent, Math.max(0, (inDegree.get(dependent) ?? 0) - 1));
+            }
+            continue;
+          }
+
+          this.log(`T3 worker ${id} failed: ${r.reason instanceof Error ? r.reason.message : String(r.reason)} — retrying once`);
           try {
             const retried = await this.retryT3(assignment, taskId);
             resultMap.set(id, retried);

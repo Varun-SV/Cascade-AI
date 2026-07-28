@@ -22,6 +22,7 @@ import { CascadeRouter } from './router/index.js';
 import { T1Administrator, type PlanApprovalDecision, type TaskPlan } from './tiers/t1-administrator.js';
 import { calculateCost } from '../utils/cost.js';
 import { T2Manager } from './tiers/t2-manager.js';
+import { RunBreaker } from './run-breaker.js';
 import { T3Worker } from './tiers/t3-worker.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { McpClient } from '../mcp/client.js';
@@ -1120,6 +1121,11 @@ ${prompt}`
     const rootPrompt = buildContextualPrompt(options.prompt, options.conversationHistory);
 
     let finalOutput = '';
+    // One breaker per run, shared by every tier below. It exists so a model that
+    // is failing every call — dead key, wrong id, exhausted quota — costs the
+    // run a handful of calls to discover instead of one per subtask plus a
+    // retry each.
+    const runBreaker = new RunBreaker();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let t2Results: any[] = [];
     let runError: unknown = null;
@@ -1209,6 +1215,7 @@ ${prompt}`
       this.emit('tier:status', { tierId: 't3-root', status: 'COMPLETED', role: 'T3' });
     } else if (complexity === 'Moderate') {
       const t2 = new T2Manager(this.router, this.toolRegistry, 'root');
+      t2.setRunBreaker(runBreaker);
       t2.setPresenter(true); // Moderate run: T2's aggregated synthesis is the answer — stream it.
       t2.setHierarchyContext('You are the ROOT Manager for this task. There is no T1 Administrator involved in this run. You are responsible for decomposing the task and managing T3 workers directly.');
       if (identityPrompt) {
@@ -1280,6 +1287,7 @@ ${prompt}`
       }
     } else {
       const t1 = new T1Administrator(this.router, this.toolRegistry, this.config);
+      t1.setRunBreaker(runBreaker);
       t1.setPresenter(true); // Complex run: T1's final compile is the answer — stream it.
       t1.setHierarchyContext('You are the top-level Administrator. You are responsible for the overall plan and supervising multiple T2 Managers.');
       if (identityPrompt) {
@@ -1307,6 +1315,24 @@ ${prompt}`
       const result = await t1.execute(rootPrompt, options.images, undefined, options.signal);
       finalOutput = result.output;
       t2Results = result.t2Results;
+    }
+
+    // The run stopped because a model was failing every call. T1 composes its
+    // answer from the section summaries, which is why this used to surface as
+    // "a series of system-level errors" — true, but not something anyone can
+    // act on. Lead with the provider's actual complaint instead, so the reader
+    // learns it was a rate limit or a dead key and can go fix it.
+    const trip = runBreaker.reason();
+    if (trip) {
+      finalOutput = [
+        `⚠ **Run stopped early — ${trip.modelId} was failing every request.**`,
+        '',
+        trip.message,
+        '',
+        `Cascade stopped after ${trip.failures} consecutive failures rather than retrying every remaining ` +
+        'subtask against the same model, which would have cost more and produced the same result.',
+        finalOutput ? `\n---\n\n${finalOutput}` : '',
+      ].join('\n').trimEnd();
     }
     } catch (err) {
       // ── Graceful cancellation handling ──────────────────────────────

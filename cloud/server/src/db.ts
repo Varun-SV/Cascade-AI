@@ -65,9 +65,26 @@ export interface CloudMemory {
   content: string;
   /** Optional user-assigned bucket (e.g. STACK / STYLE / PROJECT). */
   category: string | null;
+  /**
+   * How long this fact is expected to hold.
+   *
+   *   permanent — stable across every chat: who they are, what they prefer,
+   *               how they want to be addressed. Worth carrying forever.
+   *   volatile  — true right now and probably not next month: the project in
+   *               flight, the current sprint, what they're mid-way through.
+   *
+   * The split exists because these two want opposite handling. A permanent
+   * fact going stale is rare and cheap; a volatile one going stale is the
+   * normal case and actively misleads. Keeping them in one undifferentiated
+   * list meant the model could not tell "I am a Python developer" from
+   * "I am debugging the auth timeout today", and neither could the user.
+   */
+  durability: MemoryDurability;
   createdAt: number;
   updatedAt: number;
 }
+
+export type MemoryDurability = 'permanent' | 'volatile';
 
 export interface CloudSkill {
   id: string;
@@ -125,6 +142,7 @@ interface DbMemoryRow {
   user_id: string;
   content: string;
   category: string | null;
+  durability: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -297,6 +315,24 @@ export class CloudStore {
 
       CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id);
 
+      -- Per-message thumbs up/down. One row per (user, message): re-voting
+      -- REPLACEs rather than accumulating, so a mind changed twice is still one
+      -- opinion. Deliberately stores no message text — the verdict and the model
+      -- that earned it are the whole signal, and keeping content here would put
+      -- conversation data in a second place with different retention.
+      CREATE TABLE IF NOT EXISTS message_feedback (
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+        conversation_id TEXT NOT NULL,
+        verdict TEXT NOT NULL CHECK (verdict IN ('good','bad')),
+        model TEXT,
+        tier TEXT,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, message_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_feedback_model ON message_feedback(model, verdict);
+
       CREATE TABLE IF NOT EXISTS attachments (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -403,6 +439,10 @@ export class CloudStore {
     if (!hasCol('messages', 'why_json')) this.db.exec('ALTER TABLE messages ADD COLUMN why_json TEXT');
     // Per-user memory categories (STACK/STYLE/PROJECT/…).
     if (!hasCol('memories', 'category')) this.db.exec('ALTER TABLE memories ADD COLUMN category TEXT');
+    // Existing memories were typed by hand by the user, who would not have
+    // saved something they expected to expire — so they back-fill as permanent.
+    // NULL is read as permanent too, which keeps a pre-migration row honest.
+    if (!hasCol('memories', 'durability')) this.db.exec('ALTER TABLE memories ADD COLUMN durability TEXT');
     // Document attachments: original filename + extracted text (parsed at upload)
     // so a run injects the text without re-parsing, plus a char count for display.
     if (!hasCol('attachments', 'filename')) this.db.exec('ALTER TABLE attachments ADD COLUMN filename TEXT');
@@ -873,19 +913,33 @@ export class CloudStore {
     return rows.map((r) => this.deserializeMemory(r));
   }
 
-  addMemory(userId: string, content: string, category: string | null = null): CloudMemory {
+  addMemory(
+    userId: string,
+    content: string,
+    category: string | null = null,
+    durability: MemoryDurability = 'permanent',
+  ): CloudMemory {
     const now = Date.now();
-    const row: DbMemoryRow = { id: randomUUID(), user_id: userId, content, category, created_at: now, updated_at: now };
+    const row: DbMemoryRow = {
+      id: randomUUID(), user_id: userId, content, category, durability,
+      created_at: now, updated_at: now,
+    };
     this.db
-      .prepare('INSERT INTO memories (id, user_id, content, category, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(row.id, row.user_id, row.content, row.category, row.created_at, row.updated_at);
+      .prepare('INSERT INTO memories (id, user_id, content, category, durability, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(row.id, row.user_id, row.content, row.category, row.durability, row.created_at, row.updated_at);
     return this.deserializeMemory(row);
   }
 
-  updateMemory(id: string, userId: string, content: string, category: string | null = null): CloudMemory | null {
+  updateMemory(
+    id: string,
+    userId: string,
+    content: string,
+    category: string | null = null,
+    durability: MemoryDurability = 'permanent',
+  ): CloudMemory | null {
     const info = this.db
-      .prepare('UPDATE memories SET content = ?, category = ?, updated_at = ? WHERE id = ? AND user_id = ?')
-      .run(content, category, Date.now(), id, userId);
+      .prepare('UPDATE memories SET content = ?, category = ?, durability = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+      .run(content, category, durability, Date.now(), id, userId);
     if (info.changes === 0) return null;
     const row = this.db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as DbMemoryRow;
     return this.deserializeMemory(row);
@@ -894,6 +948,66 @@ export class CloudStore {
   deleteMemory(id: string, userId: string): boolean {
     const info = this.db.prepare('DELETE FROM memories WHERE id = ? AND user_id = ?').run(id, userId);
     return info.changes > 0;
+  }
+
+  // ── Message feedback (thumbs up / down) ──────
+
+  /**
+   * Record or change a verdict. Upsert, not insert: pressing thumbs-down after
+   * thumbs-up is a correction, not a second data point.
+   *
+   * The model and tier are captured FROM THE MESSAGE at vote time rather than
+   * looked up later — routing changes between runs, so "which model earned this
+   * rating" is only knowable now.
+   */
+  setMessageFeedback(userId: string, messageId: string, verdict: 'good' | 'bad'): boolean {
+    const msg = this.db
+      .prepare('SELECT m.id, m.conversation_id, m.model, m.tier FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE m.id = ? AND c.user_id = ?')
+      .get(messageId, userId) as { id: string; conversation_id: string; model: string | null; tier: string | null } | undefined;
+    // Scoped through conversations.user_id so one tenant cannot rate another's
+    // message — and an unknown id is indistinguishable from someone else's.
+    if (!msg) return false;
+    this.db
+      .prepare(
+        'INSERT INTO message_feedback (user_id, message_id, conversation_id, verdict, model, tier, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ' +
+        'ON CONFLICT(user_id, message_id) DO UPDATE SET verdict = excluded.verdict, created_at = excluded.created_at',
+      )
+      .run(userId, messageId, msg.conversation_id, verdict, msg.model, msg.tier, Date.now());
+    return true;
+  }
+
+  clearMessageFeedback(userId: string, messageId: string): boolean {
+    const info = this.db
+      .prepare('DELETE FROM message_feedback WHERE user_id = ? AND message_id = ?')
+      .run(userId, messageId);
+    return info.changes > 0;
+  }
+
+  /** Verdicts for one conversation, as { messageId: verdict } for the client. */
+  listConversationFeedback(userId: string, conversationId: string): Record<string, 'good' | 'bad'> {
+    const rows = this.db
+      .prepare('SELECT message_id, verdict FROM message_feedback WHERE user_id = ? AND conversation_id = ?')
+      .all(userId, conversationId) as Array<{ message_id: string; verdict: 'good' | 'bad' }>;
+    const out: Record<string, 'good' | 'bad'> = {};
+    for (const r of rows) out[r.message_id] = r.verdict;
+    return out;
+  }
+
+  /**
+   * Aggregate verdicts per model — the shape a routing prior wants.
+   *
+   * This is an ADJUSTMENT to public benchmark scores, never a replacement:
+   * counts are tiny, self-selected (people rate failures far more readily than
+   * successes), and trivially gamed by a single annoyed user. Callers must
+   * weight by sample size and treat a handful of votes as near-zero evidence.
+   */
+  modelFeedbackTotals(userId: string): Array<{ model: string; good: number; bad: number }> {
+    return this.db
+      .prepare(
+        "SELECT model, SUM(verdict = 'good') AS good, SUM(verdict = 'bad') AS bad " +
+        'FROM message_feedback WHERE user_id = ? AND model IS NOT NULL GROUP BY model',
+      )
+      .all(userId) as Array<{ model: string; good: number; bad: number }>;
   }
 
   // ── Attachments (uploaded images, on-disk, referenced by row) ──
@@ -1245,6 +1359,8 @@ export class CloudStore {
       userId: row.user_id,
       content: row.content,
       category: row.category ?? null,
+      // NULL means "written before durability existed" — see the migration.
+      durability: row.durability === 'volatile' ? 'volatile' : 'permanent',
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };

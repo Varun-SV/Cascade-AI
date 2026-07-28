@@ -311,19 +311,53 @@ export interface RunDocument {
 // their saved memories, and the text of any attached documents. Kept a pure
 // function so it's unit-testable and so the ORIGINAL user text (not this
 // augmented version) is what gets persisted.
+export interface PromptMemory {
+  content: string;
+  durability: 'permanent' | 'volatile';
+}
+
+/**
+ * Render saved memories as a small markdown document rather than one flat
+ * bullet list.
+ *
+ * Two headings, because the two kinds want to be read differently: a permanent
+ * fact ("I write Python") should be weighted the same in six months, while a
+ * volatile one ("I'm migrating the billing service this week") is a snapshot
+ * that may already be wrong. Flattening them together gave the model no way to
+ * tell which was which, so a months-old sprint note read as durable truth.
+ *
+ * This is a rendering, not a storage format — the rows stay individually
+ * addressable, so a stale line can be edited or deleted on its own and the
+ * prompt cost stays proportional to what is actually kept.
+ */
+export function renderMemoryMarkdown(memories: PromptMemory[]): string {
+  const permanent = memories.filter((m) => m.durability !== 'volatile');
+  const volatile = memories.filter((m) => m.durability === 'volatile');
+  const out: string[] = ['# What you know about this user'];
+  if (permanent.length) {
+    out.push('', '## Stable facts', 'These hold across conversations — treat them as durable.', '');
+    out.push(...permanent.map((m) => `- ${m.content}`));
+  }
+  if (volatile.length) {
+    out.push(
+      '', '## Current context',
+      'True as of recently, and liable to change. Prefer what the user says now if it conflicts.', '',
+    );
+    out.push(...volatile.map((m) => `- ${m.content}`));
+  }
+  return out.join('\n');
+}
+
 export function buildRunPrompt(
   userPrompt: string,
   skillSystemPrompt: string | undefined,
-  memories: string[],
+  memories: PromptMemory[],
   documents: RunDocument[] = [],
 ): string {
   const preamble: string[] = [];
   if (skillSystemPrompt) preamble.push(skillSystemPrompt);
   if (memories.length) {
-    preamble.push(
-      'Persistent facts about the user (they asked you to remember these):\n' +
-        memories.map((m) => `- ${m}`).join('\n'),
-    );
+    preamble.push(renderMemoryMarkdown(memories));
   }
   if (documents.length) {
     const blocks = documents.map(
@@ -611,7 +645,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   const userSkill = !builtinSkill && payload.skillId ? store.getUserSkill(payload.skillId, userId) : null;
   if (userSkill) store.incrementSkillUsage(userSkill.id, userId);
   const skillSystemPrompt = builtinSkill?.systemPrompt || userSkill?.systemPrompt || undefined;
-  const memories = store.listMemories(userId).map((m) => m.content);
+  const memories = store.listMemories(userId).map((m) => ({ content: m.content, durability: m.durability }));
   // A hosted run can't write files to disk; when the request actually looks
   // file-shaped, steer it to deliver files as `file:`-tagged fenced blocks so
   // the web can turn them into downloads. Injecting this on EVERY turn made

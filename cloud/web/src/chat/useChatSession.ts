@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 import type { ProviderConfig, WhyReport } from '../lib/types.js';
-import { getMessages, selectBranch as apiSelectBranch, deleteMessage as apiDeleteMessage } from '../lib/api.js';
+import { getMessages, selectBranch as apiSelectBranch, deleteMessage as apiDeleteMessage, fetchFeedback } from '../lib/api.js';
 import { estimateConversationTokens, contextWindowFor } from '../lib/tokens.js';
 import {
   localModelEnabled, fastAnswerModel, tierParams, extendedContext, shareLearning,
@@ -37,6 +37,8 @@ export interface ChatMessage {
   parentId?: string | null;
   /** Branching: ids of this message + its siblings, oldest first (for < n/m >). */
   siblingIds?: string[];
+  /** Thumbs verdict already cast on this reply, when the user has rated it. */
+  verdict?: 'good' | 'bad';
 }
 
 /** Map a server message (active-path row) into the client's ChatMessage shape. */
@@ -291,8 +293,18 @@ export function useChatSession(
   // ids, and per-message sibling counts (< n/m >) always match the server.
   const reloadActivePath = useCallback(async (cid: string) => {
     try {
-      const { messages: rows } = await getMessages(cid);
-      setMessages(rows.map(toChatMessage));
+      // Verdicts ride along with the transcript so a rated reply still shows
+      // its thumb after a reload. Fetched together, but failing independently:
+      // a feedback hiccup must not cost the user their messages.
+      const [{ messages: rows }, fb] = await Promise.all([
+        getMessages(cid),
+        fetchFeedback(cid).catch(() => ({ feedback: {} as Record<string, 'good' | 'bad'> })),
+      ]);
+      setMessages(rows.map((r) => {
+        const m = toChatMessage(r);
+        const v = fb.feedback[m.id];
+        return v ? { ...m, verdict: v } : m;
+      }));
     } catch { /* keep the optimistic transcript on a transient fetch error */ }
   }, []);
 

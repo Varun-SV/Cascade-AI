@@ -72,6 +72,15 @@ export abstract class BaseTier extends EventEmitter {
   }
 
   /** Record the model serving this tier; future status events carry it. */
+  /**
+   * The model actually serving this tier ("provider:id"), once one has been
+   * chosen. The run breaker reads it to attribute a failure to a model rather
+   * than to the subtask that happened to hit it.
+   */
+  getServingModel(): string | undefined {
+    return this.servingModel;
+  }
+
   protected setServingModel(model: string | undefined): void {
     this.servingModel = model || undefined;
   }
