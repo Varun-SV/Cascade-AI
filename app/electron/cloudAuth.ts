@@ -330,6 +330,28 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
   const safeName = (name: string) => name.replace(/[^a-z0-9._-]/gi, '_').slice(0, 64) || 'server';
   const hostnameOf = (url: string) => { try { return new URL(url).hostname; } catch { return 'mcp-server'; } };
 
+  /**
+   * A name whose SANITIZED prefix no other configured server already holds.
+   *
+   * Tools register as `mcp__<sanitized name>__<tool>`, so `foo bar` and
+   * `foo@bar` are different display names that collapse to the same registered
+   * names: the registry keeps one of each pair, and the single global
+   * disabledTools list cannot tell the two connections apart — switching a tool
+   * off for one silently does it for both. The OAuth store path collapses the
+   * same way, so two such servers would also share their token file.
+   * Cloud enforces this in addMcpServer; the desktop needs its own guard.
+   */
+  const uniqueServerName = (desired: string, existing: Array<{ name: string }>): string => {
+    const { mcpServerPrefix } = core();
+    const taken = new Set(existing.map((s) => mcpServerPrefix(s.name)));
+    if (!taken.has(mcpServerPrefix(desired))) return desired;
+    for (let n = 2; n < 1000; n++) {
+      const candidate = `${desired} (${n})`;
+      if (!taken.has(mcpServerPrefix(candidate))) return candidate;
+    }
+    return `${desired} (${Date.now().toString(36)})`;
+  };
+
   ipcMain.handle('mcp:list', () => {
     const cfg = hooks.getConfig();
     const servers = (cfg?.tools?.mcpServers ?? []) as Array<{ name: string; url?: string; command?: string; headers?: unknown; oauthStore?: string }>;
@@ -350,7 +372,15 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
     const cfg = hooks.getConfig();
     if (!cfg) return { ok: false, error: 'Your settings are not ready yet.' };
     const { connectMcpWithLoopbackOAuth, FileMcpOAuthStore } = core();
-    const storePath = join(app.getPath('userData'), 'mcp-oauth', `${safeName(name)}.json`);
+    cfg.tools = cfg.tools ?? {};
+    const servers = (cfg.tools.mcpServers ?? []) as Array<{ name: string }>;
+    // Re-connecting the SAME server updates it in place; only a genuinely new
+    // one that would collide gets suffixed.
+    const existingIdx = servers.findIndex((s) => s.name === name);
+    const finalName = existingIdx >= 0
+      ? name
+      : uniqueServerName(name, servers);
+    const storePath = join(app.getPath('userData'), 'mcp-oauth', `${safeName(finalName)}.json`);
     try {
       await connectMcpWithLoopbackOAuth({
         serverUrl: url,
@@ -358,15 +388,12 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
         clientName: 'Cascade AI',
         openUrl: (u) => { void shell.openExternal(u); },
       });
-      cfg.tools = cfg.tools ?? {};
-      const servers = (cfg.tools.mcpServers ?? []) as Array<{ name: string }>;
-      const entry = { name, url, oauthStore: storePath };
-      const idx = servers.findIndex((s) => s.name === name);
-      if (idx >= 0) servers[idx] = entry; else servers.push(entry);
+      const entry = { name: finalName, url, oauthStore: storePath };
+      if (existingIdx >= 0) servers[existingIdx] = entry; else servers.push(entry);
       cfg.tools.mcpServers = servers;
-      cfg.tools.mcpTrusted = Array.from(new Set([...(cfg.tools.mcpTrusted ?? []), name]));
+      cfg.tools.mcpTrusted = Array.from(new Set([...(cfg.tools.mcpTrusted ?? []), finalName]));
       await hooks.persistConfig();
-      return { ok: true, name };
+      return { ok: true, name: finalName };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : 'Could not connect.' };
     }

@@ -471,7 +471,17 @@ export class CloudStore {
     // MCP OAuth: the server's encrypted OAuth state (tokens + client reg + AS url).
     if (!hasCol('mcp_servers', 'oauth_json')) this.db.exec('ALTER TABLE mcp_servers ADD COLUMN oauth_json TEXT');
     // Per-tool selection: which of this server's tools the user switched off.
-    if (!hasCol('mcp_servers', 'disabled_tools_json')) this.db.exec('ALTER TABLE mcp_servers ADD COLUMN disabled_tools_json TEXT');
+    if (!hasCol('mcp_servers', 'disabled_tools_json')) {
+      this.db.exec('ALTER TABLE mcp_servers ADD COLUMN disabled_tools_json TEXT');
+      // Adding the column is not enough. Rows predating it may already hold two
+      // servers whose names SANITIZE to the same prefix (`foo bar` / `foo@bar`),
+      // and uniqueMcpServerName only guards future inserts. Left alone, their
+      // tools would keep registering under identical `mcp__foo_bar__…` names
+      // and listDisabledMcpTools would union their selections — a checkbox on
+      // either legacy connection silently switching the tool off for both.
+      // Runs once, on the same one-shot guard as the column itself.
+      this.disambiguateMcpServerNames();
+    }
 
     // Message branching (conversation tree). Introduced together — back-fill runs
     // exactly once, when parent_id first appears, over the pre-existing flat data:
@@ -1119,6 +1129,41 @@ export class CloudStore {
    * selection would apply to both. Suffixing at insert keeps every registered
    * name unambiguous, which is what the rest of the system already assumes.
    */
+  /**
+   * Rename pre-existing rows whose sanitized prefixes collide, per user.
+   *
+   * The FIRST row of each colliding group keeps its name — renaming everything
+   * would break connections that are working today — and later ones are
+   * suffixed until their prefix is free, matching what uniqueMcpServerName
+   * would have produced had they been inserted after this change.
+   */
+  private disambiguateMcpServerNames(): void {
+    const rows = this.db
+      .prepare('SELECT id, user_id, name FROM mcp_servers ORDER BY user_id, created_at ASC, rowid ASC')
+      .all() as Array<{ id: string; user_id: string; name: string }>;
+
+    const takenByUser = new Map<string, Set<string>>();
+    const rename = this.db.prepare('UPDATE mcp_servers SET name = ? WHERE id = ?');
+
+    for (const row of rows) {
+      let taken = takenByUser.get(row.user_id);
+      if (!taken) { taken = new Set(); takenByUser.set(row.user_id, taken); }
+
+      const prefix = mcpServerPrefix(row.name);
+      if (!taken.has(prefix)) { taken.add(prefix); continue; }
+
+      for (let n = 2; n < 1000; n++) {
+        const candidate = `${row.name} (${n})`;
+        const candidatePrefix = mcpServerPrefix(candidate);
+        if (!taken.has(candidatePrefix)) {
+          rename.run(candidate, row.id);
+          taken.add(candidatePrefix);
+          break;
+        }
+      }
+    }
+  }
+
   private uniqueMcpServerName(userId: string, desired: string): string {
     // Compared by the SANITIZED prefix, not the display name. `foo bar` and
     // `foo@bar` are different names but both register as `mcp__foo_bar__…`, so

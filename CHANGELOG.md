@@ -46,6 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at the shape it had when you last looked. In the hosted app the list is
   per-account and per-server.
 
+  Because a tool's registered name folds illegal characters, two servers whose
+  names differ only in punctuation — `My Server` and `my-server` — produced the
+  same tool prefix, so one server's tools silently overwrote the other's and a
+  deny list could not tell them apart. New connections with a colliding name are
+  now given a numeric suffix, and any pair already stored is separated the first
+  time the account is upgraded.
+
 - **The loading circle is now the Cascade mark.** Three arcs falling, widest at
   the top, lit in turn from T1 down to T3 — the wait shows the shape of what is
   actually happening rather than an anonymous rotation. The same geometry, held

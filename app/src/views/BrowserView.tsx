@@ -67,16 +67,24 @@ export function BrowserView() {
     void api.setBounds({ x: r.left, y: r.top, width: r.width, height: r.height });
   }, [api]);
 
+  // A failed navigation leaves the native view blank, and it sits ON TOP of the
+  // React tree — so the error message below was rendered underneath it and the
+  // user saw an empty rectangle with no explanation. Preserving the error
+  // (which the main process now does) achieves nothing unless the page that is
+  // covering it gets out of the way. Collapse it while an error is showing;
+  // the next navigation clears the error and brings the page straight back.
+  const hidePage = blocked || !!state.error;
+
   useEffect(() => {
     if (!api) return;
     // Hide, not close — the page and any signed-in session survive the modal.
-    if (blocked) void api.hide();
+    if (hidePage) void api.hide();
     else {
       const el = pageRef.current;
       const r = el?.getBoundingClientRect();
       if (r) void api.open(undefined, { x: r.left, y: r.top, width: r.width, height: r.height });
     }
-  }, [blocked, api]);
+  }, [hidePage, api]);
 
   useEffect(() => {
     if (!api) return;
@@ -211,10 +219,23 @@ export function BrowserView() {
       <div ref={pageRef} style={{ flex: 1, minHeight: 0, position: 'relative' }}>
         {state.error && (
           <div style={{
-            position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
-            padding: 24, textAlign: 'center', fontSize: 12.5, color: 'var(--text-dim)', pointerEvents: 'none',
+            position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
+            alignItems: 'center', justifyContent: 'center', gap: 10, padding: 24, textAlign: 'center',
           }}>
-            {state.error}
+            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>This page didn&apos;t load</div>
+            <div style={{ fontSize: 12, color: 'var(--text-dim)', maxWidth: 460, lineHeight: 1.5 }}>
+              {state.error}
+            </div>
+            <button
+              onClick={() => void api.reload()}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6, marginTop: 2, padding: '6px 12px',
+                fontSize: 12, borderRadius: 7, cursor: 'pointer', border: '1px solid var(--border)',
+                background: 'var(--bg-raised)', color: 'var(--text)',
+              }}
+            >
+              <RotateCw size={13} /> Try again
+            </button>
           </div>
         )}
       </div>

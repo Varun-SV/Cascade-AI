@@ -221,12 +221,19 @@ export default function ConnectorsModal({ onClose }: { onClose: () => void }) {
   }
 
   function toggleExpanded(s: McpServer) {
+    // The updater stays PURE. React StrictMode deliberately double-invokes
+    // updater functions to surface impurities, and concurrent rendering may
+    // replay them — so kicking off discovery inside one turned a single click
+    // into two live MCP connections and two OAuth refreshes. With rotating
+    // refresh tokens the second can invalidate the first, letting a late error
+    // response overwrite a tool list that had already loaded fine.
+    const willExpand = !expanded.has(s.id);
     setExpanded((prev) => {
       const next = new Set(prev);
-      if (next.has(s.id)) next.delete(s.id);
-      else { next.add(s.id); if (!toolsFor[s.id]) void loadTools(s); }
+      if (willExpand) next.add(s.id); else next.delete(s.id);
       return next;
     });
+    if (willExpand && !toolsFor[s.id]) void loadTools(s);
   }
 
   // One tool per request. Sending the whole list would let a second tab open on
