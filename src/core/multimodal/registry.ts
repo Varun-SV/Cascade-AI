@@ -36,7 +36,8 @@ export type GenerationApi =
   | 'openai-images'          // POST /v1/images/generations
   | 'openai-speech'          // POST /v1/audio/speech
   | 'openai-transcriptions'  // POST /v1/audio/transcriptions
-  | 'gemini-predict';        // :predict — Imagen
+  | 'gemini-predict'          // :predict — Imagen
+  | 'gemini-predict-lro';    // :predictLongRunning — Veo (submit → poll → fetch)
 
 export interface GenerationCapability {
   modality: GenerationModality;
@@ -92,14 +93,10 @@ const CAPABILITIES: readonly GenerationCapability[] = [
 
   // ── Video ──
   {
-    // Listed so `describe()` can tell the truth about what exists, and so the
-    // planner is told video is out of reach rather than left to invent a tool.
-    // Veo is a long-running operation: submit, poll, then fetch bytes from a
-    // signed URL. That is a different execution shape from every other entry
-    // here and is not wired up — claiming otherwise would produce a tool that
-    // fails at call time instead of an honest "not yet".
-    modality: 'video', provider: 'gemini', modelId: 'veo-3.1-generate-001', api: 'gemini-predict',
-    unsupported: 'Veo runs as a long-running operation (submit → poll → fetch). Not wired up yet.',
+    // Long-running: submit returns an operation name, the video lands minutes
+    // later, and the bytes come from a short-lived signed URL. generate.ts owns
+    // that polling loop; the registry only records the shape via `api`.
+    modality: 'video', provider: 'gemini', modelId: 'veo-3.1-generate-001', api: 'gemini-predict-lro',
   },
 ];
 

@@ -223,6 +223,12 @@ export interface ToolExecuteOptions {
    * paying it out and discarding the result.
    */
   signal?: AbortSignal;
+  /**
+   * Progress notes from a long-running tool. Video generation polls for minutes;
+   * without a channel back, a working render is indistinguishable from a hang —
+   * which is the most likely reason someone kills one.
+   */
+  onProgress?: (note: string) => void;
   saveSnapshot?: (filePath: string, content: string) => Promise<void>;
   sendPeerSync?: (
     to: string,
@@ -667,6 +673,12 @@ export interface ToolsConfig {
    * behavior). An empty array registers no tools at all.
    */
   enabledTools?: string[];
+  /**
+   * Tools to remove even when they would otherwise be registered. Reaches
+   * tools registered outside `enabledTools` (MCP, media generation), which is
+   * the only way to switch those off.
+   */
+  disabledTools?: string[];
 }
 
 export interface HooksConfig {

@@ -39,6 +39,14 @@ export interface SpeechRequest {
   format?: 'mp3' | 'opus' | 'aac' | 'flac' | 'wav';
 }
 
+export interface VideoRequest {
+  prompt: string;
+  /** Clip length in seconds. Billed per second — an 8s clip is 8x a 1s one. */
+  seconds?: number;
+  /** "16:9" (default) or "9:16". */
+  aspectRatio?: string;
+}
+
 export interface TranscriptionRequest {
   audio: Buffer;
   filename: string;
@@ -190,6 +198,123 @@ export async function generateSpeech(
       data: Buffer.from(await res.arrayBuffer()),
       mimeType: mime[format] ?? 'application/octet-stream',
       filename: stamp(format),
+      modelId: cap.modelId,
+      provider: cap.provider,
+    };
+  }, cap.modelId);
+}
+
+// ── Video (long-running) ──────────────────────
+
+/** How often to ask whether the video is done. */
+const VIDEO_POLL_INTERVAL_MS = 10_000;
+/** Give up after this long. Veo typically lands in 1–3 minutes. */
+const VIDEO_TIMEOUT_MS = 8 * 60_000;
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('Cancelled.'));
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    function onAbort(): void {
+      clearTimeout(timer);
+      reject(new Error('Cancelled.'));
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/**
+ * Generate a video.
+ *
+ * Unlike every other generator here, this is a long-running operation: the
+ * submit call returns an operation name, not a result, and the video appears
+ * minutes later. So the shape is submit → poll → fetch bytes, and the caller is
+ * kept informed via `onProgress` because a silent two-minute wait is
+ * indistinguishable from a hang.
+ *
+ * The final asset arrives as a short-lived signed URL that needs the API key to
+ * download, so the bytes are fetched here for the same reason as everywhere
+ * else in this file: a URL-based artifact is dead by the time anyone opens it.
+ */
+export async function generateVideo(
+  cap: GenerationCapability,
+  cfg: ProviderConfig,
+  req: VideoRequest,
+  signal?: AbortSignal,
+  onProgress?: (note: string) => void,
+): Promise<GeneratedAsset> {
+  return callProvider(async () => {
+    if (cap.api !== 'gemini-predict-lro') throw new Error(`${cap.modelId} is not a video generator.`);
+    const base = baseUrlFor(cfg, 'https://generativelanguage.googleapis.com/v1beta');
+    const key = cfg.apiKey ?? '';
+    const headers = { 'x-goog-api-key': key };
+
+    // ── Submit ──
+    const submit = await postJson(
+      `${base}/models/${encodeURIComponent(cap.modelId)}:predictLongRunning`,
+      {
+        instances: [{ prompt: req.prompt }],
+        parameters: {
+          aspectRatio: req.aspectRatio ?? '16:9',
+          ...(req.seconds ? { durationSeconds: req.seconds } : {}),
+        },
+      },
+      headers,
+      signal,
+    );
+    const started = await submit.json() as { name?: string };
+    if (!started.name) throw new Error('Video request was accepted but returned no operation to poll.');
+    onProgress?.(`Video generation started (${cap.modelId}). This usually takes 1-3 minutes.`);
+
+    // ── Poll ──
+    const deadline = Date.now() + VIDEO_TIMEOUT_MS;
+    let operation: {
+      done?: boolean;
+      error?: { message?: string };
+      response?: {
+        generateVideoResponse?: {
+          generatedSamples?: Array<{ video?: { uri?: string } }>;
+        };
+      };
+    } = {};
+
+    while (Date.now() < deadline) {
+      await sleep(VIDEO_POLL_INTERVAL_MS, signal);
+      const poll = await fetch(`${base}/${started.name}`, { headers, signal });
+      if (!poll.ok) {
+        const text = await poll.text().catch(() => '');
+        throw Object.assign(new Error(text || poll.statusText), { status: poll.status });
+      }
+      operation = await poll.json() as typeof operation;
+      if (operation.done) break;
+      onProgress?.('Still rendering…');
+    }
+
+    if (!operation.done) {
+      throw new Error(
+        `Video was still rendering after ${Math.round(VIDEO_TIMEOUT_MS / 60_000)} minutes. ` +
+        'It may still complete on the provider side, but Cascade stopped waiting.',
+      );
+    }
+    // A finished operation can still carry a failure; `done` means "no longer
+    // running", not "succeeded".
+    if (operation.error?.message) throw new Error(operation.error.message);
+
+    const uri = operation.response?.generateVideoResponse?.generatedSamples?.[0]?.video?.uri;
+    if (!uri) throw new Error('Video finished but the response contained no video.');
+
+    // ── Fetch the bytes ──
+    // The signed URI still requires the key, and expires — download now.
+    const media = await fetch(uri, { headers, signal });
+    if (!media.ok) throw new Error(`Video finished but could not be downloaded (HTTP ${media.status}).`);
+
+    return {
+      data: Buffer.from(await media.arrayBuffer()),
+      mimeType: 'video/mp4',
+      filename: stamp('mp4'),
       modelId: cap.modelId,
       provider: cap.provider,
     };

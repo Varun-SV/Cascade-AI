@@ -85,6 +85,13 @@ export const ToolsConfigSchema = z.object({
    * gating it behind approval. Omitted = full default set (unchanged).
    */
   enabledTools: z.array(z.string()).optional(),
+  /**
+   * Tools to remove even when they would otherwise be registered. Unlike
+   * `enabledTools` (an allowlist over the built-in set), this also reaches
+   * tools registered outside it — MCP tools and media generation — which is
+   * the only way to turn those off.
+   */
+  disabledTools: z.array(z.string()).optional(),
 });
 
 export const HookDefinitionSchema = z.object({

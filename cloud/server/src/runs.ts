@@ -22,7 +22,7 @@ import { z } from 'zod';
 import type { CloudEnv } from './env.js';
 import { resolveRunMcpServers } from './mcp-oauth.js';
 import type { CloudAttachment, CloudStore } from './db.js';
-import { beginRun, checkDailyLimit, todayKey } from './entitlements.js';
+import { beginRun, checkDailyLimit, checkStorageQuota, todayKey } from './entitlements.js';
 import { getSkill } from './skills.js';
 import { tenantScratchDir } from './paths.js';
 
@@ -689,6 +689,29 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     mcpServers: mcpServers.length ? mcpServers : undefined,
   });
   const cascade: Cascade = createCascade(config, scratchDir);
+
+  // Generated media lands as a real file row, so the browser can show it the
+  // same way it shows any other generated file. The SDK's default sink writes
+  // to the workspace, which is meaningless in a hosted run — the container is
+  // ephemeral and the user has no filesystem to look at.
+  cascade.setMediaSink(async (asset) => {
+    const dir = path.join(tenantScratchDir(env, userId), 'files');
+    const plan = store.getUserById(userId)?.plan ?? 'free';
+    // Quota is checked here, not after writing: a video can be tens of MB and
+    // the point of a quota is to refuse before the disk is spent.
+    checkStorageQuota(store.sumUserFileBytes(userId), asset.data.length, plan);
+    await fs.mkdir(dir, { recursive: true });
+    const file = store.addFile({
+      userId,
+      conversationId: conversation.id,
+      name: asset.filename,
+      mime: asset.mimeType,
+      size: asset.data.length,
+    });
+    await fs.writeFile(path.join(dir, file.id), asset.data);
+    socket.emit('file:created', { conversationId: conversation.id, file });
+    return asset.filename;
+  });
 
   // Your thumbs-up/down verdicts, folded into Auto routing as a bounded,
   // sample-size-shrunk adjustment to the public benchmark score. Read once per
