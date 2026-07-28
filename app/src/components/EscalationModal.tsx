@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 import { AlertTriangle, RefreshCw, SkipForward, Send } from 'lucide-react';
-import { useAppDispatch, useAppSelector, setPendingEscalation } from '../store/index.js';
+import { useAppDispatch, useAppSelector, dequeueEscalation } from '../store/index.js';
 
 /**
  * A section stopped and asked a question.
@@ -17,7 +17,10 @@ import { useAppDispatch, useAppSelector, setPendingEscalation } from '../store/i
  */
 export function EscalationModal({ socket }: { socket: Socket | null }) {
   const dispatch = useAppDispatch();
-  const pending = useAppSelector((s) => s.app.pendingEscalation);
+  // The head of the queue. Sections in a wave escalate concurrently, so more
+  // than one can be waiting; answering reveals the next rather than losing it.
+  const pending = useAppSelector((s) => s.app.pendingEscalations[0] ?? null);
+  const queued = useAppSelector((s) => s.app.pendingEscalations.length);
   const [note, setNote] = useState('');
   const [now, setNow] = useState(() => Date.now());
 
@@ -37,8 +40,8 @@ export function EscalationModal({ socket }: { socket: Socket | null }) {
   // them answering a request the server had already abandoned.
   const expired = !!pending && Date.now() - pending.receivedAt >= pending.timeoutMs;
   useEffect(() => {
-    if (expired) dispatch(setPendingEscalation(null));
-  }, [expired, dispatch]);
+    if (expired && pending) dispatch(dequeueEscalation(pending));
+  }, [expired, dispatch, pending]);
 
   if (!pending || expired) return null;
 
@@ -57,7 +60,7 @@ export function EscalationModal({ socket }: { socket: Socket | null }) {
       action,
       note: text,
     });
-    dispatch(setPendingEscalation(null));
+    dispatch(dequeueEscalation(pending));
   };
 
   const btn = (bg: string, color: string): React.CSSProperties => ({

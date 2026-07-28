@@ -18,7 +18,7 @@ import {
   setConnected, setReconnecting, setBackendError, setMeta, updateCost, upsertAgent, updateLastMessage,
   setSessions, removeSession, setOnboardingDone,
   enqueueApproval, clearApprovals, appendAgentStream, addPeerEdge, expirePeerEdges, runEnded, finalizeLastMessage,
-  setPendingPlan, setPendingEscalation, clearEscalationForSession, setWhyReport, appendCommsEvent,
+  setPendingPlan, enqueueEscalation, dequeueEscalation, clearEscalationForSession, setWhyReport, appendCommsEvent,
   type RuntimeSession, type PendingPlan, type PendingEscalation, type WhyReport,
 } from './store/index.js';
 import { SettingsView } from './views/SettingsView.js';
@@ -309,7 +309,7 @@ export function App() {
     // modal shows a countdown.
     socket.on('escalation:decision-required', (data: Omit<PendingEscalation, 'receivedAt'>) => {
       if (!data?.sectionId) return;
-      dispatch(setPendingEscalation({
+      dispatch(enqueueEscalation({
         ...data,
         issues: Array.isArray(data.issues) ? data.issues : [],
         timeoutMs: typeof data.timeoutMs === 'number' ? data.timeoutMs : 5 * 60_000,
@@ -318,8 +318,10 @@ export function App() {
     });
     // The server gave up waiting — close the modal so a late answer can't land
     // on a section that has already been failed.
-    socket.on('escalation:timeout', () => {
-      dispatch(setPendingEscalation(null));
+    // Drop only the section that timed out — without the id an older request's
+    // timeout would clear a NEWER prompt the user is mid-answer on.
+    socket.on('escalation:timeout', (data: { requestId?: string; sectionId?: string }) => {
+      dispatch(dequeueEscalation({ requestId: data?.requestId, sectionId: data?.sectionId }));
     });
 
     // The decision trail of the run that just ended — powers the Why panel.

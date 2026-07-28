@@ -4,6 +4,16 @@
 //
 // Split out from browser.ts so it can be tested without importing electron.
 
+/** A machine-local address, where a dev server almost certainly speaks plain
+ *  HTTP rather than TLS. */
+function isLoopbackHost(raw: string): boolean {
+  const host = raw.split(/[/?#]/, 1)[0] ?? '';
+  return /^localhost(:\d+)?$/i.test(host)
+    || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$/.test(host)
+    || /^\[::1\](:\d+)?$/.test(host)
+    || /^0\.0\.0\.0(:\d+)?$/.test(host);
+}
+
 /**
  * Only http(s). A `file://` or `javascript:` URL typed into the address bar
  * would be a local-file read or a script injection dressed up as navigation.
@@ -17,7 +27,11 @@ export function normalizeUrl(input: string): string | null {
   // Anything without `://` gets https:// and must still survive URL parsing,
   // which is what keeps `javascript:alert(1)` and `data:…` out (they become an
   // invalid port and throw).
-  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
+  // http for loopback: a Vite/webpack dev server listens on plain HTTP, so
+  // defaulting localhost to https produced a TLS failure with no fallback —
+  // recognising the address but still refusing to open it.
+  const scheme = isLoopbackHost(raw) ? 'http' : 'https';
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `${scheme}://${raw}`;
   try {
     const u = new URL(candidate);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;

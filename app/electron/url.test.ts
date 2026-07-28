@@ -33,18 +33,24 @@ describe('normalizeUrl', () => {
 describe('toNavigable', () => {
   const isSearch = (v: string | null) => !!v?.startsWith('https://duckduckgo.com/?q=');
 
-  it('opens localhost instead of searching for it', () => {
-    // This is a developer's browser. Searching the web for "localhost:3000"
-    // rather than opening the dev server is never what was meant.
-    expect(toNavigable('localhost:3000')).toBe('https://localhost:3000/');
-    expect(toNavigable('localhost')).toBe('https://localhost/');
-    expect(toNavigable('localhost:8080/api/health')).toBe('https://localhost:8080/api/health');
+  it('opens localhost over HTTP instead of searching for it', () => {
+    // This is a developer's browser. Searching the web for "localhost:3000" is
+    // never what was meant — and neither is https, since a Vite/webpack dev
+    // server speaks plain HTTP and the TLS attempt just fails.
+    expect(toNavigable('localhost:3000')).toBe('http://localhost:3000/');
+    expect(toNavigable('localhost')).toBe('http://localhost/');
+    expect(toNavigable('localhost:8080/api/health')).toBe('http://localhost:8080/api/health');
   });
 
-  it('opens loopback and LAN addresses', () => {
-    expect(toNavigable('127.0.0.1:5173')).toBe('https://127.0.0.1:5173/');
+  it('opens loopback over HTTP and other hosts over HTTPS', () => {
+    expect(toNavigable('127.0.0.1:5173')).toBe('http://127.0.0.1:5173/');
+    expect(toNavigable('[::1]:3000')).toBe('http://[::1]:3000/');
+    // A LAN address is not loopback — no reason to downgrade it.
     expect(toNavigable('192.168.1.10')).toBe('https://192.168.1.10/');
-    expect(toNavigable('[::1]:3000')).toBe('https://[::1]:3000/');
+  });
+
+  it('still honours an explicit https on localhost', () => {
+    expect(toNavigable('https://localhost:8443')).toBe('https://localhost:8443/');
   });
 
   it('opens a bare domain carrying a query or fragment', () => {

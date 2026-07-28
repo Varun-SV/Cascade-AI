@@ -4,6 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import Database from 'better-sqlite3';
 import { CloudStore } from './db.js';
+import { mcpServerPrefix } from '#cascade-ai';
 
 describe('CloudStore', () => {
   let dir: string;
@@ -303,6 +304,24 @@ describe('CloudStore', () => {
     // Removing a server takes its selections with it.
     store.deleteMcpServer(notion.id, alice.id);
     expect(store.listDisabledMcpTools(alice.id)).toEqual(['mcp__github__merge_pr']);
+  });
+
+  it('keeps server names unique after sanitization, not just as typed', () => {
+    // Tools register as `mcp__<sanitized name>__<tool>`, so `foo bar` and
+    // `foo@bar` are different display names that collide downstream: the
+    // registry keeps one of each pair and a per-server selection hits both.
+    const user = store.upsertUser({ provider: 'dev', providerId: 'names', email: null, name: null, avatar: null });
+
+    const a = store.addMcpServer({ userId: user.id, name: 'foo bar', url: 'https://a.example/mcp' });
+    const b = store.addMcpServer({ userId: user.id, name: 'foo@bar', url: 'https://b.example/mcp' });
+    const c = store.addMcpServer({ userId: user.id, name: 'foo bar', url: 'https://c.example/mcp' });
+
+    expect(a.name).toBe('foo bar');
+    expect(new Set([a.name, b.name, c.name]).size).toBe(3);
+
+    // And the property that actually matters: distinct registered prefixes.
+    const prefixes = store.listMcpServers(user.id).map((s) => mcpServerPrefix(s.name));
+    expect(new Set(prefixes).size).toBe(3);
   });
 
   it('composes concurrent tool toggles instead of letting one overwrite the other', () => {

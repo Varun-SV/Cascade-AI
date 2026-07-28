@@ -426,6 +426,18 @@ export class T3Worker extends BaseTier {
         this.peerBus?.publish(this.id, assignment.subtaskId, finalOutput, 'FAILED');
         return this.buildResult('ESCALATED', finalOutput, { checksRun, passed, failed }, issues, correctionAttempts);
       }
+      // A budget stop is FAILED, never ESCALATED. The router has permanently
+      // marked this run over its hard cap, so every further generation fails
+      // instantly — escalating would park the run for five minutes and offer a
+      // "retry" that cannot possibly succeed, turning the hard kill the user
+      // configured into a five-minute wait before the same answer.
+      if (err instanceof Error && err.name === 'BudgetExceededError') {
+        issues.push(errMsg);
+        const stopped = output || errMsg;
+        this.setStatus('FAILED', stopped);
+        this.peerBus?.publish(this.id, assignment.subtaskId, stopped, 'FAILED');
+        return this.buildResult('FAILED', stopped, { checksRun, passed, failed }, issues, correctionAttempts);
+      }
       issues.push(`Execution error: ${errMsg}`);
       const finalOutput = output || errMsg;
       this.setStatus('FAILED', finalOutput);

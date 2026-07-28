@@ -42,6 +42,11 @@ export class DashboardSocket {
     this.setupHandlers();
   }
 
+  /** How many sockets are currently in a room — 0 means nobody can answer. */
+  roomSize(room: string): number {
+    return this.io.sockets.adapter.rooms.get(room)?.size ?? 0;
+  }
+
   broadcastToRoom(room: string, event: string, data: unknown): void {
     this.io.to(room).emit(event, data);
   }

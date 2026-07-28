@@ -10,7 +10,7 @@
 import Database from 'better-sqlite3';
 import path from 'node:path';
 import fs from 'node:fs';
-import { SqliteVectorStore } from '#cascade-ai';
+import { SqliteVectorStore, mcpServerPrefix } from '#cascade-ai';
 import { randomUUID } from 'node:crypto';
 
 export type OAuthProvider = 'github' | 'google' | 'dev';
@@ -1120,14 +1120,17 @@ export class CloudStore {
    * name unambiguous, which is what the rest of the system already assumes.
    */
   private uniqueMcpServerName(userId: string, desired: string): string {
+    // Compared by the SANITIZED prefix, not the display name. `foo bar` and
+    // `foo@bar` are different names but both register as `mcp__foo_bar__…`, so
+    // comparing display names accepted a pair that still collided downstream.
     const taken = new Set(
       (this.db.prepare('SELECT name FROM mcp_servers WHERE user_id = ?').all(userId) as Array<{ name: string }>)
-        .map((r) => r.name),
+        .map((r) => mcpServerPrefix(r.name)),
     );
-    if (!taken.has(desired)) return desired;
+    if (!taken.has(mcpServerPrefix(desired))) return desired;
     for (let n = 2; n < 1000; n++) {
       const candidate = `${desired} (${n})`;
-      if (!taken.has(candidate)) return candidate;
+      if (!taken.has(mcpServerPrefix(candidate))) return candidate;
     }
     return `${desired} (${randomUUID().slice(0, 8)})`;
   }

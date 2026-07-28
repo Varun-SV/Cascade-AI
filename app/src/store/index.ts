@@ -121,8 +121,15 @@ export interface AppState {
   dismissedNodeIds: string[];
   /** T1's plan paused at the boardroom gate — renders the plan-review modal. */
   pendingPlan: PendingPlan | null;
-  /** A section that stopped and asked a question — renders the escalation modal. */
-  pendingEscalation: PendingEscalation | null;
+  /**
+   * Sections that stopped and asked a question — a QUEUE, oldest first.
+   *
+   * Not one slot: the SDK keys parked escalations by requestId precisely
+   * because a Complex wave dispatches sections concurrently, so two can be
+   * waiting at once. A single slot dropped the first, and answering the visible
+   * prompt left the hidden section parked until its timeout.
+   */
+  pendingEscalations: PendingEscalation[];
   /** Per-session decision trails from `run:why`, keyed by sessionId. */
   whyBySession: Record<string, WhyReport>;
   /** The Why panel (run inspector) slide-over is open. */
@@ -191,6 +198,14 @@ export interface PendingEscalation {
   receivedAt: number;
 }
 
+/**
+ * Identity of a parked escalation. `requestId` when the server supplies it;
+ * `sectionId` is the fallback for a server that predates the id.
+ */
+export function escalationKey(e: { requestId?: string; sectionId?: string }): string {
+  return e.requestId ?? `section:${e.sectionId ?? ''}`;
+}
+
 /** The decision trail + economics of a session's most recent run (/why). */
 export interface WhyReport {
   sessionId: string;
@@ -252,7 +267,7 @@ const initialState: AppState = {
   runSessionId: null,
   dismissedNodeIds: [],
   pendingPlan: null,
-  pendingEscalation: null,
+  pendingEscalations: [],
   whyBySession: {},
   showWhyPanel: false,
   commsEvents: [],
@@ -470,9 +485,19 @@ const appSlice = createSlice({
     setPendingPlan(state, action: PayloadAction<PendingPlan | null>) {
       state.pendingPlan = action.payload;
     },
-    // Section escalation awaiting the user
-    setPendingEscalation(state, action: PayloadAction<PendingEscalation | null>) {
-      state.pendingEscalation = action.payload;
+    // Section escalation awaiting the user — appended to the queue. A
+    // re-delivery of one already queued (reconnect replay) updates in place
+    // rather than asking the same question twice.
+    enqueueEscalation(state, action: PayloadAction<PendingEscalation>) {
+      const key = escalationKey(action.payload);
+      const i = state.pendingEscalations.findIndex((e) => escalationKey(e) === key);
+      if (i >= 0) state.pendingEscalations[i] = action.payload;
+      else state.pendingEscalations.push(action.payload);
+    },
+    /** Drop one by identity — the answered one, or the one that timed out. */
+    dequeueEscalation(state, action: PayloadAction<{ requestId?: string; sectionId?: string }>) {
+      const key = escalationKey(action.payload);
+      state.pendingEscalations = state.pendingEscalations.filter((e) => escalationKey(e) !== key);
     },
     /**
      * Clear the prompt only if it belongs to the session that just ended.
@@ -483,7 +508,9 @@ const appSlice = createSlice({
      */
     clearEscalationForSession(state, action: PayloadAction<string | undefined>) {
       const id = action.payload;
-      if (!id || state.pendingEscalation?.sessionId === id) state.pendingEscalation = null;
+      state.pendingEscalations = id
+        ? state.pendingEscalations.filter((e) => e.sessionId !== id)
+        : [];
     },
     // Why panel (run inspector)
     setWhyReport(state, action: PayloadAction<WhyReport>) {
@@ -532,7 +559,7 @@ export const {
   appendAgentStream, selectNode, dismissCompletedNodes, addPeerEdge, expirePeerEdges, setForceTier, runStarted, runEnded,
   openTab, closeTab, setActiveTab, setTabDirty,
   setOnboardingDone,
-  setPendingPlan, setPendingEscalation, clearEscalationForSession, setWhyReport, setShowWhyPanel,
+  setPendingPlan, enqueueEscalation, dequeueEscalation, clearEscalationForSession, setWhyReport, setShowWhyPanel,
   appendCommsEvent, clearCommsEvents, setBottomTab, openBottomTab,
   setShowPalette, setChangesSessionId, setShowContinue,
 } = appSlice.actions;

@@ -1188,12 +1188,20 @@ export class DashboardServer {
         cascade.on('plan:approval-required', (e: unknown) => {
           this.socket.broadcastToRoom(`session:${sessionId}`, 'plan:approval-required', { sessionId, ...(e as object) });
         });
-        cascade.on('escalation:decision-required', (e: unknown) => {
-          this.socket.broadcastToRoom(`session:${sessionId}`, 'escalation:decision-required', { sessionId, ...(e as object) });
-        });
-        cascade.on('escalation:timeout', (e: unknown) => {
-          this.socket.broadcastToRoom(`session:${sessionId}`, 'escalation:timeout', { sessionId, ...(e as object) });
-        });
+        // Only wire the interactive gate when someone is actually listening on
+        // this session's room. /api/run is also used headlessly, and attaching
+        // unconditionally made the SDK believe a human could answer
+        // (listenerCount > 0): an escalated section then waited the full five
+        // minutes broadcasting into an empty room, instead of taking the
+        // no-listener 'skip' policy and finishing.
+        if (this.socket.roomSize(`session:${sessionId}`) > 0) {
+          cascade.on('escalation:decision-required', (e: unknown) => {
+            this.socket.broadcastToRoom(`session:${sessionId}`, 'escalation:decision-required', { sessionId, ...(e as object) });
+          });
+          cascade.on('escalation:timeout', (e: unknown) => {
+            this.socket.broadcastToRoom(`session:${sessionId}`, 'escalation:timeout', { sessionId, ...(e as object) });
+          });
+        }
 
         try {
           const result = await cascade.run({

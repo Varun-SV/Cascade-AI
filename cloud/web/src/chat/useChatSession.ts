@@ -176,6 +176,14 @@ export interface EscalationRequest {
   receivedAt: number;
 }
 
+/**
+ * Identity of a parked escalation. `requestId` when the server supplies it;
+ * `sectionId` is the fallback for an older server that predates the id.
+ */
+function escalationKey(e: { requestId?: string; sectionId?: string }): string {
+  return e.requestId ?? `section:${e.sectionId ?? ''}`;
+}
+
 export interface PlanApproval {
   taskId?: string;
   summary?: string;
@@ -213,7 +221,12 @@ export function useChatSession(
   // The boardroom plan for the in-flight run, if Cascade produced one. Shown
   // read-only; cleared when the next run starts or the current one settles.
   const [approval, setApproval] = useState<PlanApproval | null>(null);
-  const [escalation, setEscalation] = useState<EscalationRequest | null>(null);
+  // A QUEUE, not one slot. The SDK keys parked escalations by requestId
+  // precisely because a Complex wave dispatches sections concurrently, so two
+  // can be waiting at once — storing one here threw the first away, and
+  // answering the visible prompt left the hidden section parked until timeout.
+  const [escalations, setEscalations] = useState<EscalationRequest[]>([]);
+  const escalation = escalations[0] ?? null;
   // Extended context: a pending "process this huge input?" confirm, and a
   // transient notice once a compaction actually happened.
   const [contextApproval, setContextApproval] = useState<ContextApprovalInfo | null>(null);
@@ -271,10 +284,22 @@ export function useChatSession(
     };
     const onWhy = (r: WhyReport) => { pendingWhyRef.current = r; };
     const onPlan = (e: PlanApproval) => setApproval(e);
-    const onEscalation = (e: EscalationRequest) => setEscalation({ ...e, receivedAt: Date.now() });
+    const onEscalation = (e: EscalationRequest) => setEscalations((prev) => {
+      const incoming = { ...e, receivedAt: Date.now() };
+      // Re-delivery of one already queued (a reconnect replay) updates in place
+      // rather than showing the same question twice.
+      const i = prev.findIndex((x) => escalationKey(x) === escalationKey(incoming));
+      if (i < 0) return [...prev, incoming];
+      const copy = [...prev];
+      copy[i] = incoming;
+      return copy;
+    });
     // The window closed without an answer — clear the prompt so a stale modal
     // can't be answered into a run that has already moved on.
-    const onEscalationTimeout = () => setEscalation(null);
+    // Drop only the section that timed out. Without the id an older request's
+    // timeout would clear a NEWER prompt the user is mid-answer on.
+    const onEscalationTimeout = (e: { requestId?: string; sectionId?: string }) =>
+      setEscalations((prev) => prev.filter((x) => escalationKey(x) !== escalationKey(e)));
     const onContextApproval = (e: ContextApprovalInfo) => setContextApproval(e);
     const onCompacted = (e: { kind?: string; chunks?: number; foldedTurns?: number; truncated?: boolean }) => {
       setContextApproval(null);
@@ -494,7 +519,7 @@ export function useChatSession(
    * never happened and queue a decision with nowhere to land. Distinct from
    * dismissing deliberately, which IS an answer (see resolveEscalation).
    */
-  const clearEscalation = useCallback(() => setEscalation(null), []);
+  const clearEscalation = useCallback(() => setEscalations((prev) => prev.slice(1)), []);
 
   const resolveEscalation = useCallback(
     (action: 'retry' | 'skip' | 'guidance', note?: string) => {
@@ -505,7 +530,7 @@ export function useChatSession(
         action,
         ...(note ? { note } : {}),
       });
-      setEscalation(null);
+      setEscalations((prev) => prev.slice(1));
       setStatus(action === 'skip' ? 'Skipping section…' : 'Retrying section…');
     },
     [socket, escalation],
@@ -588,7 +613,7 @@ export function useChatSession(
     busy, error, status, lastTokens, lastSaved, conversationId, loadMessages, setConversationId,
     contextTokens, contextWindow,
     routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, approval,
-    escalation, resolveEscalation, clearEscalation,
+    escalation, escalationQueued: escalations.length, resolveEscalation, clearEscalation,
     contextApproval, resolveContextApproval, compactionNotice, knowledgeNotice, activity,
   };
 }

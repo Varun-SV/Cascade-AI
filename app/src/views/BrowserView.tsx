@@ -38,13 +38,19 @@ export function BrowserView() {
   // it — including the escalation prompt, which would put us right back at
   // "the run asked me something and I never saw it". Hide the page while
   // anything is asking for the user's attention.
+  // EVERY overlay, not only the dialogs: the Why panel and Help panel are
+  // slide-overs in the same content area, reachable from the always-visible
+  // status bar and the command palette, and a React z-index cannot put them
+  // above a native child view — they were simply invisible behind the page.
   const blocked = useAppSelector((st) =>
     st.app.showSettings
     || st.app.showPalette
     || st.app.showContinue
+    || st.app.showWhyPanel
+    || st.app.helpContext !== null
     || st.app.pendingApprovals.length > 0
     || st.app.pendingPlan !== null
-    || st.app.pendingEscalation !== null
+    || st.app.pendingEscalations.length > 0
     || st.app.changesSessionId !== null,
   );
   const [state, setState] = useState<BrowserState>(EMPTY);
