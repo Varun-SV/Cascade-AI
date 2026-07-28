@@ -174,6 +174,15 @@ export class DashboardServer {
       cascade.on('plan:approval-required', (e: unknown) => {
         this.socket.emitToSocket(socketId, 'plan:approval-required', { sessionId, ...(e as object) });
       });
+      // A section stopped and asked a question. Without a listener the SDK
+      // skips the gate entirely (listenerCount === 0), which is how "Section
+      // escalated — needs a decision" became a dead end on the desktop.
+      cascade.on('escalation:decision-required', (e: unknown) => {
+        this.socket.emitToSocket(socketId, 'escalation:decision-required', { sessionId, ...(e as object) });
+      });
+      cascade.on('escalation:timeout', (e: unknown) => {
+        this.socket.emitToSocket(socketId, 'escalation:timeout', { sessionId, ...(e as object) });
+      });
 
       try {
         const result = await cascade.run({
@@ -217,6 +226,13 @@ export class DashboardServer {
       );
     });
 
+    // The escalation modal answers here. The run is parked inside
+    // requestEscalationDecision until this lands (or its timeout fires and
+    // fails the section).
+    this.socket.onEscalationDecision(({ sessionId, action, note }) => {
+      this.activeSessions.get(sessionId)?.resolveEscalation(action, note);
+    });
+
     this.socket.onSessionHalt((sessionId) => {
       this.activeControllers.get(sessionId)?.abort();
       // Unblock any tool waiting on approval so the aborted run can unwind.
@@ -224,6 +240,9 @@ export class DashboardServer {
       // And any plan paused at the boardroom — otherwise a halted run sits
       // in the gate until its 2-minute auto-approve before unwinding.
       this.activeSessions.get(sessionId)?.resolvePlanApproval(false);
+      // Same for a section parked on an escalation: skip keeps whatever the
+      // section already produced, which is the right shape for a halt.
+      this.activeSessions.get(sessionId)?.resolveEscalation('skip');
     });
 
     // The desktop/web approval modal answers here. Resolve the run that's
@@ -1153,6 +1172,12 @@ export class DashboardServer {
         });
         cascade.on('plan:approval-required', (e: unknown) => {
           this.socket.broadcastToRoom(`session:${sessionId}`, 'plan:approval-required', { sessionId, ...(e as object) });
+        });
+        cascade.on('escalation:decision-required', (e: unknown) => {
+          this.socket.broadcastToRoom(`session:${sessionId}`, 'escalation:decision-required', { sessionId, ...(e as object) });
+        });
+        cascade.on('escalation:timeout', (e: unknown) => {
+          this.socket.broadcastToRoom(`session:${sessionId}`, 'escalation:timeout', { sessionId, ...(e as object) });
         });
 
         try {

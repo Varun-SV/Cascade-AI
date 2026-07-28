@@ -18,12 +18,13 @@ import {
   setConnected, setReconnecting, setBackendError, setMeta, updateCost, upsertAgent, updateLastMessage,
   setSessions, removeSession, setOnboardingDone,
   enqueueApproval, clearApprovals, appendAgentStream, addPeerEdge, expirePeerEdges, runEnded, finalizeLastMessage,
-  setPendingPlan, setWhyReport, appendCommsEvent,
-  type RuntimeSession, type PendingPlan, type WhyReport,
+  setPendingPlan, setPendingEscalation, setWhyReport, appendCommsEvent,
+  type RuntimeSession, type PendingPlan, type PendingEscalation, type WhyReport,
 } from './store/index.js';
 import { SettingsView } from './views/SettingsView.js';
 import { ApprovalModal } from './components/ApprovalModal.js';
 import { PlanApprovalModal } from './components/PlanApprovalModal.js';
+import { EscalationModal } from './components/EscalationModal.js';
 import { WhyPanel } from './components/WhyPanel.js';
 import { CommandPalette } from './components/CommandPalette.js';
 import { ChangesModal } from './components/ChangesModal.js';
@@ -264,6 +265,24 @@ export function App() {
       dispatch(setPendingPlan(data));
     });
 
+    // A section escalated: the run is parked until this is answered. Unlike the
+    // boardroom gate, silence FAILS the section rather than proceeding, so the
+    // modal shows a countdown.
+    socket.on('escalation:decision-required', (data: Omit<PendingEscalation, 'receivedAt'>) => {
+      if (!data?.sectionId) return;
+      dispatch(setPendingEscalation({
+        ...data,
+        issues: Array.isArray(data.issues) ? data.issues : [],
+        timeoutMs: typeof data.timeoutMs === 'number' ? data.timeoutMs : 5 * 60_000,
+        receivedAt: Date.now(),
+      }));
+    });
+    // The server gave up waiting — close the modal so a late answer can't land
+    // on a section that has already been failed.
+    socket.on('escalation:timeout', () => {
+      dispatch(setPendingEscalation(null));
+    });
+
     // The decision trail of the run that just ended — powers the Why panel.
     socket.on('run:why', (data: WhyReport) => {
       if (data?.sessionId) dispatch(setWhyReport(data));
@@ -289,6 +308,7 @@ export function App() {
       dispatch(setBackendError(data?.error ? `Run failed: ${data.error}` : 'Run failed — check your model/key and try again.'));
       dispatch(clearApprovals());
       dispatch(setPendingPlan(null));
+      dispatch(setPendingEscalation(null));
       // Only end/finalize if this event belongs to the run/session actually
       // being tracked right now — otherwise a background session finishing
       // (or erroring) clobbered the Stop control and transcript of whatever
@@ -300,6 +320,7 @@ export function App() {
       dispatch(setBackendError(null));
       dispatch(clearApprovals());
       dispatch(setPendingPlan(null));
+      dispatch(setPendingEscalation(null));
       if (!data?.sessionId || data.sessionId === runSessionIdRef.current) dispatch(runEnded());
       if (!data?.sessionId || data.sessionId === sessionIdRef.current) dispatch(finalizeLastMessage({ finalOutput: data?.result?.output }));
     });
@@ -368,6 +389,7 @@ export function App() {
       {showSettings && <SettingsView socket={socketRef.current} />}
       <ApprovalModal socket={socketRef.current} />
       <PlanApprovalModal socket={socketRef.current} />
+      <EscalationModal socket={socketRef.current} />
       <ChangesModal />
       <ContinueModal />
       <CommandPalette socket={socketRef.current} />

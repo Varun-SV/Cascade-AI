@@ -167,6 +167,29 @@ export class DashboardSocket {
     });
   }
 
+  /**
+   * A section escalated and the run is parked waiting for an answer. The
+   * desktop shows the escalation modal on `escalation:decision-required` and
+   * answers here.
+   *
+   * Unlike a plan decision, silence is NOT taken as consent — the SDK fails
+   * the section on timeout — so this handler only ever forwards a real choice.
+   */
+  onEscalationDecision(callback: (data: { sessionId: string; action: 'retry' | 'skip' | 'guidance'; note?: string }) => void): void {
+    this.io.on('connection', (socket) => {
+      socket.on('escalation:decide', (payload: { sessionId?: string; action?: string; note?: string }) => {
+        const action = payload?.action;
+        if (typeof payload?.sessionId !== 'string') return;
+        if (action !== 'retry' && action !== 'skip' && action !== 'guidance') return;
+        callback({
+          sessionId: payload.sessionId,
+          action,
+          note: typeof payload.note === 'string' && payload.note.trim() ? payload.note.trim() : undefined,
+        });
+      });
+    });
+  }
+
   onSessionSteer(callback: (message: string, sessionId?: string, nodeId?: string) => void): void {
     this.io.on('connection', (socket) => {
       socket.on('session:steer', (payload: { message?: string; sessionId?: string; nodeId?: string }) => {

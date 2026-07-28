@@ -121,6 +121,8 @@ export interface AppState {
   dismissedNodeIds: string[];
   /** T1's plan paused at the boardroom gate — renders the plan-review modal. */
   pendingPlan: PendingPlan | null;
+  /** A section that stopped and asked a question — renders the escalation modal. */
+  pendingEscalation: PendingEscalation | null;
   /** Per-session decision trails from `run:why`, keyed by sessionId. */
   whyBySession: Record<string, WhyReport>;
   /** The Why panel (run inspector) slide-over is open. */
@@ -165,6 +167,25 @@ export interface PendingPlan {
   estCostUsd: number;
   critique?: string;
   summary?: string;
+}
+
+/**
+ * A section that ended ESCALATED and is now waiting on the user.
+ *
+ * Distinct from PendingPlan in one way that matters: silence here is not
+ * consent. The SDK fails the section when `timeoutMs` elapses, because an
+ * escalation exists precisely because a worker was NOT confident.
+ */
+export interface PendingEscalation {
+  sessionId?: string;
+  taskId: string;
+  sectionId: string;
+  sectionTitle: string;
+  issues: string[];
+  summary: string;
+  timeoutMs: number;
+  /** Client clock at arrival — the modal counts down from here, not from mount. */
+  receivedAt: number;
 }
 
 /** The decision trail + economics of a session's most recent run (/why). */
@@ -228,6 +249,7 @@ const initialState: AppState = {
   runSessionId: null,
   dismissedNodeIds: [],
   pendingPlan: null,
+  pendingEscalation: null,
   whyBySession: {},
   showWhyPanel: false,
   commsEvents: [],
@@ -445,6 +467,10 @@ const appSlice = createSlice({
     setPendingPlan(state, action: PayloadAction<PendingPlan | null>) {
       state.pendingPlan = action.payload;
     },
+    // Section escalation awaiting the user
+    setPendingEscalation(state, action: PayloadAction<PendingEscalation | null>) {
+      state.pendingEscalation = action.payload;
+    },
     // Why panel (run inspector)
     setWhyReport(state, action: PayloadAction<WhyReport>) {
       state.whyBySession[action.payload.sessionId] = action.payload;
@@ -492,7 +518,7 @@ export const {
   appendAgentStream, selectNode, dismissCompletedNodes, addPeerEdge, expirePeerEdges, setForceTier, runStarted, runEnded,
   openTab, closeTab, setActiveTab, setTabDirty,
   setOnboardingDone,
-  setPendingPlan, setWhyReport, setShowWhyPanel,
+  setPendingPlan, setPendingEscalation, setWhyReport, setShowWhyPanel,
   appendCommsEvent, clearCommsEvents, setBottomTab, openBottomTab,
   setShowPalette, setChangesSessionId, setShowContinue,
 } = appSlice.actions;
