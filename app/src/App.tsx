@@ -226,11 +226,21 @@ export function App() {
         .catch(() => { /* backend not ready */ });
     };
 
-    socket.on('connect', () => { dispatch(setConnected(true)); dispatch(setReconnecting(false)); loadSessions(); });
+    // Re-subscribe to the open session's room on every connect. A reconnect
+    // issues a NEW socket id and drops the old one's room memberships, so
+    // without this the backend has no way to reach this client again — a run
+    // that escalates while we were away would prompt into nowhere and sit there
+    // until it timed out. The server replays a parked prompt on join.
+    const rejoinSession = () => {
+      const active = runSessionIdRef.current ?? sessionIdRef.current;
+      if (active) socket.emit('join:session', { sessionId: active });
+    };
+
+    socket.on('connect', () => { dispatch(setConnected(true)); dispatch(setReconnecting(false)); rejoinSession(); loadSessions(); });
     socket.on('runtime:refresh', loadSessions);
     socket.on('disconnect', () => dispatch(setConnected(false)));
     socket.on('connect_error', () => dispatch(setReconnecting(true)));
-    socket.on('reconnect', () => { dispatch(setConnected(true)); dispatch(setReconnecting(false)); });
+    socket.on('reconnect', () => { dispatch(setConnected(true)); dispatch(setReconnecting(false)); rejoinSession(); });
 
     socket.on('cost:update', (data: { totalCostUsd: number; totalTokens: number; costUnknown?: boolean }) => {
       dispatch(updateCost(data));

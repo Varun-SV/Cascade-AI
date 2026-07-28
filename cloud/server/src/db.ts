@@ -1207,6 +1207,20 @@ export class CloudStore {
   }
 
   /**
+   * Read back ONE server's OAuth blob.
+   *
+   * The refresh path needs this because the row it started from may be stale:
+   * another caller can have refreshed and re-persisted the token while it waited
+   * for the per-row lock, and re-refreshing a rotated token fails.
+   */
+  getMcpServerOAuth(id: string, userId: string): string | null {
+    const row = this.db
+      .prepare('SELECT oauth_json FROM mcp_servers WHERE id = ? AND user_id = ?')
+      .get(id, userId) as { oauth_json: string | null } | undefined;
+    return row?.oauth_json ?? null;
+  }
+
+  /**
    * Switch ONE tool on or off for a server.
    *
    * A delta, not a whole-list replacement: two tabs open on the same connector

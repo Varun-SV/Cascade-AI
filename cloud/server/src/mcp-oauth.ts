@@ -121,6 +121,37 @@ export function encodeOAuthBlob(stored: StoredMcpOAuth, secret: string): string 
 }
 
 /**
+ * One in-flight token refresh per server row.
+ *
+ * Tool discovery and the start of a chat run both resolve the same user's
+ * servers, and a user who expands a connector's tool list while sending a
+ * message triggers both at once. Each would decrypt the same refresh token and
+ * present it to the authorization server; under RFC 9700's rotation guidance
+ * the second presentation is of a token the AS has already retired, so that
+ * caller's refresh throws and the resolver — which swallows refresh failures —
+ * quietly drops the connector from its list. The run loses its tools with
+ * nothing on screen saying why.
+ *
+ * Serialising per row makes the second caller wait and then re-read the row, so
+ * it uses the token the first one just persisted instead of racing for a new
+ * one. Single-process exclusion: the cloud runs as one Node process today, and
+ * a multi-instance deployment would need the same guard in the database.
+ */
+const refreshLocks = new Map<string, Promise<unknown>>();
+
+function withRowLock<T>(rowId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = refreshLocks.get(rowId) ?? Promise.resolve();
+  // `.then(fn, fn)` so one caller's failure still releases the lock for the next.
+  const run = prev.then(fn, fn);
+  const tail = run.then(() => undefined, () => undefined);
+  refreshLocks.set(rowId, tail);
+  // Only the last waiter clears the entry, so a queue forming behind us keeps
+  // its chain and the map does not grow for the process's lifetime.
+  void tail.then(() => { if (refreshLocks.get(rowId) === tail) refreshLocks.delete(rowId); });
+  return run;
+}
+
+/**
  * Resolve a user's enabled MCP servers into `{ name, url, headers }` for a run.
  * OAuth servers get a fresh Bearer token — refreshed and re-persisted when near
  * expiry — so runs never send a stale token.
@@ -136,14 +167,23 @@ export async function resolveRunMcpServers(
       continue;
     }
     if (row.oauth_json) {
+      const captured = row.oauth_json;
       try {
-        let blob = JSON.parse(decryptAtRest(row.oauth_json, secret)) as StoredMcpOAuth;
-        const refreshed = await ensureFreshToken(blob);
-        if (refreshed) {
-          blob = refreshed;
-          store.updateMcpServerOAuth(row.id, userId, encryptAtRest(JSON.stringify(blob), secret));
-        }
-        out.push({ id: row.id, name: row.name, url: row.url, headers: { Authorization: `Bearer ${blob.tokens.access_token}` } });
+        const accessToken = await withRowLock(row.id, async () => {
+          // Re-read INSIDE the lock. `row` was captured before waiting, and a
+          // refresh that finished while we waited has already persisted a newer
+          // blob — refreshing again from the captured copy would present the
+          // rotated-away token.
+          const current = store.getMcpServerOAuth(row.id, userId) ?? captured;
+          let blob = JSON.parse(decryptAtRest(current, secret)) as StoredMcpOAuth;
+          const refreshed = await ensureFreshToken(blob);
+          if (refreshed) {
+            blob = refreshed;
+            store.updateMcpServerOAuth(row.id, userId, encryptAtRest(JSON.stringify(blob), secret));
+          }
+          return blob.tokens.access_token;
+        });
+        out.push({ id: row.id, name: row.name, url: row.url, headers: { Authorization: `Bearer ${accessToken}` } });
       } catch {
         // Undecodable or refresh failed — skip; the user can reconnect.
       }

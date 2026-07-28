@@ -89,7 +89,7 @@ describe('keysync — MCP per-tool selections', () => {
   it('applies the incoming selection for a server the bundle brings', () => {
     const local = cfg({ tools: { mcpServers: [server('github')], disabledTools: [] } } as Partial<CascadeConfig>);
     const next = applySyncBundle(
-      { v: 1, mcpServers: [server('github')], disabledTools: ['mcp__github__delete_repo'] },
+      { v: 2, mcpServers: [server('github')], disabledTools: ['mcp__github__delete_repo'] },
       local,
     );
     expect(next.tools.disabledTools).toEqual(['mcp__github__delete_repo']);
@@ -101,8 +101,34 @@ describe('keysync — MCP per-tool selections', () => {
     const local = cfg({
       tools: { mcpServers: [server('github')], disabledTools: ['mcp__github__delete_repo'] },
     } as Partial<CascadeConfig>);
-    const next = applySyncBundle({ v: 1, mcpServers: [server('github')], disabledTools: [] }, local);
+    const next = applySyncBundle({ v: 2, mcpServers: [server('github')], disabledTools: [] }, local);
     expect(next.tools.disabledTools).toBeUndefined();
+  });
+
+  it('does NOT clear selections when pulling a pre-selection (v1) bundle', () => {
+    // A v1 bundle omits `disabledTools` because the format had no such field —
+    // not because nothing is switched off. Reading that as an empty selection
+    // re-enables the destructive tool the user turned off, on an ordinary sync
+    // pull, with nothing on screen saying so.
+    const local = cfg({
+      tools: { mcpServers: [server('github')], disabledTools: ['mcp__github__delete_repo'] },
+    } as Partial<CascadeConfig>);
+    const next = applySyncBundle({ v: 1, mcpServers: [server('github')] }, local);
+    expect(next.tools.disabledTools).toEqual(['mcp__github__delete_repo']);
+  });
+
+  it('DOES clear them for a v2 bundle that omits the field', () => {
+    // Same JSON, different meaning: v2 omits the field only when the pushing
+    // device genuinely had nothing switched off, so the pull must re-enable.
+    const local = cfg({
+      tools: { mcpServers: [server('github')], disabledTools: ['mcp__github__delete_repo'] },
+    } as Partial<CascadeConfig>);
+    const next = applySyncBundle({ v: 2, mcpServers: [server('github')] }, local);
+    expect(next.tools.disabledTools).toBeUndefined();
+  });
+
+  it('gathers at the version that carries selections', () => {
+    expect(gatherSyncBundle(cfg()).v).toBe(2);
   });
 
   it('leaves selections alone for a server the bundle never mentions', () => {
@@ -114,7 +140,7 @@ describe('keysync — MCP per-tool selections', () => {
       },
     } as Partial<CascadeConfig>);
     const next = applySyncBundle(
-      { v: 1, mcpServers: [server('github')], disabledTools: [] },
+      { v: 2, mcpServers: [server('github')], disabledTools: [] },
       local,
     );
     expect(next.tools.disabledTools).toEqual(['mcp__notion__delete_page']);

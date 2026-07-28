@@ -47,6 +47,11 @@ export class DashboardSocket {
     return this.io.sockets.adapter.rooms.get(room)?.size ?? 0;
   }
 
+  /** Is this exact connection still live? A reconnect issues a NEW socket id. */
+  hasSocket(socketId: string): boolean {
+    return this.io.sockets.sockets.has(socketId);
+  }
+
   broadcastToRoom(room: string, event: string, data: unknown): void {
     this.io.to(room).emit(event, data);
   }
@@ -128,6 +133,23 @@ export class DashboardSocket {
         if (sessionId && rating) {
           this.io.emit('session:rate', { sessionId, rating });
         }
+      });
+    });
+  }
+
+  /**
+   * A client subscribed to a session's room.
+   *
+   * The host uses this to replay a gate the run is already parked on. Socket.IO
+   * does not buffer room emissions, so a prompt broadcast while the renderer was
+   * reconnecting is simply gone; without a replay the section waits out its full
+   * timeout with the user sitting in front of a screen that never asked.
+   */
+  onJoinSession(callback: (sessionId: string, socketId: string) => void): void {
+    this.io.on('connection', (socket) => {
+      socket.on('join:session', (payload: SessionSubscriptionPayload) => {
+        const { sessionId } = normalizeSessionSubscriptionPayload(payload);
+        if (sessionId) callback(sessionId, socket.id);
       });
     });
   }

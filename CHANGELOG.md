@@ -32,6 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Pressing **Stop** unparks a waiting section immediately rather than leaving
   the run held until the timeout.
 
+  A prompt raised while the desktop app was reconnecting used to be lost — the
+  connection it was addressed to no longer existed, and nothing replays. Run
+  events are now addressed to the session rather than to one connection, and a
+  prompt the run is parked on is handed over as soon as a client subscribes. If
+  genuinely nobody is there to answer, the section is skipped after half a
+  minute instead of holding the run for the full five.
+
 ### Added
 - **Choose exactly which MCP tools a run can use.** A connected server usually
   brings dozens of tools and most are irrelevant to any given workspace — but
@@ -52,6 +59,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deny list could not tell them apart. New connections with a colliding name are
   now given a numeric suffix, and any pair already stored is separated the first
   time the account is upgraded.
+
+  Selections travel with **Sync settings across devices**, and a sync bundle
+  written before this release carries no selections at all. Reading that silence
+  as "nothing is switched off" would re-enable a destructive connector tool on
+  an ordinary pull, so the bundle is versioned: an older bundle leaves your
+  selections alone, and only one that knows about them can change them.
 
 - **The loading circle is now the Cascade mark.** Three arcs falling, widest at
   the top, lit in turn from T1 down to T3 — the wait shows the shape of what is

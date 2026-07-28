@@ -30,6 +30,16 @@ import type { CurrentPageProvider } from '../tools/current-page.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+/**
+ * How long an escalation waits for *any* client before it is skipped.
+ *
+ * Long enough that a routine socket reconnect (which Socket.IO retries within
+ * a second or two) still finds its prompt waiting; far short of the SDK's
+ * five-minute decision timeout, which is the wrong thing to spend when the
+ * evidence says nobody is there to decide.
+ */
+const ORPHANED_ESCALATION_GRACE_MS = 30_000;
+
 export class DashboardServer {
   private app: express.Application;
   private httpServer: ReturnType<typeof createServer>;
@@ -61,6 +71,17 @@ export class DashboardServer {
    * map is how that answer reaches the run that's blocked on it.
    */
   private pendingApprovals = new Map<string, { resolve: (d: { approved: boolean; always: boolean }) => void; sessionId: string }>();
+  /**
+   * The escalation prompt a session is currently parked on, kept so it can be
+   * delivered to a client that was not reachable when it was raised.
+   *
+   * Socket.IO buffers nothing: a prompt emitted while the renderer is mid
+   * reconnect is gone, and the section then waits out its full five minutes
+   * with the user in front of a screen that never asked them anything. Holding
+   * the payload lets `join:session` replay it, and lets a run with no reachable
+   * client be settled instead of parked (see ORPHANED_ESCALATION_GRACE_MS).
+   */
+  private pendingEscalations = new Map<string, { payload: Record<string, unknown>; requestId: string; graceTimer?: NodeJS.Timeout }>();
   /**
    * The orchestration decision trail ("why") of each session's most recent
    * run — captured when the run ends so the desktop's Why panel can show it
@@ -164,14 +185,17 @@ export class DashboardServer {
       this.activeSessions.set(sessionId, cascade);
       if (this.currentPageProvider) cascade.setCurrentPageProvider(this.currentPageProvider);
 
+      // Addressed by session, not by the socket that started the run: a
+      // reconnect gives the same client a NEW socket id, and events aimed at
+      // the old one vanish (see emitToSessionClients).
       cascade.on('stream:token', (e: { text: string; tierId: string; primary?: boolean }) => {
-        this.socket.emitToSocket(socketId, 'stream:token', { sessionId, tierId: e.tierId, text: e.text, primary: e.primary });
+        this.emitToSessionClients(socketId, sessionId, 'stream:token', { sessionId, tierId: e.tierId, text: e.text, primary: e.primary });
       });
       cascade.on('tier:status', (e: unknown) => {
-        this.socket.emitToSocket(socketId, 'tier:status', { sessionId, ...(e as object) });
+        this.emitToSessionClients(socketId, sessionId, 'tier:status', { sessionId, ...(e as object) });
       });
       cascade.on('permission:user-required', (e: unknown) => {
-        this.socket.emitToSocket(socketId, 'permission:user-required', { sessionId, ...(e as object) });
+        this.emitToSessionClients(socketId, sessionId, 'permission:user-required', { sessionId, ...(e as object) });
       });
       cascade.on('peer:message', (e: unknown) => {
         this.socket.emitPeerMessage(e as import('../types.js').PeerMessageEvent);
@@ -181,16 +205,17 @@ export class DashboardServer {
       // Without this listener the gate auto-approves (listenerCount === 0),
       // so the desktop setting silently did nothing.
       cascade.on('plan:approval-required', (e: unknown) => {
-        this.socket.emitToSocket(socketId, 'plan:approval-required', { sessionId, ...(e as object) });
+        this.emitToSessionClients(socketId, sessionId, 'plan:approval-required', { sessionId, ...(e as object) });
       });
       // A section stopped and asked a question. Without a listener the SDK
       // skips the gate entirely (listenerCount === 0), which is how "Section
       // escalated — needs a decision" became a dead end on the desktop.
       cascade.on('escalation:decision-required', (e: unknown) => {
-        this.socket.emitToSocket(socketId, 'escalation:decision-required', { sessionId, ...(e as object) });
+        this.raiseEscalation(sessionId, socketId, e as Record<string, unknown>);
       });
       cascade.on('escalation:timeout', (e: unknown) => {
-        this.socket.emitToSocket(socketId, 'escalation:timeout', { sessionId, ...(e as object) });
+        this.clearPendingEscalation(sessionId);
+        this.emitToSessionClients(socketId, sessionId, 'escalation:timeout', { sessionId, ...(e as object) });
       });
 
       try {
@@ -202,7 +227,7 @@ export class DashboardServer {
         this.recordSessionTask(sessionId, result.taskId);
         this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED', result);
         this.captureWhy(sessionId, cascade, result);
-        this.socket.emitToSocket(socketId, 'session:complete', { sessionId, result });
+        this.emitToSessionClients(socketId, sessionId, 'session:complete', { sessionId, result });
         this.socket.broadcast('cost:update', {
           sessionId,
           totalTokens: result.usage.totalTokens,
@@ -215,7 +240,7 @@ export class DashboardServer {
       } catch (err) {
         this.persistRunEnd(sessionId, title, prompt, undefined, 'FAILED');
         this.captureWhy(sessionId, cascade);
-        this.socket.emitToSocket(socketId, 'session:error', {
+        this.emitToSessionClients(socketId, sessionId, 'session:error', {
           sessionId,
           error: err instanceof Error ? err.message : String(err),
         });
@@ -223,6 +248,7 @@ export class DashboardServer {
         this.activeSessions.delete(sessionId);
         this.activeControllers.delete(sessionId);
         this.denyPendingApprovals(sessionId);
+        this.clearPendingEscalation(sessionId);
       }
     });
 
@@ -239,7 +265,14 @@ export class DashboardServer {
     // requestEscalationDecision until this lands (or its timeout fires and
     // fails the section).
     this.socket.onEscalationDecision(({ sessionId, requestId, action, note }) => {
+      this.clearPendingEscalation(sessionId);
       this.activeSessions.get(sessionId)?.resolveEscalation(action, note, requestId);
+    });
+
+    // A client (re)subscribed. If its run is parked on a prompt it never saw —
+    // raised during a reconnect, or before this client joined — hand it over now.
+    this.socket.onJoinSession((sessionId, socketId) => {
+      this.replayEscalation(sessionId, socketId);
     });
 
     this.socket.onSessionHalt((sessionId) => {
@@ -251,6 +284,7 @@ export class DashboardServer {
       this.activeSessions.get(sessionId)?.resolvePlanApproval(false);
       // Same for a section parked on an escalation: skip keeps whatever the
       // section already produced, which is the right shape for a halt.
+      this.clearPendingEscalation(sessionId);
       this.activeSessions.get(sessionId)?.resolveEscalation('skip');
     });
 
@@ -591,6 +625,79 @@ export class DashboardServer {
     } finally {
       this.activeSessions.delete(sessionId);
     }
+  }
+
+  /**
+   * Is anyone able to answer for this session right now?
+   *
+   * The originating socket first — that connection is definitely watching this
+   * run — then the session room, which is where a client lands after a
+   * reconnect issues it a new socket id.
+   */
+  private hasResponder(sessionId: string, socketId?: string): boolean {
+    if (socketId && this.socket.hasSocket(socketId)) return true;
+    return this.socket.roomSize(`session:${sessionId}`) > 0;
+  }
+
+  /**
+   * Send a run event to whoever is watching this session.
+   *
+   * A captured socket id goes stale the moment Socket.IO reconnects — the
+   * client is back, but under a new id, and `emitToSocket` on the old one is a
+   * silent no-op. Falling back to the session room keeps the run addressable
+   * across a reconnect; emitting to one OR the other (never both) keeps a
+   * client that is both the originator and a room member from seeing every
+   * token twice.
+   */
+  private emitToSessionClients(socketId: string | undefined, sessionId: string, event: string, data: unknown): void {
+    if (socketId && this.socket.hasSocket(socketId)) this.socket.emitToSocket(socketId, event, data);
+    else this.socket.broadcastToRoom(`session:${sessionId}`, event, data);
+  }
+
+  /**
+   * Raise an escalation prompt, and make sure it can still be answered.
+   *
+   * Held in `pendingEscalations` so a client that joins late (or rejoins after
+   * a reconnect) gets it replayed. If nobody is reachable at all, the gate is
+   * settled as `skip` after a short grace period rather than parked for the
+   * full timeout: that matches the SDK's policy when no listener exists, and
+   * five minutes of a held run is a real cost for a REST caller who has already
+   * hung up. The grace period exists so an ordinary two-second reconnect is not
+   * mistaken for an absent user.
+   */
+  private raiseEscalation(sessionId: string, socketId: string | undefined, event: Record<string, unknown>): void {
+    const requestId = typeof event.requestId === 'string' ? event.requestId : '';
+    const payload = { sessionId, ...event };
+    this.clearPendingEscalation(sessionId);
+    const entry: { payload: Record<string, unknown>; requestId: string; graceTimer?: NodeJS.Timeout } = { payload, requestId };
+    this.pendingEscalations.set(sessionId, entry);
+
+    if (this.hasResponder(sessionId, socketId)) {
+      this.emitToSessionClients(socketId, sessionId, 'escalation:decision-required', payload);
+      return;
+    }
+    entry.graceTimer = setTimeout(() => {
+      if (this.pendingEscalations.get(sessionId) !== entry) return;
+      if (this.hasResponder(sessionId, socketId)) return; // replayed on join
+      this.pendingEscalations.delete(sessionId);
+      this.activeSessions.get(sessionId)?.resolveEscalation('skip', 'No client was connected to answer.', requestId);
+    }, ORPHANED_ESCALATION_GRACE_MS);
+  }
+
+  /** Replay a parked prompt to a client that just subscribed to the session. */
+  private replayEscalation(sessionId: string, socketId: string): void {
+    const entry = this.pendingEscalations.get(sessionId);
+    if (!entry) return;
+    if (entry.graceTimer) { clearTimeout(entry.graceTimer); entry.graceTimer = undefined; }
+    this.socket.emitToSocket(socketId, 'escalation:decision-required', entry.payload);
+  }
+
+  /** Forget a session's parked prompt (answered, timed out, or the run ended). */
+  private clearPendingEscalation(sessionId: string): void {
+    const entry = this.pendingEscalations.get(sessionId);
+    if (!entry) return;
+    if (entry.graceTimer) clearTimeout(entry.graceTimer);
+    this.pendingEscalations.delete(sessionId);
   }
 
   /** Deny + clear any approvals still pending for a session (run end / abort). */
@@ -1194,11 +1301,16 @@ export class DashboardServer {
         // (listenerCount > 0): an escalated section then waited the full five
         // minutes broadcasting into an empty room, instead of taking the
         // no-listener 'skip' policy and finishing.
+        //
+        // Occupancy at setup is not occupancy at escalation time, though — a
+        // subscriber can leave mid-run — so `raiseEscalation` re-checks when the
+        // prompt is actually raised and settles it if the room has emptied.
         if (this.socket.roomSize(`session:${sessionId}`) > 0) {
           cascade.on('escalation:decision-required', (e: unknown) => {
-            this.socket.broadcastToRoom(`session:${sessionId}`, 'escalation:decision-required', { sessionId, ...(e as object) });
+            this.raiseEscalation(sessionId, undefined, e as Record<string, unknown>);
           });
           cascade.on('escalation:timeout', (e: unknown) => {
+            this.clearPendingEscalation(sessionId);
             this.socket.broadcastToRoom(`session:${sessionId}`, 'escalation:timeout', { sessionId, ...(e as object) });
           });
         }
@@ -1230,6 +1342,7 @@ export class DashboardServer {
         } finally {
           this.activeSessions.delete(sessionId);
           this.denyPendingApprovals(sessionId);
+          this.clearPendingEscalation(sessionId);
         }
       })();
     });
