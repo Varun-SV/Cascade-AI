@@ -23,6 +23,8 @@
 //  wrapper holds server and tool as separate fields — so this is a display and
 //  wire identity only.
 
+import { randomUUID } from 'node:crypto';
+
 /** Prefix marking a tool that came from an MCP server. */
 export const MCP_TOOL_PREFIX = 'mcp__';
 
@@ -88,7 +90,12 @@ export function uniqueMcpServerName(desired: string, existingNames: string[]): s
     const candidate = `${desired} (${n})`;
     if (!taken.has(mcpServerPrefix(candidate))) return candidate;
   }
-  return `${desired} (${Math.random().toString(36).slice(2, 10)})`;
+  // Unreached in practice (1000 same-named collisions), but this name becomes
+  // part of the filesystem path an OAuth token is stored under
+  // (`storePathFor` in cloudAuth.ts / cli/commands/mcp.ts), so the fallback
+  // needs a CSPRNG rather than Math.random() — matching the cloud twin above,
+  // which already uses randomUUID() for the same reason.
+  return `${desired} (${randomUUID().slice(0, 8)})`;
 }
 
 /**
