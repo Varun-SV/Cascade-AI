@@ -22,22 +22,36 @@ const DEFAULT_AZURE_API_VERSION = '2024-12-01-preview';
  * Returns null when the name gives no signal (e.g. "prod-fast") — the caller
  * then keeps neutral defaults, or the user can set an explicit base model.
  */
+/**
+ * Base models an Azure deployment can be mapped onto, most-specific first.
+ *
+ * Single source for BOTH the inference below and any UI that offers a picker.
+ * The cloud web app used to keep its own hand-copied array, which silently went
+ * stale the moment a family was added — gpt-5.4 and gpt-5.5 landed in the SDK
+ * and never appeared in the dropdown, so an Azure deployment of either got the
+ * wrong benchmark scores and the wrong prices. The list is served to the web via
+ * /api/config rather than duplicated (see cloud/server/src/app.ts).
+ */
+const AZURE_BASE_MODEL_RULES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/gpt-?5\.5/, 'gpt-5.5'],
+  [/gpt-?5\.4.*mini/, 'gpt-5.4-mini'],
+  [/gpt-?5\.4/, 'gpt-5.4'],
+  [/gpt-?5.*nano/, 'gpt-5-nano'],
+  [/gpt-?5.*mini/, 'gpt-5-mini'],
+  [/gpt-?5/, 'gpt-5'],
+  [/gpt-?4\.1-nano/, 'gpt-4.1-nano'],
+  [/gpt-?4\.1-mini/, 'gpt-4.1-mini'],
+  [/gpt-?4\.1/, 'gpt-4.1'],
+  [/gpt-?4o-mini/, 'gpt-4o-mini'],
+  [/gpt-?4o/, 'gpt-4o'],
+];
+
+/** Selectable base models, in the order a picker should show them. */
+export const AZURE_BASE_MODELS: readonly string[] = AZURE_BASE_MODEL_RULES.map(([, id]) => id);
+
 export function inferAzureBaseModel(deploymentName: string): string | null {
   const n = deploymentName.toLowerCase();
-  const rules: Array<[RegExp, string]> = [
-    [/gpt-?5\.5/, 'gpt-5.5'],
-    [/gpt-?5\.4.*mini/, 'gpt-5.4-mini'],
-    [/gpt-?5\.4/, 'gpt-5.4'],
-    [/gpt-?5.*nano/, 'gpt-5-nano'],
-    [/gpt-?5.*mini/, 'gpt-5-mini'],
-    [/gpt-?5/, 'gpt-5'],
-    [/gpt-?4\.1-nano/, 'gpt-4.1-nano'],
-    [/gpt-?4\.1-mini/, 'gpt-4.1-mini'],
-    [/gpt-?4\.1/, 'gpt-4.1'],
-    [/gpt-?4o-mini/, 'gpt-4o-mini'],
-    [/gpt-?4o/, 'gpt-4o'],
-  ];
-  for (const [re, base] of rules) if (re.test(n)) return base;
+  for (const [re, base] of AZURE_BASE_MODEL_RULES) if (re.test(n)) return base;
   return null;
 }
 

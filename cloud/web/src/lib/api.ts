@@ -1,6 +1,11 @@
 import type { CloudConversation, CloudMessage, CloudUser, Memory, MemoryDurability, Skill } from './types.js';
 
 export interface CloudConfig {
+  /**
+   * Azure base models, served from the SDK's own list so the picker cannot
+   * drift from what routing and pricing actually know about.
+   */
+  azureBaseModels?: string[];
   githubEnabled: boolean;
   googleEnabled: boolean;
   googleClientId: string | null;

@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────
 
 import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import { isMcpToolName, mcpServerPrefix } from '../../tools/tool-name.js';
 import { Box, Static, Text, useApp, useInput, useStdout } from 'ink';
 import { SafeTextInput } from '../components/SafeTextInput.js';
 import { sanitizeTerminalInput, containsMouseSequence } from '../utils/terminal-input.js';
@@ -610,7 +611,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         const cascade = cascadeRef.current;
         if (!cascade) return 'Cascade not initialized.';
         const toolRegistry = cascade.getToolRegistry();
-        const tools = toolRegistry.getToolDefinitions().filter(t => t.name.startsWith('mcp::'));
+        const tools = toolRegistry.getToolDefinitions().filter(t => isMcpToolName(t.name));
         if (tools.length === 0) return 'No MCP tools connected.';
         
         const servers = new Set<string>();
@@ -618,7 +619,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         
         const lines = [`Connected MCP Servers (${servers.size}):`];
         for (const server of servers) {
-          const serverTools = tools.filter(t => t.name.startsWith(`mcp::${server}::`));
+          const serverTools = tools.filter(t => t.name.startsWith(mcpServerPrefix(server)));
           lines.push(`\n● ${server} (${serverTools.length} tools)`);
           serverTools.forEach(t => lines.push(`  - ${t.name.split('::')[2]} — ${t.description.replace(`[MCP:${server}] `, '')}`));
         }

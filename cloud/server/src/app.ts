@@ -8,6 +8,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { AZURE_BASE_MODELS } from '#cascade-ai';
 import type { CloudEnv } from './env.js';
 import type { CloudStore, OAuthProvider } from './db.js';
 import {
@@ -180,6 +181,12 @@ export function createApp(env: CloudEnv, store: CloudStore) {
       googleEnabled: Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET),
       googleClientId: env.GOOGLE_CLIENT_ID ?? null,
       devLoginEnabled: env.CLOUD_DEV_BYPASS,
+      // Served from the SDK rather than hand-copied into the web bundle. The
+      // web kept its own array and it went stale the moment a family was added:
+      // gpt-5.4 and gpt-5.5 existed in routing and pricing but never appeared in
+      // the Azure base-model picker, so those deployments were scored and priced
+      // as whatever the stale list guessed instead.
+      azureBaseModels: AZURE_BASE_MODELS,
     });
   });
 

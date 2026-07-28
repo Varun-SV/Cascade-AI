@@ -70,12 +70,26 @@ describe('cloud/server app', () => {
 
   it('GET /api/config reports dev-login enabled and OAuth providers unconfigured', async () => {
     const res = await fetch(`${baseUrl}/api/config`);
-    expect(await res.json()).toEqual({
+    const body = await res.json() as Record<string, unknown>;
+    expect(body).toMatchObject({
       githubEnabled: false,
       googleEnabled: false,
       googleClientId: null,
       devLoginEnabled: true,
     });
+  });
+
+  it('GET /api/config serves the Azure base-model list from the SDK', async () => {
+    // The web used to hard-code this list and it silently went stale — gpt-5.4
+    // and gpt-5.5 shipped in routing and pricing while the picker still ended
+    // at gpt-5, so those deployments were scored and priced as something else.
+    // Serving it means the picker cannot drift from what routing knows.
+    const res = await fetch(`${baseUrl}/api/config`);
+    const { azureBaseModels } = await res.json() as { azureBaseModels?: string[] };
+    expect(Array.isArray(azureBaseModels)).toBe(true);
+    expect(azureBaseModels!.length).toBeGreaterThan(0);
+    // The families whose absence was the bug.
+    expect(azureBaseModels).toEqual(expect.arrayContaining(['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini']));
   });
 
   it('renames a conversation (owner-scoped) via PATCH /api/conversations/:id/title', async () => {
