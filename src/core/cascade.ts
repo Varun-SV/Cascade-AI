@@ -24,6 +24,8 @@ import { calculateCost } from '../utils/cost.js';
 import { T2Manager } from './tiers/t2-manager.js';
 import { MultimodalRegistry } from './multimodal/registry.js';
 import type { FeedbackSource } from './router/feedback-prior.js';
+import { DeadModelStore, fileDeadModelPersistence } from './router/dead-models.js';
+import { GLOBAL_CONFIG_DIR } from '../constants.js';
 import { buildMediaTools, type AssetSink } from '../tools/generate-media.js';
 import { RunBreaker } from './run-breaker.js';
 import { T3Worker } from './tiers/t3-worker.js';
@@ -141,6 +143,16 @@ export class Cascade extends EventEmitter {
     // them unreachable entirely, even with the key already configured. The
     // registry turns them back into callable tools, and only for the providers
     // this config actually has, so a tool never exists that cannot run.
+    // Dead-model verdicts persist across runs. Without this the router
+    // rediscovers a 404'd id every session — and because a T3 wave fires
+    // concurrently, "rediscovers" means one wasted call per worker.
+    try {
+      const nodePath = require('node:path') as typeof import('node:path');
+      this.router.setDeadModelStore(new DeadModelStore(
+        fileDeadModelPersistence(nodePath.join(GLOBAL_CONFIG_DIR, 'dead-models.json')),
+      ));
+    } catch { /* memory-only fallback; the router already has a default store */ }
+
     this.multimodal = new MultimodalRegistry(
       (this.config.providers ?? []).map((p) => p.type),
     );

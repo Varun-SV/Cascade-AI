@@ -5,6 +5,32 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.54.0 - 2026-07-28
+
+### Fixed
+- **A model that 404s is remembered, instead of being rediscovered every run.**
+  One reported run showed **twelve identical**
+  `gemini-2.0-flash -> gemini-2.5-flash (model not found)` failovers. The router
+  already dropped a dead id from its pool, but only in memory and only *after*
+  something paid a call to find out — and a T3 wave runs concurrently, so every
+  worker in the wave hit the same dead id simultaneously, before any of them
+  could record it. Verdicts now persist to `~/.cascade/dead-models.json` and are
+  consulted *before* selection, so a dead model never enters the candidate pool
+  again.
+
+  Verdicts **expire after 7 days** rather than being permanent. That is
+  deliberate: previews get promoted, quotas get granted, regions light up. A
+  permanent blocklist would quietly shrink the routing pool over time with no
+  way to see why a model stopped being chosen. A stale entry costs one call to
+  rediscover; a permanent one costs the model forever.
+
+- **Image generation on Gemini pointed at a model id that does not exist.**
+  `gemini-3-pro-image` appears on Google's pricing page but returns 404 for
+  `:predict` — Gemini's image models are called through `generateContent` with
+  an image response modality, while `:predict` is the Imagen shape. Corrected to
+  `imagen-4.0-generate-001`. A billing line item is not evidence of a callable
+  endpoint, which is the assumption that put the wrong id there.
+
 ## 0.53.0 - 2026-07-28
 
 ### Fixed
