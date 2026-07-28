@@ -29,6 +29,7 @@ import { TpmLimiter } from './tpm-limiter.js';
 import { LocalRequestQueue } from './local-queue.js';
 import type { TaskAnalyzer } from './task-analyzer.js';
 import type { FeedbackSource } from './feedback-prior.js';
+import { DeadModelStore } from './dead-models.js';
 import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
 import { buildTokenUsage } from '../../utils/cost.js';
 import { withTimeout, CascadeCancelledError } from '../../utils/retry.js';
@@ -184,6 +185,29 @@ export class CascadeRouter extends EventEmitter {
   private localQueue!: LocalRequestQueue;
   private taskAnalyzer?: TaskAnalyzer;
   private pendingFeedbackSource?: FeedbackSource;
+  /** Models known dead for this account (404 / retired / not enabled). */
+  private deadModels = new DeadModelStore();
+
+  /**
+   * Back the dead-model memory with durable storage (a JSON file on desktop, a
+   * per-user table in the cloud). Without one the verdicts still work, but only
+   * for the life of the process — so tomorrow's run pays the same wave of 404s
+   * to learn the same fact.
+   */
+  setDeadModelStore(store: DeadModelStore): void {
+    this.deadModels = store;
+    this.selector.setDeadModelStore(store);
+  }
+
+  /** Models known dead for this account, for `cascade models` and /why. */
+  listDeadModels(): ReturnType<DeadModelStore['list']> {
+    return this.deadModels.list();
+  }
+
+  /** Retry a model the user has since fixed, without waiting out the TTL. */
+  forgetDeadModel(provider: string, modelId: string): boolean {
+    return this.deadModels.forget(provider, modelId);
+  }
   private worldStateDB?: WorldStateDB;
   private privacyPaths?: PrivacyPaths;
   private guidanceQueue?: GuidanceQueue;
@@ -701,6 +725,12 @@ export class CascadeRouter extends EventEmitter {
       // candidate, instead of surfacing the raw provider error to the user.
       if (isModelNotFoundError(errMsg)) {
         this.selector.removeModel(model.id);
+        // Persist the verdict so the next run doesn't pay to rediscover it.
+        // `record` reports only the FIRST sighting as new — a concurrent T3
+        // wave all hits the same dead id at once, and the user should see one
+        // line, not one per worker.
+        const firstSighting = this.deadModels.record(model.provider, model.id, errMsg);
+        if (firstSighting) this.emit('model:dead', { provider: model.provider, modelId: model.id, reason: errMsg });
         // Cap the not-found chain: up-front validation should mean this rarely
         // fires, but a stale catalog with many dead ids must not walk them all.
         const depth = ((options as GenerateOptions & { _notFoundDepth?: number })._notFoundDepth ?? 0) + 1;

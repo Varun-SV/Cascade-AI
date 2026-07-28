@@ -71,7 +71,14 @@ const CAPABILITIES: readonly GenerationCapability[] = [
     modality: 'image', provider: 'openai', modelId: 'dall-e-3', api: 'openai-images',
   },
   {
-    modality: 'image', provider: 'gemini', modelId: 'gemini-3-pro-image', api: 'gemini-predict',
+    // Imagen, not `gemini-3-pro-image`. That id appears on Google's PRICING
+    // page but 404s on `:predict` ("not found for API version v1beta, or is not
+    // supported for predict") — the Gemini image models are called through
+    // generateContent with an image response modality, while `:predict` is the
+    // Imagen shape this executor implements. A billing line item is not proof
+    // of a callable endpoint, which is the assumption that put the wrong id
+    // here in the first place.
+    modality: 'image', provider: 'gemini', modelId: 'imagen-4.0-generate-001', api: 'gemini-predict',
   },
 
   // ── Speech (text → audio) ──

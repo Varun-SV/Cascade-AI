@@ -24,6 +24,7 @@ import { calculateCost } from '../utils/cost.js';
 import { T2Manager } from './tiers/t2-manager.js';
 import { MultimodalRegistry } from './multimodal/registry.js';
 import type { FeedbackSource } from './router/feedback-prior.js';
+import { DeadModelStore, fileDeadModelPersistence } from './router/dead-models.js';
 import { buildMediaTools, type AssetSink } from '../tools/generate-media.js';
 import { RunBreaker } from './run-breaker.js';
 import { T3Worker } from './tiers/t3-worker.js';
@@ -141,6 +142,26 @@ export class Cascade extends EventEmitter {
     // them unreachable entirely, even with the key already configured. The
     // registry turns them back into callable tools, and only for the providers
     // this config actually has, so a tool never exists that cannot run.
+    // Dead-model verdicts persist across runs. Without this the router
+    // rediscovers a 404'd id every session — and because a T3 wave fires
+    // concurrently, "rediscovers" means one wasted call per worker.
+    //
+    // Scoped to the WORKSPACE, never the machine-global config dir. On a hosted
+    // server the workspace is the per-user scratch dir, so one tenant's dead
+    // model cannot suppress another's — which matters because the verdict is
+    // key-specific: a model that 404s for one account is often perfectly live
+    // for another whose key has access to it. A shared file would let one user
+    // silently poison everyone else's routing. (The global dir is single-tenant
+    // by design and a hosted server must never write it — see cloud db.ts.)
+    // On desktop this makes verdicts per-project, which is also right: provider
+    // config is per-project too.
+    try {
+      const nodePath = require('node:path') as typeof import('node:path');
+      this.router.setDeadModelStore(new DeadModelStore(
+        fileDeadModelPersistence(nodePath.join(workspacePath, '.cascade', 'dead-models.json')),
+      ));
+    } catch { /* memory-only fallback; the router already has a default store */ }
+
     this.multimodal = new MultimodalRegistry(
       (this.config.providers ?? []).map((p) => p.type),
     );

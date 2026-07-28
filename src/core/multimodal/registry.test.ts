@@ -87,7 +87,7 @@ describe('MultimodalRegistry', () => {
     expect(openaiOnly.usable('image').map((c) => c.modelId)).toEqual(['dall-e-3']);
 
     const geminiOnly = new MultimodalRegistry(['gemini']);
-    expect(geminiOnly.select('image')!.capability.modelId).toBe('gemini-3-pro-image');
+    expect(geminiOnly.select('image')!.capability.modelId).toBe('imagen-4.0-generate-001');
     // No OpenAI key ⇒ no speech or transcription at all.
     expect(geminiOnly.select('speech')).toBeNull();
     expect(geminiOnly.select('transcription')).toBeNull();
@@ -137,15 +137,15 @@ describe('MultimodalRegistry', () => {
 
   it('honours an explicit model request over the automatic choice', () => {
     const r = new MultimodalRegistry(['openai', 'gemini']);
-    const pick = r.select('image', { preferModel: 'gemini-3-pro-image' })!;
-    expect(pick.capability.modelId).toBe('gemini-3-pro-image');
+    const pick = r.select('image', { preferModel: 'imagen-4.0-generate-001' })!;
+    expect(pick.capability.modelId).toBe('imagen-4.0-generate-001');
     expect(pick.reason).toContain('Requested explicitly');
   });
 
   it('ignores an unusable explicit request rather than failing the call', () => {
     // Naming a model there is no key for should fall back, not dead-end.
     const r = new MultimodalRegistry(['openai']);
-    const pick = r.select('image', { preferModel: 'gemini-3-pro-image' })!;
+    const pick = r.select('image', { preferModel: 'imagen-4.0-generate-001' })!;
     expect(pick.capability.modelId).toBe('dall-e-3');
   });
 

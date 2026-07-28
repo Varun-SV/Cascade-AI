@@ -42,7 +42,27 @@ export class ModelSelector {
     this.availableModels = new Map(Object.entries(MODELS));
   }
 
+  /**
+   * Verdicts from earlier runs about ids that 404 on this account. Consulted
+   * BEFORE a model enters the pool, which is the only placement that helps: a
+   * T3 wave runs concurrently, so filtering after the first failure still lets
+   * every other worker in the wave call the dead id.
+   */
+  private deadModels?: { isDead(provider: string, modelId: string): boolean };
+
+  setDeadModelStore(store: { isDead(provider: string, modelId: string): boolean }): void {
+    this.deadModels = store;
+    // Prune what is already loaded — the store usually arrives after the
+    // catalogue has been seeded from MODELS.
+    for (const [id, m] of [...this.availableModels]) {
+      if (this.deadModels.isDead(m.provider, m.id)) this.availableModels.delete(id);
+    }
+  }
+
   addDynamicModel(model: ModelInfo): void {
+    // A model already known dead never enters the pool, so nothing selects it
+    // and nothing pays a call to rediscover it.
+    if (this.deadModels?.isDead(model.provider, model.id)) return;
     this.availableModels.set(model.id, model);
     if (!(model.id in MODELS)) this.discovered.add(normalizeModelId(model.id));
   }
