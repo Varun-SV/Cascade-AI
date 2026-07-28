@@ -36,3 +36,26 @@ export function settledEscalationStatus(results: T3Result[]): T2Result['status']
   const hasWork = results.some((r) => r.status === 'COMPLETED' || !!r.output);
   return hasWork ? 'PARTIAL' : 'FAILED';
 }
+
+/**
+ * The user-facing text for a root-T2 (Moderate complexity — no T1, one
+ * section) run.
+ *
+ * A MIXED section is possible here too: one worker completes while a
+ * sibling's escalation times out, and T2 reports the section FAILED (see
+ * T2Manager.execute's 'timeout' branch) even though there is completed
+ * output to show. Looking only at the completed workers' text — which is all
+ * `cascade.ts` used to do — silently drops the one thing that explains why
+ * the answer isn't the whole task: the recorded timeout reason lives in
+ * `t2Result.issues`, and nothing rendered it.
+ */
+export function composeRootSectionOutput(
+  t2Result: Pick<T2Result, 'sectionSummary' | 'status' | 'issues'>,
+  completedOutputs: string[],
+): string {
+  let output = `${t2Result.sectionSummary}\n\n${completedOutputs.join('\n\n')}`;
+  if (t2Result.status === 'FAILED' && t2Result.issues?.length) {
+    output += `\n\n_(incomplete: ${t2Result.issues.join('; ')})_`;
+  }
+  return output;
+}

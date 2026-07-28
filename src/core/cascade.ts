@@ -22,6 +22,7 @@ import { CascadeRouter } from './router/index.js';
 import { T1Administrator, type PlanApprovalDecision, type TaskPlan } from './tiers/t1-administrator.js';
 import { calculateCost } from '../utils/cost.js';
 import { T2Manager } from './tiers/t2-manager.js';
+import { composeRootSectionOutput } from './tiers/escalation-policy.js';
 import { MultimodalRegistry } from './multimodal/registry.js';
 import type { FeedbackSource } from './router/feedback-prior.js';
 import { DeadModelStore, fileDeadModelPersistence } from './router/dead-models.js';
@@ -458,9 +459,16 @@ export class Cascade extends EventEmitter {
    * host with only one escalation in flight (and any caller that predates the
    * id) still works: without it the oldest outstanding request is answered,
    * which is correct whenever there is exactly one.
+   *
+   * `automatic` defaults to false — a call into this method is normally a real
+   * person answering the prompt. Pass `true` from a host that is itself
+   * settling the gate on nobody's behalf (a REST caller who never had a
+   * chance to connect, a session halt with no per-section review behind it),
+   * so T2 doesn't set `userSkipped` for a decision no one actually reviewed —
+   * see EscalationDecision.automatic.
    */
-  resolveEscalation(action: EscalationDecision['action'], note?: string, requestId?: string): void {
-    const decision: EscalationDecision = { action, ...(note ? { note } : {}) };
+  resolveEscalation(action: EscalationDecision['action'], note?: string, requestId?: string, automatic?: boolean): void {
+    const decision: EscalationDecision = { action, ...(note ? { note } : {}), ...(automatic ? { automatic: true } : {}) };
     if (requestId) {
       this.pendingEscalations.get(requestId)?.(decision);
       return;
@@ -1527,7 +1535,10 @@ ${prompt}`
       t2Results = [t2Result];
       const completed = t2Result.t3Results.filter((r: T3Result) => r.status === 'COMPLETED');
       if (completed.length > 0) {
-        finalOutput = t2Result.sectionSummary + '\n\n' + completed.map((r: T3Result) => r.output).join('\n\n');
+        finalOutput = composeRootSectionOutput(
+          t2Result,
+          completed.map((r: T3Result) => (typeof r.output === 'string' ? r.output : JSON.stringify(r.output))),
+        );
       } else {
         // Don't return a bare "Task failed" — surface whatever the worker(s)
         // produced plus the concrete reason(s), so the user (and logs) can see

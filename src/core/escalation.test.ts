@@ -82,6 +82,21 @@ describe('escalation gate', () => {
     });
   });
 
+  it('lets a host settle a gate on nobody\'s behalf, marked automatic — not a real answer', async () => {
+    // A dashboard/cloud host can decide nobody is reachable to answer (an
+    // orphaned REST caller who never connected, a session halt) and settle
+    // the gate itself. That is the same "not a person's decision" fact as the
+    // SDK's own no-listener/autonomy-auto/abort skips, so it must carry the
+    // same marker — T2 reads it to decide whether to set `userSkipped`.
+    const c = new Cascade(config, '/tmp');
+    c.on('escalation:decision-required', (e: { requestId: string }) => {
+      setTimeout(() => c.resolveEscalation('skip', 'No client was connected to answer.', e.requestId, true), 0);
+    });
+    await expect(gateOf(c)(ctx('a'), 'task-1')).resolves.toEqual({
+      action: 'skip', note: 'No client was connected to answer.', automatic: true,
+    });
+  });
+
   // ── The concurrency case ──────────────────────
 
   it('routes each answer to the section that asked, when two are parked', async () => {

@@ -300,8 +300,10 @@ export class DashboardServer {
       this.activeSessions.get(sessionId)?.resolvePlanApproval(false);
       // Same for a section parked on an escalation: skip keeps whatever the
       // section already produced, which is the right shape for a halt.
+      // `automatic: true` — the user stopped the whole run, not this one
+      // section specifically; nobody reviewed it (see resolveEscalation).
       this.clearSessionEscalations(sessionId);
-      this.activeSessions.get(sessionId)?.resolveEscalation('skip');
+      this.activeSessions.get(sessionId)?.resolveEscalation('skip', undefined, undefined, true);
     });
 
     // The desktop/web approval modal answers here. Resolve the run that's
@@ -699,7 +701,10 @@ export class DashboardServer {
       if (this.pendingEscalations.get(requestId) !== entry) return;
       if (this.hasResponder(sessionId, socketId)) return; // replayed on join
       this.pendingEscalations.delete(requestId);
-      this.activeSessions.get(sessionId)?.resolveEscalation('skip', 'No client was connected to answer.', requestId);
+      // `automatic: true` — nobody was there to answer, so this is the host
+      // settling the gate on nobody's behalf, not a person's decision (see
+      // resolveEscalation and EscalationDecision.automatic).
+      this.activeSessions.get(sessionId)?.resolveEscalation('skip', 'No client was connected to answer.', requestId, true);
     }, ORPHANED_ESCALATION_GRACE_MS);
   }
 
@@ -1353,26 +1358,30 @@ export class DashboardServer {
         cascade.on('plan:approval-required', (e: unknown) => {
           this.socket.broadcastToRoom(`session:${sessionId}`, 'plan:approval-required', { sessionId, ...(e as object) });
         });
-        // Only wire the interactive gate when someone is actually listening on
-        // this session's room. /api/run is also used headlessly, and attaching
-        // unconditionally made the SDK believe a human could answer
-        // (listenerCount > 0): an escalated section then waited the full five
-        // minutes broadcasting into an empty room, instead of taking the
-        // no-listener 'skip' policy and finishing.
+        // Always wire the interactive gate, even though /api/run is also used
+        // headlessly and a brand-new session's room is provably empty right
+        // here: the client only learns `sessionId` from the HTTP response this
+        // same handler is sending, so it cannot possibly have joined yet —
+        // gating on room occupancy AT THIS POINT meant a freshly started
+        // session's escalation listener was never attached at all, for the
+        // life of the run, even if a client joined moments later. The SDK
+        // decides "can anyone answer" from listenerCount, checked once, before
+        // ever emitting — so a session that started with nobody attached could
+        // never regain the prompt, no matter who subscribed after.
         //
-        // Occupancy at setup is not occupancy at escalation time, though — a
-        // subscriber can leave mid-run — so `raiseEscalation` re-checks when the
-        // prompt is actually raised and settles it if the room has emptied.
-        if (this.socket.roomSize(`session:${sessionId}`) > 0) {
-          cascade.on('escalation:decision-required', (e: unknown) => {
-            this.raiseEscalation(sessionId, undefined, e as Record<string, unknown>);
-          });
-          cascade.on('escalation:timeout', (e: unknown) => {
-            const ev = e as { requestId?: string };
-            if (ev.requestId) this.clearPendingEscalation(ev.requestId);
-            this.socket.broadcastToRoom(`session:${sessionId}`, 'escalation:timeout', { sessionId, ...(e as object) });
-          });
-        }
+        // A genuinely headless run (nobody ever connects) is instead handled
+        // by `raiseEscalation` itself: it re-checks room occupancy at the
+        // moment the prompt is actually raised and, finding it empty, settles
+        // the gate itself after a short grace period (ORPHANED_ESCALATION_GRACE_MS,
+        // 30s) rather than the SDK's own five-minute timeout.
+        cascade.on('escalation:decision-required', (e: unknown) => {
+          this.raiseEscalation(sessionId, undefined, e as Record<string, unknown>);
+        });
+        cascade.on('escalation:timeout', (e: unknown) => {
+          const ev = e as { requestId?: string };
+          if (ev.requestId) this.clearPendingEscalation(ev.requestId);
+          this.socket.broadcastToRoom(`session:${sessionId}`, 'escalation:timeout', { sessionId, ...(e as object) });
+        });
 
         try {
           const result = await cascade.run({

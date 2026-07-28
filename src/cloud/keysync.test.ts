@@ -87,6 +87,34 @@ describe('keysync — MCP per-tool selections', () => {
     expect(bundle.disabledTools).toBeUndefined();
   });
 
+  it('never syncs a non-MCP denial — it can never be re-enabled once pulled', () => {
+    // mergeDisabledTools() only lets a SERVER'S prefix override a stored
+    // entry — a built-in tool like `read_current_page` matches no server
+    // prefix, so a copy that ever reached a bundle would sit in `kept`
+    // forever: a device that later re-enabled it and pushed again could never
+    // clear the copy already pulled onto another device. Built-in tool
+    // selections are device-local; only MCP-prefixed denials travel.
+    const bundle = gatherSyncBundle(cfg({
+      tools: { mcpServers: [server('github')], disabledTools: ['mcp__github__delete_repo', 'read_current_page'] },
+    } as Partial<CascadeConfig>));
+    expect(bundle.disabledTools).toEqual(['mcp__github__delete_repo']);
+    expect(bundle.disabledTools).not.toContain('read_current_page');
+  });
+
+  it('a non-MCP denial is not undone by a later pull, and never spreads to another device', () => {
+    // End-to-end: device A disables a built-in tool, pushes, then re-enables
+    // it and pushes again. Device B, mid-way through, must never receive it
+    // (nothing to sync) and must never lose ITS OWN unrelated local denial.
+    const deviceB = cfg({ tools: { disabledTools: ['read_current_page'] } } as Partial<CascadeConfig>);
+    const pushFromA = gatherSyncBundle(cfg({
+      tools: { mcpServers: [server('github')], disabledTools: ['mcp__github__delete_repo', 'browser_screenshot'] },
+    } as Partial<CascadeConfig>));
+    const merged = applySyncBundle(pushFromA, deviceB);
+    expect(merged.tools.disabledTools).toContain('mcp__github__delete_repo'); // synced in
+    expect(merged.tools.disabledTools).toContain('read_current_page');       // B's own, untouched
+    expect(merged.tools.disabledTools).not.toContain('browser_screenshot');  // A's own, never sent
+  });
+
   it('applies the incoming selection for a server the bundle brings', () => {
     const local = cfg({ tools: { mcpServers: [server('github')], disabledTools: [] } } as Partial<CascadeConfig>);
     const next = applySyncBundle(

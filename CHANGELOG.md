@@ -72,6 +72,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepted it" signal as a real answer, so a section nobody ever looked at
   could still slip past the corrective pass. The SDK now marks which skips are
   its own rather than a person's, and only a person's answer sets the flag.
+  The dashboard server settles a gate itself in two more shapes nobody chose —
+  a REST caller that never had anyone connect to answer, and a session you
+  halted mid-escalation — and both now carry the same marker for the same
+  reason.
+
+  Two more escalation gaps: a REST-triggered run (`/api/run`) only ever learns
+  its own new session id from the HTTP response it is itself in the middle of
+  sending, so a check for "is anyone listening yet" done at that exact moment
+  always found nobody — the interactive gate was silently never wired up for
+  any freshly started session, no matter who subscribed a moment later. It's
+  now always wired; a run nobody ever connects to is still settled quickly by
+  the existing 30-second orphan check rather than waiting the SDK's full five
+  minutes. And a **Moderate** run (a single root manager, no T1) where one
+  worker finished while a sibling's escalation timed out reported the section
+  failed but showed only the completed worker's output — the timeout reason
+  went unrecorded on screen, so the answer looked complete when part of the
+  task silently wasn't.
 
 ### Added
 - **Choose exactly which MCP tools a run can use.** A connected server usually
@@ -99,6 +116,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as "nothing is switched off" would re-enable a destructive connector tool on
   an ordinary pull, so the bundle is versioned: an older bundle leaves your
   selections alone, and only one that knows about them can change them.
+
+  A per-tool selection for a **built-in** tool (not an MCP one — the browser's
+  "read this page", a media tool) was also being swept into that sync bundle,
+  even though the merge on the other end only ever treats an MCP server's own
+  prefix as authoritative for anything it carries. Once a built-in denial like
+  that reached a second device, there was no way to remove it again:
+  re-enabling it and pushing again couldn't clear the copy already sitting on
+  the other device, because nothing in the merge logic recognized it as
+  something a push was allowed to override. Built-in tool selections are
+  device-local by design and no longer leave the device at all.
 
   The same colliding-name problem existed on the desktop and the CLI's
   `cascade mcp connect`, which had no uniqueness check of its own — a config
