@@ -67,7 +67,11 @@ export default function EscalationModal({
   const urgent = seconds <= 60;
 
   return (
-    <Modal title="A section needs your decision" onClose={onDismiss}>
+    // Strictly above every other overlay (ordinary modals share z-40;
+    // ContextApprovalDialog sits at z-50) — the run is parked until this is
+    // answered, so it must win no matter what else happens to be open, not
+    // just whichever one happened to mount last.
+    <Modal title="A section needs your decision" onClose={onDismiss} zIndexClassName="z-[60]">
       <div className="flex flex-col gap-3 p-4 text-sm text-ink-100">
         <div className="flex items-start gap-2">
           <AlertTriangle size={16} className="mt-0.5 shrink-0 text-warn-400" />

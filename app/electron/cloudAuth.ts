@@ -94,7 +94,8 @@ interface CoreExports {
   FileMcpOAuthStore: new (path: string) => McpFileStore;
   mcpServerPrefix: (serverName: string) => string;
   uniqueMcpServerName: (desired: string, existingNames: string[]) => string;
-  disambiguateMcpServerNames: <T extends { name: string }>(servers: T[]) => T[];
+  disambiguateMcpServerNames: <T extends { name: string }>(servers: T[]) => { servers: T[]; renames: Array<{ from: string; to: string }> };
+  removeMcpServerDenials: (disabledTools: string[] | undefined, serverName: string) => string[] | undefined;
   discoverMcpTools: (servers: unknown[]) => Promise<Array<{
     server: string;
     tools: Array<{ server: string; tool: string; name: string; description: string }>;
@@ -436,10 +437,7 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
       // with it), so leaving them behind meant reconnecting the same connector
       // later silently re-disabled tools the user had turned off in a previous
       // life of that connection — with nothing on screen explaining why.
-      const prefix = core().mcpServerPrefix(n);
-      if (cfg.tools.disabledTools?.length) {
-        cfg.tools.disabledTools = (cfg.tools.disabledTools as string[]).filter((t) => !t.startsWith(prefix));
-      }
+      cfg.tools.disabledTools = core().removeMcpServerDenials(cfg.tools.disabledTools as string[] | undefined, n);
       if (match?.oauthStore) { try { new (core().FileMcpOAuthStore)(match.oauthStore).clear(); } catch { /* gone */ } }
       await hooks.persistConfig();
     }

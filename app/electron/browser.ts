@@ -21,6 +21,7 @@
 
 import { WebContentsView, ipcMain, shell, session, type BrowserWindow } from 'electron';
 import { normalizeUrl, toNavigable } from './url.js';
+import { normalizeBounds, type Bounds } from './bounds.js';
 
 // A partition dedicated to the built-in browser, so its permission policy
 // (below) applies only to pages the user navigates to here — never to the
@@ -44,8 +45,6 @@ function hardenBrowserSession(): void {
   s.setPermissionCheckHandler(() => false);
 }
 
-/** Where the renderer wants the page drawn, in renderer CSS pixels. */
-interface Bounds { x: number; y: number; width: number; height: number }
 
 const HOME_URL = 'https://duckduckgo.com/';
 
@@ -195,7 +194,7 @@ export function registerBrowserHandlers(getWindow: () => BrowserWindow | null): 
     const v = ensureView(w);
     if (!w.contentView.children.includes(v)) w.contentView.addChildView(v);
     visible = true;
-    if (a.bounds) lastBounds = a.bounds;
+    if (a.bounds) lastBounds = normalizeBounds(a.bounds);
     applyBounds();
     if (!v.webContents.getURL()) {
       void v.webContents.loadURL(toNavigable(a.url ?? '') ?? HOME_URL);
@@ -227,10 +226,7 @@ export function registerBrowserHandlers(getWindow: () => BrowserWindow | null): 
   ipcMain.handle('browser:setBounds', (_e, b: unknown) => {
     const bounds = b as Bounds;
     if (!bounds || typeof bounds.width !== 'number') return { ok: false };
-    lastBounds = {
-      x: Math.round(bounds.x), y: Math.round(bounds.y),
-      width: Math.max(0, Math.round(bounds.width)), height: Math.max(0, Math.round(bounds.height)),
-    };
+    lastBounds = normalizeBounds(bounds);
     applyBounds();
     return { ok: true };
   });

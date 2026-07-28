@@ -12,7 +12,7 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { ConfigManager } from '../../config/index.js';
 import { connectMcpWithLoopbackOAuth, FileMcpOAuthStore } from '../../mcp/oauth.js';
-import { uniqueMcpServerName } from '../../tools/tool-name.js';
+import { uniqueMcpServerName, removeMcpServerDenials } from '../../tools/tool-name.js';
 
 
 function openBrowser(url: string): void {
@@ -97,6 +97,11 @@ export async function mcpRemoveCommand(name: string): Promise<void> {
   if (!match) { console.log(chalk.red(`\n  No MCP server named "${name}".\n`)); process.exitCode = 1; return; }
   config.tools.mcpServers = servers.filter((s) => s.name !== name);
   config.tools.mcpTrusted = (config.tools.mcpTrusted ?? []).filter((n) => n !== name);
+  // Matches the desktop removal handler: without this, reconnecting the same
+  // connector later — through THIS command, under the same name — silently
+  // re-disabled tools the user had switched off in a previous life of that
+  // connection, with nothing on screen explaining why.
+  config.tools.disabledTools = removeMcpServerDenials(config.tools.disabledTools, name);
   if (match.oauthStore) { try { new FileMcpOAuthStore(match.oauthStore).clear(); } catch { /* already gone */ } }
   await cm.updateConfig(config);
   console.log(chalk.green(`\n  ✓ Removed "${name}".\n`));

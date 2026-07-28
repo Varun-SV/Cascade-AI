@@ -374,8 +374,21 @@ Create a CORRECTION PLAN that contains only the new sections needed to fix the i
       };
     }
 
+    // A section can be PARTIAL for two very different reasons: the pipeline
+    // fell short, or the user was asked about an escalation and explicitly
+    // chose "skip this section, keep what it produced". The reviewer only
+    // ever sees the summary text below — without this note it cannot tell
+    // the two apart, and would flag the second as a deficiency and generate a
+    // correction plan that redoes exactly the work the user just chose to
+    // stop. Kept IN the prompt (not filtered out) so its absence doesn't
+    // itself read as a gap; the note tells the reviewer what the silence means.
     const sectionsText = t2Results
-      .map((r) => `**${r.sectionTitle}**\n${r.sectionSummary}`)
+      .map((r) => {
+        const skipNote = r.userSkipped
+          ? '\n[The user was asked to retry or skip this section and explicitly chose to SKIP it. This is an intentional decision, not a failure — do not cite it as a reason to reject.]'
+          : '';
+        return `**${r.sectionTitle}**\n${r.sectionSummary}${skipNote}`;
+      })
       .join('\n\n');
 
     const prompt = `You are a strict QA Reviewer for the Cascade AI system.
@@ -387,6 +400,7 @@ T2 Manager Summaries:
 ${sectionsText}
 
 Does the current state of the workspace and the outputs fully satisfy the user's request?
+A section marked as user-skipped above is accepted as-is by the user's own choice — treat it as satisfied, not as a gap.
 If yes, reply with exactly: "APPROVED".
 If no, reply with "REJECTED: [Detailed reason explaining exactly what is missing or incorrect]".`;
 

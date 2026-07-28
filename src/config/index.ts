@@ -13,7 +13,7 @@ import { loadCascadeMd, type CascadeMdContent } from './cascade-md.js';
 import { MemoryStore } from '../memory/store.js';
 import { validateConfig } from './validate.js';
 import { loadGlobalCredentials, mergeGlobalCredentials, saveGlobalCredentials } from './global-credentials.js';
-import { disambiguateMcpServerNames } from '../tools/tool-name.js';
+import { disambiguateMcpServerNames, type McpServerRename } from '../tools/tool-name.js';
 import {
   CASCADE_CONFIG_FILE,
   CASCADE_DB_FILE,
@@ -60,9 +60,20 @@ export class ConfigManager {
     // over a short list, and it also catches a collision introduced by an
     // import or a hand edit between two loads, not only a fresh install.
     const servers = this.config.tools?.mcpServers;
-    const disambiguated = servers?.length ? disambiguateMcpServerNames(servers) : servers;
-    const mcpNamesChanged = !!servers && disambiguated !== servers;
-    if (mcpNamesChanged && this.config.tools) this.config.tools.mcpServers = disambiguated;
+    const { servers: disambiguated, renames } = servers?.length
+      ? disambiguateMcpServerNames(servers)
+      : { servers, renames: [] as McpServerRename[] };
+    const mcpNamesChanged = renames.length > 0;
+    if (mcpNamesChanged && this.config.tools) {
+      this.config.tools.mcpServers = disambiguated;
+      // The server's OLD name is still referenced elsewhere in config — as an
+      // exact match in `mcpTrusted` (McpClient.connect() checks it verbatim,
+      // so a stale entry means the renamed server is no longer trusted and
+      // either re-prompts interactively or is rejected outright in a headless
+      // run) and as a prefix in `disabledTools`. Both have to follow the
+      // rename or the migration trades one bug for another.
+      this.renameMcpServerReferences(renames);
+    }
     this.ignore = new CascadeIgnore();
     await this.ignore.load(this.workspacePath);
     this.cascadeMd = await loadCascadeMd(this.workspacePath);
@@ -180,6 +191,30 @@ export class ConfigManager {
     if (isFirstRun && !this.config.providers.find((p) => p.type === 'ollama')) {
       this.config.providers.push({ type: 'ollama' });
     }
+  }
+
+  /**
+   * Follow a disambiguation rename into `tools.mcpTrusted`.
+   *
+   * `mcpTrusted` is matched by EXACT name (`McpClient.connect()`), so a rename
+   * unambiguously invalidates the old entry — the fix here is a plain rewrite.
+   *
+   * `tools.disabledTools` deliberately gets no equivalent treatment. It's
+   * matched by sanitized PREFIX, and a prefix collision is exactly what made
+   * an existing entry ambiguous between the two servers in the first place —
+   * there is no way to tell, from the stored string alone, which of the two
+   * a denial was meant for. Leaving those entries untouched resolves that
+   * ambiguity for free: the survivor keeps the original (now unique) prefix,
+   * so an old entry keeps applying to it, while the renamed server starts
+   * clean under its new prefix. Rewriting the entry to follow the rename
+   * would do the opposite — move a denial that already worked for the
+   * survivor onto a server it may never have meant to cover.
+   */
+  private renameMcpServerReferences(renames: McpServerRename[]): void {
+    const tools = this.config.tools;
+    if (!tools?.mcpTrusted?.length || !renames.length) return;
+    const byOldName = new Map(renames.map((r) => [r.from, r.to]));
+    tools.mcpTrusted = tools.mcpTrusted.map((n) => byOldName.get(n) ?? n);
   }
 
   private async ensureDefaultIdentity(): Promise<void> {

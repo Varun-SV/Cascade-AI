@@ -45,6 +45,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tracked and replayed independently, addressed by its own request rather than
   by the session it belongs to.
 
+  Two more gaps in the desktop rename migration below are also fixed here,
+  since they touch the same code: a renamed server dropped out of
+  `tools.mcpTrusted` (matched by exact name), so it silently stopped being
+  trusted and either re-prompted or failed a headless run; and the hosted
+  app's escalation prompt could be painted over by any of the other modals
+  (API keys, Connectors, Memory…) or the tool-approval dialog, since they all
+  shared one stacking layer and whichever mounted last won. The escalation
+  prompt now sits strictly above every other overlay.
+
+  Choosing **skip** could also cause T1's own quality reviewer to reject the
+  kept output and generate a correction plan that redid exactly the work you
+  just chose to stop — the reviewer only ever sees the section's summary text,
+  with nothing distinguishing "the pipeline fell short" from "the user decided
+  this was good enough". A skipped section is now flagged through to that
+  review, which is told to accept it as-is rather than treat it as a gap.
+
 ### Added
 - **Choose exactly which MCP tools a run can use.** A connected server usually
   brings dozens of tools and most are irrelevant to any given workspace — but
@@ -84,6 +100,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connector is also serialized against expanding that same connector's tool
   list in Settings, closing the same kind of race the account-wide fix above
   closes for the hosted app.
+
+  `cascade mcp remove` also left a removed server's per-tool denials behind —
+  they live in one flat list, not scoped to the connection — so reconnecting
+  the same name later silently carried old denials into the new connection
+  with nothing on screen explaining why. It now clears them on removal,
+  matching what the desktop UI already did.
+
+- **The desktop browser now opens reliably on the first paint.** A fractional
+  display-scaling factor makes the page's on-screen rectangle land on
+  fractional pixel coordinates, which Electron's native view rejects — the
+  later resize handler already rounded to whole pixels, but the very first
+  open did not, so the tab could come up blank the one time nothing else on
+  screen explains why.
 
 - **The loading circle is now the Cascade mark.** Three arcs falling, widest at
   the top, lit in turn from T1 down to T3 — the wait shows the shape of what is

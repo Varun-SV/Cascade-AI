@@ -21,6 +21,7 @@ import {
   isProviderSafeToolName,
   mcpServerPrefix,
   mcpToolName,
+  removeMcpServerDenials,
   sanitizeToolNameSegment,
   uniqueMcpServerName,
 } from './tool-name.js';
@@ -205,9 +206,11 @@ describe('uniqueMcpServerName', () => {
 });
 
 describe('disambiguateMcpServerNames', () => {
-  it('is a true no-op — same reference — when nothing collides', () => {
+  it('is a true no-op — same reference, empty renames — when nothing collides', () => {
     const servers = [{ name: 'github' }, { name: 'notion' }];
-    expect(disambiguateMcpServerNames(servers)).toBe(servers);
+    const { servers: result, renames } = disambiguateMcpServerNames(servers);
+    expect(result).toBe(servers);
+    expect(renames).toEqual([]);
   });
 
   it('keeps the FIRST entry of a colliding group untouched', () => {
@@ -215,14 +218,14 @@ describe('disambiguateMcpServerNames', () => {
     // move its stored deny-list entries and its OAuth token path out from
     // under it for no reason.
     const servers = [{ name: 'foo bar', url: 'a' }, { name: 'foo@bar', url: 'b' }];
-    const result = disambiguateMcpServerNames(servers);
+    const { servers: result } = disambiguateMcpServerNames(servers);
     expect(result[0]!.name).toBe('foo bar');
     expect(result[1]!.name).not.toBe('foo@bar');
   });
 
   it('produces distinct sanitized prefixes for every entry', () => {
     const servers = [{ name: 'foo bar' }, { name: 'foo@bar' }, { name: 'foo/bar' }];
-    const result = disambiguateMcpServerNames(servers);
+    const { servers: result } = disambiguateMcpServerNames(servers);
     const prefixes = new Set(result.map((s) => mcpServerPrefix(s.name)));
     expect(prefixes.size).toBe(3);
   });
@@ -232,7 +235,43 @@ describe('disambiguateMcpServerNames', () => {
       { name: 'foo bar', url: 'https://a.example.com', oauthStore: '/x/a.json' },
       { name: 'foo@bar', url: 'https://b.example.com', oauthStore: '/x/b.json' },
     ];
-    const result = disambiguateMcpServerNames(servers);
+    const { servers: result } = disambiguateMcpServerNames(servers);
     expect(result[1]).toMatchObject({ url: 'https://b.example.com', oauthStore: '/x/b.json' });
+  });
+
+  it('reports every rename made, so a caller can follow it into other config fields', () => {
+    // ConfigManager uses this to keep tools.mcpTrusted and tools.disabledTools
+    // in sync — this function only owns mcpServers, so it hands back what
+    // changed rather than reaching into fields it doesn't know about.
+    const servers = [{ name: 'foo bar' }, { name: 'foo@bar' }, { name: 'notion' }];
+    const { renames } = disambiguateMcpServerNames(servers);
+    expect(renames).toHaveLength(1);
+    expect(renames[0]!.from).toBe('foo@bar');
+    expect(renames[0]!.to).not.toBe('foo@bar');
+  });
+});
+
+describe('removeMcpServerDenials', () => {
+  it('drops only the removed server\'s entries', () => {
+    const denials = ['mcp__github__delete_repo', 'mcp__notion__delete_page'];
+    expect(removeMcpServerDenials(denials, 'github')).toEqual(['mcp__notion__delete_page']);
+  });
+
+  it('is a true no-op — same reference — when the server had no denials', () => {
+    const denials = ['mcp__notion__delete_page'];
+    expect(removeMcpServerDenials(denials, 'github')).toBe(denials);
+  });
+
+  it('passes undefined through unchanged', () => {
+    expect(removeMcpServerDenials(undefined, 'github')).toBeUndefined();
+  });
+
+  it('matches by sanitized PREFIX, so a raw-name variant is still found', () => {
+    // Reconnecting under a punctuation-different raw name that folds to the
+    // same prefix must still find and drop the old denials — otherwise a
+    // remove+reconnect cycle through a slightly different raw name would leak
+    // stale denials forever.
+    const denials = ['mcp__foo_bar__delete_everything'];
+    expect(removeMcpServerDenials(denials, 'foo@bar')).toEqual([]);
   });
 });

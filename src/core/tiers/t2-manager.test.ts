@@ -300,4 +300,56 @@ describe('T2Manager', () => {
       expect(setEscalatorSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
     });
   });
+
+  describe('escalation — user chooses "skip"', () => {
+    it('marks the returned T2Result userSkipped, so T1 review does not re-correct it', async () => {
+      // The self-test always fails, on both the initial pass and the retest
+      // after correctOutput() — that is what makes the worker ESCALATE rather
+      // than complete, the common one-worker-section shape this feature is
+      // meant to cover.
+      const router = {
+        generate: vi.fn(async (_tier, options) => {
+          const latest = options.messages[options.messages.length - 1];
+          const content = typeof latest?.content === 'string' ? latest.content : '';
+          if (content.startsWith('Self-test this output')) {
+            return makeResult('{"completeness":"fail","correctness":"fail","compliance":"fail","notes":"needs more"}');
+          }
+          return makeResult('draft output');
+        }),
+        getModelForTier: () => undefined,
+      } as unknown as CascadeRouter;
+
+      const assignment = makeAssignment();
+      assignment.t3Subtasks = [assignment.t3Subtasks[0]!];
+      assignment.t3Subtasks[0]!.dependsOn = [];
+
+      const manager = new T2Manager(router, makeToolRegistry(), 't1-root');
+      manager.setEscalationCallback(async () => ({ action: 'skip' }));
+
+      const result = await manager.execute(assignment, 'task-skip');
+
+      expect(result.status).toBe('PARTIAL'); // kept, not dropped — see settledEscalationStatus
+      expect(result.userSkipped).toBe(true);
+    });
+
+    it('does NOT set userSkipped for an ordinary completed section', async () => {
+      const router = {
+        generate: vi.fn(async (_tier, options) => {
+          const latest = options.messages[options.messages.length - 1];
+          const content = typeof latest?.content === 'string' ? latest.content : '';
+          if (content.startsWith('Self-test this output')) {
+            return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+          }
+          return makeResult('Merged release notes');
+        }),
+        getModelForTier: () => undefined,
+      } as unknown as CascadeRouter;
+
+      const manager = new T2Manager(router, makeToolRegistry(), 't1-root');
+      const result = await manager.execute(makeAssignment(), 'task-ok');
+
+      expect(result.status).toBe('COMPLETED');
+      expect(result.userSkipped).toBeUndefined();
+    });
+  });
 });

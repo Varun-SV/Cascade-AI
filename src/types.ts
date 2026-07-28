@@ -365,6 +365,15 @@ export interface T2Result {
   t3Results: T3Result[];
   sectionSummary: string;
   issues: string[];
+  /**
+   * Set when this section reached PARTIAL because the user was asked about an
+   * escalation and chose "skip" — not because a T2/T3 pipeline shortfall left
+   * it incomplete. T1's reviewer pass sees only the section summary, so
+   * without this flag it cannot tell "the model gave up" from "the user
+   * decided this was good enough" and would generate a correction plan that
+   * redoes exactly the work the user just chose to keep as-is.
+   */
+  userSkipped?: boolean;
 }
 
 export interface T3ResultPayload {

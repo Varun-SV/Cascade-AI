@@ -67,6 +67,65 @@ describe('ConfigManager — MCP server name disambiguation on load', () => {
     expect(onDisk.tools.mcpServers[1]!.name).toBe(servers[1]!.name);
   });
 
+  it('follows the rename into mcpTrusted, not just mcpServers', async () => {
+    // McpClient.connect() matches mcpTrusted by exact string — a stale entry
+    // means the renamed server is no longer trusted, so it either re-prompts
+    // interactively or is rejected outright in a headless run.
+    const workspace = await makeTempWorkspace();
+    const globalDir = await makeTempWorkspace();
+    const configPath = path.join(workspace, CASCADE_CONFIG_FILE);
+    await fs.mkdir(path.dirname(configPath), { recursive: true });
+    await fs.writeFile(configPath, JSON.stringify({
+      tools: {
+        mcpServers: [
+          { name: 'foo bar', url: 'https://a.example.com/mcp' },
+          { name: 'foo@bar', url: 'https://b.example.com/mcp' },
+        ],
+        mcpTrusted: ['foo bar', 'foo@bar'],
+      },
+    }), 'utf-8');
+
+    const manager = new ConfigManager(workspace, globalDir);
+    await manager.load();
+
+    const config = manager.getConfig();
+    const renamedName = config.tools.mcpServers![1]!.name;
+    expect(renamedName).not.toBe('foo@bar');
+
+    // The first server's trust entry is untouched; the second's followed it
+    // to its new name.
+    expect(config.tools.mcpTrusted).toContain('foo bar');
+    expect(config.tools.mcpTrusted).toContain(renamedName);
+    expect(config.tools.mcpTrusted).not.toContain('foo@bar');
+  });
+
+  it('leaves disabledTools alone — the survivor keeps the entry, by design', async () => {
+    // A denial stored at the shared prefix was ambiguous BEFORE the rename —
+    // there is no way to tell which of the two servers it was meant for.
+    // Leaving it untouched resolves that for free: the survivor keeps the
+    // original prefix, so the entry keeps applying to it; the renamed server
+    // starts clean under its distinct new prefix rather than the entry being
+    // guessed onto it.
+    const workspace = await makeTempWorkspace();
+    const globalDir = await makeTempWorkspace();
+    const configPath = path.join(workspace, CASCADE_CONFIG_FILE);
+    await fs.mkdir(path.dirname(configPath), { recursive: true });
+    await fs.writeFile(configPath, JSON.stringify({
+      tools: {
+        mcpServers: [
+          { name: 'foo bar', url: 'https://a.example.com/mcp' },
+          { name: 'foo@bar', url: 'https://b.example.com/mcp' },
+        ],
+        disabledTools: ['mcp__foo_bar__delete_everything'],
+      },
+    }), 'utf-8');
+
+    const manager = new ConfigManager(workspace, globalDir);
+    await manager.load();
+
+    expect(manager.getConfig().tools.disabledTools).toEqual(['mcp__foo_bar__delete_everything']);
+  });
+
   it('does not rewrite the file when nothing collides', async () => {
     const workspace = await makeTempWorkspace();
     const globalDir = await makeTempWorkspace();

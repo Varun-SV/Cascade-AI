@@ -98,6 +98,12 @@ export function uniqueMcpServerName(desired: string, existingNames: string[]): s
   return `${desired} (${randomUUID().slice(0, 8)})`;
 }
 
+/** One entry renamed by `disambiguateMcpServerNames`, so callers can follow it. */
+export interface McpServerRename {
+  from: string;
+  to: string;
+}
+
 /**
  * Rename pre-existing entries whose sanitized prefixes collide.
  *
@@ -110,18 +116,26 @@ export function uniqueMcpServerName(desired: string, existingNames: string[]): s
  * `uniqueMcpServerName` would have produced had they been added after this
  * existed. A no-op when nothing collides, so callers can run it unconditionally
  * on every load without needing a one-time migration flag.
+ *
+ * A server's name is referenced elsewhere in config — `tools.mcpTrusted`
+ * (`McpClient.connect()` matches it exactly) and `tools.disabledTools`
+ * (matched by sanitized prefix). This function only owns `mcpServers`, so it
+ * returns the rename list rather than reaching into config fields it doesn't
+ * know about; the caller applies it to whatever else keys off the old name.
  */
-export function disambiguateMcpServerNames<T extends { name: string }>(servers: T[]): T[] {
+export function disambiguateMcpServerNames<T extends { name: string }>(
+  servers: T[],
+): { servers: T[]; renames: McpServerRename[] } {
   const seenNames: string[] = [];
-  let changed = false;
+  const renames: McpServerRename[] = [];
   const result = servers.map((s) => {
     const name = uniqueMcpServerName(s.name, seenNames);
     seenNames.push(name);
     if (name === s.name) return s;
-    changed = true;
+    renames.push({ from: s.name, to: name });
     return { ...s, name };
   });
-  return changed ? result : servers;
+  return { servers: renames.length ? result : servers, renames };
 }
 
 /**
@@ -186,6 +200,23 @@ export function assignMcpToolNames(tools: Array<{ server: string; tool: string }
  */
 export function mcpServerPrefix(serverName: string): string {
   return `${MCP_TOOL_PREFIX}${sanitizeToolNameSegment(serverName)}__`;
+}
+
+/**
+ * Drop one removed server's entries from a deny list.
+ *
+ * The deny list lives as one flat array, not scoped per server, so removing a
+ * connector without this left its denials behind — reconnecting the SAME name
+ * later silently re-disabled tools the user had switched off in a previous
+ * life of that connection, with nothing on screen explaining why. Shared by
+ * every removal path (desktop IPC, `cascade mcp remove`) so the behavior can't
+ * drift between them the way the duplicated inline version risked.
+ */
+export function removeMcpServerDenials(disabledTools: string[] | undefined, serverName: string): string[] | undefined {
+  if (!disabledTools?.length) return disabledTools;
+  const prefix = mcpServerPrefix(serverName);
+  const kept = disabledTools.filter((t) => !t.startsWith(prefix));
+  return kept.length === disabledTools.length ? disabledTools : kept;
 }
 
 /**

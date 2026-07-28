@@ -7,12 +7,21 @@ interface Props {
   onClose: () => void;
   maxWidth?: string;
   children: ReactNode;
+  /**
+   * Overrides the stacking layer. Every ordinary modal shares `z-40` — which
+   * one wins when two are open at once is decided by mount order, since ties
+   * paint in DOM order — and `ContextApprovalDialog` sits fixed above all of
+   * them at `z-50`. A run-blocking prompt (see EscalationModal) can't rely on
+   * either: it has to win regardless of what else happens to be open, so it
+   * needs a class strictly higher than z-50, not just "after" in the tree.
+   */
+  zIndexClassName?: string;
 }
 
-export default function Modal({ title, onClose, maxWidth = 'max-w-md', children }: Props) {
+export default function Modal({ title, onClose, maxWidth = 'max-w-md', children, zIndexClassName = 'z-40' }: Props) {
   return (
     <motion.div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 p-4 backdrop-blur-md"
+      className={`fixed inset-0 ${zIndexClassName} flex items-center justify-center bg-black/50 p-4 backdrop-blur-md`}
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
