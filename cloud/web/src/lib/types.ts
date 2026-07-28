@@ -74,11 +74,19 @@ export interface Skill {
   systemPrompt?: string;
 }
 
+export type MemoryDurability = 'permanent' | 'volatile';
+
 export interface Memory {
   id: string;
   userId: string;
   content: string;
   category: string | null;
+  /**
+   * 'permanent' — holds across every chat (who they are, what they prefer).
+   * 'volatile'  — true right now and expected to change (the current project).
+   * The model is told to prefer what the user says now over a volatile fact.
+   */
+  durability: MemoryDurability;
   createdAt: number;
   updatedAt: number;
 }

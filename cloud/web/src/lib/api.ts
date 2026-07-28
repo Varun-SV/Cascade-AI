@@ -1,4 +1,4 @@
-import type { CloudConversation, CloudMessage, CloudUser, Memory, Skill } from './types.js';
+import type { CloudConversation, CloudMessage, CloudUser, Memory, MemoryDurability, Skill } from './types.js';
 
 export interface CloudConfig {
   githubEnabled: boolean;
@@ -91,6 +91,33 @@ export async function fetchFileText(id: string): Promise<string> {
   const res = await fetch(`/api/files/${encodeURIComponent(id)}`, { credentials: 'include' });
   if (!res.ok) throw new Error(`Could not load file (HTTP ${res.status})`);
   return res.text();
+}
+
+// ── Message feedback (thumbs up / down) ──
+
+export type Verdict = 'good' | 'bad';
+
+/** Verdicts already cast in this conversation, as { messageId: verdict }. */
+export function fetchFeedback(conversationId: string): Promise<{ feedback: Record<string, Verdict> }> {
+  return json(fetch(`/api/conversations/${encodeURIComponent(conversationId)}/feedback`, { credentials: 'include' }));
+}
+
+/** Cast or change a verdict. Idempotent — re-voting replaces, never stacks. */
+export function setFeedback(messageId: string, verdict: Verdict): Promise<{ ok: boolean; verdict: Verdict }> {
+  return json(fetch(`/api/messages/${encodeURIComponent(messageId)}/feedback`, {
+    method: 'PUT',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ verdict }),
+  }));
+}
+
+/** Withdraw a verdict (pressing the active thumb again). */
+export function clearFeedback(messageId: string): Promise<{ ok: boolean }> {
+  return json(fetch(`/api/messages/${encodeURIComponent(messageId)}/feedback`, {
+    method: 'DELETE',
+    credentials: 'include',
+  }));
 }
 
 // ── Data management: delete + import ──
@@ -207,24 +234,33 @@ export function fetchMemories(): Promise<{ memories: Memory[] }> {
   return json(fetch('/api/memories', { credentials: 'include' }));
 }
 
-export function addMemory(content: string, category?: string | null): Promise<{ memory: Memory }> {
+export function addMemory(
+  content: string,
+  category?: string | null,
+  durability: MemoryDurability = 'permanent',
+): Promise<{ memory: Memory }> {
   return json(
     fetch('/api/memories', {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, category: category ?? null }),
+      body: JSON.stringify({ content, category: category ?? null, durability }),
     }),
   );
 }
 
-export function updateMemory(id: string, content: string, category?: string | null): Promise<{ memory: Memory }> {
+export function updateMemory(
+  id: string,
+  content: string,
+  category?: string | null,
+  durability: MemoryDurability = 'permanent',
+): Promise<{ memory: Memory }> {
   return json(
     fetch(`/api/memories/${encodeURIComponent(id)}`, {
       method: 'PUT',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, category: category ?? null }),
+      body: JSON.stringify({ content, category: category ?? null, durability }),
     }),
   );
 }

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Copy, Check, RotateCcw, ChevronDown, ChevronLeft, ChevronRight, Pencil, Trash2, FileText, Download, UploadCloud, Loader2, Eye } from 'lucide-react';
-import { uploadUrl, saveFile } from '../lib/api.js';
+import { Copy, Check, RotateCcw, ChevronDown, ChevronLeft, ChevronRight, Pencil, Trash2, FileText, Download, UploadCloud, Loader2, Eye, ThumbsUp, ThumbsDown } from 'lucide-react';
+import { uploadUrl, saveFile, setFeedback, clearFeedback, type Verdict } from '../lib/api.js';
 import Markdown from '../components/Markdown.js';
 import FileViewerModal from '../components/FileViewerModal.js';
 import { fileExt } from '../lib/fileKind.js';
@@ -209,6 +209,56 @@ function WhyPanel({ why }: { why: WhyReport }) {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Thumbs up / down on one assistant reply.
+ *
+ * Pressing the active thumb again withdraws the vote rather than casting the
+ * opposite one — "I take that back" and "I disagree" are different, and only
+ * the user knows which they meant.
+ *
+ * The button state updates before the request resolves and rolls back on
+ * failure: a rating is a throwaway gesture, and making someone wait on a round
+ * trip to see their own click register is how a feature like this goes unused.
+ */
+function FeedbackButtons({ messageId, initial }: { messageId: string; initial?: Verdict }) {
+  const [verdict, setVerdict] = useState<Verdict | undefined>(initial);
+
+  const cast = async (next: Verdict) => {
+    const prev = verdict;
+    const withdrawing = prev === next;
+    setVerdict(withdrawing ? undefined : next);
+    try {
+      if (withdrawing) await clearFeedback(messageId);
+      else await setFeedback(messageId, next);
+    } catch {
+      setVerdict(prev);
+    }
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        aria-label="Good response"
+        aria-pressed={verdict === 'good'}
+        onClick={() => void cast('good')}
+        className={verdict === 'good' ? 'text-success-500' : 'hover:text-ink-100'}
+      >
+        <ThumbsUp size={14} />
+      </button>
+      <button
+        type="button"
+        aria-label="Poor response"
+        aria-pressed={verdict === 'bad'}
+        onClick={() => void cast('bad')}
+        className={verdict === 'bad' ? 'text-danger-300' : 'hover:text-ink-100'}
+      >
+        <ThumbsDown size={14} />
+      </button>
+    </>
   );
 }
 
@@ -500,6 +550,9 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
         <div className="flex items-center gap-2 pt-0.5 text-ink-400 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
           <SiblingNav message={message} onSelect={onSelectSibling} />
           <CopyButton getText={() => splitThinking(message.content).answer || message.content} />
+          {/* Only a persisted message can carry a verdict — an id is what the
+              server keys the vote on, and a still-streaming reply has none. */}
+          {message.id && <FeedbackButtons messageId={message.id} initial={message.verdict} />}
           {onRegenerate && (
             <button type="button" aria-label="Regenerate" onClick={onRegenerate} className="hover:text-ink-100">
               <RotateCcw size={14} />
