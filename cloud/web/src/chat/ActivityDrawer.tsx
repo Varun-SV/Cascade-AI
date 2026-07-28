@@ -1,5 +1,6 @@
 import { motion } from 'framer-motion';
-import { CheckCircle2, Loader2, AlertTriangle, ArrowUpCircle, Cpu, CornerDownRight } from 'lucide-react';
+import { CheckCircle2, AlertTriangle, ArrowUpCircle, Cpu, CornerDownRight } from 'lucide-react';
+import CascadeMark from '../components/CascadeMark.js';
 import type { ActivityNode } from './useChatSession.js';
 
 // Human name + indent depth for each tier role. Cascade orchestrates
@@ -17,7 +18,7 @@ function StatusIcon({ status }: { status: string }) {
   if (s.includes('COMPLETE') || s.includes('DONE')) return <CheckCircle2 size={13} className="text-emerald-400" />;
   if (s.includes('FAIL') || s.includes('ERROR')) return <AlertTriangle size={13} className="text-danger-500" />;
   if (s.includes('ESCALAT')) return <ArrowUpCircle size={13} className="text-amber-400" />;
-  return <Loader2 size={13} className="animate-spin text-accent-400" />;
+  return <CascadeMark size={13} />;
 }
 
 // Strip a leading "provider:" so the chip stays compact ("openai:gpt-5" → "gpt-5").

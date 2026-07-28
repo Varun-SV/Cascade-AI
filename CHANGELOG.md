@@ -46,6 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at the shape it had when you last looked. In the hosted app the list is
   per-account and per-server.
 
+- **The loading circle is now the Cascade mark.** Three arcs falling, widest at
+  the top, lit in turn from T1 down to T3 — the wait shows the shape of what is
+  actually happening rather than an anonymous rotation. The same geometry, held
+  still, is the app's logo, so the brand and the busy state are one object
+  instead of two things that resemble each other. It honours
+  `prefers-reduced-motion` (the pulse stays, the travel goes).
+
 ## 0.54.0 - 2026-07-28
 
 ### Fixed

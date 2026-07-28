@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { AlertTriangle, KeyRound, Loader2, Sparkles, Layers, ChevronDown, Search } from 'lucide-react';
+import { AlertTriangle, KeyRound, Sparkles, Layers, ChevronDown, Search } from 'lucide-react';
+import CascadeMark from '../components/CascadeMark.js';
 import Message from './Message.js';
 import Composer from './Composer.js';
 import PlanNotice from './PlanNotice.js';
@@ -131,7 +132,7 @@ export default function ChatPanel({
                 className={`group flex items-center gap-2 self-start text-sm text-ink-400 ${activity.length > 0 ? 'cursor-pointer hover:text-ink-200' : 'cursor-default'}`}
                 aria-expanded={activityOpen}
               >
-                <Loader2 size={14} className="animate-spin text-accent-500" />
+                <CascadeMark size={15} />
                 <span className="shimmer-text">{status}</span>
                 {activity.length > 0 && (
                   <ChevronDown
