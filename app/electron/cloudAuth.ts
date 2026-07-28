@@ -304,6 +304,12 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
         cfg.tools = cfg.tools ?? {};
         cfg.tools.webSearch = merged.tools.webSearch;
         cfg.tools.mcpServers = merged.tools.mcpServers;
+        // The per-tool selections travel WITH the servers. Copying the servers
+        // but not this installed the synced connector with every tool switched
+        // back on — including a destructive one the user had deliberately
+        // turned off — which is the exact asymmetry putting disabledTools in
+        // the bundle was meant to close.
+        cfg.tools.disabledTools = merged.tools.disabledTools;
       }
       cfg.models = merged.models;
       cfg.budget = merged.budget;

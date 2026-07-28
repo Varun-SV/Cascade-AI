@@ -19,8 +19,30 @@
 // view is the panel's job on every view switch, or the page would float above
 // whatever the user navigated to next.
 
-import { WebContentsView, ipcMain, shell, type BrowserWindow } from 'electron';
+import { WebContentsView, ipcMain, shell, session, type BrowserWindow } from 'electron';
 import { normalizeUrl, toNavigable } from './url.js';
+
+// A partition dedicated to the built-in browser, so its permission policy
+// (below) applies only to pages the user navigates to here — never to the
+// app's own renderer, which uses the default session.
+const BROWSER_PARTITION = 'persist:cascade-browser';
+
+/**
+ * Deny every web permission by default.
+ *
+ * `sandbox` and process isolation stop a page from reaching Node or the app's
+ * IPC surface, but they do nothing about Chromium's own permission prompts —
+ * camera, microphone, geolocation, notifications, HID, USB. Electron grants
+ * those unless the app installs a handler; with none installed anywhere in
+ * this codebase, an arbitrary or compromised site the user visits here could
+ * request them with no application-level policy standing in the way. None of
+ * that is needed for reading web pages, so the policy is simply: deny.
+ */
+function hardenBrowserSession(): void {
+  const s = session.fromPartition(BROWSER_PARTITION);
+  s.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
+  s.setPermissionCheckHandler(() => false);
+}
 
 /** Where the renderer wants the page drawn, in renderer CSS pixels. */
 interface Bounds { x: number; y: number; width: number; height: number }
@@ -35,6 +57,9 @@ let view: WebContentsView | null = null;
 let owner: BrowserWindow | null = null;
 let visible = false;
 let lastBounds: Bounds = { x: 0, y: 0, width: 0, height: 0 };
+/** The current main-frame navigation error, if any. See did-fail-load below
+ *  for why this survives the did-stop-loading that always follows it. */
+let lastError: string | undefined;
 
 function ensureView(win: BrowserWindow): WebContentsView {
   if (view && !view.webContents.isDestroyed()) {
@@ -52,6 +77,7 @@ function ensureView(win: BrowserWindow): WebContentsView {
     return view;
   }
 
+  hardenBrowserSession();
   view = new WebContentsView({
     webPreferences: {
       // No preload, no node: this renders untrusted web content and must have
@@ -60,6 +86,7 @@ function ensureView(win: BrowserWindow): WebContentsView {
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
+      partition: BROWSER_PARTITION,
     },
   });
   owner = win;
@@ -78,16 +105,26 @@ function ensureView(win: BrowserWindow): WebContentsView {
     if (!owner || owner.isDestroyed()) return;
     owner.webContents.send('browser:state', getState());
   };
-  wc.on('did-navigate', pushState);
+  // A successful or freshly-started navigation retires the old error — this
+  // is the only place lastError is cleared, so did-stop-loading (below) can't
+  // wipe it out from underneath a failure it didn't cause.
+  wc.on('did-navigate', () => { lastError = undefined; pushState(); });
+  wc.on('did-start-loading', () => { lastError = undefined; pushState(); });
   wc.on('did-navigate-in-page', pushState);
   wc.on('page-title-updated', pushState);
-  wc.on('did-start-loading', pushState);
+  // Electron always follows a failed navigation with did-stop-loading. That
+  // handler calls the SAME pushState, which re-sends whatever lastError is
+  // currently set to — so a DNS/TLS/connectivity failure set by did-fail-load
+  // survives it instead of being overwritten by a state with no error field a
+  // moment later, which is what silently blanked the failure message before.
   wc.on('did-stop-loading', pushState);
-  wc.on('did-fail-load', (_e, code, desc, url) => {
+  wc.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
     // -3 is ERR_ABORTED, which fires on every ordinary redirect and on stop.
-    if (code === -3) return;
+    // A subframe (ad/tracker/embed) failing is not the page the user is on.
+    if (code === -3 || !isMainFrame) return;
     if (!owner || owner.isDestroyed()) return;
-    owner.webContents.send('browser:state', { ...getState(), error: `${desc} (${url})` });
+    lastError = `${desc} (${url})`;
+    pushState();
   });
 
   return view;
@@ -105,6 +142,10 @@ function getState() {
     loading: wc.isLoading(),
     canGoBack: wc.navigationHistory.canGoBack(),
     canGoForward: wc.navigationHistory.canGoForward(),
+    // The single source of truth for the current failure, so every caller of
+    // getState() — the event pushes below, the open/state IPC handlers — sees
+    // the same thing rather than each having to remember to attach it.
+    error: lastError,
   };
 }
 

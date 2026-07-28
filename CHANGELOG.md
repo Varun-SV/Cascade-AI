@@ -59,7 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   page&rdquo; in Chat and it sees what&rsquo;s on screen, including pages behind a login
   and pages rendered entirely by JavaScript, neither of which a plain fetch can
   reach. The page is a real browser view, not an embedded frame, so the sites
-  people actually look things up on aren&rsquo;t blank.
+  people actually look things up on aren&rsquo;t blank. Pages opened here run in
+  their own session with **every web permission denied** — camera, microphone,
+  location, notifications, USB. Reading a page needs none of them.
 
 ## 0.54.0 - 2026-07-28
 

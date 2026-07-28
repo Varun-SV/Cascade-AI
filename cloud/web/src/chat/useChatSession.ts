@@ -444,6 +444,14 @@ export function useChatSession(
           setStatus(null);
           setApproval(null);
           setContextApproval(null);
+          // The run is over, so any parked question is stale — its buttons
+          // would emit into a run that has already finished. Chat.stop() is the
+          // case that made this visible (the server aborts the controller
+          // WITHOUT disconnecting, the SDK settles the gate as 'skip', and the
+          // run acknowledges normally), but the same is true of every ending:
+          // clearing here covers stop, completion and error in one place,
+          // exactly as the approval prompts above already do.
+          setEscalations([]);
           if (ack.error) {
             setError(ack.error);
             setMessages((prev) => prev.filter((m) => !m.streaming));
