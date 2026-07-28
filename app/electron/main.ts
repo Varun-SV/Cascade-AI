@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
 import { registerCloudAuthIpc } from './cloudAuth';
+import { registerBrowserHandlers, readCurrentPage } from './browser';
 
 const isDev = process.env.ELECTRON_DEV === '1';
 
@@ -122,6 +123,11 @@ async function startBackend(): Promise<void> {
       auth: false,
     };
     const server = new DashboardServer(cascadeConfig, configManager.getStore(), workspace);
+    // The other half of the built-in browser: a run can read the page the user
+    // is actually on. Wired only here — the backend runs in this process, so it
+    // can reach the live view directly. In the CLI there is no browser and the
+    // tool is simply never registered.
+    server.setCurrentPageProvider(readCurrentPage);
     await server.start();
     dashboardServer = server;
     console.log(`[main] Cascade backend started on port ${backendPort} (workspace: ${workspace})`);
@@ -711,6 +717,8 @@ function registerIPC(): void {
     getConfig: () => cascadeConfig,
     persistConfig: () => (configManager ? configManager.save() : Promise.resolve()),
   });
+
+  registerBrowserHandlers(() => mainWindow);
 }
 
 // ─── Desktop meta store (persistent JSON in userData) ─────────────────────────

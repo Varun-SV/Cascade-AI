@@ -1,0 +1,251 @@
+// ─────────────────────────────────────────────
+//  Cascade Desktop — Built-in browser
+// ─────────────────────────────────────────────
+//
+// A real browser inside the app, so looking something up doesn't mean leaving
+// Cascade and losing the thread of a run. It works in both directions: the
+// user browses, AND the agent can read the page they are on (`read_current_page`,
+// wired in main.ts) — which is why this isn't just "open the system browser".
+//
+// A WebContentsView, not an <iframe> or <webview>. An iframe is blocked outright
+// by X-Frame-Options / frame-ancestors on most real sites — GitHub, Google,
+// almost anything worth looking up — so the panel would be permanently blank
+// on the pages people actually want. A WebContentsView is a genuine browser
+// view with its own process, subject to none of that.
+//
+// It is a NATIVE overlay: it sits on top of the renderer at bounds the renderer
+// dictates, rather than inside the React tree. So the renderer draws the chrome
+// (address bar, buttons) and tells us where the page rectangle is; hiding the
+// view is the panel's job on every view switch, or the page would float above
+// whatever the user navigated to next.
+
+import { WebContentsView, ipcMain, shell, type BrowserWindow } from 'electron';
+
+/** Where the renderer wants the page drawn, in renderer CSS pixels. */
+interface Bounds { x: number; y: number; width: number; height: number }
+
+const HOME_URL = 'https://duckduckgo.com/';
+
+/** Page text handed back in one read. Beyond this the model gains nothing and
+ *  the tokens cost real money; the SDK tool truncates again on its own side. */
+const MAX_TEXT_CHARS = 200_000;
+
+let view: WebContentsView | null = null;
+let owner: BrowserWindow | null = null;
+let visible = false;
+let lastBounds: Bounds = { x: 0, y: 0, width: 0, height: 0 };
+
+/** Only http(s). A file:// or javascript: URL typed into the bar would be a
+ *  local-file read / script injection dressed up as navigation. */
+function normalizeUrl(input: string): string | null {
+  const raw = input.trim();
+  if (!raw) return null;
+  const candidate = /^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : `https://${raw}`;
+  try {
+    const u = new URL(candidate);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+/** A typed string that isn't a URL is a search, the way any browser behaves. */
+function toNavigable(input: string): string | null {
+  const raw = input.trim();
+  if (!raw) return null;
+  const looksLikeUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) || /^[\w-]+(\.[\w-]+)+(\/|$|:\d)/.test(raw);
+  if (looksLikeUrl) return normalizeUrl(raw);
+  return `https://duckduckgo.com/?q=${encodeURIComponent(raw)}`;
+}
+
+function ensureView(win: BrowserWindow): WebContentsView {
+  if (view && !view.webContents.isDestroyed()) return view;
+
+  view = new WebContentsView({
+    webPreferences: {
+      // No preload, no node: this renders untrusted web content and must have
+      // no path to the app's IPC surface.
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+    },
+  });
+  owner = win;
+
+  const wc = view.webContents;
+
+  // window.open / target=_blank goes to the system browser rather than
+  // spawning unmanaged windows we would then have to track and clean up.
+  wc.setWindowOpenHandler(({ url }) => {
+    const safe = normalizeUrl(url);
+    if (safe) void shell.openExternal(safe);
+    return { action: 'deny' };
+  });
+
+  const pushState = () => {
+    if (!owner || owner.isDestroyed()) return;
+    owner.webContents.send('browser:state', getState());
+  };
+  wc.on('did-navigate', pushState);
+  wc.on('did-navigate-in-page', pushState);
+  wc.on('page-title-updated', pushState);
+  wc.on('did-start-loading', pushState);
+  wc.on('did-stop-loading', pushState);
+  wc.on('did-fail-load', (_e, code, desc, url) => {
+    // -3 is ERR_ABORTED, which fires on every ordinary redirect and on stop.
+    if (code === -3) return;
+    if (!owner || owner.isDestroyed()) return;
+    owner.webContents.send('browser:state', { ...getState(), error: `${desc} (${url})` });
+  });
+
+  return view;
+}
+
+function getState() {
+  if (!view || view.webContents.isDestroyed()) {
+    return { open: false, url: '', title: '', loading: false, canGoBack: false, canGoForward: false };
+  }
+  const wc = view.webContents;
+  return {
+    open: visible,
+    url: wc.getURL(),
+    title: wc.getTitle(),
+    loading: wc.isLoading(),
+    canGoBack: wc.navigationHistory.canGoBack(),
+    canGoForward: wc.navigationHistory.canGoForward(),
+  };
+}
+
+function applyBounds(): void {
+  if (!view || !owner || owner.isDestroyed()) return;
+  // Collapsed to zero rather than removed when hidden: keeping the view
+  // attached preserves the page, its scroll position and any login, so
+  // switching to Chat and back does not silently reload what the user was on.
+  view.setBounds(visible ? lastBounds : { x: 0, y: 0, width: 0, height: 0 });
+}
+
+/**
+ * Read the page currently on screen — the agent half of the feature.
+ *
+ * `innerText` rather than the HTML: the model wants what a person can read, and
+ * the markup would be mostly script and style tags burning tokens. Returns null
+ * when nothing is open, so the tool can say so instead of inventing content.
+ */
+export async function readCurrentPage(): Promise<{ url: string; title: string; text: string } | null> {
+  if (!view || view.webContents.isDestroyed()) return null;
+  const wc = view.webContents;
+  const url = wc.getURL();
+  if (!url || url === 'about:blank') return null;
+
+  const text = await wc.executeJavaScript(
+    `(() => {
+       const el = document.body;
+       if (!el) return '';
+       return (el.innerText || '').replace(/\\n{3,}/g, '\\n\\n').slice(0, ${MAX_TEXT_CHARS});
+     })()`,
+    true,
+  ).catch(() => '');
+
+  return { url, title: wc.getTitle(), text: typeof text === 'string' ? text : '' };
+}
+
+export function registerBrowserHandlers(getWindow: () => BrowserWindow | null): void {
+  const win = () => {
+    const w = getWindow();
+    return w && !w.isDestroyed() ? w : null;
+  };
+
+  ipcMain.handle('browser:open', (_e, arg: unknown) => {
+    const w = win();
+    if (!w) return { ok: false, error: 'No window.' };
+    const a = (arg ?? {}) as { url?: string; bounds?: Bounds };
+    const v = ensureView(w);
+    if (!w.contentView.children.includes(v)) w.contentView.addChildView(v);
+    visible = true;
+    if (a.bounds) lastBounds = a.bounds;
+    applyBounds();
+    if (!v.webContents.getURL()) {
+      void v.webContents.loadURL(toNavigable(a.url ?? '') ?? HOME_URL);
+    } else if (a.url) {
+      const target = toNavigable(a.url);
+      if (target) void v.webContents.loadURL(target);
+    }
+    return { ok: true, state: getState() };
+  });
+
+  // Hide, don't destroy: the page (and any session the user signed into)
+  // survives a trip to another view.
+  ipcMain.handle('browser:hide', () => {
+    visible = false;
+    applyBounds();
+    return { ok: true };
+  });
+
+  ipcMain.handle('browser:close', () => {
+    visible = false;
+    if (view && owner && !owner.isDestroyed() && owner.contentView.children.includes(view)) {
+      owner.contentView.removeChildView(view);
+    }
+    if (view && !view.webContents.isDestroyed()) view.webContents.close();
+    view = null;
+    return { ok: true };
+  });
+
+  ipcMain.handle('browser:setBounds', (_e, b: unknown) => {
+    const bounds = b as Bounds;
+    if (!bounds || typeof bounds.width !== 'number') return { ok: false };
+    lastBounds = {
+      x: Math.round(bounds.x), y: Math.round(bounds.y),
+      width: Math.max(0, Math.round(bounds.width)), height: Math.max(0, Math.round(bounds.height)),
+    };
+    applyBounds();
+    return { ok: true };
+  });
+
+  ipcMain.handle('browser:navigate', (_e, url: unknown) => {
+    if (!view || view.webContents.isDestroyed()) return { ok: false, error: 'Browser is not open.' };
+    const target = toNavigable(String(url ?? ''));
+    if (!target) return { ok: false, error: 'Only http and https addresses can be opened here.' };
+    void view.webContents.loadURL(target);
+    return { ok: true };
+  });
+
+  ipcMain.handle('browser:back', () => {
+    if (view && !view.webContents.isDestroyed() && view.webContents.navigationHistory.canGoBack()) {
+      view.webContents.navigationHistory.goBack();
+    }
+    return { ok: true };
+  });
+
+  ipcMain.handle('browser:forward', () => {
+    if (view && !view.webContents.isDestroyed() && view.webContents.navigationHistory.canGoForward()) {
+      view.webContents.navigationHistory.goForward();
+    }
+    return { ok: true };
+  });
+
+  ipcMain.handle('browser:reload', () => {
+    if (view && !view.webContents.isDestroyed()) view.webContents.reload();
+    return { ok: true };
+  });
+
+  ipcMain.handle('browser:stop', () => {
+    if (view && !view.webContents.isDestroyed()) view.webContents.stop();
+    return { ok: true };
+  });
+
+  ipcMain.handle('browser:state', () => getState());
+
+  // The page the user is on, for the renderer (Settings/debug) — the agent
+  // reaches the same function directly through the SDK tool.
+  ipcMain.handle('browser:readPage', async () => (await readCurrentPage()) ?? null);
+
+  ipcMain.handle('browser:openExternal', (_e, url: unknown) => {
+    const safe = normalizeUrl(String(url ?? ''));
+    if (!safe) return { ok: false };
+    void shell.openExternal(safe);
+    return { ok: true };
+  });
+}

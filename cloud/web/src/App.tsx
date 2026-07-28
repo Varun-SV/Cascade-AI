@@ -333,6 +333,9 @@ export default function App() {
             // the window without an answer would leave it waiting out the full
             // timeout and then failing the section for no reason.
             onDismiss={() => chat.resolveEscalation('skip')}
+            // The countdown running out is not a decision — the server already
+            // failed the section, so only clear the prompt.
+            onExpire={chat.clearEscalation}
           />
         )}
         {showVault && (

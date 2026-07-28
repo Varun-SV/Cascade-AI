@@ -2,7 +2,7 @@ import { configureStore, createSlice, PayloadAction } from '@reduxjs/toolkit';
 import { useDispatch, useSelector } from 'react-redux';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-export type ViewMode = 'onboarding' | 'cockpit' | 'chat' | 'code' | 'insights';
+export type ViewMode = 'onboarding' | 'cockpit' | 'chat' | 'code' | 'browser' | 'insights';
 export type ThemePref = 'system' | 'light' | 'dark' | 'midnight';
 
 export interface AgentNode {

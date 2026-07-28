@@ -3,7 +3,7 @@ import { Plug, Trash2, Plus, Github, Slack, Globe, ShieldCheck, Loader2, Externa
 import Modal from './Modal.js';
 import {
   fetchConnectors, fetchMcpServers, addMcpServer, setMcpServerEnabled, deleteMcpServer, startMcpOAuth,
-  fetchMcpServerTools, setMcpServerDisabledTools, type McpToolEntry,
+  fetchMcpServerTools, setMcpToolEnabled, type McpToolEntry,
   startBrokerConnect, type ConnectorEntry, type McpServer,
 } from '../lib/api.js';
 
@@ -229,15 +229,15 @@ export default function ConnectorsModal({ onClose }: { onClose: () => void }) {
     });
   }
 
-  // The whole deny list is sent each time, so the write is idempotent — two
-  // tabs racing a toggle converge instead of half-applying.
+  // One tool per request. Sending the whole list would let a second tab open on
+  // the same connector overwrite this tab's change with its own stale snapshot.
   async function toggleTool(s: McpServer, toolName: string, enable: boolean) {
     const next = enable
       ? s.disabledTools.filter((t) => t !== toolName)
       : Array.from(new Set([...s.disabledTools, toolName]));
     setServers((prev) => prev.map((x) => (x.id === s.id ? { ...x, disabledTools: next } : x)));
     try {
-      await setMcpServerDisabledTools(s.id, next);
+      await setMcpToolEnabled(s.id, toolName, enable);
     } catch {
       await refresh();
     }

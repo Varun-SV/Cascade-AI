@@ -51,6 +51,17 @@ export interface CloudTurn {
   regenerateFromUserMessageId?: string;
 }
 
+/** Live state of the built-in browser, pushed on every navigation. */
+export interface DesktopBrowserState {
+  open: boolean;
+  url: string;
+  title: string;
+  loading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  error?: string;
+}
+
 declare global {
   interface Window {
     cascade?: {
@@ -126,6 +137,23 @@ declare global {
           error?: string;
         }>;
         setToolEnabled(name: string, enabled: boolean): Promise<{ ok: boolean; disabled?: string[] }>;
+      };
+      /** Built-in browser. The page is a native view the main process
+       *  positions over the renderer at the bounds we report. */
+      browser?: {
+        open(url: string | undefined, bounds: { x: number; y: number; width: number; height: number }): Promise<{ ok: boolean; error?: string; state?: DesktopBrowserState }>;
+        hide(): Promise<{ ok: boolean }>;
+        close(): Promise<{ ok: boolean }>;
+        setBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<{ ok: boolean }>;
+        navigate(url: string): Promise<{ ok: boolean; error?: string }>;
+        back(): Promise<{ ok: boolean }>;
+        forward(): Promise<{ ok: boolean }>;
+        reload(): Promise<{ ok: boolean }>;
+        stop(): Promise<{ ok: boolean }>;
+        state(): Promise<DesktopBrowserState>;
+        readPage(): Promise<{ url: string; title: string; text: string } | null>;
+        openExternal(url: string): Promise<{ ok: boolean }>;
+        onState(cb: (s: DesktopBrowserState) => void): void;
       };
     };
   }

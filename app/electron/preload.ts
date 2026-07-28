@@ -1,5 +1,16 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
+/** Live state of the built-in browser, pushed on every navigation. */
+interface BrowserState {
+  open: boolean;
+  url: string;
+  title: string;
+  loading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  error?: string;
+}
+
 /** A message on a cloud conversation's active path (with branching data). */
 interface CloudMsg {
   id?: string;
@@ -206,6 +217,29 @@ contextBridge.exposeInMainWorld('cascade', {
     }>,
     setToolEnabled: (name: string, enabled: boolean) =>
       ipcRenderer.invoke('mcp:setToolEnabled', { name, enabled }) as Promise<{ ok: boolean; disabled?: string[] }>,
+  },
+
+  // Built-in browser. The page renders in a native WebContentsView positioned
+  // OVER the renderer at bounds this API supplies — an <iframe> would be
+  // refused outright by most real sites' X-Frame-Options.
+  browser: {
+    open: (url: string | undefined, bounds: { x: number; y: number; width: number; height: number }) =>
+      ipcRenderer.invoke('browser:open', { url, bounds }) as Promise<{ ok: boolean; error?: string; state?: BrowserState }>,
+    hide: () => ipcRenderer.invoke('browser:hide') as Promise<{ ok: boolean }>,
+    close: () => ipcRenderer.invoke('browser:close') as Promise<{ ok: boolean }>,
+    setBounds: (bounds: { x: number; y: number; width: number; height: number }) =>
+      ipcRenderer.invoke('browser:setBounds', bounds) as Promise<{ ok: boolean }>,
+    navigate: (url: string) => ipcRenderer.invoke('browser:navigate', url) as Promise<{ ok: boolean; error?: string }>,
+    back: () => ipcRenderer.invoke('browser:back') as Promise<{ ok: boolean }>,
+    forward: () => ipcRenderer.invoke('browser:forward') as Promise<{ ok: boolean }>,
+    reload: () => ipcRenderer.invoke('browser:reload') as Promise<{ ok: boolean }>,
+    stop: () => ipcRenderer.invoke('browser:stop') as Promise<{ ok: boolean }>,
+    state: () => ipcRenderer.invoke('browser:state') as Promise<BrowserState>,
+    readPage: () => ipcRenderer.invoke('browser:readPage') as Promise<{ url: string; title: string; text: string } | null>,
+    openExternal: (url: string) => ipcRenderer.invoke('browser:openExternal', url) as Promise<{ ok: boolean }>,
+    onState: (cb: (s: BrowserState) => void) => {
+      ipcRenderer.on('browser:state', (_e, s: BrowserState) => cb(s));
+    },
   },
 
   // File system (safe subset)

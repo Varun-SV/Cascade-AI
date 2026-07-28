@@ -19,10 +19,15 @@ export default function EscalationModal({
   request,
   onResolve,
   onDismiss,
+  onExpire,
 }: {
   request: EscalationRequest;
   onResolve: (action: 'retry' | 'skip' | 'guidance', note?: string) => void;
+  /** The user deliberately closed the window — that IS an answer ('skip'). */
   onDismiss: () => void;
+  /** The local deadline passed. NOT an answer: the server has already failed
+   *  the section, so this only clears the stale prompt. */
+  onExpire: () => void;
 }) {
   const [note, setNote] = useState('');
   const [now, setNow] = useState(() => Date.now());
@@ -42,12 +47,14 @@ export default function EscalationModal({
   const remainingMs = request.timeoutMs - (now - request.receivedAt);
   const seconds = Math.max(0, Math.ceil(remainingMs / 1000));
 
-  // The server has already given up; close so a late answer can't land on a
-  // section that has moved on. In an effect, not in the tick, because dismissing
-  // during render would set parent state mid-render.
+  // The server has already given up; clear so a late answer can't land on a
+  // section that has moved on. `onExpire`, not `onDismiss` — reporting "Skipping
+  // section…" for a decision nobody made would be a lie about what happened.
+  // In an effect, not in the tick, because clearing during render would set
+  // parent state mid-render.
   useEffect(() => {
-    if (remainingMs <= 0) onDismiss();
-  }, [remainingMs <= 0, onDismiss]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (remainingMs <= 0) onExpire();
+  }, [remainingMs <= 0, onExpire]); // eslint-disable-line react-hooks/exhaustive-deps
   const mm = Math.floor(seconds / 60);
   const ss = String(seconds % 60).padStart(2, '0');
   const urgent = seconds <= 60;

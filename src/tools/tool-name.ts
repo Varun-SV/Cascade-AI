@@ -65,7 +65,13 @@ export function isMcpToolName(name: string): boolean {
   return name.startsWith(MCP_TOOL_PREFIX);
 }
 
-/** Prefix matching every tool from one server, for filtering. */
+/**
+ * Prefix matching every tool from one server, for filtering.
+ *
+ * Also lets a host drop a server's per-tool selections when the server itself
+ * is removed — otherwise a tool switched off before removal stays off when the
+ * same connector is added back, with nothing on screen explaining why.
+ */
 export function mcpServerPrefix(serverName: string): string {
   return `${MCP_TOOL_PREFIX}${sanitizeToolNameSegment(serverName)}__`;
 }

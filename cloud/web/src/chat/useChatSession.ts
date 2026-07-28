@@ -488,6 +488,14 @@ export function useChatSession(
    * Cleared optimistically: the run is parked waiting on this, so leaving the
    * modal up after answering would invite a second answer that has nowhere to go.
    */
+  /**
+   * Drop the prompt WITHOUT answering. For the local deadline: the server has
+   * already failed the section, so sending 'skip' would report an action that
+   * never happened and queue a decision with nowhere to land. Distinct from
+   * dismissing deliberately, which IS an answer (see resolveEscalation).
+   */
+  const clearEscalation = useCallback(() => setEscalation(null), []);
+
   const resolveEscalation = useCallback(
     (action: 'retry' | 'skip' | 'guidance', note?: string) => {
       if (!socket || !escalation) return;
@@ -580,7 +588,7 @@ export function useChatSession(
     busy, error, status, lastTokens, lastSaved, conversationId, loadMessages, setConversationId,
     contextTokens, contextWindow,
     routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, approval,
-    escalation, resolveEscalation,
+    escalation, resolveEscalation, clearEscalation,
     contextApproval, resolveContextApproval, compactionNotice, knowledgeNotice, activity,
   };
 }

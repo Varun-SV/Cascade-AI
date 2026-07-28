@@ -26,6 +26,7 @@ import type { ScheduledTask, CascadeRunResult } from '../types.js';
 import { aggregateCostStats } from './cost-stats.js';
 import type { WhyReport } from './cost-stats.js';
 import { saveGlobalCredentials } from '../config/global-credentials.js';
+import type { CurrentPageProvider } from '../tools/current-page.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -39,6 +40,13 @@ export class DashboardServer {
   private globalStore: MemoryStore | null = null;
   private broadcastTimer: NodeJS.Timeout | null = null;
   private activeSessions = new Map<string, import('../core/cascade.js').Cascade>();
+  /**
+   * Supplied by the desktop shell so a run can read the page the user has
+   * open in the built-in browser. Absent in the CLI, where there is no
+   * browser — so the tool is simply not registered rather than present and
+   * always failing.
+   */
+  private currentPageProvider?: CurrentPageProvider;
   private activeControllers = new Map<string, AbortController>();
   /**
    * Run taskIds per chat session — file snapshots are keyed by the run's
@@ -154,6 +162,7 @@ export class DashboardServer {
       if (forceTier) cfg = { ...cfg, routing: { ...cfg.routing, forceTier: forceTier as 'T1' | 'T2' | 'T3' } };
       const cascade = new Cascade(cfg, this.workspacePath, this.store);
       this.activeSessions.set(sessionId, cascade);
+      if (this.currentPageProvider) cascade.setCurrentPageProvider(this.currentPageProvider);
 
       cascade.on('stream:token', (e: { text: string; tierId: string; primary?: boolean }) => {
         this.socket.emitToSocket(socketId, 'stream:token', { sessionId, tierId: e.tierId, text: e.text, primary: e.primary });
@@ -260,6 +269,11 @@ export class DashboardServer {
         this.socket.broadcast('session:message-injected', { sessionId, nodeId, message, steered, requestedAt: new Date().toISOString() });
       }
     });
+  }
+
+  /** Wire the host's browser view in (desktop only). */
+  setCurrentPageProvider(provider: CurrentPageProvider): void {
+    this.currentPageProvider = provider;
   }
 
   async start(): Promise<void> {
@@ -1157,6 +1171,7 @@ export class DashboardServer {
       void (async () => {
         const cascade = new Cascade(this.config, this.workspacePath, this.store);
         this.activeSessions.set(sessionId, cascade);
+        if (this.currentPageProvider) cascade.setCurrentPageProvider(this.currentPageProvider);
 
         cascade.on('stream:token', (e: { text: string; tierId: string; primary?: boolean }) => {
           this.socket.broadcastToRoom(`session:${sessionId}`, 'stream:token', { sessionId, tierId: e.tierId, text: e.text, primary: e.primary });

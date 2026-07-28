@@ -53,6 +53,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of two things that resemble each other. It honours
   `prefers-reduced-motion` (the pulse stays, the travel goes).
 
+- **A browser inside the desktop app.** Looking something up no longer means
+  leaving Cascade and losing the thread of a run. It works in both directions:
+  you browse, and Cascade can read the page you have open — ask about &ldquo;this
+  page&rdquo; in Chat and it sees what&rsquo;s on screen, including pages behind a login
+  and pages rendered entirely by JavaScript, neither of which a plain fetch can
+  reach. The page is a real browser view, not an embedded frame, so the sites
+  people actually look things up on aren&rsquo;t blank.
+
 ## 0.54.0 - 2026-07-28
 
 ### Fixed

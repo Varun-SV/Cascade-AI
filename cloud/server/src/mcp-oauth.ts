@@ -127,12 +127,12 @@ export function encodeOAuthBlob(stored: StoredMcpOAuth, secret: string): string 
  */
 export async function resolveRunMcpServers(
   store: CloudStore, userId: string, secret: string,
-): Promise<Array<{ name: string; url: string; headers?: Record<string, string> }>> {
+): Promise<Array<{ id: string; name: string; url: string; headers?: Record<string, string> }>> {
   const rows = store.listEnabledMcpServerRows(userId);
-  const out: Array<{ name: string; url: string; headers?: Record<string, string> }> = [];
+  const out: Array<{ id: string; name: string; url: string; headers?: Record<string, string> }> = [];
   for (const row of rows) {
     if (row.headers_json) {
-      out.push({ name: row.name, url: row.url, headers: JSON.parse(row.headers_json) as Record<string, string> });
+      out.push({ id: row.id, name: row.name, url: row.url, headers: JSON.parse(row.headers_json) as Record<string, string> });
       continue;
     }
     if (row.oauth_json) {
@@ -143,13 +143,13 @@ export async function resolveRunMcpServers(
           blob = refreshed;
           store.updateMcpServerOAuth(row.id, userId, encryptAtRest(JSON.stringify(blob), secret));
         }
-        out.push({ name: row.name, url: row.url, headers: { Authorization: `Bearer ${blob.tokens.access_token}` } });
+        out.push({ id: row.id, name: row.name, url: row.url, headers: { Authorization: `Bearer ${blob.tokens.access_token}` } });
       } catch {
         // Undecodable or refresh failed — skip; the user can reconnect.
       }
       continue;
     }
-    out.push({ name: row.name, url: row.url });
+    out.push({ id: row.id, name: row.name, url: row.url });
   }
   return out;
 }

@@ -62,6 +62,7 @@ import {
   estimateTokens, messagesTokens, needsCompaction, rollingSummary, mapReduceCompact, type Summarize,
 } from './context/compaction.js';
 import { GuidanceQueue } from './steering/guidance.js';
+import { CurrentPageTool, type CurrentPageProvider } from '../tools/current-page.js';
 
 /** One entry in the per-run orchestration decision trail (see /why). */
 export interface DecisionLogEntry {
@@ -620,6 +621,21 @@ export class Cascade extends EventEmitter {
   setMediaSink(sink: AssetSink): void {
     this.mediaSink = sink;
     this.registerMediaTools(this.workspacePath);
+  }
+
+  /**
+   * Let the agent read the page the user has open in the host's browser.
+   *
+   * Host-supplied because only a host WITH a browser can answer it — so the
+   * tool is simply absent in the CLI and in hosted runs, rather than present
+   * and always failing. Registered outside `enabledTools` for the same reason
+   * media tools are: that allowlist is a blast-radius control for tools that
+   * touch the machine, and reading a page the user already opened touches
+   * nothing. `disabledTools` still removes it.
+   */
+  setCurrentPageProvider(provider: CurrentPageProvider): void {
+    if ((this.config.tools?.disabledTools ?? []).includes('read_current_page')) return;
+    this.toolRegistry.register(new CurrentPageTool(provider));
   }
 
   private registerMediaTools(workspacePath: string): void {

@@ -747,22 +747,21 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid server id' }); return; }
     const userId = req.session!.userId;
 
-    // Per-tool selection. Sent as the complete deny list for this server so the
-    // write is idempotent — a toggle that raced another tab can't half-apply.
-    const hasTools = Array.isArray(req.body?.disabledTools);
+    // Per-tool selection is a single-tool DELTA, not a whole-list replacement.
+    // Two tabs open on the same connector each hold a snapshot of the list;
+    // sending the full list would make the later write silently erase the
+    // other tab's change (disable A, then disable B, and only B survives). A
+    // delta read-modify-written against the row as it is right now composes.
+    const tool = typeof req.body?.tool === 'string' ? req.body.tool.trim() : '';
+    const hasTool = tool.length > 0 && tool.length <= 200 && typeof req.body?.toolEnabled === 'boolean';
     const hasEnabled = typeof req.body?.enabled === 'boolean';
-    if (!hasTools && !hasEnabled) {
-      res.status(400).json({ error: 'enabled (boolean) or disabledTools (string[]) is required' });
+    if (!hasTool && !hasEnabled) {
+      res.status(400).json({ error: 'enabled (boolean), or tool (string) + toolEnabled (boolean), is required' });
       return;
     }
 
     let ok = true;
-    if (hasTools) {
-      const names = (req.body.disabledTools as unknown[])
-        .filter((t): t is string => typeof t === 'string' && t.length > 0 && t.length <= 200)
-        .slice(0, 500);
-      ok = store.setMcpServerDisabledTools(id, userId, names) && ok;
-    }
+    if (hasTool) ok = store.setMcpToolEnabled(id, userId, tool, req.body.toolEnabled) && ok;
     if (hasEnabled) ok = store.setMcpServerEnabled(id, userId, req.body.enabled) && ok;
 
     if (!ok) { res.status(404).json({ error: 'Not found' }); return; }
@@ -787,7 +786,11 @@ export function createApp(env: CloudEnv, store: CloudStore) {
       // and injected the same way it would be for a real run — otherwise
       // discovery would 401 on exactly the connectors this feature is for.
       const wired = await resolveRunMcpServers(store, userId, env.SESSION_SECRET);
-      const match = wired.find((s) => s.name === server.name);
+      // By id, never by display name. Two connections can legitimately share a
+      // name — the same connector added twice for two accounts — and matching
+      // on the name would discover the FIRST one's tools using the FIRST one's
+      // credentials, then present them under the second.
+      const match = wired.find((s) => s.id === server.id);
       if (!match) {
         res.json({ tools: [], disabledTools: server.disabledTools, error: 'This server is turned off.' });
         return;

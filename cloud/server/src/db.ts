@@ -1136,12 +1136,30 @@ export class CloudStore {
     return this.db.prepare('UPDATE mcp_servers SET oauth_json = ? WHERE id = ? AND user_id = ?').run(oauthJson, id, userId).changes > 0;
   }
 
-  /** Replace this server's per-tool deny list. Owner-scoped by the WHERE. */
-  setMcpServerDisabledTools(id: string, userId: string, disabledTools: string[]): boolean {
-    const json = JSON.stringify(Array.from(new Set(disabledTools.filter((t) => typeof t === 'string' && t))));
-    return this.db
-      .prepare('UPDATE mcp_servers SET disabled_tools_json = ? WHERE id = ? AND user_id = ?')
-      .run(json, id, userId).changes > 0;
+  /**
+   * Switch ONE tool on or off for a server.
+   *
+   * A delta, not a whole-list replacement: two tabs open on the same connector
+   * each hold their own snapshot, and replacing the list would let the later
+   * write silently erase the other's change. Read-modify-write inside a
+   * transaction so the row cannot move underneath the read.
+   */
+  setMcpToolEnabled(id: string, userId: string, tool: string, enabled: boolean): boolean {
+    const apply = this.db.transaction((): boolean => {
+      const row = this.db
+        .prepare('SELECT disabled_tools_json FROM mcp_servers WHERE id = ? AND user_id = ?')
+        .get(id, userId) as { disabled_tools_json: string | null } | undefined;
+      if (!row) return false;
+
+      const current = new Set(parseStringArray(row.disabled_tools_json));
+      if (enabled) current.delete(tool); else current.add(tool);
+
+      this.db
+        .prepare('UPDATE mcp_servers SET disabled_tools_json = ? WHERE id = ? AND user_id = ?')
+        .run(JSON.stringify(Array.from(current)), id, userId);
+      return true;
+    });
+    return apply();
   }
 
   /** Every tool this user has switched off, across all their servers — the

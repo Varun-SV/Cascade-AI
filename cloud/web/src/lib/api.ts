@@ -394,15 +394,19 @@ export function fetchMcpServerTools(id: string): Promise<{
   return json(fetch(`/api/mcp/servers/${encodeURIComponent(id)}/tools`, { credentials: 'include' }));
 }
 
-/** Replace the whole deny list for a server — idempotent, so two tabs racing
- *  a toggle can't half-apply. */
-export function setMcpServerDisabledTools(id: string, disabledTools: string[]): Promise<{ ok: boolean }> {
+/**
+ * Switch ONE tool on or off. A delta rather than the whole list, so two tabs
+ * open on the same connector compose instead of overwriting each other — each
+ * holds its own snapshot, and sending a full list would make the later write
+ * erase the earlier one's change.
+ */
+export function setMcpToolEnabled(id: string, tool: string, enabled: boolean): Promise<{ ok: boolean }> {
   return json(
     fetch(`/api/mcp/servers/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ disabledTools }),
+      body: JSON.stringify({ tool, toolEnabled: enabled }),
     }),
   );
 }

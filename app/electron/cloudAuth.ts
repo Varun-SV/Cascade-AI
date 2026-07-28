@@ -92,6 +92,7 @@ interface CoreExports {
   decryptSyncBlob: (blob: EncBlob, passphrase: string) => Promise<unknown>;
   connectMcpWithLoopbackOAuth: (opts: { serverUrl: string; store: McpFileStore; openUrl: (u: string) => void; clientName?: string }) => Promise<unknown>;
   FileMcpOAuthStore: new (path: string) => McpFileStore;
+  mcpServerPrefix: (serverName: string) => string;
   discoverMcpTools: (servers: unknown[]) => Promise<Array<{
     server: string;
     tools: Array<{ server: string; tool: string; name: string; description: string }>;
@@ -411,6 +412,15 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
       const match = (cfg.tools.mcpServers as Array<{ name: string; oauthStore?: string }>).find((s) => s.name === n);
       cfg.tools.mcpServers = (cfg.tools.mcpServers as Array<{ name: string }>).filter((s) => s.name !== n);
       cfg.tools.mcpTrusted = (cfg.tools.mcpTrusted ?? []).filter((x: string) => x !== n);
+      // Drop this server's per-tool selections too. They live in one global
+      // list here (unlike cloud, where they sit on the server row and vanish
+      // with it), so leaving them behind meant reconnecting the same connector
+      // later silently re-disabled tools the user had turned off in a previous
+      // life of that connection — with nothing on screen explaining why.
+      const prefix = core().mcpServerPrefix(n);
+      if (cfg.tools.disabledTools?.length) {
+        cfg.tools.disabledTools = (cfg.tools.disabledTools as string[]).filter((t) => !t.startsWith(prefix));
+      }
       if (match?.oauthStore) { try { new (core().FileMcpOAuthStore)(match.oauthStore).clear(); } catch { /* gone */ } }
       await hooks.persistConfig();
     }

@@ -268,11 +268,11 @@ describe('CloudStore', () => {
     expect(store.listMcpServers(alice.id).every((s) => s.disabledTools.length === 0)).toBe(true);
     expect(store.listDisabledMcpTools(alice.id)).toEqual([]);
 
-    expect(store.setMcpServerDisabledTools(gh.id, alice.id, ['mcp__github__delete_repo', 'mcp__github__merge_pr'])).toBe(true);
-    expect(store.setMcpServerDisabledTools(notion.id, alice.id, ['mcp__notion__delete_page'])).toBe(true);
+    expect(store.setMcpToolEnabled(gh.id, alice.id, 'mcp__github__delete_repo', false)).toBe(true);
+    expect(store.setMcpToolEnabled(gh.id, alice.id, 'mcp__github__merge_pr', false)).toBe(true);
+    expect(store.setMcpToolEnabled(notion.id, alice.id, 'mcp__notion__delete_page', false)).toBe(true);
 
-    const listed = store.listMcpServers(alice.id);
-    expect(listed.find((s) => s.id === gh.id)!.disabledTools).toEqual([
+    expect(store.listMcpServers(alice.id).find((s) => s.id === gh.id)!.disabledTools).toEqual([
       'mcp__github__delete_repo', 'mcp__github__merge_pr',
     ]);
 
@@ -285,17 +285,40 @@ describe('CloudStore', () => {
     expect(store.listDisabledMcpTools(bob.id)).toEqual([]);
     expect(store.listMcpServers(bob.id).find((s) => s.id === bobsGh.id)!.disabledTools).toEqual([]);
 
-    // Writes are owner-scoped and idempotent (the whole list is replaced, so two
-    // tabs racing a toggle converge instead of half-applying).
-    expect(store.setMcpServerDisabledTools(gh.id, bob.id, ['mcp__github__anything'])).toBe(false);
+    // Writes are owner-scoped.
+    expect(store.setMcpToolEnabled(gh.id, bob.id, 'mcp__github__anything', false)).toBe(false);
     expect(store.listDisabledMcpTools(alice.id)).toHaveLength(3);
 
-    expect(store.setMcpServerDisabledTools(gh.id, alice.id, [])).toBe(true);
-    expect(store.listDisabledMcpTools(alice.id)).toEqual(['mcp__notion__delete_page']);
+    // Re-enabling removes just that one.
+    expect(store.setMcpToolEnabled(gh.id, alice.id, 'mcp__github__delete_repo', true)).toBe(true);
+    expect(store.listDisabledMcpTools(alice.id).sort()).toEqual([
+      'mcp__github__merge_pr', 'mcp__notion__delete_page',
+    ]);
+
+    // Idempotent in both directions.
+    expect(store.setMcpToolEnabled(gh.id, alice.id, 'mcp__github__merge_pr', false)).toBe(true);
+    expect(store.listMcpServers(alice.id).find((s) => s.id === gh.id)!.disabledTools).toEqual(['mcp__github__merge_pr']);
+    expect(store.setMcpToolEnabled(gh.id, alice.id, 'mcp__github__never_set', true)).toBe(true);
 
     // Removing a server takes its selections with it.
     store.deleteMcpServer(notion.id, alice.id);
-    expect(store.listDisabledMcpTools(alice.id)).toEqual([]);
+    expect(store.listDisabledMcpTools(alice.id)).toEqual(['mcp__github__merge_pr']);
+  });
+
+  it('composes concurrent tool toggles instead of letting one overwrite the other', () => {
+    // Why this is a delta and not a whole-list write: two tabs open on the same
+    // connector each hold their own snapshot of the list. Sending the full list
+    // would make the later request silently erase the earlier one's change —
+    // disable A, then disable B from a stale snapshot, and only B survives.
+    const user = store.upsertUser({ provider: 'dev', providerId: 'tools-race', email: null, name: null, avatar: null });
+    const srv = store.addMcpServer({ userId: user.id, name: 'github', url: 'https://mcp.example.com/gh' });
+
+    // Both tabs started from the same empty state.
+    store.setMcpToolEnabled(srv.id, user.id, 'mcp__github__a', false);   // tab 1
+    store.setMcpToolEnabled(srv.id, user.id, 'mcp__github__b', false);   // tab 2
+
+    expect(store.listMcpServers(user.id).find((s) => s.id === srv.id)!.disabledTools.sort())
+      .toEqual(['mcp__github__a', 'mcp__github__b']);
   });
 
   it('exposes a working hybrid vector store over the tenant DB', () => {
