@@ -4,7 +4,12 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    include: ['src/**/*.test.ts', 'src/**/*.spec.ts', 'scripts/**/*.test.mjs'],
+    // app/electron holds a little pure logic (address-bar parsing) that is
+    // worth testing; the rest of that directory imports electron and is not.
+    include: [
+      'src/**/*.test.ts', 'src/**/*.spec.ts', 'scripts/**/*.test.mjs',
+      'app/electron/**/*.test.ts',
+    ],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],

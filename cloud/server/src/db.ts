@@ -1110,6 +1110,28 @@ export class CloudStore {
     return rows.map((r) => ({ id: r.id, name: r.name, url: r.url, headers_json: r.headers_json ?? null, oauth_json: r.oauth_json ?? null }));
   }
 
+  /**
+   * A display name no other server of this user already holds.
+   *
+   * Not cosmetic. Tools register as `mcp__<name>__<tool>`, so two connections
+   * sharing a name produce identical tool names: the registry keeps only one of
+   * each pair (silently making one connection unreachable), and a per-server
+   * selection would apply to both. Suffixing at insert keeps every registered
+   * name unambiguous, which is what the rest of the system already assumes.
+   */
+  private uniqueMcpServerName(userId: string, desired: string): string {
+    const taken = new Set(
+      (this.db.prepare('SELECT name FROM mcp_servers WHERE user_id = ?').all(userId) as Array<{ name: string }>)
+        .map((r) => r.name),
+    );
+    if (!taken.has(desired)) return desired;
+    for (let n = 2; n < 1000; n++) {
+      const candidate = `${desired} (${n})`;
+      if (!taken.has(candidate)) return candidate;
+    }
+    return `${desired} (${randomUUID().slice(0, 8)})`;
+  }
+
   addMcpServer(input: {
     userId: string; name: string; url: string;
     headers?: Record<string, string> | null; connectorId?: string | null; oauthJson?: string | null;
@@ -1117,7 +1139,7 @@ export class CloudStore {
     const row: DbMcpServerRow = {
       id: randomUUID(),
       user_id: input.userId,
-      name: input.name,
+      name: this.uniqueMcpServerName(input.userId, input.name),
       url: input.url,
       headers_json: input.headers && Object.keys(input.headers).length ? JSON.stringify(input.headers) : null,
       connector_id: input.connectorId ?? null,
@@ -1162,8 +1184,15 @@ export class CloudStore {
     return apply();
   }
 
-  /** Every tool this user has switched off, across all their servers — the
-   *  shape `tools.disabledTools` wants when wiring a run. */
+  /**
+   * Every tool this user has switched off, across all their servers — the shape
+   * `tools.disabledTools` wants when wiring a run.
+   *
+   * Flattening is safe because a user's server names are unique (see
+   * uniqueMcpServerName), so the `mcp__<name>__<tool>` keys from two different
+   * connections can never collide. Were names allowed to repeat, disabling a
+   * tool on one connection would disable it on its namesake too.
+   */
   listDisabledMcpTools(userId: string): string[] {
     const rows = this.db
       .prepare('SELECT disabled_tools_json FROM mcp_servers WHERE user_id = ?')

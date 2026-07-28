@@ -74,7 +74,7 @@ export function BrowserView() {
 
   useEffect(() => {
     if (!api) return;
-    api.onState((s) => {
+    const offState = api.onState((s) => {
       setState(s);
       if (!editingRef.current) setAddress(s.url);
     });
@@ -97,6 +97,7 @@ export function BrowserView() {
     window.addEventListener('resize', syncBounds);
 
     return () => {
+      offState();
       ro.disconnect();
       window.removeEventListener('resize', syncBounds);
       // Hide, don't close: the page and any session the user signed into

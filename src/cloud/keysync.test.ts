@@ -60,3 +60,63 @@ describe('keysync bundle', () => {
     expect(merged.budget.dailyBudgetUsd).toBe(5);
   });
 });
+
+// ── Per-tool MCP selections ───────────────────
+//
+// The bundle already carried MCP servers WITH their auth headers. Carrying the
+// servers but not the selections meant pushing settings to a second device
+// handed it the connector, its credentials, and every tool switched back on —
+// including a destructive one the user had deliberately turned off, with
+// nothing on screen saying so.
+
+describe('keysync — MCP per-tool selections', () => {
+  const server = (name: string) => ({ name, url: `https://${name}.example.com/mcp` });
+
+  it('carries the deny list alongside the servers', () => {
+    const bundle = gatherSyncBundle(cfg({
+      tools: { mcpServers: [server('github')], disabledTools: ['mcp__github__delete_repo'] },
+    } as Partial<CascadeConfig>));
+    expect(bundle.disabledTools).toEqual(['mcp__github__delete_repo']);
+  });
+
+  it('omits the field entirely when nothing is switched off', () => {
+    const bundle = gatherSyncBundle(cfg({
+      tools: { mcpServers: [server('github')] },
+    } as Partial<CascadeConfig>));
+    expect(bundle.disabledTools).toBeUndefined();
+  });
+
+  it('applies the incoming selection for a server the bundle brings', () => {
+    const local = cfg({ tools: { mcpServers: [server('github')], disabledTools: [] } } as Partial<CascadeConfig>);
+    const next = applySyncBundle(
+      { v: 1, mcpServers: [server('github')], disabledTools: ['mcp__github__delete_repo'] },
+      local,
+    );
+    expect(next.tools.disabledTools).toEqual(['mcp__github__delete_repo']);
+  });
+
+  it('lets a pull RE-ENABLE a tool, not only disable one', () => {
+    // "Push my settings" has to move in both directions, or the two devices
+    // silently diverge the moment someone turns something back on.
+    const local = cfg({
+      tools: { mcpServers: [server('github')], disabledTools: ['mcp__github__delete_repo'] },
+    } as Partial<CascadeConfig>);
+    const next = applySyncBundle({ v: 1, mcpServers: [server('github')], disabledTools: [] }, local);
+    expect(next.tools.disabledTools).toBeUndefined();
+  });
+
+  it('leaves selections alone for a server the bundle never mentions', () => {
+    // Syncing one connector must not silently re-arm another's tools.
+    const local = cfg({
+      tools: {
+        mcpServers: [server('github'), server('notion')],
+        disabledTools: ['mcp__github__delete_repo', 'mcp__notion__delete_page'],
+      },
+    } as Partial<CascadeConfig>);
+    const next = applySyncBundle(
+      { v: 1, mcpServers: [server('github')], disabledTools: [] },
+      local,
+    );
+    expect(next.tools.disabledTools).toEqual(['mcp__notion__delete_page']);
+  });
+});

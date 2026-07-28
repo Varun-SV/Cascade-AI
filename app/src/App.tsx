@@ -153,7 +153,8 @@ declare global {
         state(): Promise<DesktopBrowserState>;
         readPage(): Promise<{ url: string; title: string; text: string } | null>;
         openExternal(url: string): Promise<{ ok: boolean }>;
-        onState(cb: (s: DesktopBrowserState) => void): void;
+        /** Returns an unsubscribe — call it on unmount. */
+        onState(cb: (s: DesktopBrowserState) => void): () => void;
       };
     };
   }

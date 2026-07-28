@@ -20,6 +20,7 @@
 // whatever the user navigated to next.
 
 import { WebContentsView, ipcMain, shell, type BrowserWindow } from 'electron';
+import { normalizeUrl, toNavigable } from './url.js';
 
 /** Where the renderer wants the page drawn, in renderer CSS pixels. */
 interface Bounds { x: number; y: number; width: number; height: number }
@@ -35,32 +36,21 @@ let owner: BrowserWindow | null = null;
 let visible = false;
 let lastBounds: Bounds = { x: 0, y: 0, width: 0, height: 0 };
 
-/** Only http(s). A file:// or javascript: URL typed into the bar would be a
- *  local-file read / script injection dressed up as navigation. */
-function normalizeUrl(input: string): string | null {
-  const raw = input.trim();
-  if (!raw) return null;
-  const candidate = /^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : `https://${raw}`;
-  try {
-    const u = new URL(candidate);
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
-    return u.toString();
-  } catch {
-    return null;
-  }
-}
-
-/** A typed string that isn't a URL is a search, the way any browser behaves. */
-function toNavigable(input: string): string | null {
-  const raw = input.trim();
-  if (!raw) return null;
-  const looksLikeUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) || /^[\w-]+(\.[\w-]+)+(\/|$|:\d)/.test(raw);
-  if (looksLikeUrl) return normalizeUrl(raw);
-  return `https://duckduckgo.com/?q=${encodeURIComponent(raw)}`;
-}
-
 function ensureView(win: BrowserWindow): WebContentsView {
-  if (view && !view.webContents.isDestroyed()) return view;
+  if (view && !view.webContents.isDestroyed()) {
+    // On macOS, closing the last window leaves the app running and does NOT
+    // destroy a child WebContentsView. `app.on('activate')` then builds a NEW
+    // BrowserWindow, and returning early with the stale `owner` left every
+    // applyBounds() and state push bailing on `owner.isDestroyed()` — the
+    // reopened Browser tab was invisible and inert. Re-adopt the new window.
+    if (owner !== win) {
+      if (owner && !owner.isDestroyed() && owner.contentView.children.includes(view)) {
+        owner.contentView.removeChildView(view);
+      }
+      owner = win;
+    }
+    return view;
+  }
 
   view = new WebContentsView({
     webPreferences: {

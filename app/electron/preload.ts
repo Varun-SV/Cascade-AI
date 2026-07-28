@@ -237,8 +237,14 @@ contextBridge.exposeInMainWorld('cascade', {
     state: () => ipcRenderer.invoke('browser:state') as Promise<BrowserState>,
     readPage: () => ipcRenderer.invoke('browser:readPage') as Promise<{ url: string; title: string; text: string } | null>,
     openExternal: (url: string) => ipcRenderer.invoke('browser:openExternal', url) as Promise<{ ok: boolean }>,
-    onState: (cb: (s: BrowserState) => void) => {
-      ipcRenderer.on('browser:state', (_e, s: BrowserState) => cb(s));
+    // Returns its own unsubscribe. Without one the renderer had no way to
+    // detach: every switch to the Browser view added another listener that
+    // outlived the component, so navigation events fanned out to every
+    // unmounted copy and EventEmitter eventually warned about the pile-up.
+    onState: (cb: (s: BrowserState) => void): (() => void) => {
+      const handler = (_e: unknown, s: BrowserState) => cb(s);
+      ipcRenderer.on('browser:state', handler);
+      return () => { ipcRenderer.removeListener('browser:state', handler); };
     },
   },
 
