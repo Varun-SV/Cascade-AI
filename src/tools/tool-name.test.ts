@@ -50,6 +50,17 @@ describe('provider-safe tool names', () => {
     expect(sanitizeToolNameSegment('My  Server')).toBe(sanitizeToolNameSegment('My!@#Server'));
   });
 
+  it('trims separators in linear time, whatever the input shape', () => {
+    // The trim used to be /^_+|_+$/g, which backtracks quadratically on an
+    // interior run: `_+$` is retried from every position and fails the anchor
+    // each time. Tool names come off a remote MCP server, so the shape is not
+    // ours to guarantee even where the collapse above happens to prevent it.
+    const nasty = `a${'_'.repeat(60_000)}b`;
+    const started = Date.now();
+    expect(sanitizeToolNameSegment(nasty)).toBe('a_b');
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
   it('never yields an empty segment', () => {
     // A zero-length segment would make the assembled name ambiguous.
     expect(sanitizeToolNameSegment('')).toBe('_');

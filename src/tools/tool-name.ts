@@ -38,8 +38,22 @@ const LEGAL_NAME = /^[a-zA-Z0-9_-]+$/;
  * assembled name ambiguous.
  */
 export function sanitizeToolNameSegment(segment: string): string {
-  const cleaned = segment.replace(/[^a-zA-Z0-9-]+/g, '_').replace(/^_+|_+$/g, '');
-  return cleaned || '_';
+  const cleaned = segment.replace(/[^a-zA-Z0-9-]+/g, '_');
+  // Trim the separator off both ends with a scan, not `/^_+|_+$/g`. That
+  // pattern backtracks quadratically on an INTERIOR run — `a` + `_`x50000 + `b`
+  // took 2.7s — because `_+$` is retried from every position in the run and
+  // fails the anchor each time.
+  //
+  // It was not reachable here: `_` is outside the allowed class above, so the
+  // collapse already guarantees no run longer than one. But that safety rests
+  // on a non-obvious interaction between two adjacent lines, and would quietly
+  // disappear if the allowed class ever gained `_` or the trim moved. A scan
+  // costs nothing and doesn't need the argument.
+  let start = 0;
+  let end = cleaned.length;
+  while (start < end && cleaned[start] === '_') start++;
+  while (end > start && cleaned[end - 1] === '_') end--;
+  return cleaned.slice(start, end) || '_';
 }
 
 /** Provider-safe name for a tool exposed by an MCP server. */
