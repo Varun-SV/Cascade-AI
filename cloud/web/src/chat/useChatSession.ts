@@ -318,12 +318,20 @@ export function useChatSession(
         setKnowledgeNotice('These documents are very large. The full text was still included — to retrieve just the most relevant parts of files this big, add an embeddings-capable key (OpenAI, an OpenAI-compatible endpoint, or a local Ollama).');
       }
     };
+    // The server aborts every run on this connection the moment the socket
+    // drops (cloud/server/src/socket.ts) — it settles the escalation gate as
+    // 'skip' locally and never gets to emit `escalation:timeout` over a socket
+    // that is already gone. Without this, a dropped connection left the modal
+    // up for up to five minutes, its buttons emitting into a run that had
+    // already ended and an acknowledgement that could never arrive anyway.
+    const onDisconnect = () => setEscalations([]);
     socket.on('stream:token', onToken);
     socket.on('tier:status', onStatus);
     socket.on('run:why', onWhy);
     socket.on('plan:approval-required', onPlan);
     socket.on('escalation:decision-required', onEscalation);
     socket.on('escalation:timeout', onEscalationTimeout);
+    socket.on('disconnect', onDisconnect);
     socket.on('context:approval-required', onContextApproval);
     socket.on('context:compacted', onCompacted);
     socket.on('knowledge:retrieved', onKnowledge);
@@ -334,6 +342,7 @@ export function useChatSession(
       socket.off('plan:approval-required', onPlan);
       socket.off('escalation:decision-required', onEscalation);
       socket.off('escalation:timeout', onEscalationTimeout);
+      socket.off('disconnect', onDisconnect);
       socket.off('context:approval-required', onContextApproval);
       socket.off('context:compacted', onCompacted);
       socket.off('knowledge:retrieved', onKnowledge);

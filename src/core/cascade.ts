@@ -1573,6 +1573,20 @@ ${prompt}`
       t2Results = result.t2Results;
     }
 
+    // A budget stop inside a T3 worker (or a T2/T1 call the wave machinery
+    // wraps) is caught internally so one dead-end subtask can't crash the
+    // whole run — it comes back as a normal FAILED/PARTIAL result, same as any
+    // other tool error. That means it silently bypassed the dedicated handling
+    // below (`run:budget-exceeded`, `lastInterruptedRun` for `/continue`): a
+    // Moderate run could finish looking like an ordinary failure, and a
+    // Complex run could carry on through review/compilation with every further
+    // call guaranteed to fail. The router's own state is checked directly here
+    // — after the tier has returned, regardless of how deep in the hierarchy
+    // the cap was actually hit or how that layer chose to report it — and
+    // re-raised so the one correct handler for this class of stop still runs.
+    const budgetInfo = this.router.budgetExceededInfo();
+    if (budgetInfo) throw new CascadeRouter.BudgetExceededError(budgetInfo.reason);
+
     // The run stopped because a model was failing every call. T1 composes its
     // answer from the section summaries, which is why this used to surface as
     // "a series of system-level errors" — true, but not something anyone can

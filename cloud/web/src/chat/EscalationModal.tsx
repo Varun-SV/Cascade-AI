@@ -32,6 +32,13 @@ export default function EscalationModal({
   const [note, setNote] = useState('');
   const [now, setNow] = useState(() => Date.now());
 
+  // Reset per-request. `request` swaps to the next queued escalation without
+  // this component remounting, so without this the second, unrelated section
+  // opened with the first section's guidance already typed in and "Retry with
+  // guidance" already enabled — one click away from applying instructions
+  // meant for different work.
+  useEffect(() => { setNote(''); }, [request.requestId, request.sectionId]);
+
   // Anchored to when the request ARRIVED, not to when this effect last ran.
   // `onDismiss` is a fresh inline closure on every parent render, so with it in
   // the dependency list any unrelated re-render (a status event from another

@@ -181,6 +181,24 @@ export class CascadeRouter extends EventEmitter {
    */
   private budgetState: 'ok' | 'warned' | 'exceeded' = 'ok';
   private budgetExceededReason: string | undefined;
+
+  /**
+   * Whether the run/session budget is permanently tripped, and why.
+   *
+   * A tier or worker that catches `BudgetExceededError` internally (T3Worker
+   * does, so one dead-end subtask doesn't crash the whole run) absorbs the
+   * exception into a normal FAILED/PARTIAL result — the tier returns as if
+   * nothing unusual happened. That silently skips `Cascade.run()`'s dedicated
+   * budget-exceeded handling (the `run:budget-exceeded` event and
+   * `lastInterruptedRun` for `/continue`). This lets a caller check the
+   * router's own state directly after a tier returns, regardless of how that
+   * tier chose to report the error internally.
+   */
+  budgetExceededInfo(): { reason: string } | null {
+    if (this.runBudgetExceeded) return { reason: this.runBudgetExceededReason ?? 'Per-task budget exceeded.' };
+    if (this.budgetState === 'exceeded') return { reason: this.budgetExceededReason ?? 'Session budget exceeded.' };
+    return null;
+  }
   private tpmLimiter!: TpmLimiter;
   private localQueue!: LocalRequestQueue;
   private taskAnalyzer?: TaskAnalyzer;
