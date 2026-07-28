@@ -24,7 +24,7 @@ import { calculateCost } from '../utils/cost.js';
 import { T2Manager } from './tiers/t2-manager.js';
 import { MultimodalRegistry } from './multimodal/registry.js';
 import type { FeedbackSource } from './router/feedback-prior.js';
-import { buildMediaTools } from '../tools/generate-media.js';
+import { buildMediaTools, type AssetSink } from '../tools/generate-media.js';
 import { RunBreaker } from './run-breaker.js';
 import { T3Worker } from './tiers/t3-worker.js';
 import { ToolRegistry } from '../tools/registry.js';
@@ -93,6 +93,7 @@ export class Cascade extends EventEmitter {
   private router: CascadeRouter;
   private toolRegistry: ToolRegistry;
   private multimodal: MultimodalRegistry;
+  private mediaSink?: AssetSink;
   private mcpClient: McpClient;
   private codeIndex?: WorkspaceIndex;
   private config: CascadeConfig;
@@ -479,15 +480,42 @@ export class Cascade extends EventEmitter {
    * server stores a file row) constructs the tools itself via buildMediaTools
    * with its own sink.
    */
+  /**
+   * Replace where generated media is written.
+   *
+   * The default sink writes into the workspace, which is what a desktop or CLI
+   * run wants. A host with different storage — the cloud server keeps a file
+   * row plus bytes under the tenant's directory — supplies its own here, and
+   * the media tools are rebuilt around it. Re-registering by name replaces the
+   * existing tools rather than duplicating them.
+   */
+  setMediaSink(sink: AssetSink): void {
+    this.mediaSink = sink;
+    this.registerMediaTools(this.workspacePath);
+  }
+
   private registerMediaTools(workspacePath: string): void {
-    const allowlist = this.config.tools?.enabledTools;
-    const permitted = (name: string): boolean => !allowlist || allowlist.includes(name);
+    // Media tools register OUTSIDE `enabledTools`, the same way MCP tools do.
+    //
+    // That allowlist exists to keep shell/file/git genuinely absent from a
+    // hosted run — it is a blast-radius control for tools that touch the
+    // machine. Generation tools touch nothing: they call an API the user
+    // already configured a key for and hand the bytes to a host-supplied sink.
+    // Gating them on the same list meant a cloud run (allowlist:
+    // ['web_search','web_fetch']) silently had no image tool, so asking for a
+    // picture got "I cannot create images" from a model that was telling the
+    // truth about the tools it had been given.
+    //
+    // An explicit opt-out remains available: naming a media tool in
+    // `disabledTools` removes it.
+    const denied = new Set(this.config.tools?.disabledTools ?? []);
+    const permitted = (name: string): boolean => !denied.has(name);
 
     const tools = buildMediaTools(
       {
         registry: this.multimodal,
         lookupProvider: (provider) => (this.config.providers ?? []).find((p) => p.type === provider),
-        sink: async (asset) => {
+        sink: this.mediaSink ?? (async (asset) => {
           const fsp = await import('node:fs/promises');
           const nodePath = await import('node:path');
           const dir = nodePath.join(workspacePath, 'generated');
@@ -495,7 +523,7 @@ export class Cascade extends EventEmitter {
           const dest = nodePath.join(dir, asset.filename);
           await fsp.writeFile(dest, asset.data);
           return nodePath.relative(workspacePath, dest);
-        },
+        }),
       },
       async (p) => {
         const fsp = await import('node:fs/promises');

@@ -93,13 +93,29 @@ describe('MultimodalRegistry', () => {
     expect(geminiOnly.select('transcription')).toBeNull();
   });
 
-  it('never offers a capability Cascade cannot actually call', () => {
-    // Veo is in the catalogue so `describe` can be honest about it, but it must
-    // never be selected — a tool that always fails is worse than none.
+  it('offers video now that the polling path exists', () => {
     const r = new MultimodalRegistry(['gemini']);
-    expect(r.select('video')).toBeNull();
-    expect(r.availableModalities()).not.toContain('video');
+    const pick = r.select('video')!;
+    expect(pick.capability.modelId).toBe('veo-3.1-generate-001');
+    // The long-running shape is recorded on the capability so the executor can
+    // switch on it rather than guessing from the model name.
+    expect(pick.capability.api).toBe('gemini-predict-lro');
+    expect(r.availableModalities()).toContain('video');
+  });
+
+  it('still never offers a capability marked unsupported', () => {
+    // The guard stays even with the catalogue currently empty of them — it is
+    // what keeps a future not-yet-wired entry from becoming a failing tool.
+    const r = new MultimodalRegistry(['openai', 'gemini']);
     expect(r.usable().every((c) => !c.unsupported)).toBe(true);
+  });
+
+  it('prices video per second, so the caller can multiply by duration', () => {
+    const r = new MultimodalRegistry(['gemini']);
+    const cost = r.select('video')!.cost!;
+    expect(cost.unit).toBe('per second of video');
+    // An 8-second clip is 8x this — the reason the tool clamps duration.
+    expect(cost.amount).toBeGreaterThan(0);
   });
 
   it('prefers a ranked model over an unranked one', () => {
@@ -140,6 +156,5 @@ describe('MultimodalRegistry', () => {
     // The two most commonly assumed-present capabilities. A planner that
     // assumes either writes a step that can never run.
     expect(described).toContain('music: no supported provider');
-    expect(described).toContain('not callable');
   });
 });

@@ -19,6 +19,7 @@ import type { MultimodalRegistry } from '../core/multimodal/registry.js';
 import {
   generateImage,
   generateSpeech,
+  generateVideo,
   transcribeAudio,
   type GeneratedAsset,
 } from '../core/multimodal/generate.js';
@@ -45,7 +46,7 @@ type Resolved =
 /** Shared: resolve capability + config, or explain precisely what's missing. */
 function resolve(
   deps: Deps,
-  modality: 'image' | 'speech' | 'transcription',
+  modality: 'image' | 'speech' | 'transcription' | 'video',
   preferModel?: string,
 ): Resolved {
   const selected = deps.registry.select(modality, preferModel ? { preferModel } : {});
@@ -148,6 +149,68 @@ export class GenerateSpeechTool extends BaseTool {
   }
 }
 
+// ── Video ─────────────────────────────────────
+
+/** Clip length used when the caller doesn't say. Kept short — see the cost note. */
+const DEFAULT_VIDEO_SECONDS = 5;
+/** Hard ceiling regardless of what the model asks for. */
+const MAX_VIDEO_SECONDS = 8;
+
+export class GenerateVideoTool extends BaseTool {
+  readonly name = 'generate_video';
+  // The price is in the description on purpose. Video is ~1000x the cost of an
+  // image per call, it is billed per SECOND, and the model choosing the
+  // duration is the one deciding the bill — so the number has to be where the
+  // model reads before calling, not only in the result afterwards.
+  readonly description =
+    'Generate a short video clip from a text description. EXPENSIVE and slow: billed per second of output (about $0.40/second, so a 5-second clip costs roughly $2) and takes 1-3 minutes. Only use when the user explicitly asks for a video, and prefer the shortest duration that satisfies the request.';
+  readonly inputSchema = {
+    type: 'object',
+    properties: {
+      prompt: { type: 'string', description: 'What the video should show: subject, action, camera movement, style.' },
+      seconds: { type: 'number', description: `Clip length, 1-${MAX_VIDEO_SECONDS} seconds (default ${DEFAULT_VIDEO_SECONDS}). Billed per second — keep it short.` },
+      aspectRatio: { type: 'string', description: 'Frame shape: "16:9" (default) or "9:16" for vertical.' },
+      model: { type: 'string', description: 'Optional: force a specific video model.' },
+    },
+    required: ['prompt'],
+  };
+
+  constructor(private deps: Deps) { super(); }
+
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
+    const prompt = String(input['prompt'] ?? '').trim();
+    if (!prompt) return 'Provide a "prompt" describing the video.';
+
+    const r = resolve(this.deps, 'video', input['model'] ? String(input['model']) : undefined);
+    if (!r.ok) return r.error;
+
+    // Clamp rather than reject: a model asking for 30 seconds has misjudged the
+    // cost, and silently spending $12 to teach it that would be the wrong
+    // lesson to charge the user for.
+    const asked = typeof input['seconds'] === 'number' ? input['seconds'] : DEFAULT_VIDEO_SECONDS;
+    const seconds = Math.max(1, Math.min(MAX_VIDEO_SECONDS, Math.round(asked)));
+
+    const asset = await generateVideo(
+      r.selected.capability, r.cfg,
+      {
+        prompt,
+        seconds,
+        ...(input['aspectRatio'] ? { aspectRatio: String(input['aspectRatio']) } : {}),
+      },
+      options.signal,
+      // Progress goes to the run log so a two-minute wait doesn't look like a
+      // hang — the single most likely reason someone kills a working render.
+      (note) => options.onProgress?.(note),
+    );
+    const location = await this.deps.sink(asset);
+
+    const unit = r.selected.cost;
+    const estimate = unit ? ` Estimated cost: $${(unit.amount * seconds).toFixed(2)} (${seconds}s x ${unit.label}).` : '';
+    const clamped = seconds !== Math.round(asked) ? ` Duration was clamped to ${seconds}s (max ${MAX_VIDEO_SECONDS}).` : '';
+    return `Video generated and saved to ${location}.\nModel: ${asset.modelId}.${estimate}${clamped}`;
+  }
+}
+
 // ── Transcription ─────────────────────────────
 
 export class TranscribeAudioTool extends BaseTool {
@@ -210,6 +273,7 @@ export function buildMediaTools(
   const modalities = new Set(deps.registry.availableModalities());
   if (modalities.has('image')) tools.push(new GenerateImageTool(deps));
   if (modalities.has('speech')) tools.push(new GenerateSpeechTool(deps));
+  if (modalities.has('video')) tools.push(new GenerateVideoTool(deps));
   if (modalities.has('transcription') && readFile) tools.push(new TranscribeAudioTool(deps, readFile));
   return tools;
 }

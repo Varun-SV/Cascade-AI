@@ -5,6 +5,41 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.52.0 - 2026-07-28
+
+### Fixed
+- **Image generation was never available in a hosted run.** Asking cascadeai.in
+  for a picture got *"I cannot directly create images. My capabilities are
+  limited to generating text"* — and the model was telling the truth. A cloud
+  run sets `enabledTools: ['web_search','web_fetch']`, and 0.51.0 gated the new
+  media tools on that same allowlist, so `generate_image` was never registered.
+
+  That allowlist exists to keep shell/file/git genuinely absent from a hosted
+  run — it is a blast-radius control for tools that touch the machine.
+  Generation tools touch nothing: they call an API you already configured a key
+  for. They now register outside it, the same way MCP tools already did. A new
+  `tools.disabledTools` list is the explicit off-switch, and it reaches tools
+  registered outside the allowlist too — previously there was no way to turn
+  those off at all.
+
+- **Generated media is stored properly in the cloud.** The default sink writes
+  into the workspace, which is meaningless in a hosted run — the container is
+  ephemeral and you have no filesystem to look at. Cloud runs now store the
+  bytes as a real file row, quota-checked *before* writing, and emit a
+  `file:created` event so the browser can show it.
+
+### Added
+- **Video generation (Veo).** Submit → poll → fetch, with progress reported
+  while it runs: a silent two-minute wait is indistinguishable from a hang, and
+  killing a working render is the likeliest consequence.
+
+  Video is priced **per second** (~$0.40), which makes it roughly a thousand
+  times the cost of an image per call and puts the model in charge of the bill
+  by choosing a duration. So the price is stated in the tool description where
+  the model reads *before* calling, duration is clamped to 8 seconds regardless
+  of what is asked for, and the result reports the estimated cost. Cancelling
+  the run stops the polling loop rather than paying out a clip nobody sees.
+
 ## 0.51.0 - 2026-07-28
 
 ### Fixed
