@@ -22,6 +22,7 @@ import type {
 } from '../types.js';
 import { MODELS } from '../constants.js';
 import { BaseProvider } from './base.js';
+import { withResolvedPricing } from '../core/router/pricing.js';
 import { isChatModel } from './model-filter.js';
 
 export class GeminiProvider extends BaseProvider {
@@ -162,7 +163,10 @@ export class GeminiProvider extends BaseProvider {
         );
         if (known) return known;
 
-        return {
+        // Price from the dataset. A model it doesn't cover (a fresh preview id,
+        // say) comes back flagged `pricingUnknown` rather than $0 — the exact
+        // path that made an unpriced Gemini preview model report as free.
+        return withResolvedPricing({
           id,
           name: m.displayName || id,
           provider: 'gemini' as const,
@@ -174,7 +178,7 @@ export class GeminiProvider extends BaseProvider {
           maxOutputTokens: m.outputTokenLimit || 8_000,
           supportsStreaming: true,
           isLocal: false,
-        };
+        });
       });
     } catch {
       return Object.values(MODELS).filter((m) => m.provider === 'gemini');

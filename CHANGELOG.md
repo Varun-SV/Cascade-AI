@@ -5,6 +5,70 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.49.0 - 2026-07-27
+
+### Fixed
+- **A model with no known price is no longer reported as free.** Cascade wrote
+  `$0` whenever it couldn't find a price — for a model the provider had just
+  started serving, for a `provider:model` override it didn't recognise, for a
+  freshly released preview id. Nothing downstream could tell that `$0` apart
+  from the real `$0` of a local Ollama model, so three things went wrong at
+  once: your cost readout showed **$0.00 for calls that cost real money**; a
+  per-run or session **cost cap could never fire** on those models, because
+  their spend never reached the counter; and the value-based routing scored a
+  free-looking model as maximally cost-efficient, so an unpriced model was
+  *preferred* on cost grounds. Unknown prices are now tracked as unknown:
+  they read **"cost not tracked"** instead of `$0.00`, they're counted
+  separately from your spend total, and the router tells you when a cost budget
+  is in play but a model's spend can't be counted toward it. Genuinely free
+  local models still show as free, because for them the zero is real.
+
+### Added
+- **A real pricing dataset**, keyed by model **and** provider (and region), so
+  the same model can cost what it actually costs on each. It records input and
+  output rates per million tokens, cached-input rates, reasoning/thinking token
+  rates, **long-context tiers**, batch discounts, and per-image / per-second /
+  per-character / per-audio-minute rates for image, video, speech and
+  transcription models. Every entry carries the currency, the date it was read,
+  and the URL it came from.
+
+  The tiers matter more than they sound: Gemini 3.1 Pro is $2/$12 per 1M up to
+  a 200K-token prompt and $4/$18 above it, and GPT-5.4/5.5 step up at 272K. A
+  single flat input/output pair — which is all Cascade could store before — is
+  wrong on one side of that line no matter which number it keeps. So is
+  pretending a model costs the same everywhere: gpt-4o-mini is $0.15/$0.60 per
+  1M on OpenAI and $0.165/$0.66 on Azure, and gpt-5.4 costs 10% more on an
+  Azure `us`/`eu` deployment than on a global one.
+
+- **A local-vs-hosted toggle for `ollama` and `openai-compatible` providers.**
+  Set `"local": true` on a provider to declare "this endpoint runs on hardware
+  I already pay for, so inference is genuinely free"; set `"local": false` for
+  a hosted endpoint. Unset, it's inferred sensibly: Ollama is local, and an
+  OpenAI-compatible endpoint is local when its `baseUrl` points at
+  localhost/your LAN (llama.cpp, LM Studio, vLLM) and hosted otherwise
+  (Together, Groq, Fireworks). This is what lets Cascade say `$0` and mean it —
+  a *hosted* endpoint with no known price now reports "cost not tracked".
+
+- **The desktop status bar marks an incomplete total.** When a run used a model
+  with no known price, the session cost reads `$0.0123+` rather than a bare
+  figure, and hovering explains which spend is missing and why it doesn't count
+  toward a cost budget. A confidently-rendered number is exactly how real spend
+  came to be read as free.
+
+- **`cascade models` reports where prices disagree.** When the live source
+  (OpenRouter) quotes a different price than the bundled dataset, the live
+  number is used — it's fresher by construction — but the mismatch is shown
+  rather than silently swallowed, because it's the best available signal that
+  the committed prices need a refresh. Run `node scripts/refresh-pricing.mjs`
+  to update them.
+
+### Changed
+- **Bundled catalogue prices are now taken from the pricing dataset**, which
+  corrects several that had drifted: Claude Opus 4.5/4.8 were priced at $15/$75
+  per 1M against a published $5/$25 (3× too high), and GPT-4o at $5/$15 against
+  a published $2.50/$10 (2× too high). Cost-based routing and every spend
+  readout were skewed accordingly.
+
 ## 0.48.2 - 2026-07-27
 
 ### Changed

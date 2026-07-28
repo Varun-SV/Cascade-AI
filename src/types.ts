@@ -23,6 +23,21 @@ export interface ModelInfo {
   maxOutputTokens: number;
   supportsStreaming: boolean;
   isLocal: boolean;
+  /**
+   * True when Cascade has NO price for this model — the cost fields above are
+   * 0 only because there is nothing to put in them.
+   *
+   * This exists because 0 is ambiguous: a local Ollama model genuinely costs
+   * nothing, while a newly-released cloud preview model that isn't in the
+   * pricing dataset costs real money we can't quote. Treating the second like
+   * the first made unknown-priced models report $0.00 spend, put them outside
+   * the reach of the per-run cost cap, and gave them the best possible score in
+   * the value-based rankers. Anything that reads the cost fields must consult
+   * this flag first (see `isPricingUnknown` in core/router/pricing.ts).
+   *
+   * Never set on local models — their $0 is real.
+   */
+  pricingUnknown?: boolean;
   minSizeB?: number;              // For local models: param count in billions
   /** Tool-use capability. False for Ollama; true for all cloud providers. */
   supportsToolUse?: boolean;
@@ -53,6 +68,25 @@ export interface ProviderConfig {
   authToken?: string;
   /** Where an adopted credential came from, e.g. "Claude Code". Informational. */
   credentialSource?: string;
+  /**
+   * Local-vs-hosted toggle. `true` declares "this endpoint runs on hardware I
+   * already pay for, so inference genuinely costs $0"; `false` declares it is a
+   * paid hosted endpoint, so an unpriced model there reports "cost not tracked"
+   * rather than free.
+   *
+   * Only meaningful for `ollama` and `openai-compatible`, which can each point
+   * at either. Left unset, it defaults sensibly: ollama ⇒ local, and
+   * openai-compatible ⇒ local when `baseUrl` is loopback/LAN (llama.cpp, LM
+   * Studio, vLLM on your own box) and hosted otherwise (Together, Groq, …).
+   * See `isLocalEndpoint` in core/router/pricing.ts.
+   */
+  local?: boolean;
+  /**
+   * Deployment region for providers whose price varies by region (Azure lists
+   * different rates for `global`, `us` and `eu` deployments of the same model).
+   * Matched against the pricing dataset's per-region entries.
+   */
+  region?: string;
 }
 
 export interface StreamChunk {
@@ -66,6 +100,13 @@ export interface TokenUsage {
   outputTokens: number;
   totalTokens: number;
   estimatedCostUsd: number;
+  /**
+   * True when `estimatedCostUsd` is 0 because the model's price is UNKNOWN, not
+   * because the call was free. Cost readouts must say "not tracked" for these
+   * rather than "$0.00", and budget code must know the spend it just recorded
+   * is an undercount.
+   */
+  costUnknown?: boolean;
 }
 
 export interface GenerateOptions {

@@ -1,0 +1,1502 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-27",
+  "defaultCurrency": "USD",
+  "note": "Authoritative offline baseline for model pricing, keyed by model x provider (x region). All token rates are per 1,000,000 tokens in the entry currency. A live source (see live-data.ts) may override an entry when it is fresher; disagreements are recorded rather than silently accepted. Every entry must carry currency, asOf, source and provenance — a model with NO entry is priced \"unknown\", never $0. Regenerate with scripts/refresh-pricing.mjs.",
+  "provenanceLegend": {
+    "vendor-pricing-page": "Read directly from the vendor's own published pricing page (see `source`).",
+    "litellm-catalog": "From BerriAI/litellm model_prices_and_context_window.json, which cites the vendor page per entry. Used where the vendor page refused automated access.",
+    "seed-approximation": "NOT sourced — an approximation. No entry in this file currently uses this value; it exists so an approximation can never masquerade as a measured price."
+  },
+  "entries": [
+    {
+      "model": "claude-opus-5",
+      "provider": "anthropic",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 5,
+          "outputPer1m": 25,
+          "cachedInputPer1m": 0.5,
+          "cacheWritePer1m": 6.25,
+          "reasoningOutputPer1m": 25
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1000000
+    },
+    {
+      "model": "claude-opus-4-8",
+      "provider": "anthropic",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 5,
+          "outputPer1m": 25,
+          "cachedInputPer1m": 0.5,
+          "cacheWritePer1m": 6.25,
+          "reasoningOutputPer1m": 25
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1000000
+    },
+    {
+      "model": "claude-opus-4-7",
+      "provider": "anthropic",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 5,
+          "outputPer1m": 25,
+          "cachedInputPer1m": 0.5,
+          "cacheWritePer1m": 6.25,
+          "reasoningOutputPer1m": 25
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1000000
+    },
+    {
+      "model": "claude-opus-4-6",
+      "provider": "anthropic",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 5,
+          "outputPer1m": 25,
+          "cachedInputPer1m": 0.5,
+          "cacheWritePer1m": 6.25,
+          "reasoningOutputPer1m": 25
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1000000
+    },
+    {
+      "model": "claude-opus-4-5",
+      "provider": "anthropic",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 5,
+          "outputPer1m": 25,
+          "cachedInputPer1m": 0.5,
+          "cacheWritePer1m": 6.25,
+          "reasoningOutputPer1m": 25
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 200000
+    },
+    {
+      "model": "claude-opus-4-1",
+      "provider": "anthropic",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 15,
+          "outputPer1m": 75,
+          "cachedInputPer1m": 1.5,
+          "cacheWritePer1m": 18.75,
+          "reasoningOutputPer1m": 75
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 200000,
+      "notes": "Deprecated by Anthropic; priced for historical/cost-reporting accuracy."
+    },
+    {
+      "model": "claude-opus-4",
+      "provider": "anthropic",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 15,
+          "outputPer1m": 75,
+          "cachedInputPer1m": 1.5,
+          "cacheWritePer1m": 18.75,
+          "reasoningOutputPer1m": 75
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 200000,
+      "notes": "Retired except on Google Cloud; priced for historical/cost-reporting accuracy."
+    },
+    {
+      "model": "claude-sonnet-5",
+      "provider": "anthropic",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 2,
+          "outputPer1m": 10,
+          "cachedInputPer1m": 0.2,
+          "cacheWritePer1m": 2.5,
+          "reasoningOutputPer1m": 10
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1000000,
+      "notes": "Introductory pricing through 2026-08-31. Standard pricing of $3/$15 per 1M takes effect 2026-09-01 — re-check this entry then."
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "provider": "anthropic",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 3,
+          "outputPer1m": 15,
+          "cachedInputPer1m": 0.3,
+          "cacheWritePer1m": 3.75,
+          "reasoningOutputPer1m": 15
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1000000
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "provider": "anthropic",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "maxInputTokens": 200000,
+          "inputPer1m": 3,
+          "outputPer1m": 15,
+          "cachedInputPer1m": 0.3,
+          "cacheWritePer1m": 3.75,
+          "reasoningOutputPer1m": 15
+        },
+        {
+          "inputPer1m": 6,
+          "outputPer1m": 22.5,
+          "cachedInputPer1m": 0.6,
+          "cacheWritePer1m": 7.5,
+          "reasoningOutputPer1m": 22.5
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 200000,
+      "notes": "Long-context (>200K) premium applies to the 1M-context beta. Base rates from the Anthropic pricing page; the >200K tier from the litellm catalog (Anthropic does not tabulate it on the pricing page)."
+    },
+    {
+      "model": "claude-sonnet-4",
+      "provider": "anthropic",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 3,
+          "outputPer1m": 15,
+          "cachedInputPer1m": 0.3,
+          "cacheWritePer1m": 3.75,
+          "reasoningOutputPer1m": 15
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 200000
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "provider": "anthropic",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 1,
+          "outputPer1m": 5,
+          "cachedInputPer1m": 0.1,
+          "cacheWritePer1m": 1.25,
+          "reasoningOutputPer1m": 5
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 200000
+    },
+    {
+      "model": "claude-haiku-3-5",
+      "provider": "anthropic",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 0.8,
+          "outputPer1m": 4,
+          "cachedInputPer1m": 0.08,
+          "cacheWritePer1m": 1,
+          "reasoningOutputPer1m": 4
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 200000
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "provider": "openai",
+      "aliases": [
+        "gpt-5.6"
+      ],
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "maxInputTokens": 272000,
+          "inputPer1m": 5,
+          "outputPer1m": 30,
+          "cachedInputPer1m": 0.5,
+          "cacheWritePer1m": 6.25
+        },
+        {
+          "inputPer1m": 10,
+          "outputPer1m": 45,
+          "cachedInputPer1m": 1,
+          "cacheWritePer1m": 12.5
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1050000
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "provider": "openai",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "maxInputTokens": 272000,
+          "inputPer1m": 2.5,
+          "outputPer1m": 15,
+          "cachedInputPer1m": 0.25,
+          "cacheWritePer1m": 3.125
+        },
+        {
+          "inputPer1m": 5,
+          "outputPer1m": 22.5,
+          "cachedInputPer1m": 0.5,
+          "cacheWritePer1m": 6.25
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1050000
+    },
+    {
+      "model": "gpt-5.6-luna",
+      "provider": "openai",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "maxInputTokens": 272000,
+          "inputPer1m": 1,
+          "outputPer1m": 6,
+          "cachedInputPer1m": 0.1,
+          "cacheWritePer1m": 1.25
+        },
+        {
+          "inputPer1m": 2,
+          "outputPer1m": 9,
+          "cachedInputPer1m": 0.2,
+          "cacheWritePer1m": 2.5
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1050000
+    },
+    {
+      "model": "gpt-5.5",
+      "provider": "openai",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "maxInputTokens": 272000,
+          "inputPer1m": 5,
+          "outputPer1m": 30,
+          "cachedInputPer1m": 0.5
+        },
+        {
+          "inputPer1m": 10,
+          "outputPer1m": 45,
+          "cachedInputPer1m": 1
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1050000
+    },
+    {
+      "model": "gpt-5.4",
+      "provider": "openai",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "maxInputTokens": 272000,
+          "inputPer1m": 2.5,
+          "outputPer1m": 15,
+          "cachedInputPer1m": 0.25
+        },
+        {
+          "inputPer1m": 5,
+          "outputPer1m": 22.5,
+          "cachedInputPer1m": 0.5
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1050000
+    },
+    {
+      "model": "gpt-5.4-mini",
+      "provider": "openai",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 0.75,
+          "outputPer1m": 4.5,
+          "cachedInputPer1m": 0.075
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1050000
+    },
+    {
+      "model": "gpt-5",
+      "provider": "openai",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 1.25,
+          "outputPer1m": 10,
+          "cachedInputPer1m": 0.125
+        }
+      ],
+      "contextWindow": 272000
+    },
+    {
+      "model": "gpt-5-mini",
+      "provider": "openai",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 0.25,
+          "outputPer1m": 2,
+          "cachedInputPer1m": 0.025
+        }
+      ],
+      "contextWindow": 272000
+    },
+    {
+      "model": "gpt-5-nano",
+      "provider": "openai",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 0.05,
+          "outputPer1m": 0.4,
+          "cachedInputPer1m": 0.005
+        }
+      ],
+      "contextWindow": 272000
+    },
+    {
+      "model": "gpt-4.1",
+      "provider": "openai",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 2,
+          "outputPer1m": 8,
+          "cachedInputPer1m": 0.5
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1047576
+    },
+    {
+      "model": "gpt-4.1-mini",
+      "provider": "openai",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 0.4,
+          "outputPer1m": 1.6,
+          "cachedInputPer1m": 0.1
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1047576
+    },
+    {
+      "model": "gpt-4.1-nano",
+      "provider": "openai",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 0.1,
+          "outputPer1m": 0.4,
+          "cachedInputPer1m": 0.025
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1047576
+    },
+    {
+      "model": "gpt-4o",
+      "provider": "openai",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 2.5,
+          "outputPer1m": 10,
+          "cachedInputPer1m": 1.25
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 128000
+    },
+    {
+      "model": "gpt-4o-mini",
+      "provider": "openai",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 0.15,
+          "outputPer1m": 0.6,
+          "cachedInputPer1m": 0.075
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 128000
+    },
+    {
+      "model": "gpt-5.5",
+      "provider": "azure",
+      "region": "global",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "maxInputTokens": 272000,
+          "inputPer1m": 5,
+          "outputPer1m": 30,
+          "cachedInputPer1m": 0.5
+        },
+        {
+          "inputPer1m": 10,
+          "outputPer1m": 45,
+          "cachedInputPer1m": 1
+        }
+      ],
+      "contextWindow": 1050000
+    },
+    {
+      "model": "gpt-5.5",
+      "provider": "azure",
+      "region": "us",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "maxInputTokens": 272000,
+          "inputPer1m": 5.5,
+          "outputPer1m": 33,
+          "cachedInputPer1m": 0.55
+        },
+        {
+          "inputPer1m": 11,
+          "outputPer1m": 49.5,
+          "cachedInputPer1m": 1.1
+        }
+      ],
+      "contextWindow": 1050000
+    },
+    {
+      "model": "gpt-5.5",
+      "provider": "azure",
+      "region": "eu",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "maxInputTokens": 272000,
+          "inputPer1m": 5.5,
+          "outputPer1m": 33,
+          "cachedInputPer1m": 0.55
+        },
+        {
+          "inputPer1m": 11,
+          "outputPer1m": 49.5,
+          "cachedInputPer1m": 1.1
+        }
+      ],
+      "contextWindow": 1050000
+    },
+    {
+      "model": "gpt-5.4",
+      "provider": "azure",
+      "region": "global",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "maxInputTokens": 272000,
+          "inputPer1m": 2.5,
+          "outputPer1m": 15,
+          "cachedInputPer1m": 0.25
+        },
+        {
+          "inputPer1m": 5,
+          "outputPer1m": 22.5,
+          "cachedInputPer1m": 0.5
+        }
+      ],
+      "contextWindow": 1050000
+    },
+    {
+      "model": "gpt-5.4",
+      "provider": "azure",
+      "region": "us",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 2.75,
+          "outputPer1m": 16.5,
+          "cachedInputPer1m": 0.28
+        }
+      ],
+      "contextWindow": 1050000
+    },
+    {
+      "model": "gpt-5.4",
+      "provider": "azure",
+      "region": "eu",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 2.75,
+          "outputPer1m": 16.5,
+          "cachedInputPer1m": 0.28
+        }
+      ],
+      "contextWindow": 1050000
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "provider": "azure",
+      "region": "global",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "maxInputTokens": 272000,
+          "inputPer1m": 2.5,
+          "outputPer1m": 15,
+          "cachedInputPer1m": 0.25
+        },
+        {
+          "inputPer1m": 5,
+          "outputPer1m": 22.5,
+          "cachedInputPer1m": 0.5
+        }
+      ],
+      "contextWindow": 1050000
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "provider": "azure",
+      "region": "eu",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "maxInputTokens": 272000,
+          "inputPer1m": 2.75,
+          "outputPer1m": 16.5,
+          "cachedInputPer1m": 0.275
+        },
+        {
+          "inputPer1m": 5.5,
+          "outputPer1m": 24.75,
+          "cachedInputPer1m": 0.55
+        }
+      ],
+      "contextWindow": 1050000
+    },
+    {
+      "model": "gpt-5",
+      "provider": "azure",
+      "region": "global",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 1.25,
+          "outputPer1m": 10,
+          "cachedInputPer1m": 0.125
+        }
+      ],
+      "contextWindow": 272000
+    },
+    {
+      "model": "gpt-5-mini",
+      "provider": "azure",
+      "region": "global",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 0.25,
+          "outputPer1m": 2,
+          "cachedInputPer1m": 0.025
+        }
+      ],
+      "contextWindow": 272000
+    },
+    {
+      "model": "gpt-5-nano",
+      "provider": "azure",
+      "region": "global",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 0.05,
+          "outputPer1m": 0.4,
+          "cachedInputPer1m": 0.005
+        }
+      ],
+      "contextWindow": 272000
+    },
+    {
+      "model": "gpt-4.1",
+      "provider": "azure",
+      "region": "global",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 2,
+          "outputPer1m": 8,
+          "cachedInputPer1m": 0.5
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1047576
+    },
+    {
+      "model": "gpt-4o",
+      "provider": "azure",
+      "region": "global",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 2.5,
+          "outputPer1m": 10,
+          "cachedInputPer1m": 1.25
+        }
+      ],
+      "contextWindow": 128000
+    },
+    {
+      "model": "gpt-4o-mini",
+      "provider": "azure",
+      "region": "global",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 0.165,
+          "outputPer1m": 0.66,
+          "cachedInputPer1m": 0.075
+        }
+      ],
+      "contextWindow": 128000,
+      "notes": "Azure charges $0.165/$0.66 per 1M for gpt-4o-mini vs $0.15/$0.60 on OpenAI — same model, different price."
+    },
+    {
+      "model": "gemini-3.1-pro",
+      "provider": "gemini",
+      "aliases": [
+        "gemini-3.1-pro-preview"
+      ],
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "maxInputTokens": 200000,
+          "inputPer1m": 2,
+          "outputPer1m": 12,
+          "cachedInputPer1m": 0.2,
+          "reasoningOutputPer1m": 12
+        },
+        {
+          "inputPer1m": 4,
+          "outputPer1m": 18,
+          "cachedInputPer1m": 0.4,
+          "reasoningOutputPer1m": 18
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1048576,
+      "notes": "Long-context tier: $2/$12 per 1M up to 200K prompt tokens, $4/$18 above it."
+    },
+    {
+      "model": "gemini-3-pro",
+      "provider": "gemini",
+      "aliases": [
+        "gemini-3-pro-preview"
+      ],
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "maxInputTokens": 200000,
+          "inputPer1m": 2,
+          "outputPer1m": 12,
+          "cachedInputPer1m": 0.2,
+          "reasoningOutputPer1m": 12
+        },
+        {
+          "inputPer1m": 4,
+          "outputPer1m": 18,
+          "cachedInputPer1m": 0.4,
+          "reasoningOutputPer1m": 18
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1048576
+    },
+    {
+      "model": "gemini-3.6-flash",
+      "provider": "gemini",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 1.5,
+          "outputPer1m": 7.5,
+          "cachedInputPer1m": 0.15,
+          "reasoningOutputPer1m": 7.5
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1048576,
+      "notes": "Released 2026-07-21. Output pricing dropped ~17% from Gemini 3.5 Flash ($9.00 -> $7.50 per 1M); input unchanged."
+    },
+    {
+      "model": "gemini-3.5-flash",
+      "provider": "gemini",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 1.5,
+          "outputPer1m": 9,
+          "cachedInputPer1m": 0.15,
+          "reasoningOutputPer1m": 9
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1048576
+    },
+    {
+      "model": "gemini-3.5-flash-lite",
+      "provider": "gemini",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://ai.google.dev/gemini-api/docs/pricing",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 0.3,
+          "outputPer1m": 2.5,
+          "cachedInputPer1m": 0.03,
+          "reasoningOutputPer1m": 2.5
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1048576
+    },
+    {
+      "model": "gemini-3.1-flash-lite",
+      "provider": "gemini",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://ai.google.dev/gemini-api/docs/pricing#gemini-3.1-flash-lite",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 0.25,
+          "outputPer1m": 1.5,
+          "cachedInputPer1m": 0.025,
+          "reasoningOutputPer1m": 1.5
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1048576
+    },
+    {
+      "model": "gemini-3-flash",
+      "provider": "gemini",
+      "aliases": [
+        "gemini-3-flash-preview"
+      ],
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://ai.google.dev/pricing/gemini-3",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 0.5,
+          "outputPer1m": 3,
+          "cachedInputPer1m": 0.05,
+          "reasoningOutputPer1m": 3
+        }
+      ],
+      "contextWindow": 1048576
+    },
+    {
+      "model": "gemini-2.5-pro",
+      "provider": "gemini",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "maxInputTokens": 200000,
+          "inputPer1m": 1.25,
+          "outputPer1m": 10,
+          "cachedInputPer1m": 0.125
+        },
+        {
+          "inputPer1m": 2.5,
+          "outputPer1m": 15,
+          "cachedInputPer1m": 0.25
+        }
+      ],
+      "contextWindow": 1048576
+    },
+    {
+      "model": "gemini-2.5-flash",
+      "provider": "gemini",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://ai.google.dev/gemini-api/docs/models#gemini-2.5-flash-preview",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 0.3,
+          "outputPer1m": 2.5,
+          "cachedInputPer1m": 0.03,
+          "reasoningOutputPer1m": 2.5
+        }
+      ],
+      "contextWindow": 1048576
+    },
+    {
+      "model": "gemini-2.5-flash-lite",
+      "provider": "gemini",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://ai.google.dev/gemini-api/docs/models#gemini-2.5-flash-lite",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 0.1,
+          "outputPer1m": 0.4,
+          "cachedInputPer1m": 0.01,
+          "reasoningOutputPer1m": 0.4
+        }
+      ],
+      "contextWindow": 1048576
+    },
+    {
+      "model": "gemini-2.0-flash",
+      "provider": "gemini",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://ai.google.dev/pricing#2_0flash",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 0.1,
+          "outputPer1m": 0.4,
+          "cachedInputPer1m": 0.025
+        }
+      ],
+      "contextWindow": 1048576,
+      "notes": "Gemini Developer API price. Vertex AI lists $0.15/$0.60 per 1M for the same model — see the vertex entry."
+    },
+    {
+      "model": "gemini-2.0-flash-lite",
+      "provider": "gemini",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://ai.google.dev/gemini-api/docs/pricing#gemini-2.0-flash-lite",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 0.075,
+          "outputPer1m": 0.3,
+          "cachedInputPer1m": 0.01875
+        }
+      ],
+      "contextWindow": 1048576
+    },
+    {
+      "model": "gemini-2.0-flash",
+      "provider": "vertex",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 0.15,
+          "outputPer1m": 0.6
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "notes": "Vertex AI lists $0.15/$0.60 per 1M; the Gemini Developer API lists $0.10/$0.40 for the same model."
+    },
+    {
+      "model": "gemini-3.1-pro",
+      "provider": "vertex",
+      "aliases": [
+        "gemini-3.1-pro-preview"
+      ],
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "maxInputTokens": 200000,
+          "inputPer1m": 2,
+          "outputPer1m": 12,
+          "cachedInputPer1m": 0.2,
+          "reasoningOutputPer1m": 12
+        },
+        {
+          "inputPer1m": 4,
+          "outputPer1m": 18,
+          "cachedInputPer1m": 0.4,
+          "reasoningOutputPer1m": 18
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1048576
+    },
+    {
+      "model": "gemini-3.6-flash",
+      "provider": "vertex",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 1.5,
+          "outputPer1m": 7.5,
+          "cachedInputPer1m": 0.15,
+          "reasoningOutputPer1m": 7.5
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1048576
+    },
+    {
+      "model": "gemini-2.5-pro",
+      "provider": "vertex",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "maxInputTokens": 200000,
+          "inputPer1m": 1.25,
+          "outputPer1m": 10,
+          "cachedInputPer1m": 0.13
+        },
+        {
+          "inputPer1m": 2.5,
+          "outputPer1m": 15,
+          "cachedInputPer1m": 0.25
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1048576
+    },
+    {
+      "model": "gemini-2.5-flash",
+      "provider": "vertex",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+      "provenance": "vendor-pricing-page",
+      "tiers": [
+        {
+          "inputPer1m": 0.3,
+          "outputPer1m": 2.5,
+          "cachedInputPer1m": 0.03,
+          "reasoningOutputPer1m": 2.5
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 1048576
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "provider": "openrouter",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://openrouter.ai/anthropic/claude-sonnet-4.6",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "maxInputTokens": 200000,
+          "inputPer1m": 3,
+          "outputPer1m": 15,
+          "cachedInputPer1m": 0.3,
+          "cacheWritePer1m": 3.75
+        },
+        {
+          "inputPer1m": 6,
+          "outputPer1m": 22.5,
+          "cachedInputPer1m": 0.6,
+          "cacheWritePer1m": 7.5
+        }
+      ],
+      "contextWindow": 1000000
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "provider": "openrouter",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 1,
+          "outputPer1m": 5,
+          "cachedInputPer1m": 0.1,
+          "cacheWritePer1m": 1.25
+        }
+      ],
+      "contextWindow": 200000
+    },
+    {
+      "model": "gpt-5",
+      "provider": "openrouter",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 1.25,
+          "outputPer1m": 10,
+          "cachedInputPer1m": 0.125
+        }
+      ],
+      "contextWindow": 272000
+    },
+    {
+      "model": "gpt-5-mini",
+      "provider": "openrouter",
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 0.25,
+          "outputPer1m": 2,
+          "cachedInputPer1m": 0.025
+        }
+      ],
+      "contextWindow": 272000
+    },
+    {
+      "model": "gemini-3.1-pro",
+      "provider": "openrouter",
+      "aliases": [
+        "gemini-3.1-pro-preview"
+      ],
+      "modality": "text",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://openrouter.ai/google/gemini-3.1-pro-preview",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "maxInputTokens": 200000,
+          "inputPer1m": 2,
+          "outputPer1m": 12,
+          "cachedInputPer1m": 0.2
+        },
+        {
+          "inputPer1m": 4,
+          "outputPer1m": 18,
+          "cachedInputPer1m": 0.4,
+          "cacheWritePer1m": 0.25
+        }
+      ],
+      "contextWindow": 1048576
+    },
+    {
+      "model": "text-embedding-3-small",
+      "provider": "openai",
+      "modality": "embedding",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 0.02,
+          "outputPer1m": 0
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 8191
+    },
+    {
+      "model": "text-embedding-3-large",
+      "provider": "openai",
+      "modality": "embedding",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 0.13,
+          "outputPer1m": 0
+        }
+      ],
+      "batchMultiplier": 0.5,
+      "contextWindow": 8191
+    },
+    {
+      "model": "gemini-embedding-001",
+      "provider": "gemini",
+      "modality": "embedding",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://ai.google.dev/gemini-api/docs/embeddings#model-versions",
+      "provenance": "litellm-catalog",
+      "tiers": [
+        {
+          "inputPer1m": 0.15,
+          "outputPer1m": 0
+        }
+      ],
+      "contextWindow": 2048
+    },
+    {
+      "model": "dall-e-3",
+      "provider": "openai",
+      "modality": "image",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "rates": [
+        {
+          "unit": "per_image",
+          "amount": 0.04,
+          "variant": "1024x1024 standard"
+        }
+      ]
+    },
+    {
+      "model": "gemini-3-pro-image",
+      "provider": "gemini",
+      "modality": "image",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://ai.google.dev/gemini-api/docs/pricing",
+      "provenance": "litellm-catalog",
+      "rates": [
+        {
+          "unit": "per_image",
+          "amount": 0.134,
+          "variant": "default output resolution"
+        }
+      ],
+      "notes": "Google bills image output per output-token ($120 per 1M image output tokens); $0.134/image is that rate applied to one default-resolution image. Cost per image therefore varies with resolution."
+    },
+    {
+      "model": "imagen-4.0-generate-001",
+      "provider": "vertex",
+      "modality": "image",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+      "provenance": "litellm-catalog",
+      "rates": [
+        {
+          "unit": "per_image",
+          "amount": 0.04
+        }
+      ]
+    },
+    {
+      "model": "veo-3.1-generate-001",
+      "provider": "gemini",
+      "modality": "video",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://ai.google.dev/gemini-api/docs/video",
+      "provenance": "litellm-catalog",
+      "rates": [
+        {
+          "unit": "per_second",
+          "amount": 0.4
+        }
+      ]
+    },
+    {
+      "model": "veo-3.1-generate-001",
+      "provider": "vertex",
+      "modality": "video",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/veo",
+      "provenance": "litellm-catalog",
+      "rates": [
+        {
+          "unit": "per_second",
+          "amount": 0.4
+        }
+      ]
+    },
+    {
+      "model": "tts-1",
+      "provider": "openai",
+      "modality": "speech",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "rates": [
+        {
+          "unit": "per_character",
+          "amount": 0.000015
+        }
+      ],
+      "notes": "$15 per 1M characters."
+    },
+    {
+      "model": "tts-1-hd",
+      "provider": "openai",
+      "modality": "speech",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "rates": [
+        {
+          "unit": "per_character",
+          "amount": 0.00003
+        }
+      ],
+      "notes": "$30 per 1M characters."
+    },
+    {
+      "model": "whisper-1",
+      "provider": "openai",
+      "modality": "transcription",
+      "currency": "USD",
+      "asOf": "2026-07-27",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "provenance": "litellm-catalog",
+      "rates": [
+        {
+          "unit": "per_audio_minute",
+          "amount": 0.006
+        }
+      ],
+      "notes": "litellm records $0.0001 per audio second; $0.006/minute is that rate x 60."
+    }
+  ]
+}

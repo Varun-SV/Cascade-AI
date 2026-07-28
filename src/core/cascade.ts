@@ -1399,6 +1399,10 @@ ${prompt}`
         outputTokens: 0,
         totalTokens: stats.totalTokens,
         estimatedCostUsd: stats.totalCostUsd,
+        // At least one call ran on a model with no known price, so its spend is
+        // missing from the total above. Say so rather than letting the caller
+        // present an undercount as the final figure.
+        ...(stats.untrackedCostCalls > 0 ? { costUnknown: true } : {}),
       },
       t2Results,
       durationMs,
@@ -1489,6 +1493,7 @@ ${prompt}`
             outputTokens: 0,
             totalTokens: stats.totalTokens,
             estimatedCostUsd: stats.totalCostUsd,
+            ...(stats.untrackedCostCalls > 0 ? { costUnknown: true } : {}),
           },
           t2Results: [],
           durationMs: Date.now() - startMs,
@@ -1516,6 +1521,7 @@ ${prompt}`
         outputTokens: result.usage?.outputTokens ?? 0,
         totalTokens: stats.totalTokens,
         estimatedCostUsd: stats.totalCostUsd,
+        ...(stats.untrackedCostCalls > 0 ? { costUnknown: true } : {}),
       },
       t2Results: [],
       durationMs: Date.now() - startMs,

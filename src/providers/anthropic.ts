@@ -14,6 +14,7 @@ import type {
 } from '../types.js';
 import { MODELS } from '../constants.js';
 import { BaseProvider } from './base.js';
+import { withResolvedPricing } from '../core/router/pricing.js';
 import { isChatModel } from './model-filter.js';
 
 // Anthropic extended thinking — only the 4.x reasoning models (Opus 4 / Sonnet 4)
@@ -162,7 +163,8 @@ export class AnthropicProvider extends BaseProvider {
         const known = Object.values(MODELS).find((km) => km.id === m.id && km.provider === 'anthropic');
         if (known) return known;
 
-        return {
+        // Dataset price, or an explicit "unknown" — never a silent $0.
+        return withResolvedPricing({
           id: m.id,
           name: m.display_name || m.id,
           provider: 'anthropic' as const,
@@ -173,7 +175,7 @@ export class AnthropicProvider extends BaseProvider {
           maxOutputTokens: 8_000,
           supportsStreaming: true,
           isLocal: false,
-        };
+        });
       });
     } catch {
       return Object.values(MODELS).filter((m) => m.provider === 'anthropic');

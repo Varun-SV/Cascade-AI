@@ -113,6 +113,88 @@ describe('LiveDataProvider — live fetch', () => {
     expect(original.outputCostPer1kTokens).toBe(before); // untouched
   });
 
+  it('stays quiet when the live quote matches the bundled dataset', async () => {
+    vi.stubGlobal('fetch', routedFetch());
+    const ld = new LiveDataProvider({ cacheFile });
+    await ld.refresh(true);
+
+    // The mocked feed quotes gpt-4o at $0.0025/$0.01 per 1k — exactly what the
+    // pricing dataset says.
+    ld.applyLivePricing([MODELS['gpt-4o']!]);
+    expect(ld.getPriceDisagreements()).toHaveLength(0);
+  });
+
+  it('takes the live price but RECORDS the disagreement when the two differ', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes(SNAPSHOT_URL_FRAGMENT)) return snapshotResponse() as unknown as Response;
+      return {
+        ok: true,
+        json: async () => ({
+          // Twice the dataset's $2.50/$10 per 1M — the shape a stale committed
+          // price takes once the vendor moves.
+          data: [{ id: 'openai/gpt-4o', pricing: { prompt: '0.000005', completion: '0.00002' } }],
+        }),
+      } as unknown as Response;
+    }));
+    const ld = new LiveDataProvider({ cacheFile });
+    await ld.refresh(true);
+
+    const [updated] = ld.applyLivePricing([MODELS['gpt-4o']!]);
+    // Live wins — it is fresher by construction.
+    expect(updated!.inputCostPer1kTokens).toBeCloseTo(0.005, 6);
+
+    // …but the mismatch is visible, because it is the best signal available
+    // that pricing-data.json needs a refresh.
+    const drift = ld.getPriceDisagreements();
+    expect(drift).toHaveLength(1);
+    expect(drift[0]!.modelId).toBe('gpt-4o');
+    expect(drift[0]!.dataset.input).toBeCloseTo(0.0025, 6);
+    expect(drift[0]!.live.input).toBeCloseTo(0.005, 6);
+    expect(drift[0]!.ratio).toBeCloseTo(2, 3);
+    expect(drift[0]!.datasetAsOf).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+
+    // Deduped: pricing the same model again doesn't spam the list.
+    ld.applyLivePricing([MODELS['gpt-4o']!]);
+    expect(ld.getPriceDisagreements()).toHaveLength(1);
+  });
+
+  it('refuses a live $0 quote for a paid model — never re-introduces "free"', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes(SNAPSHOT_URL_FRAGMENT)) return snapshotResponse() as unknown as Response;
+      return {
+        ok: true,
+        json: async () => ({
+          data: [{ id: 'openai/gpt-4o', pricing: { prompt: '0', completion: '0' } }],
+        }),
+      } as unknown as Response;
+    }));
+    const ld = new LiveDataProvider({ cacheFile });
+    await ld.refresh(true);
+
+    const [updated] = ld.applyLivePricing([MODELS['gpt-4o']!]);
+    // Falls back to the model's own (dataset-backed) price rather than $0.
+    expect(updated!.inputCostPer1kTokens).toBeGreaterThan(0);
+    expect(updated!.outputCostPer1kTokens).toBeGreaterThan(0);
+  });
+
+  it('clears the unknown-price flag once a live price is applied', async () => {
+    vi.stubGlobal('fetch', routedFetch());
+    const ld = new LiveDataProvider({ cacheFile });
+    await ld.refresh(true);
+
+    const unpriced = {
+      ...MODELS['gpt-4o']!,
+      inputCostPer1kTokens: 0,
+      outputCostPer1kTokens: 0,
+      pricingUnknown: true,
+    };
+    const [updated] = ld.applyLivePricing([unpriced]);
+    expect(updated!.pricingUnknown).toBe(false);
+    expect(updated!.inputCostPer1kTokens).toBeCloseTo(0.0025, 6);
+  });
+
   it('persists a cache that a fresh provider loads as source "cache"', async () => {
     vi.stubGlobal('fetch', routedFetch());
     await new LiveDataProvider({ cacheFile }).refresh(true);

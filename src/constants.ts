@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────
 
 import type { ModelInfo, ProviderType, ThemeName } from './types.js';
+import { resolvePricing } from './core/router/pricing.js';
 
 // Injected at build time from package.json via tsup's `define` (see tsup.config.ts),
 // so the compiled bundle's version can never drift from the published package again.
@@ -368,6 +369,21 @@ export const MODELS: Record<string, ModelInfo> = {
 // get a per-family flag at runtime — see isToolCapable in providers/ollama.ts).
 for (const _m of Object.values(MODELS)) {
   if (_m.supportsToolUse === undefined) _m.supportsToolUse = !_m.isLocal;
+}
+
+// The pricing dataset (core/router/pricing-data.json) is the authoritative
+// baseline, so it overwrites the hand-maintained numbers above wherever it has
+// an entry. Hardcoded catalogue prices drift silently — this file had Claude
+// Opus 4.5 at $15/$75 per 1M long after Anthropic published $5/$25, and GPT-4o
+// at $5/$15 against a published $2.50/$10 — which quietly skewed every
+// cost-based routing decision and every spend readout. Anything the dataset
+// doesn't cover keeps its catalogue price rather than being zeroed.
+for (const _m of Object.values(MODELS)) {
+  const priced = resolvePricing(_m);
+  if (priced.unknown || priced.free || priced.estimatedFromProvider) continue;
+  _m.inputCostPer1kTokens = priced.input;
+  _m.outputCostPer1kTokens = priced.output;
+  _m.pricingUnknown = false;
 }
 
 // ── Tier Model Priority Chains ─────────────────

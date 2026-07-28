@@ -29,7 +29,7 @@ import { TpmLimiter } from './tpm-limiter.js';
 import { LocalRequestQueue } from './local-queue.js';
 import type { TaskAnalyzer } from './task-analyzer.js';
 import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
-import { calculateCost } from '../../utils/cost.js';
+import { buildTokenUsage } from '../../utils/cost.js';
 import { withTimeout, CascadeCancelledError } from '../../utils/retry.js';
 import { ModelProfiler } from './model-profiler.js';
 import type { MemoryStore } from '../../memory/store.js';
@@ -88,6 +88,14 @@ export interface RouterStats {
   outputTokensByTier: Record<string, number>;
   /** Accumulated cost (USD) broken down by feature tag (e.g. T2 section names). */
   costByFeature: Record<string, number>;
+  /**
+   * Calls made against models Cascade has no price for. Their spend is NOT in
+   * `totalCostUsd` — it can't be — so a non-zero count here means the totals
+   * above (and any budget check derived from them) are an undercount.
+   */
+  untrackedCostCalls: number;
+  /** Ids of the models responsible, for "cost not tracked for: …" readouts. */
+  untrackedCostModels: string[];
 }
 
 // ── Cloud model-discovery cache ──
@@ -143,6 +151,8 @@ export class CascadeRouter extends EventEmitter {
     inputTokensByTier: {},
     outputTokensByTier: {},
     costByFeature: {},
+    untrackedCostCalls: 0,
+    untrackedCostModels: [],
   };
 
   private tierModels: Map<TierRole, ModelInfo> = new Map();
@@ -627,7 +637,11 @@ export class CascadeRouter extends EventEmitter {
         );
       }
 
-      const correctedCost = calculateCost(
+      // Recompute against the ROUTER's view of the model (which carries dataset
+      // pricing the provider instance may not have), and carry the
+      // unknown-price flag through with it — dropping it here would turn an
+      // untracked call back into a $0.00 one.
+      const corrected = buildTokenUsage(
         result.usage.inputTokens,
         result.usage.outputTokens,
         model,
@@ -637,7 +651,8 @@ export class CascadeRouter extends EventEmitter {
         ...result,
         usage: {
           ...result.usage,
-          estimatedCostUsd: correctedCost,
+          estimatedCostUsd: corrected.estimatedCostUsd,
+          ...(corrected.costUnknown ? { costUnknown: true } : { costUnknown: undefined }),
         },
       };
 
@@ -875,6 +890,8 @@ export class CascadeRouter extends EventEmitter {
       inputTokensByTier: { ...this.stats.inputTokensByTier },
       outputTokensByTier: { ...this.stats.outputTokensByTier },
       costByFeature: { ...this.stats.costByFeature },
+      untrackedCostCalls: this.stats.untrackedCostCalls,
+      untrackedCostModels: [...this.stats.untrackedCostModels],
     };
   }
 
@@ -930,6 +947,8 @@ export class CascadeRouter extends EventEmitter {
       inputTokensByTier: {},
       outputTokensByTier: {},
       costByFeature: {},
+      untrackedCostCalls: 0,
+      untrackedCostModels: [],
     };
     this.sessionCostUsd = 0;
     this.budgetState = 'ok';
@@ -1139,6 +1158,29 @@ export class CascadeRouter extends EventEmitter {
 
     if (featureTag) {
       this.stats.costByFeature[featureTag] = (this.stats.costByFeature[featureTag] ?? 0) + usage.estimatedCostUsd;
+    }
+
+    // ── Untracked spend ──────────────────────────
+    // A call on a model with no known price contributes $0 to every total
+    // above. That is not free money: it is money we cannot count, and it means
+    // a cost cap can never be tripped by this model. Record it, and say so out
+    // loud the first time it happens while a cost cap is configured — silently
+    // under-reporting spend is precisely what a budget ceiling exists to stop.
+    if (usage.costUnknown) {
+      this.stats.untrackedCostCalls += 1;
+      if (!this.stats.untrackedCostModels.includes(model.id)) {
+        this.stats.untrackedCostModels.push(model.id);
+        const capped =
+          this.config?.budget?.maxCostPerRunUsd != null ||
+          this.config?.budget?.sessionBudgetUsd != null;
+        this.emit('cost:untracked', {
+          modelId: model.id,
+          provider: model.provider,
+          reason: capped
+            ? `No published price for ${model.provider}:${model.id}. Its spend is not counted toward your cost budget — the token cap still applies. Add it to the pricing dataset, or set the provider's \`local: true\` if this endpoint really is free.`
+            : `No published price for ${model.provider}:${model.id}. Cost for this model is reported as "not tracked" rather than $0.00.`,
+        });
+      }
     }
 
     // ── Per-run accounting (hard per-task ceiling) ──

@@ -14,6 +14,17 @@ export const ProviderConfigSchema = z.object({
   model: z.string().optional(),
   authToken: z.string().optional(),
   credentialSource: z.string().optional(),
+  /**
+   * "This endpoint is self-hosted, so inference genuinely costs $0."
+   * Only meaningful for `ollama` and `openai-compatible`. Unset ⇒ inferred:
+   * ollama is local, openai-compatible is local when its baseUrl is
+   * loopback/LAN. Set it explicitly to override — e.g. `false` for an Ollama
+   * instance you rent, `true` for a llama.cpp box on your own LAN reached by
+   * hostname.
+   */
+  local: z.boolean().optional(),
+  /** Region for providers whose price varies by region (Azure: global | us | eu | …). */
+  region: z.string().optional(),
 });
 
 export const ModelOverridesSchema = z.object({

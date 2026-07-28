@@ -75,6 +75,12 @@ export interface AppState {
   sessionTitle: string;
   totalCostUsd: number;
   totalTokens: number;
+  /**
+   * True when part of this session's spend ran on a model with no known price.
+   * `totalCostUsd` is then an undercount, and must be labelled as such rather
+   * than shown as the definitive figure.
+   */
+  costUnknown: boolean;
   activeModel: { t1: string; t2: string; t3: string; chat: string };
   agents: AgentNode[];
   messages: ChatMessage[];
@@ -197,6 +203,7 @@ const initialState: AppState = {
   sessionTitle: 'Cascade AI',
   totalCostUsd: 0,
   totalTokens: 0,
+  costUnknown: false,
   activeModel: { t1: 'auto', t2: 'auto', t3: 'auto', chat: 'auto' },
   agents: [],
   messages: [],
@@ -257,9 +264,12 @@ const appSlice = createSlice({
     setSessionId(state, action: PayloadAction<string | null>) {
       state.sessionId = action.payload;
     },
-    updateCost(state, action: PayloadAction<{ totalCostUsd: number; totalTokens: number }>) {
+    updateCost(state, action: PayloadAction<{ totalCostUsd: number; totalTokens: number; costUnknown?: boolean }>) {
       state.totalCostUsd = action.payload.totalCostUsd;
       state.totalTokens = action.payload.totalTokens;
+      // Sticky for the session: once any run has spent money we couldn't
+      // price, every later total is still an undercount.
+      if (action.payload.costUnknown) state.costUnknown = true;
     },
     setAgents(state, action: PayloadAction<AgentNode[]>) {
       state.agents = action.payload;

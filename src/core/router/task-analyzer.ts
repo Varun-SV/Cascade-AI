@@ -10,6 +10,7 @@ import type { TierRole, ModelInfo } from '../../types.js';
 import type { ModelSelector } from './selector.js';
 import type { ModelPerformanceTracker } from './model-performance-tracker.js';
 import { benchmarkScore01 } from './benchmarks.js';
+import { BLENDED_COST_CEILING, blendedCostPer1k } from './pricing.js';
 
 export type TaskType = 'code' | 'analysis' | 'creative' | 'data' | 'mixed';
 
@@ -266,9 +267,10 @@ export class TaskAnalyzer {
 
   private costEfficiency(model: ModelInfo, complexity: 1 | 2 | 3 | 4 | 5): number {
     if (this.tracker) return this.tracker.costEfficiencyScore(model, complexity);
-    // Same formula without the tracker instance
-    const blended = model.inputCostPer1kTokens + model.outputCostPer1kTokens * 2;
-    const normalised = Math.min(1.0, blended / 0.05);
+    // Same formula without the tracker instance — including the unknown-price
+    // ceiling, so both paths agree that "no price" is not "no cost".
+    const blended = blendedCostPer1k(model);
+    const normalised = Math.min(1.0, blended / BLENDED_COST_CEILING);
     const complexityWeight = (6 - complexity) / 5;
     return Math.max(0.1, 1 - normalised * complexityWeight);
   }
