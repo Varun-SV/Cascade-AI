@@ -890,7 +890,15 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
       // [CRITICAL_TOOL_ERROR] by t3-worker.ts) take precedence over generic
       // stall / execution messages — this is what the user needs to act on
       // (e.g. switch the T3 model away from a rate-limited one).
-      const allIssues = t2Results.flatMap((r) => r.t3Results.flatMap((t) => t.issues));
+      // Section-level issues FIRST. A section that failed because an escalation
+      // went unanswered records that on the T2 result, not on any T3 result —
+      // reading only t3Results showed the user the worker's original problem
+      // and silently dropped the fact that the run had asked them a question
+      // and timed out waiting, which is the one thing they could have acted on.
+      const allIssues = [
+        ...t2Results.flatMap((r) => r.issues ?? []),
+        ...t2Results.flatMap((r) => r.t3Results.flatMap((t) => t.issues)),
+      ].filter(Boolean);
       const critical = allIssues.find((i) => i.includes('[CRITICAL_TOOL_ERROR]'));
       const stalled = allIssues.find((i) => /^Stalled:/.test(i));
       const topReason = critical ?? stalled ?? allIssues[0] ?? 'no specific reason recorded';

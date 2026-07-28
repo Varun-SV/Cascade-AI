@@ -179,6 +179,9 @@ export interface PendingPlan {
 export interface PendingEscalation {
   sessionId?: string;
   taskId: string;
+  /** Identifies WHICH parked section this answers — a Complex run dispatches
+   *  sections concurrently, so more than one can be waiting at once. */
+  requestId?: string;
   sectionId: string;
   sectionTitle: string;
   issues: string[];

@@ -175,14 +175,17 @@ export class DashboardSocket {
    * Unlike a plan decision, silence is NOT taken as consent — the SDK fails
    * the section on timeout — so this handler only ever forwards a real choice.
    */
-  onEscalationDecision(callback: (data: { sessionId: string; action: 'retry' | 'skip' | 'guidance'; note?: string }) => void): void {
+  onEscalationDecision(callback: (data: { sessionId: string; requestId?: string; action: 'retry' | 'skip' | 'guidance'; note?: string }) => void): void {
     this.io.on('connection', (socket) => {
-      socket.on('escalation:decide', (payload: { sessionId?: string; action?: string; note?: string }) => {
+      socket.on('escalation:decide', (payload: { sessionId?: string; requestId?: string; action?: string; note?: string }) => {
         const action = payload?.action;
         if (typeof payload?.sessionId !== 'string') return;
         if (action !== 'retry' && action !== 'skip' && action !== 'guidance') return;
         callback({
           sessionId: payload.sessionId,
+          // Identifies WHICH parked section this answers — sections in a wave
+          // run concurrently, so more than one can be waiting.
+          requestId: typeof payload.requestId === 'string' ? payload.requestId : undefined,
           action,
           note: typeof payload.note === 'string' && payload.note.trim() ? payload.note.trim() : undefined,
         });

@@ -382,32 +382,59 @@ export class Cascade extends EventEmitter {
   // acting unattended is the option most likely to be wrong. And in cloud a
   // waiting run holds server resources, so hanging is not free either.
 
-  private pendingEscalation?: (decision: EscalationDecision) => void;
+  // Keyed by request id, NOT a single slot. A Complex run dispatches each wave
+  // of ready sections with `Promise.all` (t1-administrator.ts), so two sections
+  // can be waiting on a decision at the same moment. A single field made that
+  // case fail hard rather than merely confusingly: the second escalation
+  // overwrote the first's resolver, the user's answer resolved only the second,
+  // and then the FIRST section's timer found the slot already empty and
+  // returned without resolving anything — parking the run forever, past its own
+  // timeout. Same class of bug as the twelve-failover dead-model race: a wave
+  // is concurrent, so per-run singletons are never safe inside it.
+  private pendingEscalations = new Map<string, (decision: EscalationDecision) => void>();
 
   private async requestEscalationDecision(
     ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string },
     taskId: string,
+    signal?: AbortSignal,
   ): Promise<EscalationDecision> {
     // Autonomous runs have nobody to ask; skipping keeps whatever the section
     // did produce rather than discarding it over an unanswerable question.
     if (this.config.autonomy === 'auto') return { action: 'skip' };
     if (this.listenerCount('escalation:decision-required') === 0) return { action: 'skip' };
+    if (signal?.aborted) return { action: 'skip' };
+
+    const requestId = randomUUID();
 
     return await new Promise<EscalationDecision>((resolve) => {
-      const timeout = setTimeout(() => {
-        if (this.pendingEscalation) {
-          this.pendingEscalation = undefined;
-          this.emit('escalation:timeout', { taskId, sectionId: ctx.sectionId });
-          resolve({ action: 'timeout' });
-        }
-      }, ESCALATION_DECISION_TIMEOUT_MS);
-      this.pendingEscalation = (decision) => {
-        clearTimeout(timeout);
-        this.pendingEscalation = undefined;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+
+      // One settle path for every outcome, guarded by the map delete so the
+      // first of {answer, timeout, abort} wins and the losers are no-ops.
+      const settle = (decision: EscalationDecision) => {
+        if (!this.pendingEscalations.delete(requestId)) return;
+        if (timeout) clearTimeout(timeout);
+        signal?.removeEventListener('abort', onAbort);
         resolve(decision);
       };
+
+      // Stop / disconnect must unpark the run. T2 has already passed its
+      // cancellation checkpoint by the time it escalates, so without this the
+      // aborted run sits here holding resources until the full timeout — the
+      // user pressed Stop and watched nothing stop. Skip (not timeout) because
+      // an abort is not a failure of the section, it is the user leaving.
+      const onAbort = () => settle({ action: 'skip' });
+      signal?.addEventListener('abort', onAbort, { once: true });
+
+      timeout = setTimeout(() => {
+        this.emit('escalation:timeout', { taskId, requestId, sectionId: ctx.sectionId });
+        settle({ action: 'timeout' });
+      }, ESCALATION_DECISION_TIMEOUT_MS);
+
+      this.pendingEscalations.set(requestId, settle);
       this.emit('escalation:decision-required', {
         taskId,
+        requestId,
         sectionId: ctx.sectionId,
         sectionTitle: ctx.sectionTitle,
         issues: ctx.issues,
@@ -417,9 +444,28 @@ export class Cascade extends EventEmitter {
     });
   }
 
-  /** Resolve a pending escalation from a REPL / dashboard / cloud listener. */
-  resolveEscalation(action: EscalationDecision['action'], note?: string): void {
-    this.pendingEscalation?.({ action, ...(note ? { note } : {}) });
+  /**
+   * Resolve a pending escalation from a REPL / dashboard / cloud listener.
+   *
+   * `requestId` comes back from the `escalation:decision-required` event and is
+   * what makes an answer land on the section that asked. It is optional so a
+   * host with only one escalation in flight (and any caller that predates the
+   * id) still works: without it the oldest outstanding request is answered,
+   * which is correct whenever there is exactly one.
+   */
+  resolveEscalation(action: EscalationDecision['action'], note?: string, requestId?: string): void {
+    const decision: EscalationDecision = { action, ...(note ? { note } : {}) };
+    if (requestId) {
+      this.pendingEscalations.get(requestId)?.(decision);
+      return;
+    }
+    const oldest = this.pendingEscalations.keys().next();
+    if (!oldest.done) this.pendingEscalations.get(oldest.value)?.(decision);
+  }
+
+  /** Release every parked escalation — run teardown, so none outlive the run. */
+  private releasePendingEscalations(action: EscalationDecision['action'] = 'skip'): void {
+    for (const settle of Array.from(this.pendingEscalations.values())) settle({ action });
   }
 
   /**
@@ -761,7 +807,14 @@ export class Cascade extends EventEmitter {
           try {
             const authProvider = server.oauthStore ? fileOAuthProvider(server.oauthStore) : undefined;
             await this.mcpClient.connect(server, authProvider ? { authProvider } : {});
-            this.toolRegistry.registerMcpTools(this.mcpClient);
+            // Per-tool selection: a connected server usually brings dozens of
+            // tools, most irrelevant to any given workspace. `disabledTools`
+            // names the ones the user switched off in Settings; they are left
+            // unregistered rather than refused at call time.
+            this.toolRegistry.registerMcpTools(
+              this.mcpClient,
+              (name) => !(this.config.tools?.disabledTools ?? []).includes(name),
+            );
           } catch (err) {
             console.error(`Failed to connect to MCP server "${server.name}":`, err);
           }
@@ -1395,7 +1448,7 @@ ${prompt}`
     } else if (complexity === 'Moderate') {
       const t2 = new T2Manager(this.router, this.toolRegistry, 'root');
       t2.setRunBreaker(runBreaker);
-      t2.setEscalationCallback((ctx) => this.requestEscalationDecision(ctx, taskId));
+      t2.setEscalationCallback((ctx) => this.requestEscalationDecision(ctx, taskId, options.signal));
       t2.setPresenter(true); // Moderate run: T2's aggregated synthesis is the answer — stream it.
       t2.setHierarchyContext('You are the ROOT Manager for this task. There is no T1 Administrator involved in this run. You are responsible for decomposing the task and managing T3 workers directly.');
       if (identityPrompt) {
@@ -1454,8 +1507,14 @@ ${prompt}`
           .map((r: T3Result) => (typeof r.output === 'string' ? r.output : ''))
           .filter((o) => o.trim())
           .sort((a, b) => b.length - a.length)[0];
+        // Section-level issues too: an unanswered escalation is recorded on the
+        // T2 result, so reading only t3Results told the user why the worker
+        // struggled but not that a decision had been requested and timed out.
         const reasons = Array.from(
-          new Set(t2Result.t3Results.flatMap((r: T3Result) => r.issues ?? []).filter(Boolean)),
+          new Set([
+            ...(t2Result.issues ?? []),
+            ...t2Result.t3Results.flatMap((r: T3Result) => r.issues ?? []),
+          ].filter(Boolean)),
         );
         if (partial) {
           finalOutput = reasons.length ? `${partial}\n\n_(incomplete: ${reasons.join('; ')})_` : partial;
@@ -1468,7 +1527,7 @@ ${prompt}`
     } else {
       const t1 = new T1Administrator(this.router, this.toolRegistry, this.config);
       t1.setRunBreaker(runBreaker);
-      t1.setEscalationCallback((ctx) => this.requestEscalationDecision(ctx, taskId));
+      t1.setEscalationCallback((ctx) => this.requestEscalationDecision(ctx, taskId, options.signal));
       t1.setPresenter(true); // Complex run: T1's final compile is the answer — stream it.
       t1.setHierarchyContext('You are the top-level Administrator. You are responsible for the overall plan and supervising multiple T2 Managers.');
       if (identityPrompt) {
@@ -1552,6 +1611,11 @@ ${prompt}`
       // across runs — even on error paths. cancelAllPending is safe to call
       // when there are no pending requests.
       try { escalator.cancelAllPending(); } catch { /* non-critical */ }
+
+      // Same for section escalations. A run that ended while one was parked
+      // (error, abort, budget kill) must not leave a live timer and an
+      // unresolved promise holding the next run's map.
+      try { this.releasePendingEscalations(); } catch { /* non-critical */ }
 
       // Restore tier models to the configured baseline so Cascade Auto's
       // per-task picks don't leak into /why, the status bar, or the next run.

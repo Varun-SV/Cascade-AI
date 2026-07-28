@@ -25,21 +25,29 @@ export default function EscalationModal({
   onDismiss: () => void;
 }) {
   const [note, setNote] = useState('');
-  const [remainingMs, setRemainingMs] = useState(request.timeoutMs);
+  const [now, setNow] = useState(() => Date.now());
 
+  // Anchored to when the request ARRIVED, not to when this effect last ran.
+  // `onDismiss` is a fresh inline closure on every parent render, so with it in
+  // the dependency list any unrelated re-render (a status event from another
+  // section, say) used to restart the interval AND reset its start time — the
+  // countdown jumped back to five minutes while the server's timer kept
+  // running, so the modal could read "4:58 remaining" a second before the
+  // section was failed for not answering.
   useEffect(() => {
-    const startedAt = Date.now();
-    const id = setInterval(() => {
-      const left = request.timeoutMs - (Date.now() - startedAt);
-      setRemainingMs(left);
-      // The server has already given up by now; closing avoids an answer that
-      // would land on a run which has moved on.
-      if (left <= 0) onDismiss();
-    }, 1000);
+    const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, [request.timeoutMs, request.sectionId, onDismiss]);
+  }, [request.receivedAt]);
 
+  const remainingMs = request.timeoutMs - (now - request.receivedAt);
   const seconds = Math.max(0, Math.ceil(remainingMs / 1000));
+
+  // The server has already given up; close so a late answer can't land on a
+  // section that has moved on. In an effect, not in the tick, because dismissing
+  // during render would set parent state mid-render.
+  useEffect(() => {
+    if (remainingMs <= 0) onDismiss();
+  }, [remainingMs <= 0, onDismiss]); // eslint-disable-line react-hooks/exhaustive-deps
   const mm = Math.floor(seconds / 60);
   const ss = String(seconds % 60).padStart(2, '0');
   const urgent = seconds <= 60;

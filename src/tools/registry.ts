@@ -128,8 +128,17 @@ export class ToolRegistry extends EventEmitter {
     return Array.from(this.plugins.keys());
   }
 
-  /** Registers all tools from an MCP client */
-  registerMcpTools(mcpClient: McpClient): void {
+  /**
+   * Registers all tools from an MCP client.
+   *
+   * `isAllowed` receives the FINAL registered name (`mcp__server__tool`) — the
+   * same string the user sees and the same one that reaches the provider — so
+   * a per-tool opt-out in Settings can be expressed as a plain name list.
+   * Filtering here rather than at call time means a deselected tool is genuinely
+   * absent from the definitions handed to the model, so it is never proposed,
+   * never counted against the tool budget, and never has to be refused.
+   */
+  registerMcpTools(mcpClient: McpClient, isAllowed?: (registeredName: string) => boolean): void {
     const definitions = mcpClient.getToolDefinitions();
     for (const def of definitions) {
       // Definitions from McpClient.getToolDefinitions() are prefixed as
@@ -147,6 +156,7 @@ export class ToolRegistry extends EventEmitter {
         def.description.replace(`[MCP:${serverName}] `, ''),
         def.inputSchema,
       );
+      if (isAllowed && !isAllowed(wrapper.name)) continue;
       wrapper.setWorkspaceRoot(this.workspaceRoot);
       this.register(wrapper);
     }

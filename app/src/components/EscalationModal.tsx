@@ -42,7 +42,12 @@ export function EscalationModal({ socket }: { socket: Socket | null }) {
   const urgent = seconds <= 60;
 
   const decide = (action: 'retry' | 'skip' | 'guidance', text?: string) => {
-    socket?.emit('escalation:decide', { sessionId: pending.sessionId, action, note: text });
+    socket?.emit('escalation:decide', {
+      sessionId: pending.sessionId,
+      requestId: pending.requestId,
+      action,
+      note: text,
+    });
     dispatch(setPendingEscalation(null));
   };
 

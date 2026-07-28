@@ -24,6 +24,8 @@ export {
   beginMcpOAuth, completeMcpOAuth, discoverMcpAuthServer, refreshMcpToken,
 } from './mcp/oauth.js';
 export type { McpOAuthStore, McpOAuthState, OAuthTokens, OAuthClientInformationMixed } from './mcp/oauth.js';
+export { discoverMcpTools } from './mcp/discover.js';
+export type { DiscoveredMcpTool, McpDiscoveryResult } from './mcp/discover.js';
 export {
   Retriever, reciprocalRankFusion, SqliteVectorStore, OpenAICompatibleEmbedder,
   embedderFromProviders, chunkText, LLMReranker, chatCompleterFromProviders,

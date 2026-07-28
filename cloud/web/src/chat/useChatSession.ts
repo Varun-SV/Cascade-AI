@@ -163,11 +163,17 @@ export interface ContextApprovalInfo {
 export interface EscalationRequest {
   conversationId: string;
   taskId: string;
+  /** Identifies WHICH parked section this answer belongs to — a Complex run
+   *  dispatches sections concurrently, so more than one can be waiting. */
+  requestId?: string;
   sectionId: string;
   sectionTitle: string;
   issues: string[];
   summary: string;
   timeoutMs: number;
+  /** Client clock at arrival. The deadline is anchored here rather than to the
+   *  modal's mount so an unrelated re-render cannot restart the countdown. */
+  receivedAt: number;
 }
 
 export interface PlanApproval {
@@ -265,7 +271,7 @@ export function useChatSession(
     };
     const onWhy = (r: WhyReport) => { pendingWhyRef.current = r; };
     const onPlan = (e: PlanApproval) => setApproval(e);
-    const onEscalation = (e: EscalationRequest) => setEscalation(e);
+    const onEscalation = (e: EscalationRequest) => setEscalation({ ...e, receivedAt: Date.now() });
     // The window closed without an answer — clear the prompt so a stale modal
     // can't be answered into a run that has already moved on.
     const onEscalationTimeout = () => setEscalation(null);
@@ -487,6 +493,7 @@ export function useChatSession(
       if (!socket || !escalation) return;
       socket.emit('escalation:decide', {
         conversationId: escalation.conversationId,
+        ...(escalation.requestId ? { requestId: escalation.requestId } : {}),
         action,
         ...(note ? { note } : {}),
       });

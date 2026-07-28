@@ -267,7 +267,8 @@ export class T2Manager extends BaseTier {
         status: 'IN_PROGRESS',
       });
 
-      const summary = await this.aggregateResults(assignment, t3Results);
+      // `let`: a skipped escalation re-aggregates to keep the escalated output.
+      let summary = await this.aggregateResults(assignment, t3Results);
       const issues = t3Results
         .filter((r) => r.status !== 'COMPLETED')
         .flatMap((r) => r.issues);
@@ -292,12 +293,31 @@ export class T2Manager extends BaseTier {
         this.log(`Escalation decision for "${assignment.sectionTitle}": ${decision.action}`);
 
         if (decision.action === 'skip') {
-          // Accept what was produced and move on. PARTIAL rather than COMPLETED
-          // so the final compile still knows this section is incomplete.
-          overallStatus = t3Results.some((r) => r.status === 'COMPLETED') ? 'PARTIAL' : 'FAILED';
+          // "Skip" means keep what this section produced and move on — so the
+          // escalated work has to survive, and previously it did not. Every
+          // downstream consumer filters on COMPLETED: aggregateResults returns
+          // "no T3 workers completed" and T1 drops FAILED sections from the
+          // compile entirely. A one-worker section (the common shape) therefore
+          // discarded exactly the output the user had just chosen to keep.
+          //
+          // So re-aggregate counting the escalated outputs, and stay PARTIAL
+          // even when nothing reached COMPLETED: PARTIAL is what carries the
+          // section past T1's filter, and it is also the honest status — work
+          // exists, it just is not finished.
+          summary = await this.aggregateResults(assignment, t3Results, { includeEscalated: true });
+          overallStatus = 'PARTIAL';
         } else if (decision.action === 'retry' || decision.action === 'guidance') {
           const guided = decision.action === 'guidance' && decision.note?.trim()
-            ? { ...assignment, description: `${assignment.description}\n\nGuidance (must be followed): ${decision.note.trim()}` }
+            ? {
+                ...assignment,
+                description: `${assignment.description}\n\nGuidance (must be followed): ${decision.note.trim()}`,
+                // Drop T1's preplanned subtasks so the retry re-decomposes with
+                // the guidance in hand. The workers execute from their subtask
+                // slices, not from this description — leaving the slices in
+                // place gave "Retry with guidance" byte-identical worker
+                // prompts to "Retry as-is", making the note do nothing at all.
+                t3Subtasks: [],
+              }
             : assignment;
           // Re-run the section once with the answer applied. Bounded to a single
           // attempt: an escalation loop that can re-ask forever is how a run
@@ -917,8 +937,15 @@ Return ONLY the JSON array.`;
   private async aggregateResults(
     assignment: T1ToT2Assignment,
     results: T3Result[],
+    opts: { includeEscalated?: boolean } = {},
   ): Promise<string> {
-    const completed = results.filter((r) => r.status === 'COMPLETED');
+    // Escalated workers usually DID produce something — they stopped on a
+    // decision, not on a failure. Normally that output is excluded because the
+    // section is still open; once the user has answered "skip", keeping it is
+    // the whole point of the answer.
+    const completed = results.filter(
+      (r) => r.status === 'COMPLETED' || (opts.includeEscalated && r.status === 'ESCALATED' && r.output),
+    );
     if (!completed.length) return `Section ${assignment.sectionTitle} failed — no T3 workers completed.`;
 
     const peerOutputs = this.peerSyncBuffer

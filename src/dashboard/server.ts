@@ -229,8 +229,8 @@ export class DashboardServer {
     // The escalation modal answers here. The run is parked inside
     // requestEscalationDecision until this lands (or its timeout fires and
     // fails the section).
-    this.socket.onEscalationDecision(({ sessionId, action, note }) => {
-      this.activeSessions.get(sessionId)?.resolveEscalation(action, note);
+    this.socket.onEscalationDecision(({ sessionId, requestId, action, note }) => {
+      this.activeSessions.get(sessionId)?.resolveEscalation(action, note, requestId);
     });
 
     this.socket.onSessionHalt((sessionId) => {

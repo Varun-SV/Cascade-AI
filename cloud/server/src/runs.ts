@@ -775,11 +775,18 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     socket.emit('escalation:decision-required', { conversationId: conversation.id, ...(e as object) });
   const onEscalationTimeout = (e: unknown) =>
     socket.emit('escalation:timeout', { conversationId: conversation.id, ...(e as object) });
-  const onEscalationDecision = (d: { conversationId?: string; action?: string; note?: string }) => {
+  const onEscalationDecision = (d: { conversationId?: string; requestId?: string; action?: string; note?: string }) => {
     // One socket can carry several conversations; only answer for this run.
     if (d?.conversationId && d.conversationId !== conversation.id) return;
     if (d?.action === 'retry' || d?.action === 'skip' || d?.action === 'guidance') {
-      cascade.resolveEscalation(d.action, typeof d.note === 'string' ? d.note : undefined);
+      // requestId picks the parked section: a Complex run dispatches sections
+      // concurrently, so two can be waiting and an unkeyed answer would resolve
+      // whichever happened to be first in the map.
+      cascade.resolveEscalation(
+        d.action,
+        typeof d.note === 'string' ? d.note : undefined,
+        typeof d.requestId === 'string' ? d.requestId : undefined,
+      );
     }
   };
   cascade.on('escalation:decision-required', onEscalation);
