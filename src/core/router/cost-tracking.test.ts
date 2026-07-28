@@ -173,3 +173,74 @@ describe('RouterStats — per-tier cost tracking', () => {
     expect(router.getStats().costByFeature).toEqual({});
   });
 });
+
+// ── Untracked spend ────────────────────────────
+//
+// A call on a model with no published price adds $0 to every total. That is
+// not free money — it is money the totals cannot see, and it means a cost cap
+// can never be tripped by that model. These assert the counters that let the
+// UI and the CLI label such a total as an undercount instead of a fact.
+
+describe('untracked spend accounting', () => {
+  let router: CascadeRouter;
+
+  beforeEach(async () => {
+    router = await makeRouter();
+  });
+
+  function simulateUnpricedCall(modelId: string, tokens: number): void {
+    const r = router as unknown as {
+      recordStats: (
+        tier: string,
+        model: { id: string; provider: string },
+        usage: { inputTokens: number; outputTokens: number; totalTokens: number; estimatedCostUsd: number; costUnknown?: boolean },
+      ) => void;
+    };
+    r.recordStats('T3', { id: modelId, provider: 'openai-compatible' }, {
+      inputTokens: tokens,
+      outputTokens: tokens,
+      totalTokens: tokens * 2,
+      estimatedCostUsd: 0,
+      costUnknown: true,
+    });
+  }
+
+  it('reports no untracked calls when every price is known', () => {
+    simulateCall(router, 'T3', 500, 200, 0.0003);
+    const stats = router.getStats();
+    expect(stats.untrackedCostCalls).toBe(0);
+    expect(stats.untrackedCostModels).toEqual([]);
+  });
+
+  it('counts calls whose price is unknown and names the models responsible', () => {
+    simulateUnpricedCall('mystery-model-a', 1000);
+    simulateUnpricedCall('mystery-model-a', 1000);
+    simulateUnpricedCall('mystery-model-b', 500);
+
+    const stats = router.getStats();
+    expect(stats.untrackedCostCalls).toBe(3);
+    // Deduped — one entry per model, not per call.
+    expect(stats.untrackedCostModels).toEqual(['mystery-model-a', 'mystery-model-b']);
+  });
+
+  it('leaves the spend total untouched, so the two numbers stay distinguishable', () => {
+    simulateCall(router, 'T3', 500, 200, 0.0025);
+    simulateUnpricedCall('mystery-model-a', 1000);
+
+    const stats = router.getStats();
+    // The priced call is all the total can honestly claim...
+    expect(stats.totalCostUsd).toBeCloseTo(0.0025, 8);
+    // ...and the counter is what says the real figure is higher than that.
+    expect(stats.untrackedCostCalls).toBe(1);
+    // Tokens ARE counted for both — only the money is unknown.
+    expect(stats.totalTokens).toBe(700 + 2000);
+  });
+
+  it('resetStats clears the untracked counters too', () => {
+    simulateUnpricedCall('mystery-model-a', 1000);
+    router.resetStats();
+    const stats = router.getStats();
+    expect(stats.untrackedCostCalls).toBe(0);
+    expect(stats.untrackedCostModels).toEqual([]);
+  });
+});

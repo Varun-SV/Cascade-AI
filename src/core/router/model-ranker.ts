@@ -9,6 +9,7 @@
 
 import type { ModelInfo, TierRole } from '../../types.js';
 import type { TaskType } from './task-analyzer.js';
+import { isPricingUnknown } from './pricing.js';
 
 const TASK_KEYWORDS: Record<TaskType, string[]> = {
   code:     ['code', 'coding', 'programming', 'developer', 'software', 'debug', 'instruction'],
@@ -29,8 +30,13 @@ function specializationScore(model: ModelInfo, taskType: TaskType): number {
 }
 
 function costScore(model: ModelInfo, tier: TierRole): number {
+  // A model whose price we don't know is NOT free. Scoring it like a local
+  // model would credit an unquotable cloud model with the cheapest band on the
+  // strength of a missing number, so it scores at the bottom instead: we can
+  // neither bound its cost nor stop it with the per-run cap.
+  if (isPricingUnknown(model)) return 0;
   const avg = (model.inputCostPer1kTokens + model.outputCostPer1kTokens) / 2;
-  if (avg === 0) return 1; // free / local models
+  if (avg === 0) return 1; // genuinely free: local / self-hosted models
   // T3 workers: favor cheaper; T1: favor capable (lower score for high cost is ok)
   if (tier === 'T3') return avg < 0.01 ? 2 : avg < 0.05 ? 1 : 0;
   return avg < 0.05 ? 1 : 0;

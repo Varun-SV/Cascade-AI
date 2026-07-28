@@ -11,6 +11,7 @@ import path from 'node:path';
 import os from 'node:os';
 import type { ModelInfo } from '../../types.js';
 import type { TaskType } from './task-analyzer.js';
+import { BLENDED_COST_CEILING, blendedCostPer1k } from './pricing.js';
 
 interface ModelStat {
   successCount: number;
@@ -170,8 +171,11 @@ export class ModelPerformanceTracker {
    * normalised over $0.05 blended as the "expensive" ceiling.
    */
   costEfficiencyScore(model: ModelInfo, complexity: 1 | 2 | 3 | 4 | 5): number {
-    const blended = model.inputCostPer1kTokens + model.outputCostPer1kTokens * 2;
-    const normalised = Math.min(1.0, blended / 0.05);
+    // blendedCostPer1k returns the "expensive" ceiling for a model whose price
+    // is unknown. Reading its 0s literally scored it as maximally cost-efficient
+    // — the routing half of the zero-cost sentinel bug.
+    const blended = blendedCostPer1k(model);
+    const normalised = Math.min(1.0, blended / BLENDED_COST_CEILING);
     // complexityWeight: 1.0 for trivial tasks → 0.2 for research-grade
     const complexityWeight = (6 - complexity) / 5;
     return Math.max(0.1, 1 - normalised * complexityWeight);

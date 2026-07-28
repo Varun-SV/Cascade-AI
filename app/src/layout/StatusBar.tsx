@@ -4,7 +4,7 @@ import { useAppDispatch, useAppSelector, toggleTerminal, openBottomTab, setShowW
 
 export function StatusBar({ socket }: { socket?: Socket | null }) {
   const dispatch = useAppDispatch();
-  const { connected, reconnecting, backendError, totalCostUsd, totalTokens, activeModel } = useAppSelector((s) => s.app);
+  const { connected, reconnecting, backendError, totalCostUsd, totalTokens, costUnknown, activeModel } = useAppSelector((s) => s.app);
   const { runActive, runSessionId, activeSessionId, sessionId, showWhyPanel } = useAppSelector((s) => s.app);
 
   const fmtCost = (c: number) => c < 0.001 ? '<$0.001' : `$${c.toFixed(4)}`;
@@ -94,11 +94,21 @@ export function StatusBar({ socket }: { socket?: Socket | null }) {
         <Coins size={10} style={{ color: 'var(--text-dim)' }} />
         {fmtTokens(totalTokens)} tok
       </span>
-      <span style={{
-        color: totalCostUsd > 1 ? 'var(--warn)' : 'var(--text-muted)',
-        fontVariantNumeric: 'tabular-nums', fontWeight: 600,
-      }}>
-        {fmtCost(totalCostUsd)}
+      {/* A "+" marks a total we know to be incomplete: some call ran on a model
+          with no published price, so its spend is missing from this figure.
+          Showing a bare, confident number there is how real spend got read as
+          free in the first place. */}
+      <span
+        title={costUnknown
+          ? 'Some calls used a model with no published price — their spend is not included in this total, and does not count toward a cost budget. Run `cascade models --verbose` to see which.'
+          : undefined}
+        style={{
+          color: costUnknown ? 'var(--warn)' : totalCostUsd > 1 ? 'var(--warn)' : 'var(--text-muted)',
+          fontVariantNumeric: 'tabular-nums', fontWeight: 600,
+          cursor: costUnknown ? 'help' : undefined,
+        }}
+      >
+        {fmtCost(totalCostUsd)}{costUnknown ? '+' : ''}
       </span>
 
       <Divider />

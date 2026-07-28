@@ -25,6 +25,7 @@ CASCADE.md
 # Local-only helper scripts; CI-required ones are explicitly tracked below.
 scripts/*
 !scripts/refresh-benchmarks.mjs
+!scripts/refresh-pricing.mjs
 !scripts/publish-release.sh
 !scripts/publish-release.ps1
 # Benchmark aggregator: engine, tests, and per-source data (CI reads these).

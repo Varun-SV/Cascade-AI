@@ -189,6 +189,9 @@ export class DashboardServer {
           sessionId,
           totalTokens: result.usage.totalTokens,
           totalCostUsd: result.usage.estimatedCostUsd,
+          // True when a model with no known price was used: the total above is
+          // an undercount, and the UI must not present it as the full spend.
+          costUnknown: result.usage.costUnknown === true,
         });
         this.throttledBroadcast('workspace');
       } catch (err) {
@@ -541,6 +544,7 @@ export class DashboardServer {
         sessionId,
         totalTokens: result.usage.totalTokens,
         totalCostUsd: result.usage.estimatedCostUsd,
+        costUnknown: result.usage.costUnknown === true,
       });
       this.throttledBroadcast('workspace');
     } catch (err) {
@@ -1164,6 +1168,7 @@ export class DashboardServer {
             sessionId,
             totalTokens: result.usage.totalTokens,
             totalCostUsd: result.usage.estimatedCostUsd,
+            costUnknown: result.usage.costUnknown === true,
           });
           this.socket.broadcastToRoom(`session:${sessionId}`, 'session:complete', { sessionId, result });
           this.throttledBroadcast('workspace');

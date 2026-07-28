@@ -10,7 +10,7 @@ import type {
   StreamChunk,
   TokenUsage,
 } from '../types.js';
-import { calculateCost } from '../utils/cost.js';
+import { buildTokenUsage, calculateCost } from '../utils/cost.js';
 
 export abstract class BaseProvider {
   protected config: ProviderConfig;
@@ -50,11 +50,8 @@ export abstract class BaseProvider {
   }
 
   protected makeUsage(inputTokens: number, outputTokens: number): TokenUsage {
-    return {
-      inputTokens,
-      outputTokens,
-      totalTokens: inputTokens + outputTokens,
-      estimatedCostUsd: this.estimateCost(inputTokens, outputTokens),
-    };
+    // buildTokenUsage also flags `costUnknown` when we have no price for this
+    // model, so a $0 total is never mistaken downstream for a free call.
+    return buildTokenUsage(inputTokens, outputTokens, this.model);
   }
 }

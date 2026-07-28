@@ -6,6 +6,7 @@ import chalk from 'chalk';
 import { ConfigManager } from '../../config/index.js';
 import { CascadeRouter } from '../../core/router/index.js';
 import { benchmarkScore01 } from '../../core/router/benchmarks.js';
+import { isPricingUnknown, pricingDatasetMeta } from '../../core/router/pricing.js';
 import { withTimeout } from '../../utils/retry.js';
 
 export async function modelsCommand(options: { verbose?: boolean } = {}): Promise<void> {
@@ -36,12 +37,18 @@ export async function modelsCommand(options: { verbose?: boolean } = {}): Promis
   ];
 
   let anyMissing = false;
+  let anyUnpriced = false;
 
   for (const { tier, label, color } of tiers) {
     const model = router.getTierModel(tier);
     if (model) {
-      const costIn  = model.inputCostPer1kTokens === 0 ? 'free' : `$${model.inputCostPer1kTokens.toFixed(4)}/1K in`;
-      const costOut = model.outputCostPer1kTokens === 0 ? 'free' : `$${model.outputCostPer1kTokens.toFixed(4)}/1K out`;
+      // "free" is only ever printed for a model that genuinely costs nothing.
+      // An unpriced cloud model reads "cost not tracked" — the whole point of
+      // separating an unknown price from a zero one.
+      const unpriced = isPricingUnknown(model);
+      if (unpriced) anyUnpriced = true;
+      const costIn  = unpriced ? 'cost not tracked' : model.inputCostPer1kTokens === 0 ? 'free' : `$${model.inputCostPer1kTokens.toFixed(4)}/1K in`;
+      const costOut = unpriced ? '' : model.outputCostPer1kTokens === 0 ? 'free' : `, $${model.outputCostPer1kTokens.toFixed(4)}/1K out`;
       const ctx     = model.contextWindow >= 1_000_000
         ? `${(model.contextWindow / 1_000_000).toFixed(1)}M ctx`
         : `${(model.contextWindow / 1_000).toFixed(0)}K ctx`;
@@ -53,7 +60,7 @@ export async function modelsCommand(options: { verbose?: boolean } = {}): Promis
         `  ${color.bold(tier)}  ${chalk.white(col(model.name, 24))}` +
         `${chalk.gray(col(model.provider, 16))}` +
         (options.verbose
-          ? `${chalk.gray(col(ctx, 12))}${chalk.gray(col(`bench ${bench}/100`, 14))}${chalk.gray(`${costIn}, ${costOut}`)}`
+          ? `${chalk.gray(col(ctx, 12))}${chalk.gray(col(`bench ${bench}/100`, 14))}${chalk.gray(`${costIn}${costOut}`)}`
           : `${chalk.gray(col(ctx, 10))}${chalk.gray(`bench ${bench}/100`)}`) +
         local + vision,
       );
@@ -74,10 +81,35 @@ export async function modelsCommand(options: { verbose?: boolean } = {}): Promis
     const src = liveData.getDataSource();
     const gen = liveData.getGeneratedAt();
     const srcLabel = src === 'live' ? 'live (just fetched)' : src === 'cache' ? 'cached' : 'bundled';
+    const pricingMeta = pricingDatasetMeta();
     console.log(chalk.gray(
       `  Benchmark data: ${srcLabel}` +
       (gen ? ` · updated ${gen.slice(0, 10)}` : '') +
-      ` · pricing: ${liveData.hasLivePricing() ? 'live (OpenRouter)' : 'catalog'}`,
+      ` · pricing: ${liveData.hasLivePricing() ? 'live (OpenRouter)' : 'dataset'}` +
+      ` (baseline ${pricingMeta.generatedAt})`,
+    ));
+
+    // A dataset/live mismatch is the clearest available signal that the
+    // committed prices have drifted — show it rather than quietly preferring
+    // one number over the other.
+    const drift = liveData.getPriceDisagreements();
+    if (drift.length) {
+      console.log(chalk.yellow(`\n  ${drift.length} model${drift.length === 1 ? '' : 's'} priced differently by the live source than by the bundled dataset:`));
+      for (const d of drift.slice(0, 10)) {
+        console.log(chalk.gray(
+          `    ${d.provider}:${d.modelId}  dataset $${d.dataset.input.toFixed(5)}/$${d.dataset.output.toFixed(5)} per 1K (as of ${d.datasetAsOf})` +
+          `  →  live $${d.live.input.toFixed(5)}/$${d.live.output.toFixed(5)}  (${d.ratio}×)`,
+        ));
+      }
+      console.log(chalk.gray('    Live pricing is used. Refresh src/core/router/pricing-data.json to clear this.'));
+    }
+  }
+
+  if (anyUnpriced) {
+    console.log(chalk.yellow(
+      '\n  Some tiers use a model with no published price — their spend is reported as "cost not tracked", never $0.00,\n' +
+      '  and is not counted toward a cost budget. Add the model to the pricing dataset, or set `local: true` on the\n' +
+      '  provider if the endpoint genuinely costs nothing to run.',
     ));
   }
 

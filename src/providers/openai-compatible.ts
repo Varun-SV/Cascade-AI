@@ -7,6 +7,7 @@ import type { ModelInfo, ProviderConfig } from '../types.js';
 import { OpenAIProvider } from './openai.js';
 import { isChatModel } from './model-filter.js';
 import { preferIpv4Host, nodeHttpFetch } from '../utils/net.js';
+import { isLocalEndpoint, withResolvedPricing } from '../core/router/pricing.js';
 
 export class OpenAICompatibleProvider extends OpenAIProvider {
   constructor(config: ProviderConfig, model: ModelInfo) {
@@ -60,7 +61,14 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
     // endpoint's list to empty if everything got filtered — fall back to the raw
     // ids so an unusually-named single-model server still works.
     const chatIds = ids.filter((id) => isChatModel(id));
-    return (chatIds.length ? chatIds : ids).map((id) => ({
+    // An OpenAI-compatible endpoint is either your own hardware (llama.cpp, LM
+    // Studio, vLLM — genuinely $0) or someone's paid API (Together, Groq,
+    // Fireworks — definitely not). The default follows the baseUrl host and the
+    // user can override it with `local` in the provider config. Getting this
+    // wrong in the "hosted" direction is what silently reported real spend as
+    // free, so an unpriced hosted model is marked unknown, not zero.
+    const local = isLocalEndpoint(this.config);
+    return (chatIds.length ? chatIds : ids).map((id) => withResolvedPricing({
       id,
       name: id,
       provider: 'openai-compatible' as const,
@@ -70,7 +78,7 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
       outputCostPer1kTokens: 0,
       maxOutputTokens: 4_000,
       supportsStreaming: true,
-      isLocal: false,
+      isLocal: local,
     }));
   }
 

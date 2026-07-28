@@ -10,6 +10,7 @@ import {
   VISION_MODEL_PRIORITY,
   MODELS,
 } from '../../constants.js';
+import { withResolvedPricing } from './pricing.js';
 
 /** Normalize a model id for cross-source comparison (Gemini prefixes `models/`). */
 function normalizeModelId(id: string): string {
@@ -260,7 +261,10 @@ export class ModelSelector {
     }
 
     if (providerStr && this.availableProviders.has(providerStr)) {
-      const dynamicModel: ModelInfo = {
+      // Resolve pricing for the synthesised entry: a `provider:model` override
+      // the catalogue has never heard of used to be born at $0/$0, which read
+      // as "free" everywhere downstream.
+      const dynamicModel: ModelInfo = withResolvedPricing({
         id: actualId,
         name: actualId,
         provider: providerStr,
@@ -271,7 +275,7 @@ export class ModelSelector {
         maxOutputTokens: 8_000,
         supportsStreaming: true,
         isLocal: providerStr === 'ollama',
-      };
+      });
       this.addDynamicModel(dynamicModel);
       return dynamicModel;
     }

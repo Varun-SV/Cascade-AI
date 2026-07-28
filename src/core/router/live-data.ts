@@ -19,6 +19,7 @@ import type { ModelInfo } from '../../types.js';
 import type { BenchmarkProfile } from './benchmarks.js';
 import { GLOBAL_CONFIG_DIR } from '../../constants.js';
 import { withTimeout } from '../../utils/retry.js';
+import { reconcilePrice, type PriceDisagreement } from './pricing.js';
 
 /** Shape of the committed/refreshable quality snapshot (benchmark-data.json). */
 export interface BenchmarkSnapshot {
@@ -92,6 +93,8 @@ export class LiveDataProvider {
   private snapshot: BenchmarkSnapshot | null = null;
   private prices = new Map<string, PriceEntry>();
   private capabilities = new Map<string, CapabilityEntry>();
+  /** Dataset-vs-live price mismatches, deduped by `provider:modelId`. */
+  private disagreements = new Map<string, PriceDisagreement>();
   private source: DataSource = 'bundled';
   private fetchedAt = 0;
   private loaded = false;
@@ -256,6 +259,16 @@ export class LiveDataProvider {
   /**
    * Returns a price-corrected copy of each model when live pricing is known,
    * leaving the original untouched (so the shared catalog is never mutated).
+   *
+   * Reconciliation policy (see reconcilePrice in pricing.ts): the bundled
+   * dataset is the authoritative baseline, and a live quote overrides it
+   * because it is fresher by construction — but the disagreement is RECORDED,
+   * not swallowed. A dataset/live mismatch is the best signal available that
+   * the committed prices have gone stale, so it must be visible rather than
+   * silently resolved in either direction. A live quote of $0 for a non-local
+   * model is rejected outright: that is the very failure mode this change
+   * exists to prevent, and a marketplace's free-tier alias must never zero out
+   * the price of the paid model Cascade is actually calling.
    */
   applyLivePricing(models: ModelInfo[]): ModelInfo[] {
     return models.map((m) => {
@@ -263,8 +276,31 @@ export class LiveDataProvider {
       // arbitrary deployment name) still resolves to the real model's live price.
       const p = this.getLivePrice(m.baseModelId ?? m.id);
       if (!p) return m;
-      return { ...m, inputCostPer1kTokens: p.input, outputCostPer1kTokens: p.output };
+      const reconciled = reconcilePrice(m, p);
+      if (reconciled.disagreement) this.recordDisagreement(reconciled.disagreement);
+      if (!reconciled.accepted) return m;
+      return {
+        ...m,
+        inputCostPer1kTokens: reconciled.input,
+        outputCostPer1kTokens: reconciled.output,
+        pricingUnknown: false,
+      };
     });
+  }
+
+  private recordDisagreement(d: PriceDisagreement): void {
+    const key = `${d.provider}:${d.modelId}`;
+    if (this.disagreements.has(key)) return;
+    this.disagreements.set(key, d);
+  }
+
+  /**
+   * Dataset-vs-live price mismatches seen this session, newest-model-first
+   * insertion order. Surfaced by `cascade models --verbose`; a non-empty list
+   * means src/core/router/pricing-data.json is probably due a refresh.
+   */
+  getPriceDisagreements(): PriceDisagreement[] {
+    return [...this.disagreements.values()];
   }
 
   /** Current capability facts for a model id, or null when unknown. */

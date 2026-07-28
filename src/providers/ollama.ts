@@ -14,6 +14,7 @@ import type {
 import { OLLAMA_BASE_URL } from '../constants.js';
 import { preferIpv4Host } from '../utils/net.js';
 import { BaseProvider } from './base.js';
+import { isLocalEndpoint, withResolvedPricing } from '../core/router/pricing.js';
 import { isChatModel } from './model-filter.js';
 
 // ── Ollama API types ───────────────────────────
@@ -240,9 +241,15 @@ export class OllamaProvider extends BaseProvider {
       // Capability lookups run concurrently against the local server (cheap);
       // any that fail fall back to the family-name heuristics.
       const shows = await Promise.all(entries.map((m) => this.showModel(m.name)));
+      // Ollama is a local runtime by default, so its $0 is real — but the same
+      // API can be pointed at a box someone else bills you for. `isLocalEndpoint`
+      // honours an explicit `local: false` in the provider config, and a hosted
+      // Ollama with no price in the dataset then reports "cost not tracked"
+      // instead of free.
+      const local = isLocalEndpoint({ ...this.config, type: 'ollama' });
       return entries.map((m, i) => {
         const show = shows[i];
-        return {
+        return withResolvedPricing({
           id: m.name,
           name: m.name,
           provider: 'ollama' as const,
@@ -252,10 +259,10 @@ export class OllamaProvider extends BaseProvider {
           outputCostPer1kTokens: 0,
           maxOutputTokens: 4_000,
           supportsStreaming: true,
-          isLocal: true,
+          isLocal: local,
           supportsToolUse: show?.tools ?? isToolCapable(m.name),
           minSizeB: this.parseSizeB(m.details?.parameter_size),
-        };
+        });
       });
     } catch {
       return [];

@@ -192,7 +192,7 @@ export function App() {
     socket.on('connect_error', () => dispatch(setReconnecting(true)));
     socket.on('reconnect', () => { dispatch(setConnected(true)); dispatch(setReconnecting(false)); });
 
-    socket.on('cost:update', (data: { totalCostUsd: number; totalTokens: number }) => {
+    socket.on('cost:update', (data: { totalCostUsd: number; totalTokens: number; costUnknown?: boolean }) => {
       dispatch(updateCost(data));
     });
 

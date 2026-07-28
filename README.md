@@ -381,10 +381,14 @@ cascade doctor              # confirms detection
     "apiKey":         "...",
     "baseUrl":        "https://YOUR_RESOURCE.openai.azure.com",
     "deploymentName": "gpt-4o",
-    "apiVersion":     "2024-08-01-preview"
+    "apiVersion":     "2024-08-01-preview",
+    "region":         "global"
   }]
 }
 ```
+
+`region` selects the right price sheet — Azure charges ~10% more for `us` and
+`eu` deployments than for `global` ones. Defaults to the global rates.
 
 ### OpenAI-compatible endpoints (Groq, Together, etc.)
 
@@ -394,10 +398,27 @@ cascade doctor              # confirms detection
     "type":    "openai-compatible",
     "apiKey":  "...",
     "baseUrl": "https://api.groq.com/openai/v1",
-    "model":   "llama-3.1-70b-versatile"
+    "model":   "llama-3.1-70b-versatile",
+    "local":   false
   }]
 }
 ```
+
+### Is this endpoint free? (`local`)
+
+An OpenAI-compatible endpoint is either your own hardware — llama.cpp, LM
+Studio, vLLM — where inference genuinely costs nothing, or somebody's paid API.
+The same is true of Ollama, which is usually local but can be pointed at a
+rented box. `local` says which:
+
+| `local`   | Meaning                                                            |
+|-----------|--------------------------------------------------------------------|
+| `true`    | Self-hosted. Calls cost **$0**, and Cascade reports $0.            |
+| `false`   | Hosted. Cascade prices calls from its pricing dataset; a model it can't price reports **"cost not tracked"**, never $0.00. |
+| *(unset)* | Inferred: Ollama is local; an OpenAI-compatible endpoint is local when `baseUrl` points at localhost or your LAN. |
+
+Set it explicitly whenever the default guesses wrong — a hosted endpoint
+mistaken for a local one is how real spend gets reported as free.
 
 ---
 

@@ -6,6 +6,7 @@ import { AzureOpenAI } from 'openai';
 import { AZURE_BASE_URL_TEMPLATE, MODELS } from '../constants.js';
 import type { ModelInfo, ProviderConfig } from '../types.js';
 import { OpenAIProvider, isReasoningModel, isParamShapeError } from './openai.js';
+import { resolvePricing } from '../core/router/pricing.js';
 
 // Default Azure API version. Bumped from 2024-08-01-preview, which predates the
 // gpt-5 / reasoning deployments and made their availability probe (and runs)
@@ -61,6 +62,15 @@ export function azureModelForDeployment(cfg: ProviderConfig): ModelInfo | null {
   const baseModelId = cfg.model?.trim() || inferAzureBaseModel(id) || undefined;
   const base = baseModelId ? MODELS[baseModelId] : undefined;
   if (base) {
+    // Azure charges its own rates for the same model, and they vary by region
+    // (gpt-5.4 is $2.50/$15 per 1M on a global deployment but $2.75/$16.50 in
+    // `us`/`eu`). Prefer the dataset's azure entry for the configured region;
+    // it falls back to OpenAI list price only when Azure has no entry, and the
+    // catalogue value below is the last resort.
+    const azurePrice = resolvePricing(
+      { id, provider: 'azure', isLocal: false, baseModelId },
+      { region: cfg.region },
+    );
     return {
       ...base,
       id,               // callable deployment name
@@ -68,6 +78,13 @@ export function azureModelForDeployment(cfg: ProviderConfig): ModelInfo | null {
       provider: 'azure',
       baseModelId,      // real identity for benchmark + live pricing
       supportsToolUse: base.supportsToolUse ?? true,
+      ...(azurePrice.unknown
+        ? {}
+        : {
+            inputCostPer1kTokens: azurePrice.input,
+            outputCostPer1kTokens: azurePrice.output,
+            pricingUnknown: false,
+          }),
     };
   }
   // Unknown base — keep neutral defaults so cost/context read as an estimate.

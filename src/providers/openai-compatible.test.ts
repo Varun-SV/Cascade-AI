@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OpenAICompatibleProvider } from './openai-compatible.js';
 import type { ModelInfo } from '../types.js';
 
@@ -29,5 +29,53 @@ describe('OpenAICompatibleProvider construction', () => {
       { type: 'openai-compatible', baseUrl: 'http://127.0.0.1:8900/v1' },
       seed,
     )).not.toThrow();
+  });
+});
+
+// The provider talks to the endpoint through utils/net's nodeHttpFetch (the
+// Electron main process can't always reach loopback via global fetch), so that
+// is what has to be stubbed for a listModels() test.
+vi.mock('../utils/net.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../utils/net.js')>();
+  return {
+    ...actual,
+    nodeHttpFetch: vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: [{ id: 'qwen3-30b-instruct' }] }),
+    })),
+  };
+});
+
+describe('OpenAICompatibleProvider listModels — local vs hosted pricing', () => {
+  it('marks models from a loopback endpoint as genuinely local and free', async () => {
+    const p = new OpenAICompatibleProvider(
+      { type: 'openai-compatible', baseUrl: 'http://127.0.0.1:8900/v1' },
+      seed,
+    );
+    const [m] = await p.listModels();
+    expect(m!.isLocal).toBe(true);
+    expect(m!.inputCostPer1kTokens).toBe(0);
+    expect(m!.pricingUnknown).toBe(false);
+  });
+
+  it('marks an unpriced HOSTED endpoint as cost-unknown, not free', async () => {
+    const p = new OpenAICompatibleProvider(
+      { type: 'openai-compatible', baseUrl: 'https://api.together.xyz/v1', apiKey: 'k' },
+      seed,
+    );
+    const [m] = await p.listModels();
+    expect(m!.isLocal).toBe(false);
+    expect(m!.pricingUnknown).toBe(true);
+  });
+
+  it('honours an explicit local override on a non-loopback host', async () => {
+    const p = new OpenAICompatibleProvider(
+      { type: 'openai-compatible', baseUrl: 'https://gpu.mycorp.example/v1', apiKey: 'k', local: true },
+      seed,
+    );
+    const [m] = await p.listModels();
+    expect(m!.isLocal).toBe(true);
+    expect(m!.pricingUnknown).toBe(false);
   });
 });
