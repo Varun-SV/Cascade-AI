@@ -5,6 +5,31 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.56.0 - 2026-07-29
+
+### Fixed
+- **A Complex run could fail every section at once with "Cannot read
+  properties of undefined (reading 'join')."** T1's execution plan — and,
+  separately, a T2 manager's own re-decomposition of a section — comes back
+  as JSON from an LLM call. `constraints` is declared a required `string[]`
+  on both the section and each subtask in the TypeScript types, but that's a
+  compile-time contract only: nothing validated it at runtime, and a larger
+  plan (more sections, more subtasks — exactly the shape of a multi-section
+  research/report task) made it more likely the model would simply omit the
+  field for one or more entries. Every consumer downstream — T2Manager's own
+  decomposition prompt, and T3Worker's system and initial prompts — called
+  `.join('; ')` or `.map(...).join(...)` on it unguarded, so the first
+  missing `constraints` crashed that section's T2 manager immediately, and
+  because T1 dispatches every section from the same plan, a single omission
+  by the model took the whole run down with the same error repeated once per
+  section (and again on T1's automatic replan attempt).
+
+  Fixed by normalizing `constraints` to `[]` at the two points where LLM
+  JSON becomes plan data — `T1Administrator.validatePlan` (covers both a
+  freshly generated plan and a boardroom-edited one) and `T2Manager`'s own
+  section re-decomposition — instead of scattering null-checks across every
+  place the field gets read.
+
 ## 0.55.0 - 2026-07-28
 
 ### Fixed
