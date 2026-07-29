@@ -396,6 +396,27 @@ describe('isReadOnlyMcpToolName', () => {
     expect(isReadOnlyMcpToolName('getFileContents')).toBe(true);
   });
 
+  it('treats a compound name as dangerous when a mutating verb follows a read-only lead', () => {
+    // Codex round-4 finding: the leading-verb check alone waves these through
+    // as read-only because "get"/"read"/"fetch" lead, even though each
+    // performs (or may perform) the mutation named later in the compound
+    // action.
+    expect(isReadOnlyMcpToolName('get_or_create_repository')).toBe(false);
+    expect(isReadOnlyMcpToolName('read_and_delete_file')).toBe(false);
+    expect(isReadOnlyMcpToolName('fetch_then_update')).toBe(false);
+    // Same check, camelCase.
+    expect(isReadOnlyMcpToolName('getOrCreateRepository')).toBe(false);
+  });
+
+  it('does not flag a mutating-looking SUBSTRING that is not its own token', () => {
+    // Token-exact matching is the point of the compound check above — a
+    // regex/substring search would misfire on ordinary words that happen to
+    // contain a mutating verb's letters.
+    expect(isReadOnlyMcpToolName('get_dataset')).toBe(true); // "set" is not a token
+    expect(isReadOnlyMcpToolName('list_created_issues')).toBe(true); // "created" ≠ "create"
+    expect(isReadOnlyMcpToolName('get_updated_files')).toBe(true); // "updated" ≠ "update"
+  });
+
   it('is dangerous-by-default for a name it cannot confidently place at all', () => {
     expect(isReadOnlyMcpToolName('do_the_thing')).toBe(false);
     expect(isReadOnlyMcpToolName('mystery_action')).toBe(false);

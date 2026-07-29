@@ -125,12 +125,70 @@ describe('generateImage — Gemini generateContent', () => {
       .rejects.toThrow(/blocked by the provider \(SAFETY\)/);
   });
 
+  it('surfaces a CANDIDATE-level safety stop as a block too, not a generic empty response', async () => {
+    // Regression: promptFeedback.blockReason is reserved for a block BEFORE
+    // generation starts — a prompt that was accepted but whose OUTPUT tripped
+    // an image safety filter reports the refusal on candidates[0].finishReason
+    // instead, with no promptFeedback at all. Falling through to the generic
+    // "no image data" error hid the refusal and left it classified 'unknown'
+    // (non-systemic by accident) rather than the correct 'content_filter'.
+    stubFetch({
+      candidates: [{ content: { role: 'model', parts: [] }, finishReason: 'IMAGE_SAFETY' }],
+    });
+
+    await expect(generateImage(GEMINI_IMAGE, CFG, { prompt: 'something borderline' }))
+      .rejects.toThrow(/blocked by the provider \(IMAGE_SAFETY\)/);
+  });
+
+  it('does not treat an ordinary STOP finish as a block', async () => {
+    // The existing "answers with text and no image" case already carries
+    // finishReason: 'STOP' via imageResponse() — this pins that a normal STOP
+    // must never be misread as a refusal.
+    stubFetch(imageResponse([{ text: 'no picture, just words' }]));
+
+    await expect(generateImage(GEMINI_IMAGE, CFG, { prompt: 'a cat' }))
+      .rejects.toThrow(/no image data/);
+  });
+
   it('classifies a provider HTTP failure instead of leaking a raw response', async () => {
     // The live symptom that started this: a 404 from the retired Imagen id.
     stubFetch('This model is no longer available to new users.', false, 404);
 
     await expect(generateImage(GEMINI_IMAGE, CFG, { prompt: 'a cat' }))
       .rejects.toThrow(/Model unavailable on gemini-2\.5-flash-image/);
+  });
+
+  it('maps an OpenAI-shaped size onto the closest Gemini aspect ratio', async () => {
+    // Regression: Gemini has no free-form pixel size, only named ratios — the
+    // tool's requested "size" was parsed and then simply never forwarded, so
+    // an explicit landscape/portrait request silently rendered square.
+    const calls = stubFetch(imageResponse([
+      { inlineData: { mimeType: 'image/png', data: PNG_BYTES.toString('base64') } },
+    ]));
+
+    await generateImage(GEMINI_IMAGE, CFG, { prompt: 'a banner', size: '1792x1024' });
+
+    expect(calls[0]!.body.generationConfig.imageConfig).toEqual({ aspectRatio: '16:9' });
+  });
+
+  it('maps a portrait size onto 9:16', async () => {
+    const calls = stubFetch(imageResponse([
+      { inlineData: { mimeType: 'image/png', data: PNG_BYTES.toString('base64') } },
+    ]));
+
+    await generateImage(GEMINI_IMAGE, CFG, { prompt: 'a poster', size: '1024x1792' });
+
+    expect(calls[0]!.body.generationConfig.imageConfig).toEqual({ aspectRatio: '9:16' });
+  });
+
+  it('omits imageConfig entirely when no size is requested', async () => {
+    const calls = stubFetch(imageResponse([
+      { inlineData: { mimeType: 'image/png', data: PNG_BYTES.toString('base64') } },
+    ]));
+
+    await generateImage(GEMINI_IMAGE, CFG, { prompt: 'a cat' });
+
+    expect(calls[0]!.body.generationConfig.imageConfig).toBeUndefined();
   });
 
   it('honours a configured baseUrl override', async () => {

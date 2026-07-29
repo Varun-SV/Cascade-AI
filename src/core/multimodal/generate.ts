@@ -109,6 +109,36 @@ function stamp(ext: string): string {
   return `cascade-${Date.now()}.${ext}`;
 }
 
+/**
+ * Gemini's image models take a named aspect ratio (`generationConfig.
+ * imageConfig.aspectRatio`), not a free-form pixel WxH like OpenAI's — there
+ * is no arbitrary-size control at all.
+ * https://ai.google.dev/gemini-api/docs/image-generation
+ *
+ * `req.size` arrives as an OpenAI-shaped "WxH" string (the tool's own schema
+ * mirrors dall-e-3's accepted sizes: "1024x1024", "1792x1024", "1024x1792").
+ * Map it onto whichever of Gemini's ratios its numeric ratio is closest to,
+ * so a landscape/portrait request still lands roughly right instead of
+ * silently defaulting to square — which is what happened before this existed:
+ * the size was parsed by the tool schema and then simply never read here.
+ */
+const GEMINI_ASPECT_RATIOS: ReadonlyArray<readonly [string, number]> = [
+  ['1:1', 1 / 1], ['3:2', 3 / 2], ['2:3', 2 / 3], ['3:4', 3 / 4], ['4:3', 4 / 3],
+  ['4:5', 4 / 5], ['5:4', 5 / 4], ['9:16', 9 / 16], ['16:9', 16 / 9], ['21:9', 21 / 9],
+];
+
+function closestGeminiAspectRatio(size: string): string | undefined {
+  const m = size.match(/^(\d+)\s*[x×]\s*(\d+)$/i);
+  if (!m) return undefined;
+  const w = Number(m[1]);
+  const h = Number(m[2]);
+  if (!w || !h) return undefined;
+  const ratio = w / h;
+  return GEMINI_ASPECT_RATIOS.reduce((best, cand) =>
+    Math.abs(cand[1] - ratio) < Math.abs(best[1] - ratio) ? cand : best,
+  )[0];
+}
+
 // ── Image ─────────────────────────────────────
 
 export async function generateImage(
@@ -151,16 +181,24 @@ export async function generateImage(
       // nothing like the Imagen shape it replaced.
       const base = baseUrlFor(cfg, 'https://generativelanguage.googleapis.com/v1beta');
       const url = `${base}/models/${encodeURIComponent(cap.modelId)}:generateContent`;
+      const aspectRatio = req.size ? closestGeminiAspectRatio(req.size) : undefined;
       const res = await postJson(url, {
         contents: [{ parts: [{ text: req.prompt }] }],
-        // Asked for explicitly: these models can answer with text only, and a
-        // text-only reply to "draw me a cat" is a failed image generation.
-        generationConfig: { responseModalities: ['IMAGE', 'TEXT'] },
+        generationConfig: {
+          // Asked for explicitly: these models can answer with text only, and a
+          // text-only reply to "draw me a cat" is a failed image generation.
+          responseModalities: ['IMAGE', 'TEXT'],
+          // Gemini has no free-form pixel size — only a named aspect ratio (see
+          // closestGeminiAspectRatio). Omitted entirely when there's no
+          // requested size, or no supported ratio close enough to bother with.
+          ...(aspectRatio ? { imageConfig: { aspectRatio } } : {}),
+        },
       }, { 'x-goog-api-key': cfg.apiKey ?? '' }, signal);
 
       const body = await res.json() as {
         candidates?: Array<{
           content?: { parts?: Array<{ text?: string; inlineData?: { data?: string; mimeType?: string } }> };
+          finishReason?: string;
         }>;
         promptFeedback?: { blockReason?: string };
       };
@@ -169,14 +207,23 @@ export async function generateImage(
       // provider walks parts by hand (see providers/gemini.ts): a response can
       // mix text, thinking and inline data, and index 0 is not reliably the
       // image.
-      const parts = body.candidates?.[0]?.content?.parts ?? [];
+      const candidate = body.candidates?.[0];
+      const parts = candidate?.content?.parts ?? [];
       const image = parts.find((p) => p.inlineData?.data)?.inlineData;
       if (!image?.data) {
         // Distinguish "refused" from "empty" — a safety block returns a
         // perfectly well-formed response with no image in it, and reporting
         // that as a generic parse failure sends the user hunting a bug that
-        // isn't there.
-        const blocked = body.promptFeedback?.blockReason;
+        // isn't there. Two different places can carry the refusal: a
+        // PROMPT-level block on `promptFeedback` (checked before generation
+        // even starts), or a CANDIDATE-level stop on `finishReason` — Gemini's
+        // image safety filters commonly stop generation with a reason like
+        // `SAFETY`/`PROHIBITED_CONTENT`/`IMAGE_SAFETY` and no `blockReason` on
+        // `promptFeedback` at all, since the prompt itself was accepted; it's
+        // what came back that was refused. `STOP` is the only non-refusal
+        // value, so anything else present is treated as a block.
+        const blocked = body.promptFeedback?.blockReason
+          ?? (candidate?.finishReason && candidate.finishReason !== 'STOP' ? candidate.finishReason : undefined);
         if (blocked) throw new Error(`Image request was blocked by the provider (${blocked}).`);
         const said = parts.find((p) => p.text)?.text?.trim();
         throw new Error(

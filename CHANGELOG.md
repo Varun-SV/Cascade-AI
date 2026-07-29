@@ -5,6 +5,47 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.63.0 - 2026-07-29
+
+### Fixed
+Fourth round of Codex review findings on the same PR:
+- **A fallback image provider's non-systemic failure still escalated the
+  worker.** When the primary image provider failed systemically and the
+  fallback then failed for an unrelated reason (a content refusal, a
+  malformed prompt), the combined "every provider failed" error still
+  carried the primary's systemic wording (e.g. "Model unavailable").
+  `t3-worker.ts` always re-runs `classifyProviderError` on whatever
+  `generate_image` throws, and that check matches the WHOLE message — so
+  the leftover systemic phrasing from the primary's own failure still
+  triggered a fast-fail even though the deciding failure (the fallback's)
+  was never systemic. The fallback's own error now propagates unmixed
+  in that case, so re-classifying it lands on the correct, non-systemic
+  verdict.
+- **A compound MCP tool name could hide a mutation behind a read-only leading
+  verb.** `isReadOnlyMcpToolName` only inspected the FIRST verb, so names
+  like `get_or_create_repository`, `read_and_delete_file`, and
+  `fetch_then_update` were waved through as read-only despite performing
+  the mutation named later in the compound action. Every token in the
+  name is now checked against a mutating-verb set (exact-token matching,
+  so "dataset" and "created"/"updated" don't false-positive on "set" and
+  "create"/"update"), not only the leading one.
+- **A Gemini image-generation safety refusal at the CANDIDATE level was
+  misreported as a generic parse failure.** Only `promptFeedback.blockReason`
+  (a prompt-level, pre-generation block) was checked; a refusal that stops
+  generation AFTER the prompt was accepted reports on
+  `candidates[0].finishReason` instead (e.g. `SAFETY`, `IMAGE_SAFETY`), with
+  no `promptFeedback` at all. That fell through to a generic "no image data"
+  error, misclassified as `unknown` instead of `content_filter`. Any
+  candidate `finishReason` other than `STOP` is now treated as a block too.
+- **Requested image dimensions were silently dropped for Gemini.** The tool's
+  `size` parameter (`"1792x1024"`, `"1024x1792"`, etc. — the same values
+  DALL·E accepts) was parsed but never forwarded on the
+  `gemini-generate-content` path, so Gemini always rendered its default
+  geometry regardless of what was asked for. Unlike OpenAI, Gemini has no
+  free-form pixel size — only a named `imageConfig.aspectRatio` — so the
+  requested `WxH` is now mapped to whichever of Gemini's ten supported
+  ratios its numeric ratio is closest to.
+
 ## 0.62.0 - 2026-07-29
 
 ### Fixed

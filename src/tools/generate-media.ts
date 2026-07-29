@@ -121,6 +121,7 @@ async function runWithProviderFallback<T>(
 
     const tried = [`${failed.modelId} (${failed.provider}): ${messageOf(err)}`];
     let allSystemic = true; // the primary was systemic, by construction
+    let lastNonSystemic: unknown; // set when a fallback fails for a reason unrelated to provider health
     const seen = new Set<string>([failed.provider]);
 
     for (const alt of deps.registry.rank(modality)) {
@@ -139,13 +140,30 @@ async function runWithProviderFallback<T>(
       } catch (retryErr) {
         if (signal?.aborted) throw retryErr;
         tried.push(`${alt.capability.modelId} (${alt.capability.provider}): ${messageOf(retryErr)}`);
-        allSystemic = allSystemic && classifyProviderError(retryErr).systemic;
+        if (classifyProviderError(retryErr).systemic) {
+          continue;
+        }
+        allSystemic = false;
+        lastNonSystemic = retryErr;
       }
     }
 
     // Nothing to fall back to — propagate the original error untouched, so a
     // single-provider account behaves exactly as it did before.
     if (tried.length === 1) throw err;
+
+    // A fallback failed for a reason unrelated to provider health (a content
+    // refusal, a malformed prompt) rather than the primary's kind of systemic
+    // failure. Propagate THAT error on its own, not merged into the combined
+    // "every provider failed" message below — t3-worker.ts re-runs
+    // classifyProviderError() on whatever this throws (PROVIDER_BACKED_TOOLS
+    // are always re-classified, regardless of any `systemic` tag we do or
+    // don't set), and its text matcher works over the WHOLE message. A
+    // concatenated string still carrying the primary's systemic wording (e.g.
+    // "model not found") gets matched by that same regex and fast-fails the
+    // worker even though the actual, deciding failure — the fallback's — was
+    // never systemic at all.
+    if (!allSystemic) throw lastNonSystemic;
 
     // Every configured provider is exhausted, so the worker's fast-fail is now
     // the correct response. Naming each provider matters: "it failed" reads as
@@ -157,7 +175,7 @@ async function runWithProviderFallback<T>(
     const exhausted = new Error(
       `${modality} generation failed on every configured provider (${seen.size} tried). ${tried.join(' ')}`,
     );
-    if (allSystemic) Object.assign(exhausted, { systemic: true });
+    Object.assign(exhausted, { systemic: true });
     throw exhausted;
   }
 }

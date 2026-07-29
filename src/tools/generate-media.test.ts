@@ -158,6 +158,13 @@ const BLOCKED = asGenerateThrows(
   new Error('Image request was blocked by the provider (SAFETY).'),
   'gemini-2.5-flash-image',
 );
+/** The FALLBACK provider refusing on content grounds — used to prove a
+ *  non-systemic fallback failure isn't mixed into a message that gets
+ *  reclassified as systemic. */
+const OPENAI_BLOCKED = asGenerateThrows(
+  new Error('Your request was rejected as a result of our safety system.'),
+  'dall-e-3',
+);
 
 function asset(modelId: string, provider: string): GeneratedAsset {
   return {
@@ -255,6 +262,31 @@ describe('generate_image falls back across providers before declaring the capabi
     // "systemic" from prose — and the classifier agrees either way.
     expect(err!.systemic).toBe(true);
     expect(classifyProviderError(err).systemic).toBe(true);
+  });
+
+  it('propagates the fallback\'s own non-systemic error, unmixed with the primary\'s systemic wording', async () => {
+    // Gemini 404s (systemic, triggers the retry) and dall-e-3 then refuses on
+    // content grounds (non-systemic). Regression: the combined "every provider
+    // failed" message used to still carry Gemini's "model not found"/"model
+    // unavailable" wording, which t3-worker.ts's own classifyProviderError()
+    // re-derives systemic-ness from — matching that leftover text and
+    // fast-failing the whole worker even though the deciding failure (the
+    // fallback's safety refusal) was never systemic. The propagated error must
+    // be the fallback's own, so re-classifying it lands on content_filter.
+    generateImageMock
+      .mockRejectedValueOnce(GEMINI_404)
+      .mockRejectedValueOnce(OPENAI_BLOCKED);
+
+    const err = await imageToolWith(['openai', 'gemini'])
+      .execute({ prompt: 'something refused after failing over' }, RUN_OPTS)
+      .then(() => null, (e: unknown) => e as Error & { systemic?: boolean });
+
+    expect(attemptedProviders()).toEqual(['gemini', 'openai']);
+    expect(err).toBe(OPENAI_BLOCKED); // the fallback's own error, not a wrapper
+    expect(err!.message).not.toMatch(/model unavailable|not found/i);
+    expect(err!.systemic).not.toBe(true);
+    expect(classifyProviderError(err).systemic).toBe(false);
+    expect(classifyProviderError(err).kind).toBe('content_filter');
   });
 
   it('does not spend a second provider call on a non-systemic failure', async () => {

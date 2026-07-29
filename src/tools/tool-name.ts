@@ -125,7 +125,54 @@ export function isMcpToolName(name: string): boolean {
  */
 const READ_ONLY_MCP_VERBS = ['list', 'get', 'search', 'read', 'describe', 'find', 'query', 'fetch', 'show', 'view'];
 
+/**
+ * Verbs that mark a name as mutating no matter WHERE they sit in it. A leading
+ * read-only verb is not the whole story: `get_or_create_repository`,
+ * `read_and_delete_file` and `fetch_then_update` all start with an allowed
+ * verb, so the leading-verb check alone waves through the mutation named later
+ * in a conjunction. Checked as whole tokens, not substrings — see `mcpTokens`
+ * — so this does not fire on "dataset" (contains "set"), "created"/"updated"
+ * (past-tense filter words, not the imperative verb), or similar.
+ *
+ * A few of these (`run`, `add`) are also ordinary nouns in some real tool
+ * names (`get_run_status`, `get_address`) — "get_run_status" still tokenizes
+ * to "get"/"run"/"status", not "address", so it would be misclassified
+ * dangerous. That is the intended failure direction: an unnecessary approval
+ * prompt costs a click, a missed mutation does not — see the file-level
+ * comment on `isReadOnlyMcpToolName`.
+ */
+const MUTATING_MCP_TOKENS = new Set([
+  'create', 'delete', 'remove', 'update', 'write', 'modify', 'set', 'put',
+  'post', 'patch', 'push', 'merge', 'send', 'execute', 'exec', 'run', 'deploy',
+  'install', 'uninstall', 'upload', 'publish', 'revoke', 'grant', 'approve',
+  'reject', 'cancel', 'enable', 'disable', 'add', 'insert', 'drop', 'truncate',
+  'clear', 'reset', 'restart', 'stop', 'kill', 'terminate', 'rename', 'move',
+  'fork', 'sync', 'replace', 'overwrite', 'invite', 'ban', 'block', 'assign',
+  'lock', 'unlock', 'archive', 'star', 'comment', 'reply', 'submit', 'apply',
+  'trigger', 'invoke', 'purge', 'migrate', 'edit', 'save', 'commit',
+]);
+
+/**
+ * Break a raw MCP tool name into lowercase word tokens on `_`, `-` and
+ * camelCase boundaries, so `get_or_create_repository` and
+ * `getOrCreateRepository` both yield ["get","or","create","repository"].
+ * Token-exact matching (not substring/regex matching) is the point: it is
+ * what keeps "dataset" from matching "set" and "created" from matching
+ * "create" — see `MUTATING_MCP_TOKENS`.
+ */
+function mcpTokens(rawToolName: string): string[] {
+  return rawToolName
+    .split(/[_-]+/)
+    .flatMap((segment) => segment.split(/(?<=[a-z0-9])(?=[A-Z])/))
+    .map((t) => t.toLowerCase())
+    .filter(Boolean);
+}
+
 export function isReadOnlyMcpToolName(rawToolName: string): boolean {
+  // Checked FIRST and independent of the leading verb: a mutating token
+  // anywhere in the name overrides whatever the name starts with.
+  if (mcpTokens(rawToolName).some((t) => MUTATING_MCP_TOKENS.has(t))) return false;
+
   const lower = rawToolName.toLowerCase();
   for (const verb of READ_ONLY_MCP_VERBS) {
     if (!lower.startsWith(verb)) continue;
