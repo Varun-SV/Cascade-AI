@@ -14,6 +14,10 @@ describe('modality classification', () => {
     ['dall-e-3', 'image'],
     ['gpt-image-1', 'image'],
     ['imagen-4.0-generate-001', 'image'],
+    // The generateContent-era Gemini image model. It has to classify as `image`
+    // or it would land back in the CHAT pool, where a text turn routed to it
+    // returns a picture.
+    ['gemini-2.5-flash-image', 'image'],
     ['veo-3.1-generate-001', 'video'],
     ['sora-2', 'video'],
     ['omni-moderation-latest', 'moderation'],
@@ -87,7 +91,7 @@ describe('MultimodalRegistry', () => {
     expect(openaiOnly.usable('image').map((c) => c.modelId)).toEqual(['dall-e-3']);
 
     const geminiOnly = new MultimodalRegistry(['gemini']);
-    expect(geminiOnly.select('image')!.capability.modelId).toBe('imagen-4.0-generate-001');
+    expect(geminiOnly.select('image')!.capability.modelId).toBe('gemini-2.5-flash-image');
     // No OpenAI key ⇒ no speech or transcription at all.
     expect(geminiOnly.select('speech')).toBeNull();
     expect(geminiOnly.select('transcription')).toBeNull();
@@ -101,6 +105,19 @@ describe('MultimodalRegistry', () => {
     // switch on it rather than guessing from the model name.
     expect(pick.capability.api).toBe('gemini-predict-lro');
     expect(r.availableModalities()).toContain('video');
+  });
+
+  it('reaches Gemini image generation through generateContent, not Imagen :predict', () => {
+    // Imagen's :predict API is deprecated (shuts down 2026-08-17) and already
+    // 404s for new keys. The api discriminator is what routes the executor to
+    // the right request/response shape, so it is asserted here rather than
+    // inferred from the model name.
+    const r = new MultimodalRegistry(['gemini']);
+    const pick = r.select('image')!;
+    expect(pick.capability.modelId).toBe('gemini-2.5-flash-image');
+    expect(pick.capability.api).toBe('gemini-generate-content');
+    // Nothing in the catalogue may still point at the dying endpoint.
+    expect(allCapabilities().map((c) => c.api as string)).not.toContain('gemini-predict');
   });
 
   it('still never offers a capability marked unsupported', () => {
@@ -131,21 +148,24 @@ describe('MultimodalRegistry', () => {
     const r = new MultimodalRegistry(['openai', 'gemini']);
     const pick = r.select('image')!;
     expect(pick.reason).toContain('cost choice, not a quality one');
-    // Cheapest of the two priced options.
-    expect(pick.capability.modelId).toBe('dall-e-3');
+    // Cheapest of the two priced options. gemini-2.5-flash-image ($0.039/image)
+    // undercuts dall-e-3 ($0.040), so the automatic pick moved to Gemini when
+    // the Imagen entry was migrated — a price consequence of the migration, not
+    // a quality judgement.
+    expect(pick.capability.modelId).toBe('gemini-2.5-flash-image');
   });
 
   it('honours an explicit model request over the automatic choice', () => {
     const r = new MultimodalRegistry(['openai', 'gemini']);
-    const pick = r.select('image', { preferModel: 'imagen-4.0-generate-001' })!;
-    expect(pick.capability.modelId).toBe('imagen-4.0-generate-001');
+    const pick = r.select('image', { preferModel: 'dall-e-3' })!;
+    expect(pick.capability.modelId).toBe('dall-e-3');
     expect(pick.reason).toContain('Requested explicitly');
   });
 
   it('ignores an unusable explicit request rather than failing the call', () => {
     // Naming a model there is no key for should fall back, not dead-end.
     const r = new MultimodalRegistry(['openai']);
-    const pick = r.select('image', { preferModel: 'imagen-4.0-generate-001' })!;
+    const pick = r.select('image', { preferModel: 'gemini-2.5-flash-image' })!;
     expect(pick.capability.modelId).toBe('dall-e-3');
   });
 

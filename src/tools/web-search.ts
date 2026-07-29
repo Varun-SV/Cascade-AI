@@ -326,16 +326,24 @@ export class WebSearchTool extends BaseTool {
       }
     }
 
-    // All backends failed
+    // All backends failed. This used to be a returned STRING — an ordinary
+    // "successful" tool result as far as the agent loop was concerned, fed
+    // straight back into the worker's context. With no grounding and no
+    // signal that anything went wrong, the worker was free to produce a
+    // plausible-sounding, completely ungrounded (and sometimes wildly
+    // off-topic) answer instead of stopping. Throwing — marked `systemic`,
+    // since no backend being reachable will fail identically for every
+    // worker in this run that needs search — lets executeTool's existing
+    // CriticalToolError path escalate with the real reason intact instead.
     const configHint = !this.config.searxngUrl && !this.config.braveApiKey && !this.config.tavilyApiKey
       ? '\nTip: Configure a search backend for better results:\n  • Self-hosted: set SEARXNG_URL in your environment\n  • Brave Search API: set BRAVE_SEARCH_API_KEY\n  • Tavily API: set TAVILY_API_KEY'
       : '';
 
-    return [
+    throw Object.assign(new Error([
       `Web search for "${query}" failed across all backends:`,
       ...errors.map((e) => `  • ${e}`),
       configHint,
-    ].join('\n');
+    ].join('\n')), { systemic: true });
   }
 
   private formatResults(query: string, results: WebSearchResult[]): string {

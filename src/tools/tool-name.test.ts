@@ -20,6 +20,7 @@ import {
   disambiguateMcpServerNames,
   isMcpToolName,
   isProviderSafeToolName,
+  isReadOnlyMcpToolName,
   mcpServerPrefix,
   mcpToolName,
   removeMcpServerDenials,
@@ -345,5 +346,44 @@ describe('assignMcpToolNames — suffix must not collide with an existing base',
       { server: 'srv', tool: 'foo_bar_3' }, // already owns "_3" too
     ]);
     expect(new Set(names).size).toBe(4);
+  });
+});
+
+describe('isReadOnlyMcpToolName', () => {
+  it('recognises snake_case read-only verbs, whatever they operate on', () => {
+    for (const name of ['list_pull_requests', 'get_file_contents', 'search_issues', 'read_file', 'describe_stack', 'find_replacements', 'query_database', 'fetch_page', 'show_diff', 'view_log']) {
+      expect(isReadOnlyMcpToolName(name)).toBe(true);
+    }
+  });
+
+  it('recognises the same verbs in camelCase', () => {
+    expect(isReadOnlyMcpToolName('getFileContents')).toBe(true);
+    expect(isReadOnlyMcpToolName('listPullRequests')).toBe(true);
+  });
+
+  it('treats a bare read-only verb, with nothing appended, as read-only', () => {
+    expect(isReadOnlyMcpToolName('get')).toBe(true);
+    expect(isReadOnlyMcpToolName('list')).toBe(true);
+  });
+
+  it('is dangerous-by-default for write/mutate verbs — the actual bug this exists for', () => {
+    // The real GitHub-connector complaint: create_repository, delete_repository,
+    // push_files, merge_pull_request ran with zero approval because MCP tools
+    // had no danger classification at all.
+    for (const name of ['create_repository', 'delete_repository', 'push_files', 'merge_pull_request', 'update_pull_request', 'fork_repository', 'send_message', 'run_workflow']) {
+      expect(isReadOnlyMcpToolName(name)).toBe(false);
+    }
+  });
+
+  it('does not match a read-only verb that is only a SUBSTRING, not the leading token', () => {
+    // "target_list" contains "list" but doesn't start with it — must not be
+    // waved through as read-only.
+    expect(isReadOnlyMcpToolName('target_list')).toBe(false);
+    expect(isReadOnlyMcpToolName('unlisted_get')).toBe(false);
+  });
+
+  it('is dangerous-by-default for a name it cannot confidently place at all', () => {
+    expect(isReadOnlyMcpToolName('do_the_thing')).toBe(false);
+    expect(isReadOnlyMcpToolName('mystery_action')).toBe(false);
   });
 });

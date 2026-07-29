@@ -36,7 +36,7 @@ export type GenerationApi =
   | 'openai-images'          // POST /v1/images/generations
   | 'openai-speech'          // POST /v1/audio/speech
   | 'openai-transcriptions'  // POST /v1/audio/transcriptions
-  | 'gemini-predict'          // :predict — Imagen
+  | 'gemini-generate-content' // :generateContent with an IMAGE response modality
   | 'gemini-predict-lro';    // :predictLongRunning — Veo (submit → poll → fetch)
 
 export interface GenerationCapability {
@@ -71,14 +71,14 @@ const CAPABILITIES: readonly GenerationCapability[] = [
     modality: 'image', provider: 'openai', modelId: 'dall-e-3', api: 'openai-images',
   },
   {
-    // Imagen, not `gemini-3-pro-image`. That id appears on Google's PRICING
-    // page but 404s on `:predict` ("not found for API version v1beta, or is not
-    // supported for predict") — the Gemini image models are called through
-    // generateContent with an image response modality, while `:predict` is the
-    // Imagen shape this executor implements. A billing line item is not proof
-    // of a callable endpoint, which is the assumption that put the wrong id
-    // here in the first place.
-    modality: 'image', provider: 'gemini', modelId: 'imagen-4.0-generate-001', api: 'gemini-predict',
+    // Was `imagen-4.0-generate-001` on `:predict`, which now 404s for new keys
+    // ("no longer available to new users") — Imagen's :predict API is deprecated
+    // and shuts down 2026-08-17. Google's own migration path is this model on
+    // the ordinary generateContent endpoint, so the fix was never another Imagen
+    // id: the whole request/response SHAPE changes, which is why `api` moved to
+    // 'gemini-generate-content' rather than just the modelId moving.
+    // https://ai.google.dev/gemini-api/docs/imagen
+    modality: 'image', provider: 'gemini', modelId: 'gemini-2.5-flash-image', api: 'gemini-generate-content',
   },
 
   // ── Speech (text → audio) ──

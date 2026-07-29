@@ -144,22 +144,48 @@ export async function generateImage(
       };
     }
 
-    if (cap.api === 'gemini-predict') {
+    if (cap.api === 'gemini-generate-content') {
+      // Gemini's image models are ordinary generateContent calls, not Imagen's
+      // `:predict`. The image comes back as an inlineData PART alongside any
+      // commentary text, rather than in a `predictions[]` array — so this reads
+      // nothing like the Imagen shape it replaced.
       const base = baseUrlFor(cfg, 'https://generativelanguage.googleapis.com/v1beta');
-      const url = `${base}/models/${encodeURIComponent(cap.modelId)}:predict`;
+      const url = `${base}/models/${encodeURIComponent(cap.modelId)}:generateContent`;
       const res = await postJson(url, {
-        instances: [{ prompt: req.prompt }],
-        parameters: { sampleCount: 1 },
+        contents: [{ parts: [{ text: req.prompt }] }],
+        // Asked for explicitly: these models can answer with text only, and a
+        // text-only reply to "draw me a cat" is a failed image generation.
+        generationConfig: { responseModalities: ['IMAGE', 'TEXT'] },
       }, { 'x-goog-api-key': cfg.apiKey ?? '' }, signal);
 
       const body = await res.json() as {
-        predictions?: Array<{ bytesBase64Encoded?: string; mimeType?: string }>;
+        candidates?: Array<{
+          content?: { parts?: Array<{ text?: string; inlineData?: { data?: string; mimeType?: string } }> };
+        }>;
+        promptFeedback?: { blockReason?: string };
       };
-      const first = body.predictions?.[0];
-      if (!first?.bytesBase64Encoded) throw new Error('Image response contained no image data.');
-      const mimeType = first.mimeType ?? 'image/png';
+
+      // Walk the parts for the first one carrying bytes. Same reason the chat
+      // provider walks parts by hand (see providers/gemini.ts): a response can
+      // mix text, thinking and inline data, and index 0 is not reliably the
+      // image.
+      const parts = body.candidates?.[0]?.content?.parts ?? [];
+      const image = parts.find((p) => p.inlineData?.data)?.inlineData;
+      if (!image?.data) {
+        // Distinguish "refused" from "empty" — a safety block returns a
+        // perfectly well-formed response with no image in it, and reporting
+        // that as a generic parse failure sends the user hunting a bug that
+        // isn't there.
+        const blocked = body.promptFeedback?.blockReason;
+        if (blocked) throw new Error(`Image request was blocked by the provider (${blocked}).`);
+        const said = parts.find((p) => p.text)?.text?.trim();
+        throw new Error(
+          'Image response contained no image data.' + (said ? ` The model replied with text instead: ${said}` : ''),
+        );
+      }
+      const mimeType = image.mimeType ?? 'image/png';
       return {
-        data: Buffer.from(first.bytesBase64Encoded, 'base64'),
+        data: Buffer.from(image.data, 'base64'),
         mimeType,
         filename: stamp(mimeType.includes('jpeg') ? 'jpg' : 'png'),
         modelId: cap.modelId,

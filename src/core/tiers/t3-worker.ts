@@ -31,6 +31,7 @@ import {
   buildTextToolReminder,
 } from '../../tools/text-tool-parser.js';
 import { truncateForContext } from '../../utils/truncate.js';
+import { classifyProviderError } from '../router/provider-errors.js';
 
 /**
  * Thrown by executeTool() when the underlying tool error indicates an
@@ -73,7 +74,7 @@ export class WorkerStallError extends Error {
 const KNOWN_TOOLS = [
   'shell', 'file_read', 'file_write', 'file_edit', 'file_delete', 'file_list',
   'git', 'github', 'image_analyze', 'pdf_create', 'run_code', 'peer_message',
-  'web_search', 'glob', 'grep', 'web_fetch',
+  'web_search', 'glob', 'grep', 'web_fetch', 'generate_image',
 ];
 
 export function buildWorkerRules(has: (toolName: string) => boolean): string {
@@ -87,11 +88,20 @@ export function buildWorkerRules(has: (toolName: string) => boolean): string {
     has('web_search') &&
       '- Use the "web_search" tool to find current information, documentation, news, or general web data.',
     has('pdf_create') && '- Use the "pdf_create" tool for PDF requests.',
+    // Without this the model "writes the image" as prose — a bracketed
+    // description sitting in the deck where the picture should be — even with a
+    // working image model registered. Naming the reference syntax matters as
+    // much as naming the tool: a generated image nobody embeds is still a
+    // missing image.
+    has('generate_image') &&
+      '- When a deliverable (a file, a slide deck, a document) calls for an image, illustration, chart or other visual, you MUST call the "generate_image" tool and then reference its result in the deliverable using Markdown image syntax: ![description](location), where "location" is exactly the string the tool reported back. NEVER write a text placeholder or a bracketed description such as [image: a cat] in place of a real generated image.',
     has('run_code') &&
       '- Use the "run_code" tool for any file types (Excel, Zip, csv, etc.) or complex processing not covered by other tools. Always cleanup after code execution.',
     '- If you are not making meaningful progress, stop and escalate rather than looping or padding the response.',
     has('peer_message') &&
       '- Use the "peer_message" tool to communicate with other T3 workers if your tasks have dependencies or shared state. You can send updates or wait for signals.',
+    hasAnyTool &&
+      '- Only use tools directly relevant to THIS subtask. Do not reach for an unrelated connected-service action (e.g. creating, deleting, or modifying a repository, issue, or PR; sending a message) unless the subtask explicitly calls for it.',
     '- Return structured output that directly addresses the expected output specification.',
   ];
   return `You are a T3 Worker agent in the Cascade AI system. Your job is to execute a specific subtask completely and accurately.
@@ -785,11 +795,17 @@ export class T3Worker extends BaseTier {
       const durationMs = Date.now() - toolStartMs;
       const errMsg = err instanceof Error ? err.message : String(err);
       this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: tc.name, error: errMsg, durationMs });
-      // Unrecoverable conditions (rate-limit, auth, forbidden) — throw a
-      // CriticalToolError so the agent loop stops retrying and the worker
-      // escalates fast with the real reason intact (used to loop 15× then
-      // emit a generic failure).
-      if (/\b(429|rate.?limit|authentication|api.?key|forbidden|401|403)\b/i.test(errMsg)) {
+      // Unrecoverable/systemic conditions (rate-limit, auth, quota, AND a 404
+      // "model not found" — the shared classifier this reuses is the same one
+      // `router/index.ts` uses for chat-tier failover, so a dead image model
+      // or any other systemic provider failure is fast-failed here too rather
+      // than falling through to adaptiveFallback and looping (previously up
+      // to 15× before ever emitting the real reason). A tool can also mark its
+      // OWN failure systemic directly (e.g. web_search when every backend is
+      // down — that will fail identically for every worker in this run, not
+      // just this one subtask) without needing to fit the provider-error shape.
+      const isTaggedSystemic = err instanceof Error && (err as Error & { systemic?: boolean }).systemic === true;
+      if (isTaggedSystemic || classifyProviderError(err).systemic) {
         throw new CriticalToolError(errMsg, tc.name);
       }
       // Try to recover via a sibling tool or a synthesized one before giving up;
@@ -1129,10 +1145,17 @@ Reply with JSON: { "completeness": "pass"|"fail", "correctness": "pass"|"fail", 
 
       return { checksRun, passed, failed };
     } catch {
+      // Fail CLOSED, not open. This used to report all three checks as
+      // passing whenever the grading call itself threw or its response
+      // didn't parse — silently treating a broken grader as a clean pass, on
+      // a section that may well have nothing behind it (e.g. a worker that
+      // hit a hard tool failure and never produced grounded output). Bounded
+      // the same way an ordinary failed check is: one correction attempt and
+      // one retest (see execute()'s testResult.failed handling), not a loop.
       return {
         checksRun: ['completeness', 'correctness', 'compliance'],
-        passed: ['completeness', 'correctness', 'compliance'],
-        failed: [],
+        passed: [],
+        failed: ['completeness'],
       };
     }
   }

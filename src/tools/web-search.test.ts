@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { parseDdgAnchors, unwrapDdgRedirect } from './web-search.js';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { parseDdgAnchors, unwrapDdgRedirect, WebSearchTool } from './web-search.js';
 
 describe('unwrapDdgRedirect', () => {
   it('unwraps a protocol-relative uddg redirect to the real destination', () => {
@@ -51,5 +51,26 @@ describe('parseDdgAnchors', () => {
 
   it('returns [] for an anomaly/captcha page with no result anchors', () => {
     expect(parseDdgAnchors('<html><body>Unfortunately, bots are not allowed.</body></html>', 'result-link', 'result-snippet')).toEqual([]);
+  });
+});
+
+describe('WebSearchTool.execute — all backends down', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('throws a systemic error instead of returning a "failed" string as if it were a result', () => {
+    // Regression: this used to `return` the failure text, which the agent
+    // loop treats as an ordinary successful tool result — the worker gets no
+    // signal that it has zero real search grounding and is free to produce a
+    // plausible but ungrounded (and, in one real run, completely off-topic)
+    // answer instead of stopping. `systemic: true` is what t3-worker's
+    // executeTool now checks to escalate instead of silently continuing.
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network unreachable')));
+    const tool = new WebSearchTool({}); // no configured backends → only the two DDG attempts run
+    return expect(tool.execute({ query: 'zoom for humans' }, {} as never)).rejects.toMatchObject({
+      systemic: true,
+      message: expect.stringContaining('failed across all backends'),
+    });
   });
 });

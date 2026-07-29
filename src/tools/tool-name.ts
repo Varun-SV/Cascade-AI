@@ -111,6 +111,23 @@ export function isMcpToolName(name: string): boolean {
 }
 
 /**
+ * True when a raw MCP tool name looks read-only by its leading verb — the
+ * only case an MCP tool is treated as safe. Everything else (create, delete,
+ * push, merge, send, and any name this can't confidently place) is dangerous
+ * by default: MCP tools carry no standard "this mutates state" flag, and a
+ * connected server's `create_repository`/`delete_repository`/`push_files`
+ * (say, a GitHub server) previously ran with zero approval, unlike this
+ * codebase's own built-in tools of equivalent risk (shell, git, file writes
+ * all correctly self-report `isDangerous() === true`). Being wrong toward
+ * "dangerous" costs one extra approval prompt; being wrong the other way lets
+ * an irreversible action fire on a task that never asked for it — see
+ * McpToolWrapper.isDangerous().
+ */
+export function isReadOnlyMcpToolName(rawToolName: string): boolean {
+  return /^(list|get|search|read|describe|find|query|fetch|show|view)(?:[_-]|(?=[A-Z])|$)/i.test(rawToolName);
+}
+
+/**
  * A name for a NEW MCP server connection that won't collide, on its sanitized
  * tool prefix, with any name already in use.
  *

@@ -42,6 +42,27 @@ describe('benchmarkScore01', () => {
     expect(benchmarkScore01(g3Pro, 'analysis')).toBeGreaterThan(benchmarkScore01(g35Flash, 'analysis'));
   });
 
+  it('scores gemini-2.5-flash-lite BELOW the full gemini-2.5-flash, not the same', () => {
+    // Regression: a live /why panel showed gemini-2.5-flash-lite scored
+    // "82/100" — the full flash model's score — because the bare
+    // `gemini-?2\.5-flash` regex has no boundary after "flash" and matches
+    // "gemini-2.5-flash-lite" as a substring before any lite-specific rule is
+    // reached. That let Cascade Auto's "best value" pick land on a weaker
+    // model that only looked as strong as its full-size sibling.
+    const lite: ModelInfo = {
+      id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite', provider: 'gemini',
+      contextWindow: 1_000_000, isVisionCapable: true,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0,
+      maxOutputTokens: 8_000, supportsStreaming: true, isLocal: false,
+    };
+    const full = benchmarkScore01(MODELS['gemini-2.5-flash']!, 'code');
+    const liteScore = benchmarkScore01(lite, 'code');
+    expect(liteScore).toBeLessThan(full);
+    // And it should still beat the OLDER 2.0 lite tier, not be lumped in below it.
+    const oldLite = benchmarkScore01(MODELS['gemini-2.0-flash-lite']!, 'code');
+    expect(liteScore).toBeGreaterThan(oldLite);
+  });
+
   it('returns a neutral 0.5 for a model with no benchmark profile', () => {
     const unknown = { id: 'mystery-model-x', name: 'Mystery', provider: 'openai' } as ModelInfo;
     expect(benchmarkScore01(unknown, 'code')).toBe(0.5);

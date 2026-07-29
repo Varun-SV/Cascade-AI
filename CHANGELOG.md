@@ -5,6 +5,70 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.57.0 - 2026-07-29
+
+### Fixed
+- **A dead model was re-discovered on every single run instead of once.**
+  `DeadModelStore` persists a dead verdict specifically so a burst of
+  concurrent workers hitting the same 404 only pays for it once, ever — but
+  the file-backed persistence used a dynamic `require('node:fs')` inside its
+  own function bodies, reasoning that it "runs in the router's constructor
+  path, which is synchronous." That reasoning doesn't hold: a static import
+  is exactly as synchronous as a dynamic require, and in the ESM build (what
+  `bin/cascade.js` actually runs), the global `require` identifier doesn't
+  exist — esbuild's `__require` shim throws `Dynamic require of "fs" is not
+  supported`, silently swallowed by the store's own "best-effort" try/catch.
+  The file was never actually read or written, so every run started amnesiac
+  and re-paid the whole concurrent-burst cost. Switched to static `node:fs`
+  imports, which work correctly under both the CJS and ESM builds.
+
+- **`gemini-2.5-flash-lite` scored exactly the same as full `gemini-2.5-flash`
+  in Cascade Auto**, making the weaker, cheaper model look like the same
+  quality as its full sibling and win "best value" picks it shouldn't have.
+  The family-resolution regex `gemini-?2\.5-flash` has no word boundary after
+  "flash" and matched `gemini-2.5-flash-lite` as a plain substring, before
+  ever reaching the generic lite fallback — the exact ordering the 2.0
+  generation already got right, just missing for 2.5. Added the matching
+  `gemini-2.5-flash-lite` family entry and matcher, ordered before the bare
+  `2.5-flash` rule.
+
+- **`generate_image` failing outright, and other systemic tool errors
+  looping for up to 15 iterations before ever surfacing.** Image generation
+  is migrated off the deprecated Imagen `:predict` API (Google is shutting it
+  down August 17, 2026) to `gemini-2.5-flash-image` via the standard
+  `generateContent` endpoint. Separately, `classifyProviderError` — the
+  deterministic, non-AI JSON/HTTP error classifier already used for chat-tier
+  failover — is now also consulted at the point a tool call decides whether
+  to fast-fail or retry, replacing a hand-rolled regex that recognized
+  429/auth/forbidden but not 404/model-unavailable. A dead image model's 404
+  now escalates immediately with the real reason instead of retrying through
+  adaptive fallback first.
+
+- **A worker with no real search results could produce a plausible but
+  completely ungrounded — sometimes wildly off-topic — answer.**
+  `web_search` returned a "search failed across all backends" STRING when
+  every backend was down, which the agent loop treated as an ordinary
+  successful result with nothing to signal that the worker had zero
+  grounding. It now throws instead, tagged so it escalates the same way a
+  systemic provider failure does. Separately, a worker's self-test — the
+  check that catches this kind of ungrounded output before it's accepted as
+  done — failed OPEN: if the grading call itself broke or its response
+  didn't parse, all three checks were silently reported as passing. It now
+  fails closed, triggering the same single bounded correction-and-retest
+  pass an ordinary failed check gets.
+
+- **An MCP-connected tool could take an irreversible action — create or
+  delete a repository, push files, merge a PR — with zero human approval.**
+  Every built-in tool of comparable risk (shell, git, file writes, the
+  built-in GitHub tool) correctly self-reports as dangerous and requires
+  approval; the generic MCP tool wrapper never overrode the base class's
+  default of "safe." MCP tools now default to dangerous unless their name
+  looks read-only by its leading verb (`list_`, `get_`, `search_`, `read_`,
+  and similar) — fail-closed, matching this codebase's stated classification
+  philosophy elsewhere, and reusing the existing approval-escalation pipeline
+  end to end with no new UI needed. Paired with a worker-prompt reminder not
+  to reach for a connected-service action unrelated to the current subtask.
+
 ## 0.56.0 - 2026-07-29
 
 ### Fixed
