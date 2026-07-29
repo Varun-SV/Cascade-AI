@@ -238,6 +238,16 @@ Rules:
     expect(out).toContain('[image: a cat]');
   });
 
+  it('scopes the image instruction to PowerPoint/Word — the only exporters that actually embed one', () => {
+    // Regression: an unconditional "call generate_image for any deliverable"
+    // instruction also fires for a PDF request, but the PDF exporter
+    // (renderPdf) flattens a Markdown image reference to caption text same as
+    // the original bug — the model would pay for an image nobody ever sees.
+    const out = buildWorkerRules((name) => new Set([...FULL, 'generate_image']).has(name));
+    expect(out).toContain('slide deck (PowerPoint) or Word document');
+    expect(out).toMatch(/PDF.*do NOT call "generate_image"/);
+  });
+
   it('without generate_image (no image model configured), omits the image guidance entirely', () => {
     const out = buildWorkerRules((name) => FULL.has(name));
     // FULL has no generate_image — telling a worker to call a tool that was
@@ -326,9 +336,9 @@ describe('T3Worker.executeTool — unified provider-error classification (used t
     ).rejects.toMatchObject({ name: 'CriticalToolError' });
   });
 
-  it('still throws CriticalToolError for the previously-recognised cases (rate limit, auth)', async () => {
+  it('still throws CriticalToolError for the previously-recognised cases (rate limit, auth) on a provider-backed tool', async () => {
     const worker = makeWorkerWithFailingTool(new Error('429 Too Many Requests: rate limit exceeded'));
-    const tc: ToolCall = { id: 'tc-2', name: 'web_search', input: {} };
+    const tc: ToolCall = { id: 'tc-2', name: 'generate_image', input: {} };
     await expect(
       (worker as unknown as { executeTool: (tc: ToolCall) => Promise<string> }).executeTool(tc),
     ).rejects.toMatchObject({ name: 'CriticalToolError' });
@@ -337,6 +347,18 @@ describe('T3Worker.executeTool — unified provider-error classification (used t
   it('does NOT fast-fail an ordinary per-task error — still falls through to adaptive recovery', async () => {
     const worker = makeWorkerWithFailingTool(new Error('file not found: nope.txt'));
     const tc: ToolCall = { id: 'tc-3', name: 'file_read', input: {} };
+    const result = await (worker as unknown as { executeTool: (tc: ToolCall) => Promise<string> }).executeTool(tc);
+    expect(result).toContain('Tool error');
+  });
+
+  it('does NOT run classifyProviderError against a non-provider tool, even when its message shares provider vocabulary', async () => {
+    // Regression: a plain filesystem EACCES error contains the literal words
+    // "permission denied", which classifyProviderError's auth-failure
+    // pattern also matches — applying the classifier to EVERY tool's error
+    // indiscriminately turned an ordinary "can't read this one file" into a
+    // whole-worker escalation instead of letting the agent try another file.
+    const worker = makeWorkerWithFailingTool(new Error('EACCES: permission denied, open \'/etc/shadow\''));
+    const tc: ToolCall = { id: 'tc-5', name: 'file_read', input: {} };
     const result = await (worker as unknown as { executeTool: (tc: ToolCall) => Promise<string> }).executeTool(tc);
     expect(result).toContain('Tool error');
   });

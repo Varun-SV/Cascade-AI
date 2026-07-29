@@ -5,6 +5,53 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.59.0 - 2026-07-29
+
+### Fixed
+Codex review findings on the reliability/safety and image-embedding work above:
+- **The MCP-tool danger fix from 0.57.0 didn't actually gate anything.**
+  `McpToolWrapper.isDangerous()` returning `true` by default changed
+  nothing on its own — `T3Worker.executeTool()` decides whether to pause
+  for approval via `ToolRegistry.requiresApproval()`, which consulted only
+  a fixed built-in name list (plus user config), never `isDangerous()`. A
+  connected server's `create_repository`/`delete_repository` still ran
+  with zero approval regardless of what `isDangerous()` reported.
+  `requiresApproval()` now also gates on `isDangerous()`, closing the gap
+  for MCP tools and for any future tool that sets `isDangerous()` without
+  remembering to add itself to the static list — the exact failure mode
+  that list's own comment already documented once before (`file_edit`/`git`
+  shipped without approval for a time).
+- **The desktop browser tab stayed mounted after switching away via the
+  Activity Bar.** Every path that activates the browser tab already sets
+  the app's `view` to `'browser'` in the same action, so gating on the
+  tab's active state in addition to `view` was redundant for showing it —
+  and harmful for hiding it again, since nothing cleared the tab's active
+  state on an ordinary view switch. The native browser view kept covering
+  whatever view was selected next until the tab was explicitly closed or
+  reactivated. Now governed by `view` alone.
+- **A web search that found zero results (not zero backends) escalated the
+  whole worker.** The all-backends-exhausted path is reached both when
+  every backend errors AND when every backend responds successfully with
+  no matches for a narrow or misspelled query — only the former is
+  systemic. Both were tagged `systemic: true`, so an ordinary "nothing
+  found for this query" was treated the same as "search is completely
+  unreachable" and escalated instead of letting the worker recover.
+- **The unified provider-error classifier ran against every tool's errors,
+  not just provider calls.** A plain filesystem `EACCES: permission
+  denied` from `file_read` contains the literal words the classifier's
+  auth-failure pattern matches, so an ordinary unreadable file escalated
+  the whole worker instead of letting it try a different one. Now scoped
+  to the tools that actually call an LLM/media provider API
+  (`generate_image`, `generate_speech`, `generate_video`,
+  `transcribe_audio`).
+- **The image-generation worker instruction fired for every deliverable,
+  including ones that can't embed the result.** Only the PowerPoint/Word
+  exporters embed a Markdown image reference; PDF (and plain text)
+  flatten it straight to caption text, same as the original placeholder
+  bug — so a PDF request would still pay for `generate_image` with
+  nothing to show for it. The instruction is now scoped to state that
+  explicitly.
+
 ## 0.58.0 - 2026-07-29
 
 ### Added

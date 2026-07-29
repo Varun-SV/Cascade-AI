@@ -70,7 +70,24 @@ describe('WebSearchTool.execute — all backends down', () => {
     const tool = new WebSearchTool({}); // no configured backends → only the two DDG attempts run
     return expect(tool.execute({ query: 'zoom for humans' }, {} as never)).rejects.toMatchObject({
       systemic: true,
-      message: expect.stringContaining('failed across all backends'),
+      message: expect.stringContaining('found nothing across all backends'),
+    });
+  });
+
+  it('does NOT tag it systemic when a backend was reachable but simply found nothing', async () => {
+    // Regression: the all-backends branch is reached both when every backend
+    // errors AND when every backend responds successfully with zero
+    // results — a narrow or misspelled query, not a systemic outage. Tagging
+    // BOTH systemic escalated the whole worker instead of letting it recover
+    // (retry a different query, or report nothing was found).
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve('<html><body>no results</body></html>'),
+    }));
+    const tool = new WebSearchTool({});
+    await expect(tool.execute({ query: 'a query with no matches' }, {} as never)).rejects.toMatchObject({
+      systemic: false,
+      message: expect.stringContaining('found nothing across all backends'),
     });
   });
 });

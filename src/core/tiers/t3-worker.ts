@@ -77,6 +77,16 @@ const KNOWN_TOOLS = [
   'web_search', 'glob', 'grep', 'web_fetch', 'generate_image',
 ];
 
+/**
+ * Tools whose implementation genuinely calls an LLM/media provider's HTTP
+ * API (via multimodal/generate.ts's postJson, which attaches the real
+ * status code) — the only tools whose thrown errors classifyProviderError
+ * should ever be run against. See its call site in executeTool().
+ */
+const PROVIDER_BACKED_TOOLS = new Set([
+  'generate_image', 'generate_speech', 'generate_video', 'transcribe_audio',
+]);
+
 export function buildWorkerRules(has: (toolName: string) => boolean): string {
   const canWriteFiles = has('file_write') || has('file_edit') || has('run_code');
   const hasAnyTool = KNOWN_TOOLS.some(has);
@@ -93,8 +103,14 @@ export function buildWorkerRules(has: (toolName: string) => boolean): string {
     // working image model registered. Naming the reference syntax matters as
     // much as naming the tool: a generated image nobody embeds is still a
     // missing image.
+    //
+    // Scoped to PowerPoint/Word specifically: those are the only exporters
+    // that actually embed a Markdown image reference (cloud/web/exporters.ts
+    // toPptx/toDocx). PDF and plain-text/Markdown deliverables flatten a
+    // reference straight to caption text — telling the model to call
+    // generate_image for THOSE just pays for an image nobody ever sees.
     has('generate_image') &&
-      '- When a deliverable (a file, a slide deck, a document) calls for an image, illustration, chart or other visual, you MUST call the "generate_image" tool and then reference its result in the deliverable using Markdown image syntax: ![description](location), where "location" is exactly the string the tool reported back. NEVER write a text placeholder or a bracketed description such as [image: a cat] in place of a real generated image.',
+      '- When a slide deck (PowerPoint) or Word document deliverable calls for an image, illustration, chart or other visual, you MUST call the "generate_image" tool and then reference its result using Markdown image syntax: ![description](location), where "location" is exactly the string the tool reported back. NEVER write a text placeholder or a bracketed description such as [image: a cat] in its place. For any OTHER deliverable format (PDF, plain text, code, etc.) do NOT call "generate_image" — those cannot embed the result, so describe the visual in words instead.',
     has('run_code') &&
       '- Use the "run_code" tool for any file types (Excel, Zip, csv, etc.) or complex processing not covered by other tools. Always cleanup after code execution.',
     '- If you are not making meaningful progress, stop and escalate rather than looping or padding the response.',
@@ -804,8 +820,17 @@ export class T3Worker extends BaseTier {
       // OWN failure systemic directly (e.g. web_search when every backend is
       // down — that will fail identically for every worker in this run, not
       // just this one subtask) without needing to fit the provider-error shape.
+      //
+      // classifyProviderError is only consulted for PROVIDER_BACKED_TOOLS.
+      // Its message-text patterns are calibrated for LLM/media-provider
+      // vocabulary, and applying it to every tool's error indiscriminately
+      // misfires on unrelated local failures that happen to share words with
+      // that vocabulary — e.g. a plain filesystem `EACCES: permission denied`
+      // from file_read matches the auth-failure pattern and would otherwise
+      // escalate the whole worker instead of letting it try a different file.
       const isTaggedSystemic = err instanceof Error && (err as Error & { systemic?: boolean }).systemic === true;
-      if (isTaggedSystemic || classifyProviderError(err).systemic) {
+      const isProviderBacked = PROVIDER_BACKED_TOOLS.has(tc.name);
+      if (isTaggedSystemic || (isProviderBacked && classifyProviderError(err).systemic)) {
         throw new CriticalToolError(errMsg, tc.name);
       }
       // Try to recover via a sibling tool or a synthesized one before giving up;

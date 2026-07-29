@@ -3,6 +3,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { ToolRegistry } from './registry.js';
+import { BaseTool } from './base.js';
+import type { ToolExecuteOptions } from '../types.js';
 
 const toolsConfig = {
   shellAllowlist: [],
@@ -179,5 +181,43 @@ describe('ToolRegistry MCP per-tool selection', () => {
     const reg = new ToolRegistry(toolsConfig, '/tmp');
     reg.registerMcpTools(fakeClient([['github', 'a'], ['github', 'b']]), () => false);
     expect(reg.getToolDefinitions().some((d) => d.name.startsWith('mcp__'))).toBe(false);
+  });
+
+  it('requiresApproval() is true for a dangerous MCP tool even though it is not in the static list', () => {
+    // Regression: isDangerous() on McpToolWrapper alone changes nothing —
+    // T3Worker.executeTool() gates on requiresApproval(), which used to
+    // consult ONLY the static DEFAULT_APPROVAL_REQUIRED list (which can
+    // never name an arbitrary connected server's tools), never
+    // isDangerous(). A GitHub MCP server's create_repository/delete_repo
+    // therefore ran with zero approval no matter what isDangerous() said.
+    const reg = new ToolRegistry(toolsConfig, '/tmp');
+    reg.registerMcpTools(fakeClient([['github', 'create_repository'], ['github', 'list_repos']]));
+    expect(reg.isDangerous('mcp__github__create_repository')).toBe(true);
+    expect(reg.requiresApproval('mcp__github__create_repository')).toBe(true);
+    // A read-only-looking one should still not need approval.
+    expect(reg.isDangerous('mcp__github__list_repos')).toBe(false);
+    expect(reg.requiresApproval('mcp__github__list_repos')).toBe(false);
+  });
+});
+
+describe('ToolRegistry.requiresApproval — gated on isDangerous(), not just the static list', () => {
+  class FakeDangerousTool extends BaseTool {
+    readonly name = 'fake_dangerous_tool';
+    readonly description = 'test-only';
+    readonly inputSchema = {};
+    isDangerous(): boolean { return true; }
+    async execute(_input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> { return 'ok'; }
+  }
+
+  it('requires approval for ANY tool that self-reports dangerous, not only ones named in DEFAULT_APPROVAL_REQUIRED', () => {
+    const reg = new ToolRegistry(toolsConfig, '/tmp');
+    reg.register(new FakeDangerousTool());
+    expect(reg.hasTool('fake_dangerous_tool')).toBe(true); // sanity: not a built-in
+    expect(reg.requiresApproval('fake_dangerous_tool')).toBe(true);
+  });
+
+  it('does not require approval for an ordinary safe tool', () => {
+    const reg = new ToolRegistry(toolsConfig, '/tmp');
+    expect(reg.requiresApproval('web_search')).toBe(false);
   });
 });
