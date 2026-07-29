@@ -382,6 +382,20 @@ describe('isReadOnlyMcpToolName', () => {
     expect(isReadOnlyMcpToolName('unlisted_get')).toBe(false);
   });
 
+  it('requires a REAL camelCase boundary — a lowercase letter after the verb is not one', () => {
+    // Regression: a combined case-insensitive regex with a `(?=[A-Z])`
+    // lookahead case-folds the lookahead too under the `i` flag — in real
+    // JS, `/(?=[A-Z])/i.test('w')` is `true` — so "readwrite_file" (leading
+    // token "readwrite", not "read") was waved through as read-only. The
+    // boundary check must be case-sensitive even though the verb match
+    // itself is case-insensitive.
+    expect(isReadOnlyMcpToolName('readwrite_file')).toBe(false);
+    expect(isReadOnlyMcpToolName('listing_archived_repos')).toBe(false);
+    expect(isReadOnlyMcpToolName('getaway_car')).toBe(false);
+    // But a genuine camelCase boundary (uppercase) still works.
+    expect(isReadOnlyMcpToolName('getFileContents')).toBe(true);
+  });
+
   it('is dangerous-by-default for a name it cannot confidently place at all', () => {
     expect(isReadOnlyMcpToolName('do_the_thing')).toBe(false);
     expect(isReadOnlyMcpToolName('mystery_action')).toBe(false);

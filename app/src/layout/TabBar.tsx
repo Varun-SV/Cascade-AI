@@ -7,6 +7,7 @@ import {
 
 function Tab({ tab, active }: { tab: AppTab; active: boolean }) {
   const dispatch = useAppDispatch();
+  const openTabs = useAppSelector((s) => s.app.openTabs);
 
   const handleClick = () => {
     dispatch(setActiveTab(tab.id));
@@ -17,6 +18,23 @@ function Tab({ tab, active }: { tab: AppTab; active: boolean }) {
 
   const handleClose = (e: React.MouseEvent) => {
     e.stopPropagation();
+    // `view` is a separate piece of state from `activeTabId` — closing a tab
+    // alone never touches it. Harmless for file/session tabs (their views
+    // just sit there unselected), but `browser` is gated on `view` ALONE
+    // (see MainContent.tsx) and is a native WebContentsView layered above
+    // the whole React tree, so closing an active browser tab left it
+    // covering everything with no visible tab to explain why. Mirror the
+    // closeTab reducer's own "select the tab now to the left" logic so
+    // `view` ends up pointing at whatever tab actually becomes active.
+    if (active) {
+      const idx = openTabs.findIndex((t) => t.id === tab.id);
+      const remaining = openTabs.filter((t) => t.id !== tab.id);
+      const next = remaining[Math.max(0, idx - 1)];
+      if (next?.type === 'session') dispatch(setView('cockpit'));
+      else if (next?.type === 'file') dispatch(setView('code'));
+      else if (next?.type === 'browser') dispatch(setView('browser'));
+      else dispatch(setView('chat'));
+    }
     dispatch(closeTab(tab.id));
   };
 

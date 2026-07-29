@@ -5,6 +5,31 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.60.0 - 2026-07-29
+
+### Fixed
+Second round of Codex review findings on the same PR:
+- **The read-only-MCP-tool check had a JavaScript regex gotcha that defeated
+  it.** `isReadOnlyMcpToolName` combined a case-insensitive match with a
+  `(?=[A-Z])` camelCase-boundary lookahead — but a character class is
+  case-folded under the `i` flag even inside a lookahead
+  (`/(?=[A-Z])/i.test('w')` is `true`), so it accepted ANY following letter
+  as a "boundary," not only an uppercase one. `readwrite_file` — leading
+  token `readwrite`, not `read` — passed as read-only, silently defeating
+  the dangerous-by-default MCP protection from the previous round for any
+  server exposing a compound name like it. Rewritten as an explicit,
+  case-sensitive boundary check against the original (non-lowercased)
+  string.
+- **Closing the active browser tab left the browser visibly stuck on
+  screen.** The previous round scoped rendering the desktop browser to
+  `view === 'browser'` alone (the tab's own active-state no longer factors
+  in). Closing a tab, however, only ever removed it from the tab strip —
+  nothing updated `view` to match, so the native `WebContentsView` kept
+  covering whatever the user expected to see next, with no tab left to
+  explain why. The close handler now mirrors the tab-close reducer's own
+  "select whichever tab is now to the left" logic and switches `view` to
+  match, falling back to `chat` when no tabs remain.
+
 ## 0.59.0 - 2026-07-29
 
 ### Fixed

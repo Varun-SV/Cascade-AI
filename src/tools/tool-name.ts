@@ -123,8 +123,28 @@ export function isMcpToolName(name: string): boolean {
  * an irreversible action fire on a task that never asked for it — see
  * McpToolWrapper.isDangerous().
  */
+const READ_ONLY_MCP_VERBS = ['list', 'get', 'search', 'read', 'describe', 'find', 'query', 'fetch', 'show', 'view'];
+
 export function isReadOnlyMcpToolName(rawToolName: string): boolean {
-  return /^(list|get|search|read|describe|find|query|fetch|show|view)(?:[_-]|(?=[A-Z])|$)/i.test(rawToolName);
+  const lower = rawToolName.toLowerCase();
+  for (const verb of READ_ONLY_MCP_VERBS) {
+    if (!lower.startsWith(verb)) continue;
+    const boundary = rawToolName[verb.length];
+    // No character after the verb (exact match), a snake/kebab separator, or
+    // a genuine camelCase transition — checked against the ORIGINAL,
+    // case-preserved string, never the lowercased one. A combined
+    // case-INSENSITIVE regex with a `(?=[A-Z])` lookahead was tried first,
+    // but under the `i` flag a character class is case-folded even inside a
+    // lookahead — `/(?=[A-Z])/i.test('w')` is `true` in JS — so it silently
+    // accepted ANY following letter as a "boundary", not only an uppercase
+    // one. "readwrite_file" starts with "read" and is followed by lowercase
+    // "w", which that version happily matched, waving through a mutating
+    // tool as read-only.
+    if (boundary === undefined || boundary === '_' || boundary === '-' || (boundary >= 'A' && boundary <= 'Z')) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
