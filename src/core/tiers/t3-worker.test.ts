@@ -248,6 +248,17 @@ Rules:
     expect(out).toMatch(/PDF.*do NOT call "generate_image"/);
   });
 
+  it('excludes data-driven charts from the generate_image mandate — image models cannot guarantee exact values', () => {
+    // Regression: the original rule said "image, illustration, chart or other
+    // visual" — routing a quantitative chart (exact axes/numbers) through a
+    // generative image model risks a plausible-looking but numerically wrong
+    // picture. Only decorative visuals should go through generate_image; a
+    // data-driven chart should render as a Markdown table instead.
+    const out = buildWorkerRules((name) => new Set([...FULL, 'generate_image']).has(name));
+    expect(out).toMatch(/do NOT use "generate_image".*chart.*exact data/i);
+    expect(out).toContain('render that data as a Markdown table instead');
+  });
+
   it('without generate_image (no image model configured), omits the image guidance entirely', () => {
     const out = buildWorkerRules((name) => FULL.has(name));
     // FULL has no generate_image — telling a worker to call a tool that was

@@ -5,9 +5,18 @@ import {
   type AppTab,
 } from '../store/index.js';
 
+/** The view a tab's own type renders, or null for tab types with no dedicated view. */
+function viewForTab(tab: AppTab): 'cockpit' | 'code' | 'browser' | null {
+  if (tab.type === 'session') return 'cockpit';
+  if (tab.type === 'file') return 'code';
+  if (tab.type === 'browser') return 'browser';
+  return null;
+}
+
 function Tab({ tab, active }: { tab: AppTab; active: boolean }) {
   const dispatch = useAppDispatch();
   const openTabs = useAppSelector((s) => s.app.openTabs);
+  const view = useAppSelector((s) => s.app.view);
 
   const handleClick = () => {
     dispatch(setActiveTab(tab.id));
@@ -26,7 +35,15 @@ function Tab({ tab, active }: { tab: AppTab; active: boolean }) {
     // covering everything with no visible tab to explain why. Mirror the
     // closeTab reducer's own "select the tab now to the left" logic so
     // `view` ends up pointing at whatever tab actually becomes active.
-    if (active) {
+    //
+    // `active` (tab.id === activeTabId) alone isn't enough: the ActivityBar
+    // can change `view` (e.g. to 'insights') without ever touching
+    // `activeTabId`, leaving this tab still nominally "active" in the tab
+    // strip while something else entirely is on screen. Only reassign
+    // `view` when it's actually still showing what THIS tab renders —
+    // otherwise closing a stale-active tab would yank the user away from
+    // whatever they navigated to via the ActivityBar.
+    if (active && view === viewForTab(tab)) {
       const idx = openTabs.findIndex((t) => t.id === tab.id);
       const remaining = openTabs.filter((t) => t.id !== tab.id);
       const next = remaining[Math.max(0, idx - 1)];

@@ -327,11 +327,16 @@ async function toDocx(md: string): Promise<Blob> {
 
   // A standalone `![alt](url)` line becomes a real picture. Word needs the type
   // and an explicit pixel size up front, so the bytes are measured (sniffImage)
-  // and scaled down to the body column — never up, so a small image isn't
-  // blown out to a blurry full width.
+  // and scaled down to fit the body column AND the printable page height —
+  // never up, so a small image isn't blown out to a blurry full width. Width
+  // alone isn't enough: a portrait (tall) image scaled only to fit 6.5in of
+  // width can still be far taller than the ~9in of vertical space between the
+  // default 1in top/bottom margins, and docx has no auto-fit — it renders the
+  // ImageRun at exactly the size given, overflowing onto (or off) the page.
   const DOCX_MAX_W = 600; // ≈6.5in of body column at 96dpi
+  const DOCX_MAX_H = 864; // ≈9in of printable page height at 96dpi (11in page − 1in top/bottom margins)
   const imageParagraph = (img: LoadedImage): InstanceType<typeof Paragraph> => {
-    const scale = Math.min(1, DOCX_MAX_W / img.width);
+    const scale = Math.min(1, DOCX_MAX_W / img.width, DOCX_MAX_H / img.height);
     return new Paragraph({
       children: [new ImageRun({
         type: img.type,

@@ -165,9 +165,8 @@ export class Cascade extends EventEmitter {
     // On desktop this makes verdicts per-project, which is also right: provider
     // config is per-project too.
     try {
-      const nodePath = require('node:path') as typeof import('node:path');
       this.router.setDeadModelStore(new DeadModelStore(
-        fileDeadModelPersistence(nodePath.join(workspacePath, '.cascade', 'dead-models.json')),
+        fileDeadModelPersistence(path.join(workspacePath, '.cascade', 'dead-models.json')),
       ));
     } catch { /* memory-only fallback; the router already has a default store */ }
 

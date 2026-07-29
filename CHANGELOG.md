@@ -5,6 +5,51 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.61.0 - 2026-07-29
+
+### Fixed
+Third round of Codex review findings on the same PR:
+- **The dead-model-persistence fix from 0.57.0 never actually ran.** That
+  fix replaced `dead-models.ts`'s own dynamic `require('node:fs'/'node:path')`
+  with static imports — correct, but its caller in `cascade.ts` had a
+  separate, independent dynamic `require('node:path')` of its own,
+  wrapped in a try/catch that silently swallowed the `Dynamic require of
+  "path" is not supported` throw from esbuild's ESM `__require` shim
+  before `fileDeadModelPersistence` was ever reached. The desktop/CLI
+  build was still amnesiac end to end. Replaced with the static `path`
+  import already in scope at the top of the file (never needed the
+  dynamic form — a static import is exactly as synchronous as `require`
+  in the router constructor's synchronous path). Added an
+  `esm-safety.test.ts` static-analysis test that fails the suite if any
+  non-test source file contains a dynamic `require(` outside the one
+  legitimate exception (`tool-creator.ts`'s CJS `Worker({ eval: true })`
+  harness, which really does run under a native `require`) — this bug
+  class has now bitten twice from the same root cause.
+- **The `generate_image` worker rule told the model a data-driven chart
+  was fine to draw with an image model.** "Image, illustration, chart or
+  other visual" lumped decorative visuals in with charts/graphs/diagrams
+  that must show exact data — an image model has no mechanism to
+  guarantee the numbers, axes, or labels it draws are correct, so a
+  generated "chart" risks looking authoritative while being wrong. The
+  rule now excludes charts from the `generate_image` mandate and points
+  the model at a Markdown table instead for anything data-driven.
+- **`toDocx`'s embedded-image scaling only capped width, not height.** A
+  portrait image already fit the 6.5in body column at scale 1 with no
+  further check, so a tall image could render far taller than the ~9in of
+  printable page height between the default margins, overflowing or
+  clipping in the exported Word document. The scale factor now also
+  respects a page-height cap, so both dimensions are constrained the same
+  way `DOCX_MAX_W` already constrained width.
+- **Closing a stale-active tab could yank the view away from wherever the
+  user had navigated via the Activity Bar.** The tab-close handler shipped
+  in 0.60.0 checked only whether the closed tab was the tab strip's
+  `activeTabId` before reassigning `view` — but the Activity Bar changes
+  `view` without ever touching `activeTabId`, so a tab can stay nominally
+  "active" long after the user switched to, say, Insights. Closing it then
+  overwrote `view` back to whatever the next tab implied, discarding the
+  user's actual navigation. Now also checks that `view` still matches what
+  the tab being closed would itself display before touching it.
+
 ## 0.60.0 - 2026-07-29
 
 ### Fixed
