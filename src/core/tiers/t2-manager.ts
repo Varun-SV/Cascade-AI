@@ -474,7 +474,10 @@ Return ONLY the JSON array.`;
       const jsonMatch = /\[[\s\S]*\]/.exec(result.content);
       if (!jsonMatch) throw new Error('No JSON array found');
       const parsed = JSON.parse(jsonMatch[0]) as T2ToT3Assignment[];
-      return parsed.map((a) => ({ ...a, sectionTitle: assignment.sectionTitle }));
+      // Same class of bug as T1's plan (see T1Administrator.validatePlan):
+      // the LLM's JSON doesn't honor `constraints: string[]` being required,
+      // and every T3 prompt builder calls `.join`/`.map` on it unguarded.
+      return parsed.map((a) => ({ ...a, sectionTitle: assignment.sectionTitle, constraints: a.constraints ?? [] }));
     } catch {
       // Fallback: single subtask = the whole section
       return [{

@@ -591,6 +591,22 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
     if (!plan.sections || !Array.isArray(plan.sections) || plan.sections.length === 0) {
       throw new Error('Invalid plan: no sections');
     }
+    // `constraints` is typed as a required string[] on both the section and
+    // its subtasks, but that's a compile-time contract only — the LLM's JSON
+    // doesn't honor it, and a larger plan (more sections/subtasks) makes it
+    // more likely some entry omits the field entirely. Every downstream
+    // consumer (T2Manager, T3Worker) calls `.join`/`.map` on it unguarded,
+    // so an undefined `constraints` crashed that whole T2 manager with
+    // "Cannot read properties of undefined (reading 'join')" — for every
+    // section at once, since each section's plan comes from this same call.
+    // Normalize once here, at the trust boundary, instead of guarding every
+    // call site.
+    for (const section of plan.sections) {
+      section.constraints ??= [];
+      for (const subtask of section.t3Subtasks ?? []) {
+        subtask.constraints ??= [];
+      }
+    }
     const [min, max] = COMPLEXITY_T2_COUNT[plan.complexity] ?? [1, 8];
     if (plan.sections.length < min) {
       // Auto-expand by duplicating if needed (rare edge case)

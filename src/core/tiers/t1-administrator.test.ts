@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { T1Administrator } from './t1-administrator.js';
+import { T1Administrator, type TaskPlan } from './t1-administrator.js';
 import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import type { CascadeConfig, T1ToT2Assignment, T2Result } from '../../types.js';
@@ -64,6 +64,64 @@ describe('T1Administrator cross-section concurrency (t3Execution bug fix)', () =
       .runT2sWithDependencies(sections, managers, 'task-par');
 
     expect(active.max).toBe(3); // all three ran concurrently
+  });
+});
+
+describe('T1Administrator.validatePlan (LLM plan JSON missing `constraints` bug fix)', () => {
+  // `constraints` is a required string[] in T1ToT2Assignment/T3SubtaskSpec,
+  // but that's a compile-time contract only — the LLM's plan JSON doesn't
+  // honor it. A section or subtask with no `constraints` field crashed
+  // T2Manager/T3Worker with "Cannot read properties of undefined (reading
+  // 'join')" the moment anything called `.join`/`.map` on it, taking down
+  // every section of the run at once.
+  function validate(plan: TaskPlan): void {
+    (new T1Administrator({} as CascadeRouter, {} as ToolRegistry, {} as CascadeConfig) as unknown as {
+      validatePlan: (p: TaskPlan) => void;
+    }).validatePlan(plan);
+  }
+
+  it('fills in a missing section-level `constraints` instead of leaving it undefined', () => {
+    const plan = {
+      complexity: 'Moderate',
+      reasoning: 'r',
+      sections: [{
+        sectionId: 's1', sectionTitle: 'Baseline Research', description: 'd', expectedOutput: 'o',
+        t3Subtasks: [],
+      } as unknown as T1ToT2Assignment],
+    } as TaskPlan;
+
+    expect(() => validate(plan)).not.toThrow();
+    expect(plan.sections[0]!.constraints).toEqual([]);
+  });
+
+  it('fills in a missing subtask-level `constraints` instead of leaving it undefined', () => {
+    const plan = {
+      complexity: 'Complex',
+      reasoning: 'r',
+      sections: [{
+        sectionId: 's1', sectionTitle: 'Intervention Point 1', description: 'd', expectedOutput: 'o',
+        constraints: [],
+        t3Subtasks: [{ subtaskId: 't1', subtaskTitle: 'sub', description: 'd', expectedOutput: 'o', peerT3Ids: [] }],
+      } as unknown as T1ToT2Assignment],
+    } as TaskPlan;
+
+    expect(() => validate(plan)).not.toThrow();
+    expect(plan.sections[0]!.t3Subtasks[0]!.constraints).toEqual([]);
+  });
+
+  it('leaves an already-populated `constraints` array untouched', () => {
+    const plan: TaskPlan = {
+      complexity: 'Simple',
+      reasoning: 'r',
+      sections: [{
+        sectionId: 's1', sectionTitle: 'Section', description: 'd', expectedOutput: 'o',
+        constraints: ['must cite sources'],
+        t3Subtasks: [],
+      }],
+    };
+
+    validate(plan);
+    expect(plan.sections[0]!.constraints).toEqual(['must cite sources']);
   });
 });
 

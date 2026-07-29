@@ -55,6 +55,7 @@ function makeToolRegistry(): ToolRegistry {
     getToolDefinitions: () => definitions,
     requiresApproval: () => false,
     isDangerous: () => false,
+    hasTool: () => false,
     execute: vi.fn(),
   } as unknown as ToolRegistry;
 }
@@ -120,6 +121,42 @@ describe('T2Manager', () => {
     expect(result.status).toBe('COMPLETED');
     expect(result.t3Results).toHaveLength(2);
     expect(result.t3Results.every((t3) => t3.status === 'COMPLETED')).toBe(true);
+  });
+
+  it('recovers when T2s own LLM decomposition omits `constraints` on a subtask (used to crash with "Cannot read properties of undefined (reading \'join\')")', async () => {
+    const router = {
+      generate: vi.fn(async (tier, options) => {
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        if (content.startsWith('Decompose this section into')) {
+          // Real LLM JSON that omits `constraints` entirely — the exact shape
+          // that crashed T3Worker's prompt builders (`.join`/`.map` on
+          // undefined) for every subtask at once.
+          return makeResult(JSON.stringify([
+            { subtaskId: 'only', subtaskTitle: 'Do it', description: 'd', expectedOutput: 'o', peerT3Ids: [], dependsOn: [] },
+          ]));
+        }
+        if (content.startsWith('Execute the following subtask completely:')) {
+          return makeResult('done');
+        }
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        if (tier === 'T2') return makeResult('merged');
+        return makeResult('ok');
+      }),
+      getModelForTier: () => undefined,
+    } as unknown as CascadeRouter;
+
+    const assignment = makeAssignment();
+    assignment.t3Subtasks = []; // forces T2's own LLM decomposition, not T1's
+
+    const manager = new T2Manager(router, makeToolRegistry(), 'root');
+    const result = await manager.execute(assignment, 'task-missing-constraints');
+
+    expect(result.status).toBe('COMPLETED');
+    expect(result.t3Results).toHaveLength(1);
+    expect(result.t3Results[0]!.status).toBe('COMPLETED');
   });
 
   // ── Boardroom gate (Moderate / planApproval: 'all') ──
