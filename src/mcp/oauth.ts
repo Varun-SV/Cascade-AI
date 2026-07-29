@@ -161,6 +161,40 @@ export function fileOAuthProvider(storePath: string): McpOAuthProvider {
   });
 }
 
+/**
+ * Serialize operations against ONE OAuth-backed server's on-disk token store.
+ *
+ * Tool discovery (Settings expanding a connector) and a run's own MCP connect
+ * both go through `fileOAuthProvider(server.oauthStore)` for the same server,
+ * and either can trigger a silent refresh when the token is near expiry.
+ * Unserialized, both read the same refresh token from the store and present it
+ * to the authorization server; under rotation the second presentation is
+ * already retired, so that side's connect fails outright — for a run, that
+ * means the connector silently drops out with nothing on screen saying why.
+ *
+ * Keyed by `storePath` rather than a global lock, so servers that don't share a
+ * token file connect fully in parallel. In-process only: this closes the race
+ * inside Electron's main process, where the desktop backend and its discovery
+ * IPC handler run in the same process and share this module's module-level
+ * state. It does NOT cover two separate `cascade` CLI invocations racing each
+ * other — that would need a file lock, and is not implemented — but that
+ * requires a human running `cascade mcp` and `cascade run` against the same
+ * server in the same instant, which the desktop's expand-while-a-run-starts
+ * case does not.
+ */
+const oauthStoreLocks = new Map<string, Promise<unknown>>();
+
+export function withOAuthStoreLock<T>(storePath: string, fn: () => Promise<T>): Promise<T> {
+  const prev = oauthStoreLocks.get(storePath) ?? Promise.resolve();
+  const run = prev.then(fn, fn);
+  const tail = run.then(() => undefined, () => undefined);
+  oauthStoreLocks.set(storePath, tail);
+  // Only the last waiter clears the entry, so a queue forming behind us keeps
+  // its chain and the map does not grow for the process's lifetime.
+  void tail.then(() => { if (oauthStoreLocks.get(storePath) === tail) oauthStoreLocks.delete(storePath); });
+  return run;
+}
+
 // ── Orchestration wrappers (so consumers avoid importing the MCP SDK) ──
 
 /** Drive the OAuth flow to the point of a browser redirect (or already-authorized). */

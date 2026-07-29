@@ -42,6 +42,16 @@ export class DashboardSocket {
     this.setupHandlers();
   }
 
+  /** How many sockets are currently in a room — 0 means nobody can answer. */
+  roomSize(room: string): number {
+    return this.io.sockets.adapter.rooms.get(room)?.size ?? 0;
+  }
+
+  /** Is this exact connection still live? A reconnect issues a NEW socket id. */
+  hasSocket(socketId: string): boolean {
+    return this.io.sockets.sockets.has(socketId);
+  }
+
   broadcastToRoom(room: string, event: string, data: unknown): void {
     this.io.to(room).emit(event, data);
   }
@@ -127,6 +137,23 @@ export class DashboardSocket {
     });
   }
 
+  /**
+   * A client subscribed to a session's room.
+   *
+   * The host uses this to replay a gate the run is already parked on. Socket.IO
+   * does not buffer room emissions, so a prompt broadcast while the renderer was
+   * reconnecting is simply gone; without a replay the section waits out its full
+   * timeout with the user sitting in front of a screen that never asked.
+   */
+  onJoinSession(callback: (sessionId: string, socketId: string) => void): void {
+    this.io.on('connection', (socket) => {
+      socket.on('join:session', (payload: SessionSubscriptionPayload) => {
+        const { sessionId } = normalizeSessionSubscriptionPayload(payload);
+        if (sessionId) callback(sessionId, socket.id);
+      });
+    });
+  }
+
   onSessionRate(callback: (sessionId: string, rating: 'good' | 'bad') => void): void {
     this.io.on('connection', (socket) => {
       socket.on('session:rate', (payload: { sessionId?: string; rating?: string }) => {
@@ -163,6 +190,32 @@ export class DashboardSocket {
             editedPlan: payload.editedPlan,
           });
         }
+      });
+    });
+  }
+
+  /**
+   * A section escalated and the run is parked waiting for an answer. The
+   * desktop shows the escalation modal on `escalation:decision-required` and
+   * answers here.
+   *
+   * Unlike a plan decision, silence is NOT taken as consent — the SDK fails
+   * the section on timeout — so this handler only ever forwards a real choice.
+   */
+  onEscalationDecision(callback: (data: { sessionId: string; requestId?: string; action: 'retry' | 'skip' | 'guidance'; note?: string }) => void): void {
+    this.io.on('connection', (socket) => {
+      socket.on('escalation:decide', (payload: { sessionId?: string; requestId?: string; action?: string; note?: string }) => {
+        const action = payload?.action;
+        if (typeof payload?.sessionId !== 'string') return;
+        if (action !== 'retry' && action !== 'skip' && action !== 'guidance') return;
+        callback({
+          sessionId: payload.sessionId,
+          // Identifies WHICH parked section this answers — sections in a wave
+          // run concurrently, so more than one can be waiting.
+          requestId: typeof payload.requestId === 'string' ? payload.requestId : undefined,
+          action,
+          note: typeof payload.note === 'string' && payload.note.trim() ? payload.note.trim() : undefined,
+        });
       });
     });
   }

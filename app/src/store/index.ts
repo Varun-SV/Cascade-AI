@@ -2,7 +2,7 @@ import { configureStore, createSlice, PayloadAction } from '@reduxjs/toolkit';
 import { useDispatch, useSelector } from 'react-redux';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-export type ViewMode = 'onboarding' | 'cockpit' | 'chat' | 'code' | 'insights';
+export type ViewMode = 'onboarding' | 'cockpit' | 'chat' | 'code' | 'browser' | 'insights';
 export type ThemePref = 'system' | 'light' | 'dark' | 'midnight';
 
 export interface AgentNode {
@@ -121,6 +121,15 @@ export interface AppState {
   dismissedNodeIds: string[];
   /** T1's plan paused at the boardroom gate — renders the plan-review modal. */
   pendingPlan: PendingPlan | null;
+  /**
+   * Sections that stopped and asked a question — a QUEUE, oldest first.
+   *
+   * Not one slot: the SDK keys parked escalations by requestId precisely
+   * because a Complex wave dispatches sections concurrently, so two can be
+   * waiting at once. A single slot dropped the first, and answering the visible
+   * prompt left the hidden section parked until its timeout.
+   */
+  pendingEscalations: PendingEscalation[];
   /** Per-session decision trails from `run:why`, keyed by sessionId. */
   whyBySession: Record<string, WhyReport>;
   /** The Why panel (run inspector) slide-over is open. */
@@ -165,6 +174,36 @@ export interface PendingPlan {
   estCostUsd: number;
   critique?: string;
   summary?: string;
+}
+
+/**
+ * A section that ended ESCALATED and is now waiting on the user.
+ *
+ * Distinct from PendingPlan in one way that matters: silence here is not
+ * consent. The SDK fails the section when `timeoutMs` elapses, because an
+ * escalation exists precisely because a worker was NOT confident.
+ */
+export interface PendingEscalation {
+  sessionId?: string;
+  taskId: string;
+  /** Identifies WHICH parked section this answers — a Complex run dispatches
+   *  sections concurrently, so more than one can be waiting at once. */
+  requestId?: string;
+  sectionId: string;
+  sectionTitle: string;
+  issues: string[];
+  summary: string;
+  timeoutMs: number;
+  /** Client clock at arrival — the modal counts down from here, not from mount. */
+  receivedAt: number;
+}
+
+/**
+ * Identity of a parked escalation. `requestId` when the server supplies it;
+ * `sectionId` is the fallback for a server that predates the id.
+ */
+export function escalationKey(e: { requestId?: string; sectionId?: string }): string {
+  return e.requestId ?? `section:${e.sectionId ?? ''}`;
 }
 
 /** The decision trail + economics of a session's most recent run (/why). */
@@ -228,6 +267,7 @@ const initialState: AppState = {
   runSessionId: null,
   dismissedNodeIds: [],
   pendingPlan: null,
+  pendingEscalations: [],
   whyBySession: {},
   showWhyPanel: false,
   commsEvents: [],
@@ -445,6 +485,33 @@ const appSlice = createSlice({
     setPendingPlan(state, action: PayloadAction<PendingPlan | null>) {
       state.pendingPlan = action.payload;
     },
+    // Section escalation awaiting the user — appended to the queue. A
+    // re-delivery of one already queued (reconnect replay) updates in place
+    // rather than asking the same question twice.
+    enqueueEscalation(state, action: PayloadAction<PendingEscalation>) {
+      const key = escalationKey(action.payload);
+      const i = state.pendingEscalations.findIndex((e) => escalationKey(e) === key);
+      if (i >= 0) state.pendingEscalations[i] = action.payload;
+      else state.pendingEscalations.push(action.payload);
+    },
+    /** Drop one by identity — the answered one, or the one that timed out. */
+    dequeueEscalation(state, action: PayloadAction<{ requestId?: string; sectionId?: string }>) {
+      const key = escalationKey(action.payload);
+      state.pendingEscalations = state.pendingEscalations.filter((e) => escalationKey(e) !== key);
+    },
+    /**
+     * Clear the prompt only if it belongs to the session that just ended.
+     * An undefined sessionId means "unattributed event" — clear regardless,
+     * matching how the run-lifecycle handlers treat the same case. Runs can
+     * proceed in the background, so an unconditional clear took away the only
+     * way to answer a DIFFERENT run's still-parked question.
+     */
+    clearEscalationForSession(state, action: PayloadAction<string | undefined>) {
+      const id = action.payload;
+      state.pendingEscalations = id
+        ? state.pendingEscalations.filter((e) => e.sessionId !== id)
+        : [];
+    },
     // Why panel (run inspector)
     setWhyReport(state, action: PayloadAction<WhyReport>) {
       state.whyBySession[action.payload.sessionId] = action.payload;
@@ -492,7 +559,7 @@ export const {
   appendAgentStream, selectNode, dismissCompletedNodes, addPeerEdge, expirePeerEdges, setForceTier, runStarted, runEnded,
   openTab, closeTab, setActiveTab, setTabDirty,
   setOnboardingDone,
-  setPendingPlan, setWhyReport, setShowWhyPanel,
+  setPendingPlan, enqueueEscalation, dequeueEscalation, clearEscalationForSession, setWhyReport, setShowWhyPanel,
   appendCommsEvent, clearCommsEvents, setBottomTab, openBottomTab,
   setShowPalette, setChangesSessionId, setShowContinue,
 } = appSlice.actions;

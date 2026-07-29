@@ -15,6 +15,7 @@ const ignore: (opts?: unknown) => Ignore =
 import type { ToolDefinition, ToolExecuteOptions, ToolsConfig } from '../types.js';
 import { DEFAULT_APPROVAL_REQUIRED } from '../constants.js';
 import type { BaseTool } from './base.js';
+import { assignMcpToolNames } from './tool-name.js';
 import { ShellTool } from './shell.js';
 import { FileReadTool, FileWriteTool, FileEditTool, FileDeleteTool, FileListTool } from './file.js';
 import { GitTool } from './git.js';
@@ -128,28 +129,43 @@ export class ToolRegistry extends EventEmitter {
     return Array.from(this.plugins.keys());
   }
 
-  /** Registers all tools from an MCP client */
-  registerMcpTools(mcpClient: McpClient): void {
-    const definitions = mcpClient.getToolDefinitions();
-    for (const def of definitions) {
-      // Definitions from McpClient.getToolDefinitions() are prefixed as
-      // `mcp::<serverName>::<toolName>` — three parts, not four. Previously
-      // this destructured [,, serverName, toolName] which silently dropped
-      // every MCP tool (toolName was always undefined and the `continue`
-      // below filtered them all out).
-      const [, serverName, toolName] = def.name.split('::');
-      if (!serverName || !toolName) continue;
+  /**
+   * Registers all tools from an MCP client.
+   *
+   * `isAllowed` receives the FINAL registered name (`mcp__server__tool`) — the
+   * same string the user sees and the same one that reaches the provider — so
+   * a per-tool opt-out in Settings can be expressed as a plain name list.
+   * Filtering here rather than at call time means a deselected tool is genuinely
+   * absent from the definitions handed to the model, so it is never proposed,
+   * never counted against the tool budget, and never has to be refused.
+   */
+  registerMcpTools(mcpClient: McpClient, isAllowed?: (registeredName: string) => boolean): void {
+    // Definitions from McpClient.getToolDefinitions() are prefixed as
+    // `mcp::<serverName>::<toolName>` — three parts, not four. Previously this
+    // destructured [,, serverName, toolName] which silently dropped every MCP
+    // tool (toolName was always undefined and everything got filtered out).
+    const parsed = mcpClient.getToolDefinitions().flatMap((def) => {
+      const [, server, tool] = def.name.split('::');
+      return server && tool ? [{ def, server, tool }] : [];
+    });
+    // Named as one set: `register()` keys by name, so two tools whose raw names
+    // sanitise onto the same string would silently become one. Same call as
+    // discovery makes, so Settings and the run agree on every name.
+    const names = assignMcpToolNames(parsed);
 
+    parsed.forEach(({ def, server, tool }, i) => {
       const wrapper = new McpToolWrapper(
         mcpClient,
-        serverName,
-        toolName,
-        def.description.replace(`[MCP:${serverName}] `, ''),
+        server,
+        tool,
+        def.description.replace(`[MCP:${server}] `, ''),
         def.inputSchema,
+        names[i],
       );
+      if (isAllowed && !isAllowed(wrapper.name)) return;
       wrapper.setWorkspaceRoot(this.workspaceRoot);
       this.register(wrapper);
-    }
+    });
   }
 
   setIgnoredPaths(patterns: string[]): void {

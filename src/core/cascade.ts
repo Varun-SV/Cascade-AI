@@ -4,7 +4,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import Database from 'better-sqlite3';
 import { glob } from 'glob';
-import type {
+import type { EscalationDecision,
   ApprovalRequest,
   ApprovalResponse,
   CascadeConfig,
@@ -22,15 +22,23 @@ import { CascadeRouter } from './router/index.js';
 import { T1Administrator, type PlanApprovalDecision, type TaskPlan } from './tiers/t1-administrator.js';
 import { calculateCost } from '../utils/cost.js';
 import { T2Manager } from './tiers/t2-manager.js';
+import { composeRootSectionOutput } from './tiers/escalation-policy.js';
 import { MultimodalRegistry } from './multimodal/registry.js';
 import type { FeedbackSource } from './router/feedback-prior.js';
 import { DeadModelStore, fileDeadModelPersistence } from './router/dead-models.js';
+
+/**
+ * How long an escalation waits for an answer. Long enough that someone who
+ * stepped away for a coffee still gets to decide; short enough that a hosted
+ * run doesn't hold a worker slot all afternoon.
+ */
+const ESCALATION_DECISION_TIMEOUT_MS = 5 * 60_000;
 import { buildMediaTools, type AssetSink } from '../tools/generate-media.js';
 import { RunBreaker } from './run-breaker.js';
 import { T3Worker } from './tiers/t3-worker.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { McpClient } from '../mcp/client.js';
-import { fileOAuthProvider } from '../mcp/oauth.js';
+import { fileOAuthProvider, withOAuthStoreLock } from '../mcp/oauth.js';
 import { distillSessionFacts, buildSessionTranscript, sessionWorthRemembering } from './knowledge/session-memory.js';
 import { AuditLogger } from '../audit/log.js';
 import { AuditLogger as EncryptedAuditLogger } from './audit/audit-logger.js';
@@ -55,6 +63,7 @@ import {
   estimateTokens, messagesTokens, needsCompaction, rollingSummary, mapReduceCompact, type Summarize,
 } from './context/compaction.js';
 import { GuidanceQueue } from './steering/guidance.js';
+import { CurrentPageTool, type CurrentPageProvider } from '../tools/current-page.js';
 
 /** One entry in the per-run orchestration decision trail (see /why). */
 export interface DecisionLogEntry {
@@ -361,6 +370,123 @@ export class Cascade extends EventEmitter {
     });
   }
 
+  // ── Escalation decisions ────────────────────────────────────────────
+  //
+  // A section that ends ESCALATED used to be a dead end: the Cockpit showed
+  // "Section escalated — needs a decision" and no decision was ever requested,
+  // so the run stopped there having spent a full orchestration. This is the
+  // same round-trip shape as plan approval, with one deliberate difference —
+  // an unanswered escalation FAILS the section instead of proceeding.
+  //
+  // That direction is the safe one here. Plan approval defaults to "yes" on
+  // timeout because the plan is already the model's considered proposal;
+  // an escalation exists precisely BECAUSE the worker was not confident, so
+  // acting unattended is the option most likely to be wrong. And in cloud a
+  // waiting run holds server resources, so hanging is not free either.
+
+  // Keyed by request id, NOT a single slot. A Complex run dispatches each wave
+  // of ready sections with `Promise.all` (t1-administrator.ts), so two sections
+  // can be waiting on a decision at the same moment. A single field made that
+  // case fail hard rather than merely confusingly: the second escalation
+  // overwrote the first's resolver, the user's answer resolved only the second,
+  // and then the FIRST section's timer found the slot already empty and
+  // returned without resolving anything — parking the run forever, past its own
+  // timeout. Same class of bug as the twelve-failover dead-model race: a wave
+  // is concurrent, so per-run singletons are never safe inside it.
+  private pendingEscalations = new Map<string, (decision: EscalationDecision) => void>();
+
+  private async requestEscalationDecision(
+    ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string },
+    taskId: string,
+    signal?: AbortSignal,
+  ): Promise<EscalationDecision> {
+    // Autonomous runs have nobody to ask; skipping keeps whatever the section
+    // did produce rather than discarding it over an unanswerable question.
+    // `automatic: true` marks these as the SYSTEM's choice, not a person's —
+    // T2 must not read this as the user having reviewed and accepted the
+    // section (see EscalationDecision.automatic).
+    if (this.config.autonomy === 'auto') return { action: 'skip', automatic: true };
+    if (this.listenerCount('escalation:decision-required') === 0) return { action: 'skip', automatic: true };
+    if (signal?.aborted) return { action: 'skip', automatic: true };
+
+    const requestId = randomUUID();
+
+    return await new Promise<EscalationDecision>((resolve) => {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+
+      // One settle path for every outcome, guarded by the map delete so the
+      // first of {answer, timeout, abort} wins and the losers are no-ops.
+      const settle = (decision: EscalationDecision) => {
+        if (!this.pendingEscalations.delete(requestId)) return;
+        if (timeout) clearTimeout(timeout);
+        signal?.removeEventListener('abort', onAbort);
+        resolve(decision);
+      };
+
+      // Stop / disconnect must unpark the run. T2 has already passed its
+      // cancellation checkpoint by the time it escalates, so without this the
+      // aborted run sits here holding resources until the full timeout — the
+      // user pressed Stop and watched nothing stop. Skip (not timeout) because
+      // an abort is not a failure of the section, it is the user leaving.
+      // `automatic: true` — pressing Stop ends the whole run, it is not the
+      // user reviewing and accepting THIS section's partial output.
+      const onAbort = () => settle({ action: 'skip', automatic: true });
+      signal?.addEventListener('abort', onAbort, { once: true });
+
+      timeout = setTimeout(() => {
+        this.emit('escalation:timeout', { taskId, requestId, sectionId: ctx.sectionId });
+        settle({ action: 'timeout' });
+      }, ESCALATION_DECISION_TIMEOUT_MS);
+
+      this.pendingEscalations.set(requestId, settle);
+      this.emit('escalation:decision-required', {
+        taskId,
+        requestId,
+        sectionId: ctx.sectionId,
+        sectionTitle: ctx.sectionTitle,
+        issues: ctx.issues,
+        summary: ctx.summary,
+        timeoutMs: ESCALATION_DECISION_TIMEOUT_MS,
+      });
+    });
+  }
+
+  /**
+   * Resolve a pending escalation from a REPL / dashboard / cloud listener.
+   *
+   * `requestId` comes back from the `escalation:decision-required` event and is
+   * what makes an answer land on the section that asked. It is optional so a
+   * host with only one escalation in flight (and any caller that predates the
+   * id) still works: without it the oldest outstanding request is answered,
+   * which is correct whenever there is exactly one.
+   *
+   * `automatic` defaults to false — a call into this method is normally a real
+   * person answering the prompt. Pass `true` from a host that is itself
+   * settling the gate on nobody's behalf (a REST caller who never had a
+   * chance to connect, a session halt with no per-section review behind it),
+   * so T2 doesn't set `userSkipped` for a decision no one actually reviewed —
+   * see EscalationDecision.automatic.
+   */
+  resolveEscalation(action: EscalationDecision['action'], note?: string, requestId?: string, automatic?: boolean): void {
+    const decision: EscalationDecision = { action, ...(note ? { note } : {}), ...(automatic ? { automatic: true } : {}) };
+    if (requestId) {
+      this.pendingEscalations.get(requestId)?.(decision);
+      return;
+    }
+    const oldest = this.pendingEscalations.keys().next();
+    if (!oldest.done) this.pendingEscalations.get(oldest.value)?.(decision);
+  }
+
+  /**
+   * Release every parked escalation — run teardown, so none outlive the run.
+   * `automatic: true`: teardown resolving a section nobody answered is the
+   * same system-decided case as the early-return skips above, not a person
+   * reviewing and accepting that section's output.
+   */
+  private releasePendingEscalations(action: EscalationDecision['action'] = 'skip'): void {
+    for (const settle of Array.from(this.pendingEscalations.values())) settle({ action, automatic: true });
+  }
+
   /**
    * Resolve a pending boardroom plan approval from a REPL / dashboard listener.
    * An optional `note` re-plans and re-asks; an optional `editedPlan` is applied
@@ -513,6 +639,21 @@ export class Cascade extends EventEmitter {
   setMediaSink(sink: AssetSink): void {
     this.mediaSink = sink;
     this.registerMediaTools(this.workspacePath);
+  }
+
+  /**
+   * Let the agent read the page the user has open in the host's browser.
+   *
+   * Host-supplied because only a host WITH a browser can answer it — so the
+   * tool is simply absent in the CLI and in hosted runs, rather than present
+   * and always failing. Registered outside `enabledTools` for the same reason
+   * media tools are: that allowlist is a blast-radius control for tools that
+   * touch the machine, and reading a page the user already opened touches
+   * nothing. `disabledTools` still removes it.
+   */
+  setCurrentPageProvider(provider: CurrentPageProvider): void {
+    if ((this.config.tools?.disabledTools ?? []).includes('read_current_page')) return;
+    this.toolRegistry.register(new CurrentPageTool(provider));
   }
 
   private registerMediaTools(workspacePath: string): void {
@@ -699,8 +840,19 @@ export class Cascade extends EventEmitter {
         for (const server of this.config.tools.mcpServers) {
           try {
             const authProvider = server.oauthStore ? fileOAuthProvider(server.oauthStore) : undefined;
-            await this.mcpClient.connect(server, authProvider ? { authProvider } : {});
-            this.toolRegistry.registerMcpTools(this.mcpClient);
+            const connect = () => this.mcpClient.connect(server, authProvider ? { authProvider } : {});
+            // Settings expanding this same connector's tool list can be
+            // refreshing its token at this exact moment — serialize on the
+            // store, not the connect call in general (see withOAuthStoreLock).
+            await (server.oauthStore ? withOAuthStoreLock(server.oauthStore, connect) : connect());
+            // Per-tool selection: a connected server usually brings dozens of
+            // tools, most irrelevant to any given workspace. `disabledTools`
+            // names the ones the user switched off in Settings; they are left
+            // unregistered rather than refused at call time.
+            this.toolRegistry.registerMcpTools(
+              this.mcpClient,
+              (name) => !(this.config.tools?.disabledTools ?? []).includes(name),
+            );
           } catch (err) {
             console.error(`Failed to connect to MCP server "${server.name}":`, err);
           }
@@ -1334,6 +1486,7 @@ ${prompt}`
     } else if (complexity === 'Moderate') {
       const t2 = new T2Manager(this.router, this.toolRegistry, 'root');
       t2.setRunBreaker(runBreaker);
+      t2.setEscalationCallback((ctx) => this.requestEscalationDecision(ctx, taskId, options.signal));
       t2.setPresenter(true); // Moderate run: T2's aggregated synthesis is the answer — stream it.
       t2.setHierarchyContext('You are the ROOT Manager for this task. There is no T1 Administrator involved in this run. You are responsible for decomposing the task and managing T3 workers directly.');
       if (identityPrompt) {
@@ -1382,7 +1535,10 @@ ${prompt}`
       t2Results = [t2Result];
       const completed = t2Result.t3Results.filter((r: T3Result) => r.status === 'COMPLETED');
       if (completed.length > 0) {
-        finalOutput = t2Result.sectionSummary + '\n\n' + completed.map((r: T3Result) => r.output).join('\n\n');
+        finalOutput = composeRootSectionOutput(
+          t2Result,
+          completed.map((r: T3Result) => (typeof r.output === 'string' ? r.output : JSON.stringify(r.output))),
+        );
       } else {
         // Don't return a bare "Task failed" — surface whatever the worker(s)
         // produced plus the concrete reason(s), so the user (and logs) can see
@@ -1392,8 +1548,14 @@ ${prompt}`
           .map((r: T3Result) => (typeof r.output === 'string' ? r.output : ''))
           .filter((o) => o.trim())
           .sort((a, b) => b.length - a.length)[0];
+        // Section-level issues too: an unanswered escalation is recorded on the
+        // T2 result, so reading only t3Results told the user why the worker
+        // struggled but not that a decision had been requested and timed out.
         const reasons = Array.from(
-          new Set(t2Result.t3Results.flatMap((r: T3Result) => r.issues ?? []).filter(Boolean)),
+          new Set([
+            ...(t2Result.issues ?? []),
+            ...t2Result.t3Results.flatMap((r: T3Result) => r.issues ?? []),
+          ].filter(Boolean)),
         );
         if (partial) {
           finalOutput = reasons.length ? `${partial}\n\n_(incomplete: ${reasons.join('; ')})_` : partial;
@@ -1406,6 +1568,7 @@ ${prompt}`
     } else {
       const t1 = new T1Administrator(this.router, this.toolRegistry, this.config);
       t1.setRunBreaker(runBreaker);
+      t1.setEscalationCallback((ctx) => this.requestEscalationDecision(ctx, taskId, options.signal));
       t1.setPresenter(true); // Complex run: T1's final compile is the answer — stream it.
       t1.setHierarchyContext('You are the top-level Administrator. You are responsible for the overall plan and supervising multiple T2 Managers.');
       if (identityPrompt) {
@@ -1434,6 +1597,20 @@ ${prompt}`
       finalOutput = result.output;
       t2Results = result.t2Results;
     }
+
+    // A budget stop inside a T3 worker (or a T2/T1 call the wave machinery
+    // wraps) is caught internally so one dead-end subtask can't crash the
+    // whole run — it comes back as a normal FAILED/PARTIAL result, same as any
+    // other tool error. That means it silently bypassed the dedicated handling
+    // below (`run:budget-exceeded`, `lastInterruptedRun` for `/continue`): a
+    // Moderate run could finish looking like an ordinary failure, and a
+    // Complex run could carry on through review/compilation with every further
+    // call guaranteed to fail. The router's own state is checked directly here
+    // — after the tier has returned, regardless of how deep in the hierarchy
+    // the cap was actually hit or how that layer chose to report it — and
+    // re-raised so the one correct handler for this class of stop still runs.
+    const budgetInfo = this.router.budgetExceededInfo();
+    if (budgetInfo) throw new CascadeRouter.BudgetExceededError(budgetInfo.reason);
 
     // The run stopped because a model was failing every call. T1 composes its
     // answer from the section summaries, which is why this used to surface as
@@ -1489,6 +1666,11 @@ ${prompt}`
       // across runs — even on error paths. cancelAllPending is safe to call
       // when there are no pending requests.
       try { escalator.cancelAllPending(); } catch { /* non-critical */ }
+
+      // Same for section escalations. A run that ended while one was parked
+      // (error, abort, budget kill) must not leave a live timer and an
+      // unresolved promise holding the next run's map.
+      try { this.releasePendingEscalations(); } catch { /* non-critical */ }
 
       // Restore tier models to the configured baseline so Cascade Auto's
       // per-task picks don't leak into /why, the status bar, or the next run.

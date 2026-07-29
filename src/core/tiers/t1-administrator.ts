@@ -20,6 +20,7 @@ import type { ToolRegistry } from '../../tools/registry.js';
 import { BaseTier } from './base.js';
 import { T2Manager } from './t2-manager.js';
 import { RunBreaker } from '../run-breaker.js';
+import type { EscalationDecision } from '../../types.js';
 import { MemoryStore } from '../../memory/store.js';
 import { COMPLEXITY_T2_COUNT } from '../../constants.js';
 import { PeerBus } from '../peer/bus.js';
@@ -119,6 +120,9 @@ export class T1Administrator extends BaseTier {
   private escalations: EscalationPayload[] = [];
   private store?: MemoryStore;
   private runBreaker?: RunBreaker;
+  private escalationCallback?: (
+    ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string },
+  ) => Promise<EscalationDecision>;
   private t2PeerBus: PeerBus = new PeerBus();
   private permissionEscalator?: PermissionEscalator;
   private toolCreator?: ToolCreator;
@@ -133,6 +137,13 @@ export class T1Administrator extends BaseTier {
     this.router = router;
     this.toolRegistry = toolRegistry;
     this.config = config;
+  }
+
+  /** Ask the user what to do when any section escalates. */
+  setEscalationCallback(
+    cb: (ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string }) => Promise<EscalationDecision>,
+  ): void {
+    this.escalationCallback = cb;
   }
 
   /** Share the run-wide circuit breaker with every section manager. */
@@ -363,8 +374,21 @@ Create a CORRECTION PLAN that contains only the new sections needed to fix the i
       };
     }
 
+    // A section can be PARTIAL for two very different reasons: the pipeline
+    // fell short, or the user was asked about an escalation and explicitly
+    // chose "skip this section, keep what it produced". The reviewer only
+    // ever sees the summary text below — without this note it cannot tell
+    // the two apart, and would flag the second as a deficiency and generate a
+    // correction plan that redoes exactly the work the user just chose to
+    // stop. Kept IN the prompt (not filtered out) so its absence doesn't
+    // itself read as a gap; the note tells the reviewer what the silence means.
     const sectionsText = t2Results
-      .map((r) => `**${r.sectionTitle}**\n${r.sectionSummary}`)
+      .map((r) => {
+        const skipNote = r.userSkipped
+          ? '\n[The user was asked to retry or skip this section and explicitly chose to SKIP it. This is an intentional decision, not a failure — do not cite it as a reason to reject.]'
+          : '';
+        return `**${r.sectionTitle}**\n${r.sectionSummary}${skipNote}`;
+      })
       .join('\n\n');
 
     const prompt = `You are a strict QA Reviewer for the Cascade AI system.
@@ -376,6 +400,7 @@ T2 Manager Summaries:
 ${sectionsText}
 
 Does the current state of the workspace and the outputs fully satisfy the user's request?
+A section marked as user-skipped above is accepted as-is by the user's own choice — treat it as satisfied, not as a gap.
 If yes, reply with exactly: "APPROVED".
 If no, reply with "REJECTED: [Detailed reason explaining exactly what is missing or incorrect]".`;
 
@@ -597,6 +622,7 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
       // per-section breaker would never reach its threshold and every section
       // would pay to rediscover it.
       if (this.runBreaker) manager.setRunBreaker(this.runBreaker);
+      if (this.escalationCallback) manager.setEscalationCallback(this.escalationCallback);
       manager.setHierarchyContext(`You are a T2 Manager for the section "${section.sectionTitle}". You are part of a COMPLEX task overseen by T1 Administrator.`);
       if (this.store) {
         manager.setStore(this.store);
@@ -878,7 +904,15 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
       // [CRITICAL_TOOL_ERROR] by t3-worker.ts) take precedence over generic
       // stall / execution messages — this is what the user needs to act on
       // (e.g. switch the T3 model away from a rate-limited one).
-      const allIssues = t2Results.flatMap((r) => r.t3Results.flatMap((t) => t.issues));
+      // Section-level issues FIRST. A section that failed because an escalation
+      // went unanswered records that on the T2 result, not on any T3 result —
+      // reading only t3Results showed the user the worker's original problem
+      // and silently dropped the fact that the run had asked them a question
+      // and timed out waiting, which is the one thing they could have acted on.
+      const allIssues = [
+        ...t2Results.flatMap((r) => r.issues ?? []),
+        ...t2Results.flatMap((r) => r.t3Results.flatMap((t) => t.issues)),
+      ].filter(Boolean);
       const critical = allIssues.find((i) => i.includes('[CRITICAL_TOOL_ERROR]'));
       const stalled = allIssues.find((i) => /^Stalled:/.test(i));
       const topReason = critical ?? stalled ?? allIssues[0] ?? 'no specific reason recorded';

@@ -93,3 +93,50 @@ describe('T1Administrator.summarizeCompletedSections (corrective replan groundin
     expect(summary).toBe('');
   });
 });
+
+describe('T1Administrator.reviewT2Outputs (preserve a user-chosen skip)', () => {
+  // "Skip this section" converts an escalated section to PARTIAL and keeps its
+  // output — but the reviewer only ever sees the summary text below, and
+  // without a note explaining WHY it's incomplete, a strict QA reviewer has
+  // every reason to reject it and trigger a correction plan that redoes
+  // exactly the work the user just chose to stop.
+  type ReviewFn = (p: string, plan: unknown, r: T2Result[]) => Promise<{ approved: boolean; reason?: string }>;
+
+  function makeReviewer(captured: { prompt?: string }) {
+    const router = {
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }> }) => {
+        captured.prompt = String(options.messages[0]?.content ?? '');
+        return { content: 'APPROVED', finishReason: 'stop', usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 } };
+      }),
+    } as unknown as CascadeRouter;
+    return new T1Administrator(router, {} as ToolRegistry, {} as CascadeConfig);
+  }
+
+  it('annotates a userSkipped section in the reviewer prompt', async () => {
+    const captured: { prompt?: string } = {};
+    const admin = makeReviewer(captured);
+    const results: T2Result[] = [{
+      sectionId: 's1', sectionTitle: 'Legacy migration', status: 'PARTIAL',
+      t3Results: [], sectionSummary: 'Escalated worker output kept as-is.', issues: [],
+      userSkipped: true,
+    }];
+
+    await (admin as unknown as { reviewT2Outputs: ReviewFn }).reviewT2Outputs('goal', {} as never, results);
+
+    expect(captured.prompt).toContain('SKIP');
+    expect(captured.prompt).toMatch(/user.*explicitly chose to SKIP|intentional decision, not a failure/i);
+  });
+
+  it('adds no such note for an ordinary section', async () => {
+    const captured: { prompt?: string } = {};
+    const admin = makeReviewer(captured);
+    const results: T2Result[] = [{
+      sectionId: 's1', sectionTitle: 'Auth module', status: 'COMPLETED',
+      t3Results: [], sectionSummary: 'Done.', issues: [],
+    }];
+
+    await (admin as unknown as { reviewT2Outputs: ReviewFn }).reviewT2Outputs('goal', {} as never, results);
+
+    expect(captured.prompt).not.toMatch(/explicitly chose to SKIP/i);
+  });
+});

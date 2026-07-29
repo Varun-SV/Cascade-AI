@@ -3,6 +3,7 @@ import { useAppSelector } from '../store/index.js';
 import { CockpitView } from '../views/CockpitView.js';
 import { ChatView } from '../views/ChatView.js';
 import { CodeView } from '../views/CodeView.js';
+import { BrowserView } from '../views/BrowserView.js';
 import { InsightsView } from '../views/InsightsView.js';
 import { ReconnectBanner } from '../components/ReconnectBanner.js';
 
@@ -16,6 +17,7 @@ export function MainContent({ socket }: { socket: Socket | null }) {
         {view === 'cockpit'  && <CockpitView socket={socket} />}
         {view === 'chat'     && <ChatView socket={socket} />}
         {view === 'code'     && <CodeView socket={socket} />}
+        {view === 'browser'  && <BrowserView />}
         {view === 'insights' && <InsightsView />}
       </div>
     </main>

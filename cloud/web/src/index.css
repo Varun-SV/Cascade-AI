@@ -210,6 +210,30 @@ body {
   }
 }
 
+/* The Cascade mark, animated: three arcs, lit in turn from the top down. That
+   IS the product — T1 plans, T2 manages, T3 works — so a wait shows the shape
+   of what is happening rather than a generic circle. The arcs never fully dim,
+   so the mark stays readable between pulses. */
+@keyframes cascadeFlow {
+  0%, 100% { opacity: 0.22; transform: translateY(0); }
+  30%      { opacity: 1;    transform: translateY(0.6px); }
+  60%      { opacity: 0.35; transform: translateY(0); }
+}
+.cascade-mark > * {
+  animation: cascadeFlow 1.5s ease-in-out infinite;
+  transform-origin: center;
+}
+.cascade-mark > *:nth-child(2) { animation-delay: 0.18s; }
+.cascade-mark > *:nth-child(3) { animation-delay: 0.36s; }
+/* Someone who has asked for less motion still needs to see it is busy — keep
+   the pulse, drop the travel. */
+@media (prefers-reduced-motion: reduce) {
+  @keyframes cascadeFlow {
+    0%, 100% { opacity: 0.3; transform: none; }
+    50%      { opacity: 1;   transform: none; }
+  }
+}
+
 /* Shimmer sweep for streaming / loading states. */
 @keyframes shimmer {
   0% { background-position: -200% 0; }

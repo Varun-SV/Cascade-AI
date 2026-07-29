@@ -810,6 +810,8 @@ function AdvToggle({ label, hint, value, onChange }: { label: string; hint: stri
 // ── Connectors (OAuth-connected MCP servers) ──
 
 interface McpRow { name: string; target: string; kind: 'oauth' | 'token' | 'local' | 'open' }
+interface McpToolRow { server: string; tool: string; name: string; description: string }
+interface McpServerTools { server: string; tools: McpToolRow[]; error?: string }
 
 function McpConnectorsPanel() {
   const [servers, setServers] = useState<McpRow[]>([]);
@@ -817,6 +819,14 @@ function McpConnectorsPanel() {
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  // Per-tool selection. `disabled` is a DENY list, so a server that gains tools
+  // later exposes them by default instead of staying frozen at the shape it had
+  // when this panel was last opened.
+  const [toolsByServer, setToolsByServer] = useState<McpServerTools[] | null>(null);
+  const [disabled, setDisabled] = useState<Set<string>>(new Set());
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [loadingTools, setLoadingTools] = useState(false);
+  const [toolError, setToolError] = useState<string | null>(null);
 
   const api = window.cascade?.mcp;
 
@@ -825,6 +835,44 @@ function McpConnectorsPanel() {
     try { setServers((await api.list()).servers); } catch { setServers([]); }
   }
   useEffect(() => { void refresh(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Discovery is a real network round trip to every configured server, so it
+  // runs when the user asks for it — not on every render of Settings.
+  async function loadTools() {
+    if (!api?.tools || loadingTools) return;
+    setLoadingTools(true);
+    setToolError(null);
+    try {
+      const r = await api.tools();
+      setToolsByServer(r.servers);
+      setDisabled(new Set(r.disabled ?? []));
+      if (r.error) setToolError(r.error);
+    } catch (e) {
+      setToolError(e instanceof Error ? e.message : 'Could not list tools.');
+    } finally {
+      setLoadingTools(false);
+    }
+  }
+
+  async function toggleTool(toolName: string, enable: boolean) {
+    if (!api?.setToolEnabled) return;
+    // Optimistic: the checkbox should not lag a disk write.
+    setDisabled((prev) => {
+      const next = new Set(prev);
+      if (enable) next.delete(toolName); else next.add(toolName);
+      return next;
+    });
+    try {
+      const r = await api.setToolEnabled(toolName, enable);
+      if (r?.disabled) setDisabled(new Set(r.disabled));
+    } catch {
+      setDisabled((prev) => {
+        const next = new Set(prev);
+        if (enable) next.add(toolName); else next.delete(toolName);
+        return next;
+      });
+    }
+  }
 
   async function connect() {
     if (!api || busy) return;
@@ -848,6 +896,17 @@ function McpConnectorsPanel() {
   async function remove(n: string) {
     if (!api) return;
     setServers((prev) => prev.filter((s) => s.name !== n));
+    // Drop the removed server's discovered tools too. Left behind, its section
+    // keeps rendering with live checkboxes — the main-process handler accepts
+    // any registered name — so toggling one would re-add a denial that removal
+    // had just cleared, for a connector that is no longer there.
+    setToolsByServer((prev) => (prev ? prev.filter((s) => s.server !== n) : prev));
+    setExpanded((prev) => {
+      if (!prev.has(n)) return prev;
+      const next = new Set(prev);
+      next.delete(n);
+      return next;
+    });
     try { await api.remove(n); } catch { void refresh(); }
   }
 
@@ -877,6 +936,92 @@ function McpConnectorsPanel() {
               <button onClick={() => remove(s.name)} style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-muted)', fontSize: 11, padding: '4px 8px', cursor: 'pointer' }}>Remove</button>
             </div>
           ))}
+        </div>
+      )}
+
+      {servers.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>Tools</div>
+            <button
+              onClick={() => void loadTools()}
+              disabled={loadingTools}
+              style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-muted)', fontSize: 11, padding: '4px 8px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5 }}
+            >
+              {loadingTools ? <RefreshCw size={11} className="spin" /> : <List size={11} />}
+              {toolsByServer ? 'Refresh' : 'Show tools'}
+            </button>
+          </div>
+          <p style={{ margin: 0, fontSize: 11.5, lineHeight: 1.6, color: 'var(--text-muted)' }}>
+            Pick exactly which tools your runs can use. Anything you switch off is left
+            unregistered — the model never sees it, so it can&apos;t be proposed or called.
+          </p>
+
+          {toolError && <p style={{ margin: 0, fontSize: 11.5, color: 'var(--danger)' }}>{toolError}</p>}
+
+          {toolsByServer?.map((s) => {
+            const isOpen = expanded.has(s.server);
+            const offCount = s.tools.filter((t) => disabled.has(t.name)).length;
+            return (
+              <div key={s.server} style={{ borderRadius: 8, background: 'var(--bg-raised)', border: '1px solid var(--border)', overflow: 'hidden' }}>
+                <button
+                  onClick={() => setExpanded((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(s.server)) next.delete(s.server); else next.add(s.server);
+                    return next;
+                  })}
+                  style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '9px 11px', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left' }}
+                >
+                  <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text)', flex: 1 }}>{s.server}</span>
+                  {s.error ? (
+                    <span style={{ fontSize: 11, color: 'var(--danger)' }}>unreachable</span>
+                  ) : (
+                    <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+                      {s.tools.length - offCount} of {s.tools.length} on
+                    </span>
+                  )}
+                  <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>{isOpen ? '▾' : '▸'}</span>
+                </button>
+
+                {isOpen && s.error && (
+                  <div style={{ padding: '0 11px 10px', fontSize: 11.5, color: 'var(--text-dim)', lineHeight: 1.5 }}>
+                    {s.error}
+                  </div>
+                )}
+
+                {isOpen && !s.error && s.tools.length === 0 && (
+                  <div style={{ padding: '0 11px 10px', fontSize: 11.5, color: 'var(--text-dim)' }}>
+                    This server advertises no tools.
+                  </div>
+                )}
+
+                {isOpen && s.tools.map((t) => {
+                  const on = !disabled.has(t.name);
+                  return (
+                    <label
+                      key={t.name}
+                      style={{ display: 'flex', alignItems: 'flex-start', gap: 9, padding: '7px 11px', borderTop: '1px solid var(--border)', cursor: 'pointer' }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        onChange={(e) => void toggleTool(t.name, e.target.checked)}
+                        style={{ cursor: 'pointer', marginTop: 2 }}
+                      />
+                      <span style={{ flex: 1, minWidth: 0 }}>
+                        <span style={{ display: 'block', fontSize: 12, fontWeight: 600, color: on ? 'var(--text)' : 'var(--text-dim)' }}>{t.tool}</span>
+                        {t.description && (
+                          <span style={{ display: 'block', fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.45, marginTop: 1 }}>
+                            {t.description.length > 160 ? `${t.description.slice(0, 160)}…` : t.description}
+                          </span>
+                        )}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            );
+          })}
         </div>
       )}
 

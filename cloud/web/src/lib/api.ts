@@ -342,6 +342,17 @@ export interface McpServer {
   connectorId: string | null;
   enabled: boolean;
   createdAt: number;
+  /** Registered tool names (`mcp__server__tool`) switched OFF for this server.
+   *  A DENY list, so tools the server adds later are on by default. */
+  disabledTools: string[];
+}
+
+/** One tool a server advertises, named as it is registered at run time. */
+export interface McpToolEntry {
+  server: string;
+  tool: string;
+  name: string;
+  description: string;
 }
 
 export function fetchConnectors(): Promise<{ connectors: ConnectorEntry[] }> {
@@ -372,6 +383,30 @@ export function setMcpServerEnabled(id: string, enabled: boolean): Promise<{ ok:
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled }),
+    }),
+  );
+}
+
+/** Live discovery — connects to the server, lists its tools, disconnects. */
+export function fetchMcpServerTools(id: string): Promise<{
+  tools: McpToolEntry[]; disabledTools: string[]; error?: string;
+}> {
+  return json(fetch(`/api/mcp/servers/${encodeURIComponent(id)}/tools`, { credentials: 'include' }));
+}
+
+/**
+ * Switch ONE tool on or off. A delta rather than the whole list, so two tabs
+ * open on the same connector compose instead of overwriting each other — each
+ * holds its own snapshot, and sending a full list would make the later write
+ * erase the earlier one's change.
+ */
+export function setMcpToolEnabled(id: string, tool: string, enabled: boolean): Promise<{ ok: boolean }> {
+  return json(
+    fetch(`/api/mcp/servers/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tool, toolEnabled: enabled }),
     }),
   );
 }

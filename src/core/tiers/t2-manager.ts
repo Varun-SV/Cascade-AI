@@ -24,7 +24,9 @@ import { PeerBus } from '../peer/bus.js';
 import type { PermissionEscalator } from '../permissions/escalator.js';
 import type { ToolCreator } from '../../tools/tool-creator.js';
 import { RunBreaker } from '../run-breaker.js';
+import type { EscalationDecision } from '../../types.js';
 import { RedactionLayer } from '../audit/redaction.js';
+import { sectionNeedsDecision, settledEscalationStatus } from './escalation-policy.js';
 
 // Built per-run so the peer-coordination hint only appears when the
 // peer_message tool is actually registered. On a restricted host (e.g. cloud
@@ -56,6 +58,23 @@ export class T2Manager extends BaseTier {
   private t2PeerBus?: PeerBus;
   private permissionEscalator?: PermissionEscalator;
   private toolCreator?: ToolCreator;
+  /**
+   * Asked when a section ends ESCALATED — i.e. a worker hit something it could
+   * not decide alone. Without this the escalation was a dead end: the status
+   * said "needs a decision" and no decision was ever requested, so an MCP run
+   * that legitimately needed input just stopped there.
+   */
+  private escalationCallback?: (
+    ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string },
+  ) => Promise<EscalationDecision>;
+
+  /**
+   * The one allowed retry has been spent. Retrying is bounded because an
+   * escalation loop that can re-ask forever burns a budget on a question that
+   * is not resolving; a second escalation is terminal instead.
+   */
+  private escalationRetryUsed = false;
+
   /** Optional boardroom gate (Moderate / root-T2 runs) — pauses after decomposition. */
   private planApprovalCallback?: (
     subtasks: ReadonlyArray<{ subtaskId: string; subtaskTitle: string; description: string }>,
@@ -117,6 +136,13 @@ export class T2Manager extends BaseTier {
 
   setToolCreator(creator: ToolCreator): void {
     this.toolCreator = creator;
+  }
+
+  /** Ask the user what to do when a section escalates. */
+  setEscalationCallback(
+    cb: (ctx: { sectionId: string; sectionTitle: string; issues: string[]; summary: string }) => Promise<EscalationDecision>,
+  ): void {
+    this.escalationCallback = cb;
   }
 
   /** Boardroom gate for Moderate (root-T2) runs: pause after decomposition. */
@@ -249,12 +275,114 @@ export class T2Manager extends BaseTier {
         status: 'IN_PROGRESS',
       });
 
-      const summary = await this.aggregateResults(assignment, t3Results);
+      // `let`: a skipped escalation re-aggregates to keep the escalated output.
+      let summary = await this.aggregateResults(assignment, t3Results);
       const issues = t3Results
         .filter((r) => r.status !== 'COMPLETED')
         .flatMap((r) => r.issues);
 
-      const overallStatus = this.determineStatus(t3Results);
+      let overallStatus = this.determineStatus(t3Results);
+      // Set only by the explicit 'skip' branch below, and only when that skip
+      // was a genuine human answer — carried onto the returned T2Result so
+      // T1's reviewer pass can tell "the user chose to keep this as-is" from
+      // an ordinary shortfall (see userSkipped on the T2Result type). A skip
+      // the SDK produced itself (no listener, autonomy: 'auto', an aborted
+      // run — see EscalationDecision.automatic) is not that: nobody reviewed
+      // the section, so it must stay eligible for T1's corrective pass.
+      let userSkipped = false;
+
+      // Ask whenever ANY worker escalated — not only when the whole section
+      // came back ESCALATED. determineStatus checks `some(COMPLETED)` first, so
+      // a section with one finished worker and one that stopped on a question
+      // reports PARTIAL, and gating on the aggregate status skipped the prompt
+      // entirely: the question was never asked, and the escalated worker's
+      // output was dropped by the COMPLETED-only aggregation on the way past.
+      const hasEscalated = sectionNeedsDecision(t3Results);
+
+      // Keep the work and settle on a status T1 will act on correctly. Its
+      // compile filter is `status !== 'FAILED'`, so leaving a section ESCALATED
+      // lets it through as if it were finished — the exact dead end this
+      // feature exists to remove.
+      const settleEscalated = async (reason?: string) => {
+        if (reason) issues.push(reason);
+        summary = await this.aggregateResults(assignment, t3Results, { includeEscalated: true });
+        overallStatus = settledEscalationStatus(t3Results);
+      };
+
+      // An escalated section means a worker hit something it could not decide.
+      // Until now that was the end of the line — the status said "needs a
+      // decision" and nobody was ever asked for one. Ask, and act on the answer.
+      if (hasEscalated && this.escalationCallback && this.escalationRetryUsed) {
+        // The one allowed retry already ran and escalated again. Asking a second
+        // time is how a run burns its budget on a question that is not
+        // resolving, so this is terminal — but the work is still kept.
+        await settleEscalated('Escalated again after the retry — no further attempts were made.');
+      } else if (hasEscalated && !this.escalationCallback) {
+        // Nothing can ask (a bare T2Manager, or a host that never wired the
+        // gate). Settle rather than leaking ESCALATED past T1's filter.
+        await settleEscalated();
+      } else if (hasEscalated && this.escalationCallback) {
+        this.sendStatusUpdate({
+          progressPct: 95,
+          currentAction: 'Escalated — waiting for your decision',
+          status: 'ESCALATING',
+        });
+        const decision = await this.escalationCallback({
+          sectionId: assignment.sectionId,
+          sectionTitle: assignment.sectionTitle,
+          issues,
+          summary,
+        });
+        this.log(`Escalation decision for "${assignment.sectionTitle}": ${decision.action}`);
+
+        if (decision.action === 'skip') {
+          // "Skip" means keep what this section produced and move on — so the
+          // escalated work has to survive, and previously it did not. Every
+          // downstream consumer filters on COMPLETED: aggregateResults returns
+          // "no T3 workers completed" and T1 drops FAILED sections from the
+          // compile entirely. A one-worker section (the common shape) therefore
+          // discarded exactly the output the user had just chosen to keep.
+          //
+          // So re-aggregate counting the escalated outputs, and stay PARTIAL
+          // even when nothing reached COMPLETED: PARTIAL is what carries the
+          // section past T1's filter, and it is also the honest status — work
+          // exists, it just is not finished.
+          summary = await this.aggregateResults(assignment, t3Results, { includeEscalated: true });
+          overallStatus = settledEscalationStatus(t3Results);
+          userSkipped = decision.automatic !== true;
+        } else if (decision.action === 'retry' || decision.action === 'guidance') {
+          // Bounded to a single attempt: an escalation loop that can re-ask
+          // forever is how a run burns a budget on a question that never
+          // resolves. Recorded as a flag rather than by clearing the callback,
+          // because clearing it made the gate silently vanish on the retry —
+          // a second escalation then returned status ESCALATED unasked, which
+          // T1 compiles as though the section had finished.
+          this.escalationRetryUsed = true;
+          const guided = decision.action === 'guidance' && decision.note?.trim()
+            ? {
+                ...assignment,
+                description: `${assignment.description}\n\nGuidance (must be followed): ${decision.note.trim()}`,
+                // Drop T1's preplanned subtasks so the retry re-decomposes with
+                // the guidance in hand. The workers execute from their subtask
+                // slices, not from this description — leaving the slices in
+                // place gave "Retry with guidance" byte-identical worker
+                // prompts to "Retry as-is", making the note do nothing at all.
+                t3Subtasks: [],
+              }
+            : assignment;
+          // Re-run the section with the answer applied. The retry keeps its
+          // callback so a second escalation still reaches the terminal branch
+          // above instead of slipping through as an unasked ESCALATED.
+          return await this.execute(guided, taskId, signal);
+        } else {
+          // 'timeout' — nobody answered. Fail with the reason attached rather
+          // than hanging: in cloud the run is holding server resources, and a
+          // silent stall is indistinguishable from a crash.
+          issues.push('Escalated, but no decision was received in time.');
+          overallStatus = 'FAILED';
+        }
+      }
+
       const isOk = overallStatus === 'COMPLETED' || overallStatus === 'PARTIAL';
       this.setStatus(isOk ? 'COMPLETED' : 'FAILED', summary);
 
@@ -278,6 +406,7 @@ export class T2Manager extends BaseTier {
         t3Results,
         sectionSummary: summary,
         issues,
+        ...(userSkipped ? { userSkipped: true } : {}),
       };
 
       this.publishSectionOutput(result); // ← now result exists to publish
@@ -859,8 +988,15 @@ Return ONLY the JSON array.`;
   private async aggregateResults(
     assignment: T1ToT2Assignment,
     results: T3Result[],
+    opts: { includeEscalated?: boolean } = {},
   ): Promise<string> {
-    const completed = results.filter((r) => r.status === 'COMPLETED');
+    // Escalated workers usually DID produce something — they stopped on a
+    // decision, not on a failure. Normally that output is excluded because the
+    // section is still open; once the user has answered "skip", keeping it is
+    // the whole point of the answer.
+    const completed = results.filter(
+      (r) => r.status === 'COMPLETED' || (opts.includeEscalated && r.status === 'ESCALATED' && r.output),
+    );
     if (!completed.length) return `Section ${assignment.sectionTitle} failed — no T3 workers completed.`;
 
     const peerOutputs = this.peerSyncBuffer

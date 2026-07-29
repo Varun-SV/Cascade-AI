@@ -192,4 +192,56 @@ describe('Budget warning event', () => {
       }).not.toThrow();
     });
   });
+
+  // ── budgetExceededInfo() ───────────────────────
+  //
+  // A worker that catches BudgetExceededError internally (T3Worker does, so
+  // one dead-end subtask doesn't crash the whole run) absorbs the exception
+  // into a normal FAILED result — the tier returns as if nothing unusual
+  // happened, and Cascade.run()'s dedicated budget-exceeded handling
+  // (run:budget-exceeded, lastInterruptedRun for /continue) never fires. This
+  // accessor is what lets a caller check the router's OWN state directly
+  // after a tier returns, regardless of how deep the cap was actually hit or
+  // how that layer chose to report it.
+
+  describe('budgetExceededInfo()', () => {
+    it('is null before any cap is crossed', async () => {
+      router = await makeRouter({ sessionBudgetUsd: 1.00 });
+      expect(router.budgetExceededInfo()).toBeNull();
+    });
+
+    it('reports the session cap once it is hit, and stays tripped', async () => {
+      router = await makeRouter({ sessionBudgetUsd: 1.00 });
+      router.on('budget:warning', () => { /* suppress console noise */ });
+      try { simulateCall(router, 'T1', 1.50); } catch { /* the throw is the point of the other tests */ }
+      const info = router.budgetExceededInfo();
+      expect(info).not.toBeNull();
+      expect(info!.reason).toMatch(/Session budget/i);
+
+      // Permanent for the life of the router — a caller that checks after the
+      // exception has already been swallowed elsewhere must still see it.
+      expect(router.budgetExceededInfo()).not.toBeNull();
+    });
+
+    it('reports the per-task cap distinctly from the session cap', async () => {
+      router = await makeRouter({ maxTokensPerRun: 1000 });
+      router.beginRun();
+      for (let i = 0; i < 6; i++) simulateCall(router, 'T3', 0.001);
+      try { simulateCall(router, 'T3', 0.001); } catch { /* expected */ }
+      expect(router.budgetExceededInfo()!.reason).toMatch(/Per-task token cap/i);
+    });
+
+    it('is null again after beginRun() resets the per-task cap', async () => {
+      // The session cap (if any) is separate and does not reset on beginRun —
+      // this only exercises the per-task path.
+      router = await makeRouter({ maxTokensPerRun: 1000 });
+      router.beginRun();
+      for (let i = 0; i < 6; i++) simulateCall(router, 'T3', 0.001);
+      try { simulateCall(router, 'T3', 0.001); } catch { /* expected */ }
+      expect(router.budgetExceededInfo()).not.toBeNull();
+
+      router.beginRun();
+      expect(router.budgetExceededInfo()).toBeNull();
+    });
+  });
 });

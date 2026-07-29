@@ -10,7 +10,7 @@
 import Database from 'better-sqlite3';
 import path from 'node:path';
 import fs from 'node:fs';
-import { SqliteVectorStore } from '#cascade-ai';
+import { SqliteVectorStore, mcpServerPrefix } from '#cascade-ai';
 import { randomUUID } from 'node:crypto';
 
 export type OAuthProvider = 'github' | 'google' | 'dev';
@@ -172,6 +172,17 @@ interface DbAttachmentRow {
 }
 
 /** A remote MCP server / app connector, as exposed to the client (auth redacted). */
+/** A stored JSON array of strings, tolerant of null/garbage from older rows. */
+function parseStringArray(json: string | null | undefined): string[] {
+  if (!json) return [];
+  try {
+    const v: unknown = JSON.parse(json);
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 export interface CloudMcpServer {
   id: string;
   userId: string;
@@ -183,6 +194,10 @@ export interface CloudMcpServer {
   connectorId: string | null;
   enabled: boolean;
   createdAt: number;
+  /** Registered tool names (`mcp__server__tool`) the user switched OFF for this
+   *  server. A DENY list, so tools the server adds later are available by
+   *  default rather than frozen at the shape it had when last inspected. */
+  disabledTools: string[];
 }
 
 interface DbMcpServerRow {
@@ -195,6 +210,7 @@ interface DbMcpServerRow {
   enabled: number;
   created_at: number;
   oauth_json?: string | null;
+  disabled_tools_json?: string | null;
 }
 
 export interface CloudFile {
@@ -454,6 +470,18 @@ export class CloudStore {
     if (!hasCol('users', 'subscription_current_end')) this.db.exec('ALTER TABLE users ADD COLUMN subscription_current_end INTEGER');
     // MCP OAuth: the server's encrypted OAuth state (tokens + client reg + AS url).
     if (!hasCol('mcp_servers', 'oauth_json')) this.db.exec('ALTER TABLE mcp_servers ADD COLUMN oauth_json TEXT');
+    // Per-tool selection: which of this server's tools the user switched off.
+    if (!hasCol('mcp_servers', 'disabled_tools_json')) {
+      this.db.exec('ALTER TABLE mcp_servers ADD COLUMN disabled_tools_json TEXT');
+      // Adding the column is not enough. Rows predating it may already hold two
+      // servers whose names SANITIZE to the same prefix (`foo bar` / `foo@bar`),
+      // and uniqueMcpServerName only guards future inserts. Left alone, their
+      // tools would keep registering under identical `mcp__foo_bar__…` names
+      // and listDisabledMcpTools would union their selections — a checkbox on
+      // either legacy connection silently switching the tool off for both.
+      // Runs once, on the same one-shot guard as the column itself.
+      this.disambiguateMcpServerNames();
+    }
 
     // Message branching (conversation tree). Introduced together — back-fill runs
     // exactly once, when parent_id first appears, over the pre-existing flat data:
@@ -1092,6 +1120,66 @@ export class CloudStore {
     return rows.map((r) => ({ id: r.id, name: r.name, url: r.url, headers_json: r.headers_json ?? null, oauth_json: r.oauth_json ?? null }));
   }
 
+  /**
+   * A display name no other server of this user already holds.
+   *
+   * Not cosmetic. Tools register as `mcp__<name>__<tool>`, so two connections
+   * sharing a name produce identical tool names: the registry keeps only one of
+   * each pair (silently making one connection unreachable), and a per-server
+   * selection would apply to both. Suffixing at insert keeps every registered
+   * name unambiguous, which is what the rest of the system already assumes.
+   */
+  /**
+   * Rename pre-existing rows whose sanitized prefixes collide, per user.
+   *
+   * The FIRST row of each colliding group keeps its name — renaming everything
+   * would break connections that are working today — and later ones are
+   * suffixed until their prefix is free, matching what uniqueMcpServerName
+   * would have produced had they been inserted after this change.
+   */
+  private disambiguateMcpServerNames(): void {
+    const rows = this.db
+      .prepare('SELECT id, user_id, name FROM mcp_servers ORDER BY user_id, created_at ASC, rowid ASC')
+      .all() as Array<{ id: string; user_id: string; name: string }>;
+
+    const takenByUser = new Map<string, Set<string>>();
+    const rename = this.db.prepare('UPDATE mcp_servers SET name = ? WHERE id = ?');
+
+    for (const row of rows) {
+      let taken = takenByUser.get(row.user_id);
+      if (!taken) { taken = new Set(); takenByUser.set(row.user_id, taken); }
+
+      const prefix = mcpServerPrefix(row.name);
+      if (!taken.has(prefix)) { taken.add(prefix); continue; }
+
+      for (let n = 2; n < 1000; n++) {
+        const candidate = `${row.name} (${n})`;
+        const candidatePrefix = mcpServerPrefix(candidate);
+        if (!taken.has(candidatePrefix)) {
+          rename.run(candidate, row.id);
+          taken.add(candidatePrefix);
+          break;
+        }
+      }
+    }
+  }
+
+  private uniqueMcpServerName(userId: string, desired: string): string {
+    // Compared by the SANITIZED prefix, not the display name. `foo bar` and
+    // `foo@bar` are different names but both register as `mcp__foo_bar__…`, so
+    // comparing display names accepted a pair that still collided downstream.
+    const taken = new Set(
+      (this.db.prepare('SELECT name FROM mcp_servers WHERE user_id = ?').all(userId) as Array<{ name: string }>)
+        .map((r) => mcpServerPrefix(r.name)),
+    );
+    if (!taken.has(mcpServerPrefix(desired))) return desired;
+    for (let n = 2; n < 1000; n++) {
+      const candidate = `${desired} (${n})`;
+      if (!taken.has(mcpServerPrefix(candidate))) return candidate;
+    }
+    return `${desired} (${randomUUID().slice(0, 8)})`;
+  }
+
   addMcpServer(input: {
     userId: string; name: string; url: string;
     headers?: Record<string, string> | null; connectorId?: string | null; oauthJson?: string | null;
@@ -1099,7 +1187,7 @@ export class CloudStore {
     const row: DbMcpServerRow = {
       id: randomUUID(),
       user_id: input.userId,
-      name: input.name,
+      name: this.uniqueMcpServerName(input.userId, input.name),
       url: input.url,
       headers_json: input.headers && Object.keys(input.headers).length ? JSON.stringify(input.headers) : null,
       connector_id: input.connectorId ?? null,
@@ -1116,6 +1204,62 @@ export class CloudStore {
   /** Persist refreshed OAuth state for a server (encrypted blob, opaque here). */
   updateMcpServerOAuth(id: string, userId: string, oauthJson: string): boolean {
     return this.db.prepare('UPDATE mcp_servers SET oauth_json = ? WHERE id = ? AND user_id = ?').run(oauthJson, id, userId).changes > 0;
+  }
+
+  /**
+   * Read back ONE server's OAuth blob.
+   *
+   * The refresh path needs this because the row it started from may be stale:
+   * another caller can have refreshed and re-persisted the token while it waited
+   * for the per-row lock, and re-refreshing a rotated token fails.
+   */
+  getMcpServerOAuth(id: string, userId: string): string | null {
+    const row = this.db
+      .prepare('SELECT oauth_json FROM mcp_servers WHERE id = ? AND user_id = ?')
+      .get(id, userId) as { oauth_json: string | null } | undefined;
+    return row?.oauth_json ?? null;
+  }
+
+  /**
+   * Switch ONE tool on or off for a server.
+   *
+   * A delta, not a whole-list replacement: two tabs open on the same connector
+   * each hold their own snapshot, and replacing the list would let the later
+   * write silently erase the other's change. Read-modify-write inside a
+   * transaction so the row cannot move underneath the read.
+   */
+  setMcpToolEnabled(id: string, userId: string, tool: string, enabled: boolean): boolean {
+    const apply = this.db.transaction((): boolean => {
+      const row = this.db
+        .prepare('SELECT disabled_tools_json FROM mcp_servers WHERE id = ? AND user_id = ?')
+        .get(id, userId) as { disabled_tools_json: string | null } | undefined;
+      if (!row) return false;
+
+      const current = new Set(parseStringArray(row.disabled_tools_json));
+      if (enabled) current.delete(tool); else current.add(tool);
+
+      this.db
+        .prepare('UPDATE mcp_servers SET disabled_tools_json = ? WHERE id = ? AND user_id = ?')
+        .run(JSON.stringify(Array.from(current)), id, userId);
+      return true;
+    });
+    return apply();
+  }
+
+  /**
+   * Every tool this user has switched off, across all their servers — the shape
+   * `tools.disabledTools` wants when wiring a run.
+   *
+   * Flattening is safe because a user's server names are unique (see
+   * uniqueMcpServerName), so the `mcp__<name>__<tool>` keys from two different
+   * connections can never collide. Were names allowed to repeat, disabling a
+   * tool on one connection would disable it on its namesake too.
+   */
+  listDisabledMcpTools(userId: string): string[] {
+    const rows = this.db
+      .prepare('SELECT disabled_tools_json FROM mcp_servers WHERE user_id = ?')
+      .all(userId) as Array<{ disabled_tools_json: string | null }>;
+    return Array.from(new Set(rows.flatMap((r) => parseStringArray(r.disabled_tools_json))));
   }
 
   setMcpServerEnabled(id: string, userId: string, enabled: boolean): boolean {
@@ -1307,6 +1451,7 @@ export class CloudStore {
       connectorId: row.connector_id ?? null,
       enabled: !!row.enabled,
       createdAt: row.created_at,
+      disabledTools: parseStringArray(row.disabled_tools_json),
     };
   }
 

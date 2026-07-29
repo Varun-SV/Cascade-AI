@@ -1,5 +1,16 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
+/** Live state of the built-in browser, pushed on every navigation. */
+interface BrowserState {
+  open: boolean;
+  url: string;
+  title: string;
+  loading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  error?: string;
+}
+
 /** A message on a cloud conversation's active path (with branching data). */
 interface CloudMsg {
   id?: string;
@@ -192,6 +203,49 @@ contextBridge.exposeInMainWorld('cascade', {
     list: () => ipcRenderer.invoke('mcp:list') as Promise<{ servers: Array<{ name: string; target: string; kind: 'oauth' | 'token' | 'local' | 'open' }> }>,
     connectOAuth: (url: string, name?: string) => ipcRenderer.invoke('mcp:connectOAuth', { url, name }) as Promise<{ ok: boolean; error?: string; name?: string }>,
     remove: (name: string) => ipcRenderer.invoke('mcp:remove', name) as Promise<{ ok: boolean }>,
+    // Live discovery so Settings can offer per-tool selection; `disabled` is the
+    // persisted deny list, so a server that gains tools later exposes them by
+    // default rather than staying frozen at its shape on the day this last ran.
+    tools: () => ipcRenderer.invoke('mcp:tools') as Promise<{
+      servers: Array<{
+        server: string;
+        tools: Array<{ server: string; tool: string; name: string; description: string }>;
+        error?: string;
+      }>;
+      disabled: string[];
+      error?: string;
+    }>,
+    setToolEnabled: (name: string, enabled: boolean) =>
+      ipcRenderer.invoke('mcp:setToolEnabled', { name, enabled }) as Promise<{ ok: boolean; disabled?: string[] }>,
+  },
+
+  // Built-in browser. The page renders in a native WebContentsView positioned
+  // OVER the renderer at bounds this API supplies — an <iframe> would be
+  // refused outright by most real sites' X-Frame-Options.
+  browser: {
+    open: (url: string | undefined, bounds: { x: number; y: number; width: number; height: number }) =>
+      ipcRenderer.invoke('browser:open', { url, bounds }) as Promise<{ ok: boolean; error?: string; state?: BrowserState }>,
+    hide: () => ipcRenderer.invoke('browser:hide') as Promise<{ ok: boolean }>,
+    close: () => ipcRenderer.invoke('browser:close') as Promise<{ ok: boolean }>,
+    setBounds: (bounds: { x: number; y: number; width: number; height: number }) =>
+      ipcRenderer.invoke('browser:setBounds', bounds) as Promise<{ ok: boolean }>,
+    navigate: (url: string) => ipcRenderer.invoke('browser:navigate', url) as Promise<{ ok: boolean; error?: string }>,
+    back: () => ipcRenderer.invoke('browser:back') as Promise<{ ok: boolean }>,
+    forward: () => ipcRenderer.invoke('browser:forward') as Promise<{ ok: boolean }>,
+    reload: () => ipcRenderer.invoke('browser:reload') as Promise<{ ok: boolean }>,
+    stop: () => ipcRenderer.invoke('browser:stop') as Promise<{ ok: boolean }>,
+    state: () => ipcRenderer.invoke('browser:state') as Promise<BrowserState>,
+    readPage: () => ipcRenderer.invoke('browser:readPage') as Promise<{ url: string; title: string; text: string } | null>,
+    openExternal: (url: string) => ipcRenderer.invoke('browser:openExternal', url) as Promise<{ ok: boolean }>,
+    // Returns its own unsubscribe. Without one the renderer had no way to
+    // detach: every switch to the Browser view added another listener that
+    // outlived the component, so navigation events fanned out to every
+    // unmounted copy and EventEmitter eventually warned about the pile-up.
+    onState: (cb: (s: BrowserState) => void): (() => void) => {
+      const handler = (_e: unknown, s: BrowserState) => cb(s);
+      ipcRenderer.on('browser:state', handler);
+      return () => { ipcRenderer.removeListener('browser:state', handler); };
+    },
   },
 
   // File system (safe subset)

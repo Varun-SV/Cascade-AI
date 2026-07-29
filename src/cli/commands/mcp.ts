@@ -12,6 +12,8 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { ConfigManager } from '../../config/index.js';
 import { connectMcpWithLoopbackOAuth, FileMcpOAuthStore } from '../../mcp/oauth.js';
+import { uniqueMcpServerName, removeMcpServerDenials } from '../../tools/tool-name.js';
+
 
 function openBrowser(url: string): void {
   try {
@@ -33,25 +35,36 @@ function defaultName(url: string): string {
 }
 
 export async function mcpConnectCommand(url: string, opts: { name?: string } = {}): Promise<void> {
-  const name = (opts.name?.trim() || defaultName(url));
-  const store = new FileMcpOAuthStore(storePathFor(name));
+  const desiredName = (opts.name?.trim() || defaultName(url));
   console.log(chalk.magenta('\n  ◈ Connect an MCP server via OAuth'));
   console.log(chalk.dim(`  ${url}\n`));
   try {
+    // Resolve the FINAL name — unique against every server already configured
+    // — before starting OAuth, so the token store path is derived from the
+    // name that actually lands in config, matching the desktop's connect flow.
+    // Reconnecting the same server (exact raw-name match) still updates in
+    // place; only a genuinely new name that collides on its sanitized tool
+    // prefix (`foo bar` vs `foo@bar`) gets suffixed — this command previously
+    // had no uniqueness check at all, so two servers named that way would
+    // register identical `mcp__foo_bar__…` tool names and one would silently
+    // overwrite the other's wrapper in the registry.
+    const cm = new ConfigManager(process.cwd());
+    await cm.load();
+    const config = cm.getConfig();
+    config.tools = config.tools ?? ({} as typeof config.tools);
+    const servers = config.tools.mcpServers ?? [];
+    const existingIdx = servers.findIndex((s) => s.name === desiredName);
+    const name = existingIdx >= 0 ? desiredName : uniqueMcpServerName(desiredName, servers.map((s) => s.name));
+
+    const store = new FileMcpOAuthStore(storePathFor(name));
     await connectMcpWithLoopbackOAuth({
       serverUrl: url,
       store,
       clientName: 'Cascade AI',
       openUrl: (u) => { console.log(chalk.dim('  Opening your browser to authorize…')); openBrowser(u); },
     });
-    const cm = new ConfigManager(process.cwd());
-    await cm.load();
-    const config = cm.getConfig();
-    config.tools = config.tools ?? ({} as typeof config.tools);
-    const servers = config.tools.mcpServers ?? [];
     const entry = { name, url, oauthStore: storePathFor(name) };
-    const idx = servers.findIndex((s) => s.name === name);
-    if (idx >= 0) servers[idx] = entry; else servers.push(entry);
+    if (existingIdx >= 0) servers[existingIdx] = entry; else servers.push(entry);
     config.tools.mcpServers = servers;
     config.tools.mcpTrusted = Array.from(new Set([...(config.tools.mcpTrusted ?? []), name]));
     await cm.updateConfig(config);
@@ -84,6 +97,11 @@ export async function mcpRemoveCommand(name: string): Promise<void> {
   if (!match) { console.log(chalk.red(`\n  No MCP server named "${name}".\n`)); process.exitCode = 1; return; }
   config.tools.mcpServers = servers.filter((s) => s.name !== name);
   config.tools.mcpTrusted = (config.tools.mcpTrusted ?? []).filter((n) => n !== name);
+  // Matches the desktop removal handler: without this, reconnecting the same
+  // connector later — through THIS command, under the same name — silently
+  // re-disabled tools the user had switched off in a previous life of that
+  // connection, with nothing on screen explaining why.
+  config.tools.disabledTools = removeMcpServerDenials(config.tools.disabledTools, name);
   if (match.oauthStore) { try { new FileMcpOAuthStore(match.oauthStore).clear(); } catch { /* already gone */ } }
   await cm.updateConfig(config);
   console.log(chalk.green(`\n  ✓ Removed "${name}".\n`));

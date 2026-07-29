@@ -1,4 +1,5 @@
 import { useAppSelector } from '../store/index.js';
+import { CascadeMark } from '../components/CascadeMark.js';
 
 export function TitleBar() {
   const isMac = (window.cascade?.platform ?? 'darwin') === 'darwin';
@@ -27,7 +28,12 @@ export function TitleBar() {
         fontSize: 11, color: '#fff',
         boxShadow: '0 0 0 1px var(--accent-soft)',
         flexShrink: 0,
-      }}>◈</div>
+      }}>
+        {/* The real mark, held still. The busy indicator animates this exact
+            geometry, so the brand and "Cascade is working" are one object
+            rather than two things that merely resemble each other. */}
+        <CascadeMark size={13} animate={false} mono />
+      </div>
 
       <span style={{
         fontSize: 12, fontWeight: 600, letterSpacing: '-0.1px', color: 'var(--text)',

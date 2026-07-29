@@ -24,7 +24,15 @@ export class McpToolWrapper extends BaseTool {
     serverName: string,
     toolName: string,
     description: string,
-    inputSchema: Record<string, unknown>
+    inputSchema: Record<string, unknown>,
+    /**
+     * The registered name, when the caller is de-duplicating a whole server's
+     * tools at once (see `createMcpToolNamer`). Two raw names can sanitise onto
+     * one, and the registry keys by name — so the caller that can see the
+     * collision is the one that has to resolve it. Omitted, the plain encoding
+     * is used, which is right for a single wrapper built in isolation.
+     */
+    registeredName?: string,
   ) {
     super();
     this.mcpClient = mcpClient;
@@ -34,7 +42,7 @@ export class McpToolWrapper extends BaseTool {
     // colons in it, and used to reject the entire request along with it.
     // Execution uses the serverName/toolName fields above, never this string,
     // so the encoding is free to be lossy.
-    this.name = mcpToolName(serverName, toolName);
+    this.name = registeredName ?? mcpToolName(serverName, toolName);
     this.description = `[MCP:${serverName}] ${description}`;
     this.inputSchema = inputSchema;
   }

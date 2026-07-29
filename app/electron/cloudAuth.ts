@@ -92,6 +92,15 @@ interface CoreExports {
   decryptSyncBlob: (blob: EncBlob, passphrase: string) => Promise<unknown>;
   connectMcpWithLoopbackOAuth: (opts: { serverUrl: string; store: McpFileStore; openUrl: (u: string) => void; clientName?: string }) => Promise<unknown>;
   FileMcpOAuthStore: new (path: string) => McpFileStore;
+  mcpServerPrefix: (serverName: string) => string;
+  uniqueMcpServerName: (desired: string, existingNames: string[]) => string;
+  disambiguateMcpServerNames: <T extends { name: string }>(servers: T[]) => { servers: T[]; renames: Array<{ from: string; to: string }> };
+  removeMcpServerDenials: (disabledTools: string[] | undefined, serverName: string) => string[] | undefined;
+  discoverMcpTools: (servers: unknown[]) => Promise<Array<{
+    server: string;
+    tools: Array<{ server: string; tool: string; name: string; description: string }>;
+    error?: string;
+  }>>;
 }
 
 /** Live config access, so a pulled bundle takes effect without a backend restart. */
@@ -298,6 +307,12 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
         cfg.tools = cfg.tools ?? {};
         cfg.tools.webSearch = merged.tools.webSearch;
         cfg.tools.mcpServers = merged.tools.mcpServers;
+        // The per-tool selections travel WITH the servers. Copying the servers
+        // but not this installed the synced connector with every tool switched
+        // back on — including a destructive one the user had deliberately
+        // turned off — which is the exact asymmetry putting disabledTools in
+        // the bundle was meant to close.
+        cfg.tools.disabledTools = merged.tools.disabledTools;
       }
       cfg.models = merged.models;
       cfg.budget = merged.budget;
@@ -317,6 +332,12 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
 
   const safeName = (name: string) => name.replace(/[^a-z0-9._-]/gi, '_').slice(0, 64) || 'server';
   const hostnameOf = (url: string) => { try { return new URL(url).hostname; } catch { return 'mcp-server'; } };
+
+  // `uniqueMcpServerName` / `disambiguateMcpServerNames` live in the SDK
+  // (src/tools/tool-name.ts) rather than duplicated here, so this guard and the
+  // one `ConfigManager.load()` runs against a hand-edited or CLI-written config
+  // can never drift onto different suffix formats — which would itself produce
+  // a collision the two disagree about.
 
   ipcMain.handle('mcp:list', () => {
     const cfg = hooks.getConfig();
@@ -338,7 +359,15 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
     const cfg = hooks.getConfig();
     if (!cfg) return { ok: false, error: 'Your settings are not ready yet.' };
     const { connectMcpWithLoopbackOAuth, FileMcpOAuthStore } = core();
-    const storePath = join(app.getPath('userData'), 'mcp-oauth', `${safeName(name)}.json`);
+    cfg.tools = cfg.tools ?? {};
+    const servers = (cfg.tools.mcpServers ?? []) as Array<{ name: string }>;
+    // Re-connecting the SAME server updates it in place; only a genuinely new
+    // one that would collide gets suffixed.
+    const existingIdx = servers.findIndex((s) => s.name === name);
+    const finalName = existingIdx >= 0
+      ? name
+      : core().uniqueMcpServerName(name, servers.map((s) => s.name));
+    const storePath = join(app.getPath('userData'), 'mcp-oauth', `${safeName(finalName)}.json`);
     try {
       await connectMcpWithLoopbackOAuth({
         serverUrl: url,
@@ -346,18 +375,54 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
         clientName: 'Cascade AI',
         openUrl: (u) => { void shell.openExternal(u); },
       });
-      cfg.tools = cfg.tools ?? {};
-      const servers = (cfg.tools.mcpServers ?? []) as Array<{ name: string }>;
-      const entry = { name, url, oauthStore: storePath };
-      const idx = servers.findIndex((s) => s.name === name);
-      if (idx >= 0) servers[idx] = entry; else servers.push(entry);
+      const entry = { name: finalName, url, oauthStore: storePath };
+      if (existingIdx >= 0) servers[existingIdx] = entry; else servers.push(entry);
       cfg.tools.mcpServers = servers;
-      cfg.tools.mcpTrusted = Array.from(new Set([...(cfg.tools.mcpTrusted ?? []), name]));
+      cfg.tools.mcpTrusted = Array.from(new Set([...(cfg.tools.mcpTrusted ?? []), finalName]));
       await hooks.persistConfig();
-      return { ok: true, name };
+      return { ok: true, name: finalName };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : 'Could not connect.' };
     }
+  });
+
+  // ── Per-tool selection ──
+  //
+  // A connected server usually brings dozens of tools and most are irrelevant
+  // to any given workspace. Reported as: with GitHub connected, "in settings as
+  // well i can not fine tune on what tools to be accessible and selection" —
+  // you cannot select from a list you have never been shown. Discovery is a
+  // live connect-list-disconnect rather than a cache, because a server's tool
+  // list changes when a connector is re-authorised or the vendor ships new
+  // endpoints, and a stale list would hide tools the user does have.
+  ipcMain.handle('mcp:tools', async () => {
+    const cfg = hooks.getConfig();
+    const servers = (cfg?.tools?.mcpServers ?? []) as unknown[];
+    if (!servers.length) return { servers: [], disabled: [] };
+    try {
+      const results = await core().discoverMcpTools(servers);
+      return { servers: results, disabled: (cfg?.tools?.disabledTools ?? []) as string[] };
+    } catch (err) {
+      return { servers: [], disabled: [], error: err instanceof Error ? err.message : 'Could not list tools.' };
+    }
+  });
+
+  // Stored as a DENY list, not an allow list: a server that adds a tool later
+  // should make it available by default, the same as one connected today.
+  // An allow list would silently freeze each connector at the shape it had on
+  // the day the user last opened this panel.
+  ipcMain.handle('mcp:setToolEnabled', async (_e, arg: unknown) => {
+    const a = (arg ?? {}) as { name?: string; enabled?: boolean };
+    const name = String(a.name ?? '').trim();
+    if (!name) return { ok: false };
+    const cfg = hooks.getConfig();
+    if (!cfg) return { ok: false };
+    cfg.tools = cfg.tools ?? {};
+    const disabled = new Set((cfg.tools.disabledTools ?? []) as string[]);
+    if (a.enabled) disabled.delete(name); else disabled.add(name);
+    cfg.tools.disabledTools = Array.from(disabled);
+    await hooks.persistConfig();
+    return { ok: true, disabled: cfg.tools.disabledTools };
   });
 
   ipcMain.handle('mcp:remove', async (_e, name: unknown) => {
@@ -367,6 +432,12 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
       const match = (cfg.tools.mcpServers as Array<{ name: string; oauthStore?: string }>).find((s) => s.name === n);
       cfg.tools.mcpServers = (cfg.tools.mcpServers as Array<{ name: string }>).filter((s) => s.name !== n);
       cfg.tools.mcpTrusted = (cfg.tools.mcpTrusted ?? []).filter((x: string) => x !== n);
+      // Drop this server's per-tool selections too. They live in one global
+      // list here (unlike cloud, where they sit on the server row and vanish
+      // with it), so leaving them behind meant reconnecting the same connector
+      // later silently re-disabled tools the user had turned off in a previous
+      // life of that connection — with nothing on screen explaining why.
+      cfg.tools.disabledTools = core().removeMcpServerDenials(cfg.tools.disabledTools as string[] | undefined, n);
       if (match?.oauthStore) { try { new (core().FileMcpOAuthStore)(match.oauthStore).clear(); } catch { /* gone */ } }
       await hooks.persistConfig();
     }

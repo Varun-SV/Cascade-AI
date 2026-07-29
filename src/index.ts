@@ -24,6 +24,15 @@ export {
   beginMcpOAuth, completeMcpOAuth, discoverMcpAuthServer, refreshMcpToken,
 } from './mcp/oauth.js';
 export type { McpOAuthStore, McpOAuthState, OAuthTokens, OAuthClientInformationMixed } from './mcp/oauth.js';
+export { discoverMcpTools } from './mcp/discover.js';
+export {
+  mcpToolName, mcpServerPrefix, isMcpToolName, MCP_TOOL_PREFIX,
+  uniqueMcpServerName, disambiguateMcpServerNames, removeMcpServerDenials,
+} from './tools/tool-name.js';
+export type { McpServerRename } from './tools/tool-name.js';
+export { CurrentPageTool, MAX_PAGE_TEXT_CHARS } from './tools/current-page.js';
+export type { CurrentPageProvider, CurrentPageSnapshot } from './tools/current-page.js';
+export type { DiscoveredMcpTool, McpDiscoveryResult } from './mcp/discover.js';
 export {
   Retriever, reciprocalRankFusion, SqliteVectorStore, OpenAICompatibleEmbedder,
   embedderFromProviders, chunkText, LLMReranker, chatCompleterFromProviders,

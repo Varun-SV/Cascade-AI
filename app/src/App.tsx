@@ -18,12 +18,13 @@ import {
   setConnected, setReconnecting, setBackendError, setMeta, updateCost, upsertAgent, updateLastMessage,
   setSessions, removeSession, setOnboardingDone,
   enqueueApproval, clearApprovals, appendAgentStream, addPeerEdge, expirePeerEdges, runEnded, finalizeLastMessage,
-  setPendingPlan, setWhyReport, appendCommsEvent,
-  type RuntimeSession, type PendingPlan, type WhyReport,
+  setPendingPlan, enqueueEscalation, dequeueEscalation, clearEscalationForSession, setWhyReport, appendCommsEvent,
+  type RuntimeSession, type PendingPlan, type PendingEscalation, type WhyReport,
 } from './store/index.js';
 import { SettingsView } from './views/SettingsView.js';
 import { ApprovalModal } from './components/ApprovalModal.js';
 import { PlanApprovalModal } from './components/PlanApprovalModal.js';
+import { EscalationModal } from './components/EscalationModal.js';
 import { WhyPanel } from './components/WhyPanel.js';
 import { CommandPalette } from './components/CommandPalette.js';
 import { ChangesModal } from './components/ChangesModal.js';
@@ -48,6 +49,17 @@ export interface CloudTurn {
   assistant: { content: string; tier?: string | null; model?: string | null; costUsd?: number | null };
   editOfMessageId?: string;
   regenerateFromUserMessageId?: string;
+}
+
+/** Live state of the built-in browser, pushed on every navigation. */
+export interface DesktopBrowserState {
+  open: boolean;
+  url: string;
+  title: string;
+  loading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  error?: string;
 }
 
 declare global {
@@ -115,6 +127,34 @@ declare global {
         list(): Promise<{ servers: Array<{ name: string; target: string; kind: 'oauth' | 'token' | 'local' | 'open' }> }>;
         connectOAuth(url: string, name?: string): Promise<{ ok: boolean; error?: string; name?: string }>;
         remove(name: string): Promise<{ ok: boolean }>;
+        tools(): Promise<{
+          servers: Array<{
+            server: string;
+            tools: Array<{ server: string; tool: string; name: string; description: string }>;
+            error?: string;
+          }>;
+          disabled: string[];
+          error?: string;
+        }>;
+        setToolEnabled(name: string, enabled: boolean): Promise<{ ok: boolean; disabled?: string[] }>;
+      };
+      /** Built-in browser. The page is a native view the main process
+       *  positions over the renderer at the bounds we report. */
+      browser?: {
+        open(url: string | undefined, bounds: { x: number; y: number; width: number; height: number }): Promise<{ ok: boolean; error?: string; state?: DesktopBrowserState }>;
+        hide(): Promise<{ ok: boolean }>;
+        close(): Promise<{ ok: boolean }>;
+        setBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<{ ok: boolean }>;
+        navigate(url: string): Promise<{ ok: boolean; error?: string }>;
+        back(): Promise<{ ok: boolean }>;
+        forward(): Promise<{ ok: boolean }>;
+        reload(): Promise<{ ok: boolean }>;
+        stop(): Promise<{ ok: boolean }>;
+        state(): Promise<DesktopBrowserState>;
+        readPage(): Promise<{ url: string; title: string; text: string } | null>;
+        openExternal(url: string): Promise<{ ok: boolean }>;
+        /** Returns an unsubscribe — call it on unmount. */
+        onState(cb: (s: DesktopBrowserState) => void): () => void;
       };
     };
   }
@@ -186,11 +226,21 @@ export function App() {
         .catch(() => { /* backend not ready */ });
     };
 
-    socket.on('connect', () => { dispatch(setConnected(true)); dispatch(setReconnecting(false)); loadSessions(); });
+    // Re-subscribe to the open session's room on every connect. A reconnect
+    // issues a NEW socket id and drops the old one's room memberships, so
+    // without this the backend has no way to reach this client again — a run
+    // that escalates while we were away would prompt into nowhere and sit there
+    // until it timed out. The server replays a parked prompt on join.
+    const rejoinSession = () => {
+      const active = runSessionIdRef.current ?? sessionIdRef.current;
+      if (active) socket.emit('join:session', { sessionId: active });
+    };
+
+    socket.on('connect', () => { dispatch(setConnected(true)); dispatch(setReconnecting(false)); rejoinSession(); loadSessions(); });
     socket.on('runtime:refresh', loadSessions);
     socket.on('disconnect', () => dispatch(setConnected(false)));
     socket.on('connect_error', () => dispatch(setReconnecting(true)));
-    socket.on('reconnect', () => { dispatch(setConnected(true)); dispatch(setReconnecting(false)); });
+    socket.on('reconnect', () => { dispatch(setConnected(true)); dispatch(setReconnecting(false)); rejoinSession(); });
 
     socket.on('cost:update', (data: { totalCostUsd: number; totalTokens: number; costUnknown?: boolean }) => {
       dispatch(updateCost(data));
@@ -264,6 +314,26 @@ export function App() {
       dispatch(setPendingPlan(data));
     });
 
+    // A section escalated: the run is parked until this is answered. Unlike the
+    // boardroom gate, silence FAILS the section rather than proceeding, so the
+    // modal shows a countdown.
+    socket.on('escalation:decision-required', (data: Omit<PendingEscalation, 'receivedAt'>) => {
+      if (!data?.sectionId) return;
+      dispatch(enqueueEscalation({
+        ...data,
+        issues: Array.isArray(data.issues) ? data.issues : [],
+        timeoutMs: typeof data.timeoutMs === 'number' ? data.timeoutMs : 5 * 60_000,
+        receivedAt: Date.now(),
+      }));
+    });
+    // The server gave up waiting — close the modal so a late answer can't land
+    // on a section that has already been failed.
+    // Drop only the section that timed out — without the id an older request's
+    // timeout would clear a NEWER prompt the user is mid-answer on.
+    socket.on('escalation:timeout', (data: { requestId?: string; sectionId?: string }) => {
+      dispatch(dequeueEscalation({ requestId: data?.requestId, sectionId: data?.sectionId }));
+    });
+
     // The decision trail of the run that just ended — powers the Why panel.
     socket.on('run:why', (data: WhyReport) => {
       if (data?.sessionId) dispatch(setWhyReport(data));
@@ -289,6 +359,7 @@ export function App() {
       dispatch(setBackendError(data?.error ? `Run failed: ${data.error}` : 'Run failed — check your model/key and try again.'));
       dispatch(clearApprovals());
       dispatch(setPendingPlan(null));
+      dispatch(clearEscalationForSession(data?.sessionId));
       // Only end/finalize if this event belongs to the run/session actually
       // being tracked right now — otherwise a background session finishing
       // (or erroring) clobbered the Stop control and transcript of whatever
@@ -300,6 +371,11 @@ export function App() {
       dispatch(setBackendError(null));
       dispatch(clearApprovals());
       dispatch(setPendingPlan(null));
+      // Only for the session that finished. A background session completing
+      // used to wipe the prompt belonging to a DIFFERENT run that was still
+      // parked — taking away the only way to answer it, so that section then
+      // waited out its full timeout and failed.
+      dispatch(clearEscalationForSession(data?.sessionId));
       if (!data?.sessionId || data.sessionId === runSessionIdRef.current) dispatch(runEnded());
       if (!data?.sessionId || data.sessionId === sessionIdRef.current) dispatch(finalizeLastMessage({ finalOutput: data?.result?.output }));
     });
@@ -368,6 +444,7 @@ export function App() {
       {showSettings && <SettingsView socket={socketRef.current} />}
       <ApprovalModal socket={socketRef.current} />
       <PlanApprovalModal socket={socketRef.current} />
+      <EscalationModal socket={socketRef.current} />
       <ChangesModal />
       <ContinueModal />
       <CommandPalette socket={socketRef.current} />

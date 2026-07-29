@@ -177,6 +177,8 @@ export interface RunControls {
   maxTokensPerRun?: number;
   /** Remote MCP servers (with auth headers) to attach as tool sources. */
   mcpServers?: Array<{ name: string; url: string; headers?: Record<string, string> }>;
+  /** Registered MCP tool names the user switched off in Settings. */
+  disabledTools?: string[];
 }
 
 // Maps the UI's routing mode to Cascade Auto's bias. Cascade Auto stays ON for
@@ -244,6 +246,10 @@ export function buildCloudConfig(
       ...(controls.mcpServers?.length
         ? { mcpServers: controls.mcpServers, mcpTrusted: controls.mcpServers.map((s) => s.name) }
         : {}),
+      // Per-tool selection. Deselected tools are left UNREGISTERED rather than
+      // refused at call time, so the model never sees them and can't propose a
+      // tool the user has turned off.
+      ...(controls.disabledTools?.length ? { disabledTools: controls.disabledTools } : {}),
     },
     ...(webSearchOn && hasBackend
       ? { webSearch: { searxngUrl: wsc!.searxngUrl, braveApiKey: wsc!.braveApiKey, tavilyApiKey: wsc!.tavilyApiKey } }
@@ -687,6 +693,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     benchmarksCacheFile,
     maxTokensPerRun: payload.maxTokensPerRun,
     mcpServers: mcpServers.length ? mcpServers : undefined,
+    disabledTools: payload.fastAnswer ? [] : store.listDisabledMcpTools(userId),
   });
   const cascade: Cascade = createCascade(config, scratchDir);
 
@@ -764,6 +771,34 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   cascade.on('context:approval-required', onContextApproval);
   cascade.on('context:compacted', onCompacted);
   socket.on('context:decision', onContextDecision);
+
+  // A section that escalated is asking a real question, and until now nobody
+  // was ever asked it — the run just stopped at "needs a decision" having spent
+  // a full orchestration. Unlike plan approval above (which auto-proceeds,
+  // because the plan is already the model's considered proposal), this WAITS:
+  // an escalation exists precisely because a worker was not confident, so
+  // proceeding unattended is the option most likely to be wrong.
+  const onEscalation = (e: unknown) =>
+    socket.emit('escalation:decision-required', { conversationId: conversation.id, ...(e as object) });
+  const onEscalationTimeout = (e: unknown) =>
+    socket.emit('escalation:timeout', { conversationId: conversation.id, ...(e as object) });
+  const onEscalationDecision = (d: { conversationId?: string; requestId?: string; action?: string; note?: string }) => {
+    // One socket can carry several conversations; only answer for this run.
+    if (d?.conversationId && d.conversationId !== conversation.id) return;
+    if (d?.action === 'retry' || d?.action === 'skip' || d?.action === 'guidance') {
+      // requestId picks the parked section: a Complex run dispatches sections
+      // concurrently, so two can be waiting and an unkeyed answer would resolve
+      // whichever happened to be first in the map.
+      cascade.resolveEscalation(
+        d.action,
+        typeof d.note === 'string' ? d.note : undefined,
+        typeof d.requestId === 'string' ? d.requestId : undefined,
+      );
+    }
+  };
+  cascade.on('escalation:decision-required', onEscalation);
+  cascade.on('escalation:timeout', onEscalationTimeout);
+  socket.on('escalation:decide', onEscalationDecision);
 
   cascade.on('stream:token', onToken);
   cascade.on('tier:status', onStatus);
@@ -881,6 +916,9 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     cascade.off('context:approval-required', onContextApproval);
     cascade.off('context:compacted', onCompacted);
     socket.off('context:decision', onContextDecision);
+    cascade.off('escalation:decision-required', onEscalation);
+    cascade.off('escalation:timeout', onEscalationTimeout);
+    socket.off('escalation:decide', onEscalationDecision);
     try { await cascade.close(); } catch { /* non-critical */ }
   }
 }

@@ -13,6 +13,7 @@ import ConversationSidebar from './chat/ConversationSidebar.js';
 import ChatPanel from './chat/ChatPanel.js';
 import ChatTopBar from './chat/ChatTopBar.js';
 import ContinueModal from './chat/ContinueModal.js';
+import EscalationModal from './chat/EscalationModal.js';
 import ContextApprovalDialog from './chat/ContextApprovalDialog.js';
 import KeyVault from './keys/KeyVault.js';
 import { useChatSession, toChatMessage } from './chat/useChatSession.js';
@@ -319,6 +320,22 @@ export default function App() {
             onDensityChange={changeDensity}
             uiMode={mode}
             onUiModeChange={changeMode}
+          />
+        )}
+        {/* A parked run waiting on a decision. Rendered ahead of the other
+            modals because the run is blocked until it is answered — everything
+            else can wait, this cannot. */}
+        {chat.escalation && (
+          <EscalationModal
+            request={chat.escalation}
+            onResolve={chat.resolveEscalation}
+            // Dismissing is 'skip', not silence: the run is parked, so closing
+            // the window without an answer would leave it waiting out the full
+            // timeout and then failing the section for no reason.
+            onDismiss={() => chat.resolveEscalation('skip')}
+            // The countdown running out is not a decision — the server already
+            // failed the section, so only clear the prompt.
+            onExpire={chat.clearEscalation}
           />
         )}
         {showVault && (

@@ -4,6 +4,7 @@ import {
   Cloud, LogOut, Github, MessageSquare, ShieldCheck, ChevronRight, ChevronLeft, Trash2,
   UploadCloud, DownloadCloud, KeyRound,
 } from 'lucide-react';
+import { CascadeMark } from './CascadeMark.js';
 import { useAppDispatch, useAppSelector, setShowContinue } from '../store/index.js';
 import type { CloudUser, CloudMsg } from '../App.js';
 import { fetchSessionTranscript } from '../utils/sessionLoad.js';
@@ -154,7 +155,7 @@ function AccountHeader({ account, onChange, onSignedIn }: {
   const wrap: React.CSSProperties = { padding: '11px 12px', borderRadius: 9, background: 'var(--bg-raised)', border: '1px solid var(--border)', marginBottom: 12 };
 
   if (account.state === 'loading') {
-    return <div style={{ ...wrap, display: 'flex', alignItems: 'center', gap: 8, color: 'var(--text-dim)', fontSize: 11.5 }}><Loader2 size={13} className="spin" /> Checking your account…</div>;
+    return <div style={{ ...wrap, display: 'flex', alignItems: 'center', gap: 8, color: 'var(--text-dim)', fontSize: 11.5 }}><CascadeMark size={14} /> Checking your account…</div>;
   }
 
   async function signIn(provider: 'google' | 'github') {
@@ -356,7 +357,7 @@ function CloudChatsTab({ signedIn, backendPort, authToken, onDone }: {
 
       {loading ? (
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '24px 0', color: 'var(--text-dim)', fontSize: 11.5 }}>
-          <Loader2 size={14} className="spin" /> Loading your cloud chats…
+          <CascadeMark size={15} /> Loading your cloud chats…
         </div>
       ) : convos.length === 0 ? (
         <p style={{ padding: '20px 12px', textAlign: 'center', fontSize: 11.5, color: 'var(--text-dim)', border: '1px dashed var(--border)', borderRadius: 8 }}>
@@ -480,7 +481,7 @@ function CloudChatViewer({ conversation, backendPort, authToken, onBack, onImpor
 
       {loading ? (
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '24px 0', color: 'var(--text-dim)', fontSize: 11.5 }}>
-          <Loader2 size={14} className="spin" /> Loading…
+          <CascadeMark size={15} /> Loading…
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 320, overflowY: 'auto' }}>

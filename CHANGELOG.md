@@ -5,6 +5,197 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.55.0 - 2026-07-28
+
+### Fixed
+- **An escalated section now actually asks you.** "Section escalated — needs a
+  decision" was a dead end: the status was emitted and nobody was ever asked for
+  the decision, so a run that legitimately needed input just stopped there having
+  spent a full orchestration. This is why MCP runs so reliably ended that way.
+
+  You now get a prompt with three answers — **retry as-is**, **retry with
+  guidance** (your instruction is folded into the section and it runs again), or
+  **skip** (keep what the section did produce and move on). The retry is bounded
+  to one attempt, so an escalation cannot loop.
+
+  If nobody answers within 5 minutes the section **fails**, with the reason
+  recorded. That direction is deliberate and differs from plan approval, which
+  auto-proceeds on timeout: a plan is already the model's considered proposal,
+  whereas an escalation exists precisely *because* a worker wasn't confident — so
+  acting unattended is the option most likely to be wrong. A hosted run also
+  holds server resources while it waits, so hanging indefinitely isn't free
+  either. The countdown is shown, so the failure never looks arbitrary.
+
+  This works on the **desktop** as well as the web. Sections in a Complex run
+  are dispatched concurrently, so more than one can be waiting at once; each
+  prompt is tracked separately and your answer goes to the section that asked.
+  Pressing **Stop** unparks a waiting section immediately rather than leaving
+  the run held until the timeout.
+
+  A prompt raised while the desktop app was reconnecting used to be lost — the
+  connection it was addressed to no longer existed, and nothing replays. Run
+  events are now addressed to the session rather than to one connection, and a
+  prompt the run is parked on is handed over as soon as a client subscribes. If
+  genuinely nobody is there to answer, the section is skipped after half a
+  minute instead of holding the run for the full five.
+
+  The host side of that fix tracked one prompt per session, so a second section
+  escalating in the same wave silently displaced the first — it lost its replay
+  on reconnect and its own 30-second orphan check. Every waiting prompt is now
+  tracked and replayed independently, addressed by its own request rather than
+  by the session it belongs to.
+
+  Two more gaps in the desktop rename migration below are also fixed here,
+  since they touch the same code: a renamed server dropped out of
+  `tools.mcpTrusted` (matched by exact name), so it silently stopped being
+  trusted and either re-prompted or failed a headless run; and the hosted
+  app's escalation prompt could be painted over by any of the other modals
+  (API keys, Connectors, Memory…) or the tool-approval dialog, since they all
+  shared one stacking layer and whichever mounted last won. The escalation
+  prompt now sits strictly above every other overlay. The desktop app had the
+  same class of bug on its own separate escalation modal: it sat below the
+  command palette (⌘K) and the Help panel, so opening either while a run was
+  parked waiting for an answer could cover the prompt entirely, with the
+  section quietly running out its five-minute clock behind an unrelated
+  window. It now sits above both.
+
+  Choosing **skip** could also cause T1's own quality reviewer to reject the
+  kept output and generate a correction plan that redid exactly the work you
+  just chose to stop — the reviewer only ever sees the section's summary text,
+  with nothing distinguishing "the pipeline fell short" from "the user decided
+  this was good enough". A skipped section is now flagged through to that
+  review, which is told to accept it as-is rather than treat it as a gap. That
+  flag was reaching the reviewer for a skip nobody actually chose, too: when
+  nothing is listening, autonomy is `auto`, or a run is aborted, the SDK
+  itself resolves the escalation as a skip so the run doesn't hang — and that
+  system-produced skip was being read as the same "the user reviewed this and
+  accepted it" signal as a real answer, so a section nobody ever looked at
+  could still slip past the corrective pass. The SDK now marks which skips are
+  its own rather than a person's, and only a person's answer sets the flag.
+  The dashboard server settles a gate itself in two more shapes nobody chose —
+  a REST caller that never had anyone connect to answer, and a session you
+  halted mid-escalation — and both now carry the same marker for the same
+  reason.
+
+  Two more escalation gaps: a REST-triggered run (`/api/run`) only ever learns
+  its own new session id from the HTTP response it is itself in the middle of
+  sending, so a check for "is anyone listening yet" done at that exact moment
+  always found nobody — the interactive gate was silently never wired up for
+  any freshly started session, no matter who subscribed a moment later. It's
+  now always wired; a run nobody ever connects to is still settled quickly by
+  the existing 30-second orphan check rather than waiting the SDK's full five
+  minutes. And a **Moderate** run (a single root manager, no T1) where one
+  worker finished while a sibling's escalation timed out reported the section
+  failed but showed only the completed worker's output — the timeout reason
+  went unrecorded on screen, so the answer looked complete when part of the
+  task silently wasn't.
+
+### Added
+- **Choose exactly which MCP tools a run can use.** A connected server usually
+  brings dozens of tools and most are irrelevant to any given workspace — but
+  there was no way to see the list, let alone choose from it. Settings (desktop)
+  and Connectors (web) now expand each connection into its live tool list with a
+  checkbox per tool.
+
+  A tool you switch off is left **unregistered**, not refused at call time: the
+  model never sees it, so it cannot be proposed, it costs nothing in the tool
+  list, and there is no refusal to explain. Selections are stored as a deny
+  list, so tools a server adds later are available by default instead of frozen
+  at the shape it had when you last looked. In the hosted app the list is
+  per-account and per-server.
+
+  Because a tool's registered name folds illegal characters, two servers whose
+  names differ only in punctuation — `My Server` and `my-server` — produced the
+  same tool prefix, so one server's tools silently overwrote the other's and a
+  deny list could not tell them apart. New connections with a colliding name are
+  now given a numeric suffix, and any pair already stored is separated the first
+  time the account is upgraded.
+
+  Selections travel with **Sync settings across devices**, and a sync bundle
+  written before this release carries no selections at all. Reading that silence
+  as "nothing is switched off" would re-enable a destructive connector tool on
+  an ordinary pull, so the bundle is versioned: an older bundle leaves your
+  selections alone, and only one that knows about them can change them.
+
+  A per-tool selection for a **built-in** tool (not an MCP one — the browser's
+  "read this page", a media tool) was also being swept into that sync bundle,
+  even though the merge on the other end only ever treats an MCP server's own
+  prefix as authoritative for anything it carries. Once a built-in denial like
+  that reached a second device, there was no way to remove it again:
+  re-enabling it and pushing again couldn't clear the copy already sitting on
+  the other device, because nothing in the merge logic recognized it as
+  something a push was allowed to override. Built-in tool selections are
+  device-local by design and no longer leave the device at all.
+
+  The same colliding-name problem existed on the desktop and the CLI's
+  `cascade mcp connect`, which had no uniqueness check of its own — a config
+  file could already contain the collision from a hand edit, an older CLI
+  version, or `cascade mcp connect`. It's now checked and, if needed, fixed on
+  every load, not gated behind a one-time migration. Two servers whose raw
+  tool names collide within one connector are also disambiguated now, and the
+  choice of which keeps its plain name no longer depends on which order the
+  server happened to list them in — so a saved denial can't silently move to a
+  different tool between two runs. Refreshing an expired OAuth token for a
+  connector is also serialized against expanding that same connector's tool
+  list in Settings, closing the same kind of race the account-wide fix above
+  closes for the hosted app.
+
+  `cascade mcp remove` also left a removed server's per-tool denials behind —
+  they live in one flat list, not scoped to the connection — so reconnecting
+  the same name later silently carried old denials into the new connection
+  with nothing on screen explaining why. It now clears them on removal,
+  matching what the desktop UI already did.
+
+  Two more edges in the registered-name scheme: nothing bounded a name's
+  length, and a connector name or a vendor tool name long enough — cloud
+  alone accepts connector names up to 80 characters — could exceed OpenAI and
+  Azure's 64-character limit on its own, failing every request that included
+  the tool's definition. Long names are now shortened with a short hash of
+  the original appended, so two different long names that happen to share a
+  prefix still land on different registered names. Separately, when two
+  colliding tool names needed suffixing AND a third, unrelated tool on the
+  same server already happened to own the exact string a suffix would have
+  produced, the suffix logic could still hand out that already-taken name —
+  every possible name is now reserved up front, closing that gap.
+
+  And the trust-list fix above missed one shape: two connections that are
+  bit-for-bit the same name (from a hand edit, not merely a colliding one)
+  share a single trust entry, and moving it onto the renamed one instead of
+  granting it to both left the untouched original without trust. It's granted
+  to both now. That fix itself had a gap when THREE rows collided in a mixed
+  shape — two rows sharing one identical raw name, both renamed away because a
+  third row collides with both by sanitizing: processing the renames one at a
+  time let the first rename's own bookkeeping erase the shared name from the
+  trust list before the second rename (for the same original name) ever got
+  to look, so it silently granted trust to only one of the two renamed
+  connections. Renames sharing an original name are now grouped and settled
+  together in a single pass, so every renamed identity gets trust, not just
+  whichever ran first.
+
+- **The desktop browser now opens reliably on the first paint.** A fractional
+  display-scaling factor makes the page's on-screen rectangle land on
+  fractional pixel coordinates, which Electron's native view rejects — the
+  later resize handler already rounded to whole pixels, but the very first
+  open did not, so the tab could come up blank the one time nothing else on
+  screen explains why.
+
+- **The loading circle is now the Cascade mark.** Three arcs falling, widest at
+  the top, lit in turn from T1 down to T3 — the wait shows the shape of what is
+  actually happening rather than an anonymous rotation. The same geometry, held
+  still, is the app's logo, so the brand and the busy state are one object
+  instead of two things that resemble each other. It honours
+  `prefers-reduced-motion` (the pulse stays, the travel goes).
+
+- **A browser inside the desktop app.** Looking something up no longer means
+  leaving Cascade and losing the thread of a run. It works in both directions:
+  you browse, and Cascade can read the page you have open — ask about &ldquo;this
+  page&rdquo; in Chat and it sees what&rsquo;s on screen, including pages behind a login
+  and pages rendered entirely by JavaScript, neither of which a plain fetch can
+  reach. The page is a real browser view, not an embedded frame, so the sites
+  people actually look things up on aren&rsquo;t blank. Pages opened here run in
+  their own session with **every web permission denied** — camera, microphone,
+  location, notifications, USB. Reading a page needs none of them.
+
 ## 0.54.0 - 2026-07-28
 
 ### Fixed

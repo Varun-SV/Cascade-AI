@@ -4,6 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import Database from 'better-sqlite3';
 import { CloudStore } from './db.js';
+import { mcpServerPrefix } from '#cascade-ai';
 
 describe('CloudStore', () => {
   let dir: string;
@@ -250,6 +251,93 @@ describe('CloudStore', () => {
     expect(store.deleteMcpServer(withAuth.id, alice.id)).toBe(true);
     expect(store.listMcpServers(alice.id)).toHaveLength(1);
     expect(store.listMcpServers(bob.id)).toHaveLength(0);
+  });
+
+  it('keeps per-tool MCP selections per user and per server', () => {
+    // A connected server brings dozens of tools, most irrelevant to any given
+    // chat. Stored as a DENY list so a tool the server adds later is available
+    // by default — an allow list would freeze each connector at the shape it
+    // had when the user last opened Settings.
+    const alice = store.upsertUser({ provider: 'dev', providerId: 'tools-a', email: null, name: null, avatar: null });
+    const bob = store.upsertUser({ provider: 'dev', providerId: 'tools-b', email: null, name: null, avatar: null });
+
+    const gh = store.addMcpServer({ userId: alice.id, name: 'github', url: 'https://mcp.example.com/gh' });
+    const notion = store.addMcpServer({ userId: alice.id, name: 'notion', url: 'https://mcp.example.com/nt' });
+    const bobsGh = store.addMcpServer({ userId: bob.id, name: 'github', url: 'https://mcp.example.com/gh' });
+
+    // Nothing switched off to begin with — every tool is live by default.
+    expect(store.listMcpServers(alice.id).every((s) => s.disabledTools.length === 0)).toBe(true);
+    expect(store.listDisabledMcpTools(alice.id)).toEqual([]);
+
+    expect(store.setMcpToolEnabled(gh.id, alice.id, 'mcp__github__delete_repo', false)).toBe(true);
+    expect(store.setMcpToolEnabled(gh.id, alice.id, 'mcp__github__merge_pr', false)).toBe(true);
+    expect(store.setMcpToolEnabled(notion.id, alice.id, 'mcp__notion__delete_page', false)).toBe(true);
+
+    expect(store.listMcpServers(alice.id).find((s) => s.id === gh.id)!.disabledTools).toEqual([
+      'mcp__github__delete_repo', 'mcp__github__merge_pr',
+    ]);
+
+    // Run wiring wants one flat list across every server the user owns.
+    expect(store.listDisabledMcpTools(alice.id).sort()).toEqual([
+      'mcp__github__delete_repo', 'mcp__github__merge_pr', 'mcp__notion__delete_page',
+    ]);
+
+    // Alice's choices must not reach Bob, even though both connected 'github'.
+    expect(store.listDisabledMcpTools(bob.id)).toEqual([]);
+    expect(store.listMcpServers(bob.id).find((s) => s.id === bobsGh.id)!.disabledTools).toEqual([]);
+
+    // Writes are owner-scoped.
+    expect(store.setMcpToolEnabled(gh.id, bob.id, 'mcp__github__anything', false)).toBe(false);
+    expect(store.listDisabledMcpTools(alice.id)).toHaveLength(3);
+
+    // Re-enabling removes just that one.
+    expect(store.setMcpToolEnabled(gh.id, alice.id, 'mcp__github__delete_repo', true)).toBe(true);
+    expect(store.listDisabledMcpTools(alice.id).sort()).toEqual([
+      'mcp__github__merge_pr', 'mcp__notion__delete_page',
+    ]);
+
+    // Idempotent in both directions.
+    expect(store.setMcpToolEnabled(gh.id, alice.id, 'mcp__github__merge_pr', false)).toBe(true);
+    expect(store.listMcpServers(alice.id).find((s) => s.id === gh.id)!.disabledTools).toEqual(['mcp__github__merge_pr']);
+    expect(store.setMcpToolEnabled(gh.id, alice.id, 'mcp__github__never_set', true)).toBe(true);
+
+    // Removing a server takes its selections with it.
+    store.deleteMcpServer(notion.id, alice.id);
+    expect(store.listDisabledMcpTools(alice.id)).toEqual(['mcp__github__merge_pr']);
+  });
+
+  it('keeps server names unique after sanitization, not just as typed', () => {
+    // Tools register as `mcp__<sanitized name>__<tool>`, so `foo bar` and
+    // `foo@bar` are different display names that collide downstream: the
+    // registry keeps one of each pair and a per-server selection hits both.
+    const user = store.upsertUser({ provider: 'dev', providerId: 'names', email: null, name: null, avatar: null });
+
+    const a = store.addMcpServer({ userId: user.id, name: 'foo bar', url: 'https://a.example/mcp' });
+    const b = store.addMcpServer({ userId: user.id, name: 'foo@bar', url: 'https://b.example/mcp' });
+    const c = store.addMcpServer({ userId: user.id, name: 'foo bar', url: 'https://c.example/mcp' });
+
+    expect(a.name).toBe('foo bar');
+    expect(new Set([a.name, b.name, c.name]).size).toBe(3);
+
+    // And the property that actually matters: distinct registered prefixes.
+    const prefixes = store.listMcpServers(user.id).map((s) => mcpServerPrefix(s.name));
+    expect(new Set(prefixes).size).toBe(3);
+  });
+
+  it('composes concurrent tool toggles instead of letting one overwrite the other', () => {
+    // Why this is a delta and not a whole-list write: two tabs open on the same
+    // connector each hold their own snapshot of the list. Sending the full list
+    // would make the later request silently erase the earlier one's change —
+    // disable A, then disable B from a stale snapshot, and only B survives.
+    const user = store.upsertUser({ provider: 'dev', providerId: 'tools-race', email: null, name: null, avatar: null });
+    const srv = store.addMcpServer({ userId: user.id, name: 'github', url: 'https://mcp.example.com/gh' });
+
+    // Both tabs started from the same empty state.
+    store.setMcpToolEnabled(srv.id, user.id, 'mcp__github__a', false);   // tab 1
+    store.setMcpToolEnabled(srv.id, user.id, 'mcp__github__b', false);   // tab 2
+
+    expect(store.listMcpServers(user.id).find((s) => s.id === srv.id)!.disabledTools.sort())
+      .toEqual(['mcp__github__a', 'mcp__github__b']);
   });
 
   it('exposes a working hybrid vector store over the tenant DB', () => {

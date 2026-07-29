@@ -13,6 +13,7 @@ import { loadCascadeMd, type CascadeMdContent } from './cascade-md.js';
 import { MemoryStore } from '../memory/store.js';
 import { validateConfig } from './validate.js';
 import { loadGlobalCredentials, mergeGlobalCredentials, saveGlobalCredentials } from './global-credentials.js';
+import { disambiguateMcpServerNames, type McpServerRename } from '../tools/tool-name.js';
 import {
   CASCADE_CONFIG_FILE,
   CASCADE_DB_FILE,
@@ -49,6 +50,30 @@ export class ConfigManager {
 
   async load(): Promise<void> {
     this.config = await this.loadConfig();
+    // Desktop and CLI share this one config file, and only the desktop's OAuth
+    // connect flow ever checked for a colliding sanitized tool prefix —
+    // `cascade mcp connect` did not, and a file that already contains a
+    // colliding pair (hand-edited, imported, or written before that check
+    // existed) stays broken until something fixes the names. Run on every
+    // load rather than gating on a migration flag: disambiguateMcpServerNames
+    // is a no-op when nothing collides, so the cost of checking is one pass
+    // over a short list, and it also catches a collision introduced by an
+    // import or a hand edit between two loads, not only a fresh install.
+    const servers = this.config.tools?.mcpServers;
+    const { servers: disambiguated, renames } = servers?.length
+      ? disambiguateMcpServerNames(servers)
+      : { servers, renames: [] as McpServerRename[] };
+    const mcpNamesChanged = renames.length > 0;
+    if (mcpNamesChanged && this.config.tools) {
+      this.config.tools.mcpServers = disambiguated;
+      // The server's OLD name is still referenced elsewhere in config — as an
+      // exact match in `mcpTrusted` (McpClient.connect() checks it verbatim,
+      // so a stale entry means the renamed server is no longer trusted and
+      // either re-prompts interactively or is rejected outright in a headless
+      // run) and as a prefix in `disabledTools`. Both have to follow the
+      // rename or the migration trades one bug for another.
+      this.renameMcpServerReferences(renames);
+    }
     this.ignore = new CascadeIgnore();
     await this.ignore.load(this.workspacePath);
     this.cascadeMd = await loadCascadeMd(this.workspacePath);
@@ -62,6 +87,10 @@ export class ConfigManager {
     // carries its own key still wins (per-project override).
     this.config.providers = mergeGlobalCredentials(this.config.providers, loadGlobalCredentials(this.globalDir));
     await this.ensureDefaultIdentity();
+    // Persist the rename so it sticks — otherwise the fix applies for this
+    // process only and the file on disk (and the next process to read it)
+    // still has the collision.
+    if (mcpNamesChanged) await this.save();
   }
 
   getConfig(): CascadeConfig {
@@ -162,6 +191,71 @@ export class ConfigManager {
     if (isFirstRun && !this.config.providers.find((p) => p.type === 'ollama')) {
       this.config.providers.push({ type: 'ollama' });
     }
+  }
+
+  /**
+   * Follow a disambiguation rename into `tools.mcpTrusted`.
+   *
+   * `mcpTrusted` is matched by EXACT name (`McpClient.connect()`). Two shapes
+   * of rename reach here, and they need OPPOSITE treatment:
+   *
+   * - Distinct raw names that only collide via sanitizing (`foo bar` /
+   *   `foo@bar`): each had its OWN trust entry, and the old string now belongs
+   *   to nothing — the server that used it moved away, so the entry has to
+   *   move with it. A plain rewrite is correct here.
+   * - Literally identical names (a hand-edited or duplicated config: two rows
+   *   both named `foo`): there is only ONE trust entry for both, since
+   *   `mcpTrusted` itself is deduplicated. `this.config.tools.mcpServers` has
+   *   already been updated to the disambiguated list by the time this runs
+   *   (see `load()`), so the untouched survivor is STILL named `foo` — a plain
+   *   rewrite would move the one entry entirely onto the renamed row and
+   *   leave the survivor untrusted. The entry must be kept for the survivor
+   *   AND granted to the renamed identity, not moved.
+   *
+   * Renames are grouped by `from` before either treatment is applied, and
+   * each group is settled in one step. Two DIFFERENT rows can start out with
+   * the exact same raw name and BOTH get renamed away (e.g. three servers
+   * named `foo bar`, `foo@bar`, `foo@bar` — the two `foo@bar` rows collide
+   * with `foo bar` and with each other, so both are renamed to distinct
+   * identities while `foo bar` survives untouched). Processing renames one at
+   * a time in that shape drops coverage: the first rename's REPLACE branch
+   * would erase `from` from `trusted` entirely, so the guard on the second
+   * rename with the same `from` sees it already gone and silently skips —
+   * granting trust to only one of the two renamed identities. Grouping first
+   * means every renamed identity that shares a `from` is added or substituted
+   * together, in the one pass that still sees the original entry.
+   *
+   * `tools.disabledTools` deliberately gets no equivalent treatment. It's
+   * matched by sanitized PREFIX, and a prefix collision is exactly what made
+   * an existing entry ambiguous between the two servers in the first place —
+   * there is no way to tell, from the stored string alone, which of the two
+   * a denial was meant for. Leaving those entries untouched resolves that
+   * ambiguity for free: the survivor keeps the original (now unique) prefix,
+   * so an old entry keeps applying to it, while the renamed server starts
+   * clean under its new prefix. Rewriting the entry to follow the rename
+   * would do the opposite — move a denial that already worked for the
+   * survivor onto a server it may never have meant to cover.
+   */
+  private renameMcpServerReferences(renames: McpServerRename[]): void {
+    const tools = this.config.tools;
+    if (!tools?.mcpTrusted?.length || !renames.length) return;
+    const currentNames = new Set((tools.mcpServers ?? []).map((s) => s.name));
+
+    const byFrom = new Map<string, string[]>();
+    for (const { from, to } of renames) {
+      const tos = byFrom.get(from);
+      if (tos) tos.push(to);
+      else byFrom.set(from, [to]);
+    }
+
+    let trusted = tools.mcpTrusted;
+    for (const [from, tos] of byFrom) {
+      if (!trusted.includes(from)) continue;
+      trusted = currentNames.has(from)
+        ? [...trusted, ...tos] // a survivor still holds `from` — ADD every renamed identity
+        : [...trusted.filter((n) => n !== from), ...tos]; // `from` is now unused — replace with ALL renamed identities
+    }
+    tools.mcpTrusted = Array.from(new Set(trusted));
   }
 
   private async ensureDefaultIdentity(): Promise<void> {
