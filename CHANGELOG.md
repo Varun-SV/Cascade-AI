@@ -5,6 +5,37 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.58.0 - 2026-07-29
+
+### Added
+- **Generated images now actually land in PowerPoint and Word exports.**
+  Asking for a PPT with AI-generated images used to produce a text
+  placeholder in the deck instead of a real picture, even with a working
+  image-gen key — four separate gaps in the same chain, all fixed:
+  - The worker was never told to call `generate_image` for a deliverable
+    that needs one; `buildWorkerRules` now instructs it to, and to reference
+    the result via Markdown image syntax (`![description](location)`)
+    rather than writing a bracketed description in its place.
+  - `generate_image`'s own returned text now spells out exactly how to
+    reference the result, so the instruction above is concretely actionable.
+  - The cloud media sink reported back a bare filename with no way for
+    anything to fetch the bytes later; it now returns the file's real
+    `/api/files/:id` path, reusing the same authenticated route the Files
+    panel already downloads from.
+  - The `.pptx`/`.docx` exporters (client-side, per this pipeline's
+    existing "the content never leaves the browser" design) previously
+    flattened every line — including a correctly-formed image reference —
+    into caption text. They now detect a standalone Markdown image
+    reference, fetch the bytes (same-origin, session-authenticated),
+    sniff the real format and pixel dimensions from the file header, and
+    embed it as an actual picture — falling back gracefully to a skipped
+    image (never a broken export) if one reference 404s.
+- **The internal browser is now reachable from the Command Palette and as a
+  tab alongside chat**, not only via the sidebar's dedicated nav icon. A
+  browser tab is a fixed singleton (the underlying view is a single native
+  `WebContentsView`, not one per tab), so opening it from the palette
+  activates the same tab every time rather than creating duplicates.
+
 ## 0.57.0 - 2026-07-29
 
 ### Fixed

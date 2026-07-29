@@ -98,6 +98,13 @@ export class GenerateImageTool extends BaseTool {
 
     return [
       `Image generated and saved to ${location}.`,
+      // Knowing WHERE the image is isn't the same as knowing how to use it: a
+      // model told only "saved to X" tends to describe the picture in prose
+      // instead of embedding it. Spelling out the reference syntax here makes
+      // the worker's "never write a placeholder" rule concretely actionable,
+      // and it works for every host because `location` is whatever that host's
+      // sink returned — a workspace path on desktop/CLI, a URL in the cloud.
+      `To include this image in your output, reference it as: ![description](${location})`,
       `Model: ${asset.modelId} — ${r.selected.reason}`,
       // DALL·E rewrites the prompt before drawing; the model needs to know what
       // was actually rendered, not what it asked for, or its description of the

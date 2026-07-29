@@ -2,13 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 import Fuse from 'fuse.js';
 import {
-  Network, MessageSquare, Code2, BarChart3, Settings, TerminalSquare, Radio,
+  Network, MessageSquare, Code2, BarChart3, Globe, Settings, TerminalSquare, Radio,
   HelpCircle, GitCompareArrows, Plus, Search, CornerDownLeft, MonitorSmartphone,
 } from 'lucide-react';
 import {
   useAppDispatch, useAppSelector, setShowPalette, setView, setShowSettings,
   toggleTerminal, openBottomTab, setShowWhyPanel, setChangesSessionId,
   setActiveSessionId, loadTranscript, setSessionSidebarCollapsed, setShowContinue,
+  openTab, BROWSER_TAB_ID,
 } from '../store/index.js';
 import { fetchSessionTranscript } from '../utils/sessionLoad.js';
 
@@ -72,6 +73,12 @@ export function CommandPalette({ socket }: { socket: Socket | null }) {
       { id: 'view-cockpit',  title: 'Go to Cockpit',  hint: 'Mission Control graph', keywords: 'mission control agents graph', icon: Network,       run: () => { dispatch(setView('cockpit')); } },
       { id: 'view-chat',     title: 'Go to Chat',     keywords: 'conversation messages', icon: MessageSquare, run: () => { dispatch(setView('chat')); } },
       { id: 'view-code',     title: 'Go to Code',     keywords: 'editor files monaco', icon: Code2,         run: () => { dispatch(setView('code')); } },
+      // Also opens/activates the singleton browser tab (see BROWSER_TAB_ID)
+      // so it shows up in the tab strip, not only as a full view switch.
+      { id: 'view-browser',  title: 'Go to Browser',  hint: 'built-in browser', keywords: 'web internet url address bar', icon: Globe, run: () => {
+        dispatch(openTab({ id: BROWSER_TAB_ID, type: 'browser', title: 'Browser' }));
+        dispatch(setView('browser'));
+      } },
       { id: 'view-insights', title: 'Go to Insights', hint: 'costs · schedules · audit', keywords: 'analytics costs spend audit schedules cron', icon: BarChart3, run: () => { dispatch(setView('insights')); } },
       { id: 'new-chat',      title: 'New chat',       keywords: 'start fresh session', icon: Plus, run: () => { dispatch(loadTranscript({ sessionId: crypto.randomUUID(), messages: [] })); dispatch(setView('chat')); } },
       { id: 'settings',      title: 'Open Settings',  keywords: 'preferences providers models keys theme', icon: Settings, run: () => { dispatch(setShowSettings(true)); } },

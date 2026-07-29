@@ -1,4 +1,4 @@
-import { FileCode, Cpu, X } from 'lucide-react';
+import { FileCode, Cpu, Globe, X } from 'lucide-react';
 import {
   useAppDispatch, useAppSelector,
   closeTab, setActiveTab, setView,
@@ -12,6 +12,7 @@ function Tab({ tab, active }: { tab: AppTab; active: boolean }) {
     dispatch(setActiveTab(tab.id));
     if (tab.type === 'session') dispatch(setView('cockpit'));
     else if (tab.type === 'file') dispatch(setView('code'));
+    else if (tab.type === 'browser') dispatch(setView('browser'));
   };
 
   const handleClose = (e: React.MouseEvent) => {
@@ -49,7 +50,9 @@ function Tab({ tab, active }: { tab: AppTab; active: boolean }) {
     >
       {tab.type === 'file'
         ? <FileCode size={10} style={{ flexShrink: 0 }} />
-        : <Cpu size={10} style={{ flexShrink: 0 }} />
+        : tab.type === 'browser'
+          ? <Globe size={10} style={{ flexShrink: 0 }} />
+          : <Cpu size={10} style={{ flexShrink: 0 }} />
       }
       <span style={{
         flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
