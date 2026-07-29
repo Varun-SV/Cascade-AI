@@ -141,6 +141,34 @@ export interface SelectionResult {
   reason: string;
 }
 
+/**
+ * Say why a capability sits where it does. `isBest` is passed rather than
+ * inferred because the same capability is the automatic choice in one list and
+ * a runner-up in another, and claiming "ranked highest" for a runner-up would
+ * be the same kind of confident-but-baseless statement the quality field itself
+ * is careful to avoid.
+ */
+function explainChoice(
+  c: GenerationCapability,
+  cost: CapabilityCost | null,
+  modality: GenerationModality,
+  isBest: boolean,
+): string {
+  const priced = cost ? ` ${cost.label}.` : '';
+  if (c.quality !== undefined) {
+    return isBest
+      ? `${c.modelId} (${c.provider}) — ranked highest for ${modality}: ${c.qualityBasis}.${priced}`
+      : `${c.modelId} (${c.provider}) — ranked alternative for ${modality}: ${c.qualityBasis}.${priced}`;
+  }
+  const noRanking =
+    '. No published quality ranking is applied for this modality, so this is a cost choice, not a quality one.';
+  return isBest
+    ? `${c.modelId} (${c.provider}) — cheapest usable ${modality} model` +
+      (cost ? ` at ${cost.label}` : '') + noRanking
+    : `${c.modelId} (${c.provider}) — alternative usable ${modality} model` +
+      (cost ? ` at ${cost.label}` : '') + noRanking;
+}
+
 export class MultimodalRegistry {
   /** Provider types the user has actually configured a key for. */
   private readonly available: ReadonlySet<ProviderType>;
@@ -162,24 +190,20 @@ export class MultimodalRegistry {
   }
 
   /**
-   * Pick a model for a modality.
+   * Every usable capability for a modality, best first.
    *
    * Ranked models beat unranked ones, then higher quality, then lower unit
-   * price. An explicit `preferModel` wins outright when it is usable — the user
-   * naming a model is a stronger signal than any prior.
+   * price. An explicit `preferModel` is moved to the head when it is usable —
+   * the user naming a model is a stronger signal than any prior.
+   *
+   * `select()` is just the head of this list. The TAIL is the point: a systemic
+   * provider failure (dead key, 404, exhausted quota) is scoped to one
+   * provider+model, so "this model cannot draw" is not the same fact as "this
+   * account cannot draw". A caller holding the ordered alternatives can try the
+   * next provider instead of aborting the whole run — see generate-media.ts.
    */
-  select(modality: GenerationModality, opts: { preferModel?: string } = {}): SelectionResult | null {
-    const pool = this.usable(modality);
-    if (!pool.length) return null;
-
-    if (opts.preferModel) {
-      const wanted = pool.find((c) => c.modelId === opts.preferModel);
-      if (wanted) {
-        return { capability: wanted, cost: capabilityCost(wanted), reason: `Requested explicitly: ${wanted.modelId}.` };
-      }
-    }
-
-    const scored = pool
+  rank(modality: GenerationModality, opts: { preferModel?: string } = {}): SelectionResult[] {
+    const scored = this.usable(modality)
       .map((c) => ({ c, cost: capabilityCost(c) }))
       .sort((a, b) => {
         const qa = a.c.quality ?? -1;
@@ -192,16 +216,27 @@ export class MultimodalRegistry {
         return pa - pb;
       });
 
-    const best = scored[0]!;
-    const ranked = best.c.quality !== undefined;
-    const reason = ranked
-      ? `${best.c.modelId} (${best.c.provider}) — ranked highest for ${modality}: ${best.c.qualityBasis}.` +
-        (best.cost ? ` ${best.cost.label}.` : '')
-      : `${best.c.modelId} (${best.c.provider}) — cheapest usable ${modality} model` +
-        (best.cost ? ` at ${best.cost.label}` : '') +
-        '. No published quality ranking is applied for this modality, so this is a cost choice, not a quality one.';
+    const results: SelectionResult[] = scored.map(({ c, cost }, i) => ({
+      capability: c,
+      cost,
+      reason: explainChoice(c, cost, modality, i === 0),
+    }));
 
-    return { capability: best.c, cost: best.cost, reason };
+    if (opts.preferModel) {
+      const i = results.findIndex((r) => r.capability.modelId === opts.preferModel);
+      if (i > -1) {
+        const [wanted] = results.splice(i, 1);
+        results.unshift({ ...wanted!, reason: `Requested explicitly: ${wanted!.capability.modelId}.` });
+      }
+    }
+    return results;
+  }
+
+  /**
+   * Pick a model for a modality — the best usable one, or null if there is none.
+   */
+  select(modality: GenerationModality, opts: { preferModel?: string } = {}): SelectionResult | null {
+    return this.rank(modality, opts)[0] ?? null;
   }
 
   /**

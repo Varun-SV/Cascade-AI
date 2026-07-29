@@ -5,6 +5,30 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.62.0 - 2026-07-29
+
+### Fixed
+- **A systemic image-generation failure escalated the whole worker even
+  when a second image provider was configured and could have served the
+  request.** `classifyProviderError`'s `.systemic` verdict answers "would
+  this fail again on the same provider+model?" — a dead key, a 404 model
+  id, an exhausted quota — but `t3-worker.ts` was reading that as "the
+  whole capability is gone" and fast-failing immediately, even with a
+  second configured image provider sitting unused (e.g. Gemini's image
+  endpoint 404ing said nothing about whether OpenAI's `dall-e-3` would
+  work). `MultimodalRegistry` gained `rank()` — the same selection order
+  `select()` already used, now exposed as a full list instead of just the
+  head — and `generate_image` retries a systemic failure against the next
+  configured, resolvable provider before giving up. Only systemic failures
+  retry (a content-policy refusal or malformed prompt would plausibly fail
+  the same way again, so it isn't retried), a cancelled run is never
+  retried, and a single-provider account behaves exactly as before — the
+  original error propagates untouched. When every configured provider is
+  exhausted, the error names each one with its own message and carries the
+  same `systemic` tag `web_search` already uses, so `t3-worker.ts`'s
+  fast-fail still fires deterministically once there is truly nothing left
+  to try.
+
 ## 0.61.0 - 2026-07-29
 
 ### Fixed
