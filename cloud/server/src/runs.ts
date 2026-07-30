@@ -29,7 +29,7 @@ import { tenantScratchDir } from './paths.js';
 export { tenantScratchDir };
 
 const MAX_HISTORY_MESSAGES = 20;
-const PROVIDER_TYPES = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama'] as const;
+const PROVIDER_TYPES = ['anthropic', 'openai', 'gemini', 'azure', 'github-models', 'openai-compatible', 'ollama'] as const;
 
 // A blank form field submits as '' — plain `.optional()` accepts that as a
 // "defined" empty string rather than absent, and provider clients downstream
@@ -136,7 +136,14 @@ const ChatRunPayloadSchema = z.object({
       }),
     )
     .min(1)
-    .max(6),
+    // KeyVault's SELECTABLE_TYPES offers 5 single-instance cloud types
+    // (anthropic, openai, gemini, github-models, openai-compatible) plus
+    // Azure, which alone supports MULTIPLE deployments (each its own
+    // resource/endpoint, one array entry per deployment). 5 singles + 2 Azure
+    // deployments = 7, a plausible maximal real config; this bound must track
+    // that count whenever a provider type is added to SELECTABLE_TYPES, or a
+    // KeyVault-saved config silently fails every chat:run at this Zod gate.
+    .max(7),
 });
 
 export type ChatRunPayload = z.infer<typeof ChatRunPayloadSchema>;

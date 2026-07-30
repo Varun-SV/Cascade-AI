@@ -52,6 +52,39 @@ describe('KeyVault', () => {
     expect(onChange).toHaveBeenCalledWith([]);
   });
 
+  it('offers GitHub Models with an API key field but no base URL field', () => {
+    const onChange = vi.fn();
+    render(<KeyVault keys={[]} onChange={onChange} webSearch={null} onWebSearchChange={vi.fn()} />);
+
+    fireEvent.click(screen.getByText('Add provider'));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Provider' }), { target: { value: 'github-models' } });
+    // Fixed endpoint (models.github.ai) — unlike azure/openai-compatible, no
+    // base URL field should render for this provider.
+    expect(screen.queryByPlaceholderText('https://...')).not.toBeInTheDocument();
+    // Fine-grained PATs (github_pat_...), not classic tokens (ghp_...) — the
+    // API requires the "models: read" permission, which only fine-grained
+    // PATs can scope.
+    fireEvent.change(screen.getByPlaceholderText('github_pat_... (fine-grained, "models: read")'), { target: { value: 'github_pat_test123' } });
+    fireEvent.click(screen.getByText('Save'));
+
+    expect(onChange).toHaveBeenCalledWith([{ type: 'github-models', apiKey: 'github_pat_test123' }]);
+  });
+
+  it('does not offer a Model field for GitHub Models, since nothing in the SDK reads ProviderConfig.model for it', () => {
+    // Regression (Codex P2): ProviderConfig.model is only ever consumed by
+    // Azure's azureModelForDeployment() (resolving an opaque deployment name
+    // to its base model for benchmark/pricing) — no other provider, including
+    // github-models, translates it into an actual model selection anywhere in
+    // buildCloudConfig() or the SDK. Offering the field here would silently
+    // lie: entering "openai/gpt-4o" leaves routing on Auto and may pick a
+    // different catalog model. Only render it for providers that act on it.
+    render(<KeyVault keys={[]} onChange={vi.fn()} webSearch={null} onWebSearchChange={vi.fn()} />);
+
+    fireEvent.click(screen.getByText('Add provider'));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Provider' }), { target: { value: 'github-models' } });
+    expect(screen.queryByText(/model \(optional/i)).not.toBeInTheDocument();
+  });
+
   it('hides account sync when signed out (no sync enabled)', () => {
     render(<KeyVault keys={[]} onChange={vi.fn()} webSearch={null} onWebSearchChange={vi.fn()} />);
     expect(screen.queryByText(/sync your keys across/i)).not.toBeInTheDocument();

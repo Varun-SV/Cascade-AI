@@ -11,6 +11,7 @@ const SELECTABLE_TYPES: { value: Exclude<ProviderType, 'ollama'>; label: string 
   { value: 'openai', label: 'OpenAI' },
   { value: 'gemini', label: 'Google Gemini' },
   { value: 'azure', label: 'Azure OpenAI' },
+  { value: 'github-models', label: 'GitHub Models' },
   { value: 'openai-compatible', label: 'OpenAI-compatible endpoint' },
 ];
 
@@ -245,7 +246,7 @@ export default function KeyVault({ keys, onChange, webSearch, onWebSearchChange,
                 className="rounded border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-sm text-ink-100"
                 value={draft.apiKey ?? ''}
                 onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))}
-                placeholder="sk-..."
+                placeholder={draft.type === 'github-models' ? 'github_pat_... (fine-grained, "models: read")' : 'sk-...'}
               />
             </label>
           )}

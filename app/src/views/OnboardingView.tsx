@@ -46,6 +46,12 @@ const PROVIDERS: Provider[] = [
     keyPlaceholder: 'gsk_...',
   },
   {
+    id: 'github-models',
+    name: 'GitHub Models',
+    description: 'OpenAI, Meta, DeepSeek & more — via your GitHub/Copilot account',
+    keyPlaceholder: 'github_pat_... (fine-grained, "models: read")',
+  },
+  {
     id: 'openai-compatible',
     name: 'OpenAI-Compatible',
     description: 'Azure, Mistral, Together, Perplexity, LM Studio…',
