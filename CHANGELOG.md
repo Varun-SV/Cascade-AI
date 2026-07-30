@@ -124,6 +124,21 @@ A second Codex review pass on the same PR found four more:
   available. Added the same "any other usable model" widening already used
   elsewhere as the worst-case fallback.
 
+### Security
+- **Pagination could exfiltrate the GitHub Models PAT to an arbitrary host.**
+  `listModels()`'s new `Link: rel="next"` following (added in the pass above)
+  took the next URL from the server-supplied header verbatim and requested it
+  with the same `Authorization: Bearer <PAT>` header as the catalog itself —
+  a malicious or misconfigured response pointing `rel="next"` at an external
+  origin would have sent the token there. Every next URL is now resolved
+  against the current page (per RFC 3986 — a relative Link value is relative
+  to the request it came from) and its origin is required to match the
+  catalog's before the request is made; a mismatch throws instead of
+  following it. Visited-URL tracking was also added so a cyclic header stops
+  on the second sighting rather than burning the full page cap on identical
+  authenticated requests. Found by Codex review; fixed and verified via the
+  same revert-confirm-restore cycle as every other fix in this release.
+
 ## 0.64.0 - 2026-07-30
 
 ### Fixed

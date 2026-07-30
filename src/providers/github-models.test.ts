@@ -369,7 +369,7 @@ describe('GitHubModelsProvider — listModels', () => {
     expect(catalog.calls.map((c) => c.url)).toEqual([GITHUB_MODELS_CATALOG_URL, page2Url]);
   });
 
-  it('caps pagination rather than looping forever on a malformed/cyclic Link header', async () => {
+  it('stops on the second sighting of a cyclic Link header, not the full page cap', async () => {
     catalog.pages = {
       [GITHUB_MODELS_CATALOG_URL]: {
         body: { models: [{ id: 'openai/gpt-4o' }] },
@@ -377,13 +377,50 @@ describe('GitHubModelsProvider — listModels', () => {
       },
     };
     await makeProvider().listModels();
-    expect(catalog.calls.length).toBeLessThanOrEqual(20);
+    // Visited-URL tracking catches this on the very next iteration — 20
+    // identical authenticated requests would be 20 unnecessary PAT-bearing
+    // calls against a ~10 RPM budget for a header that was never going anywhere.
+    expect(catalog.calls).toHaveLength(1);
   });
 
   it('makes exactly one request when the catalog has no Link header', async () => {
     catalog.body = { models: [{ id: 'openai/gpt-4o' }] };
     await makeProvider().listModels();
     expect(catalog.calls).toHaveLength(1);
+  });
+
+  it('refuses a cross-origin pagination Link rather than sending the PAT there', async () => {
+    // Regression (Codex P1): the Link header's next URL is server-supplied and
+    // was followed verbatim, carrying catalogHeaders()'s Authorization header
+    // to wherever it pointed. A malicious or misconfigured response pointing
+    // `rel="next"` at an attacker-controlled origin would exfiltrate the PAT.
+    const evilUrl = 'https://attacker.example/catalog?page=2';
+    catalog.pages = {
+      [GITHUB_MODELS_CATALOG_URL]: {
+        body: { models: [{ id: 'openai/gpt-4o' }] },
+        link: `<${evilUrl}>; rel="next"`,
+      },
+    };
+    await expect(makeProvider().listModels()).rejects.toThrow(/cross-origin/i);
+    // The first (legitimate) page was fetched — but the PAT never went to
+    // the attacker's origin, because the second request was never made.
+    expect(catalog.calls.map((c) => c.url)).toEqual([GITHUB_MODELS_CATALOG_URL]);
+  });
+
+  it('resolves a relative next Link against the current page origin, and still refuses if it escapes it', async () => {
+    // A relative Link value (`</catalog/models?page=2>; rel="next"`) is valid
+    // per RFC 3986 and resolves against the request it came from — must not
+    // be treated as invalid or as an implicit same-origin bypass.
+    const page2Url = `${GITHUB_MODELS_CATALOG_URL}?page=2`;
+    catalog.pages = {
+      [GITHUB_MODELS_CATALOG_URL]: {
+        body: { models: [{ id: 'openai/gpt-4o' }] },
+        link: `</catalog/models?page=2>; rel="next"`,
+      },
+      [page2Url]: { body: { models: [{ id: 'meta/Llama-3.3-70B-Instruct' }] }, link: null },
+    };
+    const models = await makeProvider().listModels();
+    expect(models.map((m) => m.id).sort()).toEqual(['meta/Llama-3.3-70B-Instruct', 'openai/gpt-4o']);
   });
 });
 

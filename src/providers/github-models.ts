@@ -212,7 +212,17 @@ export class GitHubModelsProvider extends OpenAIProvider {
     const raw: unknown[] = [];
     let url: string | null = GITHUB_MODELS_CATALOG_URL;
     let pages = 0;
+    // Every page request carries the PAT via catalogHeaders() — a `Link`
+    // header is server-supplied, and a next URL taken from it verbatim would
+    // send that Authorization header wherever the header points. Track
+    // visited URLs so a cyclic header stops on the SECOND sighting rather
+    // than burning the full page cap on identical authenticated requests.
+    const visited = new Set<string>();
+    const catalogOrigin = new URL(GITHUB_MODELS_CATALOG_URL).origin;
     while (url && pages < GITHUB_MODELS_MAX_CATALOG_PAGES) {
+      if (visited.has(url)) break;
+      visited.add(url);
+
       const res = await nodeHttpFetch(url, { headers: this.catalogHeaders() });
       if (!res.ok) throw new Error(`GitHub Models catalog ${url} returned HTTP ${res.status}`);
 
@@ -226,7 +236,23 @@ export class GitHubModelsProvider extends OpenAIProvider {
         : [];
       raw.push(...pageItems);
 
-      url = parseNextLink(res.headers.get('link'));
+      // Unlike a parse-shape surprise above, a cross-origin `next` link is not
+      // benign data to degrade gracefully around — it's the PAT being pointed
+      // somewhere GitHub never sent it, and that must hard-fail loudly rather
+      // than silently follow it. Resolved against the CURRENT page's URL per
+      // RFC 3986 (a relative Link value is relative to the request it came
+      // from), not the catalog root, so a same-origin relative next link
+      // still works normally.
+      const next = parseNextLink(res.headers.get('link'));
+      if (next) {
+        const resolved: URL = new URL(next, url);
+        if (resolved.origin !== catalogOrigin) {
+          throw new Error(`Refusing cross-origin GitHub Models pagination URL: ${resolved.origin}`);
+        }
+        url = resolved.href;
+      } else {
+        url = null;
+      }
       pages++;
     }
 
