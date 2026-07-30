@@ -5,6 +5,21 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.64.0 - 2026-07-30
+
+### Fixed
+- **`generate_video` failed unrecoverably: `veo-3.1-generate-001` 404s on the
+  Gemini Developer API.** That id is Vertex AI's — Cascade's video generation
+  calls `generativelanguage.googleapis.com` (the Gemini Developer API), which
+  has no non-preview Veo 3.1 id yet; there, the correct id is
+  `veo-3.1-generate-preview`. Fixed the catalog entry and the matching
+  pricing-data.json row (the `provider: "vertex"` row, which genuinely does
+  use `-001`, was left untouched). `generate.ts`'s `generateVideo()` had no
+  real test coverage before this — every other test file only mocked it —
+  which is how the wrong id shipped unnoticed; added a full submit → poll →
+  download test suite, including the exact reported error as a regression
+  test.
+
 ## 0.63.0 - 2026-07-29
 
 ### Fixed

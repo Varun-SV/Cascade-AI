@@ -1438,7 +1438,7 @@
       ]
     },
     {
-      "model": "veo-3.1-generate-001",
+      "model": "veo-3.1-generate-preview",
       "provider": "gemini",
       "modality": "video",
       "currency": "USD",
