@@ -266,6 +266,34 @@ GitHub Models pin gets the wrong caps" class:
   the live provider's own `listModels()` already produces once discovery
   completes.
 
+An eighth Codex review pass found one more gap in that same synthesis
+branch, plus a startup-time quota exhaustion bug in an unrelated but
+Cascade-Auto-adjacent path:
+- **The unresolved-pin synthesis added in the previous round left
+  `supportsToolUse` undefined instead of `false`.** `t3-worker.ts`'s
+  text-tool fallback only engages on a strict `=== false`; `undefined`
+  sends native `tools` to an unverified multi-vendor catalog model, and any
+  that don't support function calling reject the request outright. Set to
+  `false`, matching the same default-to-false-when-unconfirmed policy
+  `listModels()` already applies for a real (non-synthesized) catalog entry.
+- **Startup model profiling could fire a burst of simultaneous requests
+  against GitHub's real ~10 RPM budget before the user submits a single
+  task.** `CascadeRouter.profileModels()` feeds every discovered model —
+  github-models catalog entries included — into `ModelProfiler.profileAll()`,
+  which runs the direct-LLM-query fallback (for any model OpenRouter has no
+  description for) across the whole batch via `Promise.allSettled`, fully in
+  parallel. Since that fallback (`queryModelDirectly`) always calls
+  `router.generate('T3', …)` — resolving to whatever T3's *current* tier
+  model is, not the specific catalog entry being profiled — registering N
+  github-models entries at startup fired N simultaneous requests at the same
+  rate-limited GitHub endpoint, a request-count burst the token-bucket TPM
+  guard has no visibility into at all. `profileAll()` now skips the
+  direct-query fallback for `github-models` models entirely (still allowed to
+  use the free OpenRouter-description lookup, which costs GitHub nothing);
+  they're recorded with empty specializations so profiling isn't re-attempted
+  every session, matching the existing "don't re-attempt" cache behavior for
+  every other unmatched model.
+
 ## 0.64.0 - 2026-07-30
 
 ### Fixed

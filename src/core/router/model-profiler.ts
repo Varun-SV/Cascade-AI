@@ -116,8 +116,17 @@ export class ModelProfiler {
           specializations = extractSpecializations(orMatch.description);
         }
 
-        // Fall back to direct LLM query if no data found
-        if (specializations.length === 0 && this.router) {
+        // Fall back to direct LLM query if no data found. Never for
+        // github-models: profileAll() runs every unprofiled model's query in
+        // full parallel via Promise.allSettled, and queryModelDirectly always
+        // hits the CURRENT T3 tier model (not the specific `model` being
+        // profiled) — so a github-models-only or -included config firing N
+        // parallel profiling probes sends N simultaneous requests to the same
+        // rate-limited GitHub endpoint before the user has submitted a single
+        // real task, against a provider whose real quota is ~10 RPM (Free
+        // tier) and a low daily cap, not the token-bucket approximation this
+        // burns through instead. Left unprofiled rather than guessed.
+        if (specializations.length === 0 && this.router && model.provider !== 'github-models') {
           specializations = await queryModelDirectly(this.router, model);
         }
 

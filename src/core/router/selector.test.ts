@@ -187,6 +187,9 @@ describe('ModelSelector — GitHub Models explicit tier pin', () => {
     expect(m!.inputCostPer1kTokens).toBe(0);
     expect(m!.outputCostPer1kTokens).toBe(0);
     expect(m!.pricingUnknown).toBe(false);
+    // Unconfirmed tool support must default to false, not undefined:
+    // t3-worker.ts's text-tool fallback only engages on a strict `=== false`.
+    expect(m!.supportsToolUse).toBe(false);
   });
 
   it('does not synthesize a github-models pin when the provider is not configured', () => {

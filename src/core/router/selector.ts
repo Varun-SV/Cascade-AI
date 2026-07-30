@@ -333,6 +333,14 @@ export class ModelSelector {
         pricingUnknown: false,
         maxOutputTokens: GITHUB_MODELS_MAX_OUTPUT_TOKENS,
         supportsStreaming: true,
+        // Unconfirmed (no live catalog entry to read a real capability from)
+        // must default to false, not left undefined: t3-worker.ts's text-tool
+        // fallback only engages on a strict `=== false`, so an undefined
+        // value here sends native `tools` to an unverified multi-vendor
+        // model and any that don't support function calling reject the
+        // request outright. Same default-to-false-when-unconfirmed policy
+        // listModels() already applies for a real catalog entry.
+        supportsToolUse: false,
         isLocal: false,
       };
       this.addDynamicModel(dynamicModel);
