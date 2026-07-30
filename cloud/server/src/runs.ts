@@ -29,7 +29,7 @@ import { tenantScratchDir } from './paths.js';
 export { tenantScratchDir };
 
 const MAX_HISTORY_MESSAGES = 20;
-const PROVIDER_TYPES = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama'] as const;
+const PROVIDER_TYPES = ['anthropic', 'openai', 'gemini', 'azure', 'github-models', 'openai-compatible', 'ollama'] as const;
 
 // A blank form field submits as '' — plain `.optional()` accepts that as a
 // "defined" empty string rather than absent, and provider clients downstream

@@ -5,9 +5,34 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.65.0 - 2026-07-30
+## 0.66.0 - 2026-07-30
 
 ### Added
+- **GitHub Models desktop + cloud UI wiring** (PR 2 of 2 — the provider itself
+  and its SDK/CLI/router support shipped in 0.65.0). Users can now add a
+  GitHub Models PAT from the desktop app's onboarding flow and Settings
+  panel, or from Cascade Cloud's KeyVault, with zero backend changes needed —
+  every generic provider-key/settings code path (`cascade:updateSettings`,
+  `cascade:getSettings`, `cascade:listModels`, KeyVault's `addKey()`) was
+  already keyed by the raw provider-type string.
+  - **Desktop** (`app/src/views/SettingsView.tsx`): a `githubModelsKey` field
+    in the Providers tab, alongside Anthropic/OpenAI/Google; a `github-models`
+    entry in `TIER_PROVIDERS` (`freeText: true`, matching azure/openai-compat
+    /ollama — GitHub Models has no static catalog, only live discovery) so
+    the per-tier model picker shows its real catalog once a key is set.
+  - **Desktop onboarding** (`app/src/views/OnboardingView.tsx`): added as a
+    first-run provider choice, and `app/electron/main.ts`'s `mapProvider()`
+    (onboarding id → Cascade `ProviderType`) gained the matching case.
+  - **Cloud web** (`cloud/web/src/lib/types.ts`, `cloud/web/src/keys/
+    KeyVault.tsx`): added to `ProviderType`, `SELECTABLE_TYPES`, and the
+    allowlist that renders the optional "Model" field (with an owner-prefixed
+    placeholder — `openai/gpt-4o` — since a bare model id would be wrong for
+    this provider's catalog).
+  - **Cloud server** (`cloud/server/src/runs.ts`): added to `PROVIDER_TYPES`,
+    the one place the run-payload's provider list is validated server-side —
+    without it, a browser-held GitHub Models key was rejected at the Zod
+    schema before ever reaching `buildCloudConfig` (which is otherwise fully
+    generic, passing `providers` straight through).
 - **GitHub Models as a new BYOK provider** (`github-models`). Any user with a
   GitHub/Copilot account can point Cascade at `models.github.ai`'s multi-vendor
   catalog (OpenAI, Meta, DeepSeek, Mistral, …) using a personal fine-grained

@@ -221,6 +221,14 @@ describe('parseChatRunPayload', () => {
     expect(parsed.prompt).toBe('hi');
   });
 
+  it('accepts github-models as a provider type, with its owner-prefixed model field', () => {
+    const parsed = parseChatRunPayload({
+      prompt: 'hi',
+      providers: [{ type: 'github-models', apiKey: 'ghp_test', model: 'openai/gpt-4o' }],
+    });
+    expect(parsed.providers[0]).toEqual({ type: 'github-models', apiKey: 'ghp_test', model: 'openai/gpt-4o' });
+  });
+
   it('accepts routing controls and rejects out-of-range values', () => {
     const parsed = parseChatRunPayload({
       prompt: 'hi',

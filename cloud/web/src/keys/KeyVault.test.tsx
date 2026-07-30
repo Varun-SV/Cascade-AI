@@ -52,6 +52,34 @@ describe('KeyVault', () => {
     expect(onChange).toHaveBeenCalledWith([]);
   });
 
+  it('offers GitHub Models with an API key field but no base URL field', () => {
+    const onChange = vi.fn();
+    render(<KeyVault keys={[]} onChange={onChange} webSearch={null} onWebSearchChange={vi.fn()} />);
+
+    fireEvent.click(screen.getByText('Add provider'));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Provider' }), { target: { value: 'github-models' } });
+    // Fixed endpoint (models.github.ai) — unlike azure/openai-compatible, no
+    // base URL field should render for this provider.
+    expect(screen.queryByPlaceholderText('https://...')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText('sk-...'), { target: { value: 'ghp_test123' } });
+    fireEvent.click(screen.getByText('Save'));
+
+    expect(onChange).toHaveBeenCalledWith([{ type: 'github-models', apiKey: 'ghp_test123' }]);
+  });
+
+  it('offers an optional owner-prefixed model field for GitHub Models', () => {
+    const onChange = vi.fn();
+    render(<KeyVault keys={[]} onChange={onChange} webSearch={null} onWebSearchChange={vi.fn()} />);
+
+    fireEvent.click(screen.getByText('Add provider'));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Provider' }), { target: { value: 'github-models' } });
+    fireEvent.change(screen.getByPlaceholderText('sk-...'), { target: { value: 'ghp_test123' } });
+    fireEvent.change(screen.getByPlaceholderText('owner/model, e.g. openai/gpt-4o'), { target: { value: 'openai/gpt-4o' } });
+    fireEvent.click(screen.getByText('Save'));
+
+    expect(onChange).toHaveBeenCalledWith([{ type: 'github-models', apiKey: 'ghp_test123', model: 'openai/gpt-4o' }]);
+  });
+
   it('hides account sync when signed out (no sync enabled)', () => {
     render(<KeyVault keys={[]} onChange={vi.fn()} webSearch={null} onWebSearchChange={vi.fn()} />);
     expect(screen.queryByText(/sync your keys across/i)).not.toBeInTheDocument();
