@@ -294,6 +294,22 @@ Cascade-Auto-adjacent path:
   every session, matching the existing "don't re-attempt" cache behavior for
   every other unmatched model.
 
+A ninth Codex review pass found a sharper variant of that same startup
+profiling bug:
+- **The github-models profiling guard keyed off the wrong model.** The
+  previous round's fix skipped `queryModelDirectly()` only when the model
+  BEING PROFILED (the loop variable) was itself `github-models` — but that
+  function ignores which model was passed in and always calls
+  `router.generate('T3', …)` with no override, so it actually probes
+  whatever T3 currently resolves to. In a mixed-provider config with T3
+  explicitly pinned to a github-models model, every OTHER unmatched catalog
+  model (anthropic, openai, …) still passed the old guard and still fired a
+  probe — which landed on the same pinned, rate-limited GitHub endpoint
+  regardless. The guard is now computed once per `profileAll()` call from
+  `router.getModelForTier('T3')?.provider === 'github-models'` — the model
+  that actually receives every probe in the batch — rather than from each
+  individual model being profiled.
+
 ## 0.64.0 - 2026-07-30
 
 ### Fixed

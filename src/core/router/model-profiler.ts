@@ -95,6 +95,16 @@ export class ModelProfiler {
     );
     if (toProfile.length === 0) return;
 
+    // queryModelDirectly() always probes whatever T3 CURRENTLY resolves to
+    // (it calls router.generate('T3', …) with no model override) — never the
+    // specific `model` being iterated in the loop below. Compute this once:
+    // if T3 is pinned to (or falls back to) a github-models model, EVERY
+    // probe in this batch lands on that same rate-limited endpoint no matter
+    // which catalog entry is nominally "being profiled" — so the guard has
+    // to key off the model that actually receives the requests, not the
+    // provider of whichever model happens to be unmatched by OpenRouter.
+    const probesHitGithubModels = this.router?.getModelForTier('T3')?.provider === 'github-models';
+
     // Fetch OpenRouter catalog once
     const openRouterModels = await fetchOpenRouterModels();
     const orByNormalizedId = new Map<string, OpenRouterModel>();
@@ -116,17 +126,10 @@ export class ModelProfiler {
           specializations = extractSpecializations(orMatch.description);
         }
 
-        // Fall back to direct LLM query if no data found. Never for
-        // github-models: profileAll() runs every unprofiled model's query in
-        // full parallel via Promise.allSettled, and queryModelDirectly always
-        // hits the CURRENT T3 tier model (not the specific `model` being
-        // profiled) — so a github-models-only or -included config firing N
-        // parallel profiling probes sends N simultaneous requests to the same
-        // rate-limited GitHub endpoint before the user has submitted a single
-        // real task, against a provider whose real quota is ~10 RPM (Free
-        // tier) and a low daily cap, not the token-bucket approximation this
-        // burns through instead. Left unprofiled rather than guessed.
-        if (specializations.length === 0 && this.router && model.provider !== 'github-models') {
+        // Fall back to direct LLM query if no data found — unless every probe
+        // in this batch would land on a rate-limited github-models model (see
+        // probesHitGithubModels above). Left unprofiled rather than guessed.
+        if (specializations.length === 0 && this.router && !probesHitGithubModels) {
           specializations = await queryModelDirectly(this.router, model);
         }
 
