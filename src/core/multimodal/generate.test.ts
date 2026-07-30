@@ -19,7 +19,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ProviderConfig } from '../../types.js';
-import { generateImage } from './generate.js';
+import { generateImage, generateVideo } from './generate.js';
 import { allCapabilities } from './registry.js';
 
 const CFG: ProviderConfig = { type: 'gemini', apiKey: 'test-key' };
@@ -205,5 +205,165 @@ describe('generateImage — Gemini generateContent', () => {
     expect(calls[0]!.url).toBe(
       'https://proxy.example/v1beta/models/gemini-2.5-flash-image:generateContent',
     );
+  });
+});
+
+// Live-reported bug: generate_video failed unrecoverably with a 404 on
+// `veo-3.1-generate-001`. That id is Vertex AI's — the Gemini DEVELOPER API
+// (generativelanguage.googleapis.com, what this file actually calls) uses
+// `veo-3.1-generate-preview` instead, and Veo 3.1 has no non-preview id there
+// yet. generateVideo() had zero real test coverage before this (every other
+// test file only mocks it), which is exactly how the wrong id shipped unnoticed.
+describe('generateVideo — Gemini predictLongRunning', () => {
+  const GEMINI_VIDEO = allCapabilities().find(
+    (c) => c.modality === 'video' && c.provider === 'gemini',
+  )!;
+
+  /** Stub fetch with one response per call, in order; the last one repeats if exhausted. */
+  function stubFetchSequence(
+    responses: Array<{ ok?: boolean; status?: number; json?: unknown; text?: string; bytes?: Buffer }>,
+  ): Call[] {
+    const calls: Call[] = [];
+    let i = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init: any) => {
+      calls.push({ url, body: init?.body ? JSON.parse(init.body) : undefined, headers: init?.headers });
+      const r = responses[Math.min(i, responses.length - 1)]!;
+      i++;
+      return {
+        ok: r.ok ?? true,
+        status: r.status ?? 200,
+        statusText: 'Error',
+        json: async () => r.json,
+        text: async () => r.text ?? (r.json !== undefined ? JSON.stringify(r.json) : ''),
+        arrayBuffer: async () => {
+          const b = r.bytes ?? Buffer.alloc(0);
+          // `Buffer.buffer` is the underlying pooled ArrayBuffer, not
+          // necessarily sized to this Buffer alone — slice by byteOffset/
+          // byteLength or a short test buffer can pick up neighboring bytes.
+          return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+        },
+      } as unknown as Response;
+    }));
+    return calls;
+  }
+
+  const operation = (done: boolean, extra: Record<string, unknown> = {}) => ({
+    ok: true,
+    json: { name: 'operations/abc123', done, ...extra },
+  });
+  const finished = (uri: string) => operation(true, {
+    response: { generateVideoResponse: { generatedSamples: [{ video: { uri } }] } },
+  });
+
+  it('submits to :predictLongRunning with the FIXED model id, never the retired Vertex one', async () => {
+    const calls = stubFetchSequence([
+      { ok: true, json: { name: 'operations/abc123' } },
+      finished('https://example.com/signed/video.mp4'),
+      { ok: true, bytes: Buffer.from('fake-mp4-bytes') },
+    ]);
+
+    vi.useFakeTimers();
+    try {
+      const promise = generateVideo(GEMINI_VIDEO, CFG, { prompt: 'a cat skateboarding' });
+      await vi.advanceTimersByTimeAsync(10_000); // the one poll interval before the "done" poll
+      await promise;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(calls[0]!.url).toBe(
+      'https://generativelanguage.googleapis.com/v1beta/models/veo-3.1-generate-preview:predictLongRunning',
+    );
+    expect(calls[0]!.url).not.toContain('veo-3.1-generate-001');
+    expect(calls[0]!.body).toMatchObject({ instances: [{ prompt: 'a cat skateboarding' }] });
+    // Default aspect ratio when none is requested.
+    expect(calls[0]!.body.parameters).toMatchObject({ aspectRatio: '16:9' });
+    expect(calls[0]!.headers['x-goog-api-key']).toBe('test-key');
+  });
+
+  it('reproduces the exact reported failure and classifies it as a systemic model-unavailable error', async () => {
+    // Verbatim from the live bug report.
+    stubFetchSequence([{
+      ok: false,
+      status: 404,
+      json: {
+        error: {
+          code: 404,
+          message: 'models/veo-3.1-generate-001 is not found for API version v1beta, or is not '
+            + 'supported for predictLongRunning. Call ModelService.ListModels to see the list of '
+            + 'available models and their supported methods.',
+          status: 'NOT_FOUND',
+        },
+      },
+    }]);
+
+    await expect(generateVideo(GEMINI_VIDEO, CFG, { prompt: 'a cat' }))
+      .rejects.toThrow(/Model unavailable on veo-3\.1-generate-preview/);
+  });
+
+  it('passes through an explicit aspect ratio and duration', async () => {
+    const calls = stubFetchSequence([
+      { ok: true, json: { name: 'operations/abc123' } },
+      finished('https://example.com/signed/video.mp4'),
+      { ok: true, bytes: Buffer.from('bytes') },
+    ]);
+
+    vi.useFakeTimers();
+    try {
+      const promise = generateVideo(GEMINI_VIDEO, CFG, { prompt: 'a banner clip', aspectRatio: '9:16', seconds: 8 });
+      await vi.advanceTimersByTimeAsync(10_000);
+      await promise;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(calls[0]!.body.parameters).toEqual({ aspectRatio: '9:16', durationSeconds: 8 });
+  });
+
+  it('polls until the operation reports done, then downloads the bytes', async () => {
+    vi.useFakeTimers();
+    try {
+      const calls = stubFetchSequence([
+        { ok: true, json: { name: 'operations/abc123' } },
+        operation(false), // first poll: still rendering
+        finished('https://example.com/signed/video.mp4'), // second poll: done
+        { ok: true, bytes: Buffer.from('the-real-video-bytes') },
+      ]);
+
+      const promise = generateVideo(GEMINI_VIDEO, CFG, { prompt: 'a cat' });
+      await vi.advanceTimersByTimeAsync(10_000); // first poll interval
+      await vi.advanceTimersByTimeAsync(10_000); // second poll interval
+      const asset = await promise;
+
+      expect(calls).toHaveLength(4);
+      expect(calls[1]!.url).toContain('operations/abc123');
+      expect(calls[2]!.url).toContain('operations/abc123');
+      expect(calls[3]!.url).toBe('https://example.com/signed/video.mp4');
+      expect(asset.data.toString()).toBe('the-real-video-bytes');
+      expect(asset.mimeType).toBe('video/mp4');
+      expect(asset.modelId).toBe('veo-3.1-generate-preview');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('surfaces an operation-level failure even though the operation finished ("done" is not "succeeded")', async () => {
+    stubFetchSequence([
+      { ok: true, json: { name: 'operations/abc123' } },
+      operation(true, { error: { message: 'Video generation failed: unsafe content detected.' } }),
+    ]);
+
+    vi.useFakeTimers();
+    try {
+      const promise = generateVideo(GEMINI_VIDEO, CFG, { prompt: 'a cat' });
+      // Attach the rejection handler BEFORE advancing the clock — the operation
+      // rejects during the timer flush below, and a handler attached only
+      // afterward leaves a window where Node reports it as unhandled.
+      const assertion = expect(promise).rejects.toThrow(/unsafe content detected/);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

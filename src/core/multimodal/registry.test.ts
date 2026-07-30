@@ -18,7 +18,7 @@ describe('modality classification', () => {
     // or it would land back in the CHAT pool, where a text turn routed to it
     // returns a picture.
     ['gemini-2.5-flash-image', 'image'],
-    ['veo-3.1-generate-001', 'video'],
+    ['veo-3.1-generate-preview', 'video'],
     ['sora-2', 'video'],
     ['omni-moderation-latest', 'moderation'],
     ['gpt-4o-realtime-preview', 'realtime'],
@@ -100,7 +100,7 @@ describe('MultimodalRegistry', () => {
   it('offers video now that the polling path exists', () => {
     const r = new MultimodalRegistry(['gemini']);
     const pick = r.select('video')!;
-    expect(pick.capability.modelId).toBe('veo-3.1-generate-001');
+    expect(pick.capability.modelId).toBe('veo-3.1-generate-preview');
     // The long-running shape is recorded on the capability so the executor can
     // switch on it rather than guessing from the model name.
     expect(pick.capability.api).toBe('gemini-predict-lro');

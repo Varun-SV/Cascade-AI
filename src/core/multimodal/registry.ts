@@ -103,7 +103,15 @@ const CAPABILITIES: readonly GenerationCapability[] = [
     // Long-running: submit returns an operation name, the video lands minutes
     // later, and the bytes come from a short-lived signed URL. generate.ts owns
     // that polling loop; the registry only records the shape via `api`.
-    modality: 'video', provider: 'gemini', modelId: 'veo-3.1-generate-001', api: 'gemini-predict-lro',
+    //
+    // `veo-3.1-generate-001` (no "-preview") is VERTEX AI's id for this model,
+    // not the Gemini Developer API's — this file calls
+    // generativelanguage.googleapis.com (see generate.ts), which 404s on it:
+    // "models/veo-3.1-generate-001 is not found for API version v1beta". On the
+    // Gemini API specifically, Veo 3.1 is still preview-only, so the correct id
+    // there is `veo-3.1-generate-preview`.
+    // https://ai.google.dev/gemini-api/docs/veo
+    modality: 'video', provider: 'gemini', modelId: 'veo-3.1-generate-preview', api: 'gemini-predict-lro',
   },
 ];
 
