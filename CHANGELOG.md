@@ -139,6 +139,45 @@ A second Codex review pass on the same PR found four more:
   authenticated requests. Found by Codex review; fixed and verified via the
   same revert-confirm-restore cycle as every other fix in this release.
 
+A fourth Codex review pass found two more, plus one acknowledged but
+deliberately deferred:
+- **`getNextFallback()`'s dynamic-model widening only fired when the failed
+  model was NEVER in the static priority chain.** A mixed OpenAI + GitHub
+  Models config where OpenAI's own `gpt-4o` hit a 429 (`recordFailure()`
+  disables the whole provider) walked only the *remaining* static T1
+  entries — all `openai`, all equally unusable — and returned `null`
+  outright, even with a discovered GitHub Models model ready to serve the
+  tier. The static-chain walk and the "any usable model" widening are now
+  unified into one path: static entries are tried first when the failed id
+  is in the chain, and the widening is reached either way once they're
+  exhausted, not only when the id was never in the chain at all.
+- **The advertised context window could be far larger than GitHub will
+  accept.** GitHub enforces its own per-request INPUT token cap independent
+  of the underlying model's real window — documented and corroborated at
+  ~8,000 tokens for common Free/Pro-tier models (e.g. `gpt-4o-mini`, despite
+  that model's real ~131K context elsewhere). Exposing the catalog's
+  reported window (or the 128K fallback) let `getReferenceContextWindow()`'s
+  compaction budget and `model-ranker.ts`'s candidate filter both believe
+  far more input fit than GitHub would actually accept, so a compacted-to-fit
+  prompt reached inference and was rejected instead of being compacted
+  correctly up front. Every discovered model's `contextWindow` is now capped
+  to this ceiling, the same treatment already given to `maxOutputTokens`.
+- **Acknowledged, not fixed this round: `ModelSelector.addDynamicModel()`
+  stores entries keyed only by bare `model.id`.** If two different
+  dynamically-discovered providers ever reported the identical id string
+  (e.g. a GitHub Models catalog entry and an OpenAI-compatible endpoint both
+  happening to use the exact same owner-prefixed spelling), the
+  later-registered one would silently overwrite the earlier one in
+  `availableModels`, dropping one provider from selection. Real, but the
+  fix — provider-qualified storage — touches the key contract every method
+  on `ModelSelector` assumes (`getModelById`, the override lookup in
+  `selectForTier`, `getCandidatesForTier`, `removeModel`, …), which is a
+  larger, more invasive change than fits a review-response pass; a
+  from-scratch dynamically-discovered id collision across two different
+  providers is also a narrow edge case in practice. Left as a known,
+  documented limitation for a deliberate follow-up rather than a rushed
+  storage-key rewrite under review-response time pressure.
+
 ## 0.64.0 - 2026-07-30
 
 ### Fixed

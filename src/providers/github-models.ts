@@ -32,6 +32,21 @@ import { nodeHttpFetch } from '../utils/net.js';
  */
 const GITHUB_MODELS_MAX_OUTPUT_TOKENS = 4_000;
 
+/**
+ * GitHub also caps INPUT size per request, independent of the underlying
+ * model's real window — documented and widely corroborated at 8,000 tokens
+ * for common Free/Pro-tier models (e.g. gpt-4o-mini), regardless of that
+ * model's real ~131K context. Every discovered model's advertised
+ * `contextWindow` is capped to this, not the base model's, so
+ * `CascadeRouter.getReferenceContextWindow()` (the budget extended-context
+ * compaction reasons against) and `model-ranker.ts`'s
+ * `contextWindow < estimatedTokens * 2` candidate filter both see what
+ * GitHub will actually accept — otherwise a run compacted to fit a reported
+ * 128K window reaches inference and is rejected outright instead of being
+ * compacted correctly the first time.
+ */
+const GITHUB_MODELS_MAX_INPUT_TOKENS = 8_000;
+
 /** Context window assumed when the catalog entry doesn't state one. */
 const DEFAULT_CONTEXT_WINDOW = 128_000;
 
@@ -299,7 +314,10 @@ export class GitHubModelsProvider extends OpenAIProvider {
       id: e.id,                 // full `owner/model` — what the API is addressed by
       name: e.name,
       provider: 'github-models' as const,
-      contextWindow: e.contextWindow,
+      // GitHub's real per-request input cap, not the base model's larger one
+      // (see GITHUB_MODELS_MAX_INPUT_TOKENS above) — the same reasoning
+      // already applied to maxOutputTokens below, for the input side.
+      contextWindow: Math.min(e.contextWindow, GITHUB_MODELS_MAX_INPUT_TOKENS),
       isVisionCapable: e.vision,
       // A REAL $0, not a missing number — usage is bundled into the quota of
       // the plan the PAT belongs to and is never billed per token, so

@@ -317,7 +317,7 @@ describe('GitHubModelsProvider — listModels', () => {
     expect(ids).toEqual(['openai/gpt-4o']);
   });
 
-  it('reads context window and vision capability defensively across field names', async () => {
+  it('reads context window and vision capability defensively across field names, capped to GitHub\'s real input quota', async () => {
     catalog.body = {
       models: [
         { id: 'a/one', context_window: 200_000, supported_input_modalities: ['text', 'image'] },
@@ -326,9 +326,22 @@ describe('GitHubModelsProvider — listModels', () => {
       ],
     };
     const models = await makeProvider().listModels();
-    expect(models[0]).toMatchObject({ contextWindow: 200_000, isVisionCapable: true });
-    expect(models[1]).toMatchObject({ contextWindow: 64_000, isVisionCapable: false });
-    expect(models[2]!.contextWindow).toBe(128_000); // neutral default
+    // Regression (Codex P1): the catalog-reported (or 128K default) window
+    // used to be exposed as-is — GitHub enforces its own, much smaller
+    // per-request input cap independent of the base model's real context,
+    // so a run compacted to fit the uncapped number reached inference and
+    // was rejected instead of being compacted correctly the first time.
+    expect(models[0]).toMatchObject({ contextWindow: 8_000, isVisionCapable: true });
+    expect(models[1]).toMatchObject({ contextWindow: 8_000, isVisionCapable: false });
+    expect(models[2]!.contextWindow).toBe(8_000); // neutral default, also capped
+  });
+
+  it('never advertises more context than GitHub will actually accept, even for a catalog entry under the cap', async () => {
+    catalog.body = { models: [{ id: 'a/small', context_window: 4_000 }] };
+    const models = await makeProvider().listModels();
+    // A genuinely small window is left alone — only the OVER-the-cap case is
+    // clamped down; this must never be raised.
+    expect(models[0]!.contextWindow).toBe(4_000);
   });
 
   it('returns empty, never the construction seed, on an empty or unrecognised catalog body', async () => {

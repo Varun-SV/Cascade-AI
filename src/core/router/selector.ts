@@ -164,25 +164,30 @@ export class ModelSelector {
   getNextFallback(currentModelId: string, tier: TierRole): ModelInfo | null {
     const priority = this.getPriorityList(tier);
     const currentIdx = priority.indexOf(currentModelId);
-    if (currentIdx === -1) {
-      // The failed model isn't in the tier's static priority chain — true for
-      // every dynamically-resolved pin (an explicit `github-models:…`,
-      // `azure:…`, `openai-compatible:…` or Ollama-tag override, or a
-      // live-discovered model the bundled catalog doesn't know about yet).
-      // Rather than reporting "no fallback" outright when other configured
-      // providers could still serve the tier, fall to any other usable model —
-      // the same worst-case fallback selectForTier() already uses when no
-      // priority entry matches at all.
-      for (const [id, model] of this.availableModels) {
-        if (id !== currentModelId && this.isUsable(model)) return model;
+
+    // The failed model IS in the tier's static priority chain (e.g. a
+    // bundled-catalog model like gpt-4o) — walk the remaining static entries
+    // first, same as before. currentIdx === -1 (every dynamically-resolved
+    // pin: an explicit `github-models:…`/`azure:…`/`openai-compatible:…`/
+    // Ollama-tag override, or a live-discovered model the bundled catalog
+    // doesn't know about) skips straight past this loop to the widening below.
+    if (currentIdx !== -1) {
+      for (let i = currentIdx + 1; i < priority.length; i++) {
+        const key = priority[i]!;
+        const model = this.availableModels.get(key);
+        if (model && this.isUsable(model)) return model;
       }
-      return null;
     }
 
-    for (let i = currentIdx + 1; i < priority.length; i++) {
-      const key = priority[i]!;
-      const model = this.availableModels.get(key);
-      if (model && this.isUsable(model)) return model;
+    // Reached either because the failed model was never in the static chain
+    // at all, OR because it was but every remaining static entry is also
+    // unavailable (e.g. a mixed OpenAI + GitHub Models config where OpenAI's
+    // own failure just took out the rest of that chain too). Either way,
+    // don't report "no fallback" while another configured provider could
+    // still serve the tier — fall to any other usable model, the same
+    // worst-case widening selectForTier() already uses.
+    for (const [id, model] of this.availableModels) {
+      if (id !== currentModelId && this.isUsable(model)) return model;
     }
     return null;
   }

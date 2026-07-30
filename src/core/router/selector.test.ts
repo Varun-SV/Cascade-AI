@@ -230,6 +230,30 @@ describe('ModelSelector — getNextFallback for a dynamically-resolved pin', () 
     expect(next).not.toBeNull();
     expect(next!.id).not.toBe('claude-opus-4');
   });
+
+  it('falls to a dynamic model when a STATIC model fails and the rest of its chain is also unusable', () => {
+    // Regression (Codex P2): the "any usable model" widening only fired when
+    // the failed id wasn't in the static chain AT ALL (currentIdx === -1).
+    // A mixed OpenAI + GitHub Models config where OpenAI's own gpt-4o failed
+    // (currentIdx !== -1, so recordFailure('openai', …) had already marked
+    // the whole provider unavailable) walked only the REMAINING static T1
+    // entries — none usable, since they're all 'openai' too — and returned
+    // null outright, even though a discovered github-models model was ready.
+    const selector = new ModelSelector(new Set(['github-models']));
+    selector.addDynamicModel({
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o (via GitHub)', provider: 'github-models',
+      contextWindow: 128_000, isVisionCapable: true,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    });
+    // 'gpt-4o' is a real T1_MODEL_PRIORITY entry — its provider ('openai') is
+    // NOT in availableProviders, simulating recordFailure() having just
+    // disabled it, so every remaining static entry the walk reaches is
+    // equally unusable.
+    const fallback = selector.getNextFallback('gpt-4o', 'T1');
+    expect(fallback).not.toBeNull();
+    expect(fallback!.provider).toBe('github-models');
+  });
 });
 
 describe('ModelSelector — selectVisionModel for a dynamically-discovered model', () => {
