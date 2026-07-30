@@ -326,6 +326,16 @@ export class LiveDataProvider {
    */
   applyLiveCapabilities(models: ModelInfo[]): ModelInfo[] {
     return models.map((m) => {
+      // Same reasoning as the provider guard in applyLivePricing() above: a
+      // github-models catalog id is the SAME owner/model spelling as the real
+      // OpenRouter entry for the underlying model (`openai/gpt-4o` is both),
+      // so a capability lookup by that id would silently replace the
+      // already-correct, GitHub-specific contextWindow (capped in
+      // github-models.ts to GitHub's real ~8K input quota) with the base
+      // model's much larger real window — reopening the exact "advertised
+      // more input than GitHub will accept" bug that cap exists to close,
+      // on every live-data refresh after the one at discovery time.
+      if (m.provider === 'github-models') return m;
       const c = this.getCapability(m.baseModelId ?? m.id);
       if (!c) return m;
       const next = { ...m };

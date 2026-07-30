@@ -178,6 +178,42 @@ deliberately deferred:
   documented limitation for a deliberate follow-up rather than a rushed
   storage-key rewrite under review-response time pressure.
 
+A fifth Codex review pass found a deeper variant of the same PAT-exfiltration
+class fixed above, plus two more provider-id-collision/binding gaps:
+- **A same-origin-or-external HTTP redirect could still exfiltrate the PAT,
+  even after the `Link`-header origin check above.** That check only covers
+  the header-driven pagination path; `nodeHttpFetch` (the shared `node:http`/
+  `https` fetch shim several providers use) follows actual 3xx redirects on
+  ANY request — including the initial catalog fetch — by replaying `init`
+  (headers, so the `Authorization: Bearer <PAT>` too) verbatim on the
+  followed URL regardless of origin. A malicious or misconfigured redirect,
+  including an HTTPS→HTTP downgrade, would have sent the token wherever the
+  `Location` header pointed. Added an opt-in `allowedRedirectOrigin` option
+  to `nodeHttpFetch` (every existing caller omits it and keeps today's
+  follow-anywhere behavior unchanged) and wired it into both of
+  `github-models.ts`'s catalog calls (`listModels()` and `isAvailable()`).
+  Verified with a genuinely separate second HTTP server standing in for an
+  attacker origin — the regression test confirms the attacker server is
+  never even hit, not just that its response is ignored.
+- **A live capability refresh could silently reopen the GitHub input-token
+  cap.** `applyLiveCapabilities()` had the same provider-id-collision
+  exposure as `applyLivePricing()` (fixed in an earlier round) but without
+  the matching guard: a GitHub Models catalog id is the same owner/model
+  spelling as the real OpenRouter entry (`openai/gpt-4o` is both), so its
+  capability lookup would replace the already-correct, capped `contextWindow`
+  with the base model's much larger real window on every refresh after the
+  one at discovery time. Added the identical `if (m.provider ===
+  'github-models') return m;` guard already proven in `applyLivePricing()`.
+- **A vision-required call could throw `No provider for model ...` for a
+  live-discovered model.** `selectVisionModel()`'s widening fallback (added
+  in an earlier round) can return a discovered model — e.g. GitHub Models,
+  which has no static catalog entries at all — that was never bound to a
+  `BaseProvider` instance by any other path: not the tier-fill winner (a
+  different model can win the tier when two are discovered), not an explicit
+  `options.model` override (skipped entirely when `requireVision` is set).
+  `generate()`'s `requireVision` branch now calls the same `ensureProvider()`
+  used everywhere else immediately after resolving the vision model.
+
 ## 0.64.0 - 2026-07-30
 
 ### Fixed

@@ -54,6 +54,17 @@ const DEFAULT_CONTEXT_WINDOW = 128_000;
 const GITHUB_MODELS_MAX_CATALOG_PAGES = 20;
 
 /**
+ * Every catalog request carries the PAT — passed to nodeHttpFetch's
+ * `allowedRedirectOrigin` so a 3xx response (from the initial request OR any
+ * followed `Link` page) can never carry that header to a different origin.
+ * nodeHttpFetch replays `init` (headers included) verbatim on a followed
+ * redirect by default; without this, a malicious or misconfigured redirect —
+ * including a same-origin-to-external-host or HTTPS→HTTP hop — would
+ * silently exfiltrate the token.
+ */
+const GITHUB_MODELS_CATALOG_ORIGIN = new URL(GITHUB_MODELS_CATALOG_URL).origin;
+
+/**
  * Catalog ids are owner-prefixed (`openai/gpt-4o`, `meta/Llama-3.3-70B-Instruct`,
  * `deepseek/DeepSeek-R1`). Returns just the model part — used ONLY for name-shape
  * heuristics like reasoning-family detection, never for anything that goes on the
@@ -233,12 +244,13 @@ export class GitHubModelsProvider extends OpenAIProvider {
     // visited URLs so a cyclic header stops on the SECOND sighting rather
     // than burning the full page cap on identical authenticated requests.
     const visited = new Set<string>();
-    const catalogOrigin = new URL(GITHUB_MODELS_CATALOG_URL).origin;
     while (url && pages < GITHUB_MODELS_MAX_CATALOG_PAGES) {
       if (visited.has(url)) break;
       visited.add(url);
 
-      const res = await nodeHttpFetch(url, { headers: this.catalogHeaders() });
+      const res = await nodeHttpFetch(url, { headers: this.catalogHeaders() }, 0, {
+        allowedRedirectOrigin: GITHUB_MODELS_CATALOG_ORIGIN,
+      });
       if (!res.ok) throw new Error(`GitHub Models catalog ${url} returned HTTP ${res.status}`);
 
       // A successfully-fetched body whose shape we didn't predict must never
@@ -261,7 +273,7 @@ export class GitHubModelsProvider extends OpenAIProvider {
       const next = parseNextLink(res.headers.get('link'));
       if (next) {
         const resolved: URL = new URL(next, url);
-        if (resolved.origin !== catalogOrigin) {
+        if (resolved.origin !== GITHUB_MODELS_CATALOG_ORIGIN) {
           throw new Error(`Refusing cross-origin GitHub Models pagination URL: ${resolved.origin}`);
         }
         url = resolved.href;
@@ -355,7 +367,9 @@ export class GitHubModelsProvider extends OpenAIProvider {
     // "what can it serve", which is the right trade when every request counts
     // against a ~10 RPM budget.
     try {
-      const res = await nodeHttpFetch(GITHUB_MODELS_CATALOG_URL, { headers: this.catalogHeaders() });
+      const res = await nodeHttpFetch(GITHUB_MODELS_CATALOG_URL, { headers: this.catalogHeaders() }, 0, {
+        allowedRedirectOrigin: GITHUB_MODELS_CATALOG_ORIGIN,
+      });
       return res.ok;
     } catch {
       return false;

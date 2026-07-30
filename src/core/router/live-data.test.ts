@@ -281,6 +281,35 @@ describe('LiveDataProvider — capability facts (v0.15.0)', () => {
     expect(ld.applyLiveCapabilities([stranger])[0]).toBe(stranger);
   });
 
+  it('never overwrites a GitHub Models context cap with a colliding marketplace entry', async () => {
+    // Regression (Codex): the mocked feed above quotes `openai/gpt-4o` with a
+    // real OpenRouter contextWindow (128,000) — the SAME spelling GitHub
+    // Models' own catalog uses for its entry, whose contextWindow is
+    // deliberately capped (in github-models.ts) to GitHub's real ~8K input
+    // quota. Without the provider guard, this lookup would silently replace
+    // that cap with the base model's much larger window on every live-data
+    // refresh after the one at discovery time — reopening the exact
+    // "advertised more input than GitHub will accept" bug the cap exists to
+    // close.
+    vi.stubGlobal('fetch', routedFetch());
+    const ld = new LiveDataProvider({ cacheFile });
+    await ld.refresh(true);
+
+    const githubCapped = {
+      ...MODELS['gpt-4o']!,
+      id: 'openai/gpt-4o',
+      provider: 'github-models' as const,
+      contextWindow: 8_000,
+      supportsToolUse: true,
+      isVisionCapable: false,
+    };
+    const [updated] = ld.applyLiveCapabilities([githubCapped]);
+    expect(updated).toBe(githubCapped); // untouched — same reference, no reconciliation ran
+    expect(updated!.contextWindow).toBe(8_000);
+    expect(updated!.supportsToolUse).toBe(true);
+    expect(updated!.isVisionCapable).toBe(false);
+  });
+
   it('capabilities persist in the disk cache and reload', async () => {
     vi.stubGlobal('fetch', routedFetch());
     await new LiveDataProvider({ cacheFile }).refresh(true);

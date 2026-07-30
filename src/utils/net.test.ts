@@ -11,6 +11,13 @@ const MODELS = JSON.stringify({
 
 let server: http.Server;
 let base: string;
+// A second, independently-listening server on a DIFFERENT port — origin
+// includes the port, so this is a genuinely different origin from `base`,
+// standing in for an attacker-controlled host a malicious/misconfigured
+// redirect could point at.
+let evilServer: http.Server;
+let evilBase: string;
+let evilHits: string[] = [];
 
 beforeAll(async () => {
   server = http.createServer((req, res) => {
@@ -33,7 +40,14 @@ beforeAll(async () => {
       case '/v1/models-308':
         res.writeHead(308, { Location: '/v1/models' });
         return res.end();
+      case '/v1/models-redirect-same-origin':
+        res.writeHead(302, { Location: `${base}/v1/models` });
+        return res.end();
       default:
+        if (req.url === '/v1/models-redirect-external') {
+          res.writeHead(302, { Location: `${evilBase}/v1/models` });
+          return res.end();
+        }
         res.writeHead(404);
         return res.end('nope');
     }
@@ -41,9 +55,23 @@ beforeAll(async () => {
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const { port } = server.address() as AddressInfo;
   base = `http://127.0.0.1:${port}`;
+
+  evilServer = http.createServer((req, res) => {
+    evilHits.push(req.url ?? '');
+    // Answers with a valid body — the point of the fix is that this response
+    // must never be REACHED, not that the body would be unusable if it were.
+    res.writeHead(200, { 'Content-Type': 'application/json', Authorization: 'leaked' });
+    res.end(MODELS);
+  });
+  await new Promise<void>((r) => evilServer.listen(0, '127.0.0.1', r));
+  const { port: evilPort } = evilServer.address() as AddressInfo;
+  evilBase = `http://127.0.0.1:${evilPort}`;
 });
 
-afterAll(() => new Promise<void>((r) => server.close(() => r())));
+afterAll(() => Promise.all([
+  new Promise<void>((r) => server.close(() => r())),
+  new Promise<void>((r) => evilServer.close(() => r())),
+]));
 
 async function countModels(path: string): Promise<{ ok: boolean; status: number; count: number }> {
   const res = await nodeHttpFetch(base + path, { headers: { Accept: 'application/json' } });
@@ -75,6 +103,45 @@ describe('nodeHttpFetch', () => {
 
   it('follows a 308 redirect', async () => {
     expect(await countModels('/v1/models-308')).toEqual({ ok: true, status: 200, count: 2 });
+  });
+
+  it('follows a cross-origin redirect by default, unchanged for every existing caller', async () => {
+    // Backward compatibility: allowedRedirectOrigin is opt-in. Every caller
+    // that doesn't attach a credential (which is most of them) keeps exactly
+    // today's follow-anywhere behaviour when the option is omitted.
+    expect(await countModels('/v1/models-redirect-external')).toEqual({ ok: true, status: 200, count: 2 });
+    expect(evilHits).toContain('/v1/models');
+  });
+
+  it('allows a same-origin redirect when allowedRedirectOrigin is set', async () => {
+    const res = await nodeHttpFetch(
+      `${base}/v1/models-redirect-same-origin`,
+      { headers: { Accept: 'application/json' } },
+      0,
+      { allowedRedirectOrigin: new URL(base).origin },
+    );
+    expect(res.ok).toBe(true);
+  });
+
+  it('refuses a cross-origin redirect when allowedRedirectOrigin is set, and never reaches the other origin', async () => {
+    // Regression (Codex P1): a credential attached via init.headers (a PAT,
+    // a bearer token) used to be replayed verbatim on ANY origin a 3xx
+    // response pointed to, since nodeHttpFetch reuses `init` unchanged on
+    // the followed request — a malicious or misconfigured redirect,
+    // including an HTTPS→HTTP downgrade, would silently exfiltrate it. This
+    // proves both halves: the call rejects, AND the other origin's server
+    // genuinely never receives the request (not just "the caller ignores a
+    // response it got").
+    evilHits = [];
+    await expect(
+      nodeHttpFetch(
+        `${base}/v1/models-redirect-external`,
+        { headers: { Accept: 'application/json', Authorization: 'Bearer secret-token' } },
+        0,
+        { allowedRedirectOrigin: new URL(base).origin },
+      ),
+    ).rejects.toThrow(/cross-origin/i);
+    expect(evilHits).toEqual([]);
   });
 });
 

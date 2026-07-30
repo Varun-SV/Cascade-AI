@@ -236,6 +236,57 @@ describe('CascadeRouter — GitHub Models wiring', () => {
     stream.mockRestore();
   });
 
+  it('binds a real provider for a vision model reached only through selectVisionModel()', async () => {
+    // Regression (Codex): selectVisionModel()'s "widen past the static
+    // catalog" fallback lets it return a live-discovered model that was never
+    // the tier-fill winner — here, two github-models catalog entries are
+    // discovered, so init()'s tier-fill (which only binds ONE model per tier)
+    // binds the non-vision model, leaving the vision-capable one unbound.
+    // requireVision=true then resolves to that unbound model via
+    // selectVisionModel(), and generate() used to call getProvider(model)
+    // without ever having called ensureProvider() for it on this path —
+    // throwing "No provider for model ..." even though the provider config
+    // was perfectly valid.
+    const { GitHubModelsProvider } = await import('../../providers/github-models.js');
+    const avail = vi.spyOn(GitHubModelsProvider.prototype, 'isAvailable').mockResolvedValue(true);
+    const list = vi.spyOn(GitHubModelsProvider.prototype, 'listModels').mockResolvedValue([
+      {
+        id: 'meta/Llama-3.3-70B-Instruct', name: 'Llama 3.3 70B', provider: 'github-models',
+        contextWindow: 8_000, isVisionCapable: false,
+        inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+        maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+      },
+      {
+        id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'github-models',
+        contextWindow: 8_000, isVisionCapable: true,
+        inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+        maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+      },
+    ]);
+    const stream = vi.spyOn(GitHubModelsProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'i see it', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    await router.init(makeConfig({ providers: [{ type: 'github-models', apiKey: 'ghp_test' }] }));
+
+    // Tier-fill bound the non-vision model, not the vision-capable one.
+    expect(router.getModelForTier('T1')?.id).toBe('meta/Llama-3.3-70B-Instruct');
+
+    const result = await router.generate(
+      'T1',
+      { messages: [{ role: 'user', content: 'what is in this image?' }] },
+      undefined,
+      true, // requireVision
+    );
+    expect(result.content).toBe('i see it');
+    expect(stream).toHaveBeenCalled();
+
+    avail.mockRestore();
+    list.mockRestore();
+    stream.mockRestore();
+  });
+
   it('picks up a config.rateLimits.providerTpm override through real schema validation', async () => {
     // Regression (Codex P2): rateLimits wasn't declared on CascadeConfigSchema,
     // so a config-file override for github-models' conservative default was

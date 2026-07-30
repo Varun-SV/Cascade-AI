@@ -613,6 +613,17 @@ export class CascadeRouter extends EventEmitter {
       ? this.selector.selectVisionModel()
       : (options.model ?? this.tierModels.get(tier) ?? this.selector.selectForTier(tier) ?? undefined);
 
+    // A vision-required call can resolve to a live-discovered model (e.g. a
+    // github-models catalog entry) that was never bound to a BaseProvider
+    // instance anywhere else — unlike the options.model override above
+    // (bound just before this block) or a tier-fill winner (bound during
+    // init()). Without this, getProvider(model) below returns undefined for
+    // exactly that case and the call throws "No provider for model ...".
+    // ensureProvider() is a no-op if a provider is already bound.
+    if (requireVision && model) {
+      this.ensureProvider(model, this.config.providers);
+    }
+
     // Privacy tier: a local-only subtask must NEVER reach a cloud provider.
     // Swap to a private model when the resolved one isn't; hard-error rather
     // than silently falling back to cloud when no private model exists.
