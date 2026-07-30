@@ -18,7 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   real test coverage before this — every other test file only mocked it —
   which is how the wrong id shipped unnoticed; added a full submit → poll →
   download test suite, including the exact reported error as a regression
-  test.
+  test. `scripts/refresh-pricing.mjs` (the generator that produces
+  pricing-data.json from LiteLLM's catalog) had its own separate, unfixed
+  reference to the old id — the next regen would have silently reintroduced
+  the bug — so its lookup key and emitted model id were corrected too, and
+  verified by actually running the generator against a real snapshot of
+  LiteLLM's catalog and diffing the output byte-for-byte against the fixed
+  file.
 
 ## 0.63.0 - 2026-07-29
 

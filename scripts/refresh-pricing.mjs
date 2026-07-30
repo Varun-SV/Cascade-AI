@@ -404,8 +404,12 @@ const entries = [
     modality: 'image',
     rates: [{ unit: 'per_image', amount: 0.04 }],
   }),
-  media('gemini/veo-3.1-generate-001', {
-    model: 'veo-3.1-generate-001',
+  media('gemini/veo-3.1-generate-preview', {
+    // `veo-3.1-generate-001` (no "-preview") is Vertex AI's id, not the Gemini
+    // Developer API's — this entry feeds `registry.ts`'s gemini-provider
+    // capability, which calls generativelanguage.googleapis.com and 404s on
+    // the Vertex id. See src/core/multimodal/registry.ts.
+    model: 'veo-3.1-generate-preview',
     provider: 'gemini',
     modality: 'video',
     rates: [{ unit: 'per_second', amount: 0.4 }],
