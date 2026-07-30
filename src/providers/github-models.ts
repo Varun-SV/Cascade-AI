@@ -30,7 +30,7 @@ import { nodeHttpFetch } from '../utils/net.js';
  * TPM reservation (see DEFAULT_PROVIDER_TPM in core/router/tpm-limiter.ts,
  * which budgets off exactly this number) reflect the real per-call ceiling.
  */
-const GITHUB_MODELS_MAX_OUTPUT_TOKENS = 4_000;
+export const GITHUB_MODELS_MAX_OUTPUT_TOKENS = 4_000;
 
 /**
  * GitHub also caps INPUT size per request, independent of the underlying
@@ -45,7 +45,7 @@ const GITHUB_MODELS_MAX_OUTPUT_TOKENS = 4_000;
  * 128K window reaches inference and is rejected outright instead of being
  * compacted correctly the first time.
  */
-const GITHUB_MODELS_MAX_INPUT_TOKENS = 8_000;
+export const GITHUB_MODELS_MAX_INPUT_TOKENS = 8_000;
 
 /** Context window assumed when the catalog entry doesn't state one. */
 const DEFAULT_CONTEXT_WINDOW = 128_000;

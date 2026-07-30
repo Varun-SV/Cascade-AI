@@ -244,6 +244,28 @@ budgets are what surfaced them):
   agnostic and consistent with every provider's own request-building code,
   which already treats `model.maxOutputTokens` as the authoritative ceiling.
 
+A seventh Codex review pass found one more variant of the same "unresolved
+GitHub Models pin gets the wrong caps" class:
+- **A `github-models:<id>` pin resolved before the live catalog registered
+  that exact id got the GENERIC synthesis defaults, not GitHub's real ones.**
+  `resolveDynamicModel()`'s fallback synthesis (for a pin naming a model the
+  selector hasn't seen yet — discovery hasn't run, the catalog fetch failed,
+  or the response omitted this id) hands back a flat 128K context window and
+  8K output cap for every provider, github-models included. Both are well
+  above GitHub's real ~8K input / ~4K output per-request quota, so a long
+  prompt built against the advertised 128K window bypassed compaction and
+  was rejected at inference, and the TPM guard (even after this release's
+  earlier cap fix) reserved far more than the call could ever consume.
+  Pricing was wrong too: `withResolvedPricing()` has no dataset row for this
+  provider by design, so the synthesized model came back `pricingUnknown:
+  true` instead of a real $0. Added a `github-models`-specific branch (gated
+  on the provider actually being configured, same as every other branch)
+  that synthesizes with the real `GITHUB_MODELS_MAX_INPUT_TOKENS` /
+  `GITHUB_MODELS_MAX_OUTPUT_TOKENS` constants (now exported from
+  `github-models.ts`) and a real `$0`/`pricingUnknown: false`, matching what
+  the live provider's own `listModels()` already produces once discovery
+  completes.
+
 ## 0.64.0 - 2026-07-30
 
 ### Fixed

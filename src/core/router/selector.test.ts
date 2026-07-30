@@ -166,6 +166,33 @@ describe('ModelSelector — GitHub Models explicit tier pin', () => {
     const selector = new ModelSelector(new Set(['github-models', 'anthropic']));
     expect(selector.selectForTier('T3', 'github-models:openai/gpt-4o')!.isLocal).toBe(false);
   });
+
+  it('synthesizes an unresolved pin with GitHub\'s real caps, not the generic 128K/8K defaults', () => {
+    // Regression (Codex P2): this path fires when the pin resolves before the
+    // live catalog has registered this exact id (discovery hasn't run yet,
+    // the fetch failed, or the response omitted it) — every test above hits
+    // it too, since none register a dynamic model first. The generic
+    // synthesis used to hand back a 128K context window and 8K output cap,
+    // both well above GitHub's real ~8K input / ~4K output per-request quota
+    // (github-models.ts), so a long prompt bypassed compaction and failed at
+    // inference, and the TPM guard reserved far more than the call could
+    // ever actually consume. Pricing must also be a real $0
+    // (pricingUnknown: false), matching the live provider's listModels() —
+    // not withResolvedPricing()'s "unknown" verdict, since GitHub Models has
+    // no pricing-data.json row at all by design.
+    const selector = new ModelSelector(new Set(['github-models', 'anthropic']));
+    const m = selector.selectForTier('T1', 'github-models:openai/gpt-4o');
+    expect(m!.contextWindow).toBe(8_000);
+    expect(m!.maxOutputTokens).toBe(4_000);
+    expect(m!.inputCostPer1kTokens).toBe(0);
+    expect(m!.outputCostPer1kTokens).toBe(0);
+    expect(m!.pricingUnknown).toBe(false);
+  });
+
+  it('does not synthesize a github-models pin when the provider is not configured', () => {
+    const selector = new ModelSelector(new Set(['anthropic']));
+    expect(selector.selectForTier('T1', 'github-models:openai/gpt-4o')).toBeNull();
+  });
 });
 
 describe('ModelSelector — GitHub Models stays out of Cascade Auto scoring', () => {
