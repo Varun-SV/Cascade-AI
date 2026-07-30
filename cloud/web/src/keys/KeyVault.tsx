@@ -323,14 +323,13 @@ export default function KeyVault({ keys, onChange, webSearch, onWebSearchChange,
             </>
           )}
 
-          {(draft.type === 'openai' || draft.type === 'anthropic' || draft.type === 'gemini' || draft.type === 'github-models' || draft.type === 'openai-compatible') && (
+          {(draft.type === 'openai' || draft.type === 'anthropic' || draft.type === 'gemini' || draft.type === 'openai-compatible') && (
             <label className="flex flex-col gap-1">
               <span className="text-xs text-ink-400">Model (optional — leave blank for auto)</span>
               <input
                 className="rounded border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-sm text-ink-100"
                 value={draft.model ?? ''}
                 onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
-                placeholder={draft.type === 'github-models' ? 'owner/model, e.g. openai/gpt-4o' : undefined}
               />
             </label>
           )}

@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     without it, a browser-held GitHub Models key was rejected at the Zod
     schema before ever reaching `buildCloudConfig` (which is otherwise fully
     generic, passing `providers` straight through).
+
+## 0.65.0 - 2026-07-30
+
+### Added
 - **GitHub Models as a new BYOK provider** (`github-models`). Any user with a
   GitHub/Copilot account can point Cascade at `models.github.ai`'s multi-vendor
   catalog (OpenAI, Meta, DeepSeek, Mistral, …) using a personal fine-grained

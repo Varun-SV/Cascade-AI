@@ -229,6 +229,35 @@ describe('parseChatRunPayload', () => {
     expect(parsed.providers[0]).toEqual({ type: 'github-models', apiKey: 'ghp_test', model: 'openai/gpt-4o' });
   });
 
+  it('accepts a maximal real KeyVault config: 5 single-instance types plus 2 Azure deployments', () => {
+    // Regression (Codex P2): KeyVault's SELECTABLE_TYPES offers 5 single-
+    // instance cloud types (anthropic, openai, gemini, github-models,
+    // openai-compatible) plus Azure, which alone supports multiple
+    // deployments (one array entry each). Adding github-models as a 5th
+    // single type grew the plausible maximum from 6 (4 singles + 2 Azure) to
+    // 7 (5 singles + 2 Azure) — a config KeyVault will happily save but that
+    // used to fail every chat:run at this Zod gate before ever reaching
+    // buildCloudConfig.
+    const parsed = parseChatRunPayload({
+      prompt: 'hi',
+      providers: [
+        { type: 'anthropic', apiKey: 'k' },
+        { type: 'openai', apiKey: 'k' },
+        { type: 'gemini', apiKey: 'k' },
+        { type: 'github-models', apiKey: 'k' },
+        { type: 'openai-compatible', baseUrl: 'http://127.0.0.1:1/v1' },
+        { type: 'azure', apiKey: 'k', baseUrl: 'https://a.openai.azure.com', deploymentName: 'dep-a' },
+        { type: 'azure', apiKey: 'k', baseUrl: 'https://b.openai.azure.com', deploymentName: 'dep-b' },
+      ],
+    });
+    expect(parsed.providers).toHaveLength(7);
+  });
+
+  it('still rejects a providers array beyond the raised bound', () => {
+    const providers = Array.from({ length: 8 }, () => ({ type: 'openai' as const, apiKey: 'k' }));
+    expect(() => parseChatRunPayload({ prompt: 'hi', providers })).toThrow();
+  });
+
   it('accepts routing controls and rejects out-of-range values', () => {
     const parsed = parseChatRunPayload({
       prompt: 'hi',
