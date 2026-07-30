@@ -5,6 +5,283 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.63.0 - 2026-07-29
+
+### Fixed
+Fourth round of Codex review findings on the same PR:
+- **A fallback image provider's non-systemic failure still escalated the
+  worker.** When the primary image provider failed systemically and the
+  fallback then failed for an unrelated reason (a content refusal, a
+  malformed prompt), the combined "every provider failed" error still
+  carried the primary's systemic wording (e.g. "Model unavailable").
+  `t3-worker.ts` always re-runs `classifyProviderError` on whatever
+  `generate_image` throws, and that check matches the WHOLE message — so
+  the leftover systemic phrasing from the primary's own failure still
+  triggered a fast-fail even though the deciding failure (the fallback's)
+  was never systemic. The fallback's own error now propagates unmixed
+  in that case, so re-classifying it lands on the correct, non-systemic
+  verdict.
+- **A compound MCP tool name could hide a mutation behind a read-only leading
+  verb.** `isReadOnlyMcpToolName` only inspected the FIRST verb, so names
+  like `get_or_create_repository`, `read_and_delete_file`, and
+  `fetch_then_update` were waved through as read-only despite performing
+  the mutation named later in the compound action. Every token in the
+  name is now checked against a mutating-verb set (exact-token matching,
+  so "dataset" and "created"/"updated" don't false-positive on "set" and
+  "create"/"update"), not only the leading one.
+- **A Gemini image-generation safety refusal at the CANDIDATE level was
+  misreported as a generic parse failure.** Only `promptFeedback.blockReason`
+  (a prompt-level, pre-generation block) was checked; a refusal that stops
+  generation AFTER the prompt was accepted reports on
+  `candidates[0].finishReason` instead (e.g. `SAFETY`, `IMAGE_SAFETY`), with
+  no `promptFeedback` at all. That fell through to a generic "no image data"
+  error, misclassified as `unknown` instead of `content_filter`. Any
+  candidate `finishReason` other than `STOP` is now treated as a block too.
+- **Requested image dimensions were silently dropped for Gemini.** The tool's
+  `size` parameter (`"1792x1024"`, `"1024x1792"`, etc. — the same values
+  DALL·E accepts) was parsed but never forwarded on the
+  `gemini-generate-content` path, so Gemini always rendered its default
+  geometry regardless of what was asked for. Unlike OpenAI, Gemini has no
+  free-form pixel size — only a named `imageConfig.aspectRatio` — so the
+  requested `WxH` is now mapped to whichever of Gemini's ten supported
+  ratios its numeric ratio is closest to.
+
+## 0.62.0 - 2026-07-29
+
+### Fixed
+- **A systemic image-generation failure escalated the whole worker even
+  when a second image provider was configured and could have served the
+  request.** `classifyProviderError`'s `.systemic` verdict answers "would
+  this fail again on the same provider+model?" — a dead key, a 404 model
+  id, an exhausted quota — but `t3-worker.ts` was reading that as "the
+  whole capability is gone" and fast-failing immediately, even with a
+  second configured image provider sitting unused (e.g. Gemini's image
+  endpoint 404ing said nothing about whether OpenAI's `dall-e-3` would
+  work). `MultimodalRegistry` gained `rank()` — the same selection order
+  `select()` already used, now exposed as a full list instead of just the
+  head — and `generate_image` retries a systemic failure against the next
+  configured, resolvable provider before giving up. Only systemic failures
+  retry (a content-policy refusal or malformed prompt would plausibly fail
+  the same way again, so it isn't retried), a cancelled run is never
+  retried, and a single-provider account behaves exactly as before — the
+  original error propagates untouched. When every configured provider is
+  exhausted, the error names each one with its own message and carries the
+  same `systemic` tag `web_search` already uses, so `t3-worker.ts`'s
+  fast-fail still fires deterministically once there is truly nothing left
+  to try.
+
+## 0.61.0 - 2026-07-29
+
+### Fixed
+Third round of Codex review findings on the same PR:
+- **The dead-model-persistence fix from 0.57.0 never actually ran.** That
+  fix replaced `dead-models.ts`'s own dynamic `require('node:fs'/'node:path')`
+  with static imports — correct, but its caller in `cascade.ts` had a
+  separate, independent dynamic `require('node:path')` of its own,
+  wrapped in a try/catch that silently swallowed the `Dynamic require of
+  "path" is not supported` throw from esbuild's ESM `__require` shim
+  before `fileDeadModelPersistence` was ever reached. The desktop/CLI
+  build was still amnesiac end to end. Replaced with the static `path`
+  import already in scope at the top of the file (never needed the
+  dynamic form — a static import is exactly as synchronous as `require`
+  in the router constructor's synchronous path). Added an
+  `esm-safety.test.ts` static-analysis test that fails the suite if any
+  non-test source file contains a dynamic `require(` outside the one
+  legitimate exception (`tool-creator.ts`'s CJS `Worker({ eval: true })`
+  harness, which really does run under a native `require`) — this bug
+  class has now bitten twice from the same root cause.
+- **The `generate_image` worker rule told the model a data-driven chart
+  was fine to draw with an image model.** "Image, illustration, chart or
+  other visual" lumped decorative visuals in with charts/graphs/diagrams
+  that must show exact data — an image model has no mechanism to
+  guarantee the numbers, axes, or labels it draws are correct, so a
+  generated "chart" risks looking authoritative while being wrong. The
+  rule now excludes charts from the `generate_image` mandate and points
+  the model at a Markdown table instead for anything data-driven.
+- **`toDocx`'s embedded-image scaling only capped width, not height.** A
+  portrait image already fit the 6.5in body column at scale 1 with no
+  further check, so a tall image could render far taller than the ~9in of
+  printable page height between the default margins, overflowing or
+  clipping in the exported Word document. The scale factor now also
+  respects a page-height cap, so both dimensions are constrained the same
+  way `DOCX_MAX_W` already constrained width.
+- **Closing a stale-active tab could yank the view away from wherever the
+  user had navigated via the Activity Bar.** The tab-close handler shipped
+  in 0.60.0 checked only whether the closed tab was the tab strip's
+  `activeTabId` before reassigning `view` — but the Activity Bar changes
+  `view` without ever touching `activeTabId`, so a tab can stay nominally
+  "active" long after the user switched to, say, Insights. Closing it then
+  overwrote `view` back to whatever the next tab implied, discarding the
+  user's actual navigation. Now also checks that `view` still matches what
+  the tab being closed would itself display before touching it.
+
+## 0.60.0 - 2026-07-29
+
+### Fixed
+Second round of Codex review findings on the same PR:
+- **The read-only-MCP-tool check had a JavaScript regex gotcha that defeated
+  it.** `isReadOnlyMcpToolName` combined a case-insensitive match with a
+  `(?=[A-Z])` camelCase-boundary lookahead — but a character class is
+  case-folded under the `i` flag even inside a lookahead
+  (`/(?=[A-Z])/i.test('w')` is `true`), so it accepted ANY following letter
+  as a "boundary," not only an uppercase one. `readwrite_file` — leading
+  token `readwrite`, not `read` — passed as read-only, silently defeating
+  the dangerous-by-default MCP protection from the previous round for any
+  server exposing a compound name like it. Rewritten as an explicit,
+  case-sensitive boundary check against the original (non-lowercased)
+  string.
+- **Closing the active browser tab left the browser visibly stuck on
+  screen.** The previous round scoped rendering the desktop browser to
+  `view === 'browser'` alone (the tab's own active-state no longer factors
+  in). Closing a tab, however, only ever removed it from the tab strip —
+  nothing updated `view` to match, so the native `WebContentsView` kept
+  covering whatever the user expected to see next, with no tab left to
+  explain why. The close handler now mirrors the tab-close reducer's own
+  "select whichever tab is now to the left" logic and switches `view` to
+  match, falling back to `chat` when no tabs remain.
+
+## 0.59.0 - 2026-07-29
+
+### Fixed
+Codex review findings on the reliability/safety and image-embedding work above:
+- **The MCP-tool danger fix from 0.57.0 didn't actually gate anything.**
+  `McpToolWrapper.isDangerous()` returning `true` by default changed
+  nothing on its own — `T3Worker.executeTool()` decides whether to pause
+  for approval via `ToolRegistry.requiresApproval()`, which consulted only
+  a fixed built-in name list (plus user config), never `isDangerous()`. A
+  connected server's `create_repository`/`delete_repository` still ran
+  with zero approval regardless of what `isDangerous()` reported.
+  `requiresApproval()` now also gates on `isDangerous()`, closing the gap
+  for MCP tools and for any future tool that sets `isDangerous()` without
+  remembering to add itself to the static list — the exact failure mode
+  that list's own comment already documented once before (`file_edit`/`git`
+  shipped without approval for a time).
+- **The desktop browser tab stayed mounted after switching away via the
+  Activity Bar.** Every path that activates the browser tab already sets
+  the app's `view` to `'browser'` in the same action, so gating on the
+  tab's active state in addition to `view` was redundant for showing it —
+  and harmful for hiding it again, since nothing cleared the tab's active
+  state on an ordinary view switch. The native browser view kept covering
+  whatever view was selected next until the tab was explicitly closed or
+  reactivated. Now governed by `view` alone.
+- **A web search that found zero results (not zero backends) escalated the
+  whole worker.** The all-backends-exhausted path is reached both when
+  every backend errors AND when every backend responds successfully with
+  no matches for a narrow or misspelled query — only the former is
+  systemic. Both were tagged `systemic: true`, so an ordinary "nothing
+  found for this query" was treated the same as "search is completely
+  unreachable" and escalated instead of letting the worker recover.
+- **The unified provider-error classifier ran against every tool's errors,
+  not just provider calls.** A plain filesystem `EACCES: permission
+  denied` from `file_read` contains the literal words the classifier's
+  auth-failure pattern matches, so an ordinary unreadable file escalated
+  the whole worker instead of letting it try a different one. Now scoped
+  to the tools that actually call an LLM/media provider API
+  (`generate_image`, `generate_speech`, `generate_video`,
+  `transcribe_audio`).
+- **The image-generation worker instruction fired for every deliverable,
+  including ones that can't embed the result.** Only the PowerPoint/Word
+  exporters embed a Markdown image reference; PDF (and plain text)
+  flatten it straight to caption text, same as the original placeholder
+  bug — so a PDF request would still pay for `generate_image` with
+  nothing to show for it. The instruction is now scoped to state that
+  explicitly.
+
+## 0.58.0 - 2026-07-29
+
+### Added
+- **Generated images now actually land in PowerPoint and Word exports.**
+  Asking for a PPT with AI-generated images used to produce a text
+  placeholder in the deck instead of a real picture, even with a working
+  image-gen key — four separate gaps in the same chain, all fixed:
+  - The worker was never told to call `generate_image` for a deliverable
+    that needs one; `buildWorkerRules` now instructs it to, and to reference
+    the result via Markdown image syntax (`![description](location)`)
+    rather than writing a bracketed description in its place.
+  - `generate_image`'s own returned text now spells out exactly how to
+    reference the result, so the instruction above is concretely actionable.
+  - The cloud media sink reported back a bare filename with no way for
+    anything to fetch the bytes later; it now returns the file's real
+    `/api/files/:id` path, reusing the same authenticated route the Files
+    panel already downloads from.
+  - The `.pptx`/`.docx` exporters (client-side, per this pipeline's
+    existing "the content never leaves the browser" design) previously
+    flattened every line — including a correctly-formed image reference —
+    into caption text. They now detect a standalone Markdown image
+    reference, fetch the bytes (same-origin, session-authenticated),
+    sniff the real format and pixel dimensions from the file header, and
+    embed it as an actual picture — falling back gracefully to a skipped
+    image (never a broken export) if one reference 404s.
+- **The internal browser is now reachable from the Command Palette and as a
+  tab alongside chat**, not only via the sidebar's dedicated nav icon. A
+  browser tab is a fixed singleton (the underlying view is a single native
+  `WebContentsView`, not one per tab), so opening it from the palette
+  activates the same tab every time rather than creating duplicates.
+
+## 0.57.0 - 2026-07-29
+
+### Fixed
+- **A dead model was re-discovered on every single run instead of once.**
+  `DeadModelStore` persists a dead verdict specifically so a burst of
+  concurrent workers hitting the same 404 only pays for it once, ever — but
+  the file-backed persistence used a dynamic `require('node:fs')` inside its
+  own function bodies, reasoning that it "runs in the router's constructor
+  path, which is synchronous." That reasoning doesn't hold: a static import
+  is exactly as synchronous as a dynamic require, and in the ESM build (what
+  `bin/cascade.js` actually runs), the global `require` identifier doesn't
+  exist — esbuild's `__require` shim throws `Dynamic require of "fs" is not
+  supported`, silently swallowed by the store's own "best-effort" try/catch.
+  The file was never actually read or written, so every run started amnesiac
+  and re-paid the whole concurrent-burst cost. Switched to static `node:fs`
+  imports, which work correctly under both the CJS and ESM builds.
+
+- **`gemini-2.5-flash-lite` scored exactly the same as full `gemini-2.5-flash`
+  in Cascade Auto**, making the weaker, cheaper model look like the same
+  quality as its full sibling and win "best value" picks it shouldn't have.
+  The family-resolution regex `gemini-?2\.5-flash` has no word boundary after
+  "flash" and matched `gemini-2.5-flash-lite` as a plain substring, before
+  ever reaching the generic lite fallback — the exact ordering the 2.0
+  generation already got right, just missing for 2.5. Added the matching
+  `gemini-2.5-flash-lite` family entry and matcher, ordered before the bare
+  `2.5-flash` rule.
+
+- **`generate_image` failing outright, and other systemic tool errors
+  looping for up to 15 iterations before ever surfacing.** Image generation
+  is migrated off the deprecated Imagen `:predict` API (Google is shutting it
+  down August 17, 2026) to `gemini-2.5-flash-image` via the standard
+  `generateContent` endpoint. Separately, `classifyProviderError` — the
+  deterministic, non-AI JSON/HTTP error classifier already used for chat-tier
+  failover — is now also consulted at the point a tool call decides whether
+  to fast-fail or retry, replacing a hand-rolled regex that recognized
+  429/auth/forbidden but not 404/model-unavailable. A dead image model's 404
+  now escalates immediately with the real reason instead of retrying through
+  adaptive fallback first.
+
+- **A worker with no real search results could produce a plausible but
+  completely ungrounded — sometimes wildly off-topic — answer.**
+  `web_search` returned a "search failed across all backends" STRING when
+  every backend was down, which the agent loop treated as an ordinary
+  successful result with nothing to signal that the worker had zero
+  grounding. It now throws instead, tagged so it escalates the same way a
+  systemic provider failure does. Separately, a worker's self-test — the
+  check that catches this kind of ungrounded output before it's accepted as
+  done — failed OPEN: if the grading call itself broke or its response
+  didn't parse, all three checks were silently reported as passing. It now
+  fails closed, triggering the same single bounded correction-and-retest
+  pass an ordinary failed check gets.
+
+- **An MCP-connected tool could take an irreversible action — create or
+  delete a repository, push files, merge a PR — with zero human approval.**
+  Every built-in tool of comparable risk (shell, git, file writes, the
+  built-in GitHub tool) correctly self-reports as dangerous and requires
+  approval; the generic MCP tool wrapper never overrode the base class's
+  default of "safe." MCP tools now default to dangerous unless their name
+  looks read-only by its leading verb (`list_`, `get_`, `search_`, `read_`,
+  and similar) — fail-closed, matching this codebase's stated classification
+  philosophy elsewhere, and reusing the existing approval-escalation pipeline
+  end to end with no new UI needed. Paired with a worker-prompt reminder not
+  to reach for a connected-service action unrelated to the current subtask.
+
 ## 0.56.0 - 2026-07-29
 
 ### Fixed

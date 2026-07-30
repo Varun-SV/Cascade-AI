@@ -15,7 +15,13 @@
 
 import type { ToolExecuteOptions, ProviderConfig } from '../types.js';
 import { BaseTool } from './base.js';
-import type { MultimodalRegistry } from '../core/multimodal/registry.js';
+import type {
+  GenerationCapability,
+  GenerationModality,
+  MultimodalRegistry,
+  SelectionResult,
+} from '../core/multimodal/registry.js';
+import { classifyProviderError } from '../core/router/provider-errors.js';
 import {
   generateImage,
   generateSpeech,
@@ -63,6 +69,117 @@ function resolve(
   return { ok: true, selected, cfg };
 }
 
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** A finished generation, plus what it cost in attempts to get there. */
+interface Attempt<T> {
+  value: T;
+  /** The capability that actually produced `value`. */
+  selected: SelectionResult;
+  /** Set only when the first choice failed systemically and this is the retry. */
+  fellBackFrom?: { capability: GenerationCapability; error: string };
+}
+
+/**
+ * Run a generation, and on a SYSTEMIC failure retry it against a different
+ * provider that can serve the same modality.
+ *
+ * Why this exists: classifyProviderError answers "would this fail again on the
+ * SAME provider+model?" — a dead key, a 404 model id, an exhausted quota. The
+ * T3 worker reads that answer as "the whole capability is gone" and fast-fails
+ * the worker with a CriticalToolError. That is right once, but it was being
+ * applied while a second configured provider sat there able to draw the
+ * picture: Gemini's image endpoint 404ing says nothing about whether OpenAI's
+ * dall-e-3 works. So the exhaustion has to be established HERE, where the
+ * alternatives are known, before the worker is told the capability is dead.
+ *
+ * Deliberately NOT retried:
+ *   • non-systemic failures (content-policy refusal, malformed prompt, a
+ *     transport blip) — those would very plausibly fail the same way on the
+ *     next provider, so a second call buys latency and cost and nothing else;
+ *   • a cancelled run — the user already said stop.
+ *
+ * One attempt per ALTERNATE PROVIDER, in registry rank order. A second model
+ * from the same provider is skipped because the failures this retries on are
+ * account-scoped (auth, quota) or rate-limit-scoped far more often than they
+ * are model-scoped, so it would usually just buy the same error twice.
+ */
+async function runWithProviderFallback<T>(
+  deps: Deps,
+  modality: GenerationModality,
+  first: { selected: SelectionResult; cfg: ProviderConfig },
+  run: (cap: GenerationCapability, cfg: ProviderConfig) => Promise<T>,
+  signal?: AbortSignal,
+): Promise<Attempt<T>> {
+  const failed = first.selected.capability;
+  try {
+    return { value: await run(failed, first.cfg), selected: first.selected };
+  } catch (err) {
+    if (signal?.aborted || !classifyProviderError(err).systemic) throw err;
+
+    const tried = [`${failed.modelId} (${failed.provider}): ${messageOf(err)}`];
+    let allSystemic = true; // the primary was systemic, by construction
+    let lastNonSystemic: unknown; // set when a fallback fails for a reason unrelated to provider health
+    const seen = new Set<string>([failed.provider]);
+
+    for (const alt of deps.registry.rank(modality)) {
+      if (seen.has(alt.capability.provider)) continue;
+      // Mirrors resolve()'s own check: a capability whose provider carries no
+      // config is not a fallback, it is a second way to fail.
+      const cfg = deps.lookupProvider(alt.capability.provider);
+      if (!cfg) continue;
+      seen.add(alt.capability.provider);
+      try {
+        return {
+          value: await run(alt.capability, cfg),
+          selected: alt,
+          fellBackFrom: { capability: failed, error: messageOf(err) },
+        };
+      } catch (retryErr) {
+        if (signal?.aborted) throw retryErr;
+        tried.push(`${alt.capability.modelId} (${alt.capability.provider}): ${messageOf(retryErr)}`);
+        if (classifyProviderError(retryErr).systemic) {
+          continue;
+        }
+        allSystemic = false;
+        lastNonSystemic = retryErr;
+      }
+    }
+
+    // Nothing to fall back to — propagate the original error untouched, so a
+    // single-provider account behaves exactly as it did before.
+    if (tried.length === 1) throw err;
+
+    // A fallback failed for a reason unrelated to provider health (a content
+    // refusal, a malformed prompt) rather than the primary's kind of systemic
+    // failure. Propagate THAT error on its own, not merged into the combined
+    // "every provider failed" message below — t3-worker.ts re-runs
+    // classifyProviderError() on whatever this throws (PROVIDER_BACKED_TOOLS
+    // are always re-classified, regardless of any `systemic` tag we do or
+    // don't set), and its text matcher works over the WHOLE message. A
+    // concatenated string still carrying the primary's systemic wording (e.g.
+    // "model not found") gets matched by that same regex and fast-fails the
+    // worker even though the actual, deciding failure — the fallback's — was
+    // never systemic at all.
+    if (!allSystemic) throw lastNonSystemic;
+
+    // Every configured provider is exhausted, so the worker's fast-fail is now
+    // the correct response. Naming each provider matters: "it failed" reads as
+    // a blip worth retrying, "both providers failed, here is what each said"
+    // reads as the configuration problem it actually is. The `systemic` tag is
+    // the same one web_search uses to mark its own failure unrecoverable — it
+    // makes the escalation deterministic instead of leaving t3-worker to
+    // re-derive it from prose.
+    const exhausted = new Error(
+      `${modality} generation failed on every configured provider (${seen.size} tried). ${tried.join(' ')}`,
+    );
+    Object.assign(exhausted, { systemic: true });
+    throw exhausted;
+  }
+}
+
 // ── Image ─────────────────────────────────────
 
 export class GenerateImageTool extends BaseTool {
@@ -89,16 +206,40 @@ export class GenerateImageTool extends BaseTool {
     if (!r.ok) return r.error;
 
     const size = input['size'] ? String(input['size']) : undefined;
-    const asset = await generateImage(
-      r.selected.capability, r.cfg,
-      { prompt, ...(size ? { size } : {}) },
+    // Image is the one modality with two providers in the catalogue today
+    // (dall-e-3 on OpenAI, gemini-2.5-flash-image on Gemini), so it is the one
+    // where a systemic failure is worth a second opinion. Speech is two OpenAI
+    // models — one dead key kills both — and video and transcription have a
+    // single capability each, so there is nothing to fall back TO. When a
+    // second provider lands for any of them, the change is to route that call
+    // through runWithProviderFallback the same way.
+    const attempt = await runWithProviderFallback(
+      this.deps, 'image', r,
+      (cap, cfg) => generateImage(cap, cfg, { prompt, ...(size ? { size } : {}) }, options.signal),
       options.signal,
     );
+    const asset = attempt.value;
+    const fell = attempt.fellBackFrom;
     const location = await this.deps.sink(asset);
 
     return [
       `Image generated and saved to ${location}.`,
-      `Model: ${asset.modelId} — ${r.selected.reason}`,
+      // Knowing WHERE the image is isn't the same as knowing how to use it: a
+      // model told only "saved to X" tends to describe the picture in prose
+      // instead of embedding it. Spelling out the reference syntax here makes
+      // the worker's "never write a placeholder" rule concretely actionable,
+      // and it works for every host because `location` is whatever that host's
+      // sink returned — a workspace path on desktop/CLI, a URL in the cloud.
+      `To include this image in your output, reference it as: ![description](${location})`,
+      // The reported model has to be the one that actually drew the picture, not
+      // the one that was picked and then failed.
+      `Model: ${asset.modelId} — ${fell
+        ? `used as a fallback after ${fell.capability.modelId} (${fell.capability.provider}) failed with a systemic error.`
+        : attempt.selected.reason}`,
+      // Worth one line: the run succeeded, so nothing else will report that a
+      // configured provider is broken, and "your Gemini key is dead" is exactly
+      // the kind of thing the user wants to hear once rather than never.
+      fell ? `Note: ${fell.capability.provider} failed first — ${fell.error}` : '',
       // DALL·E rewrites the prompt before drawing; the model needs to know what
       // was actually rendered, not what it asked for, or its description of the
       // result will not match the image.

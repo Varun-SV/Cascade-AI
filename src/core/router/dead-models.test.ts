@@ -8,10 +8,14 @@
 //  independently discovered the same dead id before any of them could record it.
 
 import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import {
   DEAD_MODEL_TTL_MS,
   DeadModelStore,
   deadModelKey,
+  fileDeadModelPersistence,
   type DeadModelPersistence,
   type DeadModelRecord,
 } from './dead-models.js';
@@ -119,6 +123,45 @@ describe('DeadModelStore', () => {
     const s = new DeadModelStore(broken);
     expect(() => s.record('gemini', 'm', 'model not found')).not.toThrow();
     expect(s.isDead('gemini', 'm')).toBe(true);
+  });
+});
+
+describe('fileDeadModelPersistence (the real file-backed store, not the in-memory stub)', () => {
+  // Every other test in this file uses memoryPersistence() as a stand-in — it
+  // can't catch a bug in the actual load()/save() implementation. This exists
+  // specifically so a regression in the real file I/O (like the dynamic
+  // require('fs') that silently threw and was swallowed in the ESM build,
+  // meaning the file was NEVER actually read or written) fails a test instead
+  // of only surfacing as "the same dead model gets retried every single run."
+  function tempDbPath(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'cascade-dead-models-'));
+    return join(dir, 'nested', 'dead-models.json');
+  }
+
+  it('round-trips a record through a real file on disk, across separate store instances', () => {
+    const filePath = tempDbPath();
+    const first = new DeadModelStore(fileDeadModelPersistence(filePath));
+    first.record('gemini', 'gemini-2.0-flash', 'model not found');
+
+    // A fresh store reading the same path is what "survives a restart" means
+    // for the file-backed persistence specifically — not just the in-memory
+    // stub already covered above.
+    const second = new DeadModelStore(fileDeadModelPersistence(filePath));
+    expect(second.isDead('gemini', 'gemini-2.0-flash')).toBe(true);
+    expect(second.reasonFor('gemini', 'gemini-2.0-flash')).toBe('model not found');
+
+    rmSync(dirname(filePath), { recursive: true, force: true });
+  });
+
+  it('creates the parent directory itself rather than requiring it to pre-exist', () => {
+    const filePath = tempDbPath(); // parent "nested" dir does not exist yet
+    expect(() => fileDeadModelPersistence(filePath).save([])).not.toThrow();
+    rmSync(dirname(filePath), { recursive: true, force: true });
+  });
+
+  it('returns an empty list rather than throwing when the file does not exist yet', () => {
+    const filePath = tempDbPath();
+    expect(fileDeadModelPersistence(filePath).load()).toEqual([]);
   });
 });
 

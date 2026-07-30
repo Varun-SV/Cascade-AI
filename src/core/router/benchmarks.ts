@@ -59,6 +59,12 @@ const FAMILY_BENCHMARKS: Record<string, BenchmarkProfile> = {
   // Google — strongest at analysis/data and long-context.
   'gemini-2.5-pro':    { code: 90, analysis: 93, creative: 86, data: 92 },
   'gemini-2.5-flash':  { code: 82, analysis: 83, creative: 80, data: 82 },
+  // The 2.5-lite tier scores below full 2.5-flash but above the older 2.0
+  // lite tier — it exists because a naive `gemini-?2\.5-flash` regex swallows
+  // "gemini-2.5-flash-lite" as a substring match (no lite variant of its own
+  // to fall into), so the weaker lite model got credited with the full
+  // flash's benchmark score and kept winning Cascade Auto's "best value" pick.
+  'gemini-2.5-flash-lite': { code: 72, analysis: 72, creative: 74, data: 72 },
   'gemini-1.5-pro':    { code: 82, analysis: 84, creative: 82, data: 85 },
   'gemini-2.0-flash':  { code: 79, analysis: 80, creative: 79, data: 80 },
   'gemini-flash-lite': { code: 68, analysis: 68, creative: 70, data: 68 },
@@ -93,6 +99,11 @@ const FAMILY_MATCHERS: Array<[RegExp, string]> = [
   [/gpt-?4o-mini/i, 'gpt-4o-mini'],
   [/gpt-?4o/i, 'gpt-4o'],
   [/gemini-?2\.5-pro/i, 'gemini-2.5-pro'],
+  // Must precede the bare `2\.5-flash` rule below: that pattern has no word
+  // boundary after "flash" and matches "gemini-2.5-flash-lite" as a plain
+  // substring, so the lite variant would otherwise be scored as the full
+  // flash model (see the FAMILY_BENCHMARKS comment above).
+  [/gemini-?2\.5-flash-lite/i, 'gemini-2.5-flash-lite'],
   [/gemini-?2\.5-flash/i, 'gemini-2.5-flash'],
   [/gemini-?1\.5-pro/i, 'gemini-1.5-pro'],
   [/gemini-?2\.0-flash-lite/i, 'gemini-flash-lite'],

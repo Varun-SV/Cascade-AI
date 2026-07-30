@@ -280,11 +280,19 @@ export class WebSearchTool extends BaseTool {
 
     const errors: string[] = [];
     let results: WebSearchResult[] = [];
+    // True once ANY backend actually responds, even with zero results. That
+    // is a per-QUERY outcome (a different query might well find something),
+    // not a systemic one — only "nothing could be reached at all" fails
+    // identically for every worker in this run and deserves the systemic
+    // tag. Conflating the two used to escalate the whole worker on a
+    // perfectly ordinary "no results for this narrow/misspelled query".
+    let anyBackendReachable = false;
 
     // ── 1. SearXNG (preferred — self-hosted, privacy-preserving) ──────────
     if (this.config.searxngUrl) {
       try {
         results = await searchSearXNG(query, this.config.searxngUrl, maxResults);
+        anyBackendReachable = true;
         if (results.length > 0) return this.formatResults(query, results);
         errors.push('SearXNG: returned 0 results');
       } catch (err) {
@@ -296,6 +304,7 @@ export class WebSearchTool extends BaseTool {
     if (this.config.braveApiKey) {
       try {
         results = await searchBrave(query, this.config.braveApiKey, maxResults);
+        anyBackendReachable = true;
         if (results.length > 0) return this.formatResults(query, results);
         errors.push('Brave: returned 0 results');
       } catch (err) {
@@ -307,6 +316,7 @@ export class WebSearchTool extends BaseTool {
     if (this.config.tavilyApiKey) {
       try {
         results = await searchTavily(query, this.config.tavilyApiKey, maxResults);
+        anyBackendReachable = true;
         if (results.length > 0) return this.formatResults(query, results);
         errors.push('Tavily: returned 0 results');
       } catch (err) {
@@ -319,6 +329,7 @@ export class WebSearchTool extends BaseTool {
     for (const variant of ['html', 'lite'] as const) {
       try {
         results = await searchDuckDuckGo(query, maxResults, variant);
+        anyBackendReachable = true;
         if (results.length > 0) return this.formatResults(query, results);
         errors.push(`DuckDuckGo ${variant}: returned 0 results`);
       } catch (err) {
@@ -326,16 +337,25 @@ export class WebSearchTool extends BaseTool {
       }
     }
 
-    // All backends failed
+    // Nothing came back with results — either every backend errored, or every
+    // backend responded fine but found nothing. This used to be a returned
+    // STRING either way — an ordinary "successful" tool result as far as the
+    // agent loop was concerned, fed straight back into the worker's context
+    // with no signal that anything went wrong, free to produce a
+    // plausible-sounding, completely ungrounded answer instead of stopping.
+    // Throwing lets executeTool's CriticalToolError path escalate with the
+    // real reason intact when it's genuinely systemic (see anyBackendReachable
+    // above); when a backend WAS reachable, the worker recovers normally
+    // (retry with a different query, or report nothing was found).
     const configHint = !this.config.searxngUrl && !this.config.braveApiKey && !this.config.tavilyApiKey
       ? '\nTip: Configure a search backend for better results:\n  • Self-hosted: set SEARXNG_URL in your environment\n  • Brave Search API: set BRAVE_SEARCH_API_KEY\n  • Tavily API: set TAVILY_API_KEY'
       : '';
 
-    return [
-      `Web search for "${query}" failed across all backends:`,
+    throw Object.assign(new Error([
+      `Web search for "${query}" found nothing across all backends:`,
       ...errors.map((e) => `  • ${e}`),
       configHint,
-    ].join('\n');
+    ].join('\n')), { systemic: !anyBackendReachable });
   }
 
   private formatResults(query: string, results: WebSearchResult[]): string {

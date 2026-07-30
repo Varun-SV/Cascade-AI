@@ -31,6 +31,7 @@ import {
   buildTextToolReminder,
 } from '../../tools/text-tool-parser.js';
 import { truncateForContext } from '../../utils/truncate.js';
+import { classifyProviderError } from '../router/provider-errors.js';
 
 /**
  * Thrown by executeTool() when the underlying tool error indicates an
@@ -73,8 +74,18 @@ export class WorkerStallError extends Error {
 const KNOWN_TOOLS = [
   'shell', 'file_read', 'file_write', 'file_edit', 'file_delete', 'file_list',
   'git', 'github', 'image_analyze', 'pdf_create', 'run_code', 'peer_message',
-  'web_search', 'glob', 'grep', 'web_fetch',
+  'web_search', 'glob', 'grep', 'web_fetch', 'generate_image',
 ];
+
+/**
+ * Tools whose implementation genuinely calls an LLM/media provider's HTTP
+ * API (via multimodal/generate.ts's postJson, which attaches the real
+ * status code) — the only tools whose thrown errors classifyProviderError
+ * should ever be run against. See its call site in executeTool().
+ */
+const PROVIDER_BACKED_TOOLS = new Set([
+  'generate_image', 'generate_speech', 'generate_video', 'transcribe_audio',
+]);
 
 export function buildWorkerRules(has: (toolName: string) => boolean): string {
   const canWriteFiles = has('file_write') || has('file_edit') || has('run_code');
@@ -87,11 +98,26 @@ export function buildWorkerRules(has: (toolName: string) => boolean): string {
     has('web_search') &&
       '- Use the "web_search" tool to find current information, documentation, news, or general web data.',
     has('pdf_create') && '- Use the "pdf_create" tool for PDF requests.',
+    // Without this the model "writes the image" as prose — a bracketed
+    // description sitting in the deck where the picture should be — even with a
+    // working image model registered. Naming the reference syntax matters as
+    // much as naming the tool: a generated image nobody embeds is still a
+    // missing image.
+    //
+    // Scoped to PowerPoint/Word specifically: those are the only exporters
+    // that actually embed a Markdown image reference (cloud/web/exporters.ts
+    // toPptx/toDocx). PDF and plain-text/Markdown deliverables flatten a
+    // reference straight to caption text — telling the model to call
+    // generate_image for THOSE just pays for an image nobody ever sees.
+    has('generate_image') &&
+      '- When a slide deck (PowerPoint) or Word document deliverable calls for a decorative image or illustration, you MUST call the "generate_image" tool and then reference its result using Markdown image syntax: ![description](location), where "location" is exactly the string the tool reported back. NEVER write a text placeholder or a bracketed description such as [image: a cat] in its place. Do NOT use "generate_image" for a chart, graph, or diagram that must show exact data (numbers, axes, labels) — an image model cannot guarantee those values are correct, so render that data as a Markdown table instead. For any OTHER deliverable format (PDF, plain text, code, etc.) do NOT call "generate_image" — those cannot embed the result, so describe the visual in words instead.',
     has('run_code') &&
       '- Use the "run_code" tool for any file types (Excel, Zip, csv, etc.) or complex processing not covered by other tools. Always cleanup after code execution.',
     '- If you are not making meaningful progress, stop and escalate rather than looping or padding the response.',
     has('peer_message') &&
       '- Use the "peer_message" tool to communicate with other T3 workers if your tasks have dependencies or shared state. You can send updates or wait for signals.',
+    hasAnyTool &&
+      '- Only use tools directly relevant to THIS subtask. Do not reach for an unrelated connected-service action (e.g. creating, deleting, or modifying a repository, issue, or PR; sending a message) unless the subtask explicitly calls for it.',
     '- Return structured output that directly addresses the expected output specification.',
   ];
   return `You are a T3 Worker agent in the Cascade AI system. Your job is to execute a specific subtask completely and accurately.
@@ -785,11 +811,26 @@ export class T3Worker extends BaseTier {
       const durationMs = Date.now() - toolStartMs;
       const errMsg = err instanceof Error ? err.message : String(err);
       this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: tc.name, error: errMsg, durationMs });
-      // Unrecoverable conditions (rate-limit, auth, forbidden) — throw a
-      // CriticalToolError so the agent loop stops retrying and the worker
-      // escalates fast with the real reason intact (used to loop 15× then
-      // emit a generic failure).
-      if (/\b(429|rate.?limit|authentication|api.?key|forbidden|401|403)\b/i.test(errMsg)) {
+      // Unrecoverable/systemic conditions (rate-limit, auth, quota, AND a 404
+      // "model not found" — the shared classifier this reuses is the same one
+      // `router/index.ts` uses for chat-tier failover, so a dead image model
+      // or any other systemic provider failure is fast-failed here too rather
+      // than falling through to adaptiveFallback and looping (previously up
+      // to 15× before ever emitting the real reason). A tool can also mark its
+      // OWN failure systemic directly (e.g. web_search when every backend is
+      // down — that will fail identically for every worker in this run, not
+      // just this one subtask) without needing to fit the provider-error shape.
+      //
+      // classifyProviderError is only consulted for PROVIDER_BACKED_TOOLS.
+      // Its message-text patterns are calibrated for LLM/media-provider
+      // vocabulary, and applying it to every tool's error indiscriminately
+      // misfires on unrelated local failures that happen to share words with
+      // that vocabulary — e.g. a plain filesystem `EACCES: permission denied`
+      // from file_read matches the auth-failure pattern and would otherwise
+      // escalate the whole worker instead of letting it try a different file.
+      const isTaggedSystemic = err instanceof Error && (err as Error & { systemic?: boolean }).systemic === true;
+      const isProviderBacked = PROVIDER_BACKED_TOOLS.has(tc.name);
+      if (isTaggedSystemic || (isProviderBacked && classifyProviderError(err).systemic)) {
         throw new CriticalToolError(errMsg, tc.name);
       }
       // Try to recover via a sibling tool or a synthesized one before giving up;
@@ -1129,10 +1170,17 @@ Reply with JSON: { "completeness": "pass"|"fail", "correctness": "pass"|"fail", 
 
       return { checksRun, passed, failed };
     } catch {
+      // Fail CLOSED, not open. This used to report all three checks as
+      // passing whenever the grading call itself threw or its response
+      // didn't parse — silently treating a broken grader as a clean pass, on
+      // a section that may well have nothing behind it (e.g. a worker that
+      // hit a hard tool failure and never produced grounded output). Bounded
+      // the same way an ordinary failed check is: one correction attempt and
+      // one retest (see execute()'s testResult.failed handling), not a loop.
       return {
         checksRun: ['completeness', 'correctness', 'compliance'],
-        passed: ['completeness', 'correctness', 'compliance'],
-        failed: [],
+        passed: [],
+        failed: ['completeness'],
       };
     }
   }

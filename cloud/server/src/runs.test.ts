@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { ToolRegistry } from '#cascade-ai';
-import { buildCloudConfig, parseChatRunPayload, runChatTurn, tenantScratchDir } from './runs.js';
+import { buildCloudConfig, buildMediaSink, parseChatRunPayload, runChatTurn, tenantScratchDir } from './runs.js';
 import { CloudStore } from './db.js';
 import type { CloudEnv } from './env.js';
 import { startStubOpenAIServer, type StubOpenAIServer } from './test-support/stub-openai-server.js';
@@ -146,6 +146,64 @@ describe('tenantScratchDir', () => {
     const env = { DATA_DIR: '/data' } as CloudEnv;
     expect(tenantScratchDir(env, 'alice')).toBe(path.resolve('/data', 'tenants', 'alice'));
     expect(tenantScratchDir(env, 'alice')).not.toBe(tenantScratchDir(env, 'bob'));
+  });
+});
+
+describe('buildMediaSink', () => {
+  let dir = '';
+  afterEach(async () => {
+    if (dir) await fs.rm(dir, { recursive: true, force: true });
+    dir = '';
+  });
+
+  const setup = async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-media-'));
+    const store = new CloudStore(path.join(dir, 'cloud.db'));
+    const env = { DATA_DIR: dir } as CloudEnv;
+    const user = store.upsertUser({ provider: 'dev', providerId: 'media', email: null, name: null, avatar: null });
+    const convo = store.createConversation(user.id);
+    const socket = new FakeSocket();
+    const sink = buildMediaSink({ env, store, userId: user.id, conversationId: convo.id, socket });
+    return { store, env, user, convo, socket, sink };
+  };
+
+  const asset = {
+    kind: 'image' as const,
+    data: Buffer.from('\x89PNG\r\n\x1a\nfake-image-bytes'),
+    mimeType: 'image/png',
+    filename: 'cascade-1730000000.png',
+    modelId: 'gpt-image-1',
+  };
+
+  it('returns a fetchable /api/files/:id path, not a bare filename', async () => {
+    const { store, user, sink } = await setup();
+
+    const location = await sink(asset as Parameters<typeof sink>[0]);
+
+    // The model embeds this string as ![alt](location) and the client-side
+    // exporter later fetches it. A bare filename resolves to nothing, which is
+    // how a generated image vanishes from a .pptx.
+    const [file] = store.listFiles(user.id);
+    expect(file).toBeDefined();
+    expect(location).toBe(`/api/files/${file!.id}`);
+    expect(location).not.toBe(asset.filename);
+    // …and it matches the route the server actually serves (app.ts).
+    expect(location).toMatch(/^\/api\/files\/[A-Za-z0-9._~%-]+$/);
+  });
+
+  it('still writes the bytes and announces the file row', async () => {
+    const { store, env, user, convo, socket, sink } = await setup();
+
+    const location = await sink(asset as Parameters<typeof sink>[0]);
+    const id = location.slice('/api/files/'.length);
+
+    // The locator points at a row that exists and at bytes on disk — a URL
+    // shape alone would be a regression if it 404'd.
+    expect(store.getFile(id, user.id)?.name).toBe(asset.filename);
+    const onDisk = await fs.readFile(path.join(tenantScratchDir(env, user.id), 'files', id));
+    expect(onDisk.equals(asset.data)).toBe(true);
+    expect(socket.events.filter((e) => e.event === 'file:created')).toHaveLength(1);
+    expect(socket.events[0]!.payload).toMatchObject({ conversationId: convo.id });
   });
 });
 

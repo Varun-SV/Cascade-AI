@@ -208,6 +208,7 @@ Rules:
 - Use the "run_code" tool for any file types (Excel, Zip, csv, etc.) or complex processing not covered by other tools. Always cleanup after code execution.
 - If you are not making meaningful progress, stop and escalate rather than looping or padding the response.
 - Use the "peer_message" tool to communicate with other T3 workers if your tasks have dependencies or shared state. You can send updates or wait for signals.
+- Only use tools directly relevant to THIS subtask. Do not reach for an unrelated connected-service action (e.g. creating, deleting, or modifying a repository, issue, or PR; sending a message) unless the subtask explicitly calls for it.
 - Return structured output that directly addresses the expected output specification.`);
   });
 
@@ -223,6 +224,47 @@ Rules:
     expect(out).not.toContain('If the task asks for a file or artifact');
     // A web tool exists, so the generic "use tools" line is still present.
     expect(out).toContain('- Use tools when needed.');
+  });
+
+  it('with generate_image registered, requires a real generated image over a text placeholder', () => {
+    const out = buildWorkerRules((name) => new Set([...FULL, 'generate_image']).has(name));
+    // The tool must be named — otherwise the model narrates the picture instead
+    // of drawing one, which is exactly the "[image: …]" placeholder bug.
+    expect(out).toContain('you MUST call the "generate_image" tool');
+    // …and naming the tool is not enough: it also has to be told how to
+    // reference the result, or it generates an image and then never embeds it.
+    expect(out).toContain('![description](location)');
+    expect(out).toContain('exactly the string the tool reported back');
+    expect(out).toContain('[image: a cat]');
+  });
+
+  it('scopes the image instruction to PowerPoint/Word — the only exporters that actually embed one', () => {
+    // Regression: an unconditional "call generate_image for any deliverable"
+    // instruction also fires for a PDF request, but the PDF exporter
+    // (renderPdf) flattens a Markdown image reference to caption text same as
+    // the original bug — the model would pay for an image nobody ever sees.
+    const out = buildWorkerRules((name) => new Set([...FULL, 'generate_image']).has(name));
+    expect(out).toContain('slide deck (PowerPoint) or Word document');
+    expect(out).toMatch(/PDF.*do NOT call "generate_image"/);
+  });
+
+  it('excludes data-driven charts from the generate_image mandate — image models cannot guarantee exact values', () => {
+    // Regression: the original rule said "image, illustration, chart or other
+    // visual" — routing a quantitative chart (exact axes/numbers) through a
+    // generative image model risks a plausible-looking but numerically wrong
+    // picture. Only decorative visuals should go through generate_image; a
+    // data-driven chart should render as a Markdown table instead.
+    const out = buildWorkerRules((name) => new Set([...FULL, 'generate_image']).has(name));
+    expect(out).toMatch(/do NOT use "generate_image".*chart.*exact data/i);
+    expect(out).toContain('render that data as a Markdown table instead');
+  });
+
+  it('without generate_image (no image model configured), omits the image guidance entirely', () => {
+    const out = buildWorkerRules((name) => FULL.has(name));
+    // FULL has no generate_image — telling a worker to call a tool that was
+    // never registered just burns a turn on tool-not-found.
+    expect(out).not.toContain('generate_image');
+    expect(out).not.toContain('![description](location)');
   });
 
   it('with NO tools registered (hosted pure-chat), drops all tool guidance', () => {
@@ -273,6 +315,95 @@ describe('T3Worker — text-tool lean prompts (v0.15.0)', () => {
     expect(sysPrompts[1]).toContain('TOOL USE REMINDER');       // terse afterwards
     expect(sysPrompts[1]).not.toContain('TOOL USE INSTRUCTIONS');
     expect(sysPrompts[1]).toContain('file_write');              // tool names still listed
+  });
+});
+
+describe('T3Worker.executeTool — unified provider-error classification (used to loop instead of fast-failing)', () => {
+  // Regression: a dead image-gen model's 404 ("This model is no longer
+  // available to new users") fell through the old hand-rolled regex (which
+  // only recognised 429/auth/forbidden) into adaptiveFallback, looping for up
+  // to 15 iterations before ever surfacing the real reason. classifyProviderError
+  // already recognises 404/model_unavailable as systemic — this just wires it in.
+  function makeWorkerWithFailingTool(err: unknown) {
+    const toolRegistry = makeToolRegistry({ execute: vi.fn().mockRejectedValue(err) });
+    return new T3Worker(makeRouter(vi.fn()), toolRegistry, 't2-parent');
+  }
+
+  it('throws CriticalToolError for a 404-shaped provider error (JSON body, no LLM needed)', async () => {
+    // Matches the real shape thrown by multimodal/generate.ts's postJson():
+    // Object.assign(new Error(rawResponseBodyText), { status: res.status }) —
+    // the raw JSON error body as the message, HTTP status as a real property.
+    const err = Object.assign(
+      new Error(JSON.stringify({
+        error: { code: 404, message: 'This model is no longer available to new users.', status: 'NOT_FOUND' },
+      })),
+      { status: 404 },
+    );
+    const worker = makeWorkerWithFailingTool(err);
+    const tc: ToolCall = { id: 'tc-1', name: 'generate_image', input: {} };
+
+    await expect(
+      (worker as unknown as { executeTool: (tc: ToolCall) => Promise<string> }).executeTool(tc),
+    ).rejects.toMatchObject({ name: 'CriticalToolError' });
+  });
+
+  it('still throws CriticalToolError for the previously-recognised cases (rate limit, auth) on a provider-backed tool', async () => {
+    const worker = makeWorkerWithFailingTool(new Error('429 Too Many Requests: rate limit exceeded'));
+    const tc: ToolCall = { id: 'tc-2', name: 'generate_image', input: {} };
+    await expect(
+      (worker as unknown as { executeTool: (tc: ToolCall) => Promise<string> }).executeTool(tc),
+    ).rejects.toMatchObject({ name: 'CriticalToolError' });
+  });
+
+  it('does NOT fast-fail an ordinary per-task error — still falls through to adaptive recovery', async () => {
+    const worker = makeWorkerWithFailingTool(new Error('file not found: nope.txt'));
+    const tc: ToolCall = { id: 'tc-3', name: 'file_read', input: {} };
+    const result = await (worker as unknown as { executeTool: (tc: ToolCall) => Promise<string> }).executeTool(tc);
+    expect(result).toContain('Tool error');
+  });
+
+  it('does NOT run classifyProviderError against a non-provider tool, even when its message shares provider vocabulary', async () => {
+    // Regression: a plain filesystem EACCES error contains the literal words
+    // "permission denied", which classifyProviderError's auth-failure
+    // pattern also matches — applying the classifier to EVERY tool's error
+    // indiscriminately turned an ordinary "can't read this one file" into a
+    // whole-worker escalation instead of letting the agent try another file.
+    const worker = makeWorkerWithFailingTool(new Error('EACCES: permission denied, open \'/etc/shadow\''));
+    const tc: ToolCall = { id: 'tc-5', name: 'file_read', input: {} };
+    const result = await (worker as unknown as { executeTool: (tc: ToolCall) => Promise<string> }).executeTool(tc);
+    expect(result).toContain('Tool error');
+  });
+
+  it('also fast-fails a tool-tagged systemic error (e.g. web_search when every backend is down)', async () => {
+    // web-search.ts throws `Object.assign(new Error(...), { systemic: true })`
+    // when all backends fail — a shape classifyProviderError alone would not
+    // recognise (it is not a provider/model error), so executeTool checks the
+    // tag directly too.
+    const err = Object.assign(new Error('Web search for "x" failed across all backends'), { systemic: true });
+    const worker = makeWorkerWithFailingTool(err);
+    const tc: ToolCall = { id: 'tc-4', name: 'web_search', input: {} };
+    await expect(
+      (worker as unknown as { executeTool: (tc: ToolCall) => Promise<string> }).executeTool(tc),
+    ).rejects.toMatchObject({ name: 'CriticalToolError' });
+  });
+});
+
+describe('T3Worker.selfTest — fails closed, not open, when grading itself breaks', () => {
+  function makeWorkerForSelfTest(generateImpl: CascadeRouter['generate']) {
+    return new T3Worker(makeRouter(generateImpl), makeToolRegistry(), 't2-parent');
+  }
+
+  it('reports completeness as FAILED when the grading response has no parseable JSON, instead of a clean pass', async () => {
+    // Regression: this used to be { passed: [all three], failed: [] } — a
+    // grading response that doesn't parse (malformed JSON, or none at all)
+    // silently counted as a clean pass, letting an ungrounded or off-topic
+    // worker output sail through undetected.
+    const worker = makeWorkerForSelfTest(vi.fn().mockResolvedValue(makeResult('not json at all')));
+    const result = await (worker as unknown as {
+      selfTest: (a: T2ToT3Assignment, output: string) => Promise<{ checksRun: string[]; passed: string[]; failed: string[] }>;
+    }).selfTest(makeAssignment(), 'some output');
+    expect(result.failed).toContain('completeness');
+    expect(result.passed).not.toContain('completeness');
   });
 });
 

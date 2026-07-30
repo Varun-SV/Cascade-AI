@@ -538,6 +538,57 @@ export interface ChatRunDeps {
   signal?: AbortSignal;
 }
 
+/** The asset the SDK hands a media sink — inferred so we don't re-declare it. */
+type MediaAsset = Parameters<Parameters<Cascade['setMediaSink']>[0]>[0];
+
+/**
+ * Where generated media lands in a hosted run: a real file row plus bytes under
+ * the tenant's directory, so the browser can show it the same way it shows any
+ * other generated file. The SDK's default sink writes into the workspace, which
+ * is meaningless here — the container is ephemeral and the user has no
+ * filesystem to look at.
+ *
+ * The returned string is what the tool reports back to the model as the image's
+ * `location`, and what the model then embeds as `![alt](location)`. So it has to
+ * be *fetchable*: a bare `cascade-1730000000.png` names a file nobody — not the
+ * chat view, not the client-side .pptx/.docx exporter — can resolve, and the
+ * picture silently disappears from the deck. `/api/files/:id` is the route the
+ * server already serves (app.ts, session-cookie authenticated) and the shape
+ * `lib/api.ts#fileDownloadUrl` already builds on the client.
+ *
+ * Extracted from runChatTurnInner purely so it can be tested without driving a
+ * whole model run.
+ */
+export function buildMediaSink(deps: {
+  env: CloudEnv;
+  store: CloudStore;
+  userId: string;
+  conversationId: string;
+  socket: { emit(event: string, payload: unknown): unknown };
+}): (asset: MediaAsset) => Promise<string> {
+  const { env, store, userId, conversationId, socket } = deps;
+  return async (asset) => {
+    const dir = path.join(tenantScratchDir(env, userId), 'files');
+    const plan = store.getUserById(userId)?.plan ?? 'free';
+    // Quota is checked here, not after writing: a video can be tens of MB and
+    // the point of a quota is to refuse before the disk is spent.
+    checkStorageQuota(store.sumUserFileBytes(userId), asset.data.length, plan);
+    await fs.mkdir(dir, { recursive: true });
+    const file = store.addFile({
+      userId,
+      conversationId,
+      name: asset.filename,
+      mime: asset.mimeType,
+      size: asset.data.length,
+    });
+    await fs.writeFile(path.join(dir, file.id), asset.data);
+    socket.emit('file:created', { conversationId, file });
+    // encodeURIComponent mirrors the client helper's own precaution; ids are
+    // randomUUID() today, but the escaping is free and the route is not.
+    return `/api/files/${encodeURIComponent(file.id)}`;
+  };
+}
+
 export async function runChatTurn(payload: ChatRunPayload, deps: ChatRunDeps): Promise<ChatRunResult> {
   const { env, store, userId, socket } = deps;
 
@@ -697,28 +748,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   });
   const cascade: Cascade = createCascade(config, scratchDir);
 
-  // Generated media lands as a real file row, so the browser can show it the
-  // same way it shows any other generated file. The SDK's default sink writes
-  // to the workspace, which is meaningless in a hosted run — the container is
-  // ephemeral and the user has no filesystem to look at.
-  cascade.setMediaSink(async (asset) => {
-    const dir = path.join(tenantScratchDir(env, userId), 'files');
-    const plan = store.getUserById(userId)?.plan ?? 'free';
-    // Quota is checked here, not after writing: a video can be tens of MB and
-    // the point of a quota is to refuse before the disk is spent.
-    checkStorageQuota(store.sumUserFileBytes(userId), asset.data.length, plan);
-    await fs.mkdir(dir, { recursive: true });
-    const file = store.addFile({
-      userId,
-      conversationId: conversation.id,
-      name: asset.filename,
-      mime: asset.mimeType,
-      size: asset.data.length,
-    });
-    await fs.writeFile(path.join(dir, file.id), asset.data);
-    socket.emit('file:created', { conversationId: conversation.id, file });
-    return asset.filename;
-  });
+  cascade.setMediaSink(buildMediaSink({ env, store, userId, conversationId: conversation.id, socket }));
 
   // Your thumbs-up/down verdicts, folded into Auto routing as a bounded,
   // sample-size-shrunk adjustment to the public benchmark score. Read once per

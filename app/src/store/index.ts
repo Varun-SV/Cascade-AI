@@ -43,12 +43,21 @@ export interface RuntimeSession {
 
 export interface AppTab {
   id: string;
-  type: 'file' | 'session';
+  type: 'file' | 'session' | 'browser';
   title: string;
   path?: string;
   sessionId?: string;
   isDirty?: boolean;
 }
+
+/**
+ * The built-in browser is a single native WebContentsView (see
+ * electron/browser.ts — `let view` is a module-level singleton, not keyed by
+ * id), so only one browser tab can ever exist. A fixed id lets every caller
+ * that wants "the" browser tab converge on the same `openTabs` entry instead
+ * of accidentally creating duplicates.
+ */
+export const BROWSER_TAB_ID = 'browser';
 
 /** A tool-approval request escalated to the user for a decision. */
 export interface PendingApproval {

@@ -20,6 +20,7 @@ import {
   disambiguateMcpServerNames,
   isMcpToolName,
   isProviderSafeToolName,
+  isReadOnlyMcpToolName,
   mcpServerPrefix,
   mcpToolName,
   removeMcpServerDenials,
@@ -345,5 +346,79 @@ describe('assignMcpToolNames — suffix must not collide with an existing base',
       { server: 'srv', tool: 'foo_bar_3' }, // already owns "_3" too
     ]);
     expect(new Set(names).size).toBe(4);
+  });
+});
+
+describe('isReadOnlyMcpToolName', () => {
+  it('recognises snake_case read-only verbs, whatever they operate on', () => {
+    for (const name of ['list_pull_requests', 'get_file_contents', 'search_issues', 'read_file', 'describe_stack', 'find_replacements', 'query_database', 'fetch_page', 'show_diff', 'view_log']) {
+      expect(isReadOnlyMcpToolName(name)).toBe(true);
+    }
+  });
+
+  it('recognises the same verbs in camelCase', () => {
+    expect(isReadOnlyMcpToolName('getFileContents')).toBe(true);
+    expect(isReadOnlyMcpToolName('listPullRequests')).toBe(true);
+  });
+
+  it('treats a bare read-only verb, with nothing appended, as read-only', () => {
+    expect(isReadOnlyMcpToolName('get')).toBe(true);
+    expect(isReadOnlyMcpToolName('list')).toBe(true);
+  });
+
+  it('is dangerous-by-default for write/mutate verbs — the actual bug this exists for', () => {
+    // The real GitHub-connector complaint: create_repository, delete_repository,
+    // push_files, merge_pull_request ran with zero approval because MCP tools
+    // had no danger classification at all.
+    for (const name of ['create_repository', 'delete_repository', 'push_files', 'merge_pull_request', 'update_pull_request', 'fork_repository', 'send_message', 'run_workflow']) {
+      expect(isReadOnlyMcpToolName(name)).toBe(false);
+    }
+  });
+
+  it('does not match a read-only verb that is only a SUBSTRING, not the leading token', () => {
+    // "target_list" contains "list" but doesn't start with it — must not be
+    // waved through as read-only.
+    expect(isReadOnlyMcpToolName('target_list')).toBe(false);
+    expect(isReadOnlyMcpToolName('unlisted_get')).toBe(false);
+  });
+
+  it('requires a REAL camelCase boundary — a lowercase letter after the verb is not one', () => {
+    // Regression: a combined case-insensitive regex with a `(?=[A-Z])`
+    // lookahead case-folds the lookahead too under the `i` flag — in real
+    // JS, `/(?=[A-Z])/i.test('w')` is `true` — so "readwrite_file" (leading
+    // token "readwrite", not "read") was waved through as read-only. The
+    // boundary check must be case-sensitive even though the verb match
+    // itself is case-insensitive.
+    expect(isReadOnlyMcpToolName('readwrite_file')).toBe(false);
+    expect(isReadOnlyMcpToolName('listing_archived_repos')).toBe(false);
+    expect(isReadOnlyMcpToolName('getaway_car')).toBe(false);
+    // But a genuine camelCase boundary (uppercase) still works.
+    expect(isReadOnlyMcpToolName('getFileContents')).toBe(true);
+  });
+
+  it('treats a compound name as dangerous when a mutating verb follows a read-only lead', () => {
+    // Codex round-4 finding: the leading-verb check alone waves these through
+    // as read-only because "get"/"read"/"fetch" lead, even though each
+    // performs (or may perform) the mutation named later in the compound
+    // action.
+    expect(isReadOnlyMcpToolName('get_or_create_repository')).toBe(false);
+    expect(isReadOnlyMcpToolName('read_and_delete_file')).toBe(false);
+    expect(isReadOnlyMcpToolName('fetch_then_update')).toBe(false);
+    // Same check, camelCase.
+    expect(isReadOnlyMcpToolName('getOrCreateRepository')).toBe(false);
+  });
+
+  it('does not flag a mutating-looking SUBSTRING that is not its own token', () => {
+    // Token-exact matching is the point of the compound check above — a
+    // regex/substring search would misfire on ordinary words that happen to
+    // contain a mutating verb's letters.
+    expect(isReadOnlyMcpToolName('get_dataset')).toBe(true); // "set" is not a token
+    expect(isReadOnlyMcpToolName('list_created_issues')).toBe(true); // "created" ≠ "create"
+    expect(isReadOnlyMcpToolName('get_updated_files')).toBe(true); // "updated" ≠ "update"
+  });
+
+  it('is dangerous-by-default for a name it cannot confidently place at all', () => {
+    expect(isReadOnlyMcpToolName('do_the_thing')).toBe(false);
+    expect(isReadOnlyMcpToolName('mystery_action')).toBe(false);
   });
 });

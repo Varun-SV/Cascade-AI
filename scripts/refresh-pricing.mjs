@@ -390,6 +390,14 @@ const entries = [
     notes:
       'Google bills image output per output-token ($120 per 1M image output tokens); $0.134/image is that rate applied to one default-resolution image. Cost per image therefore varies with resolution.',
   }),
+  media('gemini/gemini-2.5-flash-image', {
+    model: 'gemini-2.5-flash-image',
+    provider: 'gemini',
+    modality: 'image',
+    rates: [{ unit: 'per_image', amount: 0.039, variant: 'default 1024px output' }],
+    notes:
+      'Google bills image output per output-token ($30 per 1M image output tokens); a default 1024px image is 1290 output tokens, i.e. $0.039. Cost per image therefore varies with resolution.',
+  }),
   media('vertex_ai/imagen-4.0-generate-001', {
     model: 'imagen-4.0-generate-001',
     provider: 'vertex',

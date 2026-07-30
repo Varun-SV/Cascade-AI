@@ -190,7 +190,17 @@ export class ToolRegistry extends EventEmitter {
   requiresApproval(toolName: string): boolean {
     const defaults = DEFAULT_APPROVAL_REQUIRED as string[];
     const configured = this.config.requireApprovalFor;
-    return defaults.includes(toolName) || configured.includes(toolName);
+    // Also gate on isDangerous(): the static list requires a human to
+    // remember to add every dangerous tool to it by hand, which has already
+    // caused one real gap (see the DEFAULT_APPROVAL_REQUIRED comment — git
+    // and file_edit shipped without approval for a while) and, before this
+    // line, a second one — an MCP tool's isDangerous() override had nothing
+    // consulting it, so a connected server's create_repository/delete_file/
+    // etc. ran with zero approval no matter what isDangerous() said. Every
+    // built-in dangerous tool is already in the list, so this is a no-op for
+    // all of them; it only changes behavior for tools the list doesn't know
+    // about.
+    return defaults.includes(toolName) || configured.includes(toolName) || this.isDangerous(toolName);
   }
 
   isDangerous(toolName: string): boolean {

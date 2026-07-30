@@ -27,6 +27,21 @@
 //  the routing pool over time, and the user would have no idea why their best
 //  model stopped being chosen. A stale entry costs one wasted call to
 //  rediscover; a permanent one costs the model forever.
+//
+//  "The burst never happens again" only holds if persistence actually
+//  persists. It didn't: fileDeadModelPersistence used a dynamic require('fs')
+//  inside its function bodies, on the theory that this runs in the router's
+//  constructor path and needs to stay synchronous. That reasoning doesn't
+//  hold — a static import is exactly as synchronous as a dynamic require; only
+//  the fs function called determines sync vs async, not how the module got
+//  in. And in the ESM build (what `bin/cascade.js` actually runs), esbuild's
+//  __require shim has no real `require` to fall back to and throws "Dynamic
+//  require of \"fs\" is not supported" — silently swallowed by restore()'s and
+//  flush()'s own try/catch as "best-effort," so the file was never actually
+//  read or written. Every run started amnesiac and repaid the whole burst.
+
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 /** How long a dead verdict stands before the model is retried. */
 export const DEAD_MODEL_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -165,20 +180,13 @@ export class DeadModelStore {
 export function fileDeadModelPersistence(filePath: string): DeadModelPersistence {
   return {
     load(): DeadModelRecord[] {
-      // Deliberately require() rather than import: this runs in the router's
-      // constructor path, which is synchronous.
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const fs = require('node:fs') as typeof import('node:fs');
-      if (!fs.existsSync(filePath)) return [];
-      const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as unknown;
+      if (!existsSync(filePath)) return [];
+      const raw = JSON.parse(readFileSync(filePath, 'utf-8')) as unknown;
       return Array.isArray(raw) ? raw as DeadModelRecord[] : [];
     },
     save(records: DeadModelRecord[]): void {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const fs = require('node:fs') as typeof import('node:fs');
-      const path = require('node:path') as typeof import('node:path');
-      fs.mkdirSync(path.dirname(filePath), { recursive: true });
-      fs.writeFileSync(filePath, JSON.stringify(records, null, 2));
+      mkdirSync(dirname(filePath), { recursive: true });
+      writeFileSync(filePath, JSON.stringify(records, null, 2));
     },
   };
 }

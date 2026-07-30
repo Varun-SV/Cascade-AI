@@ -5,7 +5,7 @@
 import type { ToolDefinition, ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
 import { McpClient } from '../mcp/client.js';
-import { mcpToolName } from './tool-name.js';
+import { isReadOnlyMcpToolName, mcpToolName } from './tool-name.js';
 
 /**
  * A wrapper for a single tool exposed by an MCP server.
@@ -45,6 +45,16 @@ export class McpToolWrapper extends BaseTool {
     this.name = registeredName ?? mcpToolName(serverName, toolName);
     this.description = `[MCP:${serverName}] ${description}`;
     this.inputSchema = inputSchema;
+  }
+
+  // Every built-in tool of comparable risk (shell, git, file writes, the
+  // built-in github tool) overrides this to true. An MCP tool never did —
+  // BaseTool's default (false) meant a connected server's create/delete/push
+  // actions ran with zero human approval, whatever they did. MCP carries no
+  // standard "this mutates state" flag, so default to dangerous and name the
+  // exception (a read-only-looking verb) rather than the other way around.
+  isDangerous(): boolean {
+    return !isReadOnlyMcpToolName(this.toolName);
   }
 
   async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {

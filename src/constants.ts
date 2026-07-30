@@ -476,12 +476,18 @@ export const TOOL_NAMES = {
 } as const;
 
 // Defaults that require approval.
-// NOTE: every tool that mutates the filesystem, runs code, or performs a
-// network-side write must be listed here — approval is gated solely by this
-// list (plus user config), not by isDangerous(). file_edit and git were
-// previously omitted, so the agent could rewrite files in place (file_edit)
+// NOTE: `ToolRegistry.requiresApproval()` ORs this list together with
+// isDangerous() — a tool that self-reports dangerous requires approval
+// whether or not it's named here. This list still matters for two reasons:
+// (a) it's the CONFIGURABLE surface (users add to `requireApprovalFor` by
+// name, which only makes sense against a stable list of built-in names, not
+// an internal isDangerous() flag), and (b) it lets a tool require approval
+// for policy reasons even if it doesn't consider itself "dangerous". Keep it
+// in sync with isDangerous() anyway where you can — file_edit and git were
+// once omitted here, so the agent could rewrite files in place (file_edit)
 // or push/checkout/commit (git) with no prompt while file_write/file_delete
-// required one.
+// required one; isDangerous() alone wasn't consulted at the time, so that
+// gap went unnoticed until it was reported directly.
 export const DEFAULT_APPROVAL_REQUIRED = [
   TOOL_NAMES.SHELL,
   TOOL_NAMES.FILE_DELETE,
