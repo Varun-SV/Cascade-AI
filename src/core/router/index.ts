@@ -647,8 +647,16 @@ export class CascadeRouter extends EventEmitter {
     // Per-provider TPM guard: pause this call until the token bucket has
     // enough budget to cover the estimated input+output tokens. Prevents
     // sudden bursts of parallel T3 spawns from overshooting a provider's
-    // tokens-per-minute quota.
-    const estimatedTokens = (options.maxTokens ?? model.maxOutputTokens ?? 1024) + 512;
+    // tokens-per-minute quota. Capped at model.maxOutputTokens: some providers
+    // (github-models) silently clamp an explicit options.maxTokens down to a
+    // real per-request cap well below what a tier asked for (T1's final
+    // compilation step asks for 8,000, above GitHub's ~4K) — invisible to this
+    // estimate otherwise — so reserving the UNCLAMPED value would withdraw far
+    // more than the call can ever actually consume. This is also the exact
+    // approximation DEFAULT_PROVIDER_TPM['github-models'] documents as its
+    // design basis (tpm-limiter.ts).
+    const requestedTokens = options.maxTokens ?? model.maxOutputTokens ?? 1024;
+    const estimatedTokens = Math.min(requestedTokens, model.maxOutputTokens ?? requestedTokens) + 512;
     if (this.tpmLimiter) {
       await this.tpmLimiter.acquire(model.provider, estimatedTokens);
     }
@@ -772,7 +780,16 @@ export class CascadeRouter extends EventEmitter {
           // model (which may itself be local) can acquire its own slot.
           releaseLocalSlot?.();
           releaseLocalSlot = undefined;
-          return this.generate(tier, options, onChunk, requireVision);
+          // Clear a per-subtask pin (Cascade Auto's explicit `options.model`)
+          // that pointed at the now-rate-limited model — otherwise the
+          // recursive call's `options.model ?? this.tierModels.get(tier)`
+          // resolves right back to the pin, ignoring the fallback just bound
+          // above and re-hitting the same rate-limited provider. Same fix
+          // already applied to the model-not-found branch below.
+          const retryOpts = options.model && options.model.id === model.id
+            ? { ...options, model: undefined }
+            : options;
+          return this.generate(tier, retryOpts, onChunk, requireVision);
         }
       }
       // Stale / invalid model id (e.g. a retired preview that 404s). Drop it so

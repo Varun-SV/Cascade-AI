@@ -214,6 +214,36 @@ class fixed above, plus two more provider-id-collision/binding gaps:
   `generate()`'s `requireVision` branch now calls the same `ensureProvider()`
   used everywhere else immediately after resolving the vision model.
 
+A sixth Codex review pass found two more, both in the router's shared
+generation path (not GitHub-Models-specific, though GitHub Models' tight
+budgets are what surfaced them):
+- **A rate-limited per-call model pin was retried against the SAME
+  rate-limited model instead of the bound fallback.** When `options.model`
+  (Cascade Auto's explicit per-subtask override) hits a 429, the catch block
+  looks up a fallback via `failover.getFallbackModel()` and binds it — but
+  then recursed into `generate()` with the SAME unchanged `options`, whose
+  `options.model` still pointed at the failed model. Since
+  `options.model ?? this.tierModels.get(tier)` resolves the pin first, the
+  bound fallback was silently ignored and the retry re-hit the identical
+  rate-limited model, looping indefinitely while burning quota rather than
+  ever reaching the fallback. Now clears `options.model` before the retry
+  when it matches the failed model's id — the exact fix already applied to
+  the sibling model-not-found branch two rounds ago, just missing here.
+- **An explicit per-call `maxTokens` above a model's own cap inflated the
+  TPM reservation past what the call could ever actually consume.** The
+  reservation was `options.maxTokens ?? model.maxOutputTokens`, so T1's
+  8,000-token final-compilation request reserved 8,512 tokens even when
+  routed to GitHub Models, whose `generateStream()` override (added earlier
+  this release) silently clamps the actual request down to its real ~4K
+  cap — invisible to this estimate. Against GitHub Models' 8,000-token
+  default TPM bucket, that one call could reserve the entire budget instead
+  of the intended ~4,512, exactly contradicting the approximation
+  `DEFAULT_PROVIDER_TPM`'s own comment documents as the reason the bucket
+  works at all. The reservation is now capped at `model.maxOutputTokens`
+  (`Math.min(requestedTokens, model.maxOutputTokens) + 512`), provider-
+  agnostic and consistent with every provider's own request-building code,
+  which already treats `model.maxOutputTokens` as the authoritative ceiling.
+
 ## 0.64.0 - 2026-07-30
 
 ### Fixed

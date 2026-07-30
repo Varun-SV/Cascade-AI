@@ -126,6 +126,56 @@ describe('CascadeRouter — explicit per-tier pin overrides Cascade Auto', () =>
   });
 });
 
+describe('CascadeRouter — rate-limit failover retry', () => {
+  it('clears a rate-limited per-call model pin before retrying, so the bound fallback is actually used', async () => {
+    // Regression (Codex P1): a subtask pinned via options.model (Cascade
+    // Auto's per-subtask override) that hits a 429 used to retry with the
+    // SAME unchanged options. Since `options.model ?? this.tierModels.get(tier)`
+    // resolves options.model first, the recursive call re-selected the SAME
+    // now-rate-limited pinned model — ignoring the fallback that
+    // failover.getFallbackModel() had just bound — and would keep retrying
+    // the same dead pin indefinitely rather than using the fallback.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    const openaiStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('429 Too Many Requests'));
+    const anthropicStream = vi.spyOn(AnthropicProvider.prototype, 'generateStream')
+      .mockResolvedValue({
+        content: 'from fallback', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+      } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+
+    const pinnedModel = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+    expect(pinnedModel).toBeDefined();
+
+    const result = await router.generate('T1', {
+      messages: [{ role: 'user', content: 'hi' }],
+      model: pinnedModel,
+    });
+
+    expect(result.content).toBe('from fallback');
+    // The bug would keep re-selecting the pinned openai model and calling it
+    // again on every retry; the fix clears the pin so the very next attempt
+    // resolves to the bound fallback instead.
+    expect(openaiStream).toHaveBeenCalledTimes(1);
+    expect(anthropicStream).toHaveBeenCalledTimes(1);
+
+    openaiStream.mockRestore();
+    anthropicStream.mockRestore();
+  });
+});
+
 describe('CascadeRouter — GitHub Models wiring', () => {
   it('synthesizes a seed model and builds a GitHubModelsProvider for it', async () => {
     // GitHub Models has no static MODELS catalog entries (its catalog is served
@@ -285,6 +335,44 @@ describe('CascadeRouter — GitHub Models wiring', () => {
     avail.mockRestore();
     list.mockRestore();
     stream.mockRestore();
+  });
+
+  it('caps the TPM reservation at the model maxOutputTokens, not an uncapped per-call override', async () => {
+    // Regression (Codex P2): the reservation was `options.maxTokens ??
+    // model.maxOutputTokens`, so an explicit per-call maxTokens ABOVE the
+    // model's own cap (T1's final compilation step asks for 8,000; GitHub
+    // Models' listModels() sets maxOutputTokens to its real ~4K per-request
+    // ceiling) inflated the TPM reservation past what the provider's
+    // generateStream() override will actually clamp the request down to —
+    // silently reserving the bucket's ENTIRE 8,000-token default budget for
+    // one call instead of the intended ~4,512, exactly the invariant
+    // DEFAULT_PROVIDER_TPM['github-models']'s own comment documents.
+    const { GitHubModelsProvider } = await import('../../providers/github-models.js');
+    const avail = vi.spyOn(GitHubModelsProvider.prototype, 'isAvailable').mockResolvedValue(true);
+    const list = vi.spyOn(GitHubModelsProvider.prototype, 'listModels').mockResolvedValue([{
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'github-models',
+      contextWindow: 8_000, isVisionCapable: false,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    }]);
+    const stream = vi.spyOn(GitHubModelsProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'ok', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    await router.init(makeConfig({ providers: [{ type: 'github-models', apiKey: 'ghp_test' }] }));
+
+    const limiter = (router as unknown as { tpmLimiter: TpmLimiter }).tpmLimiter;
+    const acquire = vi.spyOn(limiter, 'acquire');
+
+    await router.generate('T1', { messages: [{ role: 'user', content: 'hi' }], maxTokens: 8_000 });
+
+    expect(acquire).toHaveBeenCalledWith('github-models', 4_512); // min(8000, 4000) + 512, not 8000 + 512
+
+    avail.mockRestore();
+    list.mockRestore();
+    stream.mockRestore();
+    acquire.mockRestore();
   });
 
   it('picks up a config.rateLimits.providerTpm override through real schema validation', async () => {
