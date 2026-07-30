@@ -231,3 +231,52 @@ describe('ModelSelector — getNextFallback for a dynamically-resolved pin', () 
     expect(next!.id).not.toBe('claude-opus-4');
   });
 });
+
+describe('ModelSelector — selectVisionModel for a dynamically-discovered model', () => {
+  it('finds a live-discovered vision-capable model when nothing in the static priority list matches', () => {
+    // Regression (Codex P2): selectVisionModel() only walked
+    // VISION_MODEL_PRIORITY, a fixed list of static-catalog keys. GitHub
+    // Models has zero static catalog entries, so a github-models-only
+    // configuration failed every vision-required call with "No model
+    // available" even though a vision-capable model was registered and
+    // available — this is the ONLY path a vision-required generate() call
+    // resolves through, ahead of any tier model or explicit override.
+    const selector = new ModelSelector(new Set(['github-models']));
+    selector.addDynamicModel({
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'github-models',
+      contextWindow: 128_000, isVisionCapable: true,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    });
+    const vision = selector.selectVisionModel();
+    expect(vision).not.toBeNull();
+    expect(vision!.provider).toBe('github-models');
+    expect(vision!.id).toBe('openai/gpt-4o');
+  });
+
+  it('ignores a dynamically-discovered model with no vision capability', () => {
+    const selector = new ModelSelector(new Set(['github-models']));
+    selector.addDynamicModel({
+      id: 'meta/Llama-3.3-70B-Instruct', name: 'Llama 3.3 70B', provider: 'github-models',
+      contextWindow: 128_000, isVisionCapable: false,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    });
+    expect(selector.selectVisionModel()).toBeNull();
+  });
+
+  it('still prefers the static VISION_MODEL_PRIORITY list when it has a match', () => {
+    // The dynamic fallback must only fire when the static walk finds nothing —
+    // it must not override an already-working, benchmarked default.
+    const selector = new ModelSelector(new Set(['anthropic', 'github-models']));
+    selector.addDynamicModel({
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'github-models',
+      contextWindow: 128_000, isVisionCapable: true,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    });
+    const vision = selector.selectVisionModel();
+    expect(vision).not.toBeNull();
+    expect(vision!.provider).toBe('anthropic'); // the static priority list's own vision model wins
+  });
+});

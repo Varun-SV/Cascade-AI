@@ -97,6 +97,33 @@ Codex review round on the GitHub Models PR found six further gaps, all fixed:
   other usable model in that case, the same worst-case fallback
   `selectForTier()` already uses.
 
+A second Codex review pass on the same PR found four more:
+- **Every catalog request could 403 regardless of PAT validity.** `nodeHttpFetch`
+  is a thin `node:http`/`https` wrapper with no default `User-Agent` — GitHub's
+  REST API rejects any request without one. Added an explicit `User-Agent` to
+  both the catalog headers and the inference client's `defaultHeaders`.
+- **`supportsToolUse` was hardcoded `true` for every discovered model.** GitHub's
+  multi-vendor catalog includes models that don't support function/tool
+  calling; sending them a `tools` parameter they reject bypasses
+  `t3-worker.ts`'s text-tool fallback (which only engages on an explicit
+  `false`) and fails the call outright. Now derived per model from catalog
+  capability metadata, defaulting to `false` — not positively advertised — when
+  unconfirmed, since a wrong `false` only costs the slower text-tool path while
+  a wrong `true` fails the request. The live smoke test now surfaces the real
+  field names to settle the exact schema with certainty.
+- **The catalog listing only ever fetched one page.** GitHub REST list
+  endpoints are RFC 5988 paginated via a `Link` header; `listModels()` now
+  follows `rel="next"` until exhausted (capped at 20 pages against a malformed
+  or cyclic header), a no-op today and forward-compatible once the catalog
+  grows past a page.
+- **`selectVisionModel()` couldn't find a live-discovered vision model.** It
+  only ever walked the static `VISION_MODEL_PRIORITY` list — the sole path any
+  vision-required call resolves through, ahead of any tier model or explicit
+  override — so a GitHub Models vision-capable model (no static catalog entry
+  at all) was invisible to it even as the only vision-capable model actually
+  available. Added the same "any other usable model" widening already used
+  elsewhere as the worst-case fallback.
+
 ## 0.64.0 - 2026-07-30
 
 ### Fixed

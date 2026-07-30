@@ -147,6 +147,17 @@ export class ModelSelector {
         return model;
       }
     }
+    // VISION_MODEL_PRIORITY only covers the bundled static catalog — a
+    // vision-capable model that's discovered live (GitHub Models has no
+    // static catalog entries at all; a locally-discovered Ollama vision tag
+    // like llava is in the same position) is otherwise invisible here even
+    // when it's the only vision-capable model actually available, and this is
+    // the sole path a vision-required call resolves through — it runs before
+    // any explicit tier/vision override is even consulted. Same worst-case
+    // widening selectForTier() and getNextFallback() already apply elsewhere.
+    for (const model of this.availableModels.values()) {
+      if (this.availableProviders.has(model.provider) && model.isVisionCapable) return model;
+    }
     return null;
   }
 

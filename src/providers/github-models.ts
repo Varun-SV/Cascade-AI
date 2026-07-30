@@ -35,6 +35,9 @@ const GITHUB_MODELS_MAX_OUTPUT_TOKENS = 4_000;
 /** Context window assumed when the catalog entry doesn't state one. */
 const DEFAULT_CONTEXT_WINDOW = 128_000;
 
+/** Hard ceiling on catalog pages fetched — a malformed/cyclic Link header must never loop forever. */
+const GITHUB_MODELS_MAX_CATALOG_PAGES = 20;
+
 /**
  * Catalog ids are owner-prefixed (`openai/gpt-4o`, `meta/Llama-3.3-70B-Instruct`,
  * `deepseek/DeepSeek-R1`). Returns just the model part — used ONLY for name-shape
@@ -75,6 +78,46 @@ function looksVisionCapable(o: Record<string, unknown>): boolean {
   return false;
 }
 
+/**
+ * True when the entry POSITIVELY advertises function/tool calling under any of
+ * the plausible field names (mirrors OpenRouter's `supported_parameters:
+ * ['tools', ...]`, the shape already seen elsewhere in this codebase — see
+ * live-data.test.ts's fixture — plus a `capabilities`-array variant matching
+ * looksVisionCapable above). Absence is NOT evidence of absence: a catalog
+ * entry with none of these fields set is treated as unsupported (see the
+ * caller), not "supported" — the safe default when the real field name is
+ * unconfirmed, since sending `tools` to a model that rejects it fails the
+ * whole call, while wrongly assuming no support only costs the slower text-
+ * tool fallback. `github-models.live.test.ts` surfaces the real field names
+ * from an actual catalog response so this can be tightened with certainty.
+ */
+function looksToolCapable(o: Record<string, unknown>): boolean {
+  const params = o['supported_parameters'];
+  if (Array.isArray(params) && params.some((x) => typeof x === 'string' && /^tools?$|function.?call/i.test(x))) {
+    return true;
+  }
+  for (const k of ['capabilities', 'supported_output_modalities']) {
+    const v = o[k];
+    if (Array.isArray(v) && v.some((x) => typeof x === 'string' && /tool|function.?call/i.test(x))) return true;
+  }
+  const caps = o['capabilities'];
+  if (caps && typeof caps === 'object' && !Array.isArray(caps)) {
+    const c = caps as Record<string, unknown>;
+    if (c['function_calling'] === true || c['tool_calling'] === true || c['tools'] === true) return true;
+  }
+  return false;
+}
+
+/** Extracts the `rel="next"` URL from an RFC 5988 `Link` header, or null past the last page. */
+function parseNextLink(linkHeader: string | null): string | null {
+  if (!linkHeader) return null;
+  for (const part of linkHeader.split(',')) {
+    const match = part.match(/<([^>]+)>\s*;\s*rel="next"/);
+    if (match) return match[1]!;
+  }
+  return null;
+}
+
 export class GitHubModelsProvider extends OpenAIProvider {
   constructor(config: ProviderConfig, model: ModelInfo) {
     // The `openai` SDK throws inside its own constructor when apiKey is
@@ -104,10 +147,13 @@ export class GitHubModelsProvider extends OpenAIProvider {
     // the same category as anthropic/gemini, neither of which override fetch.
     // The API-version header rides on every request including chat
     // completions; it is required by the catalog and harmless on inference.
+    // User-Agent is set explicitly too — the openai SDK's own HTTP client
+    // already sends one by default, unlike nodeHttpFetch (see catalogHeaders),
+    // but stating it here removes any dependence on that SDK-internal default.
     this.client = new OpenAI({
       apiKey: config.apiKey ?? '',
       baseURL: GITHUB_MODELS_INFERENCE_URL,
-      defaultHeaders: { 'X-GitHub-Api-Version': GITHUB_MODELS_API_VERSION },
+      defaultHeaders: { 'X-GitHub-Api-Version': GITHUB_MODELS_API_VERSION, 'User-Agent': 'Cascade-AI' },
     });
   }
 
@@ -142,6 +188,11 @@ export class GitHubModelsProvider extends OpenAIProvider {
       Accept: 'application/vnd.github+json',
       Authorization: `Bearer ${this.config.apiKey ?? ''}`,
       'X-GitHub-Api-Version': GITHUB_MODELS_API_VERSION,
+      // GitHub's REST API rejects any request with no User-Agent — a plain 403
+      // regardless of how valid the PAT is. nodeHttpFetch is a thin wrapper
+      // over node:http/https, neither of which sets one the way a browser's
+      // fetch or a full HTTP client library would, so this has to be explicit.
+      'User-Agent': 'Cascade-AI',
     };
   }
 
@@ -151,21 +202,39 @@ export class GitHubModelsProvider extends OpenAIProvider {
     // returns a different response shape. nodeHttpFetch is used the same way
     // azure/openai-compatible use it for their bespoke listing calls: for its
     // transparent gzip/redirect handling, not for the loopback reason.
-    const res = await nodeHttpFetch(GITHUB_MODELS_CATALOG_URL, { headers: this.catalogHeaders() });
-    if (!res.ok) throw new Error(`GitHub Models catalog ${GITHUB_MODELS_CATALOG_URL} returned HTTP ${res.status}`);
+    //
+    // GitHub REST list endpoints are RFC 5988 paginated via a `Link` response
+    // header — follow it like every other GitHub API caller does, rather than
+    // assuming the whole catalog fits on one page. A response with no `Link`
+    // header (the common case today, and every mocked test response) ends the
+    // loop after exactly one request, so this is a no-op until the catalog
+    // actually grows past a page.
+    const raw: unknown[] = [];
+    let url: string | null = GITHUB_MODELS_CATALOG_URL;
+    let pages = 0;
+    while (url && pages < GITHUB_MODELS_MAX_CATALOG_PAGES) {
+      const res = await nodeHttpFetch(url, { headers: this.catalogHeaders() });
+      if (!res.ok) throw new Error(`GitHub Models catalog ${url} returned HTTP ${res.status}`);
 
-    // A successfully-fetched body whose shape we didn't predict must never
-    // throw out of here — an unusable listing degrades the provider to its
-    // seed model, whereas an exception marks the whole provider unavailable.
-    const body = (await res.json()) as unknown;
-    const raw: unknown[] = Array.isArray(body) ? body
-      : Array.isArray((body as { models?: unknown[] })?.models) ? (body as { models: unknown[] }).models
-      : Array.isArray((body as { data?: unknown[] })?.data) ? (body as { data: unknown[] }).data
-      : [];
+      // A successfully-fetched body whose shape we didn't predict must never
+      // throw out of here — an unusable listing degrades the provider to its
+      // seed model, whereas an exception marks the whole provider unavailable.
+      const body = (await res.json()) as unknown;
+      const pageItems: unknown[] = Array.isArray(body) ? body
+        : Array.isArray((body as { models?: unknown[] })?.models) ? (body as { models: unknown[] }).models
+        : Array.isArray((body as { data?: unknown[] })?.data) ? (body as { data: unknown[] }).data
+        : [];
+      raw.push(...pageItems);
+
+      url = parseNextLink(res.headers.get('link'));
+      pages++;
+    }
 
     const entries = raw
       .map((m) => {
-        if (typeof m === 'string') return { id: m, name: m, contextWindow: DEFAULT_CONTEXT_WINDOW, vision: false };
+        if (typeof m === 'string') {
+          return { id: m, name: m, contextWindow: DEFAULT_CONTEXT_WINDOW, vision: false, tools: false };
+        }
         if (!m || typeof m !== 'object') return undefined;
         const o = m as Record<string, unknown>;
         const id = pickString(o, ['id', 'name', 'model']);
@@ -178,9 +247,10 @@ export class GitHubModelsProvider extends OpenAIProvider {
             'limits.max_input_tokens', 'limits.max_context_tokens',
           ]) ?? DEFAULT_CONTEXT_WINDOW,
           vision: looksVisionCapable(o),
+          tools: looksToolCapable(o),
         };
       })
-      .filter((e): e is { id: string; name: string; contextWindow: number; vision: boolean } => e !== undefined);
+      .filter((e): e is { id: string; name: string; contextWindow: number; vision: boolean; tools: boolean } => e !== undefined);
 
     // Unlike openai-compatible's identical-looking fallback, `this.model` here
     // is never a model the user actually typed in — every production caller
@@ -226,7 +296,12 @@ export class GitHubModelsProvider extends OpenAIProvider {
       pricingUnknown: false,
       maxOutputTokens: GITHUB_MODELS_MAX_OUTPUT_TOKENS,
       supportsStreaming: true,
-      supportsToolUse: true,
+      // Not every catalog model supports function/tool calling — a hardcoded
+      // `true` sent `tools` to models that reject the parameter outright and
+      // never engaged t3-worker.ts's existing text-tool fallback (only an
+      // explicit `false` does). See looksToolCapable's own comment for why
+      // "not positively advertised" defaults to false rather than true here.
+      supportsToolUse: e.tools,
       isLocal: false,
     }));
   }

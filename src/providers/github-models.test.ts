@@ -34,23 +34,36 @@ vi.mock('openai', () => {
 // ── Mocked catalog transport ──────────────────
 // The catalog is fetched through utils/net's nodeHttpFetch (for its gzip /
 // redirect handling), so that is what a listModels()/isAvailable() test stubs.
+// `pages` lets pagination tests give a specific URL its own body + Link
+// header; any URL not in `pages` (i.e. every existing single-page test) falls
+// through to the plain `body`/no-Link-header behaviour unchanged.
 const catalog: {
   ok: boolean;
   status: number;
   body: unknown;
   calls: Array<{ url: string; headers: Record<string, string> }>;
-} = { ok: true, status: 200, body: { models: [] }, calls: [] };
+  pages: Record<string, { body: unknown; link?: string | null }>;
+} = { ok: true, status: 200, body: { models: [] }, calls: [], pages: {} };
 
 vi.mock('../utils/net.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../utils/net.js')>();
   return {
     ...actual,
     nodeHttpFetch: async (url: string | URL, init: RequestInit = {}) => {
+      const urlStr = String(url);
       catalog.calls.push({
-        url: String(url),
+        url: urlStr,
         headers: (init.headers ?? {}) as Record<string, string>,
       });
-      return { ok: catalog.ok, status: catalog.status, json: async () => catalog.body };
+      const page = catalog.pages[urlStr];
+      const body = page ? page.body : catalog.body;
+      const link = page ? page.link ?? null : null;
+      return {
+        ok: catalog.ok,
+        status: catalog.status,
+        json: async () => body,
+        headers: { get: (name: string) => (name.toLowerCase() === 'link' ? link : null) },
+      };
     },
   };
 });
@@ -92,6 +105,7 @@ beforeEach(() => {
   catalog.status = 200;
   catalog.body = { models: [] };
   catalog.calls = [];
+  catalog.pages = {};
 });
 
 describe('GitHubModelsProvider — client construction', () => {
@@ -102,10 +116,11 @@ describe('GitHubModelsProvider — client construction', () => {
     expect(sdk.clientOptions?.['baseURL']).toBe(GITHUB_MODELS_INFERENCE_URL);
   });
 
-  it('sends the GitHub API-version header on every request, not just the catalog', () => {
+  it('sends the GitHub API-version and User-Agent headers on every request, not just the catalog', () => {
     makeProvider();
     expect(sdk.clientOptions?.['defaultHeaders']).toMatchObject({
       'X-GitHub-Api-Version': GITHUB_MODELS_API_VERSION,
+      'User-Agent': 'Cascade-AI',
     });
   });
 
@@ -225,7 +240,10 @@ describe('GitHubModelsProvider — inherited OpenAI request path', () => {
 });
 
 describe('GitHubModelsProvider — listModels', () => {
-  it('fetches the catalog URL with GitHub\'s three required headers', async () => {
+  it('fetches the catalog URL with GitHub\'s four required headers', async () => {
+    // Regression: nodeHttpFetch is a thin node:http/https wrapper with no
+    // default User-Agent (unlike a browser fetch or the openai SDK's own
+    // client) — GitHub's REST API 403s any request missing one, PAT or not.
     catalog.body = { models: [{ id: 'openai/gpt-4o', name: 'OpenAI GPT-4o' }] };
     await makeProvider().listModels();
     expect(catalog.calls).toHaveLength(1);
@@ -236,14 +254,15 @@ describe('GitHubModelsProvider — listModels', () => {
       Accept: 'application/vnd.github+json',
       Authorization: 'Bearer ghp_test',
       'X-GitHub-Api-Version': GITHUB_MODELS_API_VERSION,
+      'User-Agent': 'Cascade-AI',
     });
   });
 
   it('stamps a real $0 on every model — never isLocal, never pricing-unknown', async () => {
     catalog.body = {
       models: [
-        { id: 'openai/gpt-4o', name: 'OpenAI GPT-4o' },
-        { id: 'meta/Llama-3.3-70B-Instruct', name: 'Llama 3.3 70B' },
+        { id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', supported_parameters: ['tools'] },
+        { id: 'meta/Llama-3.3-70B-Instruct', name: 'Llama 3.3 70B', supported_parameters: ['tools'] },
       ],
     };
     const models = await makeProvider().listModels();
@@ -264,6 +283,26 @@ describe('GitHubModelsProvider — listModels', () => {
     }
     // The owner prefix is preserved — it is part of the callable id.
     expect(models.map((m) => m.id)).toContain('meta/Llama-3.3-70B-Instruct');
+  });
+
+  it('defaults supportsToolUse to false when the catalog entry does not positively advertise it', async () => {
+    // Regression (Codex P2): every discovered model used to be hardcoded
+    // supportsToolUse: true regardless of catalog data. A model that GitHub
+    // actually can't route `tools` to (some of the multi-vendor catalog can't)
+    // would then bypass t3-worker.ts's text-tool fallback — which only
+    // engages on an explicit `false` — and the inference call would fail
+    // outright on an unsupported parameter.
+    catalog.body = {
+      models: [
+        { id: 'openai/gpt-4o', supported_parameters: ['tools', 'temperature'] },
+        { id: 'meta/Llama-3.2-Instruct' }, // no capability metadata at all
+      ],
+    };
+    const models = await makeProvider().listModels();
+    const gpt4o = models.find((m) => m.id === 'openai/gpt-4o');
+    const llama = models.find((m) => m.id === 'meta/Llama-3.2-Instruct');
+    expect(gpt4o!.supportsToolUse).toBe(true);
+    expect(llama!.supportsToolUse).toBe(false);
   });
 
   it('filters out non-chat catalog models (embedders)', async () => {
@@ -308,6 +347,43 @@ describe('GitHubModelsProvider — listModels', () => {
     catalog.ok = false;
     catalog.status = 401;
     await expect(makeProvider().listModels()).rejects.toThrow(/401/);
+  });
+
+  it('follows Link: rel="next" pagination until exhausted', async () => {
+    // Regression (Codex P2): the catalog endpoint is a GitHub REST list
+    // resource, RFC 5988 paginated like every other one — a single request
+    // used to silently drop every model past the first page.
+    const page2Url = `${GITHUB_MODELS_CATALOG_URL}?page=2`;
+    catalog.pages = {
+      [GITHUB_MODELS_CATALOG_URL]: {
+        body: { models: [{ id: 'openai/gpt-4o' }] },
+        link: `<${page2Url}>; rel="next"`,
+      },
+      [page2Url]: {
+        body: { models: [{ id: 'meta/Llama-3.3-70B-Instruct' }] },
+        link: null,
+      },
+    };
+    const models = await makeProvider().listModels();
+    expect(models.map((m) => m.id).sort()).toEqual(['meta/Llama-3.3-70B-Instruct', 'openai/gpt-4o']);
+    expect(catalog.calls.map((c) => c.url)).toEqual([GITHUB_MODELS_CATALOG_URL, page2Url]);
+  });
+
+  it('caps pagination rather than looping forever on a malformed/cyclic Link header', async () => {
+    catalog.pages = {
+      [GITHUB_MODELS_CATALOG_URL]: {
+        body: { models: [{ id: 'openai/gpt-4o' }] },
+        link: `<${GITHUB_MODELS_CATALOG_URL}>; rel="next"`, // points right back at itself
+      },
+    };
+    await makeProvider().listModels();
+    expect(catalog.calls.length).toBeLessThanOrEqual(20);
+  });
+
+  it('makes exactly one request when the catalog has no Link header', async () => {
+    catalog.body = { models: [{ id: 'openai/gpt-4o' }] };
+    await makeProvider().listModels();
+    expect(catalog.calls).toHaveLength(1);
   });
 });
 

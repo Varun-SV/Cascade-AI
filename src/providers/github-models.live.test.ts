@@ -94,6 +94,18 @@ describe.skipIf(!TOKEN)('GitHub Models — LIVE (opt-in, needs GITHUB_MODELS_TES
       ids.some((id) => id.includes('/')),
       `No catalog id contained an owner prefix ('owner/model'). Sample: ${ids.slice(0, 5).join(', ')}`,
     ).toBe(true);
+
+    // looksToolCapable() in github-models.ts guesses at a few plausible field
+    // names for function/tool-calling support (supported_parameters,
+    // capabilities, …) because the real catalog schema for this specific
+    // signal was never confirmed against a live response — this is where that
+    // gets settled. Not a hard assertion: it just prints what's actually
+    // there so the guess can be corrected with certainty once a real token
+    // runs this.
+    console.log(
+      `[github-models live] first catalog entry keys: ${Object.keys(first).join(', ')} — ` +
+      `check these against looksToolCapable()'s field-name guesses in github-models.ts`,
+    );
   }, 30_000);
 
   it('listModels() parses that live catalog into usable ModelInfo', async () => {
