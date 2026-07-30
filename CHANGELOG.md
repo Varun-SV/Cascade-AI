@@ -45,6 +45,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Desktop and cloud UI wiring (Settings, onboarding, KeyVault) is a
     follow-up PR — this ships the SDK/CLI/router support first.
 
+### Fixed
+Codex review round on the GitHub Models PR found six further gaps, all fixed:
+- **A github-models-only (or fallback) config left every tier permanently
+  empty.** Real catalog models were only ever registered by the background
+  `refreshLiveData()` path, which fires fire-and-forget well after `init()`
+  returns; `applyLivePricing()` (the only tier-refresh point on that path)
+  refreshes a tier model that already exists but never fills one that was
+  never set. Even reaching a discovered model via the selector's live
+  "any available" fallback at `generate()` time wasn't enough — that path
+  never calls `ensureProvider()`, so the call would throw `No provider for
+  model ...`. Added a synchronous catalog discovery step in `init()` (mirroring
+  the existing openai-compatible discovery) so a real model is registered, and
+  a real provider bound, before the tier-fill loop runs.
+- **`listModels()`'s empty-catalog fallback returned the construction seed as
+  if it were a real model.** Every production caller constructs this provider
+  with a non-callable placeholder id (`"github-models"`, `"dummy"`) — unlike
+  the identical-looking pattern in `openai-compatible.ts`, where the seed can
+  genuinely be a model the user typed in. Now returns `[]` instead.
+- **A live-pricing refresh could silently start billing free GitHub Models
+  calls as a paid model.** GitHub Models' catalog ids are the same
+  owner/model spelling as real OpenRouter marketplace rows
+  (`openai/gpt-4o` is both), and `resolvePricing()` has no
+  `pricing-data.json` row for this provider by design — so
+  `reconcilePrice()`'s "baseline unknown ⇒ accept the live quote" path would
+  overwrite the deliberate, real `$0` with a paid price. `applyLivePricing()`
+  now skips reconciliation for this provider entirely.
+- **An explicit per-call `maxTokens` above GitHub's ~4K cap was sent
+  unclamped** (`T1Administrator`'s final compilation step asks for 8,000),
+  causing the API to reject the request instead of answering. The provider
+  now clamps in a `generateStream()` override before delegating to the
+  inherited implementation.
+- **`config.rateLimits.providerTpm` — the documented escape hatch for raising
+  GitHub Models' conservative default — was silently stripped by config
+  validation.** `CascadeConfigSchema` never declared the field, so
+  `validateConfig()` discarded it before the router's `TpmLimiter` could read
+  it. Added to the schema and `CascadeConfig` type; the router's read is now a
+  plain typed field access instead of an unsafe cast.
+- **`cascade init`'s tier picker stored a bare catalog id for GitHub Models**
+  (`openai/gpt-4o`, no provider prefix). Before the provider's live catalog is
+  registered, that bare id has nothing to exact-match against and falls
+  through `resolveDynamicModel()`'s heuristics, which reads the id's `/` as an
+  openai-compatible path and misattributes the pin to that provider (or to
+  Ollama) whenever either is also configured. Now stores
+  `github-models:<catalog id>`.
+- **A 429 on an explicitly pinned dynamic model (GitHub Models, an Azure
+  deployment, an openai-compatible/Ollama id) had no fallback at all**, even
+  when another configured provider could serve the tier — `getNextFallback()`
+  returned `null` outright whenever the failed id wasn't in the tier's static
+  priority chain, true for every dynamically-resolved pin. It now falls to any
+  other usable model in that case, the same worst-case fallback
+  `selectForTier()` already uses.
+
 ## 0.64.0 - 2026-07-30
 
 ### Fixed

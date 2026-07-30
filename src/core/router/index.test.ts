@@ -7,6 +7,8 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { CascadeRouter } from './index.js';
 import type { CascadeConfig } from '../../types.js';
+import { CascadeConfigSchema } from '../../config/schema.js';
+import { DEFAULT_PROVIDER_TPM, TpmLimiter } from './tpm-limiter.js';
 
 let server: http.Server;
 let baseUrl: string;
@@ -193,5 +195,76 @@ describe('CascadeRouter — GitHub Models wiring', () => {
     expect(router.getAvailableModels().some((m) => m.id === 'openai/gpt-4o' && m.provider === 'github-models')).toBe(true);
     avail.mockRestore();
     list.mockRestore();
+  });
+
+  it('fills an Auto tier AND binds a real provider when GitHub Models is the only configured provider', async () => {
+    // Regression (Codex P1): relying solely on the background refreshLiveData()
+    // path left every tier permanently empty for a github-models-only config —
+    // Auto tier fill in init() ran before any catalog model was registered, and
+    // applyLivePricing() (the background path's only tier-refresh point) only
+    // refreshes a tier model that ALREADY exists, never fills one that was
+    // never set. Even reaching a model via the selector's live "any available"
+    // fallback at generate() time wasn't enough on its own: that fallback never
+    // calls ensureProvider(), so getProvider(model) would return undefined and
+    // generate() would throw "No provider for model ...". A real init() +
+    // real generate() exercises both halves end to end.
+    const { GitHubModelsProvider } = await import('../../providers/github-models.js');
+    const avail = vi.spyOn(GitHubModelsProvider.prototype, 'isAvailable').mockResolvedValue(true);
+    const list = vi.spyOn(GitHubModelsProvider.prototype, 'listModels').mockResolvedValue([{
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'github-models',
+      contextWindow: 128_000, isVisionCapable: true,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    }]);
+    const stream = vi.spyOn(GitHubModelsProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'pong', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    await router.init(makeConfig({ providers: [{ type: 'github-models', apiKey: 'ghp_test' }] }));
+
+    const t1 = router.getModelForTier('T1');
+    expect(t1?.provider).toBe('github-models');
+    expect(t1?.id).toBe('openai/gpt-4o');
+
+    const result = await router.generate('T1', { messages: [{ role: 'user', content: 'hi' }] });
+    expect(result.content).toBe('pong');
+    expect(stream).toHaveBeenCalled();
+
+    avail.mockRestore();
+    list.mockRestore();
+    stream.mockRestore();
+  });
+
+  it('picks up a config.rateLimits.providerTpm override through real schema validation', async () => {
+    // Regression (Codex P2): rateLimits wasn't declared on CascadeConfigSchema,
+    // so a config-file override for github-models' conservative default was
+    // silently stripped before the router ever saw it. Parse through the REAL
+    // schema (not a hand-built object) so this fails again if that stripping
+    // regresses.
+    const raw = {
+      providers: [{ type: 'github-models', apiKey: 'ghp_test' }],
+      rateLimits: { providerTpm: { 'github-models': 50_000 } },
+    };
+    const parsed = CascadeConfigSchema.parse(raw) as unknown as CascadeConfig;
+    expect(parsed.rateLimits?.providerTpm?.['github-models']).toBe(50_000); // schema didn't strip it
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set());
+    await router.init(parsed);
+
+    const limiter = (router as unknown as { tpmLimiter: TpmLimiter }).tpmLimiter;
+    expect(limiter.snapshot()['github-models']!.tokensPerMinute).toBe(50_000);
+  });
+
+  it('falls back to the conservative default when no override is configured', async () => {
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set());
+    await router.init(makeConfig({ providers: [{ type: 'github-models', apiKey: 'ghp_test' }] }));
+
+    const limiter = (router as unknown as { tpmLimiter: TpmLimiter }).tpmLimiter;
+    expect(limiter.snapshot()['github-models']!.tokensPerMinute).toBe(DEFAULT_PROVIDER_TPM['github-models']);
   });
 });

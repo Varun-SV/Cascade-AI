@@ -272,6 +272,16 @@ export class LiveDataProvider {
    */
   applyLivePricing(models: ModelInfo[]): ModelInfo[] {
     return models.map((m) => {
+      // GitHub Models' $0 is a deliberate, provider-level fact (bundled into the
+      // account's GitHub/Copilot plan, never billed per token) — not a dataset
+      // gap for reconcilePrice to fill in. Its catalog ids are the SAME
+      // owner/model spelling as paid marketplace entries (`openai/gpt-4o` is
+      // also a real, paid row in OpenRouter's live price table), and
+      // resolvePricing() has no pricing-data.json row for this provider at all
+      // (by design — see github-models.ts), so reconcilePrice's "baseline
+      // unknown ⇒ accept the live quote" path would otherwise silently start
+      // pricing free GitHub Models calls as the paid original.
+      if (m.provider === 'github-models') return m;
       // Prefer the canonical base-model id so an Azure deployment (whose id is an
       // arbitrary deployment name) still resolves to the real model's live price.
       const p = this.getLivePrice(m.baseModelId ?? m.id);

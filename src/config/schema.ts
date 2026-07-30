@@ -202,6 +202,20 @@ export const CascadeConfigSchema = z.object({
   theme: z.string().default('cascade'),
   workspace: WorkspaceConfigSchema.default({}),
   /**
+   * Per-provider tokens-per-minute overrides for the router's TpmLimiter (see
+   * DEFAULT_PROVIDER_TPM in core/router/tpm-limiter.ts). Documented as a raw
+   * config field for a while before this — since CascadeConfigSchema strips
+   * unknown keys, a config file setting it was silently discarded and the
+   * override never reached TpmLimiter's constructor. Optional/permissive on
+   * provider name (not a ProviderType enum) so a config still validates
+   * against a slightly newer/older provider list than this schema knows.
+   */
+  rateLimits: z
+    .object({
+      providerTpm: z.record(z.string(), z.number().positive()).optional(),
+    })
+    .optional(),
+  /**
    * Cascade Auto: when true, the TaskAnalyzer selects the optimal model for each
    * tier based on task type and complexity, overriding the static priority lists.
    * Heuristic-first with AI inference fallback (adds ~0–500ms per task).

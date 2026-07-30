@@ -591,6 +591,8 @@ export interface CascadeConfig {
   budget: BudgetConfig;
   theme: string;
   workspace: WorkspaceConfig;
+  /** Per-provider TpmLimiter overrides (tokens/minute). See tpm-limiter.ts. */
+  rateLimits?: { providerTpm?: Partial<Record<ProviderType, number>> };
   /** Extended context: compact history/input that exceeds the model's window. */
   extendedContext?: ExtendedContextConfig;
   cascadeAuto?: boolean;

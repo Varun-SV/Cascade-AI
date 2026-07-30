@@ -250,9 +250,7 @@ export class CascadeRouter extends EventEmitter {
     const availableProviders = await this.detectAvailableProviders(config.providers);
     this.selector = new ModelSelector(availableProviders);
     this.failover = new FailoverManager(this.selector);
-    this.tpmLimiter = new TpmLimiter((config as unknown as {
-      rateLimits?: { providerTpm?: Partial<Record<ProviderType, number>> };
-    }).rateLimits?.providerTpm ?? {});
+    this.tpmLimiter = new TpmLimiter(config.rateLimits?.providerTpm ?? {});
 
     this.localQueue = new LocalRequestQueue(config.localConcurrency ?? 1);
 
@@ -303,6 +301,33 @@ export class CascadeRouter extends EventEmitter {
       // Same shared Set the selector holds — marks azure usable for tier-fill
       // and the "any available model" fallback below.
       availableProviders.add('azure');
+    }
+
+    // GitHub Models has no static MODELS catalog entries and no user-declared
+    // deployment like Azure's — its real, callable ids exist ONLY via a live
+    // catalog fetch. Run that fetch synchronously here (mirroring the
+    // openai-compatible discovery above) so a github-models-only or
+    // github-models-as-fallback configuration has at least one registered,
+    // real model in time for the tier-fill loop below. The background
+    // refreshLiveData() path (see discoverProviderModels) is an ONGOING
+    // re-discovery that fires fire-and-forget well after init() returns —
+    // relying on it alone left every tier permanently empty for a
+    // github-models-only setup, since applyLivePricing() only refreshes a
+    // tier model that already exists and never fills one that was never set.
+
+    // GitHub Models has no static MODELS catalog entries and no user-declared
+    // deployment like Azure's — its real, callable ids exist ONLY via a live
+    // catalog fetch. Run that fetch synchronously here (mirroring the
+    // openai-compatible discovery above) so a github-models-only or
+    // github-models-as-fallback configuration has at least one registered,
+    // real model in time for the tier-fill loop below. The background
+    // refreshLiveData() path (see discoverProviderModels) is an ONGOING
+    // re-discovery that fires fire-and-forget well after init() returns —
+    // relying on it alone left every tier permanently empty for a
+    // github-models-only setup, since applyLivePricing() only refreshes a
+    // tier model that already exists and never fills one that was never set.
+    if (availableProviders.has('github-models')) {
+      await this.discoverGitHubModelsCatalog(config);
     }
 
     // Validate the official cloud providers against their own model list, so
@@ -1150,6 +1175,27 @@ export class CascadeRouter extends EventEmitter {
     } catch (err) {
       console.warn('[router] OpenAI-compatible model discovery failed:', err instanceof Error ? err.message : err);
       return false;
+    }
+  }
+
+  /**
+   * Registers GitHub Models' real catalog ids via addDynamicModel so init()'s
+   * tier-fill loop can pick one. Registration alone does not create a bound
+   * BaseProvider instance (see ensureProvider) — the tier-fill loop's own
+   * ensureProvider call does that for whichever model it actually selects,
+   * which is why this runs BEFORE that loop rather than only in the
+   * background discoverProviderModels() refresh.
+   */
+  private async discoverGitHubModelsCatalog(config: CascadeConfig): Promise<void> {
+    const cfg = config.providers.find((p) => p.type === 'github-models') ?? { type: 'github-models' as const };
+    const seed = this.getAnyModelForProvider('github-models');
+    if (!seed) return;
+    try {
+      const provider = new GitHubModelsProvider(cfg, seed);
+      const models = await provider.listModels();
+      for (const m of models) this.selector.addDynamicModel(m);
+    } catch (err) {
+      console.warn('[router] GitHub Models catalog discovery failed:', err instanceof Error ? err.message : err);
     }
   }
 

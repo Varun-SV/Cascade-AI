@@ -12,7 +12,7 @@
 //  a pooled/shared key would be exhausted by one user's afternoon.
 
 import OpenAI from 'openai';
-import type { ModelInfo, ProviderConfig } from '../types.js';
+import type { GenerateOptions, GenerateResult, ModelInfo, ProviderConfig, StreamChunk } from '../types.js';
 import {
   GITHUB_MODELS_API_VERSION,
   GITHUB_MODELS_CATALOG_URL,
@@ -112,6 +112,27 @@ export class GitHubModelsProvider extends OpenAIProvider {
   }
 
   /**
+   * `OpenAIProvider.generateStream()` builds its request budget as
+   * `options.maxTokens ?? this.model.maxOutputTokens` — an explicit per-call
+   * `maxTokens` (T1Administrator's final compilation asks for 8,000, well
+   * above GitHub's real ~4K hard cap) wins outright and is sent unclamped.
+   * GitHub then rejects the request instead of answering, so a run routed to
+   * this provider for that step fails outright rather than getting a
+   * (perfectly serviceable, just shorter) completion. Clamp here, once, right
+   * before delegating to the inherited implementation, rather than teaching
+   * every caller GitHub's specific cap.
+   */
+  override async generateStream(
+    options: GenerateOptions,
+    onChunk: (chunk: StreamChunk) => void,
+  ): Promise<GenerateResult> {
+    const clamped = options.maxTokens !== undefined && options.maxTokens > GITHUB_MODELS_MAX_OUTPUT_TOKENS
+      ? { ...options, maxTokens: GITHUB_MODELS_MAX_OUTPUT_TOKENS }
+      : options;
+    return super.generateStream(clamped, onChunk);
+  }
+
+  /**
    * The catalog is a GitHub REST resource, not an OpenAI `/models` list, and
    * wants GitHub's own header trio — the plain `Accept: application/json` the
    * openai-compatible provider sends is not the same request.
@@ -161,7 +182,16 @@ export class GitHubModelsProvider extends OpenAIProvider {
       })
       .filter((e): e is { id: string; name: string; contextWindow: number; vision: boolean } => e !== undefined);
 
-    if (entries.length === 0) return [this.model];
+    // Unlike openai-compatible's identical-looking fallback, `this.model` here
+    // is never a model the user actually typed in — every production caller
+    // (the router's synthesized seed, setup/REPL's "dummy" probe seed)
+    // constructs this provider with a non-callable placeholder id. Returning
+    // it as if it were a real catalog entry would let that placeholder get
+    // cached, offered in a tier picker, or selected as a fallback, and the
+    // eventual API call would 404 on a literal id like `"github-models"` or
+    // `"dummy"` — a confusing failure with no diagnostic trail. An empty
+    // catalog fetch means exactly that: nothing usable was discovered.
+    if (entries.length === 0) return [];
 
     // The catalog carries embedders alongside chat models, so filter as every
     // other provider does. If that somehow empties the list the ids are shaped

@@ -189,3 +189,45 @@ describe('ModelSelector — GitHub Models stays out of Cascade Auto scoring', ()
     expect(selector.selectForTier('T1', 'github-models:openai/gpt-4o')!.provider).toBe('github-models');
   });
 });
+
+describe('ModelSelector — getNextFallback for a dynamically-resolved pin', () => {
+  it('falls over to another usable model when the failed id is not in the static priority chain', () => {
+    // Regression (Codex P2): getNextFallback used to return null outright
+    // whenever the failed model wasn't in the tier's static priority list —
+    // true for EVERY dynamically-resolved pin (github-models, an Azure
+    // deployment, an openai-compatible/Ollama id, a live-discovered model).
+    // A 429 on a pinned github-models model left the run with no fallback at
+    // all even when another configured provider could clearly serve the tier.
+    const selector = new ModelSelector(new Set(['github-models', 'anthropic']));
+    selector.addDynamicModel({
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'github-models',
+      contextWindow: 128_000, isVisionCapable: true,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    });
+    const fallback = selector.getNextFallback('openai/gpt-4o', 'T1');
+    expect(fallback).not.toBeNull();
+    expect(fallback!.provider).toBe('anthropic');
+  });
+
+  it('still returns null when no other provider has anything usable', () => {
+    const selector = new ModelSelector(new Set(['github-models']));
+    selector.addDynamicModel({
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'github-models',
+      contextWindow: 128_000, isVisionCapable: true,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    });
+    expect(selector.getNextFallback('openai/gpt-4o', 'T1')).toBeNull();
+  });
+
+  it('leaves the existing priority-chain walk unchanged for a statically-known model', () => {
+    // The new branch must only fire for currentIdx === -1 — a model that IS in
+    // the chain still walks forward from its own position, not the new "any
+    // usable model" path.
+    const selector = new ModelSelector(new Set(['anthropic', 'openai', 'gemini']));
+    const next = selector.getNextFallback('claude-opus-4', 'T1');
+    expect(next).not.toBeNull();
+    expect(next!.id).not.toBe('claude-opus-4');
+  });
+});

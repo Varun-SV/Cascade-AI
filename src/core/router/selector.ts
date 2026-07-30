@@ -153,7 +153,20 @@ export class ModelSelector {
   getNextFallback(currentModelId: string, tier: TierRole): ModelInfo | null {
     const priority = this.getPriorityList(tier);
     const currentIdx = priority.indexOf(currentModelId);
-    if (currentIdx === -1) return null;
+    if (currentIdx === -1) {
+      // The failed model isn't in the tier's static priority chain — true for
+      // every dynamically-resolved pin (an explicit `github-models:…`,
+      // `azure:…`, `openai-compatible:…` or Ollama-tag override, or a
+      // live-discovered model the bundled catalog doesn't know about yet).
+      // Rather than reporting "no fallback" outright when other configured
+      // providers could still serve the tier, fall to any other usable model —
+      // the same worst-case fallback selectForTier() already uses when no
+      // priority entry matches at all.
+      for (const [id, model] of this.availableModels) {
+        if (id !== currentModelId && this.isUsable(model)) return model;
+      }
+      return null;
+    }
 
     for (let i = currentIdx + 1; i < priority.length; i++) {
       const key = priority[i]!;

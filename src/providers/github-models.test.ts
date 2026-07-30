@@ -158,6 +158,32 @@ describe('GitHubModelsProvider — owner-prefixed reasoning detection', () => {
   });
 });
 
+describe('GitHubModelsProvider — clamps explicit maxTokens to the output cap', () => {
+  it('caps a maxTokens above the 4K limit (e.g. T1Administrator\'s 8,000)', async () => {
+    sdk.frames = [{ choices: [{ delta: { content: 'ok' } }] }, { choices: [{ finish_reason: 'stop' }] }];
+    await makeProvider().generateStream(
+      { messages: [{ role: 'user', content: 'hi' }], maxTokens: 8_000 },
+      () => { /* drop */ },
+    );
+    expect(sdk.createCalls[0]?.['max_tokens']).toBe(4_000);
+  });
+
+  it('leaves a maxTokens already under the cap untouched', async () => {
+    sdk.frames = [{ choices: [{ delta: { content: 'ok' } }] }, { choices: [{ finish_reason: 'stop' }] }];
+    await makeProvider().generateStream(
+      { messages: [{ role: 'user', content: 'hi' }], maxTokens: 500 },
+      () => { /* drop */ },
+    );
+    expect(sdk.createCalls[0]?.['max_tokens']).toBe(500);
+  });
+
+  it('leaves an unset maxTokens to fall through to the model default', async () => {
+    sdk.frames = [{ choices: [{ delta: { content: 'ok' } }] }, { choices: [{ finish_reason: 'stop' }] }];
+    await makeProvider().generateStream({ messages: [{ role: 'user', content: 'hi' }] }, () => { /* drop */ });
+    expect(sdk.createCalls[0]?.['max_tokens']).toBe(4_000);
+  });
+});
+
 describe('GitHubModelsProvider — inherited OpenAI request path', () => {
   it('generateStream() goes through the inherited implementation unmodified', async () => {
     sdk.frames = [
@@ -266,12 +292,15 @@ describe('GitHubModelsProvider — listModels', () => {
     expect(models[2]!.contextWindow).toBe(128_000); // neutral default
   });
 
-  it('falls back to the seed model on an empty or unrecognised catalog body', async () => {
+  it('returns empty, never the construction seed, on an empty or unrecognised catalog body', async () => {
+    // Unlike openai-compatible, the seed here is always a non-callable
+    // placeholder in every production path — surfacing it as a discovered
+    // model would let it be selected and 404 with no diagnostic trail.
     for (const body of [{ models: [] }, { unexpected: 'shape' }, [{ no_id_field: true }], null]) {
       catalog.calls = [];
       catalog.body = body;
       const models = await makeProvider('openai/gpt-4o').listModels();
-      expect(models.map((m) => m.id)).toEqual(['openai/gpt-4o']);
+      expect(models).toEqual([]);
     }
   });
 

@@ -295,7 +295,17 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
             const dummyModel = { id: 'dummy', name: 'dummy', provider: type as never, contextWindow: 0, isVisionCapable: false, inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, maxOutputTokens: 0, supportsStreaming: false, isLocal: false };
             const p = new GitHubModelsProvider({ type, apiKey }, dummyModel);
             const fetched = await p.listModels();
-            fetched.forEach(m => models.push({ id: m.id, name: m.name, providerLabel: entry.label }));
+            // Store `github-models:<catalog id>`, not the bare catalog id.
+            // Catalog ids are themselves owner-prefixed and contain a `/`
+            // (`openai/gpt-4o`) — with the provider omitted, and before this
+            // provider's live catalog has been registered with the router
+            // (init() hasn't run yet when this tier is saved), the id has no
+            // static entry to exact-match against. It would fall through to
+            // resolveDynamicModel()'s bare-id heuristics, which reads a `/` in
+            // the id as an openai-compatible (llama.cpp-style) path and
+            // misattributes the pin to that provider — or to Ollama — whenever
+            // either is also configured, rather than to GitHub Models.
+            fetched.forEach(m => models.push({ id: `${type}:${m.id}`, name: m.name, providerLabel: entry.label }));
             dispatchRef.current({ type: 'SET_FETCH_LOG', line: `  ✔ ${entry.label} — ${fetched.length} models` });
           } else if (type === 'gemini') {
             const { GeminiProvider } = await import('../../providers/gemini.js');
