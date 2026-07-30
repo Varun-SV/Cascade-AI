@@ -313,7 +313,7 @@ export function SettingsView({ socket }: Props) {
     }
 
     // Keys are now stored; clear the inputs so placeholders show "key set".
-    setAnthropicKey(''); setOpenaiKey(''); setGeminiKey(''); setOcKey('');
+    setAnthropicKey(''); setOpenaiKey(''); setGeminiKey(''); setGithubModelsKey(''); setOcKey('');
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -372,7 +372,7 @@ export function SettingsView({ socket }: Props) {
                 { id: 'anthropic', label: 'Anthropic', val: anthropicKey, set: setAnthropicKey, placeholder: 'sk-ant-…' },
                 { id: 'openai', label: 'OpenAI', val: openaiKey, set: setOpenaiKey, placeholder: 'sk-…' },
                 { id: 'gemini', label: 'Google', val: geminiKey, set: setGeminiKey, placeholder: 'AIza…' },
-                { id: 'github-models', label: 'GitHub Models', val: githubModelsKey, set: setGithubModelsKey, placeholder: 'ghp_… (fine-grained PAT, "models: read")' },
+                { id: 'github-models', label: 'GitHub Models', val: githubModelsKey, set: setGithubModelsKey, placeholder: 'github_pat_… (fine-grained PAT, "models: read")' },
               ].map(({ id, label, val, set, placeholder }) => (
                 <div key={label}>
                   <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>

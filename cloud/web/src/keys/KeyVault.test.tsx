@@ -61,10 +61,13 @@ describe('KeyVault', () => {
     // Fixed endpoint (models.github.ai) — unlike azure/openai-compatible, no
     // base URL field should render for this provider.
     expect(screen.queryByPlaceholderText('https://...')).not.toBeInTheDocument();
-    fireEvent.change(screen.getByPlaceholderText('sk-...'), { target: { value: 'ghp_test123' } });
+    // Fine-grained PATs (github_pat_...), not classic tokens (ghp_...) — the
+    // API requires the "models: read" permission, which only fine-grained
+    // PATs can scope.
+    fireEvent.change(screen.getByPlaceholderText('github_pat_... (fine-grained, "models: read")'), { target: { value: 'github_pat_test123' } });
     fireEvent.click(screen.getByText('Save'));
 
-    expect(onChange).toHaveBeenCalledWith([{ type: 'github-models', apiKey: 'ghp_test123' }]);
+    expect(onChange).toHaveBeenCalledWith([{ type: 'github-models', apiKey: 'github_pat_test123' }]);
   });
 
   it('does not offer a Model field for GitHub Models, since nothing in the SDK reads ProviderConfig.model for it', () => {
