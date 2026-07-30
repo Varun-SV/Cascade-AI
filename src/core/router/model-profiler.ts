@@ -95,6 +95,16 @@ export class ModelProfiler {
     );
     if (toProfile.length === 0) return;
 
+    // queryModelDirectly() always probes whatever T3 CURRENTLY resolves to
+    // (it calls router.generate('T3', …) with no model override) — never the
+    // specific `model` being iterated in the loop below. Compute this once:
+    // if T3 is pinned to (or falls back to) a github-models model, EVERY
+    // probe in this batch lands on that same rate-limited endpoint no matter
+    // which catalog entry is nominally "being profiled" — so the guard has
+    // to key off the model that actually receives the requests, not the
+    // provider of whichever model happens to be unmatched by OpenRouter.
+    const probesHitGithubModels = this.router?.getModelForTier('T3')?.provider === 'github-models';
+
     // Fetch OpenRouter catalog once
     const openRouterModels = await fetchOpenRouterModels();
     const orByNormalizedId = new Map<string, OpenRouterModel>();
@@ -116,8 +126,10 @@ export class ModelProfiler {
           specializations = extractSpecializations(orMatch.description);
         }
 
-        // Fall back to direct LLM query if no data found
-        if (specializations.length === 0 && this.router) {
+        // Fall back to direct LLM query if no data found — unless every probe
+        // in this batch would land on a rate-limited github-models model (see
+        // probesHitGithubModels above). Left unprofiled rather than guessed.
+        if (specializations.length === 0 && this.router && !probesHitGithubModels) {
           specializations = await queryModelDirectly(this.router, model);
         }
 

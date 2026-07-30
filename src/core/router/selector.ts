@@ -11,6 +11,7 @@ import {
   MODELS,
 } from '../../constants.js';
 import { withResolvedPricing } from './pricing.js';
+import { GITHUB_MODELS_MAX_INPUT_TOKENS, GITHUB_MODELS_MAX_OUTPUT_TOKENS } from '../../providers/github-models.js';
 
 /** Normalize a model id for cross-source comparison (Gemini prefixes `models/`). */
 function normalizeModelId(id: string): string {
@@ -147,18 +148,47 @@ export class ModelSelector {
         return model;
       }
     }
+    // VISION_MODEL_PRIORITY only covers the bundled static catalog — a
+    // vision-capable model that's discovered live (GitHub Models has no
+    // static catalog entries at all; a locally-discovered Ollama vision tag
+    // like llava is in the same position) is otherwise invisible here even
+    // when it's the only vision-capable model actually available, and this is
+    // the sole path a vision-required call resolves through — it runs before
+    // any explicit tier/vision override is even consulted. Same worst-case
+    // widening selectForTier() and getNextFallback() already apply elsewhere.
+    for (const model of this.availableModels.values()) {
+      if (this.availableProviders.has(model.provider) && model.isVisionCapable) return model;
+    }
     return null;
   }
 
   getNextFallback(currentModelId: string, tier: TierRole): ModelInfo | null {
     const priority = this.getPriorityList(tier);
     const currentIdx = priority.indexOf(currentModelId);
-    if (currentIdx === -1) return null;
 
-    for (let i = currentIdx + 1; i < priority.length; i++) {
-      const key = priority[i]!;
-      const model = this.availableModels.get(key);
-      if (model && this.isUsable(model)) return model;
+    // The failed model IS in the tier's static priority chain (e.g. a
+    // bundled-catalog model like gpt-4o) — walk the remaining static entries
+    // first, same as before. currentIdx === -1 (every dynamically-resolved
+    // pin: an explicit `github-models:…`/`azure:…`/`openai-compatible:…`/
+    // Ollama-tag override, or a live-discovered model the bundled catalog
+    // doesn't know about) skips straight past this loop to the widening below.
+    if (currentIdx !== -1) {
+      for (let i = currentIdx + 1; i < priority.length; i++) {
+        const key = priority[i]!;
+        const model = this.availableModels.get(key);
+        if (model && this.isUsable(model)) return model;
+      }
+    }
+
+    // Reached either because the failed model was never in the static chain
+    // at all, OR because it was but every remaining static entry is also
+    // unavailable (e.g. a mixed OpenAI + GitHub Models config where OpenAI's
+    // own failure just took out the rest of that chain too). Either way,
+    // don't report "no fallback" while another configured provider could
+    // still serve the tier — fall to any other usable model, the same
+    // worst-case widening selectForTier() already uses.
+    for (const [id, model] of this.availableModels) {
+      if (id !== currentModelId && this.isUsable(model)) return model;
     }
     return null;
   }
@@ -246,7 +276,7 @@ export class ModelSelector {
     if (overrideModelId.includes(':')) {
       const parts = overrideModelId.split(':');
       const prefix = parts[0]!.toLowerCase();
-      const validProviders = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama'];
+      const validProviders = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama', 'github-models'];
       if (validProviders.includes(prefix)) {
         providerStr = prefix as ProviderType;
         actualId = parts.slice(1).join(':');
@@ -278,6 +308,43 @@ export class ModelSelector {
       else if (this.availableProviders.has('ollama')) providerStr = 'ollama';
       else if (this.availableProviders.has('openai-compatible')) providerStr = 'openai-compatible';
       else if (this.availableProviders.size === 1) providerStr = Array.from(this.availableProviders)[0]!;
+    }
+
+    if (providerStr === 'github-models' && this.availableProviders.has('github-models')) {
+      // Reached when a `github-models:<id>` pin resolves before the live
+      // catalog has registered that exact id (discovery hasn't run yet, the
+      // fetch failed, or the response omitted it) — the generic synthesis
+      // below would advertise a 128K context window and 8K output cap, both
+      // well above GitHub's real ~8K input / ~4K output per-request quota
+      // (github-models.ts), reopening the exact "advertised more than
+      // GitHub will accept" compaction bug and TPM over-reservation those
+      // caps exist to close. $0/pricingUnknown:false matches the real
+      // provider's listModels() — GitHub's usage is genuinely free, bundled
+      // into the account's plan, not an unpriced gap for withResolvedPricing
+      // to fill in (it has no pricing-data.json row for this provider at all).
+      const dynamicModel: ModelInfo = {
+        id: actualId,
+        name: actualId,
+        provider: 'github-models',
+        contextWindow: GITHUB_MODELS_MAX_INPUT_TOKENS,
+        isVisionCapable: false,
+        inputCostPer1kTokens: 0,
+        outputCostPer1kTokens: 0,
+        pricingUnknown: false,
+        maxOutputTokens: GITHUB_MODELS_MAX_OUTPUT_TOKENS,
+        supportsStreaming: true,
+        // Unconfirmed (no live catalog entry to read a real capability from)
+        // must default to false, not left undefined: t3-worker.ts's text-tool
+        // fallback only engages on a strict `=== false`, so an undefined
+        // value here sends native `tools` to an unverified multi-vendor
+        // model and any that don't support function calling reject the
+        // request outright. Same default-to-false-when-unconfirmed policy
+        // listModels() already applies for a real catalog entry.
+        supportsToolUse: false,
+        isLocal: false,
+      };
+      this.addDynamicModel(dynamicModel);
+      return dynamicModel;
     }
 
     if (providerStr && this.availableProviders.has(providerStr)) {

@@ -44,6 +44,7 @@ export async function doctorCommand(): Promise<void> {
     { type: 'openai', name: 'OpenAI' },
     { type: 'gemini', name: 'Google Gemini' },
     { type: 'azure', name: 'Azure OpenAI' },
+    { type: 'github-models', name: 'GitHub Models' },
   ];
 
   for (const { type, name } of providers) {

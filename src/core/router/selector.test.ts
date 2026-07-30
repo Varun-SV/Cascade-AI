@@ -136,3 +136,201 @@ describe('ModelSelector — provider model validation (discovery)', () => {
     expect(selector.getCandidatesForTier('T3').some((m) => m.id === 'gemini-3.5-flash')).toBe(true);
   });
 });
+
+describe('ModelSelector — GitHub Models explicit tier pin', () => {
+  // GitHub Models catalog ids are themselves owner-prefixed and contain a `/`
+  // (`openai/gpt-4o`), while the override syntax splits on `:`. The two must
+  // not interfere: `github-models:openai/gpt-4o` has to resolve to provider
+  // `github-models` and the id `openai/gpt-4o` — with the slash intact,
+  // because that full form is what the inference endpoint is addressed by.
+  it('resolves a "github-models:owner/model" pin to the right provider and id', () => {
+    // Two available providers, so this cannot pass by accident via the
+    // "only one provider configured" fallback at the end of the heuristics.
+    const selector = new ModelSelector(new Set(['github-models', 'anthropic']));
+    const m = selector.selectForTier('T1', 'github-models:openai/gpt-4o');
+    expect(m).not.toBeNull();
+    expect(m!.provider).toBe('github-models');
+    expect(m!.id).toBe('openai/gpt-4o');
+  });
+
+  it('keeps the whole owner/model id even when the prefix split could swallow it', () => {
+    const selector = new ModelSelector(new Set(['github-models', 'anthropic']));
+    const m = selector.selectForTier('T2', 'github-models:meta/Llama-3.3-70B-Instruct');
+    expect(m!.id).toBe('meta/Llama-3.3-70B-Instruct');
+    expect(m!.provider).toBe('github-models');
+  });
+
+  it('never marks a pinned GitHub Models entry as local', () => {
+    // isLocal drives the shared local request queue, the 300s local inference
+    // timeout, and the "[local]" label — none of which is true for a hosted API.
+    const selector = new ModelSelector(new Set(['github-models', 'anthropic']));
+    expect(selector.selectForTier('T3', 'github-models:openai/gpt-4o')!.isLocal).toBe(false);
+  });
+
+  it('synthesizes an unresolved pin with GitHub\'s real caps, not the generic 128K/8K defaults', () => {
+    // Regression (Codex P2): this path fires when the pin resolves before the
+    // live catalog has registered this exact id (discovery hasn't run yet,
+    // the fetch failed, or the response omitted it) — every test above hits
+    // it too, since none register a dynamic model first. The generic
+    // synthesis used to hand back a 128K context window and 8K output cap,
+    // both well above GitHub's real ~8K input / ~4K output per-request quota
+    // (github-models.ts), so a long prompt bypassed compaction and failed at
+    // inference, and the TPM guard reserved far more than the call could
+    // ever actually consume. Pricing must also be a real $0
+    // (pricingUnknown: false), matching the live provider's listModels() —
+    // not withResolvedPricing()'s "unknown" verdict, since GitHub Models has
+    // no pricing-data.json row at all by design.
+    const selector = new ModelSelector(new Set(['github-models', 'anthropic']));
+    const m = selector.selectForTier('T1', 'github-models:openai/gpt-4o');
+    expect(m!.contextWindow).toBe(8_000);
+    expect(m!.maxOutputTokens).toBe(4_000);
+    expect(m!.inputCostPer1kTokens).toBe(0);
+    expect(m!.outputCostPer1kTokens).toBe(0);
+    expect(m!.pricingUnknown).toBe(false);
+    // Unconfirmed tool support must default to false, not undefined:
+    // t3-worker.ts's text-tool fallback only engages on a strict `=== false`.
+    expect(m!.supportsToolUse).toBe(false);
+  });
+
+  it('does not synthesize a github-models pin when the provider is not configured', () => {
+    const selector = new ModelSelector(new Set(['anthropic']));
+    expect(selector.selectForTier('T1', 'github-models:openai/gpt-4o')).toBeNull();
+  });
+});
+
+describe('ModelSelector — GitHub Models stays out of Cascade Auto scoring', () => {
+  it('a discovered GitHub Models model never enters the scored candidate pool', () => {
+    // Deliberate: it prices as the cost-efficiency ceiling ($0), so letting it
+    // compete in automatic per-subtask fan-out — especially T3's parallel waves
+    // — is the fastest way to blow through a ~10 RPM budget. The exclusion is
+    // structural (no static catalog entries ⇒ its provider is never in any
+    // tier's priority chain), not a special case; this pins that behaviour.
+    const selector = new ModelSelector(new Set(['github-models', 'gemini']));
+    selector.addDynamicModel({
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'github-models',
+      contextWindow: 128_000, isVisionCapable: true,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    });
+    for (const tier of ['T1', 'T2', 'T3'] as const) {
+      expect(selector.getCandidatesForTier(tier).some((m) => m.provider === 'github-models'), tier).toBe(false);
+    }
+    // …but an explicit pin still reaches it.
+    expect(selector.selectForTier('T1', 'github-models:openai/gpt-4o')!.provider).toBe('github-models');
+  });
+});
+
+describe('ModelSelector — getNextFallback for a dynamically-resolved pin', () => {
+  it('falls over to another usable model when the failed id is not in the static priority chain', () => {
+    // Regression (Codex P2): getNextFallback used to return null outright
+    // whenever the failed model wasn't in the tier's static priority list —
+    // true for EVERY dynamically-resolved pin (github-models, an Azure
+    // deployment, an openai-compatible/Ollama id, a live-discovered model).
+    // A 429 on a pinned github-models model left the run with no fallback at
+    // all even when another configured provider could clearly serve the tier.
+    const selector = new ModelSelector(new Set(['github-models', 'anthropic']));
+    selector.addDynamicModel({
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'github-models',
+      contextWindow: 128_000, isVisionCapable: true,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    });
+    const fallback = selector.getNextFallback('openai/gpt-4o', 'T1');
+    expect(fallback).not.toBeNull();
+    expect(fallback!.provider).toBe('anthropic');
+  });
+
+  it('still returns null when no other provider has anything usable', () => {
+    const selector = new ModelSelector(new Set(['github-models']));
+    selector.addDynamicModel({
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'github-models',
+      contextWindow: 128_000, isVisionCapable: true,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    });
+    expect(selector.getNextFallback('openai/gpt-4o', 'T1')).toBeNull();
+  });
+
+  it('leaves the existing priority-chain walk unchanged for a statically-known model', () => {
+    // The new branch must only fire for currentIdx === -1 — a model that IS in
+    // the chain still walks forward from its own position, not the new "any
+    // usable model" path.
+    const selector = new ModelSelector(new Set(['anthropic', 'openai', 'gemini']));
+    const next = selector.getNextFallback('claude-opus-4', 'T1');
+    expect(next).not.toBeNull();
+    expect(next!.id).not.toBe('claude-opus-4');
+  });
+
+  it('falls to a dynamic model when a STATIC model fails and the rest of its chain is also unusable', () => {
+    // Regression (Codex P2): the "any usable model" widening only fired when
+    // the failed id wasn't in the static chain AT ALL (currentIdx === -1).
+    // A mixed OpenAI + GitHub Models config where OpenAI's own gpt-4o failed
+    // (currentIdx !== -1, so recordFailure('openai', …) had already marked
+    // the whole provider unavailable) walked only the REMAINING static T1
+    // entries — none usable, since they're all 'openai' too — and returned
+    // null outright, even though a discovered github-models model was ready.
+    const selector = new ModelSelector(new Set(['github-models']));
+    selector.addDynamicModel({
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o (via GitHub)', provider: 'github-models',
+      contextWindow: 128_000, isVisionCapable: true,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    });
+    // 'gpt-4o' is a real T1_MODEL_PRIORITY entry — its provider ('openai') is
+    // NOT in availableProviders, simulating recordFailure() having just
+    // disabled it, so every remaining static entry the walk reaches is
+    // equally unusable.
+    const fallback = selector.getNextFallback('gpt-4o', 'T1');
+    expect(fallback).not.toBeNull();
+    expect(fallback!.provider).toBe('github-models');
+  });
+});
+
+describe('ModelSelector — selectVisionModel for a dynamically-discovered model', () => {
+  it('finds a live-discovered vision-capable model when nothing in the static priority list matches', () => {
+    // Regression (Codex P2): selectVisionModel() only walked
+    // VISION_MODEL_PRIORITY, a fixed list of static-catalog keys. GitHub
+    // Models has zero static catalog entries, so a github-models-only
+    // configuration failed every vision-required call with "No model
+    // available" even though a vision-capable model was registered and
+    // available — this is the ONLY path a vision-required generate() call
+    // resolves through, ahead of any tier model or explicit override.
+    const selector = new ModelSelector(new Set(['github-models']));
+    selector.addDynamicModel({
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'github-models',
+      contextWindow: 128_000, isVisionCapable: true,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    });
+    const vision = selector.selectVisionModel();
+    expect(vision).not.toBeNull();
+    expect(vision!.provider).toBe('github-models');
+    expect(vision!.id).toBe('openai/gpt-4o');
+  });
+
+  it('ignores a dynamically-discovered model with no vision capability', () => {
+    const selector = new ModelSelector(new Set(['github-models']));
+    selector.addDynamicModel({
+      id: 'meta/Llama-3.3-70B-Instruct', name: 'Llama 3.3 70B', provider: 'github-models',
+      contextWindow: 128_000, isVisionCapable: false,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    });
+    expect(selector.selectVisionModel()).toBeNull();
+  });
+
+  it('still prefers the static VISION_MODEL_PRIORITY list when it has a match', () => {
+    // The dynamic fallback must only fire when the static walk finds nothing —
+    // it must not override an already-working, benchmarked default.
+    const selector = new ModelSelector(new Set(['anthropic', 'github-models']));
+    selector.addDynamicModel({
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'github-models',
+      contextWindow: 128_000, isVisionCapable: true,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    });
+    const vision = selector.selectVisionModel();
+    expect(vision).not.toBeNull();
+    expect(vision!.provider).toBe('anthropic'); // the static priority list's own vision model wins
+  });
+});

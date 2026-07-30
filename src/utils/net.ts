@@ -34,10 +34,26 @@ const MAX_REDIRECTS = 5;
 // decompresses gzip/deflate/br bodies — otherwise an endpoint that canonicalises
 // `/models` with a 3xx redirect, or sits behind a proxy that gzips responses,
 // looks "unreachable" even though a browser/curl reach it fine.
+export interface NodeHttpFetchOptions {
+  /**
+   * When set, every redirect hop (not just the initial request) must resolve
+   * to this exact origin, or the fetch rejects instead of following it. For
+   * a caller sending a credential in `init.headers` (a bearer token, a PAT),
+   * omitting this means that credential is replayed on ANY origin a 3xx
+   * response points to — a malicious or misconfigured redirect, including an
+   * HTTPS→HTTP downgrade, would silently exfiltrate it, since `init` (and
+   * its headers) is reused verbatim on the followed request below. Every
+   * existing caller omits this and keeps today's follow-anywhere behaviour
+   * unchanged; it exists for exactly the callers that attach a credential.
+   */
+  allowedRedirectOrigin?: string;
+}
+
 export async function nodeHttpFetch(
   input: string | URL | Request,
   init: RequestInit = {},
   redirectCount = 0,
+  opts: NodeHttpFetchOptions = {},
 ): Promise<Response> {
   const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
   const u = new URL(preferIpv4Host(urlStr) ?? urlStr);
@@ -77,13 +93,17 @@ export async function nodeHttpFetch(
         if (status >= 300 && status < 400 && location && redirectCount < MAX_REDIRECTS) {
           res.resume(); // drain the redirect body so the socket can be reused
           const nextUrl = new URL(location, u).href;
+          if (opts.allowedRedirectOrigin && new URL(nextUrl).origin !== opts.allowedRedirectOrigin) {
+            reject(new Error(`Refusing cross-origin redirect to ${new URL(nextUrl).origin}`));
+            return;
+          }
           // 303 (and legacy 301/302 on non-GET) downgrade to GET without a body;
           // 307/308 preserve method + body.
           const downgrade = status === 303 || ((status === 301 || status === 302) && method !== 'GET' && method !== 'HEAD');
           const nextInit: RequestInit = downgrade
             ? { ...init, method: 'GET', body: undefined }
             : init;
-          resolve(nodeHttpFetch(nextUrl, nextInit, redirectCount + 1));
+          resolve(nodeHttpFetch(nextUrl, nextInit, redirectCount + 1, opts));
           return;
         }
 

@@ -452,6 +452,17 @@ export const OLLAMA_BASE_URL = 'http://localhost:11434';
 export const LM_STUDIO_BASE_URL = 'http://localhost:1234';
 export const AZURE_BASE_URL_TEMPLATE = 'https://{resource}.openai.azure.com';
 
+// GitHub Models (models.github.ai) — a single fixed, GitHub-hosted endpoint, so
+// unlike azure/openai-compatible there is nothing here for the user to edit.
+// Inference is OpenAI-compatible; the catalog is a plain GitHub REST resource
+// and wants GitHub's own Accept/API-version headers rather than the OpenAI
+// `/models` shape. Deliberately no `MODELS` catalog entries for this provider
+// (as with azure and openai-compatible): every model is discovered live from
+// the catalog below.
+export const GITHUB_MODELS_INFERENCE_URL = 'https://models.github.ai/inference';
+export const GITHUB_MODELS_CATALOG_URL = 'https://models.github.ai/catalog/models';
+export const GITHUB_MODELS_API_VERSION = '2026-03-10';
+
 // ── Slash Commands ────────────────────────────
 // Command definitions live in src/cli/slash/index.ts.
 
@@ -509,4 +520,5 @@ export const PROVIDER_DISPLAY_NAMES: Record<ProviderType, string> = {
   azure: 'Azure OpenAI',
   'openai-compatible': 'OpenAI-Compatible',
   ollama: 'Ollama (Local)',
+  'github-models': 'GitHub Models',
 };

@@ -5,6 +5,311 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.65.0 - 2026-07-30
+
+### Added
+- **GitHub Models as a new BYOK provider** (`github-models`). Any user with a
+  GitHub/Copilot account can point Cascade at `models.github.ai`'s multi-vendor
+  catalog (OpenAI, Meta, DeepSeek, Mistral, …) using a personal fine-grained
+  PAT with the `models: read` permission — no separate OpenAI/Anthropic/Gemini
+  key needed. Wired into `cascade init`, `cascade doctor`, the REPL's model
+  refresh and startup validation, tier pins (`t1: 'github-models:openai/gpt-4o'`),
+  and live catalog re-discovery, alongside every other provider.
+  - New `src/providers/github-models.ts`, extending the existing
+    `OpenAIProvider` the same way azure/openai-compatible do — inference is
+    genuinely OpenAI-compatible, so `generate()`/`generateStream()` are
+    inherited unmodified. The catalog listing is a bespoke GitHub REST call
+    (own `Accept`/`X-GitHub-Api-Version` headers, different shape from the
+    OpenAI-compatible provider's `/models` endpoint), and the constructor
+    corrects `isReasoningModel()`'s start-anchored regex for the catalog's
+    owner-prefixed ids (`openai/o3-mini`) so the first request to an o-series
+    model doesn't burn a wasted call against a ~10 RPM budget.
+  - Pricing is a real, stated `$0` (`pricingUnknown: false`) — usage is bundled
+    into the account's existing GitHub/Copilot plan, never billed per token —
+    without setting `isLocal: true`, which would incorrectly route these calls
+    onto Ollama's shared local request queue and its 300s local timeout.
+  - Rate-limited by default to a conservative `TpmLimiter` budget (well under
+    even the Free tier's ~10 RPM) since GitHub Models has no request-count
+    limiter of its own; kept out of Cascade Auto's automatic scored routing
+    (reachable only via explicit tier pin or last-resort fallback) so its $0
+    price can't cause it to be aggressively fanned out into and exhaust that
+    budget.
+  - Fixed two provider-detection bugs found while wiring this in:
+    `selector.ts`'s `resolveDynamicModel()` and `cli/repl/index.tsx`'s
+    `inferProviderFromModelId()` each carried their own separate, undupli-
+    cated `ProviderType` list; without adding the new provider to both, a
+    `github-models:owner/model` tier pin or REPL model id would fall through
+    to a same-string heuristic and silently misattribute itself to `openai`
+    (matching on `gpt` inside the model id) instead of failing loudly or
+    resolving correctly.
+  - Desktop and cloud UI wiring (Settings, onboarding, KeyVault) is a
+    follow-up PR — this ships the SDK/CLI/router support first.
+
+### Fixed
+Codex review round on the GitHub Models PR found six further gaps, all fixed:
+- **A github-models-only (or fallback) config left every tier permanently
+  empty.** Real catalog models were only ever registered by the background
+  `refreshLiveData()` path, which fires fire-and-forget well after `init()`
+  returns; `applyLivePricing()` (the only tier-refresh point on that path)
+  refreshes a tier model that already exists but never fills one that was
+  never set. Even reaching a discovered model via the selector's live
+  "any available" fallback at `generate()` time wasn't enough — that path
+  never calls `ensureProvider()`, so the call would throw `No provider for
+  model ...`. Added a synchronous catalog discovery step in `init()` (mirroring
+  the existing openai-compatible discovery) so a real model is registered, and
+  a real provider bound, before the tier-fill loop runs.
+- **`listModels()`'s empty-catalog fallback returned the construction seed as
+  if it were a real model.** Every production caller constructs this provider
+  with a non-callable placeholder id (`"github-models"`, `"dummy"`) — unlike
+  the identical-looking pattern in `openai-compatible.ts`, where the seed can
+  genuinely be a model the user typed in. Now returns `[]` instead.
+- **A live-pricing refresh could silently start billing free GitHub Models
+  calls as a paid model.** GitHub Models' catalog ids are the same
+  owner/model spelling as real OpenRouter marketplace rows
+  (`openai/gpt-4o` is both), and `resolvePricing()` has no
+  `pricing-data.json` row for this provider by design — so
+  `reconcilePrice()`'s "baseline unknown ⇒ accept the live quote" path would
+  overwrite the deliberate, real `$0` with a paid price. `applyLivePricing()`
+  now skips reconciliation for this provider entirely.
+- **An explicit per-call `maxTokens` above GitHub's ~4K cap was sent
+  unclamped** (`T1Administrator`'s final compilation step asks for 8,000),
+  causing the API to reject the request instead of answering. The provider
+  now clamps in a `generateStream()` override before delegating to the
+  inherited implementation.
+- **`config.rateLimits.providerTpm` — the documented escape hatch for raising
+  GitHub Models' conservative default — was silently stripped by config
+  validation.** `CascadeConfigSchema` never declared the field, so
+  `validateConfig()` discarded it before the router's `TpmLimiter` could read
+  it. Added to the schema and `CascadeConfig` type; the router's read is now a
+  plain typed field access instead of an unsafe cast.
+- **`cascade init`'s tier picker stored a bare catalog id for GitHub Models**
+  (`openai/gpt-4o`, no provider prefix). Before the provider's live catalog is
+  registered, that bare id has nothing to exact-match against and falls
+  through `resolveDynamicModel()`'s heuristics, which reads the id's `/` as an
+  openai-compatible path and misattributes the pin to that provider (or to
+  Ollama) whenever either is also configured. Now stores
+  `github-models:<catalog id>`.
+- **A 429 on an explicitly pinned dynamic model (GitHub Models, an Azure
+  deployment, an openai-compatible/Ollama id) had no fallback at all**, even
+  when another configured provider could serve the tier — `getNextFallback()`
+  returned `null` outright whenever the failed id wasn't in the tier's static
+  priority chain, true for every dynamically-resolved pin. It now falls to any
+  other usable model in that case, the same worst-case fallback
+  `selectForTier()` already uses.
+
+A second Codex review pass on the same PR found four more:
+- **Every catalog request could 403 regardless of PAT validity.** `nodeHttpFetch`
+  is a thin `node:http`/`https` wrapper with no default `User-Agent` — GitHub's
+  REST API rejects any request without one. Added an explicit `User-Agent` to
+  both the catalog headers and the inference client's `defaultHeaders`.
+- **`supportsToolUse` was hardcoded `true` for every discovered model.** GitHub's
+  multi-vendor catalog includes models that don't support function/tool
+  calling; sending them a `tools` parameter they reject bypasses
+  `t3-worker.ts`'s text-tool fallback (which only engages on an explicit
+  `false`) and fails the call outright. Now derived per model from catalog
+  capability metadata, defaulting to `false` — not positively advertised — when
+  unconfirmed, since a wrong `false` only costs the slower text-tool path while
+  a wrong `true` fails the request. The live smoke test now surfaces the real
+  field names to settle the exact schema with certainty.
+- **The catalog listing only ever fetched one page.** GitHub REST list
+  endpoints are RFC 5988 paginated via a `Link` header; `listModels()` now
+  follows `rel="next"` until exhausted (capped at 20 pages against a malformed
+  or cyclic header), a no-op today and forward-compatible once the catalog
+  grows past a page.
+- **`selectVisionModel()` couldn't find a live-discovered vision model.** It
+  only ever walked the static `VISION_MODEL_PRIORITY` list — the sole path any
+  vision-required call resolves through, ahead of any tier model or explicit
+  override — so a GitHub Models vision-capable model (no static catalog entry
+  at all) was invisible to it even as the only vision-capable model actually
+  available. Added the same "any other usable model" widening already used
+  elsewhere as the worst-case fallback.
+
+### Security
+- **Pagination could exfiltrate the GitHub Models PAT to an arbitrary host.**
+  `listModels()`'s new `Link: rel="next"` following (added in the pass above)
+  took the next URL from the server-supplied header verbatim and requested it
+  with the same `Authorization: Bearer <PAT>` header as the catalog itself —
+  a malicious or misconfigured response pointing `rel="next"` at an external
+  origin would have sent the token there. Every next URL is now resolved
+  against the current page (per RFC 3986 — a relative Link value is relative
+  to the request it came from) and its origin is required to match the
+  catalog's before the request is made; a mismatch throws instead of
+  following it. Visited-URL tracking was also added so a cyclic header stops
+  on the second sighting rather than burning the full page cap on identical
+  authenticated requests. Found by Codex review; fixed and verified via the
+  same revert-confirm-restore cycle as every other fix in this release.
+
+A fourth Codex review pass found two more, plus one acknowledged but
+deliberately deferred:
+- **`getNextFallback()`'s dynamic-model widening only fired when the failed
+  model was NEVER in the static priority chain.** A mixed OpenAI + GitHub
+  Models config where OpenAI's own `gpt-4o` hit a 429 (`recordFailure()`
+  disables the whole provider) walked only the *remaining* static T1
+  entries — all `openai`, all equally unusable — and returned `null`
+  outright, even with a discovered GitHub Models model ready to serve the
+  tier. The static-chain walk and the "any usable model" widening are now
+  unified into one path: static entries are tried first when the failed id
+  is in the chain, and the widening is reached either way once they're
+  exhausted, not only when the id was never in the chain at all.
+- **The advertised context window could be far larger than GitHub will
+  accept.** GitHub enforces its own per-request INPUT token cap independent
+  of the underlying model's real window — documented and corroborated at
+  ~8,000 tokens for common Free/Pro-tier models (e.g. `gpt-4o-mini`, despite
+  that model's real ~131K context elsewhere). Exposing the catalog's
+  reported window (or the 128K fallback) let `getReferenceContextWindow()`'s
+  compaction budget and `model-ranker.ts`'s candidate filter both believe
+  far more input fit than GitHub would actually accept, so a compacted-to-fit
+  prompt reached inference and was rejected instead of being compacted
+  correctly up front. Every discovered model's `contextWindow` is now capped
+  to this ceiling, the same treatment already given to `maxOutputTokens`.
+- **Acknowledged, not fixed this round: `ModelSelector.addDynamicModel()`
+  stores entries keyed only by bare `model.id`.** If two different
+  dynamically-discovered providers ever reported the identical id string
+  (e.g. a GitHub Models catalog entry and an OpenAI-compatible endpoint both
+  happening to use the exact same owner-prefixed spelling), the
+  later-registered one would silently overwrite the earlier one in
+  `availableModels`, dropping one provider from selection. Real, but the
+  fix — provider-qualified storage — touches the key contract every method
+  on `ModelSelector` assumes (`getModelById`, the override lookup in
+  `selectForTier`, `getCandidatesForTier`, `removeModel`, …), which is a
+  larger, more invasive change than fits a review-response pass; a
+  from-scratch dynamically-discovered id collision across two different
+  providers is also a narrow edge case in practice. Left as a known,
+  documented limitation for a deliberate follow-up rather than a rushed
+  storage-key rewrite under review-response time pressure.
+
+A fifth Codex review pass found a deeper variant of the same PAT-exfiltration
+class fixed above, plus two more provider-id-collision/binding gaps:
+- **A same-origin-or-external HTTP redirect could still exfiltrate the PAT,
+  even after the `Link`-header origin check above.** That check only covers
+  the header-driven pagination path; `nodeHttpFetch` (the shared `node:http`/
+  `https` fetch shim several providers use) follows actual 3xx redirects on
+  ANY request — including the initial catalog fetch — by replaying `init`
+  (headers, so the `Authorization: Bearer <PAT>` too) verbatim on the
+  followed URL regardless of origin. A malicious or misconfigured redirect,
+  including an HTTPS→HTTP downgrade, would have sent the token wherever the
+  `Location` header pointed. Added an opt-in `allowedRedirectOrigin` option
+  to `nodeHttpFetch` (every existing caller omits it and keeps today's
+  follow-anywhere behavior unchanged) and wired it into both of
+  `github-models.ts`'s catalog calls (`listModels()` and `isAvailable()`).
+  Verified with a genuinely separate second HTTP server standing in for an
+  attacker origin — the regression test confirms the attacker server is
+  never even hit, not just that its response is ignored.
+- **A live capability refresh could silently reopen the GitHub input-token
+  cap.** `applyLiveCapabilities()` had the same provider-id-collision
+  exposure as `applyLivePricing()` (fixed in an earlier round) but without
+  the matching guard: a GitHub Models catalog id is the same owner/model
+  spelling as the real OpenRouter entry (`openai/gpt-4o` is both), so its
+  capability lookup would replace the already-correct, capped `contextWindow`
+  with the base model's much larger real window on every refresh after the
+  one at discovery time. Added the identical `if (m.provider ===
+  'github-models') return m;` guard already proven in `applyLivePricing()`.
+- **A vision-required call could throw `No provider for model ...` for a
+  live-discovered model.** `selectVisionModel()`'s widening fallback (added
+  in an earlier round) can return a discovered model — e.g. GitHub Models,
+  which has no static catalog entries at all — that was never bound to a
+  `BaseProvider` instance by any other path: not the tier-fill winner (a
+  different model can win the tier when two are discovered), not an explicit
+  `options.model` override (skipped entirely when `requireVision` is set).
+  `generate()`'s `requireVision` branch now calls the same `ensureProvider()`
+  used everywhere else immediately after resolving the vision model.
+
+A sixth Codex review pass found two more, both in the router's shared
+generation path (not GitHub-Models-specific, though GitHub Models' tight
+budgets are what surfaced them):
+- **A rate-limited per-call model pin was retried against the SAME
+  rate-limited model instead of the bound fallback.** When `options.model`
+  (Cascade Auto's explicit per-subtask override) hits a 429, the catch block
+  looks up a fallback via `failover.getFallbackModel()` and binds it — but
+  then recursed into `generate()` with the SAME unchanged `options`, whose
+  `options.model` still pointed at the failed model. Since
+  `options.model ?? this.tierModels.get(tier)` resolves the pin first, the
+  bound fallback was silently ignored and the retry re-hit the identical
+  rate-limited model, looping indefinitely while burning quota rather than
+  ever reaching the fallback. Now clears `options.model` before the retry
+  when it matches the failed model's id — the exact fix already applied to
+  the sibling model-not-found branch two rounds ago, just missing here.
+- **An explicit per-call `maxTokens` above a model's own cap inflated the
+  TPM reservation past what the call could ever actually consume.** The
+  reservation was `options.maxTokens ?? model.maxOutputTokens`, so T1's
+  8,000-token final-compilation request reserved 8,512 tokens even when
+  routed to GitHub Models, whose `generateStream()` override (added earlier
+  this release) silently clamps the actual request down to its real ~4K
+  cap — invisible to this estimate. Against GitHub Models' 8,000-token
+  default TPM bucket, that one call could reserve the entire budget instead
+  of the intended ~4,512, exactly contradicting the approximation
+  `DEFAULT_PROVIDER_TPM`'s own comment documents as the reason the bucket
+  works at all. The reservation is now capped at `model.maxOutputTokens`
+  (`Math.min(requestedTokens, model.maxOutputTokens) + 512`), provider-
+  agnostic and consistent with every provider's own request-building code,
+  which already treats `model.maxOutputTokens` as the authoritative ceiling.
+
+A seventh Codex review pass found one more variant of the same "unresolved
+GitHub Models pin gets the wrong caps" class:
+- **A `github-models:<id>` pin resolved before the live catalog registered
+  that exact id got the GENERIC synthesis defaults, not GitHub's real ones.**
+  `resolveDynamicModel()`'s fallback synthesis (for a pin naming a model the
+  selector hasn't seen yet — discovery hasn't run, the catalog fetch failed,
+  or the response omitted this id) hands back a flat 128K context window and
+  8K output cap for every provider, github-models included. Both are well
+  above GitHub's real ~8K input / ~4K output per-request quota, so a long
+  prompt built against the advertised 128K window bypassed compaction and
+  was rejected at inference, and the TPM guard (even after this release's
+  earlier cap fix) reserved far more than the call could ever consume.
+  Pricing was wrong too: `withResolvedPricing()` has no dataset row for this
+  provider by design, so the synthesized model came back `pricingUnknown:
+  true` instead of a real $0. Added a `github-models`-specific branch (gated
+  on the provider actually being configured, same as every other branch)
+  that synthesizes with the real `GITHUB_MODELS_MAX_INPUT_TOKENS` /
+  `GITHUB_MODELS_MAX_OUTPUT_TOKENS` constants (now exported from
+  `github-models.ts`) and a real `$0`/`pricingUnknown: false`, matching what
+  the live provider's own `listModels()` already produces once discovery
+  completes.
+
+An eighth Codex review pass found one more gap in that same synthesis
+branch, plus a startup-time quota exhaustion bug in an unrelated but
+Cascade-Auto-adjacent path:
+- **The unresolved-pin synthesis added in the previous round left
+  `supportsToolUse` undefined instead of `false`.** `t3-worker.ts`'s
+  text-tool fallback only engages on a strict `=== false`; `undefined`
+  sends native `tools` to an unverified multi-vendor catalog model, and any
+  that don't support function calling reject the request outright. Set to
+  `false`, matching the same default-to-false-when-unconfirmed policy
+  `listModels()` already applies for a real (non-synthesized) catalog entry.
+- **Startup model profiling could fire a burst of simultaneous requests
+  against GitHub's real ~10 RPM budget before the user submits a single
+  task.** `CascadeRouter.profileModels()` feeds every discovered model —
+  github-models catalog entries included — into `ModelProfiler.profileAll()`,
+  which runs the direct-LLM-query fallback (for any model OpenRouter has no
+  description for) across the whole batch via `Promise.allSettled`, fully in
+  parallel. Since that fallback (`queryModelDirectly`) always calls
+  `router.generate('T3', …)` — resolving to whatever T3's *current* tier
+  model is, not the specific catalog entry being profiled — registering N
+  github-models entries at startup fired N simultaneous requests at the same
+  rate-limited GitHub endpoint, a request-count burst the token-bucket TPM
+  guard has no visibility into at all. `profileAll()` now skips the
+  direct-query fallback for `github-models` models entirely (still allowed to
+  use the free OpenRouter-description lookup, which costs GitHub nothing);
+  they're recorded with empty specializations so profiling isn't re-attempted
+  every session, matching the existing "don't re-attempt" cache behavior for
+  every other unmatched model.
+
+A ninth Codex review pass found a sharper variant of that same startup
+profiling bug:
+- **The github-models profiling guard keyed off the wrong model.** The
+  previous round's fix skipped `queryModelDirectly()` only when the model
+  BEING PROFILED (the loop variable) was itself `github-models` — but that
+  function ignores which model was passed in and always calls
+  `router.generate('T3', …)` with no override, so it actually probes
+  whatever T3 currently resolves to. In a mixed-provider config with T3
+  explicitly pinned to a github-models model, every OTHER unmatched catalog
+  model (anthropic, openai, …) still passed the old guard and still fired a
+  probe — which landed on the same pinned, rate-limited GitHub endpoint
+  regardless. The guard is now computed once per `profileAll()` call from
+  `router.getModelForTier('T3')?.provider === 'github-models'` — the model
+  that actually receives every probe in the batch — rather than from each
+  individual model being profiled.
+
 ## 0.64.0 - 2026-07-30
 
 ### Fixed

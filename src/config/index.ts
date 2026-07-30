@@ -142,6 +142,13 @@ export class ConfigManager {
       openai: 'OPENAI_API_KEY',
       gemini: 'GOOGLE_API_KEY',
       azure: 'AZURE_OPENAI_KEY',
+      // Deliberately NOT `GITHUB_TOKEN`: that one is injected automatically by
+      // GitHub Actions and is commonly exported in developer shells for `gh`
+      // and git auth, and it will essentially never carry the fine-grained
+      // `models: read` scope this provider needs. Adopting it would wire up a
+      // provider that 403s on its first real call — a confusing failure for
+      // something that is meant to be explicit opt-in BYOK.
+      'github-models': 'GITHUB_MODELS_TOKEN',
     };
     const envKey = envMap[provider];
     if (envKey && process.env[envKey]) return process.env[envKey];
@@ -174,6 +181,9 @@ export class ConfigManager {
       { env: 'OPENAI_API_KEY', type: 'openai' },
       { env: 'GOOGLE_API_KEY', type: 'gemini' },
       { env: 'AZURE_OPENAI_KEY', type: 'azure' },
+      // See getApiKey() above for why this is GITHUB_MODELS_TOKEN and never
+      // the ambient GITHUB_TOKEN.
+      { env: 'GITHUB_MODELS_TOKEN', type: 'github-models' },
     ];
 
     for (const { env, type } of envProviders) {

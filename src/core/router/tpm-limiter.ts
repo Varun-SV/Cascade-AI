@@ -15,6 +15,19 @@ export const DEFAULT_PROVIDER_TPM: Record<ProviderType, number> = {
   azure: 30_000,
   'openai-compatible': 30_000,
   ollama: Number.POSITIVE_INFINITY,
+  // An order of magnitude below the others, on purpose. GitHub Models is
+  // rate-limited by REQUESTS (Free ≈10 RPM, Pro ≈20, plus low daily caps), and
+  // this bucket meters TOKENS — there is no request-count limiter in this
+  // codebase, and building one is not in scope. The approximation works because
+  // the router reserves `model.maxOutputTokens + 512` per call, and the
+  // provider reports GitHub's real ~4K per-request cap rather than the
+  // underlying model's larger one — so every call withdraws a near-constant
+  // ~4.5K regardless of how short the reply actually turns out to be. At 8K/min
+  // that lands around 1–2 calls per minute of headroom: comfortably inside even
+  // the Free tier, with room for the daily cap to matter more than this does.
+  // Users on a higher tier can raise it with no code change through the generic
+  // `config.rateLimits.providerTpm['github-models']` override.
+  'github-models': 8_000,
 };
 
 interface Bucket {

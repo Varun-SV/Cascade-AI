@@ -19,6 +19,7 @@ import type {
 import { AnthropicProvider } from '../../providers/anthropic.js';
 import { AzureOpenAIProvider, azureModelForDeployment } from '../../providers/azure.js';
 import { GeminiProvider } from '../../providers/gemini.js';
+import { GitHubModelsProvider } from '../../providers/github-models.js';
 import { OllamaProvider } from '../../providers/ollama.js';
 import { OpenAICompatibleProvider } from '../../providers/openai-compatible.js';
 import { OpenAIProvider } from '../../providers/openai.js';
@@ -249,9 +250,7 @@ export class CascadeRouter extends EventEmitter {
     const availableProviders = await this.detectAvailableProviders(config.providers);
     this.selector = new ModelSelector(availableProviders);
     this.failover = new FailoverManager(this.selector);
-    this.tpmLimiter = new TpmLimiter((config as unknown as {
-      rateLimits?: { providerTpm?: Partial<Record<ProviderType, number>> };
-    }).rateLimits?.providerTpm ?? {});
+    this.tpmLimiter = new TpmLimiter(config.rateLimits?.providerTpm ?? {});
 
     this.localQueue = new LocalRequestQueue(config.localConcurrency ?? 1);
 
@@ -304,6 +303,33 @@ export class CascadeRouter extends EventEmitter {
       availableProviders.add('azure');
     }
 
+    // GitHub Models has no static MODELS catalog entries and no user-declared
+    // deployment like Azure's — its real, callable ids exist ONLY via a live
+    // catalog fetch. Run that fetch synchronously here (mirroring the
+    // openai-compatible discovery above) so a github-models-only or
+    // github-models-as-fallback configuration has at least one registered,
+    // real model in time for the tier-fill loop below. The background
+    // refreshLiveData() path (see discoverProviderModels) is an ONGOING
+    // re-discovery that fires fire-and-forget well after init() returns —
+    // relying on it alone left every tier permanently empty for a
+    // github-models-only setup, since applyLivePricing() only refreshes a
+    // tier model that already exists and never fills one that was never set.
+
+    // GitHub Models has no static MODELS catalog entries and no user-declared
+    // deployment like Azure's — its real, callable ids exist ONLY via a live
+    // catalog fetch. Run that fetch synchronously here (mirroring the
+    // openai-compatible discovery above) so a github-models-only or
+    // github-models-as-fallback configuration has at least one registered,
+    // real model in time for the tier-fill loop below. The background
+    // refreshLiveData() path (see discoverProviderModels) is an ONGOING
+    // re-discovery that fires fire-and-forget well after init() returns —
+    // relying on it alone left every tier permanently empty for a
+    // github-models-only setup, since applyLivePricing() only refreshes a
+    // tier model that already exists and never fills one that was never set.
+    if (availableProviders.has('github-models')) {
+      await this.discoverGitHubModelsCatalog(config);
+    }
+
     // Validate the official cloud providers against their own model list, so
     // AUTO selection can't pick a bundled catalog id the key doesn't serve (then
     // 404 it and slowly fail over). Best-effort + time-boxed; cached per key.
@@ -321,7 +347,7 @@ export class CascadeRouter extends EventEmitter {
 
       const model = this.selector.selectForTier(tier, override);
       if (!model) {
-        const knownProviders = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama'];
+        const knownProviders = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama', 'github-models'];
         const hasProviderPrefix = override.includes(':') &&
           knownProviders.some(p => override.startsWith(p + ':'));
         if (hasProviderPrefix) {
@@ -508,7 +534,7 @@ export class CascadeRouter extends EventEmitter {
    * models without a package upgrade. Mirrors discoverOllamaModels.
    */
   private async discoverProviderModels(): Promise<void> {
-    const cloud: ProviderType[] = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible'];
+    const cloud: ProviderType[] = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'github-models'];
     const tasks = cloud.map(async (type) => {
       if (!this.selector.isProviderAvailable(type)) return;
       const seed = this.getAnyModelForProvider(type);
@@ -587,6 +613,17 @@ export class CascadeRouter extends EventEmitter {
       ? this.selector.selectVisionModel()
       : (options.model ?? this.tierModels.get(tier) ?? this.selector.selectForTier(tier) ?? undefined);
 
+    // A vision-required call can resolve to a live-discovered model (e.g. a
+    // github-models catalog entry) that was never bound to a BaseProvider
+    // instance anywhere else — unlike the options.model override above
+    // (bound just before this block) or a tier-fill winner (bound during
+    // init()). Without this, getProvider(model) below returns undefined for
+    // exactly that case and the call throws "No provider for model ...".
+    // ensureProvider() is a no-op if a provider is already bound.
+    if (requireVision && model) {
+      this.ensureProvider(model, this.config.providers);
+    }
+
     // Privacy tier: a local-only subtask must NEVER reach a cloud provider.
     // Swap to a private model when the resolved one isn't; hard-error rather
     // than silently falling back to cloud when no private model exists.
@@ -610,8 +647,16 @@ export class CascadeRouter extends EventEmitter {
     // Per-provider TPM guard: pause this call until the token bucket has
     // enough budget to cover the estimated input+output tokens. Prevents
     // sudden bursts of parallel T3 spawns from overshooting a provider's
-    // tokens-per-minute quota.
-    const estimatedTokens = (options.maxTokens ?? model.maxOutputTokens ?? 1024) + 512;
+    // tokens-per-minute quota. Capped at model.maxOutputTokens: some providers
+    // (github-models) silently clamp an explicit options.maxTokens down to a
+    // real per-request cap well below what a tier asked for (T1's final
+    // compilation step asks for 8,000, above GitHub's ~4K) — invisible to this
+    // estimate otherwise — so reserving the UNCLAMPED value would withdraw far
+    // more than the call can ever actually consume. This is also the exact
+    // approximation DEFAULT_PROVIDER_TPM['github-models'] documents as its
+    // design basis (tpm-limiter.ts).
+    const requestedTokens = options.maxTokens ?? model.maxOutputTokens ?? 1024;
+    const estimatedTokens = Math.min(requestedTokens, model.maxOutputTokens ?? requestedTokens) + 512;
     if (this.tpmLimiter) {
       await this.tpmLimiter.acquire(model.provider, estimatedTokens);
     }
@@ -735,7 +780,16 @@ export class CascadeRouter extends EventEmitter {
           // model (which may itself be local) can acquire its own slot.
           releaseLocalSlot?.();
           releaseLocalSlot = undefined;
-          return this.generate(tier, options, onChunk, requireVision);
+          // Clear a per-subtask pin (Cascade Auto's explicit `options.model`)
+          // that pointed at the now-rate-limited model — otherwise the
+          // recursive call's `options.model ?? this.tierModels.get(tier)`
+          // resolves right back to the pin, ignoring the fallback just bound
+          // above and re-hitting the same rate-limited provider. Same fix
+          // already applied to the model-not-found branch below.
+          const retryOpts = options.model && options.model.id === model.id
+            ? { ...options, model: undefined }
+            : options;
+          return this.generate(tier, retryOpts, onChunk, requireVision);
         }
       }
       // Stale / invalid model id (e.g. a retired preview that 404s). Drop it so
@@ -1152,6 +1206,27 @@ export class CascadeRouter extends EventEmitter {
     }
   }
 
+  /**
+   * Registers GitHub Models' real catalog ids via addDynamicModel so init()'s
+   * tier-fill loop can pick one. Registration alone does not create a bound
+   * BaseProvider instance (see ensureProvider) — the tier-fill loop's own
+   * ensureProvider call does that for whichever model it actually selects,
+   * which is why this runs BEFORE that loop rather than only in the
+   * background discoverProviderModels() refresh.
+   */
+  private async discoverGitHubModelsCatalog(config: CascadeConfig): Promise<void> {
+    const cfg = config.providers.find((p) => p.type === 'github-models') ?? { type: 'github-models' as const };
+    const seed = this.getAnyModelForProvider('github-models');
+    if (!seed) return;
+    try {
+      const provider = new GitHubModelsProvider(cfg, seed);
+      const models = await provider.listModels();
+      for (const m of models) this.selector.addDynamicModel(m);
+    } catch (err) {
+      console.warn('[router] GitHub Models catalog discovery failed:', err instanceof Error ? err.message : err);
+    }
+  }
+
   private ensureProvider(model: ModelInfo, configs: ProviderConfig[]): void {
     const key = `${model.provider}:${model.id}`;
     if (this.providers.has(key)) return;
@@ -1181,6 +1256,7 @@ export class CascadeRouter extends EventEmitter {
       case 'azure': return new AzureOpenAIProvider(cfg, model);
       case 'ollama': return new OllamaProvider(cfg, model);
       case 'openai-compatible': return new OpenAICompatibleProvider(cfg, model);
+      case 'github-models': return new GitHubModelsProvider(cfg, model);
       default:
         throw new Error(`Unsupported provider type: ${String(cfg.type)}`);
     }
@@ -1189,13 +1265,15 @@ export class CascadeRouter extends EventEmitter {
   private getAnyModelForProvider(type: ProviderType): ModelInfo | undefined {
     const fromCatalog = Object.values(MODELS).find((m) => m.provider === type);
     if (fromCatalog) return fromCatalog;
-    // openai-compatible and azure are configured per-endpoint and have NO fixed
-    // catalog entry. Without a seed model `detectAvailableProviders` skipped them
-    // entirely — so an OpenAI-compatible (e.g. llama.cpp) provider was never
+    // openai-compatible, azure and github-models have NO fixed catalog entry —
+    // the first two are configured per-endpoint, and github-models serves a
+    // live multi-vendor catalog that would go stale the moment it was frozen
+    // into constants.ts. Without a seed model `detectAvailableProviders` skipped
+    // them entirely — so an OpenAI-compatible (e.g. llama.cpp) provider was never
     // marked available and its models could not be selected. Synthesize a minimal
     // seed so the client can be built for the availability check and model
     // listing; the real models are discovered from the endpoint.
-    if (type === 'openai-compatible' || type === 'azure') {
+    if (type === 'openai-compatible' || type === 'azure' || type === 'github-models') {
       return {
         id: type, name: type, provider: type,
         contextWindow: 32_000, isVisionCapable: false,
