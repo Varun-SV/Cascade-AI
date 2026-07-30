@@ -246,7 +246,7 @@ export class ModelSelector {
     if (overrideModelId.includes(':')) {
       const parts = overrideModelId.split(':');
       const prefix = parts[0]!.toLowerCase();
-      const validProviders = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama'];
+      const validProviders = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama', 'github-models'];
       if (validProviders.includes(prefix)) {
         providerStr = prefix as ProviderType;
         actualId = parts.slice(1).join(':');

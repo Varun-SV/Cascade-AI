@@ -57,3 +57,29 @@ describe('TpmLimiter', () => {
     expect(DEFAULT_PROVIDER_TPM['ollama']).toBe(Number.POSITIVE_INFINITY);
   });
 });
+
+describe('TpmLimiter — GitHub Models budget', () => {
+  it('has a deliberately low default so a ~4.5K-token reservation self-throttles', () => {
+    const tpm = DEFAULT_PROVIDER_TPM['github-models'];
+    expect(tpm).toBeGreaterThan(0);
+    expect(Number.isFinite(tpm)).toBe(true);
+    // An order of magnitude below the general cloud providers — GitHub Models
+    // is request-rate limited (Free ≈10 RPM) and this bucket meters tokens, so
+    // the low ceiling is what stands in for a request-count limiter.
+    expect(tpm).toBeLessThanOrEqual(10_000);
+    expect(tpm).toBeLessThan(DEFAULT_PROVIDER_TPM['openai']);
+    expect(tpm).toBeLessThan(DEFAULT_PROVIDER_TPM['anthropic']);
+  });
+
+  it('throttles to roughly 1-2 calls per minute at the router\'s per-call reservation', async () => {
+    // The router reserves `model.maxOutputTokens + 512`; the provider reports
+    // GitHub's real ~4K cap, so each call withdraws ~4.5K.
+    const limiter = new TpmLimiter();
+    const perCall = 4_000 + 512;
+    const capacity = DEFAULT_PROVIDER_TPM['github-models'];
+    await limiter.acquire('github-models', perCall);
+    const left = limiter.snapshot()['github-models']!.available;
+    expect(left).toBeLessThanOrEqual(capacity - perCall + 1);
+    expect(Math.floor(capacity / perCall)).toBeLessThanOrEqual(2);
+  });
+});

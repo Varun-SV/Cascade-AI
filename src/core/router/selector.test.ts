@@ -136,3 +136,56 @@ describe('ModelSelector — provider model validation (discovery)', () => {
     expect(selector.getCandidatesForTier('T3').some((m) => m.id === 'gemini-3.5-flash')).toBe(true);
   });
 });
+
+describe('ModelSelector — GitHub Models explicit tier pin', () => {
+  // GitHub Models catalog ids are themselves owner-prefixed and contain a `/`
+  // (`openai/gpt-4o`), while the override syntax splits on `:`. The two must
+  // not interfere: `github-models:openai/gpt-4o` has to resolve to provider
+  // `github-models` and the id `openai/gpt-4o` — with the slash intact,
+  // because that full form is what the inference endpoint is addressed by.
+  it('resolves a "github-models:owner/model" pin to the right provider and id', () => {
+    // Two available providers, so this cannot pass by accident via the
+    // "only one provider configured" fallback at the end of the heuristics.
+    const selector = new ModelSelector(new Set(['github-models', 'anthropic']));
+    const m = selector.selectForTier('T1', 'github-models:openai/gpt-4o');
+    expect(m).not.toBeNull();
+    expect(m!.provider).toBe('github-models');
+    expect(m!.id).toBe('openai/gpt-4o');
+  });
+
+  it('keeps the whole owner/model id even when the prefix split could swallow it', () => {
+    const selector = new ModelSelector(new Set(['github-models', 'anthropic']));
+    const m = selector.selectForTier('T2', 'github-models:meta/Llama-3.3-70B-Instruct');
+    expect(m!.id).toBe('meta/Llama-3.3-70B-Instruct');
+    expect(m!.provider).toBe('github-models');
+  });
+
+  it('never marks a pinned GitHub Models entry as local', () => {
+    // isLocal drives the shared local request queue, the 300s local inference
+    // timeout, and the "[local]" label — none of which is true for a hosted API.
+    const selector = new ModelSelector(new Set(['github-models', 'anthropic']));
+    expect(selector.selectForTier('T3', 'github-models:openai/gpt-4o')!.isLocal).toBe(false);
+  });
+});
+
+describe('ModelSelector — GitHub Models stays out of Cascade Auto scoring', () => {
+  it('a discovered GitHub Models model never enters the scored candidate pool', () => {
+    // Deliberate: it prices as the cost-efficiency ceiling ($0), so letting it
+    // compete in automatic per-subtask fan-out — especially T3's parallel waves
+    // — is the fastest way to blow through a ~10 RPM budget. The exclusion is
+    // structural (no static catalog entries ⇒ its provider is never in any
+    // tier's priority chain), not a special case; this pins that behaviour.
+    const selector = new ModelSelector(new Set(['github-models', 'gemini']));
+    selector.addDynamicModel({
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'github-models',
+      contextWindow: 128_000, isVisionCapable: true,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    });
+    for (const tier of ['T1', 'T2', 'T3'] as const) {
+      expect(selector.getCandidatesForTier(tier).some((m) => m.provider === 'github-models'), tier).toBe(false);
+    }
+    // …but an explicit pin still reaches it.
+    expect(selector.selectForTier('T1', 'github-models:openai/gpt-4o')!.provider).toBe('github-models');
+  });
+});

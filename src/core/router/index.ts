@@ -19,6 +19,7 @@ import type {
 import { AnthropicProvider } from '../../providers/anthropic.js';
 import { AzureOpenAIProvider, azureModelForDeployment } from '../../providers/azure.js';
 import { GeminiProvider } from '../../providers/gemini.js';
+import { GitHubModelsProvider } from '../../providers/github-models.js';
 import { OllamaProvider } from '../../providers/ollama.js';
 import { OpenAICompatibleProvider } from '../../providers/openai-compatible.js';
 import { OpenAIProvider } from '../../providers/openai.js';
@@ -321,7 +322,7 @@ export class CascadeRouter extends EventEmitter {
 
       const model = this.selector.selectForTier(tier, override);
       if (!model) {
-        const knownProviders = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama'];
+        const knownProviders = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama', 'github-models'];
         const hasProviderPrefix = override.includes(':') &&
           knownProviders.some(p => override.startsWith(p + ':'));
         if (hasProviderPrefix) {
@@ -508,7 +509,7 @@ export class CascadeRouter extends EventEmitter {
    * models without a package upgrade. Mirrors discoverOllamaModels.
    */
   private async discoverProviderModels(): Promise<void> {
-    const cloud: ProviderType[] = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible'];
+    const cloud: ProviderType[] = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'github-models'];
     const tasks = cloud.map(async (type) => {
       if (!this.selector.isProviderAvailable(type)) return;
       const seed = this.getAnyModelForProvider(type);
@@ -1181,6 +1182,7 @@ export class CascadeRouter extends EventEmitter {
       case 'azure': return new AzureOpenAIProvider(cfg, model);
       case 'ollama': return new OllamaProvider(cfg, model);
       case 'openai-compatible': return new OpenAICompatibleProvider(cfg, model);
+      case 'github-models': return new GitHubModelsProvider(cfg, model);
       default:
         throw new Error(`Unsupported provider type: ${String(cfg.type)}`);
     }
@@ -1189,13 +1191,15 @@ export class CascadeRouter extends EventEmitter {
   private getAnyModelForProvider(type: ProviderType): ModelInfo | undefined {
     const fromCatalog = Object.values(MODELS).find((m) => m.provider === type);
     if (fromCatalog) return fromCatalog;
-    // openai-compatible and azure are configured per-endpoint and have NO fixed
-    // catalog entry. Without a seed model `detectAvailableProviders` skipped them
-    // entirely — so an OpenAI-compatible (e.g. llama.cpp) provider was never
+    // openai-compatible, azure and github-models have NO fixed catalog entry —
+    // the first two are configured per-endpoint, and github-models serves a
+    // live multi-vendor catalog that would go stale the moment it was frozen
+    // into constants.ts. Without a seed model `detectAvailableProviders` skipped
+    // them entirely — so an OpenAI-compatible (e.g. llama.cpp) provider was never
     // marked available and its models could not be selected. Synthesize a minimal
     // seed so the client can be built for the availability check and model
     // listing; the real models are discovered from the endpoint.
-    if (type === 'openai-compatible' || type === 'azure') {
+    if (type === 'openai-compatible' || type === 'azure' || type === 'github-models') {
       return {
         id: type, name: type, provider: type,
         contextWindow: 32_000, isVisionCapable: false,

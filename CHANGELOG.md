@@ -5,6 +5,46 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.65.0 - 2026-07-30
+
+### Added
+- **GitHub Models as a new BYOK provider** (`github-models`). Any user with a
+  GitHub/Copilot account can point Cascade at `models.github.ai`'s multi-vendor
+  catalog (OpenAI, Meta, DeepSeek, Mistral, …) using a personal fine-grained
+  PAT with the `models: read` permission — no separate OpenAI/Anthropic/Gemini
+  key needed. Wired into `cascade init`, `cascade doctor`, the REPL's model
+  refresh and startup validation, tier pins (`t1: 'github-models:openai/gpt-4o'`),
+  and live catalog re-discovery, alongside every other provider.
+  - New `src/providers/github-models.ts`, extending the existing
+    `OpenAIProvider` the same way azure/openai-compatible do — inference is
+    genuinely OpenAI-compatible, so `generate()`/`generateStream()` are
+    inherited unmodified. The catalog listing is a bespoke GitHub REST call
+    (own `Accept`/`X-GitHub-Api-Version` headers, different shape from the
+    OpenAI-compatible provider's `/models` endpoint), and the constructor
+    corrects `isReasoningModel()`'s start-anchored regex for the catalog's
+    owner-prefixed ids (`openai/o3-mini`) so the first request to an o-series
+    model doesn't burn a wasted call against a ~10 RPM budget.
+  - Pricing is a real, stated `$0` (`pricingUnknown: false`) — usage is bundled
+    into the account's existing GitHub/Copilot plan, never billed per token —
+    without setting `isLocal: true`, which would incorrectly route these calls
+    onto Ollama's shared local request queue and its 300s local timeout.
+  - Rate-limited by default to a conservative `TpmLimiter` budget (well under
+    even the Free tier's ~10 RPM) since GitHub Models has no request-count
+    limiter of its own; kept out of Cascade Auto's automatic scored routing
+    (reachable only via explicit tier pin or last-resort fallback) so its $0
+    price can't cause it to be aggressively fanned out into and exhaust that
+    budget.
+  - Fixed two provider-detection bugs found while wiring this in:
+    `selector.ts`'s `resolveDynamicModel()` and `cli/repl/index.tsx`'s
+    `inferProviderFromModelId()` each carried their own separate, undupli-
+    cated `ProviderType` list; without adding the new provider to both, a
+    `github-models:owner/model` tier pin or REPL model id would fall through
+    to a same-string heuristic and silently misattribute itself to `openai`
+    (matching on `gpt` inside the model id) instead of failing loudly or
+    resolving correctly.
+  - Desktop and cloud UI wiring (Settings, onboarding, KeyVault) is a
+    follow-up PR — this ships the SDK/CLI/router support first.
+
 ## 0.64.0 - 2026-07-30
 
 ### Fixed

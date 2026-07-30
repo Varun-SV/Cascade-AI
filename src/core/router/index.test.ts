@@ -123,3 +123,75 @@ describe('CascadeRouter — explicit per-tier pin overrides Cascade Auto', () =>
     expect(chosen?.provider).toBe('openai-compatible');
   });
 });
+
+describe('CascadeRouter — GitHub Models wiring', () => {
+  it('synthesizes a seed model and builds a GitHubModelsProvider for it', async () => {
+    // GitHub Models has no static MODELS catalog entries (its catalog is served
+    // live), so without a synthesized seed `detectAvailableProviders` would skip
+    // the provider outright and it could never be probed or listed — the exact
+    // failure openai-compatible/azure already carry a seed to avoid.
+    const { GitHubModelsProvider } = await import('../../providers/github-models.js');
+    const router = new CascadeRouter();
+    const internals = router as unknown as Record<string, (...args: unknown[]) => unknown>;
+
+    const seed = internals['getAnyModelForProvider']!('github-models') as { provider: string } | undefined;
+    expect(seed).toBeDefined();
+    expect(seed!.provider).toBe('github-models');
+
+    const provider = internals['createProvider']!({ type: 'github-models', apiKey: 'ghp_test' }, seed);
+    expect(provider).toBeInstanceOf(GitHubModelsProvider);
+  });
+
+  it('detectAvailableProviders marks it available/unavailable from the catalog probe', async () => {
+    const { GitHubModelsProvider } = await import('../../providers/github-models.js');
+    const router = new CascadeRouter();
+    const detect = (router as unknown as Record<string, (...a: unknown[]) => Promise<Set<string>>>)['detectAvailableProviders']!;
+    const cfgs = [{ type: 'github-models', apiKey: 'ghp_test' }];
+
+    const ok = vi.spyOn(GitHubModelsProvider.prototype, 'isAvailable').mockResolvedValue(true);
+    expect((await detect.call(router, cfgs)).has('github-models')).toBe(true);
+    ok.mockResolvedValue(false);
+    expect((await detect.call(router, cfgs)).has('github-models')).toBe(false);
+    ok.mockRestore();
+  });
+
+  it('names the provider in the error when a github-models pin cannot be resolved', async () => {
+    // A `tier: 'provider:model'` pin that can't resolve should say WHICH
+    // provider is unreachable; an unrecognised prefix falls through to a
+    // generic "could not be loaded" that gives the user nothing to act on.
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set());
+
+    await expect(router.init(makeConfig({
+      providers: [{ type: 'github-models', apiKey: 'ghp_test' }],
+      models: { t1: 'github-models:openai/gpt-4o' },
+    }))).rejects.toThrow(/provider 'github-models' is not available/);
+  });
+
+  it('re-discovers the GitHub Models catalog on a live-data refresh', async () => {
+    const { GitHubModelsProvider } = await import('../../providers/github-models.js');
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set());
+    const avail = vi.spyOn(GitHubModelsProvider.prototype, 'isAvailable').mockResolvedValue(true);
+    const list = vi.spyOn(GitHubModelsProvider.prototype, 'listModels').mockResolvedValue([{
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'github-models',
+      contextWindow: 128_000, isVisionCapable: true,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    }]);
+
+    await router.init(makeConfig({ providers: [{ type: 'github-models', apiKey: 'ghp_test' }] }));
+    // Availability is only consulted inside discovery, so mark it directly the
+    // way a successful probe would have.
+    (router as unknown as { selector: { markProviderAvailable(p: string): void } }).selector
+      .markProviderAvailable('github-models');
+    await (router as unknown as Record<string, () => Promise<void>>)['discoverProviderModels']!();
+
+    expect(list).toHaveBeenCalled();
+    expect(router.getAvailableModels().some((m) => m.id === 'openai/gpt-4o' && m.provider === 'github-models')).toBe(true);
+    avail.mockRestore();
+    list.mockRestore();
+  });
+});

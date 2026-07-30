@@ -243,6 +243,10 @@ async function refreshModelCache(store: MemoryStore, providers: CascadeConfig['p
       else if (provider.type === 'anthropic') instance = new AnthropicProvider(provider, dummyModel);
       else if (provider.type === 'ollama') instance = new OllamaProvider(provider, dummyModel);
       else if (provider.type === 'openai-compatible') instance = new OpenAICompatibleProvider(provider, dummyModel);
+      else if (provider.type === 'github-models') {
+        const { GitHubModelsProvider } = await import('../../providers/github-models.js');
+        instance = new GitHubModelsProvider(provider, dummyModel);
+      }
       else if (provider.type === 'azure') {
         const { AzureOpenAIProvider } = await import('../../providers/azure.js');
         instance = new AzureOpenAIProvider(provider, dummyModel);
@@ -1481,10 +1485,17 @@ async function validateConfiguredModels(config: CascadeConfig): Promise<string |
   return problems.length ? `Model warnings: ${problems.join(', ')}` : null;
 }
 
-function inferProviderFromModelId(id: string, providers: CascadeConfig['providers']): ProviderType | null {
+/**
+ * Exported for tests: this is the REPL's OWN copy of the provider-prefix
+ * parsing, independent of the router's `resolveDynamicModel` — a provider added
+ * to one list and not the other breaks the startup "Model warnings" banner
+ * while the router itself works fine, which is exactly the kind of drift that
+ * goes unnoticed.
+ */
+export function inferProviderFromModelId(id: string, providers: CascadeConfig['providers']): ProviderType | null {
   if (id.includes(':')) {
     const prefix = id.split(':')[0]!.toLowerCase();
-    const validProviders = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama'];
+    const validProviders = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama', 'github-models'];
     if (validProviders.includes(prefix)) {
       return prefix as ProviderType;
     }
