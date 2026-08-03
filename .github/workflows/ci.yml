@@ -18,6 +18,16 @@ on:
     branches: ["main"]
   workflow_dispatch: {}
 
+# Least privilege: checking out and running the suites needs nothing but read
+# access to the repo contents. Without this block the job inherits whatever the
+# repository default is — which can be read/write — and a workflow that executes
+# a pull request's own code (npm ci runs its install scripts, vitest runs its
+# tests) is exactly where a write-capable token should not be sitting.
+# release.yml declares `contents: write` because it genuinely publishes; this
+# one has no reason to write anything.
+permissions:
+  contents: read
+
 # A new push to the same PR makes the previous run's answer irrelevant, so stop
 # it rather than paying for two. Never cancel on main: those runs are the record
 # of whether a merged commit was green.
@@ -71,6 +81,18 @@ jobs:
           cache: 'npm'
 
       - run: npm ci
+
+      # cloud/server imports the SDK through a vendored `#cascade-ai` bundle
+      # that is GENERATED, not committed (.gitignore: cloud/server/vendor/), so
+      # on a clean checkout nothing it imports resolves — every src file fails
+      # with TS2307 and vitest cannot load the suite either.
+      #
+      # This is the workspace's own `prebuild` wiring, not a bespoke CI step:
+      # `npm run build -w cascade-cloud-server` triggers prebuild, which runs
+      # the root `build:cli` and then scripts/link-cascade-ai.mjs to write the
+      # vendor file — and then tsup, so the server build gets covered too.
+      - name: Build SDK core + vendored bundle (server prebuild)
+        run: npm run build -w cascade-cloud-server
 
       # cloud/server has no `lint` script of its own; its typecheck is a direct
       # tsc against its tsconfig, matching what the workspace docs describe.
