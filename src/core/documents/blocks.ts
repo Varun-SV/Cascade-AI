@@ -381,7 +381,7 @@ export interface InlineRun {
  */
 export function inlineRuns(text: string): InlineRun[] {
   const acc: InlineRun[] = [];
-  const re = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\)|\*[^*\s][^*]*\*)/g;
+  const re = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]{1,500}\]\([^)]{1,2000}\)|\*[^*\s][^*]*\*)/g;
   let last = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
@@ -390,7 +390,7 @@ export function inlineRuns(text: string): InlineRun[] {
     if (tok.startsWith('**')) acc.push({ text: tok.slice(2, -2), bold: true });
     else if (tok.startsWith('`')) acc.push({ text: tok.slice(1, -1), code: true });
     else if (tok.startsWith('[')) {
-      const l = tok.match(/\[([^\]]+)\]\(([^)]+)\)/);
+      const l = tok.match(/\[([^\]]{1,500})\]\(([^)]{1,2000})\)/);
       acc.push({ text: l ? `${l[1]} (${l[2]})` : tok });
     } else acc.push({ text: tok.slice(1, -1), italic: true });
     last = re.lastIndex;
@@ -437,7 +437,7 @@ export function parseSlide(chunk: string): Slide {
     // A `chart:` fence is a real chart object, not bullet text. Pulled out here
     // (and its body skipped) so the numbers reach addChart() instead of being
     // flattened into a list of CSV rows.
-    const fence = raw.match(/^\s*```+\s*chart\s*:\s*(.+?)\s*$/i);
+    const fence = raw.match(/^[ \t]*```+[ \t]*chart[ \t]*:(.*)/i);
     if (fence) {
       const kind = chartKind(fence[1]!);
       const bodyLines: string[] = [];
@@ -450,13 +450,13 @@ export function parseSlide(chunk: string): Slide {
     }
     const line = raw.trim();
     if (!line) continue;
-    const h = line.match(/^#{1,6}\s+(.*)$/);
+    const h = line.match(/^#{1,6}[ \t]+(.*)/);
     if (h) { if (!title) title = stripInline(h[1]!); else body.push(stripInline(h[1]!)); continue; }
     // A picture, not a bullet. Kept out of `body` entirely — stripInline would
     // turn it into the caption "!alt (url)" sitting where the image belongs.
     const img = matchImageLine(line);
     if (img) { images.push(img); continue; }
-    const li = line.match(/^([-*+]|\d+[.)])\s+(.*)$/);
+    const li = line.match(/^([-*+]|\d+[.)])[ \t]+(.*)/);
     if (li) {
       // Models commonly write the reference as a list item; same treatment.
       const bulletImg = matchImageLine(li[2]!);
@@ -485,7 +485,7 @@ export function extractCharts(source: string): { charts: ChartSpec[]; rest: stri
   const charts: ChartSpec[] = [];
   const rest: string[] = [];
   for (let i = 0; i < lines.length; i++) {
-    const fence = lines[i]!.match(/^\s*```+\s*chart\s*:\s*(.+?)\s*$/i);
+    const fence = lines[i]!.match(/^[ \t]*```+[ \t]*chart[ \t]*:(.*)/i);
     if (!fence) { rest.push(lines[i]!); continue; }
     const kind = chartKind(fence[1]!);
     const body: string[] = [];
