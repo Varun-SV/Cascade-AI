@@ -198,3 +198,53 @@ describe('T1Administrator.reviewT2Outputs (preserve a user-chosen skip)', () => 
     expect(captured.prompt).not.toMatch(/explicitly chose to SKIP/i);
   });
 });
+
+describe('T1 planner prompt — media generation capability awareness', () => {
+  // Live-reported bug: a video request produced script and direction sections
+  // forever and never a section that called generate_video. T1 planned around a
+  // capability whose shape it was never told — MultimodalRegistry.describe()
+  // claimed "the planner sees this" while being wired into no prompt at all.
+  type Decompose = (prompt: string, systemContext?: string) => Promise<TaskPlan>;
+
+  function makeAdmin(captured: { systemPrompt?: string }, toolNames: string[]) {
+    const router = {
+      generate: vi.fn(async (_tier: string, options: { systemPrompt?: string }) => {
+        captured.systemPrompt = options.systemPrompt;
+        return {
+          content: '{"complexity":"Simple","reasoning":"r","sections":[]}',
+          finishReason: 'stop',
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimatedCostUsd: 0 },
+        };
+      }),
+    } as unknown as CascadeRouter;
+    const toolRegistry = {
+      getToolDefinitions: () => toolNames.map((name) => ({ name, description: '', inputSchema: {} })),
+    } as unknown as ToolRegistry;
+    return new T1Administrator(router, toolRegistry, {} as CascadeConfig);
+  }
+
+  it('tells the planner that video is one atomic billed call the plan must END on', async () => {
+    const captured: { systemPrompt?: string } = {};
+    const admin = makeAdmin(captured, ['file_write', 'generate_image', 'generate_video']);
+
+    await (admin as unknown as { decomposeTask: Decompose }).decomposeTask('make me a 5-second video of a cat');
+
+    expect(captured.systemPrompt).toContain('MEDIA GENERATION');
+    expect(captured.systemPrompt).toContain('"generate_video" (video)');
+    expect(captured.systemPrompt).toContain('ATOMIC tool call');
+    expect(captured.systemPrompt).toContain('VIDEO PLANS MUST END IN THE TOOL CALL');
+    // The pre-production the user explicitly asked to KEEP has to be sanctioned
+    // by the same paragraph that demands the terminating call.
+    expect(captured.systemPrompt).toMatch(/script, a shot list, direction/);
+  });
+
+  it('says nothing about generation when no generation tool is registered', async () => {
+    const captured: { systemPrompt?: string } = {};
+    const admin = makeAdmin(captured, ['file_write', 'web_search']);
+
+    await (admin as unknown as { decomposeTask: Decompose }).decomposeTask('write a haiku');
+
+    expect(captured.systemPrompt).not.toContain('MEDIA GENERATION');
+    expect(captured.systemPrompt).not.toContain('generate_video');
+  });
+});
