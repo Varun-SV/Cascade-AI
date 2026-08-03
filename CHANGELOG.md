@@ -97,6 +97,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name, instead of quietly producing a picture-less deck.
 - `run_code`'s guidance no longer competes for Office formats now that a
   dedicated tool produces them correctly.
+## 0.66.1 - 2026-07-30
+
+### Fixed
+
+- **Cloud web: a redeployed server could still serve an old cached bundle
+  indefinitely.** `cloud/server`'s SPA static-file serving (`app.ts`) used
+  Express's default cache headers for both `index.html` and every hashed
+  Vite asset, which meant a browser tab left open across a redeploy had no
+  reason to ever re-fetch anything — including features that shipped days
+  earlier. This produced a real bug report: a generated PowerPoint
+  "Download" saved raw Markdown text instead of a real `.pptx` binary,
+  because the tab was still running JavaScript from before the Office-export
+  feature existed, even though the server itself was already on the current
+  build (confirmed via Railway's own deploy history) and a hard refresh
+  fixed it immediately. Fixed by giving Vite's content-hashed assets a long,
+  immutable `Cache-Control` (safe — a new deploy ships new hashes, never
+  overwrites an old one) and forcing `index.html` — the one unhashed file,
+  and the only thing that names the current build's hashes — to always
+  revalidate (`Cache-Control: no-cache`) on every request, including
+  client-side SPA routes served through the catch-all handler.
 
 ## 0.66.0 - 2026-07-30
 
