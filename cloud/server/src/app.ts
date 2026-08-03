@@ -1127,9 +1127,23 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     // Discarding unsaved media early, through the same delete the Files panel
     // uses. It frees the pending allowance, not the storage quota — pending
     // media never spent any.
-    else if (store.getPendingMedia(id, userId)) {
-      try { fs.rmSync(pendingMediaPath(env, userId, id)); } catch { /* already gone */ }
-      store.deletePendingMedia(id, userId);
+    //
+    // The on-disk path is built from the STORED row's id, never from the raw
+    // `:id` param, exactly as the saved-file branch above uses `file.id`.
+    // Every other path expression in this file already derives from a
+    // server-generated id (see docs/file-generation.md: "paths are derived
+    // from a server-generated id, never client input"); this branch was the
+    // one that reached fs with the request param still attached, which is
+    // what CodeQL flagged. The DB lookup made it unexploitable in practice —
+    // ids are randomUUID(), so no traversal string can match a row — but
+    // that is an implicit invariant one migration or import path away from
+    // being untrue, and it is not the guarantee the rest of the file relies on.
+    else {
+      const pendingMedia = store.getPendingMedia(id, userId);
+      if (pendingMedia) {
+        try { fs.rmSync(pendingMediaPath(env, userId, pendingMedia.id)); } catch { /* already gone */ }
+        store.deletePendingMedia(id, userId);
+      }
     }
     res.json({ ok: true, usedBytes: store.sumUserFileBytes(userId) });
   });

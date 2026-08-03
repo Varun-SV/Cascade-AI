@@ -548,6 +548,46 @@ describe('cloud/server app', () => {
     expect((await fetch(`${baseUrl}/api/files/${id}`, { headers: { Cookie: alice } })).status).toBe(404);
   });
 
+  it('a traversal-shaped id on DELETE is refused by the ownership lookup, never reaching the filesystem', async () => {
+    // This pins the guard that actually makes DELETE /api/files/:id safe: the
+    // store lookup runs BEFORE any path is built, and no traversal string can
+    // match a row (addPendingMedia mints ids with randomUUID()), so the fs
+    // call is unreachable for an id the caller invented.
+    //
+    // Worth stating plainly: this test passes both before and after the
+    // accompanying `pendingMedia.id` change, and it is NOT a regression test
+    // for it. CodeQL flagged that line (high severity, "Uncontrolled data
+    // used in path expression") because the raw `:id` param reached a path
+    // expression at all — a real taint flow, but one the lookup above already
+    // made unexploitable, so no test can fail on it without fabricating a row
+    // the application cannot produce. That change is defense in depth and
+    // consistency with every other path expression here (see
+    // docs/file-generation.md: "paths are derived from a server-generated id,
+    // never client input").
+    //
+    // What this test DOES catch is the guard itself being dropped — e.g. an
+    // "optimization" that skips the lookup and unlinks straight from the
+    // param. Then the canary below dies and this fails, which is exactly the
+    // regression worth owning.
+    const alice = await login('Alice');
+    const { id } = await generateMedia(alice);
+    const canary = path.join(dir, 'canary.txt');
+    await fs.writeFile(canary, 'must survive');
+
+    // Escapes the tenant's tmp-media dir and lands exactly on the canary.
+    const traversal = encodeURIComponent('../../../canary.txt');
+    const res = await fetch(`${baseUrl}/api/files/${traversal}`, { method: 'DELETE', headers: { Cookie: alice } });
+
+    // The route is a no-op for an unknown id, and the file outside the tenant
+    // directory is untouched.
+    expect(res.status).toBe(200);
+    expect(await fs.readFile(canary, 'utf-8')).toBe('must survive');
+    // …and the real asset was not collateral damage.
+    expect((await (await fetch(`${baseUrl}/api/pending-media`, { headers: { Cookie: alice } })).json()).media)
+      .toHaveLength(1);
+    expect((await fetch(`${baseUrl}/api/files/${id}`, { headers: { Cookie: alice } })).status).toBe(200);
+  });
+
   it('expired media reads as gone and cannot be saved, even before the sweeper deletes it', async () => {
     const alice = await login('Alice');
     const userId = await userIdFor(alice);
