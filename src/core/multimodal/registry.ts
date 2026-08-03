@@ -249,8 +249,12 @@ export class MultimodalRegistry {
 
   /**
    * A plain-language account of what this account can and cannot generate —
-   * including the things it cannot, and why. The planner sees this, so being
-   * candid here is what stops it inventing a `generate_music` call.
+   * including the things it cannot, and why.
+   *
+   * This is the USER-facing inventory (model ids and unit prices), keyed on
+   * which providers are configured. It is deliberately NOT what the planner
+   * reads: see `describeGenerationForPlanner()` below for that, and the note
+   * there for why the two cannot be the same string.
    */
   describe(): string {
     const lines: string[] = [];
@@ -286,6 +290,110 @@ export class MultimodalRegistry {
 /** The catalogue itself, for tests and `cascade models`. */
 export function allCapabilities(): readonly GenerationCapability[] {
   return CAPABILITIES;
+}
+
+// ── Planner-facing capability awareness ───────
+//
+//  Live-reported bug: asked for a video, Cascade wrote a script, wrote
+//  direction notes, and then kept planning — thirty minutes of paid planning
+//  calls and no clip, because nothing in the plan prompt said that video is one
+//  tool call the plan has to END on. The creative pre-production was fine and
+//  wanted; what was missing was the terminating step.
+
+/**
+ * The tool each generation modality is reached through, plus the one
+ * operational fact about it a model cannot infer from the tool name.
+ *
+ * Keyed on TOOL NAME rather than on a registry instance because the planner's
+ * question is "what can this run call?", and the honest answer to that is the
+ * tool registry — media tools are registered only for modalities the account
+ * can actually serve (see tools/generate-media.ts buildMediaTools), and a
+ * restricted host can drop them anyway.
+ */
+const PLANNER_FACTS: ReadonlyArray<{
+  tool: string;
+  modality: GenerationModality;
+  shape: string;
+}> = [
+  { tool: 'generate_image', modality: 'image', shape: 'one call returns one finished image' },
+  { tool: 'generate_speech', modality: 'speech', shape: 'one call returns one finished audio file' },
+  {
+    tool: 'generate_video',
+    modality: 'video',
+    shape: 'one call returns one finished clip, after rendering for 1-3 minutes (Cascade stops waiting at 8)',
+  },
+  {
+    tool: 'transcribe_audio',
+    modality: 'transcription',
+    shape: 'one call returns the transcript of one audio file',
+  },
+];
+
+/**
+ * The catalogue's price for a modality, stated only where it can be stated
+ * exactly: every priced entry for the modality has to agree before a number is
+ * quoted. With two priced models in play the real cost depends on which one
+ * selection lands on, and averaging them would invent a number nobody charges —
+ * the same mistake the `quality` field above refuses to make. When they
+ * disagree the UNIT is still worth saying: "billed per second of video" is what
+ * stops a planner treating a 30-second clip as free.
+ */
+function plannerPriceNote(modality: GenerationModality): string {
+  const costs = CAPABILITIES
+    .filter((c) => c.modality === modality && !c.unsupported)
+    .map((c) => capabilityCost(c))
+    .filter((c): c is CapabilityCost => c !== null);
+  if (!costs.length) return '';
+  const labels = new Set(costs.map((c) => c.label));
+  if (labels.size === 1) return ` Billed ${costs[0]!.label}.`;
+  const units = new Set(costs.map((c) => c.unit));
+  return units.size === 1 ? ` Billed ${[...units][0]}.` : '';
+}
+
+/**
+ * What the PLANNER (T1 and T2) needs to know about generation, keyed on the
+ * tools this run can actually call. Empty string when there are none, so a
+ * text-only run's prompt is unchanged.
+ *
+ * Deliberately not `describe()`. That method is a user-facing inventory of
+ * model ids and prices keyed on configured PROVIDERS, and two things make it
+ * the wrong string to paste into a plan prompt:
+ *
+ *   • it answers "what could this account generate", not "what can THIS RUN
+ *     call". A restricted host still has the provider configured, so it would
+ *     advertise a capability no worker can reach — precisely the situation
+ *     buildMediaTools exists to prevent;
+ *   • a list of model ids says nothing about plan SHAPE. The planner does not
+ *     mis-plan video because it is unaware of Veo's price; it mis-plans video by
+ *     emitting a script subtask, a direction subtask and a review subtask, and
+ *     no subtask that ever calls the tool. That is the fact that has to reach
+ *     the prompt, and an inventory has nowhere to put it.
+ */
+export function describeGenerationForPlanner(has: (toolName: string) => boolean): string {
+  const present = PLANNER_FACTS.filter((f) => has(f.tool));
+  if (!present.length) return '';
+
+  const lines = ['MEDIA GENERATION — the only generation tools this run can call:'];
+  for (const f of present) {
+    lines.push(`- "${f.tool}" (${f.modality}): ${f.shape}.${plannerPriceNote(f.modality)}`);
+  }
+  lines.push(
+    'Each one is a single ATOMIC tool call, made by ONE T3 worker, that produces the finished file. '
+    + 'It is never a multi-step pipeline, and no worker can satisfy it by describing the result in words.',
+    'No other modality has a tool here — never plan a step that generates music, 3D or anything not listed above.',
+  );
+  if (has('generate_video')) {
+    lines.push(
+      'VIDEO PLANS MUST END IN THE TOOL CALL. Creative pre-production — a script, a shot list, direction '
+      + 'notes — is expected and worth planning, but it is NOT the video. Any plan that involves video MUST '
+      + 'contain exactly ONE subtask whose deliverable is the "generate_video" call itself; it MUST be the '
+      + 'last subtask on that path (dependsOn the pre-production ones), and nothing after it may be required '
+      + 'to produce the clip. Never end a video plan on a script, a storyboard or a review step. Never split '
+      + 'one clip across several "generate_video" subtasks, and never plan a render → critique → re-render '
+      + 'loop: every render is billed again and takes minutes.',
+    );
+  }
+  return lines.join('\n');
 }
 
 // Re-exported so callers pricing a text model and a capability use one import.
