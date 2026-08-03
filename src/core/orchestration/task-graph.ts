@@ -63,31 +63,94 @@ function normalizeDependencies(input: readonly string[] | undefined): string[] {
   return [...new Set(input.map((dependency) => dependency.trim()).filter(Boolean))];
 }
 
+/**
+ * The nodes that genuinely sit ON a cycle — members of a strongly connected
+ * component of two or more nodes (or, defensively, a self-edge).
+ *
+ * This deliberately does NOT use "whatever a topological sort could not reach".
+ * Kahn's algorithm stalls on a cycle AND on everything downstream of one, since
+ * a downstream node's in-degree never falls to zero while its dependency is
+ * stuck. Treating that whole stalled set as "the cycle" made the repair below
+ * strip dependencies from innocent downstream nodes: given root → a ⇄ b → tail,
+ * `tail` lost its edge to `b` and became immediately schedulable, so it ran in
+ * the first wave — before the work it consumes. A repair pass meant to make a
+ * bad plan runnable was silently making a runnable plan wrong, and nothing threw.
+ *
+ * Tarjan's algorithm, iterative rather than recursive: depth is bounded by the
+ * node count, and while planner graphs are small, a stack overflow inside the
+ * trust boundary would be a poor way to find the ceiling.
+ */
 function cycleNodes<TPayload>(nodes: readonly TaskGraphNode<TPayload>[]): Set<string> {
-  const inDegree = new Map(nodes.map((node) => [node.id, node.dependsOn.length] as const));
-  const dependents = new Map<string, string[]>();
-  for (const node of nodes) {
-    dependents.set(node.id, []);
-  }
-  for (const node of nodes) {
-    for (const dependencyId of node.dependsOn) {
-      dependents.get(dependencyId)?.push(node.id);
+  const adjacency = new Map<string, readonly string[]>(
+    nodes.map((node) => [node.id, node.dependsOn] as const),
+  );
+
+  const index = new Map<string, number>();
+  const lowlink = new Map<string, number>();
+  const onStack = new Set<string>();
+  const stack: string[] = [];
+  const inCycle = new Set<string>();
+  let counter = 0;
+
+  const open = (id: string): void => {
+    index.set(id, counter);
+    lowlink.set(id, counter);
+    counter++;
+    stack.push(id);
+    onStack.add(id);
+  };
+
+  for (const root of nodes) {
+    if (index.has(root.id)) continue;
+    open(root.id);
+    // Each frame is a node plus how far through its edges we are, which is what
+    // the recursive form keeps in the call stack.
+    const frames: Array<{ id: string; edge: number }> = [{ id: root.id, edge: 0 }];
+
+    while (frames.length > 0) {
+      const frame = frames[frames.length - 1]!;
+      const neighbours = adjacency.get(frame.id) ?? [];
+
+      if (frame.edge < neighbours.length) {
+        const next = neighbours[frame.edge]!;
+        frame.edge++;
+        // Unknown dependencies are already stripped upstream; skipping them here
+        // too keeps this function correct when called on its own.
+        if (!adjacency.has(next)) continue;
+        if (!index.has(next)) {
+          open(next);
+          frames.push({ id: next, edge: 0 });
+        } else if (onStack.has(next)) {
+          lowlink.set(frame.id, Math.min(lowlink.get(frame.id)!, index.get(next)!));
+        }
+        continue;
+      }
+
+      frames.pop();
+      const parent = frames[frames.length - 1];
+      if (parent) {
+        lowlink.set(parent.id, Math.min(lowlink.get(parent.id)!, lowlink.get(frame.id)!));
+      }
+
+      if (lowlink.get(frame.id) === index.get(frame.id)) {
+        const component: string[] = [];
+        for (;;) {
+          const member = stack.pop()!;
+          onStack.delete(member);
+          component.push(member);
+          if (member === frame.id) break;
+        }
+        // A single node is only cyclic if it points at itself. compileTaskGraph
+        // strips self-dependencies before calling this, so that arm is reached
+        // only by a direct caller.
+        const cyclic = component.length > 1
+          || (adjacency.get(component[0]!) ?? []).includes(component[0]!);
+        if (cyclic) for (const member of component) inCycle.add(member);
+      }
     }
   }
 
-  const queue = nodes.filter((node) => (inDegree.get(node.id) ?? 0) === 0).map((node) => node.id);
-  const visited = new Set<string>();
-  for (let index = 0; index < queue.length; index++) {
-    const id = queue[index]!;
-    visited.add(id);
-    for (const dependentId of dependents.get(id) ?? []) {
-      const next = (inDegree.get(dependentId) ?? 1) - 1;
-      inDegree.set(dependentId, next);
-      if (next === 0) queue.push(dependentId);
-    }
-  }
-
-  return new Set(nodes.map((node) => node.id).filter((id) => !visited.has(id)));
+  return inCycle;
 }
 
 function throwIfStrict(mode: TaskGraphValidationMode, issues: readonly TaskGraphIssue[]): void {
