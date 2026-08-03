@@ -7,6 +7,7 @@ import {
   localModelEnabled, fastAnswerModel, tierParams, extendedContext, shareLearning,
   maxTokensPerRun, maxCostPerRunUsd, rememberSessions, defaultRoutingBias, defaultWebSearch,
 } from '../lib/prefs.js';
+import { refreshPendingMedia } from '../lib/pendingMedia.js';
 import { detectLocalModelCapability } from '../lib/localModel/capability.js';
 import { warmLocalModel } from '../lib/localModel/engine.js';
 import { classifyLocalComplexity } from '../lib/localModel/classifier.js';
@@ -325,6 +326,11 @@ export function useChatSession(
     // up for up to five minutes, its buttons emitting into a run that had
     // already ended and an acknowledgement that could never arrive anyway.
     const onDisconnect = () => setEscalations([]);
+    // A run produced a file. `pending: true` means generated media the user
+    // has not kept — refresh the unsaved list so its expiry badge and Save
+    // button appear on the message as soon as the image lands. A saved file
+    // needs nothing here (the Files panel has its own refresh).
+    const onFileCreated = (e: { pending?: boolean }) => { if (e?.pending) void refreshPendingMedia(); };
     socket.on('stream:token', onToken);
     socket.on('tier:status', onStatus);
     socket.on('run:why', onWhy);
@@ -335,6 +341,7 @@ export function useChatSession(
     socket.on('context:approval-required', onContextApproval);
     socket.on('context:compacted', onCompacted);
     socket.on('knowledge:retrieved', onKnowledge);
+    socket.on('file:created', onFileCreated);
     return () => {
       socket.off('stream:token', onToken);
       socket.off('tier:status', onStatus);
@@ -346,6 +353,7 @@ export function useChatSession(
       socket.off('context:approval-required', onContextApproval);
       socket.off('context:compacted', onCompacted);
       socket.off('knowledge:retrieved', onKnowledge);
+      socket.off('file:created', onFileCreated);
     };
   }, [socket]);
 

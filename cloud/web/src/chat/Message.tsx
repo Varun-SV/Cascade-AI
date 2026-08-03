@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Copy, Check, RotateCcw, ChevronDown, ChevronLeft, ChevronRight, Pencil, Trash2, FileText, Download, UploadCloud, Loader2, Eye, ThumbsUp, ThumbsDown } from 'lucide-react';
-import { uploadUrl, saveFile, setFeedback, clearFeedback, type Verdict } from '../lib/api.js';
+import { Copy, Check, RotateCcw, ChevronDown, ChevronLeft, ChevronRight, Pencil, Trash2, FileText, Download, UploadCloud, Loader2, Eye, ThumbsUp, ThumbsDown, Image as ImageIcon, Film, Clock } from 'lucide-react';
+import { uploadUrl, saveFile, setFeedback, clearFeedback, fileDownloadUrl, type Verdict, type PendingMedia } from '../lib/api.js';
+import { usePendingMedia, markPendingMediaSaved } from '../lib/pendingMedia.js';
 import Markdown from '../components/Markdown.js';
 import FileViewerModal from '../components/FileViewerModal.js';
 import { fileExt } from '../lib/fileKind.js';
@@ -145,6 +146,101 @@ function GeneratedFileCard({ file }: { file: GeneratedFile }) {
           actions={saveButton(true)}
         />
       )}
+    </div>
+  );
+}
+
+// Generated media is referenced in the reply as `/api/files/<id>` — usually
+// `![alt](…)` for an image, a plain link for a video/audio clip. Collect every
+// such id so the still-unsaved ones can be offered a Save card; ids the server
+// doesn't list as pending are saved files and need no card.
+function extractMediaIds(md: string): string[] {
+  const ids = new Set<string>();
+  for (const m of md.matchAll(/\/api\/files\/([A-Za-z0-9._~%-]+)/g)) {
+    if (m[1]) ids.add(m[1]);
+  }
+  return [...ids];
+}
+
+/** "23h" / "45m" / "expired" — how long is left to decide. */
+function formatRemaining(expiresAt: number, now = Date.now()): string {
+  const ms = expiresAt - now;
+  if (ms <= 0) return 'expired';
+  const hours = Math.floor(ms / (60 * 60 * 1000));
+  if (hours >= 1) return `${hours}h`;
+  return `${Math.max(1, Math.floor(ms / (60 * 1000)))}m`;
+}
+
+/**
+ * The unsaved-artifact card for a generated image/video — the media twin of
+ * GeneratedFileCard.
+ *
+ * The asymmetry with text/office exports is unavoidable: those live in the
+ * model's own reply, so the browser can rebuild them at any time and nothing
+ * is stored until Save. A picture is real binary that only exists because a
+ * server-side tool call produced it, so it is parked server-side — but
+ * deliberately outside the storage quota and on a timer, so the user's choice
+ * still decides whether it is kept. Download is free (the bytes are already
+ * theirs to fetch); Save is the metered action, and the only one that spends
+ * quota.
+ */
+function GeneratedMediaCard({ media, saved }: { media: PendingMedia; saved: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const isVideo = media.mime.startsWith('video/');
+  const Icon = isVideo ? Film : ImageIcon;
+
+  async function save() {
+    if (busy || saved) return;
+    setBusy(true); setError(null);
+    try {
+      // The same POST /api/files the text/office cards use — the server holds
+      // the bytes already, so this sends the id instead of re-uploading them.
+      await saveFile({ pendingMediaId: media.id });
+      markPendingMediaSaved(media.id);
+      window.dispatchEvent(new CustomEvent('cascade:files-changed'));
+    } catch (e) { setError(e instanceof Error ? e.message : 'Could not save.'); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <div data-testid="generated-media-card" className="flex items-center gap-2.5 rounded-xl border border-elev/10 bg-elev/[0.05] px-3 py-2.5">
+      <Icon size={16} className="shrink-0 text-accent-300" />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <span className="truncate text-sm font-medium text-ink-100">{media.name}</span>
+          {saved ? (
+            <span className="shrink-0 rounded bg-success-500/12 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-success-300">
+              Saved
+            </span>
+          ) : (
+            <span className="flex shrink-0 items-center gap-0.5 rounded bg-warning-500/12 px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-warning-300">
+              <Clock size={9} /> Temporary
+            </span>
+          )}
+        </div>
+        <div className="truncate text-[11px] text-ink-500">
+          {formatBytes(media.size)} · {saved
+            ? 'Saved to your Cascade files.'
+            : `Expires in ${formatRemaining(media.expiresAt)} unless you save it.`}
+          {error ? ` · ${error}` : ''}
+        </div>
+      </div>
+      <a
+        href={fileDownloadUrl(media.id)}
+        download={media.name}
+        className="flex items-center gap-1 rounded-lg border border-elev/10 px-2.5 py-1 text-xs text-ink-200 hover:bg-elev/[0.06]"
+      >
+        <Download size={13} /> Download
+      </a>
+      <button
+        type="button"
+        onClick={save}
+        disabled={busy || saved}
+        className="flex items-center gap-1 rounded-lg bg-accent-600 px-2.5 py-1 text-xs text-white hover:bg-accent-500 disabled:opacity-60"
+      >
+        {busy ? <Loader2 size={13} className="animate-spin" /> : saved ? <Check size={13} /> : <UploadCloud size={13} />} {saved ? 'Saved' : 'Save'}
+      </button>
     </div>
   );
 }
@@ -382,6 +478,13 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
   const [whyOpen, setWhyOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(message.content);
+  // Only a reply that actually references generated media asks the server
+  // which of it is still unsaved — an ordinary chat turn costs no request.
+  const mediaIds = message.role === 'assistant' && !message.streaming ? extractMediaIds(message.content) : [];
+  const { media: pendingMedia, savedIds } = usePendingMedia(mediaIds.length > 0);
+  const unsavedMedia = mediaIds.length
+    ? pendingMedia.filter((m) => mediaIds.includes(m.id))
+    : [];
 
   function submitEdit() {
     const text = draft.trim();
@@ -538,9 +641,12 @@ export default function Message({ message, busy, onRegenerate, onEdit, onDelete,
                 <Markdown>{rest}</Markdown>
               </div>
             )}
-            {files.length > 0 && (
+            {(files.length > 0 || unsavedMedia.length > 0) && (
               <div className="mt-1 flex flex-col gap-2">
                 {files.map((f, i) => <GeneratedFileCard key={`${f.name}-${i}`} file={f} />)}
+                {unsavedMedia.map((m) => (
+                  <GeneratedMediaCard key={m.id} media={m} saved={savedIds.has(m.id)} />
+                ))}
               </div>
             )}
           </>

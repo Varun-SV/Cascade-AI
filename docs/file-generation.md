@@ -76,6 +76,46 @@ contains no fenced example and says to emit `file:` blocks ONLY when explicitly
 asked; both guards exist because injecting an example fence on every turn made
 small models echo a phantom `report.md` in reply to a bare "hi".
 
+## Generated images & video (server-held, still unsaved)
+
+Media is the one artifact the browser cannot rebuild on its own. A `.pdf` or
+`.xlsx` is re-rendered from the model's own text at any time, so nothing needs
+to be stored until you press Save — but a generated image or video is real
+binary that exists only because a **server-side** tool call (`generate_image` /
+`generate_video`) produced it. The browser never had a source to re-render.
+
+So it gets the same *deal* as every other generated artifact, with a different
+mechanism:
+
+- The run's media sink writes it to the tenant's **`tmp-media/`** directory with
+  a `pending_media` row (`id, user_id, conversation_id, name, mime, size,
+  created_at, expires_at`). This is **not** counted by `sumUserFileBytes` — it
+  spends **no storage quota**, and `checkStorageQuota` is never called at
+  generation time.
+- It survives a page refresh (it is server-held, not browser-held), so reloading
+  mid-conversation still lets you view, download or save it.
+- **Download is free**, exactly like a text card's download.
+- **Save** promotes the row into a real `files` row — *that* is when
+  `checkStorageQuota` runs and the bytes become metered storage. Promotion keeps
+  the same id, so the `![alt](/api/files/:id)` already written into the
+  transcript keeps resolving before and after a save.
+- Unsaved media is **deleted after `PENDING_MEDIA_TTL_MS` (24 hours)** —
+  the shortest window that still spans an overnight gap, keeping unmetered bytes
+  bounded to about a day of one user's own generation.
+- A separate, larger per-plan ceiling (`PlanLimits.pendingMediaBytes` — 64 MB
+  free / 512 MB Pro) caps how much unsaved media can be parked at once. Expiry
+  bounds how *long* bytes live, not how *fast* they arrive; this is the rate
+  ceiling, and it is not extra storage — saving still costs quota.
+- Cleanup is both **opportunistic** (the sink and the pending listing sweep, the
+  convention the native-auth/MCP-OAuth stores already follow) and **periodic**
+  (an hourly sweeper started in `index.ts`), because an asset nobody ever opens
+  again still has to go.
+
+`GET /api/files/:id` serves saved files and pending media through one route, so
+the URL shape never depends on save state. `file:created` is emitted for both,
+with `pending: true` (and `expiresAt`) on unsaved media, and the chat renders a
+card badged **Temporary · expires in Nh unless you save it** next to the image.
+
 ## Files storage (metered)
 
 | Plan | Storage | At the cap |
@@ -94,9 +134,10 @@ small models echo a phantom `report.md` in reply to a bare "hi".
 | Method · Path | Purpose |
 | --- | --- |
 | `GET /api/files` | List your saved files + storage used / limit |
-| `POST /api/files` | Save content as a file (quota-checked; 413 at cap) |
-| `GET /api/files/:id` | Download a saved file (owner-scoped) |
-| `DELETE /api/files/:id` | Delete a saved file (frees quota) |
+| `POST /api/files` | Save content as a file, or `{ pendingMediaId }` to keep generated media (quota-checked; 413 at cap) |
+| `GET /api/files/:id` | Download a saved file **or still-pending media** (owner-scoped) |
+| `DELETE /api/files/:id` | Delete a saved file (frees quota), or discard pending media |
+| `GET /api/pending-media` | List generated media you haven't saved, with its expiry |
 
 ## Files panel (right side)
 
@@ -121,13 +162,22 @@ Download / Save actions.
   a server-generated id, never client input (no path traversal).
 - Saved content is size-checked against the plan cap **before** it's written;
   the write is atomic and the `files` row is the source of truth for usage.
+- Pending media is owner-scoped and expiry-scoped on every read: another tenant
+  gets a 404, and so does an expired asset whose bytes the sweeper hasn't
+  reached yet. Promotion is a single transaction, so an asset can be saved (and
+  charged) exactly once.
 - No new code execution: "generation" is the model's text reply; the browser or
   an explicit save is what makes a file. The hosted run still has no shell/file
   tools.
 
 ## References
 
-- Plan limits live in `entitlements.ts` (`PlanLimits.storageBytes`); plan comes
-  from `billing.ts` (`planForStatus`).
+- Plan limits live in `entitlements.ts` (`PlanLimits.storageBytes`,
+  `PlanLimits.pendingMediaBytes`, `PENDING_MEDIA_TTL_MS`); plan comes from
+  `billing.ts` (`planForStatus`).
+- Only the hosted server replaces the media sink (`cloud/server/src/runs.ts`
+  calls `cascade.setMediaSink`). Desktop and the CLI never do, so they keep the
+  SDK's default sink — generated media is written straight into the user's own
+  workspace, where there is no quota, no expiry and nothing to save.
 - Uploads/attachments (`POST /api/uploads`) established the per-tenant file
   storage pattern this builds on.

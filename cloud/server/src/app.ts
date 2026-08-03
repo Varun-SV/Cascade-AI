@@ -26,6 +26,7 @@ import { limitsForPlan, todayKey, checkStorageQuota } from './entitlements.js';
 import { skillCatalog } from './skills.js';
 import { renderDocsPage } from './docs.js';
 import { tenantScratchDir } from './paths.js';
+import { pendingMediaPath, sweepPendingMediaInBackground } from './pending-media.js';
 import {
   billingConfig, makeRazorpay, createSubscription, cancelSubscription,
   verifyWebhookSignature, planForStatus, subscriptionFromWebhook,
@@ -996,12 +997,78 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     });
   });
 
+  /**
+   * Generated media the user has NOT saved yet — an image/video a run just
+   * produced, held in the tenant's temp area and charged to nobody's quota
+   * until they press Save. Listed so the UI can badge it as temporary and
+   * offer Save after a page reload, when the socket event that announced it
+   * is long gone.
+   */
+  app.get('/api/pending-media', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    const userId = req.session!.userId;
+    const plan = store.getUserById(userId)?.plan ?? 'free';
+    // Opportunistic sweep, the same way every other expiring artifact in this
+    // server is cleaned (native-auth flows, MCP-OAuth registry). Backgrounded
+    // so a listing never waits on unlinks; the query below already filters on
+    // expires_at, so the response is correct either way.
+    sweepPendingMediaInBackground(env, store);
+    res.json({
+      media: store.listPendingMedia(userId),
+      usedBytes: store.sumUserPendingMediaBytes(userId),
+      limitBytes: limitsForPlan(plan).pendingMediaBytes,
+    });
+  });
+
   app.post('/api/files', sessionMiddleware(env.SESSION_SECRET), uploadJson, (req: AuthedRequest, res) => {
     const userId = req.session!.userId;
     const body = req.body ?? {};
     const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 200) : '';
     const content = typeof body.content === 'string' ? body.content : '';
     const conversationId = typeof body.conversationId === 'string' ? body.conversationId : null;
+
+    // ── Save generated media (promotion) ──
+    // Deliberately the SAME route the text/office "unsaved artifact" cards
+    // already save through, so there is exactly one metered save in the
+    // product: same quota check, same 413, same { file, usedBytes, limitBytes }
+    // response, same client helper. It differs only in what the client sends —
+    // an id rather than the content — because for media the bytes are already
+    // on the server (a run's media sink parked them there) and shipping tens of
+    // megabytes of base64 back up the wire to store what we are already
+    // holding would be absurd.
+    const pendingMediaId = typeof body.pendingMediaId === 'string' ? body.pendingMediaId : '';
+    if (pendingMediaId) {
+      const plan = store.getUserById(userId)?.plan ?? 'free';
+      const media = store.getPendingMedia(pendingMediaId, userId);
+      if (!media) {
+        res.status(404).json({ error: "That generated file is no longer available — unsaved media is kept for 24 hours." });
+        return;
+      }
+      // THE quota check for generated media. Not at generation time: making a
+      // picture isn't choosing to keep one.
+      try {
+        checkStorageQuota(store.sumUserFileBytes(userId), media.size, plan);
+      } catch (err) {
+        res.status(413).json({ error: err instanceof Error ? err.message : 'Storage full.' });
+        return;
+      }
+      fs.mkdirSync(filesDir(userId), { recursive: true });
+      // Row first (one transaction, and it keeps the id so the ![alt](/api/files/:id)
+      // already sitting in the transcript still resolves), then the bytes. If
+      // the move fails the row is undone rather than left charging quota for
+      // bytes that aren't there.
+      const file = store.promotePendingMedia(media.id, userId);
+      if (!file) { res.status(404).json({ error: 'That generated file is no longer available.' }); return; }
+      try {
+        fs.renameSync(pendingMediaPath(env, userId, media.id), path.join(filesDir(userId), file.id));
+      } catch {
+        store.deleteFile(file.id, userId);
+        res.status(500).json({ error: "Couldn't save that file — its data is no longer on the server." });
+        return;
+      }
+      res.json({ file, usedBytes: store.sumUserFileBytes(userId), limitBytes: limitsForPlan(plan).storageBytes });
+      return;
+    }
+
     // Client renders binary formats (PDF/Office) and sends them base64-encoded;
     // text files are stored as UTF-8 as before.
     const encoding: BufferEncoding = body.encoding === 'base64' ? 'base64' : 'utf-8';
@@ -1022,14 +1089,33 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     res.json({ file, usedBytes: store.sumUserFileBytes(userId), limitBytes: limitsForPlan(plan).storageBytes });
   });
 
+  /**
+   * Serves saved files AND still-pending generated media, transparently.
+   *
+   * One route rather than a parallel `/api/pending-media/:id` because the
+   * locator is baked into the model's own reply the moment it writes
+   * `![alt](/api/files/:id)`: a save-state-dependent URL shape would mean the
+   * transcript, the Files panel and the client-side .pptx/.docx exporters each
+   * had to know whether the user had pressed Save yet — and every message
+   * persisted before a save would point at a URL that stops existing after
+   * one. Promotion keeps the id, so this single URL is correct for the whole
+   * life of the asset.
+   */
   app.get('/api/files/:id', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
     const id = req.params['id'];
     if (typeof id !== 'string') { res.status(400).json({ error: 'Invalid file id' }); return; }
-    const file = store.getFile(id, req.session!.userId);
-    if (!file) { res.status(404).json({ error: 'Not found' }); return; }
-    res.type(file.mime);
-    res.setHeader('Content-Disposition', `attachment; filename="${file.name.replace(/[^\w.\- ]/g, '_')}"`);
-    fs.createReadStream(path.join(filesDir(req.session!.userId), file.id)).on('error', () => res.status(404).end()).pipe(res);
+    const userId = req.session!.userId;
+    const file = store.getFile(id, userId);
+    // Owner-scoped and expiry-scoped: getPendingMedia refuses another tenant's
+    // asset and anything past its TTL, so a swept id reads as gone immediately
+    // even if the bytes are still waiting for the sweeper.
+    const pending = file ? null : store.getPendingMedia(id, userId);
+    const asset = file ?? pending;
+    if (!asset) { res.status(404).json({ error: 'Not found' }); return; }
+    const onDisk = pending ? pendingMediaPath(env, userId, asset.id) : path.join(filesDir(userId), asset.id);
+    res.type(asset.mime);
+    res.setHeader('Content-Disposition', `attachment; filename="${asset.name.replace(/[^\w.\- ]/g, '_')}"`);
+    fs.createReadStream(onDisk).on('error', () => res.status(404).end()).pipe(res);
   });
 
   app.delete('/api/files/:id', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
@@ -1038,6 +1124,13 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     const userId = req.session!.userId;
     const file = store.getFile(id, userId);
     if (file) { try { fs.rmSync(path.join(filesDir(userId), file.id)); } catch { /* already gone */ } store.deleteFile(id, userId); }
+    // Discarding unsaved media early, through the same delete the Files panel
+    // uses. It frees the pending allowance, not the storage quota — pending
+    // media never spent any.
+    else if (store.getPendingMedia(id, userId)) {
+      try { fs.rmSync(pendingMediaPath(env, userId, id)); } catch { /* already gone */ }
+      store.deletePendingMedia(id, userId);
+    }
     res.json({ ok: true, usedBytes: store.sumUserFileBytes(userId) });
   });
 
