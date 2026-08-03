@@ -693,3 +693,76 @@ describe('CloudStore — memory durability', () => {
     expect(store.listMemories(userId)[0]!.durability).toBe('permanent');
   });
 });
+
+// ── Pending media (generated but unsaved) ─────
+
+describe('CloudStore — pending media', () => {
+  let dir: string;
+  let store: CloudStore;
+  let userId: string;
+  let otherId: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-pending-media-'));
+    store = new CloudStore(path.join(dir, 'cloud.db'));
+    userId = store.upsertUser({ provider: 'dev', providerId: 'owner', email: null, name: null, avatar: null }).id;
+    otherId = store.upsertUser({ provider: 'dev', providerId: 'other', email: null, name: null, avatar: null }).id;
+  });
+  afterEach(async () => {
+    store.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  const park = (owner: string, size = 1000, expiresInMs = 60_000) => store.addPendingMedia({
+    userId: owner, conversationId: null, name: 'cascade.png', mime: 'image/png',
+    size, expiresAt: Date.now() + expiresInMs,
+  });
+
+  it('is invisible to the storage quota — that is the whole point', () => {
+    park(userId, 5000);
+    expect(store.sumUserFileBytes(userId)).toBe(0);
+    expect(store.listFiles(userId)).toHaveLength(0);
+    // Tracked, just on its own (self-expiring) budget.
+    expect(store.sumUserPendingMediaBytes(userId)).toBe(5000);
+  });
+
+  it('hides expired rows from reads and from the pending budget', () => {
+    park(userId, 700, -1);
+    const live = park(userId, 300);
+    expect(store.listPendingMedia(userId).map((m) => m.id)).toEqual([live.id]);
+    expect(store.sumUserPendingMediaBytes(userId)).toBe(300);
+    expect(store.listExpiredPendingMedia(Date.now())).toHaveLength(1);
+  });
+
+  it('is owner-scoped on read, promote and delete', () => {
+    const mine = park(userId);
+    expect(store.getPendingMedia(mine.id, otherId)).toBeNull();
+    expect(store.promotePendingMedia(mine.id, otherId)).toBeNull();
+    expect(store.deletePendingMedia(mine.id, otherId)).toBe(false);
+    // …and none of that disturbed the real owner's asset.
+    expect(store.getPendingMedia(mine.id, userId)).not.toBeNull();
+  });
+
+  it('promotion keeps the id, charges the quota, and is single-use', () => {
+    const media = park(userId, 2048);
+
+    const file = store.promotePendingMedia(media.id, userId);
+
+    // Same id: the model already wrote ![alt](/api/files/<id>) into a message
+    // that is now permanent — a new id would break that image on the next sweep.
+    expect(file?.id).toBe(media.id);
+    expect(file?.name).toBe('cascade.png');
+    expect(store.sumUserFileBytes(userId)).toBe(2048);
+    // It stops being pending, so it can't be saved (or charged) twice.
+    expect(store.getPendingMedia(media.id, userId)).toBeNull();
+    expect(store.promotePendingMedia(media.id, userId)).toBeNull();
+    expect(store.sumUserFileBytes(userId)).toBe(2048);
+    expect(store.sumUserPendingMediaBytes(userId)).toBe(0);
+  });
+
+  it('refuses to promote something already expired', () => {
+    const stale = park(userId, 100, -1);
+    expect(store.promotePendingMedia(stale.id, userId)).toBeNull();
+    expect(store.sumUserFileBytes(userId)).toBe(0);
+  });
+});

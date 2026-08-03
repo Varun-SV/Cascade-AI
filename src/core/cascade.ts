@@ -34,6 +34,7 @@ import { DeadModelStore, fileDeadModelPersistence } from './router/dead-models.j
  */
 const ESCALATION_DECISION_TIMEOUT_MS = 5 * 60_000;
 import { buildMediaTools, type AssetSink } from '../tools/generate-media.js';
+import { buildDocumentTools } from '../tools/generate-document.js';
 import { RunBreaker } from './run-breaker.js';
 import { T3Worker } from './tiers/t3-worker.js';
 import { ToolRegistry } from '../tools/registry.js';
@@ -174,6 +175,7 @@ export class Cascade extends EventEmitter {
       (this.config.providers ?? []).map((p) => p.type),
     );
     this.registerMediaTools(workspacePath);
+    this.registerDocumentTools(workspacePath);
     this.telemetry = config.telemetry?.enabled
       ? new Telemetry(config.telemetry, config.telemetry.distinctId ?? 'anonymous')
       : noopTelemetry;
@@ -697,6 +699,36 @@ export class Cascade extends EventEmitter {
       // a restricted embed must not gain new tools just because it has an
       // OpenAI key.
       if (!permitted(tool.name)) continue;
+      tool.setWorkspaceRoot(workspacePath);
+      this.toolRegistry.register(tool);
+    }
+  }
+
+  /**
+   * Register `generate_document` where there is a real workspace to write into.
+   *
+   * A `.docx`/`.pptx`/`.xlsx` is a ZIP of OOXML parts, so `file_write` — which
+   * does exactly what it says and writes the model's text verbatim — produced
+   * files Word/Excel/PowerPoint correctly reported as corrupted. This tool owns
+   * the conversion (see tools/generate-document.ts for why it isn't folded into
+   * file_write).
+   *
+   * Registered OUTSIDE `enabledTools` for the same reason the media tools are:
+   * that allowlist is a blast-radius control for tools that reach the machine
+   * or the network, and this one only writes the artifact the user asked for,
+   * into the workspace the run already owns. `disabledTools` still removes it.
+   * A host with no filesystem (the cloud) has its own browser-side exporter and
+   * simply never reaches this path — `buildDocumentTools` returns nothing
+   * without a file reader, mirroring `transcribe_audio`.
+   */
+  private registerDocumentTools(workspacePath: string): void {
+    const denied = new Set(this.config.tools?.disabledTools ?? []);
+    const tools = buildDocumentTools(async (p) => {
+      const fsp = await import('node:fs/promises');
+      return new Uint8Array(await fsp.readFile(p));
+    });
+    for (const tool of tools) {
+      if (denied.has(tool.name)) continue;
       tool.setWorkspaceRoot(workspacePath);
       this.toolRegistry.register(tool);
     }

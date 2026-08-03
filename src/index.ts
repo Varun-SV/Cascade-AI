@@ -47,6 +47,22 @@ export type {
   FileManifest, ManifestDiff, WorkspaceIndexOptions, RefreshResult,
   GraphFactSource, GraphSearchOptions, RankedFact,
 } from './retrieval/index.js';
+// Document generation. The parser + OOXML renderers are deliberately part of
+// the public surface: cloud/web imports the SAME module for its browser-side
+// export path, so there is exactly one implementation of "model text → real
+// Office binary" rather than two copies free to drift apart.
+export {
+  parseBlocks, parseDelimited, fileExt, chartKind, parseChartSpec, chartToTableRows,
+  matchImageLine, sniffImage, bytesToBase64, stripInline, inlineRuns,
+  splitSlides, parseSlide, extractCharts,
+  DOCUMENT_MIME, isDocumentFormat, renderDocument, renderDocx, renderPptx, renderXlsx,
+} from './core/documents/index.js';
+export type {
+  Block, ChartKind as DocumentChartKind, ChartSeries, ChartSpec, ImageInfo, ImageRef,
+  InlineRun, LoadedImage, Slide, DocumentFormat, ImageByteLoader, RenderOptions,
+} from './core/documents/index.js';
+export { GenerateDocumentTool, buildDocumentTools } from './tools/generate-document.js';
+export type { WorkspaceFileReader } from './tools/generate-document.js';
 export { CodeSearchTool } from './tools/code-search.js';
 export { GraphSearchTool } from './tools/graph-search.js';
 export {

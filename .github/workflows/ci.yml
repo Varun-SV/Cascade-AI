@@ -1,0 +1,111 @@
+# Runs the test suites, typechecks and builds on every pull request.
+#
+# Until this existed the only PR checks were CodeQL's security analysis, so a
+# pull request could show all-green with a failing test suite — which is exactly
+# what happened: a PR sat green for hours while one of its own new tests failed.
+# CodeQL answers "is this code dangerous"; nothing answered "does this code
+# work". This is that second check.
+#
+# NOTE: a passing workflow does not block a merge on its own. To make it a real
+# gate, mark "SDK, CLI & desktop" and "Cloud server & web" as required status
+# checks in the repository's branch-protection rules for `main`.
+name: CI
+
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+  workflow_dispatch: {}
+
+# Least privilege: checking out and running the suites needs nothing but read
+# access to the repo contents. Without this block the job inherits whatever the
+# repository default is — which can be read/write — and a workflow that executes
+# a pull request's own code (npm ci runs its install scripts, vitest runs its
+# tests) is exactly where a write-capable token should not be sitting.
+# release.yml declares `contents: write` because it genuinely publishes; this
+# one has no reason to write anything.
+permissions:
+  contents: read
+
+# A new push to the same PR makes the previous run's answer irrelevant, so stop
+# it rather than paying for two. Never cancel on main: those runs are the record
+# of whether a merged commit was green.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  sdk:
+    name: SDK, CLI & desktop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # 22 to match release.yml — optional native deps (isolated-vm) ship
+          # prebuilds for the Node 22/24 ABIs only.
+          node-version: '22'
+          cache: 'npm'
+
+      - run: npm ci
+
+      # Typecheck before tests: a type error is the cheapest failure to read,
+      # and vitest transpiles without checking types, so a broken signature can
+      # otherwise sail through a green test run.
+      - name: Lint (tsc --noEmit)
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build (web + CLI)
+        run: npm run build
+
+      # Kept in this job, after the CLI build: the desktop main process compiles
+      # against the built core, so it needs `dist/` to exist. release.yml builds
+      # them in this same order for the same reason.
+      - name: Build desktop app
+        run: npm run build -w app
+
+  cloud:
+    name: Cloud server & web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - run: npm ci
+
+      # cloud/server imports the SDK through a vendored `#cascade-ai` bundle
+      # that is GENERATED, not committed (.gitignore: cloud/server/vendor/), so
+      # on a clean checkout nothing it imports resolves — every src file fails
+      # with TS2307 and vitest cannot load the suite either.
+      #
+      # This is the workspace's own `prebuild` wiring, not a bespoke CI step:
+      # `npm run build -w cascade-cloud-server` triggers prebuild, which runs
+      # the root `build:cli` and then scripts/link-cascade-ai.mjs to write the
+      # vendor file — and then tsup, so the server build gets covered too.
+      - name: Build SDK core + vendored bundle (server prebuild)
+        run: npm run build -w cascade-cloud-server
+
+      # cloud/server has no `lint` script of its own; its typecheck is a direct
+      # tsc against its tsconfig, matching what the workspace docs describe.
+      - name: Server typecheck
+        run: npx tsc --noEmit -p tsconfig.json
+        working-directory: cloud/server
+
+      - name: Server tests
+        run: npm test -w cascade-cloud-server
+
+      - name: Web tests
+        run: npm test -w cascade-cloud-web
+
+      # `build` here is `tsc && vite build`, so this typechecks the SPA too.
+      - name: Web build
+        run: npm run build -w cascade-cloud-web

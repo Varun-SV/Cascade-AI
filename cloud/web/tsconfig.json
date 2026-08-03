@@ -12,7 +12,11 @@
     "noEmit": true,
     "jsx": "react-jsx",
     "strict": true,
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
+    "paths": {
+      "@cascade/documents": ["../../src/core/documents/index.ts"]
+    }
   },
   "include": ["src"],
   "exclude": ["e2e", "node_modules", "dist"]

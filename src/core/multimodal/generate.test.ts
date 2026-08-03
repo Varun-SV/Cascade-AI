@@ -21,6 +21,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ProviderConfig } from '../../types.js';
 import { generateImage, generateVideo } from './generate.js';
 import { allCapabilities } from './registry.js';
+import { classifyProviderError } from '../router/provider-errors.js';
 
 const CFG: ProviderConfig = { type: 'gemini', apiKey: 'test-key' };
 
@@ -345,6 +346,60 @@ describe('generateVideo — Gemini predictLongRunning', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('gives up at the deadline with the OUTCOME, not a "Provider said:" wrapper', async () => {
+    // The provider said nothing — it is still rendering; Cascade is the one
+    // that stopped waiting. Running that through describeProviderError turned
+    // the only fact the user needs ("no video exists") into "The model call
+    // failed on veo-…. Provider said: …", which reads as a generic swallowed
+    // failure and hides that nothing was produced.
+    stubFetchSequence([
+      { ok: true, json: { name: 'operations/abc123' } },
+      operation(false), // never finishes
+    ]);
+
+    vi.useFakeTimers();
+    let caught: unknown;
+    try {
+      const promise = generateVideo(GEMINI_VIDEO, CFG, { prompt: 'a cat' }).catch((e: unknown) => { caught = e; });
+      await vi.advanceTimersByTimeAsync(8 * 60_000 + 10_000);
+      await promise;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const message = (caught as Error).message;
+    expect(message).toMatch(/veo-3\.1-generate-preview timed out after 8 minutes — no video was produced/);
+    // The give-up must reach the user as itself, NOT wrapped in the classifier's
+    // generic prose — nothing here came from the provider.
+    expect(message).not.toContain('Provider said');
+    expect(message).not.toContain('The model call failed');
+    expect(message.startsWith('veo-3.1-generate-preview timed out')).toBe(true);
+  });
+
+  it('classifies that give-up as non-systemic, so no layer retries the 8-minute render', async () => {
+    // The T3 worker fast-fails a SYSTEMIC provider error and (since this fix)
+    // any provider-backed failure at all — but generate-media.ts's
+    // runWithProviderFallback keys on `systemic` to decide whether to pay for a
+    // second provider. A timeout must not read as systemic there, or a second
+    // video model landing in the catalogue would buy a second 8-minute wait.
+    stubFetchSequence([
+      { ok: true, json: { name: 'operations/abc123' } },
+      operation(false),
+    ]);
+
+    vi.useFakeTimers();
+    let caught: unknown;
+    try {
+      const promise = generateVideo(GEMINI_VIDEO, CFG, { prompt: 'a cat' }).catch((e: unknown) => { caught = e; });
+      await vi.advanceTimersByTimeAsync(8 * 60_000 + 10_000);
+      await promise;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(classifyProviderError(caught).systemic).toBe(false);
   });
 
   it('surfaces an operation-level failure even though the operation finished ("done" is not "succeeded")', async () => {

@@ -5,6 +5,237 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+Cascade Cloud only — no SDK, CLI or desktop code is touched, so the version is
+deliberately not bumped (see `CONTRIBUTING.md`: a bump on `main` publishes npm
+and rebuilds the desktop installers, which would ship a byte-identical release).
+
+### Changed
+- **Generated images and videos are no longer saved to your storage the moment
+  they're made.** A hosted run's media sink used to call `checkStorageQuota` and
+  create a permanent `files` row the instant `generate_image` / `generate_video`
+  returned, so every picture the model produced — including ones nobody asked to
+  keep — was irreversibly metered against a 10 MB free plan with no opt-out, and
+  a video bigger than the whole plan cap failed the run outright. Media now gets
+  the same deal every other generated artifact already had (see
+  `docs/file-generation.md`): free to view and download, metered **only** when
+  the user explicitly saves it.
+  - **Pending media area** (`cloud/server/src/pending-media.ts`, new
+    `pending_media` table): the bytes land in the tenant's `tmp-media/`
+    directory with a row carrying an `expires_at`. It is invisible to
+    `sumUserFileBytes`, so generation spends no quota at all. Server-held rather
+    than browser-held because — unlike a `.pdf`/`.xlsx` export, which the
+    browser re-renders from the model's own text — a generated image is real
+    binary the browser never had a source for; it therefore survives a page
+    refresh, so reloading mid-chat doesn't lose the picture.
+  - **Save is the metered action.** `POST /api/files` — the exact route, helper
+    and 413-at-cap behaviour the existing text/office "unsaved artifact" cards
+    already save through — now also accepts `{ pendingMediaId }`, promoting the
+    row into a real `files` row and running `checkStorageQuota` **at that
+    moment**. Promotion keeps the id, so the `![alt](/api/files/:id)` the model
+    already wrote into the transcript resolves before and after a save.
+  - **One URL for both states.** `GET /api/files/:id` transparently serves saved
+    files and still-pending media (owner- and expiry-scoped), so nothing that
+    renders a transcript — the chat, the Files panel, the client-side
+    `.pptx`/`.docx` exporters — has to know whether Save has been pressed.
+    `DELETE /api/files/:id` likewise discards pending media.
+  - **Expiry**: unsaved media is deleted (row *and* bytes) after
+    `PENDING_MEDIA_TTL_MS` — 24 hours, the shortest window that still spans an
+    overnight gap. Cleanup is opportunistic at the natural entry points (the
+    convention the native-auth and MCP-OAuth stores already follow) *and*
+    periodic — an hourly sweeper started in `index.ts`, because an asset nobody
+    ever opens again would otherwise sit on the volume forever.
+  - **A separate, larger allowance** (`PlanLimits.pendingMediaBytes`: 64 MB free
+    / 512 MB Pro) caps unsaved media. Self-expiry bounds how long unmetered
+    bytes live, not how fast they arrive; this is the rate ceiling, and it is
+    not extra storage — saving still costs quota.
+
+### Added
+- **`GET /api/pending-media`** — lists the generated media you haven't saved,
+  with its size and expiry, so the UI can offer Save after a reload rather than
+  relying on the socket event that announced it.
+- **An unsaved-media card in chat** (`cloud/web/src/chat/Message.tsx`), the
+  media twin of the existing file cards: a **Temporary** badge with
+  "expires in 23h unless you save it", a free **Download**, and a **Save**
+  button that flips to "Saved to your Cascade files". `file:created` now carries
+  `pending: true` and `expiresAt` for unsaved media, so the client can tell a
+  new saved file from something about to disappear.
+## 0.67.0 - 2026-08-03
+
+### Fixed
+- **Desktop/CLI could not produce a valid `.docx`, `.pptx` or `.xlsx` at all** —
+  every generated Office file opened as "corrupted". The only file-writing tool
+  a worker had was `file_write`, whose `execute()` is a plain
+  `fs.writeFile(path, content, 'utf-8')` with no awareness of the target
+  extension: ask for `report.docx` and the model, having nothing better to call,
+  wrote literal Markdown into a file named `.docx`. A real Office file is a ZIP
+  archive of OOXML parts, and there was no conversion step anywhere on
+  desktop/CLI — the equivalent existed only in the browser
+  (`cloud/web/src/lib/exporters.ts`).
+  - **New `generate_document` tool** (`src/tools/generate-document.ts`): the
+    model passes a target path plus the source — Markdown for `.docx`, Markdown
+    slides (`---`-separated) for `.pptx`, CSV for `.xlsx` — and the tool renders
+    the real OOXML archive in Node and writes the bytes. Registered wherever
+    there is a genuine workspace (desktop, CLI, SDK, via `Cascade`'s
+    constructor), and absent on a host with no filesystem, mirroring how
+    `transcribe_audio` is gated on a file reader. `pdf_create` still owns PDFs.
+  - `file_write` was deliberately **not** taught to reinterpret those
+    extensions: a tool the model understands as "write these exact bytes" must
+    keep meaning that, or writing already-valid `.docx` bytes through it would
+    silently corrupt them.
+  - **One renderer, two hosts.** The parsing and layout now live in
+    `src/core/documents/` (`parseBlocks`, `stripInline`, `inlineRuns`,
+    `sniffImage`, `splitSlides`/`parseSlide`, `parseDelimited`, and the
+    `renderDocx`/`renderPptx`/`renderXlsx` renderers), imported by BOTH the new
+    tool and `cloud/web` (through a `@cascade/documents` alias) instead of being
+    copied. The module is DOM-free and Node-free: images arrive through an
+    injected `loadImageBytes(url)` callback (browser `fetch` with the session
+    cookie; `fs.readFile` on desktop), base64 feature-detects `Buffer` off
+    `globalThis`, and docx packs via `Packer.toArrayBuffer` — the one packer
+    needing neither a Node `Buffer` nor a DOM `Blob`. `cloud/web`'s exporter
+    keeps only the browser-specific parts (the `/api/files/:id` fetch, Blob
+    wrappers, the jsPDF layout). A docx image page-height fix had already
+    landed in one copy with nothing keeping a second honest.
+  - `verifyArtifacts()` now checks a promised `.docx`/`.pptx`/`.xlsx` really
+    begins with the ZIP signature `PK\x03\x04`, so the original failure is
+    caught rather than passing an "it's a non-empty file" check.
+  - Added `docx`, `pptxgenjs` and `xlsx` to the SDK's dependencies (previously
+    only in `cloud/web`); all three verified to work in plain Node and to
+    survive tsup's CJS bundling for the embedded desktop backend.
+
+### Added
+- **Real charts in generated documents — a `chart:` block convention.** Asked to
+  visualize data, a model previously had two options and both were bad: draw it
+  with an image model (which cannot be trusted to get numbers, axes or labels
+  right — there is a standing rule against it) or emit a flat Markdown table,
+  which is not a chart. In practice it sometimes did neither and just described
+  the chart in prose. Now it can write a fenced ` ```chart:bar ` block (also
+  `chart:line`, `chart:pie`, `chart:doughnut`, `chart:area`, `chart:scatter`)
+  whose body is CSV: an optional `title:` line, a `<category>,<series>,<series>`
+  header row, then one row per category. CSV rather than JSON because models emit
+  it far more reliably and it matches the existing `.xlsx` convention; decorated
+  values (`$1,200`, `42%`, `(50)`) are coerced, and a block that cannot be parsed
+  stays a visible code block rather than being silently dropped.
+  - `.pptx` renders it as a **genuine, editable PowerPoint chart** via
+    `pptxgenjs` `addChart` — the model's exact numbers land in the chart part's
+    embedded workbook (`ppt/charts/chart1.xml`), not in a picture.
+  - `.docx` renders a titled Word table of the same numbers. The `docx` library
+    exposes no chart API whatsoever (a Word chart needs a DrawingML chart part
+    plus an embedded workbook, which it does not model) — a documented gap, with
+    the data preserved rather than dropped.
+  - `.xlsx` puts each chart's data on its own worksheet as real numeric rows the
+    user can chart in one click; SheetJS's community build writes cells, not
+    chart objects.
+  - `.pdf` renders title + table (jsPDF draws no charts).
+  - Both `FILE_DELIVERY_GUIDANCE` (hosted) and `buildWorkerRules` (desktop/CLI)
+    now teach the convention, replacing the old "fall back to a Markdown table"
+    advice.
+
+### Fixed (image reliability)
+- **"Image insertion only worked once"** had two distinct causes, both addressed.
+  - `generate_image` exists only when an OpenAI or Gemini key is configured
+    (`multimodal/registry.ts`'s `CAPABILITIES`); with neither, the tool was
+    simply absent and the model was never given a choice — so it wrote
+    `[illustration of a cat]` and moved on. `buildWorkerRules` now states
+    plainly, up front, when no image model is available this run, and points at
+    `chart:` blocks for anything data-driven.
+  - The existing "you MUST call generate_image" rule was being declined in
+    practice. It is tightened (call it *before* writing the document, once per
+    image, and the reference must stand **alone** on its line or it stays prose)
+    and, more importantly, made checkable: the new `missingVisualEvidence()`
+    check runs after the agent loop and, when the subtask asked for a visual but
+    the output has no image reference, no `chart:` block and no
+    `generate_image`/`generate_document` call, triggers one correction round
+    with tools rather than shipping a paragraph about a picture that does not
+    exist.
+- `generate_document` reports each image reference it could *not* embed, by
+  name, instead of quietly producing a picture-less deck.
+- `run_code`'s guidance no longer competes for Office formats now that a
+  dedicated tool produces them correctly.
+## 0.66.2 - 2026-08-03
+
+### Fixed
+- **A video request wrote scripts and direction notes forever and never
+  produced a video**, burning 30+ minutes of paid planning and generation calls
+  with nothing to show. Three independent defects stacked into that one run;
+  the creative pre-production the user liked is kept, and the pipeline now
+  reliably ends in a real `generate_video` call that either completes or fails
+  fast.
+  - **The planner had zero visibility into generation capabilities.**
+    `MultimodalRegistry.describe()` carried a doc comment claiming "the planner
+    sees this", but it was called from nothing except its own test — neither
+    `t1-administrator.ts` nor `t2-manager.ts` had ever been told that video is a
+    single, slow, per-second-billed tool call. Added
+    `describeGenerationForPlanner()` next to the capability table and wired it
+    into both `buildT1SystemPrompt()` and `buildT2SystemPrompt()`, keyed on the
+    tools actually registered for the run (the same predicate the rest of those
+    prompts use) rather than on which providers are configured — a restricted
+    host has the provider but not the tool, and advertising a capability no
+    worker can reach is the exact situation `buildMediaTools` exists to prevent.
+    It states that each generation tool is one ATOMIC call, quotes the unit
+    price from the shared pricing dataset (only where every catalogue entry for
+    that modality agrees — otherwise the unit alone, never an invented average),
+    and adds the rule that actually fixes the run: a video plan must contain
+    exactly ONE subtask whose deliverable is the `generate_video` call, it must
+    be last on its path, and pre-production steps before it are expected and
+    fine. `describe()` is unchanged and remains the user-facing inventory; its
+    misleading comment was corrected.
+  - **The T3 worker had a "you MUST call this tool" rule for images and none for
+    video.** `KNOWN_TOOLS` — the list that decides whether ANY tool guidance
+    renders at all — listed `generate_image` and omitted `generate_video`,
+    `generate_speech` and `transcribe_audio`, so a worker whose only tools were
+    media ones counted as "no tools registered" and was told nothing about using
+    tools whatsoever. All four are now listed, and `buildWorkerRules()` gained a
+    video rule mirroring the image one: call the tool (that call IS the
+    deliverable), never substitute prose, a script, a storyboard or a
+    `[video: …]` placeholder, call it exactly once, report the returned location
+    verbatim, and report a failure rather than re-ordering the render. Unlike
+    the image rule it is not scoped to a document format — the clip is the
+    deliverable, not an illustration inside one — and the reference syntax is a
+    plain link, since Markdown image syntax cannot embed a video.
+  - **A timed-out render was handed to a retry mechanism built for a different
+    problem.** The 8-minute Veo give-up classifies as `unknown`/non-systemic, so
+    it fell past the fast-fail branch into `adaptiveFallback()` — which exists
+    for a wrong or missing tool NAME, where a name-similar sibling plausibly
+    does the same job for near-zero cost. For `generate_video` that meant a
+    keyword-similar substitution (`generate_image` "recovering" a video
+    request), a synthesized replacement tool, or an error string the agent loop
+    answers by ordering the same 8-minute render again — each separately billed.
+    `generate-media.ts`'s `runWithProviderFallback` had already settled this
+    question with the alternatives in hand (systemic → one attempt per alternate
+    provider; non-systemic → deliberately not retried); the worker now agrees
+    with that reasoning instead of quietly re-opening it. Any
+    `PROVIDER_BACKED_TOOLS` failure, systemic or not, now fails the subtask on
+    the first attempt with the real reason intact. `adaptiveFallback` is scoped,
+    not removed — ordinary tools still use it.
+  - **The give-up message misattributed Cascade's own deadline to the provider.**
+    `callProvider` wrapped it as "The model call failed on veo-…. Provider said:
+    …", but the provider said nothing — it is still rendering. The timeout is now
+    a `GenerationGaveUpError` that passes through unwrapped and leads with the
+    outcome: "veo-3.1-generate-preview timed out after 8 minutes — no video was
+    produced."
+## 0.66.1 - 2026-07-30
+
+### Fixed
+
+- **Cloud web: a redeployed server could still serve an old cached bundle
+  indefinitely.** `cloud/server`'s SPA static-file serving (`app.ts`) used
+  Express's default cache headers for both `index.html` and every hashed
+  Vite asset, which meant a browser tab left open across a redeploy had no
+  reason to ever re-fetch anything — including features that shipped days
+  earlier. This produced a real bug report: a generated PowerPoint
+  "Download" saved raw Markdown text instead of a real `.pptx` binary,
+  because the tab was still running JavaScript from before the Office-export
+  feature existed, even though the server itself was already on the current
+  build (confirmed via Railway's own deploy history) and a hard refresh
+  fixed it immediately. Fixed by giving Vite's content-hashed assets a long,
+  immutable `Cache-Control` (safe — a new deploy ships new hashes, never
+  overwrites an old one) and forcing `index.html` — the one unhashed file,
+  and the only thing that names the current build's hashes — to always
+  revalidate (`Cache-Control: no-cache`) on every request, including
+  client-side SPA routes served through the catch-all handler.
+
 ## 0.66.0 - 2026-07-30
 
 ### Added

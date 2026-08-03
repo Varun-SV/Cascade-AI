@@ -1,6 +1,6 @@
 {
   "name": "cascade-ai",
-  "version": "0.66.0",
+  "version": "0.67.0",
   "description": "Multi-tier AI orchestration CLI — T1/T2/T3 hierarchical agent system",
   "type": "module",
   "main": "dist/index.cjs",
@@ -56,6 +56,7 @@
     "conf": "^13.0.0",
     "dayjs": "^1.11.13",
     "diff": "^7.0.0",
+    "docx": "^9.7.1",
     "dotenv": "^16.4.0",
     "express": "^4.21.0",
     "express-rate-limit": "^7.4.0",
@@ -74,6 +75,7 @@
     "ora": "^8.1.0",
     "pdfkit": "^0.18.0",
     "posthog-node": "^5.37.1",
+    "pptxgenjs": "^4.0.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "simple-git": "^3.27.0",
@@ -83,6 +85,7 @@
     "update-notifier": "^7.3.0",
     "winston": "^3.15.0",
     "wrap-ansi": "^10.0.0",
+    "xlsx": "^0.18.5",
     "zod": "^3.23.8"
   },
   "optionalDependencies": {
@@ -110,6 +113,7 @@
     "@types/pdfkit": "^0.17.5",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
+    "jszip": "^3.10.1",
     "tsup": "^8.3.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"

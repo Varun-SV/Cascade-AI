@@ -57,6 +57,20 @@ export interface TranscriptionRequest {
 const DEFAULT_TIMEOUT_MS = 120_000;
 
 /**
+ * A verdict Cascade reached on its own rather than one the provider reported.
+ * Passed through callProvider untouched: describeProviderError would prefix it
+ * with "The model call failed … Provider said:", and the provider said nothing
+ * — it is still rendering. Misattributing our own deadline to the vendor turns
+ * the one fact the user needs ("no video exists") into generic noise.
+ */
+export class GenerationGaveUpError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'GenerationGaveUpError';
+  }
+}
+
+/**
  * Wrap a provider call so a failure carries the same classified, actionable
  * message the chat tiers produce. A generation failure used to surface as a raw
  * SDK stack; there is no reason a dead key should read differently here than it
@@ -66,6 +80,7 @@ async function callProvider<T>(fn: () => Promise<T>, modelId: string): Promise<T
   try {
     return await fn();
   } catch (err) {
+    if (err instanceof GenerationGaveUpError) throw err;
     const classified = classifyProviderError(err);
     throw new Error(describeProviderError(classified, modelId));
   }
@@ -367,9 +382,13 @@ export async function generateVideo(
     }
 
     if (!operation.done) {
-      throw new Error(
-        `Video was still rendering after ${Math.round(VIDEO_TIMEOUT_MS / 60_000)} minutes. ` +
-        'It may still complete on the provider side, but Cascade stopped waiting.',
+      // Stated as the outcome, not the symptom: the caller's next move (report
+      // it and stop — see t3-worker.ts's provider-backed fast-fail) depends on
+      // knowing that nothing was produced and nothing is coming.
+      throw new GenerationGaveUpError(
+        `${cap.modelId} timed out after ${Math.round(VIDEO_TIMEOUT_MS / 60_000)} minutes — no video was produced. ` +
+        'Cascade stopped waiting; the render may still finish on the provider side, but nothing was saved. ' +
+        'Try again with a shorter clip or a simpler prompt.',
       );
     }
     // A finished operation can still carry a failure; `done` means "no longer

@@ -4,7 +4,9 @@ import type { AddressInfo } from 'node:net';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
+import { buildMediaSink } from './runs.js';
 import { CloudStore } from './db.js';
 import type { CloudEnv } from './env.js';
 import { SESSION_COOKIE_NAME } from './auth/session.js';
@@ -25,11 +27,38 @@ function extractCookie(res: Response, name: string): string | null {
   return null;
 }
 
+// createApp() checks whether cloud/web's build output exists and, if so,
+// registers static-serving routes for it — a decision made once, synchronously,
+// at createApp() call time. So this fixture has to exist BEFORE the per-test
+// beforeEach below ever calls createApp(), which means beforeAll/afterAll here,
+// not a nested describe's beforeEach (which would run AFTER the outer one).
+const webDistDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../web/dist');
+const HASHED_ASSET = 'assets/app-testfixturehash.js';
+
 describe('cloud/server app', () => {
   let dir: string;
   let store: CloudStore;
   let server: http.Server;
   let baseUrl: string;
+  let webDistPreexisted = false;
+  let originalIndexHtml: string | null = null;
+
+  beforeAll(async () => {
+    webDistPreexisted = await fs.access(webDistDir).then(() => true, () => false);
+    originalIndexHtml = webDistPreexisted
+      ? await fs.readFile(path.join(webDistDir, 'index.html'), 'utf-8').catch(() => null)
+      : null;
+    await fs.mkdir(path.join(webDistDir, 'assets'), { recursive: true });
+    await fs.writeFile(path.join(webDistDir, 'index.html'), '<!doctype html><html><body>fixture</body></html>');
+    await fs.writeFile(path.join(webDistDir, HASHED_ASSET), 'console.log("fixture");');
+  });
+
+  afterAll(async () => {
+    if (!webDistPreexisted) { await fs.rm(webDistDir, { recursive: true, force: true }); return; }
+    if (originalIndexHtml !== null) await fs.writeFile(path.join(webDistDir, 'index.html'), originalIndexHtml);
+    await fs.rm(path.join(webDistDir, HASHED_ASSET), { force: true });
+  });
+
   const env: CloudEnv = {
     PORT: 0,
     SESSION_SECRET: 'test-session-secret-value',
@@ -90,6 +119,30 @@ describe('cloud/server app', () => {
     expect(azureBaseModels!.length).toBeGreaterThan(0);
     // The families whose absence was the bug.
     expect(azureBaseModels).toEqual(expect.arrayContaining(['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini']));
+  });
+
+  // Regression: a browser tab left open across a redeploy could silently keep
+  // running an old bundle forever — no error, no visible sign anything was
+  // wrong — because index.html and hashed assets were served with the same
+  // (effectively cacheable) default headers. A stale index.html means the
+  // client never learns about the NEW hashed filenames, so it never re-fetches
+  // anything, even on a hard navigation.
+  it('serves a hashed SPA asset with a long, immutable Cache-Control', async () => {
+    const res = await fetch(`${baseUrl}/${HASHED_ASSET}`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+  });
+
+  it('serves index.html — and any other SPA route — with no-cache, so a redeploy is always picked up', async () => {
+    const root = await fetch(`${baseUrl}/`);
+    expect(root.headers.get('cache-control')).toBe('no-cache');
+    expect(await root.text()).toContain('fixture');
+
+    // A client-side route (e.g. after a page reload on /chat/abc) falls through
+    // to the same catch-all handler, not express.static's own index-serving.
+    const spaRoute = await fetch(`${baseUrl}/chat/some-conversation-id`);
+    expect(spaRoute.headers.get('cache-control')).toBe('no-cache');
+    expect(await spaRoute.text()).toContain('fixture');
   });
 
   it('renames a conversation (owner-scoped) via PATCH /api/conversations/:id/title', async () => {
@@ -417,6 +470,198 @@ describe('cloud/server app', () => {
     });
     return extractCookie(res, SESSION_COOKIE_NAME)!;
   }
+
+  // ── Generated media: free until saved ──
+  // Drives the REAL sink a hosted run uses, so these cover the whole loop the
+  // user sees: the model makes a picture → it costs nothing → they press Save
+  // → it costs quota.
+
+  /** The signed-in user's id (routes are cookie-scoped; the store is not). */
+  async function userIdFor(cookie: string): Promise<string> {
+    const me = (await (await fetch(`${baseUrl}/api/me`, { headers: { Cookie: cookie } })).json()) as { user: { id: string } };
+    return me.user.id;
+  }
+
+  /** Generate media exactly the way a run does, and report where it landed. */
+  async function generateMedia(
+    cookie: string,
+    opts: { bytes?: Buffer; name?: string; mime?: string } = {},
+  ): Promise<{ id: string; location: string; userId: string; size: number }> {
+    const userId = await userIdFor(cookie);
+    const convo = store.createConversation(userId);
+    const sink = buildMediaSink({
+      env, store, userId, conversationId: convo.id,
+      socket: { emit: () => undefined },
+    });
+    const data = opts.bytes ?? Buffer.from(TINY_PNG_BASE64, 'base64');
+    const location = await sink({
+      kind: 'image', data, mimeType: opts.mime ?? 'image/png',
+      filename: opts.name ?? 'cascade-image.png', modelId: 'gpt-image-1',
+    } as Parameters<typeof sink>[0]);
+    return { id: location.slice('/api/files/'.length), location, userId, size: data.length };
+  }
+
+  it('generated media costs no storage until it is saved, and is served meanwhile', async () => {
+    const alice = await login('Alice');
+    const { id, size } = await generateMedia(alice);
+
+    // Nothing metered: the Files list and the usage bar are untouched.
+    const files = await (await fetch(`${baseUrl}/api/files`, { headers: { Cookie: alice } })).json();
+    expect(files.files).toHaveLength(0);
+    expect(files.usedBytes).toBe(0);
+
+    // …but it IS listed as pending, with an expiry the UI can badge.
+    const pending = await (await fetch(`${baseUrl}/api/pending-media`, { headers: { Cookie: alice } })).json();
+    expect(pending.media).toHaveLength(1);
+    expect(pending.media[0]).toMatchObject({ id, name: 'cascade-image.png', mime: 'image/png', size });
+    expect(pending.media[0].expiresAt).toBeGreaterThan(Date.now());
+    expect(pending.usedBytes).toBe(size);
+
+    // The URL the model embedded resolves — the same route a saved file uses,
+    // so the transcript renders identically before and after a save.
+    const served = await fetch(`${baseUrl}/api/files/${id}`, { headers: { Cookie: alice } });
+    expect(served.status).toBe(200);
+    expect(served.headers.get('content-type')).toContain('image/png');
+    expect(Buffer.from(await served.arrayBuffer()).length).toBe(size);
+  });
+
+  it('saving generated media promotes it to a real file, charging quota then and only then', async () => {
+    const alice = await login('Alice');
+    const { id, size, userId } = await generateMedia(alice);
+    expect(store.sumUserFileBytes(userId)).toBe(0);
+
+    // The SAME POST /api/files the text/office cards save through.
+    const saved = await fetch(`${baseUrl}/api/files`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ pendingMediaId: id }),
+    });
+    expect(saved.status).toBe(200);
+    const body = await saved.json();
+    // Same id: the ![alt](/api/files/:id) already written into the transcript
+    // must keep working after a save, not point at a swept locator.
+    expect(body.file.id).toBe(id);
+    expect(body.usedBytes).toBe(size);
+
+    const files = await (await fetch(`${baseUrl}/api/files`, { headers: { Cookie: alice } })).json();
+    expect(files.files.map((f: { id: string }) => f.id)).toEqual([id]);
+    expect(files.usedBytes).toBe(size);
+    // No longer pending — and the bytes moved with the row.
+    const pending = await (await fetch(`${baseUrl}/api/pending-media`, { headers: { Cookie: alice } })).json();
+    expect(pending.media).toHaveLength(0);
+    const served = await fetch(`${baseUrl}/api/files/${id}`, { headers: { Cookie: alice } });
+    expect(served.status).toBe(200);
+    expect(Buffer.from(await served.arrayBuffer()).length).toBe(size);
+  });
+
+  it('a save that would exceed the plan cap is refused, and the media stays pending', async () => {
+    const alice = await login('Alice');
+    const userId = await userIdFor(alice);
+    // Fill the free 10 MB cap with an already-saved file, then try to keep an
+    // 8 MB clip. The clip generated fine (quota is not checked then) — it is
+    // the SAVE that has to refuse.
+    store.addFile({ userId, conversationId: null, name: 'big.bin', mime: 'application/octet-stream', size: 9 * 1024 * 1024 });
+    const { id } = await generateMedia(alice, { bytes: Buffer.alloc(8 * 1024 * 1024, 1), name: 'clip.mp4', mime: 'video/mp4' });
+
+    const res = await fetch(`${baseUrl}/api/files`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ pendingMediaId: id }),
+    });
+    expect(res.status).toBe(413);
+    expect((await res.json()).error).toMatch(/storage full/i);
+
+    // Refused, not destroyed: the user can delete something and try again.
+    const pending = await (await fetch(`${baseUrl}/api/pending-media`, { headers: { Cookie: alice } })).json();
+    expect(pending.media.map((m: { id: string }) => m.id)).toContain(id);
+    expect(store.sumUserFileBytes(userId)).toBe(9 * 1024 * 1024);
+  });
+
+  it('pending media is owner-scoped: another tenant can neither read nor save it', async () => {
+    const alice = await login('Alice');
+    const bob = await login('Bob');
+    const { id } = await generateMedia(alice);
+
+    expect((await fetch(`${baseUrl}/api/files/${id}`, { headers: { Cookie: bob } })).status).toBe(404);
+    const stolen = await fetch(`${baseUrl}/api/files`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: bob },
+      body: JSON.stringify({ pendingMediaId: id }),
+    });
+    expect(stolen.status).toBe(404);
+    expect((await (await fetch(`${baseUrl}/api/pending-media`, { headers: { Cookie: bob } })).json()).media).toHaveLength(0);
+  });
+
+  it('discarding pending media deletes it through the same DELETE the Files panel uses', async () => {
+    const alice = await login('Alice');
+    const { id } = await generateMedia(alice);
+
+    const res = await fetch(`${baseUrl}/api/files/${id}`, { method: 'DELETE', headers: { Cookie: alice } });
+    expect(res.status).toBe(200);
+    expect((await res.json()).usedBytes).toBe(0);
+    expect((await (await fetch(`${baseUrl}/api/pending-media`, { headers: { Cookie: alice } })).json()).media).toHaveLength(0);
+    expect((await fetch(`${baseUrl}/api/files/${id}`, { headers: { Cookie: alice } })).status).toBe(404);
+  });
+
+  it('a traversal-shaped id on DELETE is refused by the ownership lookup, never reaching the filesystem', async () => {
+    // This pins the guard that actually makes DELETE /api/files/:id safe: the
+    // store lookup runs BEFORE any path is built, and no traversal string can
+    // match a row (addPendingMedia mints ids with randomUUID()), so the fs
+    // call is unreachable for an id the caller invented.
+    //
+    // Worth stating plainly: this test passes both before and after the
+    // accompanying `pendingMedia.id` change, and it is NOT a regression test
+    // for it. CodeQL flagged that line (high severity, "Uncontrolled data
+    // used in path expression") because the raw `:id` param reached a path
+    // expression at all — a real taint flow, but one the lookup above already
+    // made unexploitable, so no test can fail on it without fabricating a row
+    // the application cannot produce. That change is defense in depth and
+    // consistency with every other path expression here (see
+    // docs/file-generation.md: "paths are derived from a server-generated id,
+    // never client input").
+    //
+    // What this test DOES catch is the guard itself being dropped — e.g. an
+    // "optimization" that skips the lookup and unlinks straight from the
+    // param. Then the canary below dies and this fails, which is exactly the
+    // regression worth owning.
+    const alice = await login('Alice');
+    const { id } = await generateMedia(alice);
+    const canary = path.join(dir, 'canary.txt');
+    await fs.writeFile(canary, 'must survive');
+
+    // Escapes the tenant's tmp-media dir and lands exactly on the canary.
+    const traversal = encodeURIComponent('../../../canary.txt');
+    const res = await fetch(`${baseUrl}/api/files/${traversal}`, { method: 'DELETE', headers: { Cookie: alice } });
+
+    // The route is a no-op for an unknown id, and the file outside the tenant
+    // directory is untouched.
+    expect(res.status).toBe(200);
+    expect(await fs.readFile(canary, 'utf-8')).toBe('must survive');
+    // …and the real asset was not collateral damage.
+    expect((await (await fetch(`${baseUrl}/api/pending-media`, { headers: { Cookie: alice } })).json()).media)
+      .toHaveLength(1);
+    expect((await fetch(`${baseUrl}/api/files/${id}`, { headers: { Cookie: alice } })).status).toBe(200);
+  });
+
+  it('expired media reads as gone and cannot be saved, even before the sweeper deletes it', async () => {
+    const alice = await login('Alice');
+    const userId = await userIdFor(alice);
+    // Bytes still on disk, row already past its TTL — the state between an
+    // expiry and the next sweep. Without the lazy check that window would
+    // leave an "expired" asset downloadable and savable.
+    const stale = store.addPendingMedia({
+      userId, conversationId: null, name: 'yesterday.png', mime: 'image/png',
+      size: 4, expiresAt: Date.now() - 1,
+    });
+    await fs.mkdir(path.join(dir, 'tenants', userId, 'tmp-media'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'tenants', userId, 'tmp-media', stale.id), Buffer.from('data'));
+
+    expect((await fetch(`${baseUrl}/api/files/${stale.id}`, { headers: { Cookie: alice } })).status).toBe(404);
+    const save = await fetch(`${baseUrl}/api/files`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: alice },
+      body: JSON.stringify({ pendingMediaId: stale.id }),
+    });
+    expect(save.status).toBe(404);
+    expect(store.sumUserFileBytes(userId)).toBe(0);
+    expect((await (await fetch(`${baseUrl}/api/pending-media`, { headers: { Cookie: alice } })).json()).media).toHaveLength(0);
+  });
 
   it('GET /api/skills returns the catalog without leaking system prompts', async () => {
     const res = await fetch(`${baseUrl}/api/skills`);

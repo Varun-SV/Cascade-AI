@@ -5,6 +5,7 @@ import os from 'node:os';
 import { ToolRegistry } from '#cascade-ai';
 import { buildCloudConfig, buildMediaSink, parseChatRunPayload, runChatTurn, tenantScratchDir } from './runs.js';
 import { CloudStore } from './db.js';
+import { limitsForPlan, PENDING_MEDIA_TTL_MS } from './entitlements.js';
 import type { CloudEnv } from './env.js';
 import { startStubOpenAIServer, type StubOpenAIServer } from './test-support/stub-openai-server.js';
 
@@ -182,28 +183,103 @@ describe('buildMediaSink', () => {
 
     // The model embeds this string as ![alt](location) and the client-side
     // exporter later fetches it. A bare filename resolves to nothing, which is
-    // how a generated image vanishes from a .pptx.
-    const [file] = store.listFiles(user.id);
-    expect(file).toBeDefined();
-    expect(location).toBe(`/api/files/${file!.id}`);
+    // how a generated image vanishes from a .pptx. The URL shape is the SAME
+    // for pending and saved media (and the id survives a save), so nothing
+    // that renders the transcript has to know which state the asset is in.
+    const [media] = store.listPendingMedia(user.id);
+    expect(media).toBeDefined();
+    expect(location).toBe(`/api/files/${media!.id}`);
     expect(location).not.toBe(asset.filename);
     // …and it matches the route the server actually serves (app.ts).
     expect(location).toMatch(/^\/api\/files\/[A-Za-z0-9._~%-]+$/);
   });
 
-  it('still writes the bytes and announces the file row', async () => {
+  it('writes the bytes to the tenant temp area and announces them as pending', async () => {
     const { store, env, user, convo, socket, sink } = await setup();
 
+    const before = Date.now();
     const location = await sink(asset as Parameters<typeof sink>[0]);
     const id = location.slice('/api/files/'.length);
 
     // The locator points at a row that exists and at bytes on disk — a URL
     // shape alone would be a regression if it 404'd.
-    expect(store.getFile(id, user.id)?.name).toBe(asset.filename);
-    const onDisk = await fs.readFile(path.join(tenantScratchDir(env, user.id), 'files', id));
+    expect(store.getPendingMedia(id, user.id)?.name).toBe(asset.filename);
+    const onDisk = await fs.readFile(path.join(tenantScratchDir(env, user.id), 'tmp-media', id));
     expect(onDisk.equals(asset.data)).toBe(true);
-    expect(socket.events.filter((e) => e.event === 'file:created')).toHaveLength(1);
-    expect(socket.events[0]!.payload).toMatchObject({ conversationId: convo.id });
+    // Not in the permanent area at all — nothing to clean up if it expires.
+    await expect(fs.readFile(path.join(tenantScratchDir(env, user.id), 'files', id))).rejects.toThrow();
+
+    const events = socket.events.filter((e) => e.event === 'file:created');
+    expect(events).toHaveLength(1);
+    // Same event as a saved file, flagged so the client can badge it as
+    // temporary instead of announcing storage the user never spent.
+    expect(events[0]!.payload).toMatchObject({ conversationId: convo.id, pending: true });
+    const { expiresAt } = events[0]!.payload as { expiresAt: number };
+    expect(expiresAt).toBeGreaterThanOrEqual(before + PENDING_MEDIA_TTL_MS);
+    expect(expiresAt).toBeLessThanOrEqual(Date.now() + PENDING_MEDIA_TTL_MS);
+  });
+
+  // ── The bug this whole change exists to fix ──
+  it('does NOT charge storage quota, or create a files row, at generation time', async () => {
+    const { store, user, sink } = await setup();
+
+    expect(store.sumUserFileBytes(user.id)).toBe(0);
+    await sink(asset as Parameters<typeof sink>[0]);
+
+    // Generating is not keeping. Until the user presses Save, their metered
+    // storage is untouched and their Files list is empty — the old sink
+    // charged them the instant the model produced a picture, with no opt-out.
+    expect(store.sumUserFileBytes(user.id)).toBe(0);
+    expect(store.listFiles(user.id)).toHaveLength(0);
+    // The bytes are accounted for, just not against the quota.
+    expect(store.sumUserPendingMediaBytes(user.id)).toBe(asset.data.length);
+  });
+
+  it('generates media LARGER than the whole free storage cap without failing', async () => {
+    // The sharpest form of the regression: 12 MB against a 10 MB free plan.
+    // While generation ran checkStorageQuota, this threw and the user got an
+    // apology instead of their video — for an asset they had not asked to
+    // keep. Quota is now the *save* button's business, so this must succeed
+    // and still spend nothing.
+    const { store, user, sink } = await setup();
+    const huge = { ...asset, data: Buffer.alloc(12 * 1024 * 1024, 7), filename: 'clip.mp4', mimeType: 'video/mp4' };
+
+    const location = await sink(huge as unknown as Parameters<typeof sink>[0]);
+
+    expect(location).toMatch(/^\/api\/files\//);
+    expect(store.sumUserFileBytes(user.id)).toBe(0);
+    expect(limitsForPlan('free').storageBytes).toBeLessThan(huge.data.length);
+  });
+
+  it('still refuses to park unbounded unsaved bytes (the pending allowance)', async () => {
+    // Self-expiry bounds how long unmetered bytes live, not how fast they
+    // arrive, so there is one ceiling left. It is NOT the storage quota: it is
+    // ~6x the free plan's, and nothing here is permanent.
+    const { store, user, sink } = await setup();
+    const cap = limitsForPlan('free').pendingMediaBytes;
+    const big = { ...asset, data: Buffer.alloc(cap + 1, 3) };
+
+    await expect(sink(big as unknown as Parameters<typeof sink>[0])).rejects.toThrow(/unsaved generated media/i);
+    expect(store.listPendingMedia(user.id)).toHaveLength(0);
+    expect(store.sumUserFileBytes(user.id)).toBe(0);
+  });
+
+  it('sweeps expired media before checking the allowance, so yesterday cannot block today', async () => {
+    const { store, env, user, sink } = await setup();
+    const cap = limitsForPlan('free').pendingMediaBytes;
+    // An asset that filled the allowance yesterday and has already expired.
+    const stale = store.addPendingMedia({
+      userId: user.id, conversationId: null, name: 'old.png', mime: 'image/png',
+      size: cap, expiresAt: Date.now() - 1000,
+    });
+    await fs.mkdir(path.join(tenantScratchDir(env, user.id), 'tmp-media'), { recursive: true });
+    await fs.writeFile(path.join(tenantScratchDir(env, user.id), 'tmp-media', stale.id), Buffer.alloc(16));
+
+    await expect(sink(asset as Parameters<typeof sink>[0])).resolves.toMatch(/^\/api\/files\//);
+
+    // The stale asset and its bytes are gone, not merely ignored.
+    expect(store.listExpiredPendingMedia(Date.now())).toHaveLength(0);
+    await expect(fs.readFile(path.join(tenantScratchDir(env, user.id), 'tmp-media', stale.id))).rejects.toThrow();
   });
 });
 

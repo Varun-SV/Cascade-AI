@@ -437,6 +437,14 @@ T3 workers have access to the following tools. All destructive operations requir
 | `github`      | Create PRs, list/comment issues (GitHub/GitLab)  | ✓         |
 | `browser`     | Playwright automation (vision models only)       | ✓         |
 | `image_analyze` | Describe an image file                         |           |
+| `generate_document` | Render a REAL `.docx` / `.pptx` / `.xlsx` from Markdown or CSV | ✓ |
+
+> `generate_document`, not `file_write`, is how a Word/PowerPoint/Excel file gets
+> made: those formats are ZIP archives of OOXML, so text saved under the
+> extension opens as a corrupted file. It embeds generated images
+> (`![alt](path)` on its own line) and turns a fenced ` ```chart:bar ` block
+> (body: CSV) into a real, editable PowerPoint chart — see
+> [docs/file-generation.md](docs/file-generation.md).
 
 ### Shell allowlist / blocklist
 
