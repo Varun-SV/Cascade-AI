@@ -27,6 +27,7 @@ import { PeerBus } from '../peer/bus.js';
 import type { PermissionEscalator } from '../permissions/escalator.js';
 import type { ToolCreator } from '../../tools/tool-creator.js';
 import { parseFirstJsonObject } from '../../utils/json-extract.js';
+import { describeGenerationForPlanner } from '../multimodal/registry.js';
 
 /** Case-insensitive shared keywords between two keyword lists. */
 export function sharedKeywords(a: string[] = [], b: string[] = []): string[] {
@@ -54,6 +55,11 @@ export function isStrongKeywordOverlap(a: string[] = [], b: string[] = []): bool
 // drops them so T1 never plans steps around tools the workers can't call.
 export function buildT1SystemPrompt(has: (toolName: string) => boolean): string {
   const canWriteArtifacts = has('file_write') || has('file_edit') || has('run_code') || has('pdf_create');
+  // Generation tools are the one capability class whose plan SHAPE the planner
+  // cannot guess: a video is one atomic, slow, per-second-billed call the plan
+  // has to terminate on, and without being told so T1 planned script/direction
+  // sections and never a section that called the tool.
+  const generation = describeGenerationForPlanner(has);
   const rules: Array<string | false> = [
     '- Simple → 1 T3, Moderate → 2-3 T2s, Complex → 3-5 T2s, Highly Complex → 5+ T2s',
     '- Return ONLY valid JSON — no other text',
@@ -88,7 +94,7 @@ DEPENDENCY GUIDANCE:
 QUALITY RULES:
 - Each section must have a clear, testable "expectedOutput" so T2 knows when it is done.
 - Do NOT create trivial sections that only move files or print summaries — fold those into adjacent sections.
-- If the plan would naturally produce fewer than 2 independent sections, prefer Moderate routing (single T2).`;
+- If the plan would naturally produce fewer than 2 independent sections, prefer Moderate routing (single T2).${generation ? `\n\n${generation}` : ''}`;
 }
 
 export interface TaskPlan {

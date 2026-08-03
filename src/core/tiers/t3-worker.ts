@@ -34,10 +34,11 @@ import { truncateForContext } from '../../utils/truncate.js';
 import { classifyProviderError } from '../router/provider-errors.js';
 
 /**
- * Thrown by executeTool() when the underlying tool error indicates an
- * unrecoverable condition (rate limit, auth failure, forbidden) — the
- * agent loop should NOT keep retrying and the worker should escalate
- * fast with the real reason intact.
+ * Thrown by executeTool() when the underlying tool error indicates a condition
+ * this worker must not keep paying to rediscover — a systemic provider failure
+ * (rate limit, auth, quota, dead model), or ANY failure of a provider-backed
+ * media generation tool, whose every attempt is separately billed. The agent
+ * loop stops immediately and the worker escalates with the real reason intact.
  */
 export class CriticalToolError extends Error {
   constructor(message: string, public readonly toolName: string) {
@@ -74,7 +75,13 @@ export class WorkerStallError extends Error {
 const KNOWN_TOOLS = [
   'shell', 'file_read', 'file_write', 'file_edit', 'file_delete', 'file_list',
   'git', 'github', 'image_analyze', 'pdf_create', 'run_code', 'peer_message',
-  'web_search', 'glob', 'grep', 'web_fetch', 'generate_image',
+  'web_search', 'glob', 'grep', 'web_fetch',
+  // Every media tool buildMediaTools can register, not just the image one.
+  // Omitting three of the four meant a run whose ONLY tools were media ones
+  // (a video-generation subtask on an account with no file/web tools) counted
+  // as "no tools registered" and dropped all tool guidance — the worker was
+  // then told nothing about using tools at all, and wrote the video as prose.
+  'generate_image', 'generate_video', 'generate_speech', 'transcribe_audio',
 ];
 
 /**
@@ -111,6 +118,16 @@ export function buildWorkerRules(has: (toolName: string) => boolean): string {
     // generate_image for THOSE just pays for an image nobody ever sees.
     has('generate_image') &&
       '- When a slide deck (PowerPoint) or Word document deliverable calls for a decorative image or illustration, you MUST call the "generate_image" tool and then reference its result using Markdown image syntax: ![description](location), where "location" is exactly the string the tool reported back. NEVER write a text placeholder or a bracketed description such as [image: a cat] in its place. Do NOT use "generate_image" for a chart, graph, or diagram that must show exact data (numbers, axes, labels) — an image model cannot guarantee those values are correct, so render that data as a Markdown table instead. For any OTHER deliverable format (PDF, plain text, code, etc.) do NOT call "generate_image" — those cannot embed the result, so describe the visual in words instead.',
+    // The video counterpart of the image rule above, and the fix for the
+    // reported "it writes scripts forever and never makes the video" run. The
+    // failure mode is identical — the model narrates the deliverable instead of
+    // producing it — but the stakes are not: a video subtask that ends in prose
+    // has burned the whole pre-production plan for nothing. Unlike the image
+    // rule this is NOT scoped to a document format, because the clip itself is
+    // the deliverable rather than an illustration inside one, and the reference
+    // syntax is a plain link: Markdown image syntax does not embed a video.
+    has('generate_video') &&
+      '- When the subtask deliverable is a video, you MUST call the "generate_video" tool — that call IS the deliverable, and the subtask is not done until it has returned. NEVER deliver the video as prose, a script, a storyboard, or a bracketed placeholder such as [video: a cat skating], and NEVER claim a video exists unless the tool reported a location for it. Call it exactly ONCE: it is billed per second of output and renders for minutes, so a second call charges the user again. Then report the location string the tool returned VERBATIM as your result, referencing it as [description](location) if it goes inside a document. If the tool reports a failure or a timeout, report that failure verbatim and stop — do NOT call it again, and do NOT substitute a written description of a video that was never made.',
     has('run_code') &&
       '- Use the "run_code" tool for any file types (Excel, Zip, csv, etc.) or complex processing not covered by other tools. Always cleanup after code execution.',
     '- If you are not making meaningful progress, stop and escalate rather than looping or padding the response.',
@@ -833,6 +850,30 @@ export class T3Worker extends BaseTier {
       if (isTaggedSystemic || (isProviderBacked && classifyProviderError(err).systemic)) {
         throw new CriticalToolError(errMsg, tc.name);
       }
+      // A provider-backed GENERATION call that failed for a NON-systemic reason
+      // stops here too, and this is the one case where "stop" costs less than
+      // "try again". generate-media.ts's runWithProviderFallback already settled
+      // the retry question for these tools with the alternatives in hand: a
+      // systemic failure is retried once per alternate provider, and a
+      // non-systemic one (content refusal, malformed prompt, a render that blew
+      // past its deadline) is deliberately NOT retried, because it would very
+      // plausibly fail the same way again while costing another billed call. By
+      // the time the error reaches here that decision has been made — and
+      // adaptiveFallback was quietly re-opening it with a mechanism built for a
+      // completely different problem (a wrong or missing tool NAME). For
+      // generate_video that meant either a keyword-similar substitution
+      // (generate_image "recovering" a video request), a synthesized replacement
+      // tool, or an error string the agent loop answers by calling the same
+      // 8-minute render again — the "thirty minutes and no video" burn.
+      // Failing the subtask on the first attempt, with the real reason intact,
+      // is both cheaper and more honest.
+      if (isProviderBacked) {
+        throw new CriticalToolError(
+          `${tc.name} failed and was not retried — media generation is billed per attempt, `
+          + `so Cascade stops on the first failure instead of paying for a second. Reason: ${errMsg}`,
+          tc.name,
+        );
+      }
       // Try to recover via a sibling tool or a synthesized one before giving up;
       // returns the original error string if no fallback succeeds.
       return await this.adaptiveFallback(tc, `Tool error: ${errMsg}`);
@@ -845,6 +886,14 @@ export class T3Worker extends BaseTier {
    *   1. Find a semantically similar registered tool and retry with same input
    *   2. Synthesize a new tool via ToolCreator (if available) and run it
    *   3. Return the original error so the agent loop can decide what to do next
+   *
+   * Scoped to CHEAP, task-scoped failures — the class of problem it was built
+   * for is a wrong or missing tool name, where a name-similar sibling plausibly
+   * does the same job for the same (near-zero) cost. PROVIDER_BACKED_TOOLS never
+   * reach it: their siblings are keyword-similar but semantically different
+   * (generate_image is not a stand-in for generate_video), and every attempt —
+   * theirs, or a synthesized replacement's — is separately billed. See the
+   * fast-fail branch in executeTool().
    */
   private async adaptiveFallback(tc: ToolCall, originalError: string): Promise<string> {
     // Strategy 1: alternative tool with overlapping purpose

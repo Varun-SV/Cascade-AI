@@ -1341,8 +1341,27 @@ export function createApp(env: CloudEnv, store: CloudStore) {
   // is built first and this serves it directly — no separate static host.
   const webDistDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../web/dist');
   if (fs.existsSync(webDistDir)) {
-    app.use(express.static(webDistDir));
+    app.use(express.static(webDistDir, {
+      // Vite content-hashes every JS/CSS chunk's filename, so a hashed asset
+      // can be cached forever — a new deploy simply ships new hashes, never
+      // overwrites an old one. `index.html` is the one file that ISN'T
+      // hashed, and it's what names the current build's hashes, so it must
+      // never be served stale: `index: false` stops express.static's own
+      // auto-index (which used no-cache-free defaults) from ever answering
+      // it, forcing every request through the explicit no-cache handler
+      // below instead. Without this, a browser tab left open across a
+      // redeploy can keep running an old bundle indefinitely — e.g. one that
+      // predates a feature entirely — while talking to the new server, with
+      // no error and no visible sign anything is wrong.
+      index: false,
+      setHeaders: (res, filePath) => {
+        if (path.basename(filePath) !== 'index.html') {
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        }
+      },
+    }));
     app.get('*', (_req, res) => {
+      res.set('Cache-Control', 'no-cache');
       res.sendFile(path.join(webDistDir, 'index.html'));
     });
   }

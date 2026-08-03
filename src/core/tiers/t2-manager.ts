@@ -27,20 +27,29 @@ import { RunBreaker } from '../run-breaker.js';
 import type { EscalationDecision } from '../../types.js';
 import { RedactionLayer } from '../audit/redaction.js';
 import { sectionNeedsDecision, settledEscalationStatus } from './escalation-policy.js';
+import { describeGenerationForPlanner } from '../multimodal/registry.js';
 
 // Built per-run so the peer-coordination hint only appears when the
 // peer_message tool is actually registered. On a restricted host (e.g. cloud
 // pure-chat) the planner isn't told to hand out peerT3Ids for a tool that
 // doesn't exist. With the full tool set the prompt is unchanged.
-function buildT2SystemPrompt(hasPeerMessage: boolean): string {
+//
+// Takes the same tool-presence predicate as buildT1SystemPrompt/buildWorkerRules
+// rather than a single boolean: T2 is a planner too — it is the tier that turns
+// "make a video" into the actual subtask list — so it needs the same
+// capability awareness T1 gets, or T1's terminating generate_video step is
+// decomposed back into script-and-direction prose one level down.
+export function buildT2SystemPrompt(has: (toolName: string) => boolean): string {
+  const generation = describeGenerationForPlanner(has);
   return [
     'You are a T2 Manager agent in the Cascade AI system.',
     'Your role is to analyze a section of a task and decompose it into 2-5 discrete subtasks for T3 Workers.',
     'If subtasks have dependencies, you can specify "executionMode": "sequential" for the section.',
-    hasPeerMessage && 'Provide "peerT3Ids" to subtasks so they can coordinate using the peer_message tool.',
+    has('peer_message') && 'Provide "peerT3Ids" to subtasks so they can coordinate using the peer_message tool.',
     'Return ONLY valid JSON matching the T3 subtask array schema — no other text.',
+    generation && `\n${generation}`,
   ]
-    .filter((l): l is string => l !== false)
+    .filter((l): l is string => l !== false && l !== '')
     .join('\n');
 }
 
@@ -465,7 +474,7 @@ Return ONLY the JSON array.`;
     const messages: ConversationMessage[] = [{ role: 'user', content: prompt }];
     const result = await this.router.generate('T2', {
       messages,
-      systemPrompt: this.systemPromptOverride + buildT2SystemPrompt(this.toolRegistry.hasTool('peer_message')) + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
+      systemPrompt: this.systemPromptOverride + buildT2SystemPrompt((name) => this.toolRegistry.hasTool(name)) + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
       maxTokens: 2000,
       ...(this.sectionModel ? { model: this.sectionModel } : {}),
     });

@@ -259,6 +259,42 @@ Rules:
     expect(out).toContain('render that data as a Markdown table instead');
   });
 
+  it('with generate_video registered, requires the actual tool call, not a script standing in for it', () => {
+    // Live-reported bug: "it just keeps on writing scripts, directing and etc,
+    // but the video never gets generated". The worker had an explicit MUST-call
+    // rule for images and none for video, and generate_video was not even in
+    // KNOWN_TOOLS — so a "generate the video" subtask was answered in prose.
+    const out = buildWorkerRules((name) => new Set([...FULL, 'generate_video']).has(name));
+    expect(out).toContain('you MUST call the "generate_video" tool');
+    expect(out).toContain('that call IS the deliverable');
+    // Naming the tool is not enough — the placeholder shapes have to be named
+    // too, exactly as the image rule names "[image: a cat]".
+    expect(out).toContain('[video: a cat skating]');
+    expect(out).toMatch(/NEVER deliver the video as prose, a script, a storyboard/);
+    // How to report the result, so a generated clip is not orphaned.
+    expect(out).toContain('[description](location)');
+    // Cost control: one call, and a failure is reported rather than re-run.
+    expect(out).toContain('Call it exactly ONCE');
+    expect(out).toMatch(/do NOT call it again/);
+  });
+
+  it('without generate_video (no video model configured), omits the video guidance entirely', () => {
+    const out = buildWorkerRules((name) => new Set([...FULL, 'generate_image']).has(name));
+    expect(out).not.toContain('generate_video');
+    expect(out).not.toContain('[video: a cat skating]');
+  });
+
+  it('counts every media tool as a tool, so a media-only run still gets tool guidance', () => {
+    // KNOWN_TOOLS decides whether ANY tool guidance renders. It listed
+    // generate_image only, so a worker whose sole tools were generate_video /
+    // generate_speech / transcribe_audio counted as "no tools registered" and
+    // was told nothing about using tools at all.
+    for (const tool of ['generate_video', 'generate_speech', 'transcribe_audio']) {
+      const out = buildWorkerRules((name) => name === tool);
+      expect(out, `${tool} alone should still enable tool guidance`).toContain('- Use tools when needed.');
+    }
+  });
+
   it('without generate_image (no image model configured), omits the image guidance entirely', () => {
     const out = buildWorkerRules((name) => FULL.has(name));
     // FULL has no generate_image — telling a worker to call a tool that was
@@ -370,6 +406,69 @@ describe('T3Worker.executeTool — unified provider-error classification (used t
     // whole-worker escalation instead of letting the agent try another file.
     const worker = makeWorkerWithFailingTool(new Error('EACCES: permission denied, open \'/etc/shadow\''));
     const tc: ToolCall = { id: 'tc-5', name: 'file_read', input: {} };
+    const result = await (worker as unknown as { executeTool: (tc: ToolCall) => Promise<string> }).executeTool(tc);
+    expect(result).toContain('Tool error');
+  });
+
+  it('does NOT retry a timed-out generate_video — it fails the subtask on the first attempt', async () => {
+    // Live-reported bug: a video run burned 30+ minutes and produced nothing.
+    // The 8-minute Veo timeout classifies as `unknown`/non-systemic, so it fell
+    // through to adaptiveFallback — a mechanism built for a WRONG TOOL NAME,
+    // which for generate_video means either a keyword-similar substitution
+    // (generate_image "recovering" a video request), a synthesized replacement
+    // tool, or an error string the agent loop answers by ordering the same
+    // 8-minute render again. Every one of those is separately billed.
+    // generate-media.ts's runWithProviderFallback had already decided a
+    // non-systemic generation failure is not worth retrying; this makes the
+    // worker agree instead of quietly re-opening the question.
+    const execute = vi.fn().mockRejectedValue(new Error(
+      'veo-3.1-generate-preview timed out after 8 minutes — no video was produced. '
+      + 'Cascade stopped waiting; the render may still finish on the provider side, but nothing was saved.',
+    ));
+    const worker = new T3Worker(makeRouter(vi.fn()), makeToolRegistry({ execute }), 't2-parent');
+    const tc: ToolCall = { id: 'tc-video', name: 'generate_video', input: { prompt: 'a cat skating' } };
+
+    const err = await (worker as unknown as { executeTool: (tc: ToolCall) => Promise<string> })
+      .executeTool(tc)
+      .then(() => null, (e: unknown) => e as Error);
+
+    // Stops the loop rather than returning a string the model can answer with
+    // another render order.
+    expect(err).toMatchObject({ name: 'CriticalToolError', toolName: 'generate_video' });
+    // ONE attempt — no second 8-minute cycle, no substitute tool.
+    expect(execute).toHaveBeenCalledOnce();
+    // And the reason the user reads is the specific one, not a generic
+    // "the tool failed".
+    expect(err!.message).toContain('no video was produced');
+    expect(err!.message).toContain('was not retried');
+  });
+
+  it('does not let adaptive fallback substitute a different media tool for a failed one', async () => {
+    // findAlternativeTool scores on shared name keywords, so "generate_video"
+    // matches "generate_image" — a $2 video request silently answered with a
+    // 4-cent picture. Provider-backed tools must never reach that path.
+    const execute = vi.fn().mockRejectedValue(new Error('The provider refused this prompt.'));
+    const toolRegistry = makeToolRegistry({
+      execute,
+      getToolDefinitions: () => ([
+        { name: 'generate_video', description: 'v', inputSchema: {} },
+        { name: 'generate_image', description: 'i', inputSchema: {} },
+      ] as ToolDefinition[]),
+    });
+    const worker = new T3Worker(makeRouter(vi.fn()), toolRegistry, 't2-parent');
+    const tc: ToolCall = { id: 'tc-video-2', name: 'generate_video', input: { prompt: 'a cat' } };
+
+    await expect(
+      (worker as unknown as { executeTool: (tc: ToolCall) => Promise<string> }).executeTool(tc),
+    ).rejects.toMatchObject({ name: 'CriticalToolError' });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute.mock.calls.map((c) => c[0])).toEqual(['generate_video']);
+  });
+
+  it('still lets a NON-provider tool use adaptive fallback — the mechanism is not removed, just scoped', async () => {
+    const execute = vi.fn().mockRejectedValue(new Error('file not found: nope.txt'));
+    const worker = new T3Worker(makeRouter(vi.fn()), makeToolRegistry({ execute }), 't2-parent');
+    const tc: ToolCall = { id: 'tc-file', name: 'file_read', input: {} };
     const result = await (worker as unknown as { executeTool: (tc: ToolCall) => Promise<string> }).executeTool(tc);
     expect(result).toContain('Tool error');
   });

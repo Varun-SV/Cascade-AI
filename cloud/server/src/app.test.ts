@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
 import { buildMediaSink } from './runs.js';
 import { CloudStore } from './db.js';
@@ -26,11 +27,38 @@ function extractCookie(res: Response, name: string): string | null {
   return null;
 }
 
+// createApp() checks whether cloud/web's build output exists and, if so,
+// registers static-serving routes for it — a decision made once, synchronously,
+// at createApp() call time. So this fixture has to exist BEFORE the per-test
+// beforeEach below ever calls createApp(), which means beforeAll/afterAll here,
+// not a nested describe's beforeEach (which would run AFTER the outer one).
+const webDistDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../web/dist');
+const HASHED_ASSET = 'assets/app-testfixturehash.js';
+
 describe('cloud/server app', () => {
   let dir: string;
   let store: CloudStore;
   let server: http.Server;
   let baseUrl: string;
+  let webDistPreexisted = false;
+  let originalIndexHtml: string | null = null;
+
+  beforeAll(async () => {
+    webDistPreexisted = await fs.access(webDistDir).then(() => true, () => false);
+    originalIndexHtml = webDistPreexisted
+      ? await fs.readFile(path.join(webDistDir, 'index.html'), 'utf-8').catch(() => null)
+      : null;
+    await fs.mkdir(path.join(webDistDir, 'assets'), { recursive: true });
+    await fs.writeFile(path.join(webDistDir, 'index.html'), '<!doctype html><html><body>fixture</body></html>');
+    await fs.writeFile(path.join(webDistDir, HASHED_ASSET), 'console.log("fixture");');
+  });
+
+  afterAll(async () => {
+    if (!webDistPreexisted) { await fs.rm(webDistDir, { recursive: true, force: true }); return; }
+    if (originalIndexHtml !== null) await fs.writeFile(path.join(webDistDir, 'index.html'), originalIndexHtml);
+    await fs.rm(path.join(webDistDir, HASHED_ASSET), { force: true });
+  });
+
   const env: CloudEnv = {
     PORT: 0,
     SESSION_SECRET: 'test-session-secret-value',
@@ -91,6 +119,30 @@ describe('cloud/server app', () => {
     expect(azureBaseModels!.length).toBeGreaterThan(0);
     // The families whose absence was the bug.
     expect(azureBaseModels).toEqual(expect.arrayContaining(['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini']));
+  });
+
+  // Regression: a browser tab left open across a redeploy could silently keep
+  // running an old bundle forever — no error, no visible sign anything was
+  // wrong — because index.html and hashed assets were served with the same
+  // (effectively cacheable) default headers. A stale index.html means the
+  // client never learns about the NEW hashed filenames, so it never re-fetches
+  // anything, even on a hard navigation.
+  it('serves a hashed SPA asset with a long, immutable Cache-Control', async () => {
+    const res = await fetch(`${baseUrl}/${HASHED_ASSET}`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+  });
+
+  it('serves index.html — and any other SPA route — with no-cache, so a redeploy is always picked up', async () => {
+    const root = await fetch(`${baseUrl}/`);
+    expect(root.headers.get('cache-control')).toBe('no-cache');
+    expect(await root.text()).toContain('fixture');
+
+    // A client-side route (e.g. after a page reload on /chat/abc) falls through
+    // to the same catch-all handler, not express.static's own index-serving.
+    const spaRoute = await fetch(`${baseUrl}/chat/some-conversation-id`);
+    expect(spaRoute.headers.get('cache-control')).toBe('no-cache');
+    expect(await spaRoute.text()).toContain('fixture');
   });
 
   it('renames a conversation (owner-scoped) via PATCH /api/conversations/:id/title', async () => {

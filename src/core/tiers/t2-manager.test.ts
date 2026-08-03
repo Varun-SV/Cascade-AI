@@ -421,3 +421,53 @@ describe('T2Manager', () => {
     });
   });
 });
+
+describe('T2 decomposition prompt — media generation capability awareness', () => {
+  // T2 is a planner too: it is the tier that turns "make a video" into the
+  // actual subtask list. Without the same capability awareness T1 now gets, a
+  // terminating generate_video step handed down by T1 gets decomposed straight
+  // back into script-and-direction prose one level lower — the reported bug,
+  // one tier down.
+  function makeCapturingManager(captured: { systemPrompt?: string }, tools: string[]) {
+    const router = {
+      generate: vi.fn(async (_tier: string, options: { systemPrompt?: string }) => {
+        captured.systemPrompt = options.systemPrompt;
+        return makeResult('[]');
+      }),
+      getModelForTier: () => undefined,
+    } as unknown as CascadeRouter;
+    const toolRegistry = {
+      getToolDefinitions: () => [],
+      requiresApproval: () => false,
+      isDangerous: () => false,
+      hasTool: (n: string) => tools.includes(n),
+      execute: vi.fn(),
+    } as unknown as ToolRegistry;
+    return new T2Manager(router, toolRegistry, 't1-root');
+  }
+
+  type Decompose = (a: T1ToT2Assignment) => Promise<unknown>;
+
+  it('carries the video plan-shape rule into the subtask decomposition prompt', async () => {
+    const captured: { systemPrompt?: string } = {};
+    const manager = makeCapturingManager(captured, ['generate_video', 'generate_image', 'peer_message']);
+
+    await (manager as unknown as { decomposeSection: Decompose }).decomposeSection(makeAssignment());
+
+    expect(captured.systemPrompt).toContain('MEDIA GENERATION');
+    expect(captured.systemPrompt).toContain('VIDEO PLANS MUST END IN THE TOOL CALL');
+    // The predicate replaced a single hasPeerMessage boolean — the peer line
+    // must still key off the real tool, not off the new argument shape.
+    expect(captured.systemPrompt).toContain('peerT3Ids');
+  });
+
+  it('leaves the decomposition prompt untouched when no generation tool exists', async () => {
+    const captured: { systemPrompt?: string } = {};
+    const manager = makeCapturingManager(captured, []);
+
+    await (manager as unknown as { decomposeSection: Decompose }).decomposeSection(makeAssignment());
+
+    expect(captured.systemPrompt).not.toContain('MEDIA GENERATION');
+    expect(captured.systemPrompt).not.toContain('peerT3Ids');
+  });
+});
