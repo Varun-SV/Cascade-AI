@@ -402,7 +402,19 @@ export const FILE_DELIVERY_GUIDANCE =
   + 'renders the real binary on download: a file:<name>.pdf or file:<name>.docx block whose body is Markdown '
   + 'becomes a PDF or a Word document; a file:<name>.xlsx block whose body is CSV becomes an Excel spreadsheet; '
   + 'a file:<name>.pptx block whose body is Markdown becomes a PowerPoint deck — separate slides with a --- rule '
-  + 'and start each slide with a heading for its title. For every other request, '
+  + 'and start each slide with a heading for its title. '
+  // Before this the only advice for a data visualization was "render a table",
+  // because an image model cannot be trusted with exact numbers and there was
+  // nothing else. There is now: a chart: fence carries the real values into a
+  // genuine PowerPoint chart object (and into a table/worksheet elsewhere), so
+  // the guidance has to say it exists or the model keeps writing prose about a
+  // chart that was never drawn.
+  + 'For a chart, graph or any data-driven visualization inside one of those documents, write a fenced block whose '
+  + 'info string is chart:bar (or chart:line, chart:pie, chart:doughnut, chart:area, chart:scatter) and whose body is '
+  + 'an optional "title: ..." line followed by CSV — a header row of "<category label>,<series name>,<series name>", '
+  + 'then one row per category. In a .pptx that becomes a REAL, editable chart with your exact numbers; in .docx, .xlsx '
+  + 'and .pdf the same block keeps every value as a table or worksheet. Never describe a chart in prose instead of '
+  + 'emitting one, and never use a generated image for data that has to be accurate. For every other request, '
   + 'answer in plain prose or ordinary code blocks — never emit a file: block the user did not ask for.';
 
 /**
