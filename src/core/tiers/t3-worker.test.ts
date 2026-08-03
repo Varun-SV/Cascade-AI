@@ -323,6 +323,42 @@ Rules:
     expect(out).toContain('- Execute the subtask completely');
     expect(out).toContain('- Return structured output');
   });
+
+  it('with generate_video registered, requires the actual tool call, not a script standing in for it', () => {
+    // Live-reported bug: "it just keeps on writing scripts, directing and etc,
+    // but the video never gets generated". The worker had an explicit MUST-call
+    // rule for images and none for video, and generate_video was not even in
+    // KNOWN_TOOLS — so a "generate the video" subtask was answered in prose.
+    const out = buildWorkerRules((name) => new Set([...FULL, 'generate_video']).has(name));
+    expect(out).toContain('you MUST call the "generate_video" tool');
+    expect(out).toContain('that call IS the deliverable');
+    // Naming the tool is not enough — the placeholder shapes have to be named
+    // too, exactly as the image rule names "[image: a cat]".
+    expect(out).toContain('[video: a cat skating]');
+    expect(out).toMatch(/NEVER deliver the video as prose, a script, a storyboard/);
+    // How to report the result, so a generated clip is not orphaned.
+    expect(out).toContain('[description](location)');
+    // Cost control: one call, and a failure is reported rather than re-run.
+    expect(out).toContain('Call it exactly ONCE');
+    expect(out).toMatch(/do NOT call it again/);
+  });
+
+  it('without generate_video (no video model configured), omits the video guidance entirely', () => {
+    const out = buildWorkerRules((name) => new Set([...FULL, 'generate_image']).has(name));
+    expect(out).not.toContain('generate_video');
+    expect(out).not.toContain('[video: a cat skating]');
+  });
+
+  it('counts every media tool as a tool, so a media-only run still gets tool guidance', () => {
+    // KNOWN_TOOLS decides whether ANY tool guidance renders. It listed
+    // generate_image only, so a worker whose sole tools were generate_video /
+    // generate_speech / transcribe_audio counted as "no tools registered" and
+    // was told nothing about using tools at all.
+    for (const tool of ['generate_video', 'generate_speech', 'transcribe_audio']) {
+      const out = buildWorkerRules((name) => name === tool);
+      expect(out, `${tool} alone should still enable tool guidance`).toContain('- Use tools when needed.');
+    }
+  });
 });
 
 describe('T3Worker — text-tool lean prompts (v0.15.0)', () => {

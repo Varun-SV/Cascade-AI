@@ -3,7 +3,12 @@
 // ─────────────────────────────────────────────
 
 import { describe, expect, it } from 'vitest';
-import { MultimodalRegistry, allCapabilities, capabilityCost } from './registry.js';
+import {
+  MultimodalRegistry,
+  allCapabilities,
+  capabilityCost,
+  describeGenerationForPlanner,
+} from './registry.js';
 import { classifyModality, isChatModel } from '../../providers/model-filter.js';
 
 describe('modality classification', () => {
@@ -176,5 +181,75 @@ describe('MultimodalRegistry', () => {
     // The two most commonly assumed-present capabilities. A planner that
     // assumes either writes a step that can never run.
     expect(described).toContain('music: no supported provider');
+  });
+});
+
+describe('describeGenerationForPlanner', () => {
+  // Live-reported bug: "video — it just keeps on writing scripts, directing and
+  // etc, but the video never gets generated, even after 30 minutes". The plan
+  // never terminated in a generate_video call because nothing the planner read
+  // said generation is an atomic, billed, terminating tool call — describe()
+  // says so in its doc comment but was never wired into any prompt.
+  const ALL = (name: string) => [
+    'generate_image', 'generate_video', 'generate_speech', 'transcribe_audio',
+  ].includes(name);
+
+  it('names every registered generation tool and what one call actually returns', () => {
+    const out = describeGenerationForPlanner(ALL);
+    expect(out).toContain('"generate_image" (image)');
+    expect(out).toContain('"generate_video" (video)');
+    expect(out).toContain('"generate_speech" (speech)');
+    expect(out).toContain('"transcribe_audio" (transcription)');
+    expect(out).toContain('ATOMIC tool call');
+  });
+
+  it('states the plan-shape rule that makes a video run terminate, while keeping pre-production', () => {
+    const out = describeGenerationForPlanner(ALL);
+    expect(out).toContain('VIDEO PLANS MUST END IN THE TOOL CALL');
+    // The user liked the script/direction work and asked to keep it — the rule
+    // must not read as "stop doing pre-production".
+    expect(out).toMatch(/pre-production[\s\S]*expected and worth planning/);
+    expect(out).toContain('exactly ONE subtask whose deliverable is the "generate_video" call');
+    // And it must forbid the two shapes that burn money without a clip:
+    // ending on a script, and re-rendering after a critique.
+    expect(out).toContain('Never end a video plan on a script');
+    expect(out).toContain('re-render');
+  });
+
+  it('quotes video\'s real per-second price from the shared pricing dataset, never an invented one', () => {
+    const out = describeGenerationForPlanner(ALL);
+    const veo = allCapabilities().find((c) => c.modality === 'video')!;
+    const cost = capabilityCost(veo)!;
+    expect(cost.unit).toBe('per second of video');
+    // The number has to come from the audited table, not from prose that can
+    // drift away from it.
+    expect(out).toContain(`Billed ${cost.label}.`);
+  });
+
+  it('quotes only the unit when a modality has two models at different prices', () => {
+    // Image has dall-e-3 and gemini-2.5-flash-image at different rates; picking
+    // one, or averaging them, would state a price nobody is charged.
+    const out = describeGenerationForPlanner(ALL);
+    const imageLine = out.split('\n').find((l) => l.startsWith('- "generate_image"'))!;
+    expect(imageLine).toContain('Billed per image.');
+    expect(imageLine).not.toMatch(/\$\d/);
+  });
+
+  it('says out loud that unlisted modalities have no tool, so the planner cannot invent one', () => {
+    expect(describeGenerationForPlanner(ALL)).toContain('never plan a step that generates music');
+  });
+
+  it('describes only the tools THIS run can call, and drops the video rule with no video tool', () => {
+    // An image-only account (no Gemini key → buildMediaTools registers no
+    // generate_video) must not be told to plan around a tool it cannot call.
+    const out = describeGenerationForPlanner((n) => n === 'generate_image');
+    expect(out).toContain('"generate_image"');
+    expect(out).not.toContain('generate_video');
+    expect(out).not.toContain('VIDEO PLANS MUST END IN THE TOOL CALL');
+  });
+
+  it('renders nothing at all when no generation tool is registered', () => {
+    // A text-only run's plan prompt must be byte-identical to before.
+    expect(describeGenerationForPlanner(() => false)).toBe('');
   });
 });

@@ -97,6 +97,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name, instead of quietly producing a picture-less deck.
 - `run_code`'s guidance no longer competes for Office formats now that a
   dedicated tool produces them correctly.
+## 0.66.2 - 2026-08-03
+
+### Fixed
+- **A video request wrote scripts and direction notes forever and never
+  produced a video**, burning 30+ minutes of paid planning and generation calls
+  with nothing to show. Three independent defects stacked into that one run;
+  the creative pre-production the user liked is kept, and the pipeline now
+  reliably ends in a real `generate_video` call that either completes or fails
+  fast.
+  - **The planner had zero visibility into generation capabilities.**
+    `MultimodalRegistry.describe()` carried a doc comment claiming "the planner
+    sees this", but it was called from nothing except its own test — neither
+    `t1-administrator.ts` nor `t2-manager.ts` had ever been told that video is a
+    single, slow, per-second-billed tool call. Added
+    `describeGenerationForPlanner()` next to the capability table and wired it
+    into both `buildT1SystemPrompt()` and `buildT2SystemPrompt()`, keyed on the
+    tools actually registered for the run (the same predicate the rest of those
+    prompts use) rather than on which providers are configured — a restricted
+    host has the provider but not the tool, and advertising a capability no
+    worker can reach is the exact situation `buildMediaTools` exists to prevent.
+    It states that each generation tool is one ATOMIC call, quotes the unit
+    price from the shared pricing dataset (only where every catalogue entry for
+    that modality agrees — otherwise the unit alone, never an invented average),
+    and adds the rule that actually fixes the run: a video plan must contain
+    exactly ONE subtask whose deliverable is the `generate_video` call, it must
+    be last on its path, and pre-production steps before it are expected and
+    fine. `describe()` is unchanged and remains the user-facing inventory; its
+    misleading comment was corrected.
+  - **The T3 worker had a "you MUST call this tool" rule for images and none for
+    video.** `KNOWN_TOOLS` — the list that decides whether ANY tool guidance
+    renders at all — listed `generate_image` and omitted `generate_video`,
+    `generate_speech` and `transcribe_audio`, so a worker whose only tools were
+    media ones counted as "no tools registered" and was told nothing about using
+    tools whatsoever. All four are now listed, and `buildWorkerRules()` gained a
+    video rule mirroring the image one: call the tool (that call IS the
+    deliverable), never substitute prose, a script, a storyboard or a
+    `[video: …]` placeholder, call it exactly once, report the returned location
+    verbatim, and report a failure rather than re-ordering the render. Unlike
+    the image rule it is not scoped to a document format — the clip is the
+    deliverable, not an illustration inside one — and the reference syntax is a
+    plain link, since Markdown image syntax cannot embed a video.
+  - **A timed-out render was handed to a retry mechanism built for a different
+    problem.** The 8-minute Veo give-up classifies as `unknown`/non-systemic, so
+    it fell past the fast-fail branch into `adaptiveFallback()` — which exists
+    for a wrong or missing tool NAME, where a name-similar sibling plausibly
+    does the same job for near-zero cost. For `generate_video` that meant a
+    keyword-similar substitution (`generate_image` "recovering" a video
+    request), a synthesized replacement tool, or an error string the agent loop
+    answers by ordering the same 8-minute render again — each separately billed.
+    `generate-media.ts`'s `runWithProviderFallback` had already settled this
+    question with the alternatives in hand (systemic → one attempt per alternate
+    provider; non-systemic → deliberately not retried); the worker now agrees
+    with that reasoning instead of quietly re-opening it. Any
+    `PROVIDER_BACKED_TOOLS` failure, systemic or not, now fails the subtask on
+    the first attempt with the real reason intact. `adaptiveFallback` is scoped,
+    not removed — ordinary tools still use it.
+  - **The give-up message misattributed Cascade's own deadline to the provider.**
+    `callProvider` wrapped it as "The model call failed on veo-…. Provider said:
+    …", but the provider said nothing — it is still rendering. The timeout is now
+    a `GenerationGaveUpError` that passes through unwrapped and leads with the
+    outcome: "veo-3.1-generate-preview timed out after 8 minutes — no video was
+    produced."
 ## 0.66.1 - 2026-07-30
 
 ### Fixed
