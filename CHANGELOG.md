@@ -5,6 +5,62 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+Cascade Cloud only — no SDK, CLI or desktop code is touched, so the version is
+deliberately not bumped (see `CONTRIBUTING.md`: a bump on `main` publishes npm
+and rebuilds the desktop installers, which would ship a byte-identical release).
+
+### Changed
+- **Generated images and videos are no longer saved to your storage the moment
+  they're made.** A hosted run's media sink used to call `checkStorageQuota` and
+  create a permanent `files` row the instant `generate_image` / `generate_video`
+  returned, so every picture the model produced — including ones nobody asked to
+  keep — was irreversibly metered against a 10 MB free plan with no opt-out, and
+  a video bigger than the whole plan cap failed the run outright. Media now gets
+  the same deal every other generated artifact already had (see
+  `docs/file-generation.md`): free to view and download, metered **only** when
+  the user explicitly saves it.
+  - **Pending media area** (`cloud/server/src/pending-media.ts`, new
+    `pending_media` table): the bytes land in the tenant's `tmp-media/`
+    directory with a row carrying an `expires_at`. It is invisible to
+    `sumUserFileBytes`, so generation spends no quota at all. Server-held rather
+    than browser-held because — unlike a `.pdf`/`.xlsx` export, which the
+    browser re-renders from the model's own text — a generated image is real
+    binary the browser never had a source for; it therefore survives a page
+    refresh, so reloading mid-chat doesn't lose the picture.
+  - **Save is the metered action.** `POST /api/files` — the exact route, helper
+    and 413-at-cap behaviour the existing text/office "unsaved artifact" cards
+    already save through — now also accepts `{ pendingMediaId }`, promoting the
+    row into a real `files` row and running `checkStorageQuota` **at that
+    moment**. Promotion keeps the id, so the `![alt](/api/files/:id)` the model
+    already wrote into the transcript resolves before and after a save.
+  - **One URL for both states.** `GET /api/files/:id` transparently serves saved
+    files and still-pending media (owner- and expiry-scoped), so nothing that
+    renders a transcript — the chat, the Files panel, the client-side
+    `.pptx`/`.docx` exporters — has to know whether Save has been pressed.
+    `DELETE /api/files/:id` likewise discards pending media.
+  - **Expiry**: unsaved media is deleted (row *and* bytes) after
+    `PENDING_MEDIA_TTL_MS` — 24 hours, the shortest window that still spans an
+    overnight gap. Cleanup is opportunistic at the natural entry points (the
+    convention the native-auth and MCP-OAuth stores already follow) *and*
+    periodic — an hourly sweeper started in `index.ts`, because an asset nobody
+    ever opens again would otherwise sit on the volume forever.
+  - **A separate, larger allowance** (`PlanLimits.pendingMediaBytes`: 64 MB free
+    / 512 MB Pro) caps unsaved media. Self-expiry bounds how long unmetered
+    bytes live, not how fast they arrive; this is the rate ceiling, and it is
+    not extra storage — saving still costs quota.
+
+### Added
+- **`GET /api/pending-media`** — lists the generated media you haven't saved,
+  with its size and expiry, so the UI can offer Save after a reload rather than
+  relying on the socket event that announced it.
+- **An unsaved-media card in chat** (`cloud/web/src/chat/Message.tsx`), the
+  media twin of the existing file cards: a **Temporary** badge with
+  "expires in 23h unless you save it", a free **Download**, and a **Save**
+  button that flips to "Saved to your Cascade files". `file:created` now carries
+  `pending: true` and `expiresAt` for unsaved media, so the client can tell a
+  new saved file from something about to disappear.
 ## 0.67.0 - 2026-08-03
 
 ### Fixed

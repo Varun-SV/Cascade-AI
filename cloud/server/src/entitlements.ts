@@ -13,13 +13,36 @@ export interface PlanLimits {
   maxConcurrentRuns: number;
   /** Cascade Files storage cap (bytes). Pro is a generous metered cap, not "unlimited". */
   storageBytes: number;
+  /**
+   * Ceiling on *unsaved* generated media held in the tenant's temp area
+   * (bytes). Deliberately larger than `storageBytes`: nothing here is
+   * permanent — every byte self-deletes after PENDING_MEDIA_TTL_MS — so it is
+   * a burst allowance, not storage. It is NOT extra quota: promoting any of it
+   * to a saved file still goes through `checkStorageQuota`.
+   */
+  pendingMediaBytes: number;
 }
 
 const MB = 1024 * 1024;
 const PLAN_LIMITS: Record<string, PlanLimits> = {
-  free: { dailyRuns: 20, maxConcurrentRuns: 1, storageBytes: 10 * MB },
-  pro: { dailyRuns: 200, maxConcurrentRuns: 3, storageBytes: 1024 * MB },
+  free: { dailyRuns: 20, maxConcurrentRuns: 1, storageBytes: 10 * MB, pendingMediaBytes: 64 * MB },
+  pro: { dailyRuns: 200, maxConcurrentRuns: 3, storageBytes: 1024 * MB, pendingMediaBytes: 512 * MB },
 };
+
+/**
+ * How long a generated-but-unsaved image/video survives before it is swept.
+ *
+ * 24 hours, chosen as the shortest window that still spans an overnight gap:
+ * the realistic "I'll come back to that picture later today / first thing
+ * tomorrow" behaviour is covered, while the unmetered bytes a single user can
+ * park on the volume stay bounded to roughly one day of their own generation.
+ * A longer window (48h+) buys little — someone who hasn't pressed Save within
+ * a day has moved on — and doubles the disk that quota accounting cannot see.
+ *
+ * One constant, read by the sink, the sweeper and the lazy expiry checks, so
+ * retuning the window is a one-line change.
+ */
+export const PENDING_MEDIA_TTL_MS = 24 * 60 * 60 * 1000;
 
 export function limitsForPlan(plan: string): PlanLimits {
   return PLAN_LIMITS[plan] ?? PLAN_LIMITS['free']!;
@@ -32,6 +55,27 @@ export function checkStorageQuota(usedBytes: number, incomingBytes: number, plan
     throw new EntitlementError(
       `Storage full — you've used ${(usedBytes / MB).toFixed(1)} MB of your ${(limit / MB).toFixed(0)} MB `
       + `${plan === 'pro' ? 'Pro' : 'free'} limit. Delete some files${plan === 'pro' ? '' : ' or upgrade to Pro'} to save more.`,
+    );
+  }
+}
+
+/**
+ * Throw when parking `incomingBytes` of freshly generated, unsaved media would
+ * exceed the plan's pending-media allowance.
+ *
+ * The permanent quota is deliberately NOT consulted when media is generated —
+ * that is the whole point of holding it as pending — but "not metered" cannot
+ * mean "unbounded". Self-expiry limits how LONG bytes live, not how FAST they
+ * arrive: a loop asking for video after video would otherwise park unlimited
+ * bytes on the volume for a full TTL window. This is the rate ceiling.
+ */
+export function checkPendingMediaCap(usedBytes: number, incomingBytes: number, plan: string): void {
+  const limit = limitsForPlan(plan).pendingMediaBytes;
+  if (usedBytes + incomingBytes > limit) {
+    throw new EntitlementError(
+      `Too much unsaved generated media — ${(usedBytes / MB).toFixed(1)} MB of your ${(limit / MB).toFixed(0)} MB `
+      + 'temporary media allowance is in use. Save what you want to keep (or delete it) and try again; '
+      + 'unsaved media clears itself within 24 hours.',
     );
   }
 }

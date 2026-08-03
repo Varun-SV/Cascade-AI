@@ -76,10 +76,35 @@ export function fetchFiles(): Promise<{ files: CloudFile[]; usedBytes: number; l
   return json(fetch('/api/files', { credentials: 'include' }));
 }
 
-export function saveFile(input: { name: string; content: string; conversationId?: string | null; encoding?: 'base64' }): Promise<{ file: CloudFile; usedBytes: number; limitBytes: number }> {
+/**
+ * What to save. Text/office exports send the content the browser rendered;
+ * generated media sends only its pending id, because the server is already
+ * holding those bytes (see PendingMedia below) — one route, one quota check,
+ * one "Save" in the product.
+ */
+export type SaveFileInput =
+  | { name: string; content: string; conversationId?: string | null; encoding?: 'base64' }
+  | { pendingMediaId: string; conversationId?: string | null };
+
+export function saveFile(input: SaveFileInput): Promise<{ file: CloudFile; usedBytes: number; limitBytes: number }> {
   return json(fetch('/api/files', {
     method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
   }));
+}
+
+// ── Pending media (generated, not saved) ──
+// An image/video a run generated is held server-side WITHOUT touching storage
+// quota and deleted after its expiry unless the user saves it. It is served
+// from the same /api/files/:id URL as a saved file (and keeps its id when
+// saved), so only this listing distinguishes the two states.
+
+export interface PendingMedia extends CloudFile {
+  /** Epoch ms after which this is deleted unless saved. */
+  expiresAt: number;
+}
+
+export function fetchPendingMedia(): Promise<{ media: PendingMedia[]; usedBytes: number; limitBytes: number }> {
+  return json(fetch('/api/pending-media', { credentials: 'include' }));
 }
 
 export function deleteFile(id: string): Promise<{ ok: boolean; usedBytes: number }> {
