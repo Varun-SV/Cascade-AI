@@ -10,6 +10,7 @@ import { loadEnv, dataDirIsRailwayVolume } from './env.js';
 import { CloudStore } from './db.js';
 import { createApp } from './app.js';
 import { attachSocket } from './socket.js';
+import { startPendingMediaSweeper } from './pending-media.js';
 
 export function bootstrap() {
   dotenv.config();
@@ -32,12 +33,16 @@ export function bootstrap() {
   const app = createApp(env, store);
   const httpServer = http.createServer(app);
   const io = attachSocket(httpServer, env, store);
+  // Unsaved generated media expires. Request paths sweep opportunistically,
+  // but an asset nobody ever opens again is exactly the one that would
+  // otherwise sit on the volume forever — so the process sweeps on a timer too.
+  const stopMediaSweeper = startPendingMediaSweeper(env, store);
 
   httpServer.listen(env.PORT, () => {
     console.log(`Cascade Cloud server listening on :${env.PORT}`);
   });
 
-  return { httpServer, app, io, store, env };
+  return { httpServer, app, io, store, env, stopMediaSweeper };
 }
 
 const isMainModule = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;

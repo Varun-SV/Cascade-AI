@@ -22,9 +22,10 @@ import { z } from 'zod';
 import type { CloudEnv } from './env.js';
 import { resolveRunMcpServers } from './mcp-oauth.js';
 import type { CloudAttachment, CloudStore } from './db.js';
-import { beginRun, checkDailyLimit, checkStorageQuota, todayKey } from './entitlements.js';
+import { beginRun, checkDailyLimit, checkPendingMediaCap, PENDING_MEDIA_TTL_MS, todayKey } from './entitlements.js';
 import { getSkill } from './skills.js';
 import { tenantScratchDir } from './paths.js';
+import { pendingMediaDir, sweepPendingMedia } from './pending-media.js';
 
 export { tenantScratchDir };
 
@@ -549,19 +550,34 @@ export interface ChatRunDeps {
 type MediaAsset = Parameters<Parameters<Cascade['setMediaSink']>[0]>[0];
 
 /**
- * Where generated media lands in a hosted run: a real file row plus bytes under
- * the tenant's directory, so the browser can show it the same way it shows any
- * other generated file. The SDK's default sink writes into the workspace, which
- * is meaningless here — the container is ephemeral and the user has no
- * filesystem to look at.
+ * Where generated media lands in a hosted run: the tenant's PENDING media area
+ * — bytes under `tmp-media/` plus a `pending_media` row — never a permanent
+ * `files` row. The SDK's default sink writes into the workspace, which is
+ * meaningless here: the container is ephemeral and the user has no filesystem
+ * to look at.
+ *
+ * Nothing here touches the storage quota, and that is the point. Generating a
+ * picture is not the same as choosing to keep one: this sink used to call
+ * `checkStorageQuota` + `store.addFile` the instant the tool returned, so every
+ * image the user glanced at and every video the model produced unasked was
+ * permanently charged against a 10 MB free plan with no way to decline. Media
+ * now behaves like every other generated artifact in this product (see
+ * docs/file-generation.md): free to view and download, metered only when the
+ * user explicitly saves it — at which point `POST /api/files` promotes the row
+ * and runs `checkStorageQuota` for real. Unsaved media self-deletes after
+ * PENDING_MEDIA_TTL_MS.
+ *
+ * `checkPendingMediaCap` is the one refusal left, and it is a rate ceiling on
+ * unmetered bytes, not quota: the plan's permanent storage is untouched.
  *
  * The returned string is what the tool reports back to the model as the image's
  * `location`, and what the model then embeds as `![alt](location)`. So it has to
  * be *fetchable*: a bare `cascade-1730000000.png` names a file nobody — not the
  * chat view, not the client-side .pptx/.docx exporter — can resolve, and the
- * picture silently disappears from the deck. `/api/files/:id` is the route the
- * server already serves (app.ts, session-cookie authenticated) and the shape
- * `lib/api.ts#fileDownloadUrl` already builds on the client.
+ * picture silently disappears from the deck. It stays `/api/files/:id` even
+ * while the asset is pending: that route serves saved files and pending media
+ * alike, and a save keeps the id, so one URL is correct before and after the
+ * user decides — no client needs to know which state it is in to render it.
  *
  * Extracted from runChatTurnInner purely so it can be tested without driving a
  * whole model run.
@@ -575,24 +591,35 @@ export function buildMediaSink(deps: {
 }): (asset: MediaAsset) => Promise<string> {
   const { env, store, userId, conversationId, socket } = deps;
   return async (asset) => {
-    const dir = path.join(tenantScratchDir(env, userId), 'files');
+    const now = Date.now();
+    // Generation is the busiest natural entry point, so it carries the
+    // opportunistic sweep (the convention native-auth/mcp-oauth/handoff follow)
+    // — and it has to run BEFORE the cap check, or yesterday's expired bytes
+    // would refuse today's image.
+    await sweepPendingMedia(env, store, now);
+    const dir = pendingMediaDir(env, userId);
     const plan = store.getUserById(userId)?.plan ?? 'free';
-    // Quota is checked here, not after writing: a video can be tens of MB and
-    // the point of a quota is to refuse before the disk is spent.
-    checkStorageQuota(store.sumUserFileBytes(userId), asset.data.length, plan);
+    // Checked before writing: a video can be tens of MB and the point of a
+    // ceiling is to refuse before the disk is spent.
+    checkPendingMediaCap(store.sumUserPendingMediaBytes(userId, now), asset.data.length, plan);
     await fs.mkdir(dir, { recursive: true });
-    const file = store.addFile({
+    const media = store.addPendingMedia({
       userId,
       conversationId,
       name: asset.filename,
       mime: asset.mimeType,
       size: asset.data.length,
+      expiresAt: now + PENDING_MEDIA_TTL_MS,
     });
-    await fs.writeFile(path.join(dir, file.id), asset.data);
-    socket.emit('file:created', { conversationId, file });
+    await fs.writeFile(path.join(dir, media.id), asset.data);
+    // Same event the saved-file path emits, with `pending: true` so a listener
+    // can tell "here is a new file in your storage" from "here is something
+    // that will disappear unless you keep it". A flag beats a second event
+    // name: every consumer wants the same refresh, and only the badge differs.
+    socket.emit('file:created', { conversationId, file: media, pending: true, expiresAt: media.expiresAt });
     // encodeURIComponent mirrors the client helper's own precaution; ids are
     // randomUUID() today, but the escaping is free and the route is not.
-    return `/api/files/${encodeURIComponent(file.id)}`;
+    return `/api/files/${encodeURIComponent(media.id)}`;
   };
 }
 

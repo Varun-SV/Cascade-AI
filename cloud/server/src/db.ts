@@ -233,6 +233,20 @@ interface DbFileRow {
   created_at: number;
 }
 
+/**
+ * A generated image/video the user has not saved. Identical to CloudFile plus
+ * `expiresAt` — the client renders it with the same card, just badged as
+ * temporary.
+ */
+export interface CloudPendingMedia extends CloudFile {
+  /** Epoch ms after which the row + its bytes are swept. */
+  expiresAt: number;
+}
+
+interface DbPendingMediaRow extends DbFileRow {
+  expires_at: number;
+}
+
 interface DbMessageRow {
   id: string;
   conversation_id: string;
@@ -443,6 +457,27 @@ export class CloudStore {
         created_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_files_user ON files(user_id);
+
+      -- Pending media: an image/video a run just generated that the user has
+      -- NOT chosen to keep. Same shape as the files table (deliberately —
+      -- saving one promotes the row into files keeping its id, so the
+      -- ![alt](/api/files/:id) the model already wrote survives the save),
+      -- with an expiry: the bytes
+      -- live at <tenant>/tmp-media/<id> and are swept once expires_at passes.
+      -- These rows are NOT counted by sumUserFileBytes, so generated media
+      -- never touches the plan's storage quota until it is explicitly saved.
+      CREATE TABLE IF NOT EXISTS pending_media (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        conversation_id TEXT,
+        name TEXT NOT NULL,
+        mime TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_pending_media_user ON pending_media(user_id);
+      CREATE INDEX IF NOT EXISTS idx_pending_media_expiry ON pending_media(expires_at);
     `);
 
     // Additive columns — ALTER ... ADD COLUMN throws if the column already
@@ -1310,6 +1345,106 @@ export class CloudStore {
   sumUserFileBytes(userId: string): number {
     const row = this.db.prepare('SELECT COALESCE(SUM(size), 0) AS total FROM files WHERE user_id = ?').get(userId) as { total: number };
     return row.total;
+  }
+
+  // ── Pending media (generated but not saved) ──
+  //
+  // Everything here is deliberately invisible to sumUserFileBytes: a picture
+  // the user never asked to keep must not spend their storage. Saving one is
+  // promotePendingMedia, which is the moment it becomes a real `files` row and
+  // the moment the quota is charged.
+
+  addPendingMedia(input: {
+    userId: string; conversationId?: string | null; name: string; mime: string; size: number; expiresAt: number;
+  }): CloudPendingMedia {
+    const row: DbPendingMediaRow = {
+      id: randomUUID(),
+      user_id: input.userId,
+      conversation_id: input.conversationId ?? null,
+      name: input.name,
+      mime: input.mime,
+      size: input.size,
+      created_at: Date.now(),
+      expires_at: input.expiresAt,
+    };
+    this.db
+      .prepare('INSERT INTO pending_media (id, user_id, conversation_id, name, mime, size, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(row.id, row.user_id, row.conversation_id, row.name, row.mime, row.size, row.created_at, row.expires_at);
+    return this.deserializePendingMedia(row);
+  }
+
+  /** The user's still-live pending media (expired rows are never returned). */
+  listPendingMedia(userId: string, now = Date.now()): CloudPendingMedia[] {
+    const rows = this.db
+      .prepare('SELECT * FROM pending_media WHERE user_id = ? AND expires_at > ? ORDER BY created_at DESC, rowid DESC')
+      .all(userId, now) as DbPendingMediaRow[];
+    return rows.map((r) => this.deserializePendingMedia(r));
+  }
+
+  /** One pending asset, owner-scoped. Null when unknown or already expired. */
+  getPendingMedia(id: string, userId: string, now = Date.now()): CloudPendingMedia | null {
+    const row = this.db
+      .prepare('SELECT * FROM pending_media WHERE id = ? AND user_id = ? AND expires_at > ?')
+      .get(id, userId, now) as DbPendingMediaRow | undefined;
+    return row ? this.deserializePendingMedia(row) : null;
+  }
+
+  /** Live pending bytes for this user — the authority for the pending cap. */
+  sumUserPendingMediaBytes(userId: string, now = Date.now()): number {
+    const row = this.db
+      .prepare('SELECT COALESCE(SUM(size), 0) AS total FROM pending_media WHERE user_id = ? AND expires_at > ?')
+      .get(userId, now) as { total: number };
+    return row.total;
+  }
+
+  deletePendingMedia(id: string, userId: string): boolean {
+    return this.db.prepare('DELETE FROM pending_media WHERE id = ? AND user_id = ?').run(id, userId).changes > 0;
+  }
+
+  /** Everything past its TTL, across all tenants — what the sweeper deletes. */
+  listExpiredPendingMedia(now = Date.now()): CloudPendingMedia[] {
+    const rows = this.db
+      .prepare('SELECT * FROM pending_media WHERE expires_at <= ?')
+      .all(now) as DbPendingMediaRow[];
+    return rows.map((r) => this.deserializePendingMedia(r));
+  }
+
+  /** Drop a swept row by id (the sweeper already holds the row). */
+  deletePendingMediaById(id: string): void {
+    this.db.prepare('DELETE FROM pending_media WHERE id = ?').run(id);
+  }
+
+  /**
+   * Save a pending asset: it becomes a real `files` row and stops being
+   * pending, in one transaction.
+   *
+   * The id is carried over deliberately. The model already embedded
+   * `![alt](/api/files/<id>)` into a persisted message, so minting a new id
+   * would leave that transcript pointing at a locator that the sweeper deletes
+   * a few hours later — the picture would vanish from a chat the user had
+   * explicitly saved. Both tables key on randomUUID(), so reusing the id
+   * cannot collide.
+   *
+   * Quota is the CALLER's job (POST /api/files checks it first) — this is the
+   * bookkeeping half of the save, and moving the bytes on disk is the other.
+   */
+  promotePendingMedia(id: string, userId: string, now = Date.now()): CloudFile | null {
+    const promote = this.db.transaction((mediaId: string, uid: string): CloudFile | null => {
+      const row = this.db
+        .prepare('SELECT * FROM pending_media WHERE id = ? AND user_id = ? AND expires_at > ?')
+        .get(mediaId, uid, now) as DbPendingMediaRow | undefined;
+      if (!row) return null;
+      this.db
+        .prepare('INSERT INTO files (id, user_id, conversation_id, name, mime, size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(row.id, row.user_id, row.conversation_id, row.name, row.mime, row.size, Date.now());
+      this.db.prepare('DELETE FROM pending_media WHERE id = ?').run(mediaId);
+      return this.getFile(row.id, uid);
+    });
+    return promote(id, userId);
+  }
+
+  private deserializePendingMedia(row: DbPendingMediaRow): CloudPendingMedia {
+    return { ...this.deserializeFile(row), expiresAt: row.expires_at };
   }
 
   /** Delete a conversation (owner-scoped) with its messages + attachment rows. */
