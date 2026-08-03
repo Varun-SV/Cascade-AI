@@ -97,6 +97,18 @@ describe('wantsFileDelivery (file-guidance gate)', () => {
     // …and the instruction is explicitly conditional.
     expect(FILE_DELIVERY_GUIDANCE).toContain('ONLY');
   });
+
+  it('tells the model the chart: convention exists, not just "use a table"', () => {
+    // The exporters can now produce a genuine PowerPoint chart object from a
+    // chart: fence. Guidance that doesn't mention it leaves the model writing
+    // prose about a chart nobody drew — which is what real decks came back with.
+    expect(FILE_DELIVERY_GUIDANCE).toContain('chart:bar');
+    expect(FILE_DELIVERY_GUIDANCE).toContain('chart:line');
+    expect(FILE_DELIVERY_GUIDANCE).toContain('REAL, editable chart');
+    expect(FILE_DELIVERY_GUIDANCE).toContain('never use a generated image for data that has to be accurate');
+    // Still echo-proof: describing the fence must not require writing one.
+    expect(FILE_DELIVERY_GUIDANCE).not.toContain('```');
+  });
 });
 
 describe('skills catalog', () => {

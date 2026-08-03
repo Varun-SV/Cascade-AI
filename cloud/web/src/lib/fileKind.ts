@@ -1,5 +1,13 @@
 // How a generated/saved file should be previewed. Pure helpers so they're unit
 // testable and shared between the in-message card viewer and the Files panel.
+//
+// `fileExt` and `parseDelimited` are re-exported from the SDK's shared document
+// module rather than defined twice: the Office renderers need the exact same
+// CSV semantics this viewer uses, and "the spreadsheet previewed one way and
+// exported another" is precisely the drift the shared module exists to prevent.
+
+export { fileExt, parseDelimited } from '@cascade/documents';
+import { fileExt } from '@cascade/documents';
 
 export type FileKind = 'markdown' | 'code' | 'csv' | 'html' | 'svg' | 'image' | 'pdf' | 'text';
 
@@ -19,13 +27,6 @@ const CODE_EXTS = new Set([
   'php', 'swift', 'sh', 'bash', 'zsh', 'sql', 'json', 'yaml', 'yml', 'toml', 'ini', 'xml',
   'css', 'scss', 'less', 'dockerfile', 'makefile', 'r', 'lua', 'pl', 'dart', 'vue', 'svelte',
 ]);
-
-/** File extension (lowercased, no dot), or '' when there is none. */
-export function fileExt(name: string): string {
-  const base = name.split(/[\\/]/).pop() ?? name;
-  const dot = base.lastIndexOf('.');
-  return dot > 0 ? base.slice(dot + 1).toLowerCase() : '';
-}
 
 /**
  * Decide how to preview a file from its name (and optional MIME). Unknown types
@@ -52,38 +53,4 @@ export function codeLanguage(name: string): string {
   const ext = fileExt(name);
   const alias: Record<string, string> = { yml: 'yaml', sh: 'bash', zsh: 'bash', h: 'c', cc: 'cpp', py: 'python', rb: 'ruby', rs: 'rust', kt: 'kotlin', ts: 'typescript', tsx: 'tsx', js: 'javascript', jsx: 'jsx' };
   return alias[ext] ?? ext ?? '';
-}
-
-/**
- * Parse CSV/TSV into rows of cells. Handles quoted fields, escaped quotes (""),
- * and embedded newlines/commas inside quotes. Delimiter is auto-detected from the
- * extension (tsv → tab) or inferred from the first line. Bounded for safety.
- */
-export function parseDelimited(text: string, name = ''): string[][] {
-  const delim = fileExt(name) === 'tsv' || (text.indexOf('\t') !== -1 && text.indexOf(',') === -1) ? '\t' : ',';
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let cell = '';
-  let quoted = false;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (quoted) {
-      if (ch === '"') {
-        if (text[i + 1] === '"') { cell += '"'; i++; } else quoted = false;
-      } else cell += ch;
-    } else if (ch === '"') {
-      quoted = true;
-    } else if (ch === delim) {
-      row.push(cell); cell = '';
-    } else if (ch === '\n') {
-      row.push(cell); rows.push(row); row = []; cell = '';
-    } else if (ch === '\r') {
-      // swallow — handled by the \n
-    } else {
-      cell += ch;
-    }
-    if (rows.length > 5000) break; // guard against a pathological file
-  }
-  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
-  return rows.filter((r) => r.length > 1 || (r[0] ?? '') !== '');
 }

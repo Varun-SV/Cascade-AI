@@ -41,8 +41,12 @@ download button as a fallback (filename inferred). From a card you can:
 A run streams text, so it can never emit a binary directly. For **PDF**,
 **Excel**, **Word** and **PowerPoint** the model instead writes the *source* and
 names the block with the target extension; the browser turns it into the real
-binary. All four are laid out in `cloud/web/src/lib/exporters.ts`, which parses a
-small Markdown subset once into a shared block model:
+binary. The parsing and the Office renderers live in **`src/core/documents/`**
+(the SDK) and are imported by `cloud/web/src/lib/exporters.ts` through the
+`@cascade/documents` alias — see "One renderer, two hosts" below. The exporter
+file itself keeps only the browser-specific parts: the `/api/files/:id` fetch,
+the Blob wrappers and the jsPDF layout. A small Markdown subset is parsed once
+into a shared block model:
 
 - `file:report.pdf` whose body is **Markdown** → a genuine `.pdf` via `jsPDF`
   (headings, paragraphs, bullet/number lists, code fences, blockquotes, tables
@@ -67,6 +71,99 @@ metered `/api/files` store accepts a base64 body (`encoding: 'base64'`), and the
 Files panel previews a saved PDF inline and offers "download to open" for Office
 binaries. The hosted guidance (`FILE_DELIVERY_GUIDANCE`) tells the model how to
 target these formats, still only when the user explicitly asks for a file.
+
+## One renderer, two hosts (desktop/CLI got nothing until v0.67.0)
+
+Everything above described the *hosted* path only. On desktop and the CLI the
+only file-writing tool was `file_write`, whose `execute()` is a plain
+`fs.writeFile(path, content, 'utf-8')` with no awareness of the extension — so
+asking for `report.docx` wrote literal Markdown into a file named `.docx`, and
+Word/Excel/PowerPoint correctly reported it as **corrupted**. There was no
+conversion step anywhere outside the browser.
+
+The fix is a dedicated tool, **`generate_document`** (`src/tools/generate-document.ts`):
+the model passes a target path plus the same source conventions as above
+(Markdown → `.docx`, Markdown slides → `.pptx`, CSV → `.xlsx`) and the tool
+renders the real OOXML archive in Node and `fs.writeFile`s the bytes. It is
+registered wherever there is a real workspace (desktop, CLI, SDK — via
+`Cascade`'s constructor), and absent on a host with no filesystem, mirroring how
+`transcribe_audio` is gated on a file reader. `pdf_create` still owns PDFs.
+
+`file_write` was deliberately **not** taught to reinterpret those extensions: a
+tool the model understands as "write these exact bytes" has to keep meaning
+that, or writing already-valid `.docx` bytes through it would silently corrupt
+them.
+
+The parser and renderers are shared, not copied — `src/core/documents/`:
+
+| Piece | Why it's portable |
+| --- | --- |
+| `blocks.ts` | `parseBlocks`, `stripInline`, `inlineRuns`, `sniffImage`, `splitSlides`/`parseSlide`, the chart parser, `parseDelimited`. No DOM, no `fs`, no `Buffer` reference (base64 feature-detects off `globalThis`). |
+| `render.ts` | `renderDocx`/`renderPptx`/`renderXlsx`, all returning `Uint8Array`. The two non-portable bits are injected: images arrive through a `loadImageBytes(url)` callback (browser `fetch` with the session cookie; `fs.readFile` on desktop), and docx is packed with `Packer.toArrayBuffer`, the one packer that needs neither a Node `Buffer` nor a DOM `Blob`. |
+
+`cloud/web` reaches it through a `@cascade/documents` alias declared in
+`vite.config.ts`, `vitest.config.ts` and `tsconfig.json`; the SDK re-exports the
+same surface from `src/index.ts`. One implementation, two importers — the
+alternative had already cost the codebase a docx image page-height fix that
+landed in only one copy.
+
+## Charts: `chart:` blocks become real chart objects
+
+A model asked to visualize data used to have two options, both bad: draw it with
+an image model (which cannot be trusted to get numbers, axes or labels right) or
+emit a flat Markdown table (which is not a chart) — and in practice it sometimes
+did neither, just describing the chart in prose. There is now a third:
+
+    ```chart:bar
+    title: Quarterly revenue
+    Quarter,Revenue,Costs
+    Q1,120,80
+    Q2,150,95
+    ```
+
+`chart:bar`, `chart:line`, `chart:pie`, `chart:doughnut`, `chart:area`,
+`chart:scatter` (plus aliases: `column`→bar, `donut`→doughnut). The body is CSV —
+the same format the `.xlsx` convention already uses, chosen over JSON because
+models emit it far more reliably and a malformed row degrades to one bad row
+rather than a failed parse. An optional leading `title:` line names the chart.
+The header row is `<category label>,<series>,<series>…`; each later row is a
+category plus its numbers. Decorated values (`$1,200`, `42%`, `(50)`) are
+coerced; anything unparseable becomes `0` rather than poisoning the series. A
+block that cannot be parsed at all stays a visible code block — never a silent
+drop.
+
+What each format does with it:
+
+| Format | Result |
+| --- | --- |
+| `.pptx` | A **real, editable PowerPoint chart** via `pptxgenjs` `addChart` — the numbers live in the chart part's embedded workbook (`ppt/charts/chart1.xml`), so "Edit Data" shows exactly what the model wrote. |
+| `.docx` | A titled Word **table** of the same numbers. The `docx` library exposes no chart API at all (a Word chart needs a DrawingML chart part plus an embedded workbook, which it does not model), so this is a documented gap, not an oversight — the data is never dropped. |
+| `.xlsx` | Each chart's data goes onto **its own worksheet as real numeric rows** the user can chart in one click. SheetJS's community build writes cells, not chart objects. |
+| `.pdf` | Title + table (jsPDF draws no charts). |
+
+Both the hosted guidance (`FILE_DELIVERY_GUIDANCE`) and the desktop/CLI worker
+rules (`buildWorkerRules`) now teach this convention explicitly, replacing the
+old "fall back to a Markdown table" advice.
+
+## Image reliability
+
+Two separate causes, both addressed:
+
+- **The tool may not exist.** `generate_image` is only registered when an OpenAI
+  or Gemini key is configured (`multimodal/registry.ts`'s `CAPABILITIES`). With
+  neither, the model was never given a choice — and an uninformed model writes
+  `[illustration of a cat]` and moves on. `buildWorkerRules` now emits an
+  explicit "no image-generation model is available on this run" rule in that
+  case, pointing at `chart:` blocks for anything data-driven.
+- **The rule wasn't always followed.** The `generate_image` instruction is
+  tightened (call it *before* writing the document, one call per image, the
+  reference must stand **alone** on its line or it stays prose) and, more
+  importantly, made *checkable*: `missingVisualEvidence()` runs after the agent
+  loop and, when the subtask asked for a visual but the output contains no image
+  reference, no `chart:` block and no `generate_image`/`generate_document` call,
+  triggers one correction round with tools. `verifyArtifacts()` additionally
+  asserts that a promised `.docx`/`.pptx`/`.xlsx` really starts with the ZIP
+  signature `PK\x03\x04`.
 
 The worker is steered (a hosted system instruction) to use the `file:` fence —
 but only on turns whose request actually looks file-shaped (`wantsFileDelivery`:

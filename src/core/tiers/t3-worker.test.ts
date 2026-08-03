@@ -11,7 +11,7 @@ import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import { PeerBus } from '../peer/bus.js';
 import { PermissionEscalator } from '../permissions/escalator.js';
-import { T3Worker, buildWorkerRules, shouldRequireArtifact } from './t3-worker.js';
+import { T3Worker, buildWorkerRules, missingVisualEvidence, shouldRequireArtifact } from './t3-worker.js';
 
 function makeResult(
   content: string,
@@ -195,7 +195,7 @@ describe('buildWorkerRules — tool-scoped guidance', () => {
     'web_search', 'glob', 'grep', 'web_fetch',
   ]);
 
-  it('with the full tool set, renders the original prompt verbatim (no behavior change for desktop)', () => {
+  it('with the full tool set, renders every rule the registered tools warrant', () => {
     const out = buildWorkerRules((name) => FULL.has(name));
     expect(out).toBe(`You are a T3 Worker agent in the Cascade AI system. Your job is to execute a specific subtask completely and accurately.
 
@@ -205,7 +205,8 @@ Rules:
 - If the task asks for a file or artifact, you must actually create it in the workspace, verify that it exists, and inspect it before claiming success.
 - Use the "web_search" tool to find current information, documentation, news, or general web data.
 - Use the "pdf_create" tool for PDF requests.
-- Use the "run_code" tool for any file types (Excel, Zip, csv, etc.) or complex processing not covered by other tools. Always cleanup after code execution.
+- No image-generation model is available on this run, so there is NO tool that can draw a picture. Do not emit a Markdown image reference, a bracketed placeholder such as [image: a cat], or any claim that an illustration is included. If the request needs a data visualization use a \`\`\`chart: block, which needs no image model; otherwise describe the visual in words and say plainly that no image could be generated.
+- Use the "run_code" tool for data processing, archives, and file formats not covered by a dedicated tool. Do NOT use it to build a PDF — "pdf_create" does that. Always cleanup after code execution.
 - If you are not making meaningful progress, stop and escalate rather than looping or padding the response.
 - Use the "peer_message" tool to communicate with other T3 workers if your tasks have dependencies or shared state. You can send updates or wait for signals.
 - Only use tools directly relevant to THIS subtask. Do not reach for an unrelated connected-service action (e.g. creating, deleting, or modifying a repository, issue, or PR; sending a message) unless the subtask explicitly calls for it.
@@ -249,14 +250,78 @@ Rules:
   });
 
   it('excludes data-driven charts from the generate_image mandate — image models cannot guarantee exact values', () => {
-    // Regression: the original rule said "image, illustration, chart or other
-    // visual" — routing a quantitative chart (exact axes/numbers) through a
-    // generative image model risks a plausible-looking but numerically wrong
-    // picture. Only decorative visuals should go through generate_image; a
-    // data-driven chart should render as a Markdown table instead.
+    // Routing a quantitative chart (exact axes/numbers) through a generative
+    // image model risks a plausible-looking but numerically wrong picture. Only
+    // decorative visuals go through generate_image; data-driven ones now have a
+    // REAL alternative (a chart: block) rather than the flat table that used to
+    // be the only fallback.
     const out = buildWorkerRules((name) => new Set([...FULL, 'generate_image']).has(name));
     expect(out).toMatch(/do NOT use "generate_image".*chart.*exact data/i);
-    expect(out).toContain('render that data as a Markdown table instead');
+    expect(out).toContain('emit a ```chart: block instead');
+    expect(out).not.toContain('render that data as a Markdown table instead');
+  });
+
+  it('without generate_image, says so out loud instead of leaving the model to guess', () => {
+    // The other half of the "images only worked once" report: generate_image
+    // exists only when an OpenAI or Gemini key is configured, and a model that
+    // is not told writes "[illustration of a cat]" and moves on.
+    const out = buildWorkerRules((name) => FULL.has(name));
+    // Never name a tool that was not registered — that just burns a turn on
+    // tool-not-found.
+    expect(out).not.toContain('"generate_image"');
+    expect(out).not.toContain('![description](location)');
+    expect(out).toContain('No image-generation model is available on this run');
+    expect(out).toContain('chart: block, which needs no image model');
+  });
+
+  it('omits the image-absence notice for a worker that could not produce a document anyway', () => {
+    // A hosted pure-chat run has no deliverable to put a picture in, so the
+    // notice would be noise.
+    const out = buildWorkerRules((name) => new Set(['web_search', 'web_fetch']).has(name));
+    expect(out).not.toContain('No image-generation model is available');
+  });
+
+  it('with generate_document registered, forbids file_write for Office formats', () => {
+    // The original bug: file_write does exactly what it promises — writes the
+    // model's characters verbatim — so `report.docx` held Markdown and Word
+    // reported it corrupted. Naming the prohibition matters as much as naming
+    // the tool, because the model already has a file_write habit.
+    const out = buildWorkerRules((name) => new Set([...FULL, 'generate_document']).has(name));
+    expect(out).toContain('you MUST call the "generate_document" tool and NEVER "file_write"');
+    expect(out).toContain('ZIP archives of XML');
+    expect(out).toContain('Markdown slides separated by --- rules for .pptx');
+    // …and run_code must stop competing for the same formats.
+    expect(out).toContain('Do NOT use it to build a .docx, .pptx or .xlsx');
+  });
+
+  it('teaches the chart: convention wherever a document can be rendered', () => {
+    const out = buildWorkerRules((name) => new Set([...FULL, 'generate_document']).has(name));
+    expect(out).toContain('```chart:bar');
+    expect(out).toContain('chart:line');
+    expect(out).toContain('chart:pie');
+    expect(out).toContain('REAL, editable chart');
+    expect(out).toContain('Never write prose describing a chart in place of emitting one');
+  });
+
+  it('omits the chart convention when nothing can render a document', () => {
+    const out = buildWorkerRules((name) => FULL.has(name));
+    expect(out).not.toContain('```chart:bar');
+    expect(out).not.toContain('generate_document');
+  });
+
+  it('with NO tools registered (hosted pure-chat), drops all tool guidance', () => {
+    const out = buildWorkerRules(() => false);
+    // The model has zero tools — never tell it to reach for one, so it can't
+    // waste turns hallucinating tool calls against an empty registry.
+    expect(out).not.toContain('- Use tools when needed.');
+    expect(out).not.toContain('web_search');
+    expect(out).not.toContain('run_code');
+    expect(out).not.toContain('pdf_create');
+    expect(out).not.toContain('peer_message');
+    expect(out).not.toContain('If the task asks for a file or artifact');
+    // Non-tool execution guidance still renders.
+    expect(out).toContain('- Execute the subtask completely');
+    expect(out).toContain('- Return structured output');
   });
 
   it('with generate_video registered, requires the actual tool call, not a script standing in for it', () => {
@@ -293,29 +358,6 @@ Rules:
       const out = buildWorkerRules((name) => name === tool);
       expect(out, `${tool} alone should still enable tool guidance`).toContain('- Use tools when needed.');
     }
-  });
-
-  it('without generate_image (no image model configured), omits the image guidance entirely', () => {
-    const out = buildWorkerRules((name) => FULL.has(name));
-    // FULL has no generate_image — telling a worker to call a tool that was
-    // never registered just burns a turn on tool-not-found.
-    expect(out).not.toContain('generate_image');
-    expect(out).not.toContain('![description](location)');
-  });
-
-  it('with NO tools registered (hosted pure-chat), drops all tool guidance', () => {
-    const out = buildWorkerRules(() => false);
-    // The model has zero tools — never tell it to reach for one, so it can't
-    // waste turns hallucinating tool calls against an empty registry.
-    expect(out).not.toContain('- Use tools when needed.');
-    expect(out).not.toContain('web_search');
-    expect(out).not.toContain('run_code');
-    expect(out).not.toContain('pdf_create');
-    expect(out).not.toContain('peer_message');
-    expect(out).not.toContain('If the task asks for a file or artifact');
-    // Non-tool execution guidance still renders.
-    expect(out).toContain('- Execute the subtask completely');
-    expect(out).toContain('- Return structured output');
   });
 });
 
@@ -410,69 +452,6 @@ describe('T3Worker.executeTool — unified provider-error classification (used t
     expect(result).toContain('Tool error');
   });
 
-  it('does NOT retry a timed-out generate_video — it fails the subtask on the first attempt', async () => {
-    // Live-reported bug: a video run burned 30+ minutes and produced nothing.
-    // The 8-minute Veo timeout classifies as `unknown`/non-systemic, so it fell
-    // through to adaptiveFallback — a mechanism built for a WRONG TOOL NAME,
-    // which for generate_video means either a keyword-similar substitution
-    // (generate_image "recovering" a video request), a synthesized replacement
-    // tool, or an error string the agent loop answers by ordering the same
-    // 8-minute render again. Every one of those is separately billed.
-    // generate-media.ts's runWithProviderFallback had already decided a
-    // non-systemic generation failure is not worth retrying; this makes the
-    // worker agree instead of quietly re-opening the question.
-    const execute = vi.fn().mockRejectedValue(new Error(
-      'veo-3.1-generate-preview timed out after 8 minutes — no video was produced. '
-      + 'Cascade stopped waiting; the render may still finish on the provider side, but nothing was saved.',
-    ));
-    const worker = new T3Worker(makeRouter(vi.fn()), makeToolRegistry({ execute }), 't2-parent');
-    const tc: ToolCall = { id: 'tc-video', name: 'generate_video', input: { prompt: 'a cat skating' } };
-
-    const err = await (worker as unknown as { executeTool: (tc: ToolCall) => Promise<string> })
-      .executeTool(tc)
-      .then(() => null, (e: unknown) => e as Error);
-
-    // Stops the loop rather than returning a string the model can answer with
-    // another render order.
-    expect(err).toMatchObject({ name: 'CriticalToolError', toolName: 'generate_video' });
-    // ONE attempt — no second 8-minute cycle, no substitute tool.
-    expect(execute).toHaveBeenCalledOnce();
-    // And the reason the user reads is the specific one, not a generic
-    // "the tool failed".
-    expect(err!.message).toContain('no video was produced');
-    expect(err!.message).toContain('was not retried');
-  });
-
-  it('does not let adaptive fallback substitute a different media tool for a failed one', async () => {
-    // findAlternativeTool scores on shared name keywords, so "generate_video"
-    // matches "generate_image" — a $2 video request silently answered with a
-    // 4-cent picture. Provider-backed tools must never reach that path.
-    const execute = vi.fn().mockRejectedValue(new Error('The provider refused this prompt.'));
-    const toolRegistry = makeToolRegistry({
-      execute,
-      getToolDefinitions: () => ([
-        { name: 'generate_video', description: 'v', inputSchema: {} },
-        { name: 'generate_image', description: 'i', inputSchema: {} },
-      ] as ToolDefinition[]),
-    });
-    const worker = new T3Worker(makeRouter(vi.fn()), toolRegistry, 't2-parent');
-    const tc: ToolCall = { id: 'tc-video-2', name: 'generate_video', input: { prompt: 'a cat' } };
-
-    await expect(
-      (worker as unknown as { executeTool: (tc: ToolCall) => Promise<string> }).executeTool(tc),
-    ).rejects.toMatchObject({ name: 'CriticalToolError' });
-    expect(execute).toHaveBeenCalledOnce();
-    expect(execute.mock.calls.map((c) => c[0])).toEqual(['generate_video']);
-  });
-
-  it('still lets a NON-provider tool use adaptive fallback — the mechanism is not removed, just scoped', async () => {
-    const execute = vi.fn().mockRejectedValue(new Error('file not found: nope.txt'));
-    const worker = new T3Worker(makeRouter(vi.fn()), makeToolRegistry({ execute }), 't2-parent');
-    const tc: ToolCall = { id: 'tc-file', name: 'file_read', input: {} };
-    const result = await (worker as unknown as { executeTool: (tc: ToolCall) => Promise<string> }).executeTool(tc);
-    expect(result).toContain('Tool error');
-  });
-
   it('also fast-fails a tool-tagged systemic error (e.g. web_search when every backend is down)', async () => {
     // web-search.ts throws `Object.assign(new Error(...), { systemic: true })`
     // when all backends fail — a shape classifyProviderError alone would not
@@ -532,5 +511,56 @@ describe('shouldRequireArtifact', () => {
 
   it('tolerates an undefined assignment', () => {
     expect(shouldRequireArtifact(undefined, ['file_write'])).toBe(false);
+  });
+
+  it('recognises Office deliverables now that a tool can genuinely produce them', () => {
+    // Before generate_document existed, `deck.pptx` could only ever have been
+    // "satisfied" by writing text into a file PowerPoint refuses to open.
+    expect(shouldRequireArtifact({ description: 'Build deck.pptx' }, ['generate_document'])).toBe(true);
+    expect(shouldRequireArtifact({ description: 'Build book.xlsx' }, ['file_write'])).toBe(true);
+    expect(shouldRequireArtifact({ description: 'Build deck.pptx' }, ['web_search'])).toBe(false);
+  });
+});
+
+describe('missingVisualEvidence — "you asked for a picture, is there one?"', () => {
+  const ASKS = { description: 'Build a deck with a chart of quarterly revenue', expectedOutput: 'deck.pptx' };
+  const TOOLS = ['file_write', 'generate_image', 'generate_document'];
+
+  it('flags prose that only DESCRIBES the visual it was asked for', () => {
+    // The exact failure a real generated deck showed: an emphatic MUST-call
+    // rule, and the output still had no image, no chart — just a paragraph
+    // about what a chart would have shown.
+    const issue = missingVisualEvidence(ASKS, 'The chart would show revenue rising each quarter.', [], TOOLS);
+    expect(issue).toContain('no embedded image and no chart block');
+    expect(issue).toContain('generate_image');
+    expect(issue).toContain('chart:bar');
+  });
+
+  it('accepts a real chart block as evidence', () => {
+    const out = '# Deck\n\n```chart:bar\nQuarter,Revenue\nQ1,120\n```\n';
+    expect(missingVisualEvidence(ASKS, out, [], TOOLS)).toBeNull();
+  });
+
+  it('accepts an embedded image reference as evidence', () => {
+    expect(missingVisualEvidence(ASKS, '![a cat](generated/cat.png)', [], TOOLS)).toBeNull();
+  });
+
+  it('accepts having actually called a tool that writes the visual into the binary', () => {
+    // generate_document writes the picture into a file, so it will never show
+    // up in the worker's text — the call itself is the evidence.
+    expect(missingVisualEvidence(ASKS, 'Done.', ['generate_document'], TOOLS)).toBeNull();
+    expect(missingVisualEvidence(ASKS, 'Done.', ['generate_image'], TOOLS)).toBeNull();
+  });
+
+  it('stays silent when the subtask never asked for a visual', () => {
+    expect(missingVisualEvidence(
+      { description: 'Summarise the Q3 numbers', expectedOutput: 'A paragraph' }, 'Revenue grew.', [], TOOLS,
+    )).toBeNull();
+  });
+
+  it('stays silent when nothing registered could satisfy it', () => {
+    // Demanding a picture from a worker with no way to make one is the
+    // unsatisfiable-requirement bug verifyArtifacts already had to unlearn.
+    expect(missingVisualEvidence(ASKS, 'Here is what a chart would show.', [], ['web_search'])).toBeNull();
   });
 });

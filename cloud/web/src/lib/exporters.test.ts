@@ -211,6 +211,32 @@ describe('exporters — embedded images', () => {
     expect(cx).toBeLessThan(DOCX_MAX_W_EMU); // scaled down proportionally, well under the width cap
   }, 30_000);
 
+  it('renders a chart: block as a REAL PowerPoint chart, not a picture or a table', async () => {
+    // The browser path shares the SDK's renderers (@cascade/documents), so this
+    // asserts the same guarantee from the cloud side: an editable chart part
+    // carrying the model's exact numbers, not an AI-drawn image whose axes
+    // nobody can vouch for.
+    const md = '# Revenue\n\n```chart:bar\ntitle: Quarterly revenue\nQuarter,Revenue\nQ1,120\nQ2,150\n```\n';
+    const blob = await renderExport('pptx', md, 'deck.pptx');
+    const names = await entryNames(blob);
+    expect(names).toContain('ppt/charts/chart1.xml');
+    expect(names).not.toContain('ppt/media/image');
+
+    const zip = await JSZip.loadAsync(await readBytes(blob));
+    const xml = await zip.file('ppt/charts/chart1.xml')!.async('string');
+    expect(xml).toContain('<c:barChart>');
+    expect(xml).toContain('120');
+    expect(xml).toContain('150');
+  }, 30_000);
+
+  it('keeps chart numbers in the .pdf, which cannot draw one', async () => {
+    const md = '# Revenue\n\n```chart:bar\nQuarter,Revenue\nQ1,120\n```\n';
+    const blob = await renderExport('pdf', md, 'report.pdf');
+    const head = (await readBytes(blob)).subarray(0, 4);
+    expect(String.fromCharCode(...head)).toBe('%PDF');
+    expect(blob.size).toBeGreaterThan(0);
+  }, 30_000);
+
   it('caps a landscape image to the column WIDTH as before, unaffected by the height cap', async () => {
     stubFetch(async () => ({ ok: true, arrayBuffer: async () => syntheticPng(4000, 200).buffer }));
     const blob = await renderExport('docx', '# Report\n\n![wide](/api/files/wide-1)\n', 'doc.docx');

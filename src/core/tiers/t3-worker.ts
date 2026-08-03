@@ -82,6 +82,7 @@ const KNOWN_TOOLS = [
   // as "no tools registered" and dropped all tool guidance — the worker was
   // then told nothing about using tools at all, and wrote the video as prose.
   'generate_image', 'generate_video', 'generate_speech', 'transcribe_audio',
+  'generate_document',
 ];
 
 /**
@@ -105,19 +106,49 @@ export function buildWorkerRules(has: (toolName: string) => boolean): string {
     has('web_search') &&
       '- Use the "web_search" tool to find current information, documentation, news, or general web data.',
     has('pdf_create') && '- Use the "pdf_create" tool for PDF requests.',
+    // A .docx/.pptx/.xlsx is a ZIP of OOXML parts, not text with a suffix.
+    // file_write does exactly what it promises — writes the model's characters
+    // verbatim — so without this rule the worker "wrote" a Word document that
+    // Word correctly reported as corrupted. Stated as an explicit prohibition
+    // on the tool it would otherwise reach for, because "use generate_document"
+    // alone competes with a file_write habit the model already has.
+    has('generate_document') &&
+      '- For a Word (.docx), PowerPoint (.pptx) or Excel (.xlsx) deliverable you MUST call the "generate_document" tool and NEVER "file_write" or "run_code" — those formats are ZIP archives of XML, so text written straight to the path opens as a corrupted file. Pass the target path plus the source: Markdown for .docx, Markdown slides separated by --- rules for .pptx (each slide starts with a heading), CSV for .xlsx.',
+    // The alternative to this rule is not "a worse chart" — it is a paragraph
+    // describing a chart that does not exist, which is what real decks came
+    // back with. A `chart:` block is checkable, carries the exact numbers, and
+    // becomes a genuine editable PowerPoint chart object.
+    has('generate_document') &&
+      '- For any data-driven visualization (a chart, graph, trend, breakdown or comparison of numbers), emit a fenced ```chart:bar block — also chart:line, chart:pie, chart:doughnut, chart:area, chart:scatter — whose body is an optional "title: ..." line followed by CSV: a header row of "<category label>,<series name>,<series name>", then one row per category. In a PowerPoint deliverable that becomes a REAL, editable chart carrying your exact numbers; in Word and Excel the same block keeps every value as a table or worksheet. Never write prose describing a chart in place of emitting one.',
     // Without this the model "writes the image" as prose — a bracketed
     // description sitting in the deck where the picture should be — even with a
     // working image model registered. Naming the reference syntax matters as
     // much as naming the tool: a generated image nobody embeds is still a
-    // missing image.
+    // missing image. It also has to say the reference must stand ALONE on its
+    // line, because only a standalone reference is parsed as a picture (see
+    // core/documents/blocks.ts matchImageLine) — one embedded mid-sentence
+    // silently degrades to caption text.
     //
-    // Scoped to PowerPoint/Word specifically: those are the only exporters
-    // that actually embed a Markdown image reference (cloud/web/exporters.ts
-    // toPptx/toDocx). PDF and plain-text/Markdown deliverables flatten a
-    // reference straight to caption text — telling the model to call
-    // generate_image for THOSE just pays for an image nobody ever sees.
+    // Scoped to PowerPoint/Word specifically: those are the only renderers that
+    // actually embed a Markdown image reference. PDF and plain-text/Markdown
+    // deliverables flatten a reference straight to caption text — telling the
+    // model to call generate_image for THOSE just pays for an image nobody
+    // ever sees.
     has('generate_image') &&
-      '- When a slide deck (PowerPoint) or Word document deliverable calls for a decorative image or illustration, you MUST call the "generate_image" tool and then reference its result using Markdown image syntax: ![description](location), where "location" is exactly the string the tool reported back. NEVER write a text placeholder or a bracketed description such as [image: a cat] in its place. Do NOT use "generate_image" for a chart, graph, or diagram that must show exact data (numbers, axes, labels) — an image model cannot guarantee those values are correct, so render that data as a Markdown table instead. For any OTHER deliverable format (PDF, plain text, code, etc.) do NOT call "generate_image" — those cannot embed the result, so describe the visual in words instead.',
+      // Supersedes the earlier wording of this same rule: it now names the
+      // standalone-line parser constraint, says to generate BEFORE writing the
+      // document, and points data-driven visuals at a ```chart: block rather
+      // than a Markdown table, which is only the right advice now that chart
+      // blocks render as real chart objects.
+      '- When a slide deck (PowerPoint) or Word document deliverable calls for a decorative image, photo or illustration, you MUST call the "generate_image" tool — once per image the deliverable needs, BEFORE you write the document — and then put each result on a line of its OWN using Markdown image syntax: ![description](location), where "location" is exactly the string the tool reported back. A reference inside a sentence stays prose and no picture appears. NEVER write a text placeholder or a bracketed description such as [image: a cat] in its place, and never state that an image is included when you did not generate one. Do NOT use "generate_image" for a chart, graph or diagram that must show exact data (numbers, axes, labels) — an image model cannot guarantee those values are correct; emit a ```chart: block instead. For any OTHER deliverable format (PDF, plain text, code, etc.) do NOT call "generate_image" — those cannot embed the result, so describe the visual in words instead.',
+    // The other half of image reliability, and the half no amount of
+    // instruction-tightening could fix: generate_image only exists when an
+    // OpenAI or Gemini key is configured (multimodal/registry.ts CAPABILITIES).
+    // With neither, the model was never given a choice — and a model that
+    // doesn't know that writes "[illustration of a cat]" and moves on. Said out
+    // loud, up front, so the fallback is a real chart or honest prose.
+    !has('generate_image') && (has('generate_document') || canWriteFiles) &&
+      '- No image-generation model is available on this run, so there is NO tool that can draw a picture. Do not emit a Markdown image reference, a bracketed placeholder such as [image: a cat], or any claim that an illustration is included. If the request needs a data visualization use a ```chart: block, which needs no image model; otherwise describe the visual in words and say plainly that no image could be generated.',
     // The video counterpart of the image rule above, and the fix for the
     // reported "it writes scripts forever and never makes the video" run. The
     // failure mode is identical — the model narrates the deliverable instead of
@@ -129,7 +160,9 @@ export function buildWorkerRules(has: (toolName: string) => boolean): string {
     has('generate_video') &&
       '- When the subtask deliverable is a video, you MUST call the "generate_video" tool — that call IS the deliverable, and the subtask is not done until it has returned. NEVER deliver the video as prose, a script, a storyboard, or a bracketed placeholder such as [video: a cat skating], and NEVER claim a video exists unless the tool reported a location for it. Call it exactly ONCE: it is billed per second of output and renders for minutes, so a second call charges the user again. Then report the location string the tool returned VERBATIM as your result, referencing it as [description](location) if it goes inside a document. If the tool reports a failure or a timeout, report that failure verbatim and stop — do NOT call it again, and do NOT substitute a written description of a video that was never made.',
     has('run_code') &&
-      '- Use the "run_code" tool for any file types (Excel, Zip, csv, etc.) or complex processing not covered by other tools. Always cleanup after code execution.',
+      `- Use the "run_code" tool for data processing, archives, and file formats not covered by a dedicated tool. ${
+        has('generate_document') ? 'Do NOT use it to build a .docx, .pptx or .xlsx — "generate_document" already produces those correctly. ' : ''
+      }${has('pdf_create') ? 'Do NOT use it to build a PDF — "pdf_create" does that. ' : ''}Always cleanup after code execution.`,
     '- If you are not making meaningful progress, stop and escalate rather than looping or padding the response.',
     has('peer_message') &&
       '- Use the "peer_message" tool to communicate with other T3 workers if your tasks have dependencies or shared state. You can send updates or wait for signals.',
@@ -144,7 +177,16 @@ ${rules.filter((r): r is string => r !== false).join('\n')}`;
 }
 
 /** File-writing tools — a worker can only produce a file artifact if it has one. */
-const ARTIFACT_TOOLS = new Set(['file_write', 'file_edit', 'shell']);
+const ARTIFACT_TOOLS = new Set(['file_write', 'file_edit', 'shell', 'generate_document']);
+
+/**
+ * Filenames worth treating as a promised artifact. Office extensions are here
+ * because there is now a tool that can genuinely produce them — before
+ * generate_document, a subtask naming `deck.pptx` could only ever have been
+ * satisfied by writing text into a file Office refuses to open.
+ */
+const ARTIFACT_FILE_RE =
+  /\b[\w./-]+\.(pdf|md|html|txt|json|csv|py|js|ts|tsx|jsx|docx?|pptx?|xlsx?|png|jpg|jpeg|svg|gif)\b/i;
 
 /**
  * Whether a worker should be *required* to produce a verified file artifact.
@@ -165,8 +207,62 @@ export function shouldRequireArtifact(
   // An explicit spec slice is authoritative — no regex guessing needed.
   if (assignment?.files?.length) return true;
   const haystack = `${assignment?.description ?? ''}\n${assignment?.expectedOutput ?? ''}`;
-  return /\b[\w./-]+\.(pdf|md|html|txt|json|csv|py|js|ts|tsx|jsx|docx?|png|jpg|jpeg|svg|gif)\b/i.test(haystack)
+  return ARTIFACT_FILE_RE.test(haystack)
     || /save (?:a|the)? file|create (?:a|the)? file|write (?:a|the)? file/i.test(haystack);
+}
+
+/** Words that mean "this deliverable is supposed to SHOW something". */
+const VISUAL_REQUEST_RE =
+  /\b(image|images|picture|pictures|photo|photos|illustration|illustrations|visual|visuals|visualisation|visualization|visualizations|chart|charts|graph|graphs|plot|plots|diagram|diagrams|infographic)\b/i;
+
+/** Evidence the output really CONTAINS a visual, not a sentence about one. */
+const IMAGE_REF_RE = /!\[[^\]]*\]\([^)]+\)/;
+const CHART_BLOCK_RE = /^\s*```+\s*chart\s*:/im;
+
+/**
+ * "You asked for a picture — is there one?"
+ *
+ * The `generate_image` rule was already an emphatic MUST and real decks still
+ * came back with zero images and zero charts, just prose describing what a
+ * chart would have shown. An instruction the model can silently decline is not
+ * a guarantee; this is the checkable version of the same requirement, in the
+ * spirit of verifyArtifacts ("did the file the subtask promised actually get
+ * written?").
+ *
+ * Deliberately narrow, because a false positive costs a correction round on a
+ * perfectly good answer:
+ *   • only when the subtask ITSELF asks for a visual;
+ *   • only when a tool that could satisfy it is registered — with neither
+ *     generate_image nor generate_document there is nothing to demand;
+ *   • satisfied by ANY of: an embedded image reference, a `chart:` block, or a
+ *     generate_image / generate_document call (the binary path writes the
+ *     picture into a file, so it will never appear in the worker's text).
+ *
+ * Returns the issue to correct, or null when the deliverable is fine.
+ */
+export function missingVisualEvidence(
+  assignment: { description?: string; expectedOutput?: string } | undefined,
+  output: string,
+  calledTools: string[],
+  toolNames: string[],
+): string | null {
+  const canVisualize = toolNames.includes('generate_image') || toolNames.includes('generate_document');
+  if (!canVisualize) return null;
+  const haystack = `${assignment?.description ?? ''}\n${assignment?.expectedOutput ?? ''}`;
+  if (!VISUAL_REQUEST_RE.test(haystack)) return null;
+  if (calledTools.includes('generate_image') || calledTools.includes('generate_document')) return null;
+  if (IMAGE_REF_RE.test(output) || CHART_BLOCK_RE.test(output)) return null;
+
+  const options: string[] = [];
+  if (toolNames.includes('generate_image')) {
+    options.push('call "generate_image" and reference the result on its own line as ![description](location)');
+  }
+  if (toolNames.includes('generate_document')) {
+    options.push('emit a fenced ```chart:bar (or chart:line / chart:pie) block whose body is CSV, for anything data-driven');
+  }
+  return `The subtask asks for a visual, but the output contains no embedded image and no chart block — only prose. ${
+    options.join(', or ')
+  }. Describing a picture is not producing one.`;
 }
 
 export class T3Worker extends BaseTier {
@@ -395,6 +491,22 @@ export class T3Worker extends BaseTier {
           this.peerBus?.publish(this.id, assignment.subtaskId, output, 'ESCALATED');
           return this.buildResult('ESCALATED', output, { checksRun, passed, failed }, issues, correctionAttempts);
         }
+      }
+
+      // "You asked for a picture — is there one?" The MUST-call-generate_image
+      // rule is an instruction the model can silently decline, and real decks
+      // proved it does: no image, no chart, just a paragraph describing one.
+      // One correction round, with tools, so the worker can still go and make
+      // the thing. Not a hard failure — a missing illustration should never
+      // throw away an otherwise-good deliverable.
+      const visualIssue = missingVisualEvidence(
+        assignment, output, toolCalls.map((t) => t.name), this.tools.map((t) => t.name),
+      );
+      if (visualIssue) {
+        correctionAttempts = 1;
+        issues.push(visualIssue);
+        this.sendStatusUpdate({ progressPct: 68, currentAction: 'Verifying requested visuals', status: 'IN_PROGRESS' });
+        output = await this.correctOutput(output, [visualIssue]);
       }
 
       this.sendStatusUpdate({ progressPct: 70, currentAction: 'Self-testing output', status: 'IN_PROGRESS' });
@@ -1040,7 +1152,7 @@ export class T3Worker extends BaseTier {
     const declared = (assignment.files ?? []).map((f) => f.trim()).filter((f) => f.includes('.'));
     const haystack = `${assignment.description}
 ${assignment.expectedOutput}`;
-    const matches = haystack.match(/\b[\w./-]+\.(pdf|md|html|txt|json|csv|py|js|ts|tsx|jsx|docx?|png|jpg|jpeg|svg|gif)\b/gi) ?? [];
+    const matches = haystack.match(new RegExp(ARTIFACT_FILE_RE.source, 'gi')) ?? [];
     return [...new Set([...declared, ...matches.map((m) => m.trim())])];
   }
 
@@ -1066,7 +1178,27 @@ ${assignment.expectedOutput}`;
           continue;
         }
 
-        if (!/\.pdf$/i.test(artifactPath)) {
+        // Office formats are ZIP archives of XML: a valid one starts with the
+        // "PK\x03\x04" local-file signature. Checking that is what catches the
+        // original bug — Markdown written straight into `report.docx` is a
+        // perfectly non-empty file that Word refuses to open — and reading such
+        // a file as utf-8 would have declared it fine.
+        if (/\.(docx|pptx|xlsx)$/i.test(artifactPath)) {
+          const head = Buffer.alloc(4);
+          const fh = await fs.open(absolutePath, 'r');
+          try {
+            await fh.read(head, 0, 4, 0);
+          } finally {
+            await fh.close();
+          }
+          if (head.toString('latin1') !== 'PK\x03\x04') {
+            issues.push(
+              `${artifactPath} is not a valid Office file — it must be written with the generate_document tool, `
+              + 'which renders the real OOXML archive. Plain text saved under that extension opens as corrupted.',
+            );
+            continue;
+          }
+        } else if (!/\.pdf$/i.test(artifactPath)) {
           const content = await fs.readFile(absolutePath, 'utf-8');
           if (!content.trim()) {
             issues.push(`Artifact content is empty: ${artifactPath}`);

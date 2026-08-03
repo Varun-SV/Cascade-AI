@@ -61,6 +61,98 @@ and rebuilds the desktop installers, which would ship a byte-identical release).
   button that flips to "Saved to your Cascade files". `file:created` now carries
   `pending: true` and `expiresAt` for unsaved media, so the client can tell a
   new saved file from something about to disappear.
+## 0.67.0 - 2026-08-03
+
+### Fixed
+- **Desktop/CLI could not produce a valid `.docx`, `.pptx` or `.xlsx` at all** —
+  every generated Office file opened as "corrupted". The only file-writing tool
+  a worker had was `file_write`, whose `execute()` is a plain
+  `fs.writeFile(path, content, 'utf-8')` with no awareness of the target
+  extension: ask for `report.docx` and the model, having nothing better to call,
+  wrote literal Markdown into a file named `.docx`. A real Office file is a ZIP
+  archive of OOXML parts, and there was no conversion step anywhere on
+  desktop/CLI — the equivalent existed only in the browser
+  (`cloud/web/src/lib/exporters.ts`).
+  - **New `generate_document` tool** (`src/tools/generate-document.ts`): the
+    model passes a target path plus the source — Markdown for `.docx`, Markdown
+    slides (`---`-separated) for `.pptx`, CSV for `.xlsx` — and the tool renders
+    the real OOXML archive in Node and writes the bytes. Registered wherever
+    there is a genuine workspace (desktop, CLI, SDK, via `Cascade`'s
+    constructor), and absent on a host with no filesystem, mirroring how
+    `transcribe_audio` is gated on a file reader. `pdf_create` still owns PDFs.
+  - `file_write` was deliberately **not** taught to reinterpret those
+    extensions: a tool the model understands as "write these exact bytes" must
+    keep meaning that, or writing already-valid `.docx` bytes through it would
+    silently corrupt them.
+  - **One renderer, two hosts.** The parsing and layout now live in
+    `src/core/documents/` (`parseBlocks`, `stripInline`, `inlineRuns`,
+    `sniffImage`, `splitSlides`/`parseSlide`, `parseDelimited`, and the
+    `renderDocx`/`renderPptx`/`renderXlsx` renderers), imported by BOTH the new
+    tool and `cloud/web` (through a `@cascade/documents` alias) instead of being
+    copied. The module is DOM-free and Node-free: images arrive through an
+    injected `loadImageBytes(url)` callback (browser `fetch` with the session
+    cookie; `fs.readFile` on desktop), base64 feature-detects `Buffer` off
+    `globalThis`, and docx packs via `Packer.toArrayBuffer` — the one packer
+    needing neither a Node `Buffer` nor a DOM `Blob`. `cloud/web`'s exporter
+    keeps only the browser-specific parts (the `/api/files/:id` fetch, Blob
+    wrappers, the jsPDF layout). A docx image page-height fix had already
+    landed in one copy with nothing keeping a second honest.
+  - `verifyArtifacts()` now checks a promised `.docx`/`.pptx`/`.xlsx` really
+    begins with the ZIP signature `PK\x03\x04`, so the original failure is
+    caught rather than passing an "it's a non-empty file" check.
+  - Added `docx`, `pptxgenjs` and `xlsx` to the SDK's dependencies (previously
+    only in `cloud/web`); all three verified to work in plain Node and to
+    survive tsup's CJS bundling for the embedded desktop backend.
+
+### Added
+- **Real charts in generated documents — a `chart:` block convention.** Asked to
+  visualize data, a model previously had two options and both were bad: draw it
+  with an image model (which cannot be trusted to get numbers, axes or labels
+  right — there is a standing rule against it) or emit a flat Markdown table,
+  which is not a chart. In practice it sometimes did neither and just described
+  the chart in prose. Now it can write a fenced ` ```chart:bar ` block (also
+  `chart:line`, `chart:pie`, `chart:doughnut`, `chart:area`, `chart:scatter`)
+  whose body is CSV: an optional `title:` line, a `<category>,<series>,<series>`
+  header row, then one row per category. CSV rather than JSON because models emit
+  it far more reliably and it matches the existing `.xlsx` convention; decorated
+  values (`$1,200`, `42%`, `(50)`) are coerced, and a block that cannot be parsed
+  stays a visible code block rather than being silently dropped.
+  - `.pptx` renders it as a **genuine, editable PowerPoint chart** via
+    `pptxgenjs` `addChart` — the model's exact numbers land in the chart part's
+    embedded workbook (`ppt/charts/chart1.xml`), not in a picture.
+  - `.docx` renders a titled Word table of the same numbers. The `docx` library
+    exposes no chart API whatsoever (a Word chart needs a DrawingML chart part
+    plus an embedded workbook, which it does not model) — a documented gap, with
+    the data preserved rather than dropped.
+  - `.xlsx` puts each chart's data on its own worksheet as real numeric rows the
+    user can chart in one click; SheetJS's community build writes cells, not
+    chart objects.
+  - `.pdf` renders title + table (jsPDF draws no charts).
+  - Both `FILE_DELIVERY_GUIDANCE` (hosted) and `buildWorkerRules` (desktop/CLI)
+    now teach the convention, replacing the old "fall back to a Markdown table"
+    advice.
+
+### Fixed (image reliability)
+- **"Image insertion only worked once"** had two distinct causes, both addressed.
+  - `generate_image` exists only when an OpenAI or Gemini key is configured
+    (`multimodal/registry.ts`'s `CAPABILITIES`); with neither, the tool was
+    simply absent and the model was never given a choice — so it wrote
+    `[illustration of a cat]` and moved on. `buildWorkerRules` now states
+    plainly, up front, when no image model is available this run, and points at
+    `chart:` blocks for anything data-driven.
+  - The existing "you MUST call generate_image" rule was being declined in
+    practice. It is tightened (call it *before* writing the document, once per
+    image, and the reference must stand **alone** on its line or it stays prose)
+    and, more importantly, made checkable: the new `missingVisualEvidence()`
+    check runs after the agent loop and, when the subtask asked for a visual but
+    the output has no image reference, no `chart:` block and no
+    `generate_image`/`generate_document` call, triggers one correction round
+    with tools rather than shipping a paragraph about a picture that does not
+    exist.
+- `generate_document` reports each image reference it could *not* embed, by
+  name, instead of quietly producing a picture-less deck.
+- `run_code`'s guidance no longer competes for Office formats now that a
+  dedicated tool produces them correctly.
 ## 0.66.2 - 2026-08-03
 
 ### Fixed
