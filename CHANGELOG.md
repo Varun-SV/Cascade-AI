@@ -7,9 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
-Cascade Cloud only — no SDK, CLI or desktop code is touched, so the version is
-deliberately not bumped (see `CONTRIBUTING.md`: a bump on `main` publishes npm
-and rebuilds the desktop installers, which would ship a byte-identical release).
+Held unreleased on purpose. A version bump on `main` publishes npm and rebuilds
+all three desktop installers (see `CONTRIBUTING.md`), so the orchestration work
+below is accumulating across several changes and will be bumped once, when the
+series is complete, rather than cutting a release per step.
 
 ### Changed
 - **Generated images and videos are no longer saved to your storage the moment
@@ -52,6 +53,21 @@ and rebuilds the desktop installers, which would ship a byte-identical release).
     not extra storage — saving still costs quota.
 
 ### Added
+- **Acceptance criteria are now checked mechanically before a model is asked.**
+  T1 specifies them as "checks a reviewer could verify mechanically (file exists
+  / contains X)" and the planner writes them that way, but every one of them was
+  graded solely by an LLM self-test — a worse judge of "does this file exist"
+  than `stat` is, and one that will pass a criterion because the output *claims*
+  the file was written. A new deterministic rung settles what can be settled by
+  looking, escalates immediately when a promised file genuinely is not there
+  (rather than paying for a grading call to be told so), and passes everything
+  ambiguous through to the model untouched. Criteria it cannot parse with
+  confidence — subjective wording, shell commands, negations, or several files
+  at once — are deliberately left undecided, because deferring is always safe
+  and deciding wrongly is not. Shell criteria are never executed: acceptance
+  text is LLM-authored, and running it would turn a plan into a command channel.
+
+
 - **`GET /api/pending-media`** — lists the generated media you haven't saved,
   with its size and expiry, so the UI can offer Save after a reload rather than
   relying on the socket event that announced it.
@@ -61,9 +77,16 @@ and rebuilds the desktop installers, which would ship a byte-identical release).
   button that flips to "Saved to your Cascade files". `file:created` now carries
   `pending: true` and `expiresAt` for unsaved media, so the client can tell a
   new saved file from something about to disappear.
-## 0.67.1 - 2026-08-04
 
 ### Fixed
+- **A subtask's correction count was a boolean wearing a number's clothes.**
+  `correctionAttempts` was ASSIGNED `1` at each correction site instead of
+  incremented, so a worker that corrected for a missing artifact, then for
+  acceptance, then for a failed self-test reported exactly the same "1" as one
+  that corrected once. It is the only per-attempt signal downstream has for
+  judging whether a tier is struggling, and it could not distinguish one round
+  from three. It now counts.
+
 - **Repairing a circular plan could silently corrupt the order of a valid one.**
   T1 (sections), T2 (subtasks) and the new orchestration compiler each detected
   cycles the same wrong way: run a topological pass, then treat everything it

@@ -32,6 +32,9 @@ import {
 } from '../../tools/text-tool-parser.js';
 import { truncateForContext } from '../../utils/truncate.js';
 import { classifyProviderError } from '../router/provider-errors.js';
+import {
+  evaluateAcceptance, failures, undecided, type AcceptanceResult,
+} from '../verification/acceptance.js';
 
 /**
  * Thrown by executeTool() when the underlying tool error indicates a condition
@@ -450,6 +453,14 @@ export class T3Worker extends BaseTier {
 
     let output = '';
     let toolCalls: ToolCall[] = [];
+    // Counts every correction round this subtask actually took. It used to be
+    // ASSIGNED 1 at each of the (now four) correction sites rather than
+    // incremented, so a worker that corrected for a missing artifact, then for
+    // acceptance, then for a failed self-test reported the same "1" as one that
+    // corrected once. The field is the only per-attempt signal downstream has —
+    // reported as correctionAttempts in T3Result and used to judge whether a
+    // tier is struggling — so a boolean wearing a number's clothes made a
+    // three-round subtask indistinguishable from a clean one.
     let correctionAttempts = 0;
     const checksRun: string[] = [];
     const passed: string[] = [];
@@ -480,7 +491,7 @@ export class T3Worker extends BaseTier {
         ? await this.verifyArtifacts(assignment)
         : { ok: true, issues: [] };
       if (!artifactCheck.ok) {
-        correctionAttempts = 1;
+        correctionAttempts++;
         issues.push(...artifactCheck.issues);
         output = await this.correctOutput(output, artifactCheck.issues);
         const retryArtifactCheck = await this.verifyArtifacts(assignment);
@@ -503,21 +514,57 @@ export class T3Worker extends BaseTier {
         assignment, output, toolCalls.map((t) => t.name), this.tools.map((t) => t.name),
       );
       if (visualIssue) {
-        correctionAttempts = 1;
+        correctionAttempts++;
         issues.push(visualIssue);
         this.sendStatusUpdate({ progressPct: 68, currentAction: 'Verifying requested visuals', status: 'IN_PROGRESS' });
         output = await this.correctOutput(output, [visualIssue]);
       }
 
+      // ── Deterministic rung of the verification ladder ──
+      //
+      // Acceptance criteria are specified (t1-administrator.ts) as "checks a
+      // reviewer could verify mechanically (file exists / contains X)", but
+      // until now every one of them was graded only by selfTest() — an LLM,
+      // which is a worse judge of "does this file exist" than stat is, and which
+      // will happily pass a criterion because the output *claims* the file was
+      // written. Decide what can be decided by looking; anything ambiguous is
+      // left untouched for the model, so this only ever adds certainty.
+      const acceptanceResults = await this.checkAcceptance(assignment);
+      const acceptanceFailures = failures(acceptanceResults);
+      if (acceptanceFailures.length > 0) {
+        correctionAttempts++;
+        issues.push(...acceptanceFailures);
+        this.sendStatusUpdate({ progressPct: 69, currentAction: 'Acceptance checks failed — correcting', status: 'IN_PROGRESS' });
+        output = await this.correctOutput(output, acceptanceFailures);
+
+        const recheck = failures(await this.checkAcceptance(assignment));
+        if (recheck.length > 0) {
+          // Deterministic and still failing: the file genuinely is not there.
+          // No amount of LLM grading changes that, so stop rather than spend a
+          // grading call to be told what stat already proved.
+          issues.push(...recheck);
+          checksRun.push(...acceptanceResults.map((r) => r.criterion));
+          failed.push(...recheck);
+          this.setStatus('FAILED');
+          this.peerBus?.publish(this.id, assignment.subtaskId, output, 'ESCALATED');
+          return this.buildResult('ESCALATED', output, { checksRun, passed, failed }, issues, correctionAttempts);
+        }
+      }
+      for (const result of acceptanceResults) {
+        if (result.verdict === 'undecidable') continue;
+        checksRun.push(result.criterion);
+        if (result.verdict === 'passed') passed.push(result.criterion);
+      }
+
       this.sendStatusUpdate({ progressPct: 70, currentAction: 'Self-testing output', status: 'IN_PROGRESS' });
 
-      const testResult = await this.selfTest(assignment, output);
+      const testResult = await this.selfTest(assignment, output, undecided(acceptanceResults));
       checksRun.push(...testResult.checksRun);
       passed.push(...testResult.passed);
       failed.push(...testResult.failed);
 
       if (testResult.failed.length > 0) {
-        correctionAttempts = 1;
+        correctionAttempts++;
         issues.push(`Initial check failed: ${testResult.failed.join(', ')}`);
         const corrected = await this.correctOutput(output, testResult.failed);
         output = corrected;
@@ -1309,17 +1356,51 @@ ${current}`,
     return current;
   }
 
+  /**
+   * Run the acceptance criteria that can be settled by looking at the workspace.
+   * Reads go through the same workspace-relative resolution verifyArtifacts uses.
+   */
+  private async checkAcceptance(assignment: T2ToT3Assignment): Promise<AcceptanceResult[]> {
+    const criteria = assignment.acceptance ?? [];
+    if (!criteria.length) return [];
+    const resolve = (target: string) => path.resolve(process.cwd(), target);
+    return evaluateAcceptance(criteria, assignment.files ?? [], {
+      stat: async (target) => {
+        try {
+          const stat = await fs.stat(resolve(target));
+          return stat.isFile() ? { size: stat.size } : null;
+        } catch { return null; }
+      },
+      read: async (target) => {
+        try {
+          const content = await fs.readFile(resolve(target), 'utf-8');
+          // A binary file read as utf-8 comes back full of replacement chars;
+          // treating that as text would make "contains" answer nonsense.
+          // U+FFFD is what a binary byte sequence decodes to as utf-8; treating
+          // such a file as text would make a "contains" check answer nonsense.
+          return content.includes('\uFFFD') ? null : content;
+        } catch { return null; }
+      },
+    });
+  }
+
   private async selfTest(
     assignment: T2ToT3Assignment,
     output: string,
+    /**
+     * Only the criteria the deterministic rung could not settle. Re-grading one
+     * that stat already decided invites the model to overturn a fact.
+     */
+    pendingAcceptance?: readonly string[],
   ): Promise<{ checksRun: string[]; passed: string[]; failed: string[] }> {
+    const acceptance = pendingAcceptance ?? assignment.acceptance ?? [];
     const prompt = `Self-test this output against the assignment requirements.
 
 Assignment: ${assignment.description}
 Expected output: ${assignment.expectedOutput}
 Constraints: ${assignment.constraints.join('; ')}
-${assignment.acceptance?.length ? `Acceptance criteria — ALL must be satisfied for "completeness" to pass:
-${assignment.acceptance.map((a) => `- ${a}`).join('\n')}
+${acceptance.length ? `Acceptance criteria — ALL must be satisfied for "completeness" to pass:
+${acceptance.map((a) => `- ${a}`).join('\n')}
 ` : ''}
 Output to test:
 ${output}

@@ -8,6 +8,7 @@ export { T1Administrator } from './core/tiers/t1-administrator.js';
 export { T2Manager } from './core/tiers/t2-manager.js';
 export { T3Worker } from './core/tiers/t3-worker.js';
 export * from './core/orchestration/index.js';
+export * from './core/verification/index.js';
 
 export { runCascade, createCascade, streamCascade } from './sdk/index.js';
 
