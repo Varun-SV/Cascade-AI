@@ -139,3 +139,64 @@ describe('summarizeCompleted', () => {
     expect(summary).toContain('…');
   });
 });
+
+describe('ResumeStore claim/release/settle', () => {
+  it('keeps the checkpoint on disk while a resume is being prepared', async () => {
+    // The bug this replaces: consume() deleted the file before the resumed run
+    // existed, so a crash in that window destroyed the only recovery record —
+    // in the mechanism whose entire purpose is surviving crashes.
+    const store = new ResumeStore({ dir });
+    await store.save(checkpoint('run-1'));
+
+    const claimed = await store.claim();
+    expect(claimed?.checkpoint.taskId).toBe('run-1');
+    // Hidden from other claimers...
+    expect(await store.latest()).toBeNull();
+    // ...but still on disk.
+    expect((await fs.readdir(dir)).some((n) => n.endsWith('.claimed'))).toBe(true);
+  });
+
+  it('release puts the work back when a resume fails to start', async () => {
+    const store = new ResumeStore({ dir });
+    await store.save(checkpoint('run-1'));
+
+    const claimed = await store.claim();
+    await store.release(claimed!.claimId);
+
+    expect((await store.latest())?.taskId).toBe('run-1');
+  });
+
+  it('settle discards it once the resumed run owns the work', async () => {
+    const store = new ResumeStore({ dir });
+    await store.save(checkpoint('run-1'));
+
+    const claimed = await store.claim();
+    await store.settle(claimed!.claimId);
+
+    expect(await store.latest()).toBeNull();
+    expect(await fs.readdir(dir)).toEqual([]);
+  });
+
+  it('two concurrent resumes cannot claim the same work', async () => {
+    const store = new ResumeStore({ dir });
+    await store.save(checkpoint('run-1'));
+
+    const [a, b] = await Promise.all([store.claim(), store.claim()]);
+    expect([a, b].filter(Boolean)).toHaveLength(1);
+  });
+
+  it('reclaims a checkpoint stranded by a process that died mid-resume', async () => {
+    let clock = 1_000_000_000;
+    const store = new ResumeStore({ dir, claimTimeoutMs: 1000, now: () => clock });
+    await store.save(checkpoint('run-1'));
+    await store.claim();
+
+    // Still held: not yet stale, so it stays hidden.
+    expect(await store.reclaimStale()).toBe(0);
+    expect(await store.latest()).toBeNull();
+
+    clock += 5000; // the holder is long gone
+    expect(await store.reclaimStale()).toBe(1);
+    expect((await store.latest())?.taskId).toBe('run-1');
+  });
+});

@@ -120,6 +120,8 @@ export class Cascade extends EventEmitter {
   private lastInterruptedRun?: { prompt: string; partialOutput: string; taskId: string };
   /** Durable resume checkpoints. See core/orchestration/resume-store.ts. */
   private resumeStore?: ResumeStore;
+  /** Claim held by an in-flight resume, settled once the run owns the work. */
+  private claimedResumeId?: string;
   /** Section results of the CURRENT run, so an interruption can checkpoint them. */
   private currentRunCompleted: CompletedNode[] = [];
   private initPromise?: Promise<void>;
@@ -833,12 +835,43 @@ export class Cascade extends EventEmitter {
    * checkpoint, so the same finished work is never restored into two runs.
    */
   async prepareDurableResume(opts: { maxTokens?: number; taskId?: string } = {}): Promise<string | null> {
-    const checkpoint = await this.resumeStore?.consume(opts.taskId);
-    if (!checkpoint) return null;
+    // Reclaim anything a previous process claimed and then died holding, so a
+    // crash mid-resume doesn't strand the checkpoint invisibly.
+    await this.resumeStore?.reclaimStale();
 
-    this.lastInterruptedRun = undefined; // the durable copy supersedes it
-    this.raiseBudgetForResume(opts.maxTokens);
-    return this.buildResumePrompt(checkpoint.prompt, checkpoint.partialOutput, checkpoint.completed);
+    const claimed = await this.resumeStore?.claim(opts.taskId);
+    if (!claimed) return null;
+
+    try {
+      this.lastInterruptedRun = undefined; // the durable copy supersedes it
+      this.raiseBudgetForResume(opts.maxTokens);
+      const prompt = this.buildResumePrompt(
+        claimed.checkpoint.prompt, claimed.checkpoint.partialOutput, claimed.checkpoint.completed,
+      );
+      // Only now is the continuation safely in the caller's hands. Settling
+      // earlier — as consume() did — meant a crash between reading and running
+      // destroyed the one record of the work, in the mechanism whose whole
+      // purpose is surviving crashes.
+      this.claimedResumeId = claimed.claimId;
+      return prompt;
+    } catch (err) {
+      // Building the continuation failed: hand the checkpoint back so the work
+      // stays recoverable rather than disappearing with a failed attempt.
+      await this.resumeStore?.release(claimed.claimId);
+      throw err;
+    }
+  }
+
+  /**
+   * Discard the claimed checkpoint once the resumed run has taken ownership of
+   * the work (it has produced its own checkpoint, or finished). Called by the
+   * run loop; safe to call when nothing is claimed.
+   */
+  private async settleClaimedResume(): Promise<void> {
+    const claimId = this.claimedResumeId;
+    if (!claimId) return;
+    this.claimedResumeId = undefined;
+    await this.resumeStore?.settle(claimId);
   }
 
   /** A resume gets a bigger budget — the previous attempt exhausted the old one. */
@@ -1823,6 +1856,10 @@ ${prompt}`
       // across runs — even on error paths. cancelAllPending is safe to call
       // when there are no pending requests.
       try { escalator.cancelAllPending(); } catch { /* non-critical */ }
+
+      // The resumed run has now either checkpointed its own progress or finished,
+      // so the claim it was resuming from is safe to discard.
+      try { await this.settleClaimedResume(); } catch { /* non-critical */ }
 
       // Same for section escalations. A run that ended while one was parked
       // (error, abort, budget kill) must not leave a live timer and an
