@@ -114,7 +114,11 @@ describe('a resumed run must not lose the work it inherited', () => {
   ): CompletedNode[] {
     const merged = new Map<string, CompletedNode>();
     for (const node of inherited) merged.set(node.id, node);
-    for (const node of thisAttempt) merged.set(node.id, node);
+    for (const node of thisAttempt) {
+      const existing = merged.get(node.id);
+      if (existing?.status === 'COMPLETED' && node.status !== 'COMPLETED') continue;
+      merged.set(node.id, node);
+    }
     return [...merged.values()];
   }
 
@@ -148,6 +152,19 @@ describe('a resumed run must not lose the work it inherited', () => {
     const third = await store.claim();
     expect(third!.checkpoint.completed.map((c) => c.id).sort()).toEqual(['s1', 's2', 's3']);
     expect(third!.checkpoint.prompt).toBe('Write a market report');
+  });
+
+  it('never downgrades a COMPLETED section to PARTIAL', () => {
+    // Plain last-write-wins let a re-run that came back PARTIAL replace an
+    // inherited COMPLETED, so recovery state moved backwards and every later
+    // resume inherited the downgrade. The old test only covered the flattering
+    // direction (PARTIAL -> COMPLETED), so it encoded the rule that caused this.
+    const done: CompletedNode = { id: 's1', title: 'Research', status: 'COMPLETED', output: 'full' };
+    const worse: CompletedNode = { id: 's1', title: 'Research', status: 'PARTIAL', output: 'thin' };
+    const merged = cumulative([done], [worse]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.status).toBe('COMPLETED');
+    expect(merged[0]?.output).toBe('full');
   });
 
   it('a re-run section supersedes its inherited copy rather than duplicating', async () => {

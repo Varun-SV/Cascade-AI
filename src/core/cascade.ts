@@ -803,10 +803,20 @@ export class Cascade extends EventEmitter {
     // for — work two runs had completed. Sections are keyed by id so a node
     // re-run in this attempt supersedes its inherited copy rather than
     // appearing twice.
+    //
+    // Superseding is NOT unconditional last-write-wins. Plain overwrite let a
+    // re-run that came back PARTIAL replace an inherited COMPLETED, so the
+    // recovery state moved backwards and every later resume inherited the
+    // downgrade. Progress only goes forward here; genuinely invalidating a
+    // finished section needs an explicit act, not an incidental re-run.
     const inherited = this.resumedFrom?.completed ?? [];
     const merged = new Map<string, CompletedNode>();
     for (const node of inherited) merged.set(node.id, node);
-    for (const node of this.currentRunCompleted) merged.set(node.id, node);
+    for (const node of this.currentRunCompleted) {
+      const existing = merged.get(node.id);
+      if (existing?.status === 'COMPLETED' && node.status !== 'COMPLETED') continue;
+      merged.set(node.id, node);
+    }
     const completed = [...merged.values()];
 
     // The ORIGINAL prompt travels forward, so each resume does not nest the
