@@ -765,10 +765,15 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       onContinue: async (args) => {
         const cascade = cascadeRef.current;
         if (!cascade) return 'Not ready yet.';
-        if (!cascade.hasResumableRun()) return 'Nothing to continue — no task was stopped by the budget cap.';
         const n = args[0] ? parseInt(args[0].replace(/[^0-9]/g, ''), 10) : NaN;
-        const prompt = cascade.prepareResume(Number.isFinite(n) && n > 0 ? { maxTokens: n } : {});
-        if (!prompt) return 'Nothing to continue.';
+        const opts = Number.isFinite(n) && n > 0 ? { maxTokens: n } : {};
+        // Try the durable checkpoint first — it survives a crash or a restart
+        // and carries the finished sections, so they are not re-run. The
+        // in-memory record is the same-process fallback.
+        const prompt = (await cascade.prepareDurableResume(opts)) ?? cascade.prepareResume(opts);
+        if (!prompt) {
+          return 'Nothing to continue — no interrupted task was found for this workspace.';
+        }
         await handleSubmit(prompt);
         return '';
       },

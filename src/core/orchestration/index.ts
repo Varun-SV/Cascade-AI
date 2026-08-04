@@ -19,3 +19,12 @@ export {
   type SchedulerResult,
 } from './scheduler.js';
 export { compileSectionGraph, compileSubtaskGraph } from './adapters.js';
+export {
+  ResumeStore,
+  RESUME_SCHEMA_VERSION,
+  summarizeCompleted,
+  type CompletedNode,
+  type ResumeCheckpoint,
+  type ResumeReason,
+  type ResumeStoreOptions,
+} from './resume-store.js';

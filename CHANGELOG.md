@@ -5,12 +5,12 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.68.0 - 2026-08-04
 
-Held unreleased on purpose. A version bump on `main` publishes npm and rebuilds
-all three desktop installers (see `CONTRIBUTING.md`), so the orchestration work
-below is accumulating across several changes and will be bumped once, when the
-series is complete, rather than cutting a release per step.
+The orchestration series: a typed task graph and one scheduler, a deterministic
+rung on the verification ladder, and durable resume. One release for the whole
+series rather than a bump per step, since a bump on `main` publishes npm and
+rebuilds all three desktop installers.
 
 ### Changed
 - **Generated images and videos are no longer saved to your storage the moment
@@ -53,6 +53,30 @@ series is complete, rather than cutting a release per step.
     not extra storage — saving still costs quota.
 
 ### Added
+- **An interrupted run no longer throws away the work it already finished.**
+  Resume state used to be a single in-memory field, set on exactly one path (the
+  budget cap), so the two interruptions people actually hit — a crash and Ctrl-C
+  — lost every completed section, and even a budget stop was lost the moment the
+  process exited. The work was on disk; the knowledge of what had been done was
+  not, so the next attempt re-planned and re-paid for all of it.
+
+  Checkpoints are now written durably for all four ways a run can stop: the
+  budget cap, cancellation, an unexpected error, and the provider circuit
+  breaker. `/continue` picks them up across a restart, and the resumed run is
+  told which sections are finished and what they produced, so the planner can
+  skip them instead of inferring from "do not recreate the files" that something
+  unspecified happened. Completed work is restored as fact; only the remainder
+  is re-planned, so a run that stalled because the plan was wrong can still
+  adapt.
+
+  Checkpoints hold your prompt and partial output, so they are pruned to the
+  five most recent and expire after seven days. Writes are atomic — a crash is
+  one of the triggers, so a half-written checkpoint had to be impossible rather
+  than unlikely — and a corrupt or unrecognised file is skipped rather than
+  breaking the ones beside it. Failing to save a checkpoint never escalates a
+  recoverable stop into a crash.
+
+
 - **Acceptance criteria are now checked mechanically before a model is asked.**
   T1 specifies them as "checks a reviewer could verify mechanically (file exists
   / contains X)" and the planner writes them that way, but every one of them was

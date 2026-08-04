@@ -53,6 +53,7 @@ import { benchmarkScore01 } from './router/benchmarks.js';
 import { ToolCreator } from '../tools/tool-creator.js';
 import { CascadeCancelledError } from '../utils/retry.js';
 import { WorldStateDB } from './knowledge/world-state.js';
+import { ResumeStore, summarizeCompleted, type CompletedNode, type ResumeReason } from './orchestration/resume-store.js';
 import { PrivacyPaths } from './privacy/paths.js';
 import { CascadeIgnore } from '../config/ignore.js';
 import { WorkspaceIndex } from '../retrieval/workspace-index.js';
@@ -111,8 +112,16 @@ export class Cascade extends EventEmitter {
   /** Orchestration decisions for the CURRENT run — cleared on each run(). */
   private decisionLog: DecisionLogEntry[] = [];
   private initialized = false;
-  /** Last task that stopped at the budget cap — powers /continue (resumeRun). */
+  /**
+   * Last interrupted task — powers /continue (resumeRun). Kept in memory as a
+   * fast path for the same-process case; the durable copy lives in `resumeStore`
+   * so a crash or an exit no longer throws away everything already finished.
+   */
   private lastInterruptedRun?: { prompt: string; partialOutput: string; taskId: string };
+  /** Durable resume checkpoints. See core/orchestration/resume-store.ts. */
+  private resumeStore?: ResumeStore;
+  /** Section results of the CURRENT run, so an interruption can checkpoint them. */
+  private currentRunCompleted: CompletedNode[] = [];
   private initPromise?: Promise<void>;
   private store?: MemoryStore;
   private audit?: AuditLogger;
@@ -170,6 +179,15 @@ export class Cascade extends EventEmitter {
         fileDeadModelPersistence(path.join(workspacePath, '.cascade', 'dead-models.json')),
       ));
     } catch { /* memory-only fallback; the router already has a default store */ }
+
+    // Durable resume checkpoints live beside the other per-project state. Same
+    // reasoning as dead-models above: this is a property of THIS workspace's
+    // run history, not of the machine.
+    try {
+      this.resumeStore = new ResumeStore({
+        dir: path.join(workspacePath, '.cascade', 'resume'),
+      });
+    } catch { /* resume is a convenience; never block construction on it */ }
 
     this.multimodal = new MultimodalRegistry(
       (this.config.providers ?? []).map((p) => p.type),
@@ -746,9 +764,52 @@ export class Cascade extends EventEmitter {
     this.router.setFeedbackSource(source);
   }
 
-  /** True when a task stopped at the budget cap and can be resumed via /continue. */
+  /**
+   * Write a durable checkpoint for an interrupted run.
+   *
+   * Best-effort throughout: a run is already ending badly on every path that
+   * calls this, and failing to record a resume file must not make that ending
+   * worse. Nothing here is allowed to throw.
+   */
+  private async checkpointRun(
+    taskId: string,
+    prompt: string,
+    partialOutput: string,
+    reason: ResumeReason,
+    detail?: string,
+  ): Promise<void> {
+    // Nothing finished and nothing produced — a checkpoint would restore no work
+    // and only leave the prompt sitting on disk for no benefit.
+    if (!this.currentRunCompleted.length && !partialOutput) return;
+    try {
+      await this.resumeStore?.save({
+        taskId,
+        prompt,
+        reason,
+        ...(detail ? { detail } : {}),
+        partialOutput,
+        completed: [...this.currentRunCompleted],
+      });
+    } catch { /* never let checkpointing worsen an already-failing run */ }
+  }
+
+  /** True when a task can be resumed via /continue (this process or a previous one). */
   hasResumableRun(): boolean {
     return this.lastInterruptedRun != null;
+  }
+
+  /**
+   * True when a checkpoint from ANY process is resumable. Async because the
+   * durable check touches disk; `hasResumableRun` remains the sync in-memory
+   * answer for callers already on a hot path.
+   */
+  async hasDurableResume(): Promise<boolean> {
+    return (await this.resumeStore?.latest()) != null;
+  }
+
+  /** Interrupted runs available to resume, newest first. */
+  async listResumableRuns() {
+    return (await this.resumeStore?.list()) ?? [];
   }
 
   /**
@@ -762,16 +823,54 @@ export class Cascade extends EventEmitter {
     if (!last) return null;
     this.lastInterruptedRun = undefined; // consume it
 
-    const raised = opts.maxTokens ?? Math.round((this.config.budget?.maxTokensPerRun ?? 200_000) * 2);
+    this.raiseBudgetForResume(opts.maxTokens);
+    return this.buildResumePrompt(last.prompt, last.partialOutput, []);
+  }
+
+  /**
+   * Durable counterpart to prepareResume: recovers a run interrupted in ANY
+   * process, including one that crashed before it could return. Consumes the
+   * checkpoint, so the same finished work is never restored into two runs.
+   */
+  async prepareDurableResume(opts: { maxTokens?: number; taskId?: string } = {}): Promise<string | null> {
+    const checkpoint = await this.resumeStore?.consume(opts.taskId);
+    if (!checkpoint) return null;
+
+    this.lastInterruptedRun = undefined; // the durable copy supersedes it
+    this.raiseBudgetForResume(opts.maxTokens);
+    return this.buildResumePrompt(checkpoint.prompt, checkpoint.partialOutput, checkpoint.completed);
+  }
+
+  /** A resume gets a bigger budget — the previous attempt exhausted the old one. */
+  private raiseBudgetForResume(maxTokens?: number): void {
+    const raised = maxTokens ?? Math.round((this.config.budget?.maxTokensPerRun ?? 200_000) * 2);
     this.config = { ...this.config, budget: { ...this.config.budget, maxTokensPerRun: raised } };
     this.router.setMaxTokensPerRun(raised);
+  }
 
-    return (
-      'Continue and FINISH this task. A previous attempt was interrupted before completion; ' +
-      'any files already created are on disk — build on them, do NOT recreate them. Complete only the remaining work.\n\n' +
-      `Original task: ${last.prompt}` +
-      (last.partialOutput ? `\n\nPartial result so far:\n${last.partialOutput}` : '')
-    );
+  /**
+   * The resume prompt. Completed sections are named explicitly rather than
+   * gestured at: "do not recreate the files" is an instruction a planner can
+   * only guess at, whereas a list of what is already done, and what it produced,
+   * is something it can act on. That difference is the entire reason node
+   * results are kept — a re-plan that cannot see the finished work will plan the
+   * finished work again, and the user pays for it a second time.
+   */
+  private buildResumePrompt(
+    prompt: string,
+    partialOutput: string,
+    completed: readonly CompletedNode[],
+  ): string {
+    const done = summarizeCompleted(completed);
+    return [
+      'Continue and FINISH this task. A previous attempt was interrupted before completion; '
+      + 'any files already created are on disk — build on them, do NOT recreate them. '
+      + 'Plan ONLY the remaining work.',
+      '',
+      `Original task: ${prompt}`,
+      done ? `\n${done}` : '',
+      partialOutput ? `\nPartial result so far:\n${partialOutput}` : '',
+    ].filter(Boolean).join('\n');
   }
 
   /**
@@ -779,7 +878,9 @@ export class Cascade extends EventEmitter {
    * Returns null when there is nothing to resume.
    */
   async resumeRun(opts: { maxTokens?: number } = {}): Promise<CascadeRunResult | null> {
-    const prompt = this.prepareResume(opts);
+    // Prefer the durable checkpoint: it carries the finished sections, whereas
+    // the in-memory record only ever held the prompt and the partial text.
+    const prompt = (await this.prepareDurableResume(opts)) ?? this.prepareResume(opts);
     if (!prompt) return null;
     return this.run({ prompt });
   }
@@ -1278,6 +1379,9 @@ ${prompt}`
     const startMs = Date.now();
     const taskId = randomUUID();
     this.decisionLog = [];
+    // Sections finished by THIS run. Reset per run so a checkpoint can never
+    // restore work from an earlier, unrelated task.
+    this.currentRunCompleted = [];
 
     // "Fast answer": a single mid-tier model, no orchestration, no tools, no
     // verification — the quickest, cheapest path for simple asks.
@@ -1466,6 +1570,12 @@ ${prompt}`
       });
       tier.on('log', (e) => this.emit('log', e));
       tier.on('tier:status', (e) => this.emit('tier:status', e));
+      // Accumulate finished sections so an interruption can checkpoint them.
+      tier.on('section:complete', (e: CompletedNode) => {
+        if (e.status !== 'COMPLETED' && e.status !== 'PARTIAL') return;
+        this.currentRunCompleted.push(e);
+        this.emit('section:complete', e);
+      });
       tier.on('tool:call', (e) => this.emit('tool:call', e));
       tier.on('tool:result', (e) => this.emit('tool:result', e));
       // Legacy approval events (for tiers not yet wired to escalator)
@@ -1650,6 +1760,10 @@ ${prompt}`
     // learns it was a rate limit or a dead key and can go fix it.
     const trip = runBreaker.reason();
     if (trip) {
+      // The run did not throw — it degraded — so this path needs its own
+      // checkpoint. Fixing the key or switching model and resuming is exactly
+      // the recovery this stop is asking for.
+      await this.checkpointRun(taskId, options.prompt, finalOutput || '', 'breaker', trip.message);
       finalOutput = [
         `⚠ **Run stopped early — ${trip.modelId} was failing every request.**`,
         '',
@@ -1674,6 +1788,11 @@ ${prompt}`
           reason: err instanceof Error ? err.message : 'Task cancelled',
           partialOutput: finalOutput || '',
         });
+        // Cancelling is a decision to stop NOW, not a decision to throw away the
+        // sections that already finished. Checkpointing lets /continue pick them
+        // back up; the file is pruned by age and count like any other.
+        await this.checkpointRun(taskId, options.prompt, finalOutput || '', 'cancelled',
+          err instanceof Error ? err.message : 'Task cancelled');
         runError = null; // suppress telemetry error flag for intentional cancels
       } else if (err instanceof Error && err.name === 'BudgetExceededError') {
         // Per-task (or session) budget ceiling hit — stop gracefully with a
@@ -1686,9 +1805,16 @@ ${prompt}`
         // Remember the interrupted task so /continue can resume it with a raised
         // budget (files already created persist on disk via snapshots).
         this.lastInterruptedRun = { prompt: options.prompt, partialOutput: finalOutput || '', taskId };
+        await this.checkpointRun(taskId, options.prompt, finalOutput || '', 'budget', err.message);
         if (!finalOutput) finalOutput = `⚠ Stopped to avoid runaway cost: ${err.message}`;
         runError = null;
       } else {
+        // An unexpected error still re-throws — the caller must see it — but the
+        // finished sections are no longer lost with it. This is the case that
+        // made resume worth building: a crash used to discard every completed
+        // node, so the next attempt paid for all of them a second time.
+        await this.checkpointRun(taskId, options.prompt, finalOutput || '', 'error',
+          err instanceof Error ? err.message : String(err));
         runError = err;
         throw err;
       }

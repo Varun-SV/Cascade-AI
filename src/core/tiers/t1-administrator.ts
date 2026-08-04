@@ -876,6 +876,16 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
         onNodeComplete: (node, result) => {
           resultMap.set(node.id, result);
           completedSections++;
+          // Publish each finished section as it lands, so an interruption later
+          // in the run can checkpoint the work that is already paid for. Waiting
+          // until the run returns would defeat the purpose: the cases worth
+          // resuming from are exactly the ones where it never returns.
+          this.emit('section:complete', {
+            id: node.id,
+            title: result.sectionTitle,
+            status: result.status,
+            output: result.sectionSummary,
+          });
         },
       },
       {
