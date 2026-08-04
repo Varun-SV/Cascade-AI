@@ -23,6 +23,8 @@ import { RunBreaker } from '../run-breaker.js';
 import type { EscalationDecision } from '../../types.js';
 import { MemoryStore } from '../../memory/store.js';
 import { COMPLEXITY_T2_COUNT } from '../../constants.js';
+import { compileSectionGraph } from '../orchestration/adapters.js';
+import { DependencyScheduler } from '../orchestration/scheduler.js';
 import { PeerBus } from '../peer/bus.js';
 import type { PermissionEscalator } from '../permissions/escalator.js';
 import type { ToolCreator } from '../../tools/tool-creator.js';
@@ -72,7 +74,7 @@ export function buildT1SystemPrompt(has: (toolName: string) => boolean): string 
 Your responsibilities:
 1. Analyze task complexity: Simple | Moderate | Complex | Highly Complex
 2. Decompose the task into logical sections (one per T2 Manager)
-3. For each section, define 2-5 subtasks for T3 Workers
+3. For each section, define 1-4 subtasks for T3 Workers — the fewest that fully cover it
 4. Return a structured plan as JSON
 
 CRITICAL PATH RULE: If the user specifies a target directory (e.g. "inside python_exclusive",
@@ -774,143 +776,104 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
   }
 
   /**
-   * Runs T2 managers respecting dependsOn declarations using Kahn's algorithm.
+   * Runs T2 managers respecting dependsOn declarations.
+   *
+   * Graph construction, validation and cycle repair now live in
+   * compileSectionGraph (orchestration/adapters.ts), and wave execution in
+   * DependencyScheduler — the same pair T2 uses for its subtasks, so a plan is
+   * ordered by one implementation rather than two that drifted.
+   *
+   * The hand-rolled Kahn pass this replaces treated every node it could not
+   * reach as part of a cycle. That set also contains everything DOWNSTREAM of a
+   * cycle, whose in-degree can never fall to zero while its dependency is stuck,
+   * so breaking a cycle here also cut the dependencies of innocent later
+   * sections and started them immediately — before the sections they consume.
+   * compileTaskGraph uses strongly connected components, so only real cycle
+   * members are touched.
    */
   private async runT2sWithDependencies(
     sections: T1ToT2Assignment[],
     managers: T2Manager[],
     taskId: string,
   ): Promise<T2Result[]> {
-    const adj = new Map<string, Set<string>>();
-    const inDegree = new Map<string, number>();
+    const compiled = compileSectionGraph(sections);
+    for (const issue of compiled.issues) {
+      this.log(`⚠ Section graph: ${issue.message}`);
+    }
+
+    // The old pass sanitized `dependsOn` in place, and the plan summary sent to
+    // the reviewer reads it, so write the compiled edges back rather than
+    // leaving a dropped dependency visible downstream.
+    const byId = new Map(compiled.graph.nodes.map((node) => [node.id, node] as const));
+    for (const section of sections) {
+      const node = byId.get(section.sectionId);
+      if (node) section.dependsOn = [...node.dependsOn];
+    }
+
     const resultMap = new Map<string, T2Result>();
-    const allKeys = new Set(sections.map(s => s.sectionId));
-
-    for (const s of sections) {
-      if (!adj.has(s.sectionId)) adj.set(s.sectionId, new Set());
-      inDegree.set(s.sectionId, 0);
-      // Sanitize dependencies
-      s.dependsOn = (s.dependsOn ?? []).filter(d => allKeys.has(d));
-    }
-
-    for (const s of sections) {
-      for (const dep of (s.dependsOn ?? [])) {
-        adj.get(dep)!.add(s.sectionId);
-        inDegree.set(s.sectionId, (inDegree.get(s.sectionId) ?? 0) + 1);
-      }
-    }
-
-    // Break cycles
-    const queue: string[] = [];
-    const degree = new Map(inDegree);
-    for (const [id, deg] of degree.entries()) if (deg === 0) queue.push(id);
-    const visited = new Set<string>();
-    while (queue.length > 0) {
-      const u = queue.shift()!;
-      visited.add(u);
-      for (const v of adj.get(u) ?? new Set()) {
-        const newDeg = (degree.get(v) ?? 1) - 1;
-        degree.set(v, newDeg);
-        if (newDeg === 0) queue.push(v);
-      }
-    }
-    const cycleNodes = [...inDegree.keys()].filter(id => !visited.has(id));
-    if (cycleNodes.length > 0) {
-      this.log(`⚠ Circular dependency detected among sections: [${cycleNodes.join(', ')}]. Breaking cycles.`);
-      for (const s of sections) {
-        if (cycleNodes.includes(s.sectionId)) {
-          const safeDeps = (s.dependsOn ?? []).filter(d => !cycleNodes.includes(d));
-          for (const removed of (s.dependsOn ?? []).filter(d => cycleNodes.includes(d))) {
-            inDegree.set(s.sectionId, Math.max(0, (inDegree.get(s.sectionId) ?? 1) - 1));
-            adj.get(removed)?.delete(s.sectionId);
-          }
-          s.dependsOn = safeDeps;
-        }
-      }
-    }
-
-    // Wave-based execution
-    const totalSections = sections.length;
+    const totalSections = compiled.graph.nodes.length;
     let completedSections = 0;
-    const executeWave = async () => {
-      const readyIds: string[] = [];
-      for (const [id, deg] of inDegree.entries()) {
-        if (deg === 0 && !resultMap.has(id)) {
-          readyIds.push(id);
-        }
-      }
-      if (readyIds.length === 0) return;
 
-      const runOne = async (id: string) => {
-        // Mark as started (prevent picking it up in next wave before it finishes)
-        resultMap.set(id, null as any);
+    const scheduler = new DependencyScheduler<T1ToT2Assignment, T2Result>(
+      compiled.graph,
+      {
+        execute: async (node) => {
+          const section = node.payload;
+          // `ordinal` is the node's index in the original sections array, which
+          // is what `managers` is parallel to — findIndex would be wrong if the
+          // compiler ever dropped a malformed node.
+          const manager = managers[node.ordinal]!;
 
-        const index = sections.findIndex(s => s.sectionId === id);
-        const section = sections[index]!;
-        const manager = managers[index]!;
+          const progressPct = 10 + Math.floor((completedSections / totalSections) * 85);
+          this.sendStatusUpdate({
+            progressPct,
+            currentAction: `T2 working on: ${section.sectionTitle}`,
+            status: 'IN_PROGRESS',
+          });
 
-        const progressPct = 10 + Math.floor((completedSections / totalSections) * 85);
-        this.sendStatusUpdate({
-          progressPct,
-          currentAction: `T2 working on: ${section.sectionTitle}`,
-          status: 'IN_PROGRESS',
-        });
+          this.throwIfCancelled();
 
-        this.throwIfCancelled();
-
-        let result: T2Result;
-        try {
-          result = await manager.execute(section, taskId, this.signal);
-          manager.shareCompletedOutput(section.sectionId, result.sectionSummary);
-          if (result.status === 'ESCALATED') {
-            this.escalations.push({
-              raisedBy: `T2_${section.sectionId}`,
+          try {
+            const result = await manager.execute(section, taskId, this.signal);
+            manager.shareCompletedOutput(section.sectionId, result.sectionSummary);
+            if (result.status === 'ESCALATED') {
+              this.escalations.push({
+                raisedBy: `T2_${section.sectionId}`,
+                sectionId: section.sectionId,
+                attempted: result.issues,
+                blocker: result.issues.join('; '),
+                needs: 'Human review required',
+              });
+            }
+            return result;
+          } catch (err) {
+            return {
               sectionId: section.sectionId,
-              attempted: result.issues,
-              blocker: result.issues.join('; '),
-              needs: 'Human review required',
-            });
+              sectionTitle: section.sectionTitle,
+              status: 'FAILED',
+              t3Results: [],
+              sectionSummary: '',
+              issues: [err instanceof Error ? err.message : String(err)],
+            } satisfies T2Result;
           }
-        } catch (err) {
-          result = {
-            sectionId: section.sectionId,
-            sectionTitle: section.sectionTitle,
-            status: 'FAILED',
-            t3Results: [],
-            sectionSummary: '',
-            issues: [err instanceof Error ? err.message : String(err)],
-          };
-        }
+        },
+        onNodeComplete: (node, result) => {
+          resultMap.set(node.id, result);
+          completedSections++;
+        },
+      },
+      {
+        // Cross-section concurrency respects the same t3Execution mode as the
+        // intra-section T3 wave (t2-manager.ts) — 'sequential' otherwise only
+        // serialized T3 workers within a single section while every section's
+        // T2Manager (and its T3 workers) still ran in parallel here.
+        mode: this.router.getT3ExecutionMode?.() === 'sequential' ? 'sequential' : 'parallel',
+      },
+    );
 
-        resultMap.set(id, result);
-        completedSections++;
+    await scheduler.run();
 
-        for (const dependentId of adj.get(id) ?? new Set()) {
-          inDegree.set(dependentId, Math.max(0, (inDegree.get(dependentId) ?? 1) - 1));
-        }
-      };
-
-      // Cross-section concurrency respects the same t3Execution mode as the
-      // intra-section T3 wave (t2-manager.ts) — 'sequential' otherwise only
-      // serialized T3 workers within a single section while every section's
-      // T2Manager (and its T3 workers) still ran in parallel here.
-      if (this.router.getT3ExecutionMode?.() === 'sequential') {
-        for (const id of readyIds) {
-          await runOne(id);
-        }
-      } else {
-        await Promise.all(readyIds.map(runOne));
-      }
-
-      // Check if more are ready after this wave
-      if (Array.from(inDegree.values()).some(deg => deg === 0) && resultMap.size < totalSections) {
-        await executeWave();
-      }
-    };
-
-    await executeWave();
-
-    return sections.map(s => resultMap.get(s.sectionId)!).filter(Boolean);
+    return sections.map((s) => resultMap.get(s.sectionId)!).filter(Boolean);
   }
 
   private async compileFinalOutput(

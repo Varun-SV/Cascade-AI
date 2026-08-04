@@ -1,4 +1,4 @@
-import type { T1ToT2Assignment, T3SubtaskSpec } from '../../types.js';
+import type { T1ToT2Assignment } from '../../types.js';
 import { compileTaskGraph, type CompiledTaskGraph } from './task-graph.js';
 
 export function compileSectionGraph(
@@ -16,9 +16,21 @@ export function compileSectionGraph(
   );
 }
 
-export function compileSubtaskGraph(
-  subtasks: readonly T3SubtaskSpec[],
-): CompiledTaskGraph<T3SubtaskSpec> {
+/**
+ * The subtask fields the graph actually needs. Generic over the whole record so
+ * both the planner's `T3SubtaskSpec` and T2's richer `T2ToT3Assignment` compile
+ * without a cast — they carry the same identity and dependency fields, and the
+ * payload comes back out at its original type.
+ */
+export interface SubtaskGraphInput {
+  subtaskId: string;
+  subtaskTitle: string;
+  dependsOn?: string[];
+}
+
+export function compileSubtaskGraph<TSubtask extends SubtaskGraphInput>(
+  subtasks: readonly TSubtask[],
+): CompiledTaskGraph<TSubtask> {
   return compileTaskGraph(
     subtasks.map((subtask) => ({
       id: subtask.subtaskId,

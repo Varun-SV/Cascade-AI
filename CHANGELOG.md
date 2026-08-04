@@ -61,6 +61,40 @@ and rebuilds the desktop installers, which would ship a byte-identical release).
   button that flips to "Saved to your Cascade files". `file:created` now carries
   `pending: true` and `expiresAt` for unsaved media, so the client can tell a
   new saved file from something about to disappear.
+## 0.67.1 - 2026-08-04
+
+### Fixed
+- **Repairing a circular plan could silently corrupt the order of a valid one.**
+  T1 (sections), T2 (subtasks) and the new orchestration compiler each detected
+  cycles the same wrong way: run a topological pass, then treat everything it
+  failed to reach as "the cycle". That set also contains every task DOWNSTREAM
+  of a cycle, because a downstream task's in-degree can never fall to zero while
+  its dependency is stuck. So breaking one cycle also cut the dependencies of
+  innocent later tasks, which then started in the first wave — before the work
+  they consume had produced anything. Nothing threw and nothing looked wrong:
+  the plan really was acyclic afterwards, just executed in the wrong order, and
+  the number of tasks affected grew with the length of the chain hanging off the
+  cycle. Cycle detection now uses strongly connected components, so only tasks
+  genuinely on a cycle are touched.
+
+### Changed
+- **One dependency scheduler instead of two.** T1's section dispatch now runs on
+  the same `compileTaskGraph` + `DependencyScheduler` pair as T2's subtasks,
+  replacing a hand-rolled Kahn implementation in each tier. Both are pinned by a
+  parity harness that asserts wave-for-wave identical output against the previous
+  algorithm across 600 generated graphs, so plan ordering is unchanged except for
+  the cycle case above. T2 keeps its own execution loop — it adds workers
+  mid-run, re-runs a wave after tool synthesis and short-circuits on the run
+  breaker, none of which a fixed-DAG scheduler can express — but its graph
+  building and cycle repair now come from the shared compiler.
+- **The planner is no longer told two different subtask counts.** T2's system
+  prompt asked for "2-5 subtasks" while the decomposition prompt it is paired
+  with asked for "1-4 … the FEWEST that fully cover it", and T1's plan prompt
+  said "2-5" against its own "use the FEWEST" rule. The model saw both, so its
+  floor was simultaneously one and two; the cheaper reading pads every small
+  section with a second worker that bills a real model call. All four now agree.
+
+
 ## 0.67.0 - 2026-08-03
 
 ### Fixed
