@@ -134,6 +134,29 @@ describe('explicit ratings after a completed run', () => {
     expect(tracker.explicitTyped).toEqual([{ modelId: 'code-model', taskType: 'code', rating: 'good' }]);
   });
 
+  it('counts one opinion once when the same model serves several tiers', async () => {
+    // The tracker is keyed (modelId, taskType) — tier is NOT part of the key.
+    // One model on T1+T2+T3 (the ordinary single-local-model setup) meant three
+    // recordExplicit calls, each recording three samples for its 3x weighting:
+    // nine samples from one thumbs-up.
+    const tracker = makeTracker();
+    const analyzer = new TaskAnalyzer(tracker as never);
+    const model = { id: 'solo-model', provider: 'ollama', contextWindow: 8000, tags: [] };
+    const selector = {
+      selectForTier: () => model,
+      selectVisionModel: () => model,
+      getCandidatesForTier: () => [model],
+    } as never;
+
+    for (const tier of ['T1', 'T2', 'T3'] as const) {
+      await analyzer.selectModel('Refactor the auth module', tier, selector);
+    }
+    analyzer.recordRunOutcome('success', { T1: 0, T2: 0, T3: 0 });
+
+    expect(analyzer.recordExplicitRating('good')).toBe(true);
+    expect(tracker.explicit).toEqual([{ modelId: 'solo-model', rating: 'good' }]);
+  });
+
   it('reports false when there is genuinely no completed run to rate', () => {
     const tracker = makeTracker();
     const analyzer = new TaskAnalyzer(tracker as never);

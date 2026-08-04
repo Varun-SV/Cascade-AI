@@ -304,9 +304,16 @@ export class TaskAnalyzer {
   recordExplicitRating(rating: 'good' | 'bad'): boolean {
     const snapshot = this.lastCompletedRun;
     if (!this.tracker || !snapshot || snapshot.selections.size === 0) return false;
-    // The snapshot's own task type — NOT lastProfile, which the next run has
-    // very likely already overwritten.
+    // Deduplicated by MODEL, not by tier. The tracker is keyed (modelId,
+    // taskType) — tier is not part of it — so one model serving T1, T2 and T3
+    // (the ordinary single-local-model setup) took three recordExplicit calls,
+    // and each of those records three samples for its 3x weighting. One thumbs
+    // up became nine samples, and the models a user happens to run on every
+    // tier drifted fastest purely from that.
+    const ratedModels = new Set<string>();
     for (const [, model] of snapshot.selections) {
+      if (ratedModels.has(model.id)) continue;
+      ratedModels.add(model.id);
       this.tracker.recordExplicit(model.id, snapshot.taskType, rating, 0);
     }
     this.lastCompletedRun = undefined;
