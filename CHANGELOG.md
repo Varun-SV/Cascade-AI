@@ -28,6 +28,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behaves exactly as before, so T2's subtask waves are unchanged.
 
 ### Fixed
+- **A rating could be credited to the wrong kind of work.** The model selections
+  were snapshotted at run completion but the task type was not — it was read
+  from `lastProfile` at rating time, which the next run has very likely already
+  overwritten. Rating run A after run B started recorded A's models under B's
+  task type, teaching the router that a coding model is good at creative writing
+  from a rating that never said so. The type is now snapshotted with the
+  selections and consumed as one immutable pair.
+- **Three more paths could still lose a resume checkpoint.** `save()` swallowed
+  filesystem errors and returned void, so a full disk looked identical to a
+  successful write and the original claim was settled with no replacement on
+  disk; it now reports whether the atomic rename actually landed. `runError ==
+  null` was being read as "the run succeeded", but the cancellation and budget
+  handlers null it deliberately and the breaker path never sets it, so an
+  immediate interruption with no output deleted the claim it should have kept;
+  normal completion is now tracked separately. And `resumeRun()` — the SDK and
+  headless path — had no failed-start catch, while `run()` awaits `init()`
+  before entering its own `finally`, so a failure there left the claim hidden
+  until stale reclamation.
 - **Two model selections never reached the rating snapshot.** `selectModel()`
   had early returns for vision routing and for the no-candidates fallback that
   skipped the recording step, so a vision-routed run had nothing to rate at all

@@ -5,11 +5,16 @@ import { TaskAnalyzer } from './task-analyzer.js';
 function makeTracker() {
   const auto: string[] = [];
   const explicit: Array<{ modelId: string; rating: string }> = [];
+  const explicitTyped: Array<{ modelId: string; taskType: string; rating: string }> = [];
   return {
     auto,
     explicit,
+    explicitTyped,
     record: (modelId: string) => { auto.push(modelId); },
-    recordExplicit: (modelId: string, _t: string, rating: string) => { explicit.push({ modelId, rating }); },
+    recordExplicit: (modelId: string, taskType: string, rating: string) => {
+      explicit.push({ modelId, rating });
+      explicitTyped.push({ modelId, taskType, rating });
+    },
     save: async () => {},
     getStats: () => undefined,
     performanceScore: () => 0.5,
@@ -98,6 +103,35 @@ describe('explicit ratings after a completed run', () => {
     expect(analyzer.recordExplicitRating('good')).toBe(false);
     expect(analyzer.recordExplicitRating('bad')).toBe(false);
     expect(tracker.explicit).toHaveLength(1);
+  });
+
+  it('credits a rating to the task type the run actually had', async () => {
+    // lastProfile is overwritten by the NEXT analyze(), so a run B that starts
+    // before the user rates run A used to record A's models under B's task type
+    // — teaching the router a coding model is good at creative writing, from a
+    // rating that never said so.
+    const tracker = makeTracker();
+    const analyzer = new TaskAnalyzer(tracker as never);
+    const model = { id: 'code-model', provider: 'openai', contextWindow: 8000, tags: [] };
+    const selector = {
+      selectForTier: () => model,
+      selectVisionModel: () => model,
+      getCandidatesForTier: () => [model],
+    } as never;
+
+    // Run A: a code task, completed.
+    await analyzer.selectModel('Refactor the auth module, fix the failing test, and export the class', 'T3', selector);
+    const codeType = analyzer.getLastProfile()?.type;
+    expect(codeType).toBe('code');
+    analyzer.recordRunOutcome('success', { T3: 0 });
+
+    // Run B begins and re-analyzes with a very different prompt...
+    await analyzer.analyze('Write a persuasive marketing blog post, imaginative and narrative in style');
+    expect(analyzer.getLastProfile()?.type).not.toBe('code');
+
+    // ...then the user finally rates run A. It must still count as code.
+    expect(analyzer.recordExplicitRating('good')).toBe(true);
+    expect(tracker.explicitTyped).toEqual([{ modelId: 'code-model', taskType: 'code', rating: 'good' }]);
   });
 
   it('reports false when there is genuinely no completed run to rate', () => {

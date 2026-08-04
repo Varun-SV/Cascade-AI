@@ -153,7 +153,13 @@ export class TaskAnalyzer {
   /** Models chosen by the run currently in flight. Cleared when it completes. */
   private currentRunSelections = new Map<TierRole, ModelInfo>();
   /**
-   * Immutable snapshot of the last COMPLETED run's selections.
+   * Immutable snapshot of the last COMPLETED run: its selections AND the task
+   * type they were chosen for.
+   *
+   * The task type has to travel WITH the selections. `lastProfile` is overwritten
+   * by the next analyze(), so if run B started before the user rated run A, A's
+   * models were credited under B's task type — teaching the router that a coding
+   * model is good at creative writing, from a rating that never said so.
    *
    * Explicit ratings arrive after the run finishes — rateLastRun() is by nature
    * a reaction to a finished answer — but the run finalizer calls
@@ -161,7 +167,7 @@ export class TaskAnalyzer {
    * every explicit rating iterated an empty map, recorded nothing, and returned
    * false: the 3x-weighted user signal never reached the tracker at all.
    */
-  private lastCompletedRunSelections = new Map<TierRole, ModelInfo>();
+  private lastCompletedRun?: { selections: Map<TierRole, ModelInfo>; taskType: TaskType };
 
   constructor(tracker?: ModelPerformanceTracker, bias: AutoBias = 'balanced') {
     this.tracker = tracker;
@@ -275,8 +281,9 @@ export class TaskAnalyzer {
       this.tracker.record(model.id, taskType, outcome, 0, cost, contextTokens);
     }
     // Hand the selections to the completed-run snapshot rather than dropping
-    // them, so a rating that arrives after this point still knows what to rate.
-    this.lastCompletedRunSelections = new Map(this.currentRunSelections);
+    // them, so a rating that arrives after this point still knows what to rate —
+    // and what task type to rate it under.
+    this.lastCompletedRun = { selections: new Map(this.currentRunSelections), taskType };
     this.currentRunSelections.clear();
     void this.tracker.save();
   }
@@ -295,13 +302,14 @@ export class TaskAnalyzer {
    * that reports false, which is what "rate this run" should mean.
    */
   recordExplicitRating(rating: 'good' | 'bad'): boolean {
-    if (!this.tracker || !this.lastProfile) return false;
-    if (this.lastCompletedRunSelections.size === 0) return false;
-    const taskType = this.lastProfile.type;
-    for (const [, model] of this.lastCompletedRunSelections) {
-      this.tracker.recordExplicit(model.id, taskType, rating, 0);
+    const snapshot = this.lastCompletedRun;
+    if (!this.tracker || !snapshot || snapshot.selections.size === 0) return false;
+    // The snapshot's own task type — NOT lastProfile, which the next run has
+    // very likely already overwritten.
+    for (const [, model] of snapshot.selections) {
+      this.tracker.recordExplicit(model.id, snapshot.taskType, rating, 0);
     }
-    this.lastCompletedRunSelections.clear();
+    this.lastCompletedRun = undefined;
     return true;
   }
 

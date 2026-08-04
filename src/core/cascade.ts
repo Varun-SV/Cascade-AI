@@ -124,6 +124,16 @@ export class Cascade extends EventEmitter {
   private claimedResumeId?: string;
   /** Whether THIS run persisted a checkpoint of its own. Drives settle-vs-release. */
   private wroteCheckpointThisRun = false;
+  /**
+   * Whether the run reached the end of its normal path.
+   *
+   * NOT the same as `runError == null`: the cancellation and budget handlers
+   * both null `runError` deliberately (an intentional stop is not a telemetry
+   * error) and the breaker path never sets it at all. Treating that as success
+   * meant an immediate cancel — no output, no replacement checkpoint — deleted
+   * the original claim and the finished sections with it.
+   */
+  private completedNormally = false;
   /** Section results of the CURRENT run, so an interruption can checkpoint them. */
   private currentRunCompleted: CompletedNode[] = [];
   private initPromise?: Promise<void>;
@@ -786,7 +796,7 @@ export class Cascade extends EventEmitter {
     // and only leave the prompt sitting on disk for no benefit.
     if (!this.currentRunCompleted.length && !partialOutput) return false;
     try {
-      await this.resumeStore?.save({
+      const saved = await this.resumeStore?.save({
         taskId,
         prompt,
         reason,
@@ -794,8 +804,11 @@ export class Cascade extends EventEmitter {
         partialOutput,
         completed: [...this.currentRunCompleted],
       });
-      this.wroteCheckpointThisRun = true;
-      return true;
+      // save() swallows filesystem errors by design, so `await` resolving is not
+      // evidence anything was written. Trusting it marked a checkpoint present
+      // when the disk was full and then deleted the claim it was replacing.
+      this.wroteCheckpointThisRun = saved === true;
+      return saved === true;
     } catch {
       return false; /* never let checkpointing worsen an already-failing run */
     }
@@ -946,7 +959,16 @@ export class Cascade extends EventEmitter {
     // the in-memory record only ever held the prompt and the partial text.
     const prompt = (await this.prepareDurableResume(opts)) ?? this.prepareResume(opts);
     if (!prompt) return null;
-    return this.run({ prompt });
+    try {
+      return await this.run({ prompt });
+    } catch (err) {
+      // run() awaits init() BEFORE entering its try/finally, so a failure there
+      // never reaches settleClaimedResume and the claim would stay hidden until
+      // stale reclamation. The REPL has its own catch; SDK and headless callers
+      // come through here and need the same protection.
+      await this.releaseClaimedResume();
+      throw err;
+    }
   }
 
   public getWorkspacePath(): string {
@@ -1447,6 +1469,7 @@ ${prompt}`
     // restore work from an earlier, unrelated task.
     this.currentRunCompleted = [];
     this.wroteCheckpointThisRun = false;
+    this.completedNormally = false;
 
     // "Fast answer": a single mid-tier model, no orchestration, no tools, no
     // verification — the quickest, cheapest path for simple asks.
@@ -1839,6 +1862,10 @@ ${prompt}`
         finalOutput ? `\n---\n\n${finalOutput}` : '',
       ].join('\n').trimEnd();
     }
+    // Reaching the end of the normal path IS the definition of success here.
+    // Set it last, so a breaker trip or any earlier degradation that skipped
+    // ahead cannot leave it true.
+    this.completedNormally = true;
     } catch (err) {
       // ── Graceful cancellation handling ──────────────────────────────
       // When aborted, don't re-throw — resolve with what we have so far. This
@@ -1891,7 +1918,7 @@ ${prompt}`
 
       // The resumed run has now either checkpointed its own progress or finished,
       // so the claim it was resuming from is safe to discard.
-      try { await this.settleClaimedResume(runError == null); } catch { /* non-critical */ }
+      try { await this.settleClaimedResume(this.completedNormally); } catch { /* non-critical */ }
 
       // Same for section escalations. A run that ended while one was parked
       // (error, abort, budget kill) must not leave a live timer and an
