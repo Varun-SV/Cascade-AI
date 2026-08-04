@@ -118,11 +118,17 @@ export class ResumeStore {
   }
 
   /**
-   * Persist a checkpoint and prune. Never throws: failing to save a resume file
-   * must not turn a recoverable stop into a crash, which would be a strictly
-   * worse outcome than the one this store exists to improve.
+   * Persist a checkpoint and prune.
+   *
+   * Never throws — failing to save a resume file must not turn a recoverable
+   * stop into a crash — but DOES report whether the atomic rename landed.
+   * Callers decide whether an original claim is safe to discard based on that
+   * answer, so "I swallowed the error" and "the checkpoint is on disk" must not
+   * look alike to them.
+   *
+   * @returns true only when the checkpoint is durably on disk.
    */
-  async save(checkpoint: Omit<ResumeCheckpoint, 'version' | 'createdAt'> & { createdAt?: string }): Promise<void> {
+  async save(checkpoint: Omit<ResumeCheckpoint, 'version' | 'createdAt'> & { createdAt?: string }): Promise<boolean> {
     try {
       const timestamp = this.now();
       const record: ResumeCheckpoint = {
@@ -140,9 +146,16 @@ export class ResumeStore {
       await fs.writeFile(tempPath, JSON.stringify(record, null, 2), 'utf-8');
       await fs.rename(tempPath, finalPath);
 
+      // Pruning is maintenance: it must not turn a successful save into a
+      // reported failure, or a caller would release a claim it could keep.
       await this.prune();
+      return true;
     } catch {
-      /* Resume is best-effort by design — see the note above. */
+      // Still never throws — a failing run must not be made worse — but the
+      // caller now LEARNS the write failed. Swallowing it silently let
+      // cascade.ts mark a checkpoint written when nothing reached disk, and
+      // then delete the original claim it was supposed to be replacing.
+      return false;
     }
   }
 

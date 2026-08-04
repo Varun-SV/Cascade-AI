@@ -873,6 +873,52 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
             } satisfies T2Result;
           }
         },
+        // PARTIAL is deliberately not a failure: a degraded-but-real section
+        // can still feed the one after it, and cancelling that work would cost
+        // the user more than letting it try.
+        classify: (_node, result) => (result.status === 'FAILED' ? 'failed' : 'succeeded'),
+        onNodeBlocked: (node, blockedInfo) => {
+          // Synthesizing these AFTER scheduler.run() bypassed this lifecycle
+          // entirely: blocked sections never advanced progress and their tier
+          // never reached a terminal status, so the Cockpit showed them as
+          // pending forever even though the final result accounted for them.
+          const section = node.payload;
+          this.log(`⤫ Skipped "${section.sectionTitle}" — ${blockedInfo.reason}`);
+
+          resultMap.set(node.id, {
+            sectionId: section.sectionId,
+            sectionTitle: section.sectionTitle,
+            status: 'FAILED',
+            t3Results: [],
+            sectionSummary: '',
+            issues: [
+              `${blockedInfo.reason}. This section was not attempted, so no tokens were spent on it. `
+              + `Blocked by: ${blockedInfo.blockedBy.join(', ')}.`,
+            ],
+          } satisfies T2Result);
+
+          // A blocked section is finished as far as the run is concerned — it
+          // counts toward progress, so the bar reaches 100% rather than stalling.
+          completedSections++;
+          this.sendStatusUpdate({
+            progressPct: 10 + Math.floor((completedSections / totalSections) * 85),
+            currentAction: `Skipped: ${section.sectionTitle} (blocked by an upstream failure)`,
+            status: 'IN_PROGRESS',
+          });
+          // Terminal status for the node, without ever constructing its manager
+          // or spending a token on it.
+          this.emit('tier:status', {
+            tierId: section.sectionId,
+            role: 'T2',
+            status: 'FAILED',
+          });
+          this.emit('section:complete', {
+            id: node.id,
+            title: section.sectionTitle,
+            status: 'FAILED',
+            output: '',
+          });
+        },
         onNodeComplete: (node, result) => {
           resultMap.set(node.id, result);
           completedSections++;
@@ -894,9 +940,16 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
         // serialized T3 workers within a single section while every section's
         // T2Manager (and its T3 workers) still ran in parallel here.
         mode: this.router.getT3ExecutionMode?.() === 'sequential' ? 'sequential' : 'parallel',
+        // A section that declared `dependsOn` said it needs that section's
+        // output. Running it after the dependency failed produces a second
+        // failure, billed, whose cause is the first one — so don't.
+        onUpstreamFailure: 'block',
       },
     );
 
+    // Blocked sections are recorded by the onNodeBlocked hook as the run
+    // proceeds, so they share the progress and tier-status lifecycle of the
+    // sections that actually executed.
     await scheduler.run();
 
     return sections.map((s) => resultMap.get(s.sectionId)!).filter(Boolean);

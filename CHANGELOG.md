@@ -7,7 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+- **A section no longer runs after the section it depends on has failed.** The
+  scheduler only ever knew "the upstream promise resolved", which is a different
+  question from "the upstream worked" — and T1 deliberately catches worker
+  errors into an ordinary `FAILED` result so one dead section cannot crash the
+  run. That resolved value released the dependents anyway, so "run the
+  integration tests" would start after "implement the API" had failed outright,
+  fail in turn, and bill for the privilege.
+
+  Dependents of a failed node are now skipped, transitively, and reported with
+  the chain that blocked them, so a section two hops downstream explains its
+  real cause rather than blaming its immediate parent. `PARTIAL` deliberately
+  does not block: a degraded-but-real section can still feed the next one, and
+  cancelling that work would cost more than letting it try. Blocked sections get
+  a real result so review and compilation still account for them instead of them
+  vanishing from the plan — and no tokens are spent on them.
+
+  Failure awareness is opt-in per caller: a scheduler given no classifier
+  behaves exactly as before, so T2's subtask waves are unchanged.
+
 ### Fixed
+- **A breaker trip counted as a successful run.** The circuit-breaker path
+  degrades rather than throwing, so it fell through to the same "reached the end
+  normally" assignment as a clean finish. A breaker opening on the first
+  operation completes no section and writes no replacement checkpoint, yet still
+  deleted the claim it should have preserved.
+- **A resumed run's checkpoint dropped everything it had inherited.** It saved
+  only the sections THIS attempt finished, so a resume that completed one more
+  section and was interrupted again settled the claim and discarded the earlier
+  attempts' work — the third try re-did, and re-paid for, what two runs had
+  already produced. Checkpoints are cumulative now, keyed by node id so a re-run
+  section supersedes its inherited copy, and the original prompt travels forward
+  rather than each resume nesting the last continuation inside a longer one.
+- **Blocking was still ordered by provider latency.** Applying failures after
+  the wave was not enough: parallel workers recorded them in completion order,
+  so for two failed siblings converging on one node, whichever provider returned
+  first became that node's sole recorded cause. Outcomes are now collected by id
+  and processed in graph order, and a node blocked by several failures names all
+  of them.
+- **Blocked sections never reached a terminal state in the UI.** They were
+  synthesized after the scheduler finished, bypassing the progress and
+  tier-status lifecycle, so the Cockpit left them looking pending even though
+  the final result accounted for them. They now go through the same hook as
+  executed sections — advancing progress and emitting a terminal status —
+  without constructing a manager or spending a token.
+- **A rating could be credited to the wrong kind of work.** The model selections
+  were snapshotted at run completion but the task type was not — it was read
+  from `lastProfile` at rating time, which the next run has very likely already
+  overwritten. Rating run A after run B started recorded A's models under B's
+  task type, teaching the router that a coding model is good at creative writing
+  from a rating that never said so. The type is now snapshotted with the
+  selections and consumed as one immutable pair.
+- **Three more paths could still lose a resume checkpoint.** `save()` swallowed
+  filesystem errors and returned void, so a full disk looked identical to a
+  successful write and the original claim was settled with no replacement on
+  disk; it now reports whether the atomic rename actually landed. `runError ==
+  null` was being read as "the run succeeded", but the cancellation and budget
+  handlers null it deliberately and the breaker path never sets it, so an
+  immediate interruption with no output deleted the claim it should have kept;
+  normal completion is now tracked separately. And `resumeRun()` — the SDK and
+  headless path — had no failed-start catch, while `run()` awaits `init()`
+  before entering its own `finally`, so a failure there left the claim hidden
+  until stale reclamation.
+- **Two model selections never reached the rating snapshot.** `selectModel()`
+  had early returns for vision routing and for the no-candidates fallback that
+  skipped the recording step, so a vision-routed run had nothing to rate at all
+  and a fallback choice was silently missing from the feedback meant to teach
+  the router. Every exit records now.
+- **Rating a run twice counted it twice.** An explicit rating is weighted 3x by
+  recording three samples, so a double submit injected six — a stutter on the
+  button counted as two opinions. The snapshot is consumed, making the second
+  call a no-op that reports false.
+- **A failed resume could still lose the work it was recovering.** The claim was
+  settled unconditionally at the end of the run, but a resumed attempt that dies
+  on its first provider call completes no section and produces no output, so no
+  replacement checkpoint is written — and settling anyway deleted the original,
+  which still held the finished sections. The claim is now released instead of
+  settled unless the run succeeded or left its own checkpoint. `/continue` also
+  hands the claim straight back if the run never starts, rather than leaving it
+  unavailable for the full lease timeout.
+
+
 - **Rating a run did nothing.** The run finalizer called `recordRunOutcome()`,
   which cleared the only map of which models a run had selected — and an explicit
   thumbs-up/down necessarily arrives *after* the run finishes. So every rating

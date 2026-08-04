@@ -153,7 +153,13 @@ export class TaskAnalyzer {
   /** Models chosen by the run currently in flight. Cleared when it completes. */
   private currentRunSelections = new Map<TierRole, ModelInfo>();
   /**
-   * Immutable snapshot of the last COMPLETED run's selections.
+   * Immutable snapshot of the last COMPLETED run: its selections AND the task
+   * type they were chosen for.
+   *
+   * The task type has to travel WITH the selections. `lastProfile` is overwritten
+   * by the next analyze(), so if run B started before the user rated run A, A's
+   * models were credited under B's task type — teaching the router that a coding
+   * model is good at creative writing, from a rating that never said so.
    *
    * Explicit ratings arrive after the run finishes — rateLastRun() is by nature
    * a reaction to a finished answer — but the run finalizer calls
@@ -161,7 +167,7 @@ export class TaskAnalyzer {
    * every explicit rating iterated an empty map, recorded nothing, and returned
    * false: the 3x-weighted user signal never reached the tracker at all.
    */
-  private lastCompletedRunSelections = new Map<TierRole, ModelInfo>();
+  private lastCompletedRun?: { selections: Map<TierRole, ModelInfo>; taskType: TaskType };
 
   constructor(tracker?: ModelPerformanceTracker, bias: AutoBias = 'balanced') {
     this.tracker = tracker;
@@ -229,13 +235,22 @@ export class TaskAnalyzer {
   ): Promise<ModelInfo | null> {
     const profile = await this.analyze(prompt);
 
+    // EVERY exit from this method must record, or the run is only partially
+    // represented in the rating snapshot: a vision-routed run had nothing to
+    // rate at all, and a fallback selection was silently omitted from the
+    // feedback that is supposed to teach the router which models work.
+    const recordSelection = (model: ModelInfo | null): ModelInfo | null => {
+      if (model) this.currentRunSelections.set(tier, model);
+      return model;
+    };
+
     // Vision tasks: always route to a vision-capable model
     if (profile.requiresVision) {
-      return selector.selectVisionModel();
+      return recordSelection(selector.selectVisionModel());
     }
 
     let candidates = selector.getCandidatesForTier(tier);
-    if (candidates.length === 0) return selector.selectForTier(tier);
+    if (candidates.length === 0) return recordSelection(selector.selectForTier(tier));
 
     // Tool-heavy subtasks prefer models with NATIVE tool support — the text
     // fallback works but is slower and flakier. Soft gate: if every candidate
@@ -251,9 +266,7 @@ export class TaskAnalyzer {
     }));
     scored.sort((a, b) => b.score - a.score);
 
-    const best = scored[0]?.model ?? selector.selectForTier(tier);
-    if (best) this.currentRunSelections.set(tier, best);
-    return best;
+    return recordSelection(scored[0]?.model ?? selector.selectForTier(tier));
   }
 
   /**
@@ -268,8 +281,9 @@ export class TaskAnalyzer {
       this.tracker.record(model.id, taskType, outcome, 0, cost, contextTokens);
     }
     // Hand the selections to the completed-run snapshot rather than dropping
-    // them, so a rating that arrives after this point still knows what to rate.
-    this.lastCompletedRunSelections = new Map(this.currentRunSelections);
+    // them, so a rating that arrives after this point still knows what to rate —
+    // and what task type to rate it under.
+    this.lastCompletedRun = { selections: new Map(this.currentRunSelections), taskType };
     this.currentRunSelections.clear();
     void this.tracker.save();
   }
@@ -280,16 +294,30 @@ export class TaskAnalyzer {
    *
    * Reads the completed-run snapshot, not the in-flight map: by the time a user
    * can rate an answer, the finalizer has already run and the in-flight map is
-   * empty. The snapshot is left in place so rating twice is idempotent rather
-   * than silently becoming a no-op.
+   * empty.
+   *
+   * The snapshot is CONSUMED. recordExplicit() weights a rating 3x by recording
+   * three samples, so a double submit would inject six — a stutter on the
+   * button would count as two opinions. Consuming makes a second call a no-op
+   * that reports false, which is what "rate this run" should mean.
    */
   recordExplicitRating(rating: 'good' | 'bad'): boolean {
-    if (!this.tracker || !this.lastProfile) return false;
-    const taskType = this.lastProfile.type;
-    for (const [, model] of this.lastCompletedRunSelections) {
-      this.tracker.recordExplicit(model.id, taskType, rating, 0);
+    const snapshot = this.lastCompletedRun;
+    if (!this.tracker || !snapshot || snapshot.selections.size === 0) return false;
+    // Deduplicated by MODEL, not by tier. The tracker is keyed (modelId,
+    // taskType) — tier is not part of it — so one model serving T1, T2 and T3
+    // (the ordinary single-local-model setup) took three recordExplicit calls,
+    // and each of those records three samples for its 3x weighting. One thumbs
+    // up became nine samples, and the models a user happens to run on every
+    // tier drifted fastest purely from that.
+    const ratedModels = new Set<string>();
+    for (const [, model] of snapshot.selections) {
+      if (ratedModels.has(model.id)) continue;
+      ratedModels.add(model.id);
+      this.tracker.recordExplicit(model.id, snapshot.taskType, rating, 0);
     }
-    return this.lastCompletedRunSelections.size > 0;
+    this.lastCompletedRun = undefined;
+    return true;
   }
 
   private scoreModel(model: ModelInfo, profile: TaskProfile): number {

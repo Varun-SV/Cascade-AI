@@ -765,6 +765,14 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       onContinue: async (args) => {
         const cascade = cascadeRef.current;
         if (!cascade) return 'Not ready yet.';
+        // Claiming while a run is in flight is unsafe: handleSubmit would QUEUE
+        // this prompt (it is not a slash command), and the active run's finally
+        // would then settle the checkpoint we just claimed for a run that has
+        // not started — destroying it. Refuse before taking the claim rather
+        // than taking one we cannot honour.
+        if (state.isExecuting) {
+          return 'A task is already running — wait for it to finish (or press Esc to stop it) before using /continue.';
+        }
         const n = args[0] ? parseInt(args[0].replace(/[^0-9]/g, ''), 10) : NaN;
         const opts = Number.isFinite(n) && n > 0 ? { maxTokens: n } : {};
         // Try the durable checkpoint first — it survives a crash or a restart
@@ -774,7 +782,15 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         if (!prompt) {
           return 'Nothing to continue — no interrupted task was found for this workspace.';
         }
-        await handleSubmit(prompt);
+        try {
+          await handleSubmit(prompt);
+        } catch (err) {
+          // The claim was taken by prepareDurableResume but the run never
+          // started. Hand it straight back rather than leaving the checkpoint
+          // unavailable until the lease times out.
+          await cascade.releaseClaimedResume();
+          throw err;
+        }
         return '';
       },
     });

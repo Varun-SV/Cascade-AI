@@ -122,6 +122,23 @@ export class Cascade extends EventEmitter {
   private resumeStore?: ResumeStore;
   /** Claim held by an in-flight resume, settled once the run owns the work. */
   private claimedResumeId?: string;
+  /**
+   * Facts inherited from the checkpoint this run is resuming, so its own
+   * checkpoint is cumulative rather than only covering this attempt.
+   */
+  private resumedFrom?: { prompt: string; completed: CompletedNode[]; partialOutput: string };
+  /** Whether THIS run persisted a checkpoint of its own. Drives settle-vs-release. */
+  private wroteCheckpointThisRun = false;
+  /**
+   * Whether the run reached the end of its normal path.
+   *
+   * NOT the same as `runError == null`: the cancellation and budget handlers
+   * both null `runError` deliberately (an intentional stop is not a telemetry
+   * error) and the breaker path never sets it at all. Treating that as success
+   * meant an immediate cancel — no output, no replacement checkpoint — deleted
+   * the original claim and the finished sections with it.
+   */
+  private completedNormally = false;
   /** Section results of the CURRENT run, so an interruption can checkpoint them. */
   private currentRunCompleted: CompletedNode[] = [];
   private initPromise?: Promise<void>;
@@ -779,20 +796,62 @@ export class Cascade extends EventEmitter {
     partialOutput: string,
     reason: ResumeReason,
     detail?: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
+    // A resumed run's checkpoint must be CUMULATIVE. Saving only this attempt's
+    // sections and then settling the claim discarded everything the earlier
+    // attempts had already finished, so a third attempt re-did — and re-paid
+    // for — work two runs had completed. Sections are keyed by id so a node
+    // re-run in this attempt supersedes its inherited copy rather than
+    // appearing twice.
+    //
+    // Superseding is NOT unconditional last-write-wins. Plain overwrite let a
+    // re-run that came back PARTIAL replace an inherited COMPLETED, so the
+    // recovery state moved backwards and every later resume inherited the
+    // downgrade. Progress only goes forward here; genuinely invalidating a
+    // finished section needs an explicit act, not an incidental re-run.
+    const inherited = this.resumedFrom?.completed ?? [];
+    const merged = new Map<string, CompletedNode>();
+    for (const node of inherited) merged.set(node.id, node);
+    for (const node of this.currentRunCompleted) {
+      const existing = merged.get(node.id);
+      if (existing?.status === 'COMPLETED' && node.status !== 'COMPLETED') continue;
+      merged.set(node.id, node);
+    }
+    const completed = [...merged.values()];
+
+    // The ORIGINAL prompt travels forward, so each resume does not nest the
+    // previous continuation inside a longer one until the task is unreadable.
+    const canonicalPrompt = this.resumedFrom?.prompt ?? prompt;
+
+    // Inherited partial output survives an attempt that produced none of its
+    // own. Otherwise: attempt 1 writes a useful draft, attempt 2 dies before
+    // producing anything, the inherited completed nodes still make this save,
+    // and the replacement is written with an EMPTY partialOutput — then the
+    // original is settled and the draft is gone, despite having been explicitly
+    // part of the recoverable checkpoint. A newer draft supersedes; nothing
+    // never does.
+    const carriedPartial = partialOutput || (this.resumedFrom?.partialOutput ?? '');
+
     // Nothing finished and nothing produced — a checkpoint would restore no work
     // and only leave the prompt sitting on disk for no benefit.
-    if (!this.currentRunCompleted.length && !partialOutput) return;
+    if (!completed.length && !carriedPartial) return false;
     try {
-      await this.resumeStore?.save({
+      const saved = await this.resumeStore?.save({
         taskId,
-        prompt,
+        prompt: canonicalPrompt,
         reason,
         ...(detail ? { detail } : {}),
-        partialOutput,
-        completed: [...this.currentRunCompleted],
+        partialOutput: carriedPartial,
+        completed,
       });
-    } catch { /* never let checkpointing worsen an already-failing run */ }
+      // save() swallows filesystem errors by design, so `await` resolving is not
+      // evidence anything was written. Trusting it marked a checkpoint present
+      // when the disk was full and then deleted the claim it was replacing.
+      this.wroteCheckpointThisRun = saved === true;
+      return saved === true;
+    } catch {
+      return false; /* never let checkpointing worsen an already-failing run */
+    }
   }
 
   /** True when a task can be resumed via /continue (this process or a previous one). */
@@ -848,6 +907,18 @@ export class Cascade extends EventEmitter {
       const prompt = this.buildResumePrompt(
         claimed.checkpoint.prompt, claimed.checkpoint.partialOutput, claimed.checkpoint.completed,
       );
+      // Carry the claim's facts forward so the NEXT checkpoint is cumulative.
+      // Without this, a resumed attempt that finishes one new section and is
+      // interrupted again writes a checkpoint containing only that one section:
+      // settling the claim then discards the original graph facts, and the
+      // third attempt re-does work that two earlier runs already paid for. The
+      // original prompt travels too, so it stays canonical instead of each
+      // resume nesting the last continuation inside a longer one.
+      this.resumedFrom = {
+        prompt: claimed.checkpoint.prompt,
+        completed: claimed.checkpoint.completed,
+        partialOutput: claimed.checkpoint.partialOutput,
+      };
       // Only now is the continuation safely in the caller's hands. Settling
       // earlier — as consume() did — meant a crash between reading and running
       // destroyed the one record of the work, in the mechanism whose whole
@@ -867,11 +938,36 @@ export class Cascade extends EventEmitter {
    * the work (it has produced its own checkpoint, or finished). Called by the
    * run loop; safe to call when nothing is claimed.
    */
-  private async settleClaimedResume(): Promise<void> {
+  private async settleClaimedResume(succeeded: boolean): Promise<void> {
     const claimId = this.claimedResumeId;
     if (!claimId) return;
     this.claimedResumeId = undefined;
-    await this.resumeStore?.settle(claimId);
+
+    // Settling unconditionally recreated a narrower form of the bug the lease
+    // was introduced to fix. A resumed attempt that dies on its FIRST provider
+    // call completes no section and produces no output, so checkpointRun()
+    // correctly declines to save — and settling anyway deleted the original,
+    // which still held two finished sections. There was then nothing left to
+    // continue. Only discard the claim when the work it protects is genuinely
+    // safe: the run finished, or it left a replacement checkpoint behind.
+    if (succeeded || this.wroteCheckpointThisRun) {
+      await this.resumeStore?.settle(claimId);
+    } else {
+      await this.resumeStore?.release(claimId);
+    }
+  }
+
+  /**
+   * Hand back a claim taken by prepareDurableResume() when the caller never
+   * gets as far as run(). The REPL prepares the continuation and submits it
+   * separately, so a failure in between would otherwise strand the checkpoint
+   * for the whole lease timeout before reclaimStale() could recover it.
+   */
+  async releaseClaimedResume(): Promise<void> {
+    const claimId = this.claimedResumeId;
+    if (!claimId) return;
+    this.claimedResumeId = undefined;
+    await this.resumeStore?.release(claimId);
   }
 
   /** A resume gets a bigger budget — the previous attempt exhausted the old one. */
@@ -915,7 +1011,16 @@ export class Cascade extends EventEmitter {
     // the in-memory record only ever held the prompt and the partial text.
     const prompt = (await this.prepareDurableResume(opts)) ?? this.prepareResume(opts);
     if (!prompt) return null;
-    return this.run({ prompt });
+    try {
+      return await this.run({ prompt });
+    } catch (err) {
+      // run() awaits init() BEFORE entering its try/finally, so a failure there
+      // never reaches settleClaimedResume and the claim would stay hidden until
+      // stale reclamation. The REPL has its own catch; SDK and headless callers
+      // come through here and need the same protection.
+      await this.releaseClaimedResume();
+      throw err;
+    }
   }
 
   public getWorkspacePath(): string {
@@ -1415,6 +1520,11 @@ ${prompt}`
     // Sections finished by THIS run. Reset per run so a checkpoint can never
     // restore work from an earlier, unrelated task.
     this.currentRunCompleted = [];
+    this.wroteCheckpointThisRun = false;
+    this.completedNormally = false;
+    // Cleared only when a run starts WITHOUT resuming; prepareDurableResume
+    // sets it just before the resumed run begins, so it must survive that reset.
+    if (!this.claimedResumeId) this.resumedFrom = undefined;
 
     // "Fast answer": a single mid-tier model, no orchestration, no tools, no
     // verification — the quickest, cheapest path for simple asks.
@@ -1807,6 +1917,12 @@ ${prompt}`
         finalOutput ? `\n---\n\n${finalOutput}` : '',
       ].join('\n').trimEnd();
     }
+    // Reaching here means the run produced its result the ordinary way — UNLESS
+    // the breaker tripped, which falls through this same path with a warning
+    // stitched onto the output. A breaker trip on the first operation completes
+    // no section and writes no replacement checkpoint, so calling it "normal
+    // completion" deleted the claim it should have preserved.
+    this.completedNormally = trip == null;
     } catch (err) {
       // ── Graceful cancellation handling ──────────────────────────────
       // When aborted, don't re-throw — resolve with what we have so far. This
@@ -1859,7 +1975,7 @@ ${prompt}`
 
       // The resumed run has now either checkpointed its own progress or finished,
       // so the claim it was resuming from is safe to discard.
-      try { await this.settleClaimedResume(); } catch { /* non-critical */ }
+      try { await this.settleClaimedResume(this.completedNormally); } catch { /* non-critical */ }
 
       // Same for section escalations. A run that ended while one was parked
       // (error, abort, budget kill) must not leave a live timer and an

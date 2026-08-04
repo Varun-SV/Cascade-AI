@@ -103,7 +103,9 @@ describe('ResumeStore', () => {
     await fs.writeFile(blocker, 'not a directory', 'utf-8');
 
     const store = new ResumeStore({ dir: path.join(blocker, 'checkpoints') });
-    await expect(store.save(checkpoint('run-1'))).resolves.toBeUndefined();
+    // Resolves rather than throwing — and reports false, so the caller can tell
+    // a swallowed error from a checkpoint that is genuinely on disk.
+    await expect(store.save(checkpoint('run-1'))).resolves.toBe(false);
     await expect(store.list()).resolves.toEqual([]);
   });
 
@@ -198,5 +200,39 @@ describe('ResumeStore claim/release/settle', () => {
     clock += 5000; // the holder is long gone
     expect(await store.reclaimStale()).toBe(1);
     expect((await store.latest())?.taskId).toBe('run-1');
+  });
+});
+
+describe('save() reports whether the checkpoint actually landed', () => {
+  it('returns true when the write succeeds', async () => {
+    const store = new ResumeStore({ dir });
+    expect(await store.save(checkpoint('run-1'))).toBe(true);
+    expect((await store.latest())?.taskId).toBe('run-1');
+  });
+
+  it('returns false when the filesystem rejects the write', async () => {
+    // save() swallows the error by design — a failing run must not be made
+    // worse — but the CALLER has to be able to tell "I hid an error" from
+    // "the checkpoint is on disk". Conflating them let cascade.ts mark a
+    // checkpoint written when nothing landed, then delete the claim it was
+    // supposed to be replacing.
+    const blocker = path.join(dir, 'blocker');
+    await fs.writeFile(blocker, 'not a directory', 'utf-8');
+    const store = new ResumeStore({ dir: path.join(blocker, 'nested') });
+
+    expect(await store.save(checkpoint('run-1'))).toBe(false);
+    expect(await store.list()).toEqual([]);
+  });
+
+  it('still reports success when only pruning fails', async () => {
+    // Pruning is maintenance. Reporting failure for it would make a caller
+    // release a claim whose replacement is genuinely on disk.
+    // Distinct timestamps: filenames carry the clock, so two saves inside one
+    // millisecond leave prune with no defined order to keep.
+    let clock = 1_000_000;
+    const store = new ResumeStore({ dir, maxCheckpoints: 1, now: () => (clock += 1000) });
+    expect(await store.save(checkpoint('run-1'))).toBe(true);
+    expect(await store.save(checkpoint('run-2'))).toBe(true);
+    expect((await store.list()).map((c) => c.taskId)).toEqual(['run-2']);
   });
 });

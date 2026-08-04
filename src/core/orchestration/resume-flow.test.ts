@@ -101,3 +101,77 @@ describe('durable resume flow', () => {
     expect(new Set(reasons)).toEqual(new Set(['budget', 'cancelled', 'error', 'breaker']));
   });
 });
+
+describe('a resumed run must not lose the work it inherited', () => {
+  const node = (id: string, title = id): CompletedNode => ({
+    id, title, status: 'COMPLETED', output: `output of ${id}`,
+  });
+
+  /** Mirrors Cascade.checkpointRun's merge: inherited nodes + this attempt's. */
+  function cumulative(
+    inherited: readonly CompletedNode[],
+    thisAttempt: readonly CompletedNode[],
+  ): CompletedNode[] {
+    const merged = new Map<string, CompletedNode>();
+    for (const node of inherited) merged.set(node.id, node);
+    for (const node of thisAttempt) {
+      const existing = merged.get(node.id);
+      if (existing?.status === 'COMPLETED' && node.status !== 'COMPLETED') continue;
+      merged.set(node.id, node);
+    }
+    return [...merged.values()];
+  }
+
+  it('carries earlier sections through resume -> partial -> interruption -> resume', async () => {
+    const store = new ResumeStore({ dir });
+
+    // Attempt 1 finishes two sections, then stops.
+    await store.save({
+      taskId: 'task-1', prompt: 'Write a market report', reason: 'budget', partialOutput: 'draft',
+      completed: [node('s1', 'Research'), node('s2', 'Pricing')],
+    });
+
+    // Attempt 2 claims it, finishes ONE more section, and is interrupted again.
+    const claimed = await store.claim();
+    expect(claimed).not.toBeNull();
+    const inherited = claimed!.checkpoint.completed;
+
+    await store.save({
+      taskId: 'task-2',
+      // The ORIGINAL prompt travels forward rather than the continuation text,
+      // so repeated resumes don't nest prompts inside prompts.
+      prompt: claimed!.checkpoint.prompt,
+      reason: 'cancelled',
+      partialOutput: 'draft 2',
+      completed: cumulative(inherited, [node('s3', 'Draft')]),
+    });
+    await store.settle(claimed!.claimId);
+
+    // Attempt 3 must see ALL THREE sections. Before the merge it saw only s3,
+    // and re-did (and re-paid for) the two that were already finished.
+    const third = await store.claim();
+    expect(third!.checkpoint.completed.map((c) => c.id).sort()).toEqual(['s1', 's2', 's3']);
+    expect(third!.checkpoint.prompt).toBe('Write a market report');
+  });
+
+  it('never downgrades a COMPLETED section to PARTIAL', () => {
+    // Plain last-write-wins let a re-run that came back PARTIAL replace an
+    // inherited COMPLETED, so recovery state moved backwards and every later
+    // resume inherited the downgrade. The old test only covered the flattering
+    // direction (PARTIAL -> COMPLETED), so it encoded the rule that caused this.
+    const done: CompletedNode = { id: 's1', title: 'Research', status: 'COMPLETED', output: 'full' };
+    const worse: CompletedNode = { id: 's1', title: 'Research', status: 'PARTIAL', output: 'thin' };
+    const merged = cumulative([done], [worse]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.status).toBe('COMPLETED');
+    expect(merged[0]?.output).toBe('full');
+  });
+
+  it('a re-run section supersedes its inherited copy rather than duplicating', async () => {
+    const older: CompletedNode = { id: 's1', title: 'Research', status: 'PARTIAL', output: 'thin' };
+    const newer: CompletedNode = { id: 's1', title: 'Research', status: 'COMPLETED', output: 'full' };
+    const merged = cumulative([older], [newer]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.output).toBe('full');
+  });
+});
