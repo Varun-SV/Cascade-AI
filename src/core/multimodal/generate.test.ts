@@ -422,3 +422,20 @@ describe('generateVideo — Gemini predictLongRunning', () => {
     }
   });
 });
+
+describe('video duration bounds', () => {
+  it('never sends a duration Veo will reject', async () => {
+    // Veo answers anything under 4s with
+    //   "The number value for `durationSeconds` is out of bound.
+    //    Please provide a value between 4 and 8, inclusive."
+    // and media is billed per attempt, so there is no retry — the user got a
+    // hard failure for a value Cascade itself chose. The clamp floor was 1.
+    const { GenerateVideoTool } = await import('../../tools/generate-media.js');
+    const tool = new GenerateVideoTool({ apiKey: 'k' } as never);
+
+    const schema = tool.getDefinition?.() ?? tool.definition;
+    const description = JSON.stringify(schema);
+    expect(description).toContain('4-8 seconds');
+    expect(description).not.toContain('1-8 seconds');
+  });
+});

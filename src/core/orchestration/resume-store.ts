@@ -62,6 +62,8 @@ export interface ResumeStoreOptions {
   maxAgeMs?: number;
   /** Injectable clock, for tests. */
   now?: () => number;
+  /** How long a claim may be held before it is considered abandoned. */
+  claimTimeoutMs?: number;
 }
 
 const DEFAULT_MAX_CHECKPOINTS = 5;
@@ -69,6 +71,12 @@ const DEFAULT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Filenames are `<epochMs>-<taskId>.json`, so age and order need no file reads. */
 const FILE_PATTERN = /^(\d+)-(.+)\.json$/;
+
+/** A claimed checkpoint: hidden from list(), still present on disk. */
+const CLAIM_SUFFIX = '.claimed';
+
+/** A claim held longer than this is assumed to belong to a dead process. */
+const DEFAULT_CLAIM_TIMEOUT_MS = 10 * 60 * 1000;
 
 /**
  * Keep task ids to characters that mean the same thing on every filesystem.
@@ -99,12 +107,14 @@ export class ResumeStore {
   private readonly maxCheckpoints: number;
   private readonly maxAgeMs: number;
   private readonly now: () => number;
+  private readonly claimTimeoutMs: number;
 
   constructor(options: ResumeStoreOptions) {
     this.dir = options.dir;
     this.maxCheckpoints = options.maxCheckpoints ?? DEFAULT_MAX_CHECKPOINTS;
     this.maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_AGE_MS;
     this.now = options.now ?? Date.now;
+    this.claimTimeoutMs = options.claimTimeoutMs ?? DEFAULT_CLAIM_TIMEOUT_MS;
   }
 
   /**
@@ -174,15 +184,90 @@ export class ResumeStore {
   }
 
   /**
-   * Load a checkpoint and delete it in the same step. Resuming twice from one
-   * checkpoint would re-run restored work, so consumption is part of reading.
+   * Claim a checkpoint for a resume attempt.
+   *
+   * This used to DELETE the file and return it, which opened a window with no
+   * recovery record at all: between preparing the continuation and the resumed
+   * run writing its own checkpoint, a crash lost the only copy — and a crash is
+   * precisely what this store exists to survive. Deleting on read optimised for
+   * "never resume twice" at the cost of "never lose the work", which is the
+   * wrong trade for a recovery mechanism.
+   *
+   * Instead the file is RENAMED to `.claimed`, which still hides it from
+   * `list()` (so a concurrent resume cannot take the same work) but keeps it on
+   * disk. The caller then either `release`s it — restoring it for another
+   * attempt — or `settle`s it once the resumed run is safely under way. A claim
+   * abandoned by a dead process is reclaimed after `claimTimeoutMs`.
    */
-  async consume(taskId?: string): Promise<ResumeCheckpoint | null> {
+  async claim(taskId?: string): Promise<{ checkpoint: ResumeCheckpoint; claimId: string } | null> {
     const all = await this.list();
     const target = taskId ? all.find((c) => c.taskId === taskId) : all[0];
     if (!target) return null;
-    await this.delete(target.taskId);
-    return target;
+
+    try {
+      const entries = await fs.readdir(this.dir);
+      const wanted = safeId(target.taskId);
+      const source = entries.find((name) => FILE_PATTERN.exec(name)?.[2] === wanted);
+      if (!source) return null;
+
+      const claimId = `${this.now()}-${safeId(target.taskId)}`;
+      await fs.rename(path.join(this.dir, source), path.join(this.dir, `${claimId}${CLAIM_SUFFIX}`));
+      return { checkpoint: target, claimId };
+    } catch {
+      return null; // lost a race with another claimer; treat as nothing to resume
+    }
+  }
+
+  /** Give a claim back, so the work stays recoverable after a failed start. */
+  async release(claimId: string): Promise<void> {
+    try {
+      await fs.rename(
+        path.join(this.dir, `${claimId}${CLAIM_SUFFIX}`),
+        path.join(this.dir, `${claimId}.json`),
+      );
+    } catch { /* already settled or gone */ }
+  }
+
+  /** Discard a claim for good — the resumed run has taken ownership. */
+  async settle(claimId: string): Promise<void> {
+    try {
+      await fs.rm(path.join(this.dir, `${claimId}${CLAIM_SUFFIX}`), { force: true });
+    } catch { /* already gone */ }
+  }
+
+  /**
+   * Claim-and-discard in one step. Kept for callers that genuinely want the old
+   * semantics; prefer claim/settle so a crash mid-resume stays recoverable.
+   */
+  async consume(taskId?: string): Promise<ResumeCheckpoint | null> {
+    const claimed = await this.claim(taskId);
+    if (!claimed) return null;
+    await this.settle(claimed.claimId);
+    return claimed.checkpoint;
+  }
+
+  /**
+   * Return claims abandoned by a process that died mid-resume. Without this a
+   * crash between claim and settle would strand the checkpoint invisibly —
+   * trading one loss window for another.
+   */
+  async reclaimStale(): Promise<number> {
+    let reclaimed = 0;
+    try {
+      const entries = await fs.readdir(this.dir);
+      const cutoff = this.now() - this.claimTimeoutMs;
+      for (const name of entries) {
+        if (!name.endsWith(CLAIM_SUFFIX)) continue;
+        const stamp = Number(/^(\d+)-/.exec(name)?.[1]);
+        if (!Number.isFinite(stamp) || stamp >= cutoff) continue;
+        await fs.rename(
+          path.join(this.dir, name),
+          path.join(this.dir, `${name.slice(0, -CLAIM_SUFFIX.length)}.json`),
+        );
+        reclaimed++;
+      }
+    } catch { /* best effort */ }
+    return reclaimed;
   }
 
   /** Remove every checkpoint for a task id. */

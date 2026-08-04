@@ -5,6 +5,35 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+- **Rating a run did nothing.** The run finalizer called `recordRunOutcome()`,
+  which cleared the only map of which models a run had selected — and an explicit
+  thumbs-up/down necessarily arrives *after* the run finishes. So every rating
+  iterated an empty map, recorded nothing, and reported failure. The 3x-weighted
+  user signal never reached the tracker at all. Selections are now handed to an
+  immutable last-completed-run snapshot instead of being dropped.
+- **The verification retest re-graded facts already settled.** After a failed
+  self-test the correction path called `selfTest()` without the pending-criteria
+  list, so it defaulted to the full acceptance set — handing the model back the
+  criteria `stat` had already decided. That is exactly the "invite the model to
+  overturn a fact" the deterministic ladder exists to prevent, reappearing on
+  the retry path.
+- **A resume checkpoint could be lost mid-recovery.** Claiming a checkpoint
+  deleted it before the resumed run existed, so a crash in that window destroyed
+  the only recovery record — in the mechanism whose whole purpose is surviving
+  crashes. Claims are now leased: the file is hidden from other claimers but
+  stays on disk, released if the resume fails to start, discarded only once the
+  resumed run owns the work, and reclaimed automatically if the claiming process
+  dies.
+- **Video generation failed outright for any clip under 4 seconds.** Veo accepts
+  4-8s and rejects anything else with `durationSeconds is out of bound`, but the
+  clamp floor was 1 — so a model asking for a 2-second clip produced a
+  guaranteed 400. Media is billed per attempt and therefore never retried, so
+  the user got a hard, unrecoverable failure for a value Cascade itself chose to
+  send. The clamp now matches the provider's real bounds.
+
 ## 0.68.0 - 2026-08-04
 
 The orchestration series: a typed task graph and one scheduler, a deterministic

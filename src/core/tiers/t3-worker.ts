@@ -558,7 +558,14 @@ export class T3Worker extends BaseTier {
 
       this.sendStatusUpdate({ progressPct: 70, currentAction: 'Self-testing output', status: 'IN_PROGRESS' });
 
-      const testResult = await this.selfTest(assignment, output, undecided(acceptanceResults));
+      // Computed once and reused by BOTH the test and the retest. Passing it only
+      // to the first call left the retest defaulting to the full acceptance list,
+      // which handed the model back the criteria stat had already settled — the
+      // exact "invite the model to overturn a fact" the ladder exists to prevent,
+      // reappearing on the retry path.
+      const pendingAcceptance = undecided(acceptanceResults);
+
+      const testResult = await this.selfTest(assignment, output, pendingAcceptance);
       checksRun.push(...testResult.checksRun);
       passed.push(...testResult.passed);
       failed.push(...testResult.failed);
@@ -568,7 +575,7 @@ export class T3Worker extends BaseTier {
         issues.push(`Initial check failed: ${testResult.failed.join(', ')}`);
         const corrected = await this.correctOutput(output, testResult.failed);
         output = corrected;
-        const retest = await this.selfTest(assignment, output);
+        const retest = await this.selfTest(assignment, output, pendingAcceptance);
         passed.push(...retest.passed);
         if (retest.failed.length > 0) {
           failed.push(...retest.failed);

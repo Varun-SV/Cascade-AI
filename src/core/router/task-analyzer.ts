@@ -150,7 +150,18 @@ export class TaskAnalyzer {
   private feedback?: FeedbackSource;
   private bias: AutoBias;
   private lastProfile: TaskProfile | null = null;
-  private lastSelectedModels = new Map<TierRole, ModelInfo>();
+  /** Models chosen by the run currently in flight. Cleared when it completes. */
+  private currentRunSelections = new Map<TierRole, ModelInfo>();
+  /**
+   * Immutable snapshot of the last COMPLETED run's selections.
+   *
+   * Explicit ratings arrive after the run finishes — rateLastRun() is by nature
+   * a reaction to a finished answer — but the run finalizer calls
+   * recordRunOutcome() first, and that used to clear the only map there was. So
+   * every explicit rating iterated an empty map, recorded nothing, and returned
+   * false: the 3x-weighted user signal never reached the tracker at all.
+   */
+  private lastCompletedRunSelections = new Map<TierRole, ModelInfo>();
 
   constructor(tracker?: ModelPerformanceTracker, bias: AutoBias = 'balanced') {
     this.tracker = tracker;
@@ -241,7 +252,7 @@ export class TaskAnalyzer {
     scored.sort((a, b) => b.score - a.score);
 
     const best = scored[0]?.model ?? selector.selectForTier(tier);
-    if (best) this.lastSelectedModels.set(tier, best);
+    if (best) this.currentRunSelections.set(tier, best);
     return best;
   }
 
@@ -252,26 +263,33 @@ export class TaskAnalyzer {
   recordRunOutcome(outcome: 'success' | 'failure', costByTier: Record<string, number>, contextTokens = 0): void {
     if (!this.tracker || !this.lastProfile) return;
     const taskType = this.lastProfile.type;
-    for (const [tier, model] of this.lastSelectedModels) {
+    for (const [tier, model] of this.currentRunSelections) {
       const cost = costByTier[tier] ?? 0;
       this.tracker.record(model.id, taskType, outcome, 0, cost, contextTokens);
     }
-    this.lastSelectedModels.clear();
+    // Hand the selections to the completed-run snapshot rather than dropping
+    // them, so a rating that arrives after this point still knows what to rate.
+    this.lastCompletedRunSelections = new Map(this.currentRunSelections);
+    this.currentRunSelections.clear();
     void this.tracker.save();
   }
 
   /**
-   * Record an explicit user rating (good/bad) for the last run's selected models.
+   * Record an explicit user rating (good/bad) for the last COMPLETED run's models.
    * Explicit ratings carry 3× the weight of auto-detected outcomes.
-   * Does NOT clear lastSelectedModels — the auto record already did that.
+   *
+   * Reads the completed-run snapshot, not the in-flight map: by the time a user
+   * can rate an answer, the finalizer has already run and the in-flight map is
+   * empty. The snapshot is left in place so rating twice is idempotent rather
+   * than silently becoming a no-op.
    */
   recordExplicitRating(rating: 'good' | 'bad'): boolean {
     if (!this.tracker || !this.lastProfile) return false;
     const taskType = this.lastProfile.type;
-    for (const [, model] of this.lastSelectedModels) {
+    for (const [, model] of this.lastCompletedRunSelections) {
       this.tracker.recordExplicit(model.id, taskType, rating, 0);
     }
-    return this.lastSelectedModels.size > 0;
+    return this.lastCompletedRunSelections.size > 0;
   }
 
   private scoreModel(model: ModelInfo, profile: TaskProfile): number {

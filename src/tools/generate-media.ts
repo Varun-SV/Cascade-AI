@@ -296,6 +296,14 @@ export class GenerateSpeechTool extends BaseTool {
 const DEFAULT_VIDEO_SECONDS = 5;
 /** Hard ceiling regardless of what the model asks for. */
 const MAX_VIDEO_SECONDS = 8;
+/**
+ * Veo rejects anything under 4s outright: "The number value for
+ * `durationSeconds` is out of bound. Please provide a value between 4 and 8".
+ * The clamp floor used to be 1, so a model asking for a 2-second clip produced a
+ * guaranteed 400 — and because media is billed per attempt there is no retry, so
+ * the user got a hard failure for a value Cascade itself chose to send.
+ */
+const MIN_VIDEO_SECONDS = 4;
 
 export class GenerateVideoTool extends BaseTool {
   readonly name = 'generate_video';
@@ -309,7 +317,7 @@ export class GenerateVideoTool extends BaseTool {
     type: 'object',
     properties: {
       prompt: { type: 'string', description: 'What the video should show: subject, action, camera movement, style.' },
-      seconds: { type: 'number', description: `Clip length, 1-${MAX_VIDEO_SECONDS} seconds (default ${DEFAULT_VIDEO_SECONDS}). Billed per second — keep it short.` },
+      seconds: { type: 'number', description: `Clip length, ${MIN_VIDEO_SECONDS}-${MAX_VIDEO_SECONDS} seconds (default ${DEFAULT_VIDEO_SECONDS}). Billed per second — keep it short.` },
       aspectRatio: { type: 'string', description: 'Frame shape: "16:9" (default) or "9:16" for vertical.' },
       model: { type: 'string', description: 'Optional: force a specific video model.' },
     },
@@ -329,7 +337,7 @@ export class GenerateVideoTool extends BaseTool {
     // cost, and silently spending $12 to teach it that would be the wrong
     // lesson to charge the user for.
     const asked = typeof input['seconds'] === 'number' ? input['seconds'] : DEFAULT_VIDEO_SECONDS;
-    const seconds = Math.max(1, Math.min(MAX_VIDEO_SECONDS, Math.round(asked)));
+    const seconds = Math.max(MIN_VIDEO_SECONDS, Math.min(MAX_VIDEO_SECONDS, Math.round(asked)));
 
     const asset = await generateVideo(
       r.selected.capability, r.cfg,
@@ -347,7 +355,9 @@ export class GenerateVideoTool extends BaseTool {
 
     const unit = r.selected.cost;
     const estimate = unit ? ` Estimated cost: $${(unit.amount * seconds).toFixed(2)} (${seconds}s x ${unit.label}).` : '';
-    const clamped = seconds !== Math.round(asked) ? ` Duration was clamped to ${seconds}s (max ${MAX_VIDEO_SECONDS}).` : '';
+    const clamped = seconds !== Math.round(asked)
+      ? ` Duration was clamped to ${seconds}s (allowed ${MIN_VIDEO_SECONDS}-${MAX_VIDEO_SECONDS}).`
+      : '';
     return `Video generated and saved to ${location}.\nModel: ${asset.modelId}.${estimate}${clamped}`;
   }
 }
