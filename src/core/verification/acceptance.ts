@@ -37,8 +37,17 @@ export interface AcceptanceProbe {
   read(path: string): Promise<string | null>;
 }
 
-/** A filename-with-extension token, which is what a mechanical criterion names. */
-const PATH_TOKEN = /[\w./\\-]*\w\.[A-Za-z0-9]{1,8}\b/g;
+/**
+ * A filename-with-extension token, which is what a mechanical criterion names.
+ *
+ * The leading run is BOUNDED. Unbounded (`*`) it is a polynomial-ReDoS shape:
+ * the pattern is unanchored with /g, so on input like "-------------…" every
+ * position starts a fresh scan to the end looking for a `\w\.` that never
+ * arrives — O(n²), on text an LLM wrote. 200 characters is far longer than any
+ * real path, and a longer one simply stops being recognised as a path, which
+ * lands the criterion in `undecidable` — the safe direction.
+ */
+const PATH_TOKEN = /[\w./\\-]{0,200}\w\.[A-Za-z0-9]{1,8}\b/g;
 
 /** `contains "x"`, `contains 'x'`, `includes \`x\`` — the quoted needle forms. */
 const QUOTED_NEEDLE = /(?:contains?|includes?|mentions?)\s+["'`]([^"'`]+)["'`]/i;

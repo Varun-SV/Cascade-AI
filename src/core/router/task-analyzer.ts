@@ -116,6 +116,22 @@ function heuristicAnalyze(prompt: string): TaskProfile {
 
 // ── TaskAnalyzer class ─────────────────────────
 
+/**
+ * Cache key for an analysed prompt. A digest of the full text, so two prompts
+ * that merely start alike cannot share a routing profile. Non-cryptographic
+ * (FNV-1a over the whole string, length-salted) — this guards a local Map, not
+ * a security boundary, and avoids pulling node:crypto into a hot path that the
+ * browser bundle also reaches.
+ */
+function hashPrompt(prompt: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < prompt.length; index++) {
+    hash ^= prompt.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `${prompt.length}:${hash.toString(36)}`;
+}
+
 /** Prompt hash cache — avoids repeated analysis of the same input within a session. */
 const analysisCache = new Map<string, TaskProfile>();
 
@@ -169,7 +185,14 @@ export class TaskAnalyzer {
    * Low confidence prompts fall back to a conservative mixed/moderate profile.
    */
   async analyze(prompt: string): Promise<TaskProfile> {
-    const cacheKey = prompt.slice(0, 200);
+    // Hash the WHOLE prompt, not its first 200 characters. Two tasks that share
+    // a preamble — the same file header, the same "You are working in repo X"
+    // block, the same pasted stack trace — collided on the truncated key and the
+    // second silently inherited the first's profile. That profile decides tier
+    // and model, so "summarise this log" could be routed as whatever the last
+    // task with the same opening happened to be. Truncation only ever saved a
+    // few microseconds of hashing on a call that then does real work.
+    const cacheKey = hashPrompt(prompt);
     const cached = analysisCache.get(cacheKey);
     if (cached) {
       this.lastProfile = cached;

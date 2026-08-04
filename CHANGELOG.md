@@ -79,6 +79,20 @@ series is complete, rather than cutting a release per step.
   new saved file from something about to disappear.
 
 ### Fixed
+- **Two different tasks could share a routing decision.** The task analyser
+  cached its profile under `prompt.slice(0, 200)`, and long shared preambles are
+  the norm rather than the exception — a repo header, a "you are working in X"
+  block, a pasted stack trace. The second task silently inherited the first's
+  profile, and that profile picks the tier and the model, so a trivial follow-up
+  could be routed as research-grade work or the reverse. The key is now a digest
+  of the whole prompt.
+- **An under-sized plan was detected and then silently accepted.** `validatePlan`
+  compared the section count against the complexity band inside an `if` with an
+  empty body, and never looked at the upper bound at all. It now reports the
+  mismatch instead of dropping it — and deliberately does NOT pad the plan to
+  reach the floor, which the original comment proposed doing by duplicating a
+  section: that bills the user twice for identical work and contradicts the
+  planner's own instruction to use the fewest sections that cover the task.
 - **A subtask's correction count was a boolean wearing a number's clothes.**
   `correctionAttempts` was ASSIGNED `1` at each correction site instead of
   incremented, so a worker that corrected for a missing artifact, then for

@@ -615,9 +615,25 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
         subtask.constraints ??= [];
       }
     }
+    // The section count is a signal about the COMPLEXITY LABEL, not something to
+    // correct. This branch used to read `if (sections.length < min) {}` with an
+    // empty body and a comment proposing to "auto-expand by duplicating" — so an
+    // under-sized plan was detected and then silently accepted, and the `max`
+    // half was never looked at at all.
+    //
+    // Padding is not the fix. Duplicating a section bills the user twice for
+    // identical work, and the plan prompt explicitly tells the planner to "use
+    // the FEWEST sections and workers that fully cover the task" — a floor that
+    // forces filler sections contradicts the instruction that produced the plan.
+    // A count outside the band means the model's own complexity label disagrees
+    // with the plan it wrote, which is worth seeing rather than papering over.
     const [min, max] = COMPLEXITY_T2_COUNT[plan.complexity] ?? [1, 8];
-    if (plan.sections.length < min) {
-      // Auto-expand by duplicating if needed (rare edge case)
+    if (plan.sections.length < min || plan.sections.length > max) {
+      this.log(
+        `⚠ Plan has ${plan.sections.length} section(s) but complexity "${plan.complexity}" `
+        + `expects ${min}-${max}. Keeping the plan as written — a right-sized plan is `
+        + 'better than one padded to hit a floor.',
+      );
     }
   }
 
