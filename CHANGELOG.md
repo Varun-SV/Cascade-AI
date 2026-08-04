@@ -5,11 +5,12 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.68.0 - 2026-08-04
 
-Cascade Cloud only — no SDK, CLI or desktop code is touched, so the version is
-deliberately not bumped (see `CONTRIBUTING.md`: a bump on `main` publishes npm
-and rebuilds the desktop installers, which would ship a byte-identical release).
+The orchestration series: a typed task graph and one scheduler, a deterministic
+rung on the verification ladder, and durable resume. One release for the whole
+series rather than a bump per step, since a bump on `main` publishes npm and
+rebuilds all three desktop installers.
 
 ### Changed
 - **Generated images and videos are no longer saved to your storage the moment
@@ -52,6 +53,45 @@ and rebuilds the desktop installers, which would ship a byte-identical release).
     not extra storage — saving still costs quota.
 
 ### Added
+- **An interrupted run no longer throws away the work it already finished.**
+  Resume state used to be a single in-memory field, set on exactly one path (the
+  budget cap), so the two interruptions people actually hit — a crash and Ctrl-C
+  — lost every completed section, and even a budget stop was lost the moment the
+  process exited. The work was on disk; the knowledge of what had been done was
+  not, so the next attempt re-planned and re-paid for all of it.
+
+  Checkpoints are now written durably for all four ways a run can stop: the
+  budget cap, cancellation, an unexpected error, and the provider circuit
+  breaker. `/continue` picks them up across a restart, and the resumed run is
+  told which sections are finished and what they produced, so the planner can
+  skip them instead of inferring from "do not recreate the files" that something
+  unspecified happened. Completed work is restored as fact; only the remainder
+  is re-planned, so a run that stalled because the plan was wrong can still
+  adapt.
+
+  Checkpoints hold your prompt and partial output, so they are pruned to the
+  five most recent and expire after seven days. Writes are atomic — a crash is
+  one of the triggers, so a half-written checkpoint had to be impossible rather
+  than unlikely — and a corrupt or unrecognised file is skipped rather than
+  breaking the ones beside it. Failing to save a checkpoint never escalates a
+  recoverable stop into a crash.
+
+
+- **Acceptance criteria are now checked mechanically before a model is asked.**
+  T1 specifies them as "checks a reviewer could verify mechanically (file exists
+  / contains X)" and the planner writes them that way, but every one of them was
+  graded solely by an LLM self-test — a worse judge of "does this file exist"
+  than `stat` is, and one that will pass a criterion because the output *claims*
+  the file was written. A new deterministic rung settles what can be settled by
+  looking, escalates immediately when a promised file genuinely is not there
+  (rather than paying for a grading call to be told so), and passes everything
+  ambiguous through to the model untouched. Criteria it cannot parse with
+  confidence — subjective wording, shell commands, negations, or several files
+  at once — are deliberately left undecided, because deferring is always safe
+  and deciding wrongly is not. Shell criteria are never executed: acceptance
+  text is LLM-authored, and running it would turn a plan into a command channel.
+
+
 - **`GET /api/pending-media`** — lists the generated media you haven't saved,
   with its size and expiry, so the UI can offer Save after a reload rather than
   relying on the socket event that announced it.
@@ -61,6 +101,61 @@ and rebuilds the desktop installers, which would ship a byte-identical release).
   button that flips to "Saved to your Cascade files". `file:created` now carries
   `pending: true` and `expiresAt` for unsaved media, so the client can tell a
   new saved file from something about to disappear.
+
+### Fixed
+- **Two different tasks could share a routing decision.** The task analyser
+  cached its profile under `prompt.slice(0, 200)`, and long shared preambles are
+  the norm rather than the exception — a repo header, a "you are working in X"
+  block, a pasted stack trace. The second task silently inherited the first's
+  profile, and that profile picks the tier and the model, so a trivial follow-up
+  could be routed as research-grade work or the reverse. The key is now a digest
+  of the whole prompt.
+- **An under-sized plan was detected and then silently accepted.** `validatePlan`
+  compared the section count against the complexity band inside an `if` with an
+  empty body, and never looked at the upper bound at all. It now reports the
+  mismatch instead of dropping it — and deliberately does NOT pad the plan to
+  reach the floor, which the original comment proposed doing by duplicating a
+  section: that bills the user twice for identical work and contradicts the
+  planner's own instruction to use the fewest sections that cover the task.
+- **A subtask's correction count was a boolean wearing a number's clothes.**
+  `correctionAttempts` was ASSIGNED `1` at each correction site instead of
+  incremented, so a worker that corrected for a missing artifact, then for
+  acceptance, then for a failed self-test reported exactly the same "1" as one
+  that corrected once. It is the only per-attempt signal downstream has for
+  judging whether a tier is struggling, and it could not distinguish one round
+  from three. It now counts.
+
+- **Repairing a circular plan could silently corrupt the order of a valid one.**
+  T1 (sections), T2 (subtasks) and the new orchestration compiler each detected
+  cycles the same wrong way: run a topological pass, then treat everything it
+  failed to reach as "the cycle". That set also contains every task DOWNSTREAM
+  of a cycle, because a downstream task's in-degree can never fall to zero while
+  its dependency is stuck. So breaking one cycle also cut the dependencies of
+  innocent later tasks, which then started in the first wave — before the work
+  they consume had produced anything. Nothing threw and nothing looked wrong:
+  the plan really was acyclic afterwards, just executed in the wrong order, and
+  the number of tasks affected grew with the length of the chain hanging off the
+  cycle. Cycle detection now uses strongly connected components, so only tasks
+  genuinely on a cycle are touched.
+
+### Changed
+- **One dependency scheduler instead of two.** T1's section dispatch now runs on
+  the same `compileTaskGraph` + `DependencyScheduler` pair as T2's subtasks,
+  replacing a hand-rolled Kahn implementation in each tier. Both are pinned by a
+  parity harness that asserts wave-for-wave identical output against the previous
+  algorithm across 600 generated graphs, so plan ordering is unchanged except for
+  the cycle case above. T2 keeps its own execution loop — it adds workers
+  mid-run, re-runs a wave after tool synthesis and short-circuits on the run
+  breaker, none of which a fixed-DAG scheduler can express — but its graph
+  building and cycle repair now come from the shared compiler.
+- **The planner is no longer told two different subtask counts.** T2's system
+  prompt asked for "2-5 subtasks" while the decomposition prompt it is paired
+  with asked for "1-4 … the FEWEST that fully cover it", and T1's plan prompt
+  said "2-5" against its own "use the FEWEST" rule. The model saw both, so its
+  floor was simultaneously one and two; the cheaper reading pads every small
+  section with a second worker that bills a real model call. All four now agree.
+
+
 ## 0.67.0 - 2026-08-03
 
 ### Fixed

@@ -28,6 +28,7 @@ import type { EscalationDecision } from '../../types.js';
 import { RedactionLayer } from '../audit/redaction.js';
 import { sectionNeedsDecision, settledEscalationStatus } from './escalation-policy.js';
 import { describeGenerationForPlanner } from '../multimodal/registry.js';
+import { compileSubtaskGraph } from '../orchestration/adapters.js';
 
 // Built per-run so the peer-coordination hint only appears when the
 // peer_message tool is actually registered. On a restricted host (e.g. cloud
@@ -43,7 +44,12 @@ export function buildT2SystemPrompt(has: (toolName: string) => boolean): string 
   const generation = describeGenerationForPlanner(has);
   return [
     'You are a T2 Manager agent in the Cascade AI system.',
-    'Your role is to analyze a section of a task and decompose it into 2-5 discrete subtasks for T3 Workers.',
+    // Must agree with the decomposition prompt in decomposeSection(), which is
+    // the one carrying the actual instruction. It said 1-4 and "the FEWEST that
+    // fully cover it"; this said 2-5. The model received both, so its floor was
+    // simultaneously one and two, and the cheaper reading — pad to two — costs a
+    // real worker call on every small section.
+    'Your role is to analyze a section of a task and decompose it into 1-4 discrete subtasks for T3 Workers — the fewest that fully cover it.',
     'If subtasks have dependencies, you can specify "executionMode": "sequential" for the section.',
     has('peer_message') && 'Provide "peerT3Ids" to subtasks so they can coordinate using the peer_message tool.',
     'Return ONLY valid JSON matching the T3 subtask array schema — no other text.',
@@ -603,6 +609,37 @@ Return ONLY the JSON array.`;
     taskId: string,
   ): Promise<T3Result[]> {
     // ── Build graph ────────────────────────────
+    //
+    // Validation and cycle repair are compileSubtaskGraph's job — the same
+    // compiler T1 uses for sections, so a plan is checked by one implementation
+    // instead of two that drifted. It replaces the local breakCycles(), which
+    // (like T1's copy) treated every node a topological pass could not reach as
+    // cyclic. That set also holds everything DOWNSTREAM of a cycle, whose
+    // in-degree can never reach zero while its dependency is stuck, so breaking
+    // one cycle also cut the dependencies of innocent later subtasks and ran
+    // them in the first wave — before the work they consume. The compiler uses
+    // strongly connected components, so only real cycle members are touched.
+    //
+    // Execution stays here rather than moving to DependencyScheduler: this loop
+    // adds nodes mid-run (T3→T2 reinforcements), re-runs a whole wave after tool
+    // synthesis (respawnBudget) and short-circuits on the run breaker. The
+    // scheduler executes a fixed DAG and cannot express any of those.
+    const compiled = compileSubtaskGraph(assignments);
+    for (const issue of compiled.issues) {
+      this.log(`⚠ Subtask graph: ${issue.message}`);
+    }
+    const sanitizedAssignments = compiled.graph.nodes.map((node) => {
+      const assignment = node.payload;
+      const original = assignment.dependsOn ?? [];
+      const repaired = node.dependsOn;
+      // Same object when nothing was dropped, a copy when it was. breakCycles
+      // had exactly this contract — it never mutated the caller's assignments —
+      // and the worker prompt reads dependsOn off whichever it gets.
+      const unchanged = repaired.length === original.length
+        && repaired.every((dependencyId, index) => dependencyId === original[index]);
+      return unchanged ? assignment : { ...assignment, dependsOn: [...repaired] };
+    });
+
     // adjacency: subtaskId → set of subtaskIds that depend on it
     const adj = new Map<string, Set<string>>();
     // inDegree: how many unresolved dependencies each task has
@@ -610,26 +647,16 @@ Return ONLY the JSON array.`;
     // resolved outputs
     const resultMap = new Map<string, T3Result>();
 
-    for (const a of assignments) {
+    for (const a of sanitizedAssignments) {
       if (!adj.has(a.subtaskId)) adj.set(a.subtaskId, new Set());
       inDegree.set(a.subtaskId, 0);
     }
-
-    for (const a of assignments) {
-      const deps = (a.dependsOn ?? []);
-      for (const dep of deps) {
+    for (const a of sanitizedAssignments) {
+      for (const dep of a.dependsOn ?? []) {
         adj.get(dep)!.add(a.subtaskId);
         inDegree.set(a.subtaskId, (inDegree.get(a.subtaskId) ?? 0) + 1);
       }
     }
-
-    // ── Cycle detection & breaking (Kahn's) ───
-    //
-    // After a full topological pass, any task still with inDegree > 0
-    // is part of a cycle. We break cycles by forcibly zeroing their inDegree
-    // and logging a warning so they can still execute (without that dependency).
-
-    const sanitizedAssignments = this.breakCycles(assignments, adj, inDegree);
 
     // ── Wave-based execution ───────────────────
     //
@@ -900,65 +927,6 @@ Return ONLY the JSON array.`;
     return [...resultMap.values()];
   }
 
-  /**
-   * Detects cyclic dependencies using Kahn's algorithm and breaks them
-   * by removing back-edges. Returns a sanitized copy of assignments.
-   *
-   * A cycle like t1→t2→t3→t1 is broken at the last edge (t3→t1),
-   * meaning t3 will start without waiting for t1, preventing deadlock.
-   */
-  private breakCycles(
-    assignments: T2ToT3Assignment[],
-    adj: Map<string, Set<string>>,
-    inDegree: Map<string, number>,
-  ): T2ToT3Assignment[] {
-    // Clone inDegree for simulation
-    const degree = new Map(inDegree);
-    const queue: string[] = [];
-    const visited = new Set<string>();
-
-    for (const [id, d] of degree) {
-      if (d === 0) queue.push(id);
-    }
-
-    while (queue.length > 0) {
-      const id = queue.shift()!;
-      visited.add(id);
-      for (const dep of adj.get(id) ?? []) {
-        const newDeg = (degree.get(dep) ?? 1) - 1;
-        degree.set(dep, newDeg);
-        if (newDeg === 0) queue.push(dep);
-      }
-    }
-
-    // Any node not visited is in a cycle
-    const cycleNodes = [...inDegree.keys()].filter((id) => !visited.has(id));
-
-    if (cycleNodes.length === 0) return assignments; // No cycles
-
-    this.log(
-      `⚠ Circular dependency detected among subtasks: [${cycleNodes.join(', ')}]. ` +
-      `Breaking cycles — affected tasks will run without their cyclic dependencies.`,
-    );
-
-    // Sanitize: remove dependsOn references that involve cycle nodes
-    return assignments.map((a) => {
-      if (!cycleNodes.includes(a.subtaskId)) return a;
-      const safeDeps = (a.dependsOn ?? []).filter((d) => !cycleNodes.includes(d));
-      if (safeDeps.length !== (a.dependsOn ?? []).length) {
-        this.log(
-          `  → Breaking cycle: removed ${(a.dependsOn ?? []).filter((d) => cycleNodes.includes(d)).join(', ')} ` +
-          `from "${a.subtaskTitle}" dependsOn`,
-        );
-        // Also decrement inDegree for the removed deps
-        for (const removed of (a.dependsOn ?? []).filter((d) => cycleNodes.includes(d))) {
-          inDegree.set(a.subtaskId, Math.max(0, (inDegree.get(a.subtaskId) ?? 1) - 1));
-          adj.get(removed)?.delete(a.subtaskId);
-        }
-      }
-      return { ...a, dependsOn: safeDeps };
-    });
-  }
 
 
   private async retryT3(assignment: T2ToT3Assignment, taskId: string): Promise<T3Result> {
