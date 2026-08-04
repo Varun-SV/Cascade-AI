@@ -873,6 +873,10 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
             } satisfies T2Result;
           }
         },
+        // PARTIAL is deliberately not a failure: a degraded-but-real section
+        // can still feed the one after it, and cancelling that work would cost
+        // the user more than letting it try.
+        classify: (_node, result) => (result.status === 'FAILED' ? 'failed' : 'succeeded'),
         onNodeComplete: (node, result) => {
           resultMap.set(node.id, result);
           completedSections++;
@@ -894,10 +898,33 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
         // serialized T3 workers within a single section while every section's
         // T2Manager (and its T3 workers) still ran in parallel here.
         mode: this.router.getT3ExecutionMode?.() === 'sequential' ? 'sequential' : 'parallel',
+        // A section that declared `dependsOn` said it needs that section's
+        // output. Running it after the dependency failed produces a second
+        // failure, billed, whose cause is the first one — so don't.
+        onUpstreamFailure: 'block',
       },
     );
 
-    await scheduler.run();
+    const run = await scheduler.run();
+
+    // Give every blocked section a real result, so review, compilation and the
+    // final report account for it instead of it vanishing from the plan.
+    for (const [nodeId, blockedInfo] of run.blocked) {
+      const section = sections.find((candidate) => candidate.sectionId === nodeId);
+      if (!section) continue;
+      this.log(`⤫ Skipped "${section.sectionTitle}" — ${blockedInfo.reason}`);
+      resultMap.set(nodeId, {
+        sectionId: section.sectionId,
+        sectionTitle: section.sectionTitle,
+        status: 'FAILED',
+        t3Results: [],
+        sectionSummary: '',
+        issues: [
+          `${blockedInfo.reason}. This section was not attempted, so no tokens were spent on it. `
+          + `Blocked by: ${blockedInfo.blockedBy.join(' <- ')}.`,
+        ],
+      } satisfies T2Result);
+    }
 
     return sections.map((s) => resultMap.get(s.sectionId)!).filter(Boolean);
   }

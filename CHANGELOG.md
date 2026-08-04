@@ -7,7 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+- **A section no longer runs after the section it depends on has failed.** The
+  scheduler only ever knew "the upstream promise resolved", which is a different
+  question from "the upstream worked" — and T1 deliberately catches worker
+  errors into an ordinary `FAILED` result so one dead section cannot crash the
+  run. That resolved value released the dependents anyway, so "run the
+  integration tests" would start after "implement the API" had failed outright,
+  fail in turn, and bill for the privilege.
+
+  Dependents of a failed node are now skipped, transitively, and reported with
+  the chain that blocked them, so a section two hops downstream explains its
+  real cause rather than blaming its immediate parent. `PARTIAL` deliberately
+  does not block: a degraded-but-real section can still feed the next one, and
+  cancelling that work would cost more than letting it try. Blocked sections get
+  a real result so review and compilation still account for them instead of them
+  vanishing from the plan — and no tokens are spent on them.
+
+  Failure awareness is opt-in per caller: a scheduler given no classifier
+  behaves exactly as before, so T2's subtask waves are unchanged.
+
 ### Fixed
+- **Two model selections never reached the rating snapshot.** `selectModel()`
+  had early returns for vision routing and for the no-candidates fallback that
+  skipped the recording step, so a vision-routed run had nothing to rate at all
+  and a fallback choice was silently missing from the feedback meant to teach
+  the router. Every exit records now.
+- **Rating a run twice counted it twice.** An explicit rating is weighted 3x by
+  recording three samples, so a double submit injected six — a stutter on the
+  button counted as two opinions. The snapshot is consumed, making the second
+  call a no-op that reports false.
+- **A failed resume could still lose the work it was recovering.** The claim was
+  settled unconditionally at the end of the run, but a resumed attempt that dies
+  on its first provider call completes no section and produces no output, so no
+  replacement checkpoint is written — and settling anyway deleted the original,
+  which still held the finished sections. The claim is now released instead of
+  settled unless the run succeeded or left its own checkpoint. `/continue` also
+  hands the claim straight back if the run never starts, rather than leaving it
+  unavailable for the full lease timeout.
+
+
 - **Rating a run did nothing.** The run finalizer called `recordRunOutcome()`,
   which cleared the only map of which models a run had selected — and an explicit
   thumbs-up/down necessarily arrives *after* the run finishes. So every rating

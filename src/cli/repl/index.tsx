@@ -774,7 +774,15 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         if (!prompt) {
           return 'Nothing to continue — no interrupted task was found for this workspace.';
         }
-        await handleSubmit(prompt);
+        try {
+          await handleSubmit(prompt);
+        } catch (err) {
+          // The claim was taken by prepareDurableResume but the run never
+          // started. Hand it straight back rather than leaving the checkpoint
+          // unavailable until the lease times out.
+          await cascade.releaseClaimedResume();
+          throw err;
+        }
         return '';
       },
     });

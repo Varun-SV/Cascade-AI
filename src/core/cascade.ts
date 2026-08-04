@@ -122,6 +122,8 @@ export class Cascade extends EventEmitter {
   private resumeStore?: ResumeStore;
   /** Claim held by an in-flight resume, settled once the run owns the work. */
   private claimedResumeId?: string;
+  /** Whether THIS run persisted a checkpoint of its own. Drives settle-vs-release. */
+  private wroteCheckpointThisRun = false;
   /** Section results of the CURRENT run, so an interruption can checkpoint them. */
   private currentRunCompleted: CompletedNode[] = [];
   private initPromise?: Promise<void>;
@@ -779,10 +781,10 @@ export class Cascade extends EventEmitter {
     partialOutput: string,
     reason: ResumeReason,
     detail?: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     // Nothing finished and nothing produced — a checkpoint would restore no work
     // and only leave the prompt sitting on disk for no benefit.
-    if (!this.currentRunCompleted.length && !partialOutput) return;
+    if (!this.currentRunCompleted.length && !partialOutput) return false;
     try {
       await this.resumeStore?.save({
         taskId,
@@ -792,7 +794,11 @@ export class Cascade extends EventEmitter {
         partialOutput,
         completed: [...this.currentRunCompleted],
       });
-    } catch { /* never let checkpointing worsen an already-failing run */ }
+      this.wroteCheckpointThisRun = true;
+      return true;
+    } catch {
+      return false; /* never let checkpointing worsen an already-failing run */
+    }
   }
 
   /** True when a task can be resumed via /continue (this process or a previous one). */
@@ -867,11 +873,36 @@ export class Cascade extends EventEmitter {
    * the work (it has produced its own checkpoint, or finished). Called by the
    * run loop; safe to call when nothing is claimed.
    */
-  private async settleClaimedResume(): Promise<void> {
+  private async settleClaimedResume(succeeded: boolean): Promise<void> {
     const claimId = this.claimedResumeId;
     if (!claimId) return;
     this.claimedResumeId = undefined;
-    await this.resumeStore?.settle(claimId);
+
+    // Settling unconditionally recreated a narrower form of the bug the lease
+    // was introduced to fix. A resumed attempt that dies on its FIRST provider
+    // call completes no section and produces no output, so checkpointRun()
+    // correctly declines to save — and settling anyway deleted the original,
+    // which still held two finished sections. There was then nothing left to
+    // continue. Only discard the claim when the work it protects is genuinely
+    // safe: the run finished, or it left a replacement checkpoint behind.
+    if (succeeded || this.wroteCheckpointThisRun) {
+      await this.resumeStore?.settle(claimId);
+    } else {
+      await this.resumeStore?.release(claimId);
+    }
+  }
+
+  /**
+   * Hand back a claim taken by prepareDurableResume() when the caller never
+   * gets as far as run(). The REPL prepares the continuation and submits it
+   * separately, so a failure in between would otherwise strand the checkpoint
+   * for the whole lease timeout before reclaimStale() could recover it.
+   */
+  async releaseClaimedResume(): Promise<void> {
+    const claimId = this.claimedResumeId;
+    if (!claimId) return;
+    this.claimedResumeId = undefined;
+    await this.resumeStore?.release(claimId);
   }
 
   /** A resume gets a bigger budget — the previous attempt exhausted the old one. */
@@ -1415,6 +1446,7 @@ ${prompt}`
     // Sections finished by THIS run. Reset per run so a checkpoint can never
     // restore work from an earlier, unrelated task.
     this.currentRunCompleted = [];
+    this.wroteCheckpointThisRun = false;
 
     // "Fast answer": a single mid-tier model, no orchestration, no tools, no
     // verification — the quickest, cheapest path for simple asks.
@@ -1859,7 +1891,7 @@ ${prompt}`
 
       // The resumed run has now either checkpointed its own progress or finished,
       // so the claim it was resuming from is safe to discard.
-      try { await this.settleClaimedResume(); } catch { /* non-critical */ }
+      try { await this.settleClaimedResume(runError == null); } catch { /* non-critical */ }
 
       // Same for section escalations. A run that ended while one was parked
       // (error, abort, budget kill) must not leave a live timer and an

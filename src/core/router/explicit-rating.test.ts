@@ -43,6 +43,63 @@ describe('explicit ratings after a completed run', () => {
     expect(tracker.explicit).toEqual([{ modelId: 'model-a', rating: 'good' }]);
   });
 
+  it('records a vision-routed selection — every exit must reach the snapshot', async () => {
+    // selectModel() had two early returns that never wrote to the selections
+    // map, so a vision run had nothing to rate at all and a fallback selection
+    // was silently missing from the feedback meant to teach the router.
+    const tracker = makeTracker();
+    const analyzer = new TaskAnalyzer(tracker as never);
+    const vision = { id: 'vision-model', provider: 'openai', contextWindow: 8000, tags: [] };
+    const selector = {
+      selectForTier: () => vision,
+      selectVisionModel: () => vision,
+      getCandidatesForTier: () => [vision],
+    } as never;
+
+    await analyzer.selectModel('Describe this screenshot image in detail', 'T3', selector);
+    analyzer.recordRunOutcome('success', { T3: 0 });
+
+    expect(analyzer.recordExplicitRating('good')).toBe(true);
+    expect(tracker.explicit).toEqual([{ modelId: 'vision-model', rating: 'good' }]);
+  });
+
+  it('records a fallback selection when the tier has no candidates', async () => {
+    const tracker = makeTracker();
+    const analyzer = new TaskAnalyzer(tracker as never);
+    const fallback = { id: 'fallback-model', provider: 'openai', contextWindow: 8000, tags: [] };
+    const selector = {
+      selectForTier: () => fallback,
+      selectVisionModel: () => fallback,
+      getCandidatesForTier: () => [],   // nothing eligible for this tier
+    } as never;
+
+    await analyzer.selectModel('Refactor the auth module', 'T3', selector);
+    analyzer.recordRunOutcome('success', { T3: 0 });
+
+    expect(analyzer.recordExplicitRating('good')).toBe(true);
+    expect(tracker.explicit).toEqual([{ modelId: 'fallback-model', rating: 'good' }]);
+  });
+
+  it('counts a run once, however many times the button is pressed', async () => {
+    // recordExplicit() weights a rating 3x by recording three samples, so a
+    // double submit injected six — a stutter would count as two opinions.
+    const tracker = makeTracker();
+    const analyzer = new TaskAnalyzer(tracker as never);
+    const model = { id: 'model-a', provider: 'openai', contextWindow: 8000, tags: [] };
+    const selector = {
+      selectForTier: () => model,
+      selectVisionModel: () => model,
+      getCandidatesForTier: () => [model],
+    } as never;
+    await analyzer.selectModel('Refactor the auth module', 'T3', selector);
+    analyzer.recordRunOutcome('success', { T3: 0 });
+
+    expect(analyzer.recordExplicitRating('good')).toBe(true);
+    expect(analyzer.recordExplicitRating('good')).toBe(false);
+    expect(analyzer.recordExplicitRating('bad')).toBe(false);
+    expect(tracker.explicit).toHaveLength(1);
+  });
+
   it('reports false when there is genuinely no completed run to rate', () => {
     const tracker = makeTracker();
     const analyzer = new TaskAnalyzer(tracker as never);

@@ -229,13 +229,22 @@ export class TaskAnalyzer {
   ): Promise<ModelInfo | null> {
     const profile = await this.analyze(prompt);
 
+    // EVERY exit from this method must record, or the run is only partially
+    // represented in the rating snapshot: a vision-routed run had nothing to
+    // rate at all, and a fallback selection was silently omitted from the
+    // feedback that is supposed to teach the router which models work.
+    const recordSelection = (model: ModelInfo | null): ModelInfo | null => {
+      if (model) this.currentRunSelections.set(tier, model);
+      return model;
+    };
+
     // Vision tasks: always route to a vision-capable model
     if (profile.requiresVision) {
-      return selector.selectVisionModel();
+      return recordSelection(selector.selectVisionModel());
     }
 
     let candidates = selector.getCandidatesForTier(tier);
-    if (candidates.length === 0) return selector.selectForTier(tier);
+    if (candidates.length === 0) return recordSelection(selector.selectForTier(tier));
 
     // Tool-heavy subtasks prefer models with NATIVE tool support — the text
     // fallback works but is slower and flakier. Soft gate: if every candidate
@@ -251,9 +260,7 @@ export class TaskAnalyzer {
     }));
     scored.sort((a, b) => b.score - a.score);
 
-    const best = scored[0]?.model ?? selector.selectForTier(tier);
-    if (best) this.currentRunSelections.set(tier, best);
-    return best;
+    return recordSelection(scored[0]?.model ?? selector.selectForTier(tier));
   }
 
   /**
@@ -280,16 +287,22 @@ export class TaskAnalyzer {
    *
    * Reads the completed-run snapshot, not the in-flight map: by the time a user
    * can rate an answer, the finalizer has already run and the in-flight map is
-   * empty. The snapshot is left in place so rating twice is idempotent rather
-   * than silently becoming a no-op.
+   * empty.
+   *
+   * The snapshot is CONSUMED. recordExplicit() weights a rating 3x by recording
+   * three samples, so a double submit would inject six — a stutter on the
+   * button would count as two opinions. Consuming makes a second call a no-op
+   * that reports false, which is what "rate this run" should mean.
    */
   recordExplicitRating(rating: 'good' | 'bad'): boolean {
     if (!this.tracker || !this.lastProfile) return false;
+    if (this.lastCompletedRunSelections.size === 0) return false;
     const taskType = this.lastProfile.type;
     for (const [, model] of this.lastCompletedRunSelections) {
       this.tracker.recordExplicit(model.id, taskType, rating, 0);
     }
-    return this.lastCompletedRunSelections.size > 0;
+    this.lastCompletedRunSelections.clear();
+    return true;
   }
 
   private scoreModel(model: ModelInfo, profile: TaskProfile): number {
