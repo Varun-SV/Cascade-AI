@@ -227,7 +227,10 @@ describe('save() reports whether the checkpoint actually landed', () => {
   it('still reports success when only pruning fails', async () => {
     // Pruning is maintenance. Reporting failure for it would make a caller
     // release a claim whose replacement is genuinely on disk.
-    const store = new ResumeStore({ dir, maxCheckpoints: 1 });
+    // Distinct timestamps: filenames carry the clock, so two saves inside one
+    // millisecond leave prune with no defined order to keep.
+    let clock = 1_000_000;
+    const store = new ResumeStore({ dir, maxCheckpoints: 1, now: () => (clock += 1000) });
     expect(await store.save(checkpoint('run-1'))).toBe(true);
     expect(await store.save(checkpoint('run-2'))).toBe(true);
     expect((await store.list()).map((c) => c.taskId)).toEqual(['run-2']);

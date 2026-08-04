@@ -126,7 +126,7 @@ export class Cascade extends EventEmitter {
    * Facts inherited from the checkpoint this run is resuming, so its own
    * checkpoint is cumulative rather than only covering this attempt.
    */
-  private resumedFrom?: { prompt: string; completed: CompletedNode[] };
+  private resumedFrom?: { prompt: string; completed: CompletedNode[]; partialOutput: string };
   /** Whether THIS run persisted a checkpoint of its own. Drives settle-vs-release. */
   private wroteCheckpointThisRun = false;
   /**
@@ -813,16 +813,25 @@ export class Cascade extends EventEmitter {
     // previous continuation inside a longer one until the task is unreadable.
     const canonicalPrompt = this.resumedFrom?.prompt ?? prompt;
 
+    // Inherited partial output survives an attempt that produced none of its
+    // own. Otherwise: attempt 1 writes a useful draft, attempt 2 dies before
+    // producing anything, the inherited completed nodes still make this save,
+    // and the replacement is written with an EMPTY partialOutput — then the
+    // original is settled and the draft is gone, despite having been explicitly
+    // part of the recoverable checkpoint. A newer draft supersedes; nothing
+    // never does.
+    const carriedPartial = partialOutput || (this.resumedFrom?.partialOutput ?? '');
+
     // Nothing finished and nothing produced — a checkpoint would restore no work
     // and only leave the prompt sitting on disk for no benefit.
-    if (!completed.length && !partialOutput) return false;
+    if (!completed.length && !carriedPartial) return false;
     try {
       const saved = await this.resumeStore?.save({
         taskId,
         prompt: canonicalPrompt,
         reason,
         ...(detail ? { detail } : {}),
-        partialOutput,
+        partialOutput: carriedPartial,
         completed,
       });
       // save() swallows filesystem errors by design, so `await` resolving is not
@@ -898,6 +907,7 @@ export class Cascade extends EventEmitter {
       this.resumedFrom = {
         prompt: claimed.checkpoint.prompt,
         completed: claimed.checkpoint.completed,
+        partialOutput: claimed.checkpoint.partialOutput,
       };
       // Only now is the continuation safely in the caller's hands. Settling
       // earlier — as consume() did — meant a crash between reading and running
