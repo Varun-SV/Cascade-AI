@@ -877,6 +877,48 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
         // can still feed the one after it, and cancelling that work would cost
         // the user more than letting it try.
         classify: (_node, result) => (result.status === 'FAILED' ? 'failed' : 'succeeded'),
+        onNodeBlocked: (node, blockedInfo) => {
+          // Synthesizing these AFTER scheduler.run() bypassed this lifecycle
+          // entirely: blocked sections never advanced progress and their tier
+          // never reached a terminal status, so the Cockpit showed them as
+          // pending forever even though the final result accounted for them.
+          const section = node.payload;
+          this.log(`⤫ Skipped "${section.sectionTitle}" — ${blockedInfo.reason}`);
+
+          resultMap.set(node.id, {
+            sectionId: section.sectionId,
+            sectionTitle: section.sectionTitle,
+            status: 'FAILED',
+            t3Results: [],
+            sectionSummary: '',
+            issues: [
+              `${blockedInfo.reason}. This section was not attempted, so no tokens were spent on it. `
+              + `Blocked by: ${blockedInfo.blockedBy.join(', ')}.`,
+            ],
+          } satisfies T2Result);
+
+          // A blocked section is finished as far as the run is concerned — it
+          // counts toward progress, so the bar reaches 100% rather than stalling.
+          completedSections++;
+          this.sendStatusUpdate({
+            progressPct: 10 + Math.floor((completedSections / totalSections) * 85),
+            currentAction: `Skipped: ${section.sectionTitle} (blocked by an upstream failure)`,
+            status: 'IN_PROGRESS',
+          });
+          // Terminal status for the node, without ever constructing its manager
+          // or spending a token on it.
+          this.emit('tier:status', {
+            tierId: section.sectionId,
+            role: 'T2',
+            status: 'FAILED',
+          });
+          this.emit('section:complete', {
+            id: node.id,
+            title: section.sectionTitle,
+            status: 'FAILED',
+            output: '',
+          });
+        },
         onNodeComplete: (node, result) => {
           resultMap.set(node.id, result);
           completedSections++;
@@ -905,26 +947,10 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
       },
     );
 
-    const run = await scheduler.run();
-
-    // Give every blocked section a real result, so review, compilation and the
-    // final report account for it instead of it vanishing from the plan.
-    for (const [nodeId, blockedInfo] of run.blocked) {
-      const section = sections.find((candidate) => candidate.sectionId === nodeId);
-      if (!section) continue;
-      this.log(`⤫ Skipped "${section.sectionTitle}" — ${blockedInfo.reason}`);
-      resultMap.set(nodeId, {
-        sectionId: section.sectionId,
-        sectionTitle: section.sectionTitle,
-        status: 'FAILED',
-        t3Results: [],
-        sectionSummary: '',
-        issues: [
-          `${blockedInfo.reason}. This section was not attempted, so no tokens were spent on it. `
-          + `Blocked by: ${blockedInfo.blockedBy.join(' <- ')}.`,
-        ],
-      } satisfies T2Result);
-    }
+    // Blocked sections are recorded by the onNodeBlocked hook as the run
+    // proceeds, so they share the progress and tier-status lifecycle of the
+    // sections that actually executed.
+    await scheduler.run();
 
     return sections.map((s) => resultMap.get(s.sectionId)!).filter(Boolean);
   }

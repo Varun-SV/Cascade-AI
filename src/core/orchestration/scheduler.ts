@@ -75,7 +75,6 @@ export class DependencyScheduler<TPayload, TResult> {
 
   async run(): Promise<SchedulerResult<TResult>> {
     const nodes = [...this.graph.nodes].sort((a, b) => a.ordinal - b.ordinal);
-    const byId = new Map(nodes.map((node) => [node.id, node] as const));
     const inDegree = new Map(nodes.map((node) => [node.id, node.dependsOn.length] as const));
     const dependents = new Map<string, string[]>();
     for (const node of nodes) dependents.set(node.id, []);
@@ -93,29 +92,59 @@ export class DependencyScheduler<TPayload, TResult> {
     let wave = 0;
 
     /**
-     * Mark every descendant of a failed node as blocked. Walks the whole
-     * subtree: a node two hops downstream is just as unable to do its job as
-     * its immediate parent, and releasing it would only produce a second
-     * failure to explain.
+     * Mark every descendant of the wave's failed nodes as blocked.
+     *
+     * Takes ALL the wave's failures at once, in ordinal order, rather than one
+     * at a time. Two failed siblings that converge on the same join node used to
+     * race: whichever provider happened to return first became that node's sole
+     * blockedBy, so the recorded cause changed with network latency. Here the
+     * roots are collected first and every failed ancestor of a node is recorded,
+     * so the answer is the same on every run.
+     *
+     * Walks the whole subtree, not just direct children: a node two hops
+     * downstream is just as unable to do its job, and releasing it would only
+     * produce a second failure whose cause is the first.
      */
-    const blockDescendants = async (failedId: string, reason: string) => {
-      const queue: Array<{ id: string; chain: string[] }> = (dependents.get(failedId) ?? [])
-        .map((id) => ({ id, chain: [failedId] }));
+    const blockDescendants = async (failedIds: readonly string[]) => {
+      // rootsFor[nodeId] = every failed root this node descends from.
+      const rootsFor = new Map<string, Set<string>>();
+      const queue: Array<{ id: string; root: string }> = [];
+      for (const rootId of failedIds) {
+        for (const childId of dependents.get(rootId) ?? []) queue.push({ id: childId, root: rootId });
+      }
 
       while (queue.length > 0) {
-        const { id, chain } = queue.shift()!;
-        if (settled.has(id) || blocked.has(id)) continue;
+        const { id, root } = queue.shift()!;
+        if (settled.has(id)) continue;
 
-        const record: BlockedNode = { blockedBy: chain, reason };
-        blocked.set(id, record);
-        settled.add(id);
-
-        const node = byId.get(id);
-        if (node) await this.hooks.onNodeBlocked?.(node, record);
-
-        for (const childId of dependents.get(id) ?? []) {
-          queue.push({ id: childId, chain: [id, ...chain] });
+        const known = rootsFor.get(id);
+        if (known) {
+          // Already reached from another root: record this one too, but don't
+          // re-walk the subtree we have already covered from here.
+          if (!known.has(root)) known.add(root);
+          continue;
         }
+        rootsFor.set(id, new Set([root]));
+        for (const childId of dependents.get(id) ?? []) queue.push({ id: childId, root });
+      }
+
+      // Emit in ordinal order so the hook fires deterministically too.
+      for (const node of nodes) {
+        const roots = rootsFor.get(node.id);
+        if (!roots || settled.has(node.id)) continue;
+
+        // Ordinal order again, so a join node blocked by two parents always
+        // names them the same way round.
+        const blockedBy = nodes.filter((n) => roots.has(n.id)).map((n) => n.id);
+        const record: BlockedNode = {
+          blockedBy,
+          reason: blockedBy.length === 1
+            ? `Required upstream node "${blockedBy[0]}" failed`
+            : `Required upstream nodes ${blockedBy.map((id) => `"${id}"`).join(', ')} failed`,
+        };
+        blocked.set(node.id, record);
+        settled.add(node.id);
+        await this.hooks.onNodeBlocked?.(node, record);
       }
     };
 
@@ -128,11 +157,11 @@ export class DependencyScheduler<TPayload, TResult> {
       waves.push(ready.map((node) => node.id));
       await this.hooks.onWaveStart?.(ready, wave);
 
-      // Failures are collected and applied AFTER the wave finishes. Blocking
-      // mid-wave would depend on which sibling happened to resolve first, and a
-      // scheduler whose output changes with provider latency is not one anyone
-      // can reason about.
-      const failures: Array<{ id: string; title: string }> = [];
+      // Outcomes are recorded BY ID and read back in ordinal order after the
+      // wave. Pushing into a list as each worker resolves would order them by
+      // provider latency, which is exactly the non-determinism this is meant to
+      // remove — the ordering has to come from the graph, not the network.
+      const outcomes = new Map<string, NodeOutcome>();
 
       const runOne = async (node: TaskGraphNode<TPayload>) => {
         const result = await this.hooks.execute(node);
@@ -140,8 +169,9 @@ export class DependencyScheduler<TPayload, TResult> {
         settled.add(node.id);
 
         const outcome = this.hooks.classify?.(node, result) ?? 'succeeded';
+        outcomes.set(node.id, outcome);
         if (outcome === 'failed' && policy === 'block') {
-          failures.push({ id: node.id, title: node.id });
+          // Dependents stay locked; blocking happens below, in graph order.
         } else {
           // Succeeded, partial, or policy says carry on: release the dependents.
           for (const dependentId of dependents.get(node.id) ?? []) {
@@ -157,8 +187,12 @@ export class DependencyScheduler<TPayload, TResult> {
         await Promise.all(ready.map(runOne));
       }
 
-      for (const failure of failures) {
-        await blockDescendants(failure.id, `Required upstream node "${failure.title}" failed`);
+      // `ready` is already ordinal-sorted, so this list is deterministic.
+      const failedThisWave = ready
+        .filter((node) => outcomes.get(node.id) === 'failed')
+        .map((node) => node.id);
+      if (policy === 'block' && failedThisWave.length > 0) {
+        await blockDescendants(failedThisWave);
       }
 
       wave++;

@@ -122,6 +122,11 @@ export class Cascade extends EventEmitter {
   private resumeStore?: ResumeStore;
   /** Claim held by an in-flight resume, settled once the run owns the work. */
   private claimedResumeId?: string;
+  /**
+   * Facts inherited from the checkpoint this run is resuming, so its own
+   * checkpoint is cumulative rather than only covering this attempt.
+   */
+  private resumedFrom?: { prompt: string; completed: CompletedNode[] };
   /** Whether THIS run persisted a checkpoint of its own. Drives settle-vs-release. */
   private wroteCheckpointThisRun = false;
   /**
@@ -792,17 +797,33 @@ export class Cascade extends EventEmitter {
     reason: ResumeReason,
     detail?: string,
   ): Promise<boolean> {
+    // A resumed run's checkpoint must be CUMULATIVE. Saving only this attempt's
+    // sections and then settling the claim discarded everything the earlier
+    // attempts had already finished, so a third attempt re-did — and re-paid
+    // for — work two runs had completed. Sections are keyed by id so a node
+    // re-run in this attempt supersedes its inherited copy rather than
+    // appearing twice.
+    const inherited = this.resumedFrom?.completed ?? [];
+    const merged = new Map<string, CompletedNode>();
+    for (const node of inherited) merged.set(node.id, node);
+    for (const node of this.currentRunCompleted) merged.set(node.id, node);
+    const completed = [...merged.values()];
+
+    // The ORIGINAL prompt travels forward, so each resume does not nest the
+    // previous continuation inside a longer one until the task is unreadable.
+    const canonicalPrompt = this.resumedFrom?.prompt ?? prompt;
+
     // Nothing finished and nothing produced — a checkpoint would restore no work
     // and only leave the prompt sitting on disk for no benefit.
-    if (!this.currentRunCompleted.length && !partialOutput) return false;
+    if (!completed.length && !partialOutput) return false;
     try {
       const saved = await this.resumeStore?.save({
         taskId,
-        prompt,
+        prompt: canonicalPrompt,
         reason,
         ...(detail ? { detail } : {}),
         partialOutput,
-        completed: [...this.currentRunCompleted],
+        completed,
       });
       // save() swallows filesystem errors by design, so `await` resolving is not
       // evidence anything was written. Trusting it marked a checkpoint present
@@ -867,6 +888,17 @@ export class Cascade extends EventEmitter {
       const prompt = this.buildResumePrompt(
         claimed.checkpoint.prompt, claimed.checkpoint.partialOutput, claimed.checkpoint.completed,
       );
+      // Carry the claim's facts forward so the NEXT checkpoint is cumulative.
+      // Without this, a resumed attempt that finishes one new section and is
+      // interrupted again writes a checkpoint containing only that one section:
+      // settling the claim then discards the original graph facts, and the
+      // third attempt re-does work that two earlier runs already paid for. The
+      // original prompt travels too, so it stays canonical instead of each
+      // resume nesting the last continuation inside a longer one.
+      this.resumedFrom = {
+        prompt: claimed.checkpoint.prompt,
+        completed: claimed.checkpoint.completed,
+      };
       // Only now is the continuation safely in the caller's hands. Settling
       // earlier — as consume() did — meant a crash between reading and running
       // destroyed the one record of the work, in the mechanism whose whole
@@ -1470,6 +1502,9 @@ ${prompt}`
     this.currentRunCompleted = [];
     this.wroteCheckpointThisRun = false;
     this.completedNormally = false;
+    // Cleared only when a run starts WITHOUT resuming; prepareDurableResume
+    // sets it just before the resumed run begins, so it must survive that reset.
+    if (!this.claimedResumeId) this.resumedFrom = undefined;
 
     // "Fast answer": a single mid-tier model, no orchestration, no tools, no
     // verification — the quickest, cheapest path for simple asks.
@@ -1862,10 +1897,12 @@ ${prompt}`
         finalOutput ? `\n---\n\n${finalOutput}` : '',
       ].join('\n').trimEnd();
     }
-    // Reaching the end of the normal path IS the definition of success here.
-    // Set it last, so a breaker trip or any earlier degradation that skipped
-    // ahead cannot leave it true.
-    this.completedNormally = true;
+    // Reaching here means the run produced its result the ordinary way — UNLESS
+    // the breaker tripped, which falls through this same path with a warning
+    // stitched onto the output. A breaker trip on the first operation completes
+    // no section and writes no replacement checkpoint, so calling it "normal
+    // completion" deleted the claim it should have preserved.
+    this.completedNormally = trip == null;
     } catch (err) {
       // ── Graceful cancellation handling ──────────────────────────────
       // When aborted, don't re-throw — resolve with what we have so far. This

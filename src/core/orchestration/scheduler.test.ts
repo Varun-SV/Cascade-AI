@@ -97,8 +97,10 @@ describe('failure-aware dependency contracts', () => {
     );
 
     const result = await scheduler.run();
-    // c is two hops from the failure and must say so, not just "b".
-    expect(result.blocked.get('c')?.blockedBy).toEqual(['b', 'a']);
+    // c is two hops from the failure; it names the failed ROOT, which is the
+    // thing that actually has to be fixed, not the intermediate that was itself
+    // only blocked.
+    expect(result.blocked.get('c')?.blockedBy).toEqual(['a']);
     expect(result.blocked.get('c')?.reason).toContain('failed');
   });
 
@@ -163,5 +165,50 @@ describe('failure-aware dependency contracts', () => {
     const result = await scheduler.run();
     expect(ran.sort()).toEqual(['a', 'b', 'c', 'd']);
     expect(result.blocked.size).toBe(0);
+  });
+});
+
+describe('blocking is deterministic under provider latency', () => {
+  /** Two independent parents, both failing, converging on one join node. */
+  const join = (): TaskGraph<string> => ({
+    nodes: [
+      { id: 'p1', ordinal: 0, dependsOn: [], payload: 'p1', kind: 'section' },
+      { id: 'p2', ordinal: 1, dependsOn: [], payload: 'p2', kind: 'section' },
+      { id: 'join', ordinal: 2, dependsOn: ['p1', 'p2'], payload: 'join', kind: 'section' },
+    ],
+  } as TaskGraph<string>);
+
+  const runWithDelays = async (d1: number, d2: number) => {
+    const scheduler = new DependencyScheduler<string, string>(
+      join(),
+      {
+        execute: async (node) => {
+          const delay = node.id === 'p1' ? d1 : node.id === 'p2' ? d2 : 0;
+          await new Promise((r) => setTimeout(r, delay));
+          return 'FAILED';
+        },
+        classify: () => 'failed',
+      },
+      { onUpstreamFailure: 'block' },
+    );
+    return scheduler.run();
+  };
+
+  it('names the same causes whichever parent returns first', async () => {
+    // Previously the first provider to return became the join node's SOLE
+    // blockedBy, so inverting the delays changed the recorded cause. A
+    // scheduler whose output depends on network timing cannot be reasoned about.
+    const a = await runWithDelays(0, 30);
+    const b = await runWithDelays(30, 0);
+
+    expect(a.blocked.get('join')?.blockedBy).toEqual(['p1', 'p2']);
+    expect(b.blocked.get('join')?.blockedBy).toEqual(['p1', 'p2']);
+    expect(a.blocked.get('join')?.reason).toBe(b.blocked.get('join')?.reason);
+  });
+
+  it('reports every failed parent, not just the one that lost the race', async () => {
+    const result = await runWithDelays(5, 5);
+    expect(result.blocked.get('join')?.reason).toContain('"p1"');
+    expect(result.blocked.get('join')?.reason).toContain('"p2"');
   });
 });

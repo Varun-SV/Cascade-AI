@@ -28,6 +28,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behaves exactly as before, so T2's subtask waves are unchanged.
 
 ### Fixed
+- **A breaker trip counted as a successful run.** The circuit-breaker path
+  degrades rather than throwing, so it fell through to the same "reached the end
+  normally" assignment as a clean finish. A breaker opening on the first
+  operation completes no section and writes no replacement checkpoint, yet still
+  deleted the claim it should have preserved.
+- **A resumed run's checkpoint dropped everything it had inherited.** It saved
+  only the sections THIS attempt finished, so a resume that completed one more
+  section and was interrupted again settled the claim and discarded the earlier
+  attempts' work — the third try re-did, and re-paid for, what two runs had
+  already produced. Checkpoints are cumulative now, keyed by node id so a re-run
+  section supersedes its inherited copy, and the original prompt travels forward
+  rather than each resume nesting the last continuation inside a longer one.
+- **Blocking was still ordered by provider latency.** Applying failures after
+  the wave was not enough: parallel workers recorded them in completion order,
+  so for two failed siblings converging on one node, whichever provider returned
+  first became that node's sole recorded cause. Outcomes are now collected by id
+  and processed in graph order, and a node blocked by several failures names all
+  of them.
+- **Blocked sections never reached a terminal state in the UI.** They were
+  synthesized after the scheduler finished, bypassing the progress and
+  tier-status lifecycle, so the Cockpit left them looking pending even though
+  the final result accounted for them. They now go through the same hook as
+  executed sections — advancing progress and emitting a terminal status —
+  without constructing a manager or spending a token.
 - **A rating could be credited to the wrong kind of work.** The model selections
   were snapshotted at run completion but the task type was not — it was read
   from `lastProfile` at rating time, which the next run has very likely already
