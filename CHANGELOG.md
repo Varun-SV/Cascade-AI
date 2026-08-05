@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Changed
+- **The landing page now cascades instead of just saying it does.** The old page
+  described three tiers in a row of three equal, centred cards — the layout of
+  any SaaS page with the word applied on top. Everything below the hero now hangs
+  off a spine that runs down the page: the accent walks azure → sky → teal with
+  the tiers, nodes light as each section arrives, and the tier cards step
+  progressively rightward so the structure of the product is the structure of the
+  page. On narrow screens the step collapses to a coloured left border, which
+  keeps the hierarchy without the horizontal room.
+- **The hero shows a run rather than asserting a number.** A compact diagram
+  plays once: a prompt becomes a plan, fans out to three workers on different
+  models, and lands with its real cost and saving. It freezes on the finished
+  state — a permanently looping animation competes with the copy forever.
+- **Added the three things other orchestrators hide.** Blocked work (skipped
+  because an upstream failed, naming the cause and costing nothing), resume
+  (finished sections that survive an interruption), and the routing rationale.
+  These are the product's actual differentiators and the site mentioned none of
+  them; it sold a graph, a timeline and logs, which every agent framework has.
+- **`/docs` and the landing page are one design again.** Both hang their content
+  off the same tier-coloured spine, and the docs page picked up the phone
+  breakpoints it was missing. The two surfaces carry separate copies of the
+  colour ramp — the docs page is self-contained inline CSS on purpose and cannot
+  import from the web app — so a test now reads both and fails if they ever
+  disagree.
+- All new motion respects `prefers-reduced-motion`: the spine renders complete
+  and static, the run diagram starts finished, and section reveals are skipped
+  entirely rather than left waiting on an animation that never plays.
+
 ### Added
 - **A section no longer runs after the section it depends on has failed.** The
   scheduler only ever knew "the upstream promise resolved", which is a different

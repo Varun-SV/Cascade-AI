@@ -151,14 +151,41 @@ export function renderDocsPage(): string {
   .wrap{max-width:1080px;margin:0 auto;display:grid;grid-template-columns:220px 1fr;gap:40px;padding:28px 24px 80px}
   nav{position:sticky;top:74px;align-self:start;display:flex;flex-direction:column;gap:2px;font-size:.92rem}
   nav a{color:var(--muted);padding:6px 10px;border-radius:7px;border-left:2px solid transparent}
-  nav a:hover{color:var(--ink);background:var(--panel);text-decoration:none}
-  main{min-width:0}
-  section{padding:8px 0 26px;border-bottom:1px solid var(--line)}
+  nav a:hover{color:var(--ink);background:var(--panel);text-decoration:none;border-left-color:currentColor}
+  /* Nav entries pick up the tier ramp, so the docs read in the same colour
+     language as the landing page's spine. */
+  nav a:nth-child(3n+1){border-left-color:rgba(76,141,255,.35)}
+  nav a:nth-child(3n+2){border-left-color:rgba(56,176,222,.35)}
+  nav a:nth-child(3n+3){border-left-color:rgba(45,212,191,.35)}
+
+  /* The spine. Same device as the landing page: one line running down the
+     content with a tier-coloured node per section, so both public surfaces
+     descend the same way instead of looking like two different sites. */
+  main{min-width:0;position:relative;padding-left:26px}
+  main::before{content:"";position:absolute;left:0;top:6px;bottom:0;width:1px;
+    background:linear-gradient(to bottom,var(--azure),var(--sky),var(--teal));opacity:.5}
+  section{padding:8px 0 26px;border-bottom:1px solid var(--line);position:relative}
+  section::before{content:"";position:absolute;left:-30px;top:16px;width:9px;height:9px;
+    border-radius:50%;background:var(--sky);box-shadow:0 0 0 3px var(--bg)}
+  section:nth-child(3n+1)::before{background:var(--azure)}
+  section:nth-child(3n+3)::before{background:var(--teal)}
   section:last-child{border-bottom:0}
   section h2{font-size:1.4rem;margin:0 0 10px;letter-spacing:-.01em}
   section p{margin:0 0 12px} ul,ol{margin:0 0 12px;padding-left:22px} li{margin:4px 0}
   footer{border-top:1px solid var(--line);color:var(--muted);font-size:.86rem;text-align:center;padding:26px 24px}
-  @media(max-width:760px){.wrap{grid-template-columns:1fr;gap:8px}nav{position:static;flex-flow:row wrap}}
+
+  @media(max-width:760px){
+    .wrap{grid-template-columns:1fr;gap:8px;padding:20px 18px 60px}
+    nav{position:static;flex-flow:row wrap}
+    .hero{padding:36px 18px 4px}
+    .hero h1{font-size:1.7rem}
+    .bar{padding:12px 18px}
+    /* The full spine costs horizontal room a phone doesn't have; the section
+       nodes carry the same idea in less of it. */
+    main{padding-left:18px}
+    section::before{left:-22px}
+  }
+  @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
 </style>
 </head>
 <body>
@@ -180,7 +207,7 @@ export function renderDocsPage(): string {
 ${body()}
   </main>
 </div>
-<footer>Cascade — multi-tier AI orchestration · <a href="/">Open the app</a> · <a href="https://github.com/Varun-SV/Cascade-AI">GitHub</a></footer>
+<footer>Cascade — multi-tier AI orchestration · <a href="/">Open the app</a> · <a href="/#tiers">How the tiers work</a> · <a href="https://github.com/Varun-SV/Cascade-AI">GitHub</a></footer>
 </body>
 </html>`;
 }
