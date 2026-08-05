@@ -39,7 +39,15 @@ export default function RunDiagram({ reduced }: { reduced: boolean }) {
   const [elapsed, setElapsed] = useState(reduced ? Infinity : 0);
 
   useEffect(() => {
-    if (reduced) return;
+    // Turning reduced motion ON mid-play must JUMP to the end, not stop where
+    // it happens to be. Cancelling the frame loop alone left a half-lit diagram
+    // with no cost row — the animation removed and the information with it,
+    // which is the opposite of what the preference asks for.
+    if (reduced) { setElapsed(Infinity); return; }
+
+    // Re-enabling it replays from the start rather than resuming mid-way, so
+    // the sequence still reads as a sequence.
+    setElapsed(0);
     const started = performance.now();
     let frame = 0;
     const tick = () => {

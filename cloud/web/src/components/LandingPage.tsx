@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { motion } from 'framer-motion';
+import { useState, type CSSProperties } from 'react';
+import { motion, useReducedMotion } from 'framer-motion';
 import {
   Github, ArrowRight, Layers, KeyRound, Coins, FileText, Terminal, ShieldCheck,
   Download, BookOpen, Sparkles, Ban, RotateCcw, HelpCircle,
@@ -109,18 +109,15 @@ const SURFACES = [
 export default function LandingPage({ config, onDevLogin }: Props) {
   const [devName, setDevName] = useState('');
   const [busy, setBusy] = useState(false);
-  const [reduced, setReduced] = useState(false);
   const canSignIn = config.githubEnabled || config.googleEnabled;
 
   // A run diagram and a scroll-driven spine are exactly the kind of motion that
-  // makes people ill. Honour the OS setting rather than treating it as a nicety.
-  useEffect(() => {
-    const query = window.matchMedia('(prefers-reduced-motion: reduce)');
-    setReduced(query.matches);
-    const onChange = () => setReduced(query.matches);
-    query.addEventListener('change', onChange);
-    return () => query.removeEventListener('change', onChange);
-  }, []);
+  // makes people ill, so the preference has to be known on the FIRST render.
+  // Reading matchMedia in an effect defaulted to `false`, which meant Framer and
+  // RunDiagram both mounted in animated mode and played a frame of animation
+  // before the setting was applied — the one frame the user asked not to see.
+  // useReducedMotion subscribes and reads synchronously (and is SSR-safe).
+  const reduced = useReducedMotion() ?? false;
 
   async function handleDevLogin() {
     setBusy(true);
@@ -248,13 +245,15 @@ export default function LandingPage({ config, onDevLogin }: Props) {
                 key={t.n}
                 {...reveal}
                 transition={reduced ? undefined : { ...(reveal as { transition?: object }).transition, delay: i * 0.08 }}
-                className="glass rounded-2xl border-l-2 p-5 sm:p-6"
+                className="glass rounded-2xl border-l-2 p-5 sm:p-6 lg:ml-[var(--tier-step)]"
                 style={{
                   borderLeftColor: t.color,
-                  // The step. Collapses to zero under lg, where the coloured
-                  // left border carries the hierarchy instead.
-                  marginLeft: `calc(${i} * clamp(0px, 4vw, 3rem))`,
-                }}
+                  // The step is a CSS variable consumed ONLY by the lg: class
+                  // above. Setting marginLeft inline applied it at every width —
+                  // a 375px phone still gave the third card ~30px of indent,
+                  // exactly the behaviour the comment claimed it avoided.
+                  '--tier-step': `${i * 3}rem`,
+                } as CSSProperties}
               >
                 <div className="flex flex-wrap items-center gap-3">
                   <span className="flex h-9 w-9 items-center justify-center rounded-xl text-sm font-bold text-white" style={{ background: t.color }}>{t.n}</span>
