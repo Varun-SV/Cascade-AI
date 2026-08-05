@@ -1,11 +1,14 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   Github, ArrowRight, Layers, KeyRound, Coins, FileText, Terminal, ShieldCheck,
-  Download, BookOpen, Sparkles,
+  Download, BookOpen, Sparkles, Ban, RotateCcw, HelpCircle,
 } from 'lucide-react';
 import type { CloudConfig } from '../lib/api.js';
 import { devLogin } from '../lib/api.js';
+import { AZURE, SKY, TEAL, TIERS } from '../lib/brand.js';
+import CascadeSpine from './CascadeSpine.js';
+import RunDiagram from './RunDiagram.js';
 
 interface Props {
   config: CloudConfig;
@@ -15,44 +18,109 @@ interface Props {
 const RELEASES = 'https://github.com/Varun-SV/Cascade-AI/releases/latest';
 const REPO = 'https://github.com/Varun-SV/Cascade-AI';
 
-// The three-bar cascade mark (azure → sky → teal), matching the /docs page.
+/** Sections the spine tracks, top to bottom. */
+const SPINE_SECTIONS = ['tiers', 'visible', 'surfaces', 'features'] as const;
+
+/** The three-bar cascade mark (azure → sky → teal), matching the /docs page. */
 function Mark({ size = 22 }: { size?: number }) {
   const unit = size / 22;
   return (
     <span className="inline-flex items-end gap-[3px]" style={{ height: size }} aria-hidden>
-      <span style={{ width: 6 * unit, height: 10 * unit, borderRadius: 2, background: '#4C8DFF' }} />
-      <span style={{ width: 6 * unit, height: 16 * unit, borderRadius: 2, background: '#38B0DE' }} />
-      <span style={{ width: 6 * unit, height: 22 * unit, borderRadius: 2, background: '#2DD4BF' }} />
+      <span style={{ width: 6 * unit, height: 10 * unit, borderRadius: 2, background: AZURE }} />
+      <span style={{ width: 6 * unit, height: 16 * unit, borderRadius: 2, background: SKY }} />
+      <span style={{ width: 6 * unit, height: 22 * unit, borderRadius: 2, background: TEAL }} />
     </span>
   );
 }
 
-const TIERS = [
-  { n: '1', name: 'Administrator', color: '#4C8DFF', text: 'Reads the request, plans the work, and delegates. Simple asks it answers directly.' },
-  { n: '2', name: 'Supervisor', color: '#38B0DE', text: 'Breaks the plan into subtasks and coordinates the workers running in parallel.' },
-  { n: '3', name: 'Worker', color: '#2DD4BF', text: 'Does the actual generation on the cheapest model that is good enough for the job.' },
+/**
+ * The three moments no other orchestrator shows you. These are the product's
+ * actual differentiators and the old landing mentioned none of them — it sold
+ * "a graph, a timeline, logs", which every agent framework has.
+ */
+const MOMENTS = [
+  {
+    icon: Ban,
+    color: AZURE,
+    title: 'Work that was skipped, and why',
+    body: 'When a section fails, everything downstream of it is skipped rather than run into the same wall. You see which upstream failed and that the skipped work cost you nothing.',
+    demo: (
+      <div className="space-y-1.5 text-[11px]">
+        <Row tone="fail" label="Implement API" right="FAILED" />
+        <Row tone="block" label="Integration tests" right="BLOCKED" />
+        <p className="pt-0.5 text-ink-500">Blocked by: Implement API · 0 tokens spent</p>
+      </div>
+    ),
+  },
+  {
+    icon: RotateCcw,
+    color: SKY,
+    title: 'Runs that survive an interruption',
+    body: 'Hit the budget cap, cancel, or lose the process entirely — the finished sections are checkpointed. Continue picks up where it stopped instead of paying for the same work twice.',
+    demo: (
+      <div className="space-y-1.5 text-[11px]">
+        <Row tone="done" label="Research competitors" right="DONE" />
+        <Row tone="done" label="Gather pricing" right="DONE" />
+        <Row tone="idle" label="Draft the report" right="REMAINING" />
+        <p className="pt-0.5 text-ink-500">/continue → re-plans only what is left</p>
+      </div>
+    ),
+  },
+  {
+    icon: HelpCircle,
+    color: TEAL,
+    title: 'The reason behind every choice',
+    body: 'Each answer shows the tier and model that produced it. “Why?” explains the routing decision and what it saved against running the whole thing on a frontier model.',
+    demo: (
+      <div className="space-y-1.5 text-[11px]">
+        <Row tone="done" label="Table extraction" right="gpt-5-mini" />
+        <Row tone="done" label="Final synthesis" right="sonnet" />
+        <p className="pt-0.5 text-ink-500">$0.04 vs $0.38 all-frontier · 89% saved</p>
+      </div>
+    ),
+  },
 ];
+
+function Row({ tone, label, right }: { tone: 'done' | 'fail' | 'block' | 'idle'; label: string; right: string }) {
+  const color = tone === 'done' ? TEAL : tone === 'fail' ? '#F87171' : tone === 'block' ? '#FBBF24' : undefined;
+  return (
+    <div className="flex items-center justify-between gap-2 rounded-lg border border-elev/10 px-2 py-1.5">
+      <span className="truncate text-ink-300">{label}</span>
+      <span className="shrink-0 font-semibold tabular-nums" style={{ color: color ?? 'rgb(var(--c-ink-500))' }}>{right}</span>
+    </div>
+  );
+}
 
 const FEATURES = [
   { icon: Coins, title: 'Auto-routing that saves money', body: 'Cascade Auto ranks the models your providers serve by benchmark quality against price, so cheap work goes to cheap models and only the hard work reaches the frontier ones.' },
   { icon: KeyRound, title: 'Bring your own keys', body: 'Add your own provider keys — encrypted on your device, synced between your devices end-to-end. You pay providers directly; nothing is stored on our servers in the clear.' },
   { icon: FileText, title: 'Real document exports', body: 'Ask for a report and download a genuine PDF, Word, Excel or PowerPoint — rendered in your browser from the model’s output, never on a server.' },
-  { icon: Layers, title: 'See every decision', body: 'Each answer shows which tier and model handled it. “Why?” explains the routing and exactly what it saved versus running everything on the top model.' },
+  { icon: Layers, title: 'Parallel by default', body: 'Independent sections run at the same time; dependent ones wait. The plan is compiled into a graph, so ordering comes from the work rather than from luck.' },
   { icon: Terminal, title: 'Web, desktop & CLI', body: 'One account across a polished web app, a native desktop app, and a terminal CLI — your keys, chats and settings follow you.' },
   { icon: ShieldCheck, title: 'Yours to control', body: 'Cap a run’s spend and token budget, pin a model to a tier, delete any chat or file, and clear everything whenever you want.' },
 ];
 
-const STATS = [
-  ['90%', 'cheaper vs. all-frontier'],
-  ['3', 'tiers, fully parallel'],
-  ['6', 'model providers'],
-  ['0', 'config to start'],
+const SURFACES = [
+  { icon: Terminal, name: 'CLI', body: 'The full orchestrator in your terminal. Watch tiers stream, approve tool calls, resume with /continue.' },
+  { icon: Layers, name: 'Desktop', body: 'A native app with the run graph, timeline, artifacts and diff review side by side.' },
+  { icon: BookOpen, name: 'Web', body: 'Nothing to install. Same account, same keys, same chats — in any browser.' },
 ];
 
 export default function LandingPage({ config, onDevLogin }: Props) {
   const [devName, setDevName] = useState('');
   const [busy, setBusy] = useState(false);
+  const [reduced, setReduced] = useState(false);
   const canSignIn = config.githubEnabled || config.googleEnabled;
+
+  // A run diagram and a scroll-driven spine are exactly the kind of motion that
+  // makes people ill. Honour the OS setting rather than treating it as a nicety.
+  useEffect(() => {
+    const query = window.matchMedia('(prefers-reduced-motion: reduce)');
+    setReduced(query.matches);
+    const onChange = () => setReduced(query.matches);
+    query.addEventListener('change', onChange);
+    return () => query.removeEventListener('change', onChange);
+  }, []);
 
   async function handleDevLogin() {
     setBusy(true);
@@ -78,12 +146,16 @@ export default function LandingPage({ config, onDevLogin }: Props) {
     </div>
   );
 
-  const reveal = {
-    initial: { opacity: 0, y: 18 },
-    whileInView: { opacity: 1, y: 0 },
-    viewport: { once: true, margin: '-60px' },
-    transition: { duration: 0.5, ease: [0.22, 1, 0.36, 1] as const },
-  };
+  // Reveal-on-scroll, disabled wholesale under reduced motion so nothing waits
+  // on an animation that will never play.
+  const reveal = reduced
+    ? {}
+    : {
+      initial: { opacity: 0, y: 18 },
+      whileInView: { opacity: 1, y: 0 },
+      viewport: { once: true, margin: '-60px' },
+      transition: { duration: 0.5, ease: [0.22, 1, 0.36, 1] as const },
+    };
 
   return (
     <div className="h-dvh overflow-y-auto text-ink-100">
@@ -105,89 +177,179 @@ export default function LandingPage({ config, onDevLogin }: Props) {
       {/* Hero */}
       <section className="relative overflow-hidden">
         <div className="pointer-events-none absolute inset-x-0 -top-32 mx-auto h-72 max-w-3xl rounded-full opacity-25 blur-3xl"
-          style={{ background: 'radial-gradient(closest-side, #38B0DE, transparent)' }} />
-        <div className="mx-auto max-w-3xl px-5 pb-8 pt-20 text-center sm:pt-28">
-          <motion.h1 initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.55 }}
-            className="text-4xl font-bold leading-[1.05] tracking-tight sm:text-6xl">
-            Agents that<br />
-            <span className="bg-gradient-to-r from-[#4C8DFF] via-[#38B0DE] to-[#2DD4BF] bg-clip-text text-transparent">cascade</span>
-            <span className="text-ink-500">.</span>
-          </motion.h1>
-          <motion.p initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.55, delay: 0.08 }}
-            className="mx-auto mt-5 max-w-xl text-[15px] leading-relaxed text-ink-300 sm:text-lg">
-            One prompt becomes a self-organizing hierarchy of AI agents that plan, delegate and execute —
-            auto-routing every step to the cheapest model that’s best at it.{' '}
-            <strong className="text-ink-100">Up to 90% cheaper</strong> than running everything on one frontier model.
-          </motion.p>
+          style={{ background: `radial-gradient(closest-side, ${SKY}, transparent)` }} />
+        <div className="mx-auto max-w-5xl px-5 pb-10 pt-16 sm:pt-24">
+          <div className="grid items-center gap-10 lg:grid-cols-[1.05fr_1fr]">
+            <div className="text-center lg:text-left">
+              <motion.h1
+                initial={reduced ? undefined : { opacity: 0, y: 20 }} animate={reduced ? undefined : { opacity: 1, y: 0 }}
+                transition={{ duration: 0.55 }}
+                className="text-4xl font-bold leading-[1.05] tracking-tight sm:text-6xl"
+              >
+                Agents that<br />
+                <span className="bg-gradient-to-r from-[#4C8DFF] via-[#38B0DE] to-[#2DD4BF] bg-clip-text text-transparent">cascade</span>
+                <span className="text-ink-500">.</span>
+              </motion.h1>
+              <motion.p
+                initial={reduced ? undefined : { opacity: 0, y: 20 }} animate={reduced ? undefined : { opacity: 1, y: 0 }}
+                transition={{ duration: 0.55, delay: 0.08 }}
+                className="mx-auto mt-5 max-w-xl text-[15px] leading-relaxed text-ink-300 sm:text-lg lg:mx-0"
+              >
+                One prompt becomes a hierarchy of agents that plan, delegate and execute in parallel —
+                each step routed to the cheapest model that is genuinely good at it.
+              </motion.p>
 
-          <motion.div id="start" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.55, delay: 0.16 }} className="mt-8 scroll-mt-24">
-            {signInButtons}
-            <p className="mt-3 text-xs text-ink-500">Free to start — you bring your own API keys.</p>
-            <div className="mt-5 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-sm">
-              <a href={RELEASES} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-ink-300 hover:text-ink-100">
-                <Download size={15} /> Download desktop app
-              </a>
-              <a href="/docs" className="inline-flex items-center gap-1.5 text-ink-300 hover:text-ink-100">
-                <BookOpen size={15} /> Read the docs
-              </a>
+              <motion.div
+                id="start"
+                initial={reduced ? undefined : { opacity: 0, y: 20 }} animate={reduced ? undefined : { opacity: 1, y: 0 }}
+                transition={{ duration: 0.55, delay: 0.16 }}
+                className="mt-8 scroll-mt-24"
+              >
+                <div className="lg:[&>div]:justify-start">{signInButtons}</div>
+                <p className="mt-3 text-xs text-ink-500">Free to start — you bring your own API keys.</p>
+                <div className="mt-5 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-sm lg:justify-start">
+                  <a href={RELEASES} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-ink-300 hover:text-ink-100">
+                    <Download size={15} /> Download desktop app
+                  </a>
+                  <a href="/docs" className="inline-flex items-center gap-1.5 text-ink-300 hover:text-ink-100">
+                    <BookOpen size={15} /> Read the docs
+                  </a>
+                </div>
+              </motion.div>
             </div>
+
+            <motion.div
+              initial={reduced ? undefined : { opacity: 0, scale: 0.97 }} animate={reduced ? undefined : { opacity: 1, scale: 1 }}
+              transition={{ duration: 0.6, delay: 0.2 }}
+            >
+              <RunDiagram reduced={reduced} />
+            </motion.div>
+          </div>
+        </div>
+      </section>
+
+      {/* Everything below hangs off the spine. */}
+      <div className="relative mx-auto max-w-6xl px-5 lg:pl-16">
+        <CascadeSpine sectionIds={SPINE_SECTIONS} reduced={reduced} />
+
+        {/* Tiers — each steps further right, so the section descends as it reads. */}
+        <section id="tiers" className="scroll-mt-24 py-16">
+          <motion.div {...reveal} className="mb-10 max-w-2xl">
+            <h2 className="text-2xl font-bold tracking-tight sm:text-3xl">One prompt, three tiers</h2>
+            <p className="mt-3 text-ink-400">
+              Complexity decides how far it cascades. A trivial ask gets answered directly; a hard one fans
+              out across all three.
+            </p>
           </motion.div>
 
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.6, delay: 0.3 }}
-            className="mx-auto mt-12 grid max-w-2xl grid-cols-2 gap-3 sm:grid-cols-4">
-            {STATS.map(([n, label]) => (
-              <div key={label} className="glass rounded-xl px-3 py-3">
-                <div className="text-2xl font-bold text-ink-50">{n}</div>
-                <div className="mt-0.5 text-[11px] leading-tight text-ink-400">{label}</div>
-              </div>
+          <div className="space-y-4">
+            {TIERS.map((t, i) => (
+              <motion.div
+                key={t.n}
+                {...reveal}
+                transition={reduced ? undefined : { ...(reveal as { transition?: object }).transition, delay: i * 0.08 }}
+                className="glass rounded-2xl border-l-2 p-5 sm:p-6"
+                style={{
+                  borderLeftColor: t.color,
+                  // The step. Collapses to zero under lg, where the coloured
+                  // left border carries the hierarchy instead.
+                  marginLeft: `calc(${i} * clamp(0px, 4vw, 3rem))`,
+                }}
+              >
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="flex h-9 w-9 items-center justify-center rounded-xl text-sm font-bold text-white" style={{ background: t.color }}>{t.n}</span>
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: t.color }}>Tier {t.n}</div>
+                    <h3 className="text-lg font-semibold text-ink-50">{t.name}</h3>
+                  </div>
+                </div>
+                <p className="mt-3 text-sm leading-relaxed text-ink-300">{t.text}</p>
+                <p className="mt-2 text-sm leading-relaxed text-ink-500">{t.example}</p>
+              </motion.div>
             ))}
+          </div>
+        </section>
+
+        {/* The differentiators. */}
+        <section id="visible" className="scroll-mt-24 py-16">
+          <motion.div {...reveal} className="mb-10 max-w-2xl">
+            <h2 className="text-2xl font-bold tracking-tight sm:text-3xl">What other orchestrators hide</h2>
+            <p className="mt-3 text-ink-400">
+              Most agent tools show you a graph and a log. The useful questions are what got skipped, what
+              survives a crash, and why this model — so Cascade answers those.
+            </p>
           </motion.div>
-        </div>
-      </section>
 
-      {/* How it cascades */}
-      <section className="mx-auto max-w-6xl px-5 py-16">
-        <motion.div {...reveal} className="mx-auto mb-10 max-w-2xl text-center">
-          <h2 className="text-2xl font-bold tracking-tight sm:text-3xl">One prompt, three tiers</h2>
-          <p className="mt-3 text-ink-400">Complexity decides how far it cascades. Trivial asks get a direct answer; hard ones fan out across all three.</p>
-        </motion.div>
-        <div className="grid gap-4 md:grid-cols-3">
-          {TIERS.map((t, i) => (
-            <motion.div key={t.n} {...reveal} transition={{ ...reveal.transition, delay: i * 0.08 }}
-              className="glass rounded-2xl p-6">
-              <div className="flex items-center gap-3">
-                <span className="flex h-9 w-9 items-center justify-center rounded-xl text-sm font-bold text-white" style={{ background: t.color }}>{t.n}</span>
-                <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: t.color }}>Tier {t.n}</div>
-              </div>
-              <h3 className="mt-4 text-lg font-semibold text-ink-50">{t.name}</h3>
-              <p className="mt-2 text-sm leading-relaxed text-ink-300">{t.text}</p>
-            </motion.div>
-          ))}
-        </div>
-      </section>
+          <div className="grid gap-4 md:grid-cols-3">
+            {MOMENTS.map((m, i) => (
+              <motion.div
+                key={m.title}
+                {...reveal}
+                transition={reduced ? undefined : { ...(reveal as { transition?: object }).transition, delay: i * 0.08 }}
+                className="glass flex flex-col rounded-2xl p-5"
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl" style={{ background: `${m.color}1F`, color: m.color }}>
+                  <m.icon size={19} />
+                </div>
+                <h3 className="mt-4 font-semibold text-ink-50">{m.title}</h3>
+                <p className="mt-1.5 text-sm leading-relaxed text-ink-400">{m.body}</p>
+                <div className="mt-4 rounded-xl border border-elev/10 bg-elev/[0.03] p-2.5">{m.demo}</div>
+              </motion.div>
+            ))}
+          </div>
+        </section>
 
-      {/* Features */}
-      <section className="mx-auto max-w-6xl px-5 py-8 pb-16">
-        <motion.h2 {...reveal} className="mb-10 text-center text-2xl font-bold tracking-tight sm:text-3xl">Everything you need to ship</motion.h2>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {FEATURES.map((f, i) => (
-            <motion.div key={f.title} {...reveal} transition={{ ...reveal.transition, delay: (i % 3) * 0.06 }}
-              className="glass rounded-2xl p-5">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-accent-500/12 text-accent-300">
-                <f.icon size={19} />
-              </div>
-              <h3 className="mt-4 font-semibold text-ink-50">{f.title}</h3>
-              <p className="mt-1.5 text-sm leading-relaxed text-ink-400">{f.body}</p>
-            </motion.div>
-          ))}
-        </div>
-      </section>
+        {/* Three surfaces. */}
+        <section id="surfaces" className="scroll-mt-24 py-16">
+          <motion.div {...reveal} className="mb-10 max-w-2xl">
+            <h2 className="text-2xl font-bold tracking-tight sm:text-3xl">Three surfaces, one account</h2>
+            <p className="mt-3 text-ink-400">Your keys, chats and settings follow you between them.</p>
+          </motion.div>
+          <div className="grid gap-4 sm:grid-cols-3">
+            {SURFACES.map((s, i) => (
+              <motion.div
+                key={s.name}
+                {...reveal}
+                transition={reduced ? undefined : { ...(reveal as { transition?: object }).transition, delay: i * 0.07 }}
+                className="glass rounded-2xl p-5"
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-accent-500/12 text-accent-300">
+                  <s.icon size={19} />
+                </div>
+                <h3 className="mt-4 font-semibold text-ink-50">{s.name}</h3>
+                <p className="mt-1.5 text-sm leading-relaxed text-ink-400">{s.body}</p>
+              </motion.div>
+            ))}
+          </div>
+        </section>
+
+        {/* Features. */}
+        <section id="features" className="scroll-mt-24 py-16">
+          <motion.h2 {...reveal} className="mb-10 text-2xl font-bold tracking-tight sm:text-3xl">Everything else you need</motion.h2>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {FEATURES.map((f, i) => (
+              <motion.div
+                key={f.title}
+                {...reveal}
+                transition={reduced ? undefined : { ...(reveal as { transition?: object }).transition, delay: (i % 3) * 0.06 }}
+                className="glass rounded-2xl p-5"
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-accent-500/12 text-accent-300">
+                  <f.icon size={19} />
+                </div>
+                <h3 className="mt-4 font-semibold text-ink-50">{f.title}</h3>
+                <p className="mt-1.5 text-sm leading-relaxed text-ink-400">{f.body}</p>
+              </motion.div>
+            ))}
+          </div>
+        </section>
+      </div>
 
       {/* Final CTA */}
       <section className="mx-auto max-w-3xl px-5 pb-20">
         <motion.div {...reveal} className="glass-strong relative overflow-hidden rounded-3xl px-6 py-12 text-center">
           <div className="pointer-events-none absolute inset-x-0 -top-16 mx-auto h-40 max-w-md rounded-full opacity-20 blur-3xl"
-            style={{ background: 'radial-gradient(closest-side, #4C8DFF, transparent)' }} />
+            style={{ background: `radial-gradient(closest-side, ${AZURE}, transparent)` }} />
           <Mark size={30} />
           <h2 className="mt-4 text-2xl font-bold tracking-tight sm:text-3xl">Start orchestrating in a minute</h2>
           <p className="mx-auto mt-3 max-w-md text-ink-300">Sign in, add a provider key, and send your first prompt. No setup, no lock-in.</p>
