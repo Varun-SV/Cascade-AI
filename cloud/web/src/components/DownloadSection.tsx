@@ -101,7 +101,14 @@ export default function DownloadSection({ reduced }: { reduced: boolean }) {
           <Download size={16} /> Downloads on GitHub <ExternalLink size={13} className="text-ink-500" />
         </a>
       ) : !manifest ? (
-        <div className="h-[52px] w-64 animate-pulse rounded-xl bg-elev/[0.06]" aria-hidden />
+        // A pulsing placeholder is motion too. It was the one animation in here
+        // that ignored the preference, which rather defeats honouring it in the
+        // three that did.
+        <div
+          data-testid="download-skeleton"
+          className={`h-[52px] w-64 rounded-xl bg-elev/[0.06] ${reduced ? '' : 'animate-pulse'}`}
+          aria-hidden
+        />
       ) : (
         <div className="max-w-2xl">
           {primary ? (

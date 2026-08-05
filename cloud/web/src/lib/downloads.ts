@@ -65,12 +65,21 @@ export function detectOs(): TargetOs | null {
   const ua = navigator.userAgent.toLowerCase();
   const haystack = `${platform} ${ua}`;
 
-  // Order matters: an iPad reports "mac" in desktop mode, and Android reports
-  // "linux". Neither has a build, so they fall through to null and get the
+  // Order matters: Android reports "linux" and every iOS device reports
+  // "Mac OS X". None of them has a build, so they resolve to null and get the
   // full list rather than a button that hands them the wrong file.
   if (/android|iphone|ipad|ipod/.test(ua)) return null;
   if (/win/.test(haystack)) return 'windows';
-  if (/mac/.test(haystack)) return 'mac';
+
+  if (/mac/.test(haystack)) {
+    // An iPad in desktop mode sends a Mac user-agent with NO iPad token — that
+    // is the entire point of the mode, so the string genuinely cannot tell the
+    // two apart and the guard above never fires for it. Touch points can: a Mac
+    // reports 0 even with a trackpad or a Touch Bar, an iPad reports 5.
+    if ((navigator.maxTouchPoints ?? 0) > 1) return null;
+    return 'mac';
+  }
+
   if (/linux|x11|ubuntu|fedora|debian/.test(haystack)) return 'linux';
   return null;
 }

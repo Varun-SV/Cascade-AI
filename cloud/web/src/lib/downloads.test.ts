@@ -16,14 +16,18 @@ const UA = {
   linux: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
   android: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36',
   iphone: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-  ipadDesktop: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15 iPad',
 };
 
 describe('detectOs', () => {
   it('reads the three desktop platforms', () => {
-    withNavigator({ userAgent: UA.macSafari }, () => expect(detectOs()).toBe('mac'));
+    withNavigator({ userAgent: UA.macSafari, maxTouchPoints: 0 }, () => expect(detectOs()).toBe('mac'));
     withNavigator({ userAgent: UA.windows }, () => expect(detectOs()).toBe('windows'));
     withNavigator({ userAgent: UA.linux }, () => expect(detectOs()).toBe('linux'));
+  });
+
+  it('still reads a Mac when maxTouchPoints is absent entirely', () => {
+    // Not every environment reports it. Missing must not be read as "touchy".
+    withNavigator({ userAgent: UA.macSafari }, () => expect(detectOs()).toBe('mac'));
   });
 
   it('prefers userAgentData.platform when the browser exposes it', () => {
@@ -37,8 +41,18 @@ describe('detectOs', () => {
     // Android's UA says "Linux" and an iPhone's says "Mac OS X"; both would
     // otherwise be handed a desktop installer they cannot run.
     withNavigator({ userAgent: UA.android }, () => expect(detectOs()).toBeNull());
-    withNavigator({ userAgent: UA.iphone }, () => expect(detectOs()).toBeNull());
-    withNavigator({ userAgent: UA.ipadDesktop }, () => expect(detectOs()).toBeNull());
+    withNavigator({ userAgent: UA.iphone, maxTouchPoints: 5 }, () => expect(detectOs()).toBeNull());
+  });
+
+  it('claims nothing on an iPad in desktop mode', () => {
+    // The real thing: byte-for-byte the SAME user-agent a MacBook sends, with
+    // no iPad token anywhere — that is what desktop mode is. The string cannot
+    // separate them, so only maxTouchPoints (0 on a Mac, 5 on an iPad) can.
+    //
+    // The earlier fixture for this appended " iPad" to a Mac UA, which no real
+    // device produces; the test passed on a token the browser never sends,
+    // proving nothing about the case it was named for.
+    withNavigator({ userAgent: UA.macSafari, maxTouchPoints: 5 }, () => expect(detectOs()).toBeNull());
   });
 
   it('returns null for anything unrecognised', () => {

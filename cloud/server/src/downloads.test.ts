@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   DownloadResolver, buildManifest, classifyAsset, isTargetId, isTrustedAssetUrl,
-  TARGET_META, CACHE_TTL_MS, CACHE_STALE_MS,
+  TARGET_META, CACHE_TTL_MS, CACHE_STALE_MS, REFRESH_RETRY_MS,
 } from './downloads.js';
 
 /**
@@ -236,6 +236,54 @@ describe('DownloadResolver', () => {
     // Past the stale window it stops pretending it knows.
     now += CACHE_STALE_MS;
     expect(await resolver.get()).toBeNull();
+  });
+
+  it('does not re-ask a failing GitHub on every request', async () => {
+    let now = 1_000_000;
+    const fetchImpl = vi.fn(async () => { throw new Error('rate limited'); });
+    const resolver = new DownloadResolver(fetchImpl as unknown as typeof fetch, () => now);
+
+    expect(await resolver.get()).toBeNull();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    // SEQUENTIAL callers, which is what real traffic looks like — `inFlight`
+    // only ever covered concurrent ones, so without negative caching each of
+    // these would be another GitHub request during an outage.
+    now += 1_000;
+    expect(await resolver.get()).toBeNull();
+    now += 1_000;
+    expect(await resolver.get()).toBeNull();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    // Once the retry window passes it tries again, so a transient failure
+    // clears on its own rather than blacking the section out for a full TTL.
+    now += REFRESH_RETRY_MS;
+    await resolver.get();
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('serves the stale manifest without another call during the retry window', async () => {
+    let now = 1_000_000;
+    let fail = false;
+    const fetchImpl = vi.fn(async () => {
+      if (fail) throw new Error('network down');
+      return okResponse(realRelease());
+    });
+    const resolver = new DownloadResolver(fetchImpl as unknown as typeof fetch, () => now);
+
+    await resolver.get();
+    fail = true;
+    now += CACHE_TTL_MS + 1;
+
+    // First call past the TTL genuinely tries, fails, and falls back to stale.
+    expect((await resolver.get())!.version).toBe('0.68.0');
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+    // The next one gets the same answer immediately, with no doomed request in
+    // front of it — the visitor does not wait on a timeout to see the section.
+    now += 1_000;
+    expect((await resolver.get())!.version).toBe('0.68.0');
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
   it('returns null on a rate-limited or errored response', async () => {

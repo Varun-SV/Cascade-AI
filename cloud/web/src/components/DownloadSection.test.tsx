@@ -96,6 +96,21 @@ describe('DownloadSection', () => {
     expect(await screen.findByText(/Version 0\.68\.0/)).toBeInTheDocument();
   });
 
+  it('keeps the loading placeholder static under reduced motion', async () => {
+    mockDetectOs.mockReturnValue('mac');
+    // Never resolves, so the skeleton stays on screen to be inspected.
+    mockFetch.mockReturnValue(new Promise(() => {}));
+
+    const { unmount } = render(<DownloadSection reduced />);
+    expect(screen.getByTestId('download-skeleton').className).not.toContain('animate-pulse');
+    unmount();
+
+    // …and it does pulse when motion is allowed, so the assertion above is
+    // about the preference rather than about the class never being applied.
+    render(<DownloadSection reduced={false} />);
+    expect(screen.getByTestId('download-skeleton').className).toContain('animate-pulse');
+  });
+
   it('falls back to the GitHub releases page when the manifest cannot be fetched', async () => {
     mockDetectOs.mockReturnValue('mac');
     mockFetch.mockRejectedValue(new Error('503'));

@@ -25,7 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than a detection that quietly hands half of Mac users the wrong file.
   Android, iOS and iPadOS get no primary button at all: their user-agent strings
   say "Linux" and "Mac OS X", and a confident button there would hand a phone a
-  desktop installer.
+  desktop installer. An iPad in desktop mode is the hard case — it sends the
+  same user-agent a MacBook does, with no iPad token anywhere — so it is
+  separated by touch points (0 on a Mac, 5 on an iPad) rather than by the
+  string, which genuinely cannot tell them apart.
 
   Each build also gets a stable URL — `/download/mac-arm64`, `/download/win-x64`
   — that always means "the current build for this platform", so a link in a
@@ -35,13 +38,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than proxying. Streaming ~150 MB per click through the app server would
   put every download on the hosting egress bill and hold a connection open for
   the length of a large file transfer, which is a poor trade for hiding a
-  hostname. The release is resolved through GitHub's API at most once every 15
-  minutes — unauthenticated callers get 60 requests an hour, so asking per page
-  view would exhaust it in a minute of real traffic — and a previously resolved
-  list keeps being served for a day if that API starts failing, since release
-  assets are append-only and a slightly stale list still points at files that
-  exist. If it cannot be resolved at all, the section falls back to the same
-  releases link it replaced.
+  hostname.
+
+  The release is resolved through GitHub's API at most once every 15 minutes on
+  the happy path, and at most once every 2 minutes while that API is failing —
+  unauthenticated callers get 60 requests an hour, so asking per page view would
+  exhaust it in a minute of real traffic. Both halves matter: a success-only TTL
+  paces nothing during an outage, because it is exactly then that no successful
+  fetch ever updates it, so every arriving request would try again and wait for
+  its own doomed call before falling back. A previously resolved list keeps
+  being served for a day if the API stays down, since release assets are
+  append-only and a slightly stale list still points at files that exist. If it
+  cannot be resolved at all, the section falls back to the same releases link it
+  replaced.
 
 ### Changed
 - **The landing page now cascades instead of just saying it does.** The old page

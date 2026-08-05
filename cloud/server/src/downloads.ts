@@ -35,6 +35,16 @@ const CACHE_TTL_MS = 15 * 60 * 1000;
  * should degrade to "slightly stale" rather than to "no downloads on the site".
  */
 const CACHE_STALE_MS = 24 * 60 * 60 * 1000;
+/**
+ * How long a FAILED refresh suppresses the next attempt.
+ *
+ * Without this the TTL only paces the happy path: `cache.fetchedAt` advances
+ * on success alone, so a failing upstream is re-asked by every request that
+ * arrives. Two minutes caps the failure path at 30 calls an hour — comfortably
+ * under the 60/hour limit, and short enough that a transient blip clears
+ * quickly rather than blacking the section out for a full TTL.
+ */
+const REFRESH_RETRY_MS = 2 * 60 * 1000;
 
 /** GitHub rejects API requests without one. */
 const USER_AGENT = 'cascade-ai-cloud';
@@ -206,8 +216,19 @@ interface CacheEntry {
  */
 export class DownloadResolver {
   private cache: CacheEntry | null = null;
-  /** De-duplicates concurrent refreshes so a cold cache costs one request, not one per visitor. */
+  /** De-duplicates CONCURRENT refreshes so a cold cache costs one request, not one per visitor. */
   private inFlight: Promise<DownloadManifest | null> | null = null;
+  /**
+   * When a refresh was last ATTEMPTED, successful or not. Null until the first.
+   *
+   * `cache.fetchedAt` only advances on success, so it cannot pace retries: with
+   * it alone, a failing upstream is re-asked by every single request, because
+   * `inFlight` covers concurrent callers and nothing covers sequential ones.
+   * During a rate limit that turns each page view into another GitHub call —
+   * spending the very allowance the cache exists to protect, and making every
+   * visitor wait for a doomed request before they get the stale answer.
+   */
+  private lastAttemptAt: number | null = null;
 
   constructor(
     private readonly fetchImpl: typeof fetch = fetch,
@@ -218,11 +239,27 @@ export class DownloadResolver {
     const cached = this.cache;
     if (cached && this.now() - cached.fetchedAt < CACHE_TTL_MS) return cached.manifest;
 
+    // Negative caching: hold off re-asking a failing upstream. Worst case is
+    // one call per retry window (30/hour) rather than one per request, which
+    // stays under the 60/hour limit even while everything is going wrong.
+    if (this.lastAttemptAt !== null && this.now() - this.lastAttemptAt < REFRESH_RETRY_MS) {
+      return this.staleOrNull(cached);
+    }
+
     this.inFlight ??= this.refresh().finally(() => { this.inFlight = null; });
     const fresh = await this.inFlight;
     if (fresh) return fresh;
 
-    // Refresh failed. A recent-enough previous answer is far better than none.
+    return this.staleOrNull(cached);
+  }
+
+  /**
+   * A previously resolved list, if it is not yet ancient.
+   *
+   * Stale but correct: release assets are append-only, so an old list still
+   * points at files that exist. Serving it beats serving nothing.
+   */
+  private staleOrNull(cached: CacheEntry | null): DownloadManifest | null {
     if (cached && this.now() - cached.fetchedAt < CACHE_STALE_MS) return cached.manifest;
     return null;
   }
@@ -245,8 +282,12 @@ export class DownloadResolver {
       // Network failure, malformed JSON, DNS — all the same to a caller that
       // just needs to know whether it can render buttons yet.
       return null;
+    } finally {
+      // Records the attempt whatever the outcome. This is the half that paces
+      // retries; `cache.fetchedAt` only ever records successes.
+      this.lastAttemptAt = this.now();
     }
   }
 }
 
-export { RELEASES_PAGE_URL, CACHE_TTL_MS, CACHE_STALE_MS };
+export { RELEASES_PAGE_URL, CACHE_TTL_MS, CACHE_STALE_MS, REFRESH_RETRY_MS };
