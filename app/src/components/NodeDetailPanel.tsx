@@ -4,7 +4,8 @@ import { useAppDispatch, useAppSelector, selectNode } from '../store/index.js';
 
 const TIER_COLORS: Record<string, string> = { T1: '#4c8dff', T2: '#38b0de', T3: '#2dd4bf' };
 const STATUS_LABEL: Record<string, string> = {
-  ACTIVE: 'running', COMPLETED: 'done', FAILED: 'failed', ESCALATED: 'escalated', IDLE: 'idle',
+  ACTIVE: 'running', COMPLETED: 'done', FAILED: 'failed', ESCALATED: 'escalated',
+  BLOCKED: 'skipped', IDLE: 'idle',
 };
 
 /**

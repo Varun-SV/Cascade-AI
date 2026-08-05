@@ -26,8 +26,17 @@ export type UpstreamFailurePolicy =
 
 /** Why a node never ran. */
 export interface BlockedNode {
-  /** The failed ancestors responsible, nearest first. */
+  /**
+   * Ids of the failed ancestors responsible, nearest first. Stable and
+   * machine-readable — use these to link a blocked node back to its cause.
+   */
   blockedBy: string[];
+  /**
+   * The same ancestors by title, in the same order. Node ids are internal
+   * ("s1", "s2"); anything a person reads should use these instead.
+   */
+  blockedByTitles: string[];
+  /** A sentence naming the cause, written with titles rather than ids. */
   reason: string;
 }
 
@@ -135,12 +144,17 @@ export class DependencyScheduler<TPayload, TResult> {
 
         // Ordinal order again, so a join node blocked by two parents always
         // names them the same way round.
-        const blockedBy = nodes.filter((n) => roots.has(n.id)).map((n) => n.id);
+        const causes = nodes.filter((n) => roots.has(n.id));
+        const blockedBy = causes.map((n) => n.id);
+        // Titles, not ids. The reason reaches the user through the section's
+        // issues list, and an id says "s1" where a title says "Implement API".
+        const blockedByTitles = causes.map((n) => n.title || n.id);
         const record: BlockedNode = {
           blockedBy,
-          reason: blockedBy.length === 1
-            ? `Required upstream node "${blockedBy[0]}" failed`
-            : `Required upstream nodes ${blockedBy.map((id) => `"${id}"`).join(', ')} failed`,
+          blockedByTitles,
+          reason: blockedByTitles.length === 1
+            ? `Required upstream work "${blockedByTitles[0]}" failed`
+            : `Required upstream work ${blockedByTitles.map((t) => `"${t}"`).join(', ')} failed`,
         };
         blocked.set(node.id, record);
         settled.add(node.id);

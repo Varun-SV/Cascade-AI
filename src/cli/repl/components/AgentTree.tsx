@@ -5,13 +5,16 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import Spinner from 'ink-spinner';
-import type { Theme } from '../../../types.js';
+import type { Theme, TierStatus } from '../../../types.js';
 
 export interface TierNode {
   id: string;
   role: 'T1' | 'T2' | 'T3';
   label: string;
-  status: 'IDLE' | 'ACTIVE' | 'COMPLETED' | 'FAILED' | 'ESCALATED';
+  // Imported, not re-declared. This union used to be a literal copy of
+  // TierStatus, so adding a status to the core type left the tree silently
+  // rendering it through whatever default branch it happened to hit.
+  status: TierStatus;
   currentAction?: string;
   progressPct?: number;
   children?: TierNode[];
@@ -133,6 +136,8 @@ function AgentTreeInternal({
               {node.status === 'COMPLETED' && <Text color={theme.colors.success}> ✔</Text>}
               {node.status === 'FAILED' && <Text color={theme.colors.error}> ✘</Text>}
               {node.status === 'ESCALATED' && <Text color={theme.colors.warning}> ▲</Text>}
+              {/* Skipped, not broken — muted rather than the error colour. */}
+              {node.status === 'BLOCKED' && <Text color={theme.colors.muted}> ⤫ skipped</Text>}
             </Box>
           );
         }
@@ -156,6 +161,7 @@ function AgentTreeInternal({
               )}
               {node.status === 'COMPLETED' && <Text color={theme.colors.success}> ✔</Text>}
               {node.status === 'FAILED' && <Text color={theme.colors.error}> ✘</Text>}
+              {node.status === 'BLOCKED' && <Text color={theme.colors.muted}> ⤫ skipped</Text>}
             </Box>
           );
         }

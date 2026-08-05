@@ -212,3 +212,33 @@ describe('blocking is deterministic under provider latency', () => {
     expect(result.blocked.get('join')?.reason).toContain('"p2"');
   });
 });
+
+describe('blocked causes are named for a human', () => {
+  /**
+   * The reason reaches the user through the section's issues list, so it has to
+   * read like a sentence about their work. Node ids are internal — "s1" — and
+   * the previous wording put those in front of the user twice.
+   */
+  const titled = () => compileTaskGraph([
+    { id: 's1', title: 'Implement API', kind: 'section' as const, payload: 's1' },
+    { id: 's2', title: 'Integration tests', kind: 'section' as const, dependsOn: ['s1'], payload: 's2' },
+  ]).graph;
+
+  const run = async () => new DependencyScheduler<string, string>(
+    titled(),
+    { execute: async () => 'FAILED', classify: () => 'failed' },
+    { onUpstreamFailure: 'block' },
+  ).run();
+
+  it('names the blocking work by title, not by id', async () => {
+    const blocked = (await run()).blocked.get('s2');
+    expect(blocked?.reason).toBe('Required upstream work "Implement API" failed');
+    expect(blocked?.reason).not.toContain('s1');
+  });
+
+  it('keeps the ids alongside, so a caller can still link back to the cause', async () => {
+    const blocked = (await run()).blocked.get('s2');
+    expect(blocked?.blockedBy).toEqual(['s1']);
+    expect(blocked?.blockedByTitles).toEqual(['Implement API']);
+  });
+});

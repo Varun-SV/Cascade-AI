@@ -30,7 +30,7 @@ export function CockpitView({ socket }: { socket: Socket | null }) {
   const agents = allAgents.filter((a) => a.sessionId === currentSessionId && !dismissedNodeIds.includes(a.id));
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
   const runActive = agents.some((a) => a.status === 'ACTIVE');
-  const hasCleanableNodes = agents.some((a) => a.status === 'COMPLETED' || a.status === 'FAILED' || a.status === 'ESCALATED');
+  const hasCleanableNodes = agents.some((a) => a.status === 'COMPLETED' || a.status === 'FAILED' || a.status === 'ESCALATED' || a.status === 'BLOCKED');
 
   const steer = () => {
     if (!steerText.trim() || !socket) return;

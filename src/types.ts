@@ -270,7 +270,17 @@ export interface ToolExecuteOptions {
 // ── Tier System ───────────────────────────────
 
 export type TierRole = 'T1' | 'T2' | 'T3';
-export type TierStatus = 'IDLE' | 'ACTIVE' | 'COMPLETED' | 'FAILED' | 'ESCALATED';
+/**
+ * A tier's lifecycle state.
+ *
+ * BLOCKED is terminal like COMPLETED and FAILED — the tier will never run,
+ * because work it depended on failed first. It is NOT the same word as
+ * `MessageStatus.BLOCKED` below, which means "running but stuck": one describes
+ * a tier that never started, the other a tier that started and cannot finish.
+ * Anything rendering a status label should treat BLOCKED as "skipped", not as
+ * an error and not as in-progress.
+ */
+export type TierStatus = 'IDLE' | 'ACTIVE' | 'COMPLETED' | 'FAILED' | 'ESCALATED' | 'BLOCKED';
 
 export type TaskComplexity = 'Simple' | 'Moderate' | 'Complex' | 'Highly Complex';
 
@@ -375,10 +385,24 @@ export interface StatusUpdate {
 export interface T2Result {
   sectionId: string;
   sectionTitle: string;
-  status: 'COMPLETED' | 'PARTIAL' | 'FAILED' | 'ESCALATED';
+  /**
+   * BLOCKED is not a kind of FAILED. A failed section was attempted and did not
+   * work; a blocked one was never attempted, because something it depended on
+   * failed first — so it spent no tokens and says nothing about whether it
+   * would have worked. Reporting it as FAILED (which is what happened until
+   * now) tells the user their work broke when in fact the scheduler protected
+   * them from paying for work that could not succeed yet.
+   */
+  status: 'COMPLETED' | 'PARTIAL' | 'FAILED' | 'ESCALATED' | 'BLOCKED';
   t3Results: T3Result[];
   sectionSummary: string;
   issues: string[];
+  /**
+   * Set only on BLOCKED sections: which upstream work stopped this one, by
+   * title and by id. Structured rather than flattened into `issues`, so a UI
+   * can link a skipped section back to its cause instead of parsing prose.
+   */
+  blockedBy?: { ids: string[]; titles: string[] };
   /**
    * Set when this section reached PARTIAL because the user was asked about an
    * escalation and chose "skip" — not because a T2/T3 pipeline shortfall left

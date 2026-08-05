@@ -9,7 +9,10 @@ export interface AgentNode {
   id: string;
   tier: 'T1' | 'T2' | 'T3';
   label: string;
-  status: 'IDLE' | 'ACTIVE' | 'COMPLETED' | 'FAILED' | 'ESCALATED';
+  // BLOCKED = never ran because upstream work failed. Terminal, and NOT an
+  // error — it is the scheduler saving the user from paying for work that
+  // could not have succeeded.
+  status: 'IDLE' | 'ACTIVE' | 'COMPLETED' | 'FAILED' | 'ESCALATED' | 'BLOCKED';
   progressPct?: number;
   currentAction?: string;
   parentId?: string;
@@ -351,7 +354,7 @@ const appSlice = createSlice({
     // losing the underlying data if the user scrolls back through history.
     dismissCompletedNodes(state, action: PayloadAction<string>) {
       const toHide = state.agents
-        .filter((a) => a.sessionId === action.payload && (a.status === 'COMPLETED' || a.status === 'FAILED' || a.status === 'ESCALATED'))
+        .filter((a) => a.sessionId === action.payload && (a.status === 'COMPLETED' || a.status === 'FAILED' || a.status === 'ESCALATED' || a.status === 'BLOCKED'))
         .map((a) => a.id);
       for (const id of toHide) {
         if (!state.dismissedNodeIds.includes(id)) state.dismissedNodeIds.push(id);

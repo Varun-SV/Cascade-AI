@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+- **Work that was skipped is no longer reported as work that failed.** When a
+  section fails, everything downstream of it is skipped rather than run into the
+  same wall — that has been true since the dependency contracts shipped. What
+  the user was *told*, though, was that those sections `FAILED`: the skip was
+  recorded as a failure with the real explanation flattened into a prose string,
+  so a single broken section made three more look broken too. Skipped work is
+  now `BLOCKED`, a terminal state of its own that means "never attempted, cost
+  nothing, says nothing about whether it would have worked".
+
+  The cause is carried as data rather than prose, and by **title** rather than
+  by internal id — the previous message read `Blocked by: s1`, naming a section
+  the user has never seen, twice.
+
+  Three surfaces were showing this wrongly, each differently:
+  - The hosted web app matched status names by substring and `BLOCKED` matched
+    none of them, so skipped sections fell through to the in-progress mark and
+    sat there spinning for the rest of the session.
+  - The desktop app kept its own copy of the status list, so blocked nodes
+    rendered as grey "not started" and were never eligible for "clean up
+    session" — they stayed on the graph permanently.
+  - The CLI tree kept a third copy and simply drew nothing.
+
+  All three now read the status vocabulary from one place, so the next addition
+  is a compile error rather than a silent fallback. Blocked work is drawn muted
+  and labelled *skipped*, deliberately not in the error colour.
+
+- **A blocked section could be compiled into the final answer as though it were
+  finished work.** The filter selecting sections to write up asked for
+  `status !== 'FAILED'`, which was only accidentally right while FAILED was the
+  only unproductive state. A never-attempted section passed it, so an empty
+  summary was handed to the compile step as if a manager had written it — and a
+  run whose first section failed stopped reporting failure at all, because the
+  sections blocked behind it now looked like output. The three places that ask
+  this question now share one predicate, stated positively: a new status has to
+  opt *in* to counting as content.
+
 ### Added
 - **The desktop app downloads from the site instead of from GitHub.** "Download
   desktop app" used to be a link to the releases page, which answers "I want the

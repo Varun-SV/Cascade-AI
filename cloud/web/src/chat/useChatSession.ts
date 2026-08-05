@@ -96,6 +96,18 @@ function statusLabel(e: Record<string, unknown>): string {
   const role = String(e['role'] ?? e['tierId'] ?? e['tier'] ?? e['id'] ?? '').toUpperCase();
   const label = typeof e['label'] === 'string' ? (e['label'] as string).trim() : '';
   const action = typeof e['currentAction'] === 'string' ? (e['currentAction'] as string).trim() : '';
+
+  // Blocked work is finished, not in progress, so it must not get a trailing
+  // "…" or a "Working" verb. It also carries the only thing worth saying about
+  // it: which upstream failure stopped it.
+  if (String(e['status'] ?? '').toUpperCase() === 'BLOCKED') {
+    const causes = Array.isArray(e['blockedBy'])
+      ? (e['blockedBy'] as unknown[]).filter((c): c is string => typeof c === 'string' && !!c.trim())
+      : [];
+    const what = label ? `Skipped ${label}` : 'Skipped';
+    return causes.length ? `${what} — blocked by ${causes.join(', ')}` : `${what} — blocked upstream`;
+  }
+
   if (action) return `${action}…`;
   if (role.startsWith('T1')) return 'Mapping the approach…';
   if (role.startsWith('T2')) return label ? `Cascading: ${label}…` : 'Cascading — delegating to specialists…';
@@ -109,9 +121,11 @@ export interface ActivityNode {
   role: string;            // 'T1' | 'T2' | 'T3'
   label?: string;          // subtask / section title
   model?: string;          // provider:model serving this tier
-  status: string;          // ACTIVE | COMPLETED | …
+  status: string;          // ACTIVE | COMPLETED | BLOCKED | …
   currentAction?: string;
   progressPct?: number;
+  /** Titles of the upstream work that stopped this one. BLOCKED nodes only. */
+  blockedBy?: string[];
   order: number;           // arrival order, for stable display
 }
 
@@ -130,6 +144,9 @@ function mergeActivity(prev: ActivityNode[], e: Record<string, unknown>): Activi
     status: str('status') ?? cur?.status ?? 'ACTIVE',
     currentAction: str('currentAction') ?? cur?.currentAction,
     progressPct: typeof e['progressPct'] === 'number' ? (e['progressPct'] as number) : cur?.progressPct,
+    blockedBy: Array.isArray(e['blockedBy'])
+      ? (e['blockedBy'] as unknown[]).filter((c): c is string => typeof c === 'string')
+      : cur?.blockedBy,
     order: cur?.order ?? prev.length,
   };
   if (i >= 0) { const copy = [...prev]; copy[i] = node; return copy; }
