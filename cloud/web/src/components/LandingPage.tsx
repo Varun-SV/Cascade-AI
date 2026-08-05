@@ -9,17 +9,17 @@ import { devLogin } from '../lib/api.js';
 import { AZURE, SKY, TEAL, TIERS } from '../lib/brand.js';
 import CascadeSpine from './CascadeSpine.js';
 import RunDiagram from './RunDiagram.js';
+import DownloadSection from './DownloadSection.js';
 
 interface Props {
   config: CloudConfig;
   onDevLogin: () => void;
 }
 
-const RELEASES = 'https://github.com/Varun-SV/Cascade-AI/releases/latest';
 const REPO = 'https://github.com/Varun-SV/Cascade-AI';
 
 /** Sections the spine tracks, top to bottom. */
-const SPINE_SECTIONS = ['tiers', 'visible', 'surfaces', 'features'] as const;
+const SPINE_SECTIONS = ['tiers', 'visible', 'surfaces', 'download', 'features'] as const;
 
 /** The three-bar cascade mark (azure → sky → teal), matching the /docs page. */
 function Mark({ size = 22 }: { size?: number }) {
@@ -164,6 +164,7 @@ export default function LandingPage({ config, onDevLogin }: Props) {
             <span className="bg-gradient-to-r from-[#4C8DFF] via-[#38B0DE] to-[#2DD4BF] bg-clip-text text-transparent">Cascade</span>
           </span>
           <nav className="ml-auto flex items-center gap-1 text-sm">
+            <a href="#download" className="rounded-lg px-3 py-1.5 text-ink-300 hover:bg-elev/[0.06] hover:text-ink-100">Download</a>
             <a href="/docs" className="rounded-lg px-3 py-1.5 text-ink-300 hover:bg-elev/[0.06] hover:text-ink-100">Docs</a>
             <a href={REPO} target="_blank" rel="noreferrer" className="hidden rounded-lg px-3 py-1.5 text-ink-300 hover:bg-elev/[0.06] hover:text-ink-100 sm:block">GitHub</a>
             <a href="#start" className="accent-grad ml-1 rounded-lg px-3.5 py-1.5 font-semibold text-white shadow shadow-accent-700/20 hover:brightness-110">Sign in</a>
@@ -205,7 +206,7 @@ export default function LandingPage({ config, onDevLogin }: Props) {
                 <div className="lg:[&>div]:justify-start">{signInButtons}</div>
                 <p className="mt-3 text-xs text-ink-500">Free to start — you bring your own API keys.</p>
                 <div className="mt-5 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-sm lg:justify-start">
-                  <a href={RELEASES} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-ink-300 hover:text-ink-100">
+                  <a href="#download" className="inline-flex items-center gap-1.5 text-ink-300 hover:text-ink-100">
                     <Download size={15} /> Download desktop app
                   </a>
                   <a href="/docs" className="inline-flex items-center gap-1.5 text-ink-300 hover:text-ink-100">
@@ -322,6 +323,12 @@ export default function LandingPage({ config, onDevLogin }: Props) {
           </div>
         </section>
 
+        {/* Downloads — placed right after the three surfaces, since that
+            section is where "there is a desktop app" lands. */}
+        <motion.div {...reveal}>
+          <DownloadSection reduced={reduced} />
+        </motion.div>
+
         {/* Features. */}
         <section id="features" className="scroll-mt-24 py-16">
           <motion.h2 {...reveal} className="mb-10 text-2xl font-bold tracking-tight sm:text-3xl">Everything else you need</motion.h2>
@@ -375,6 +382,7 @@ export default function LandingPage({ config, onDevLogin }: Props) {
         <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-3 px-5 py-6 text-sm text-ink-400 sm:flex-row">
           <span className="inline-flex items-center gap-2"><Mark size={16} /> Cascade — multi-tier AI orchestration</span>
           <div className="flex items-center gap-4">
+            <a href="#download" className="hover:text-ink-100 inline-flex items-center gap-1"><Download size={14} /> Download</a>
             <a href="/docs" className="hover:text-ink-100 inline-flex items-center gap-1"><BookOpen size={14} /> Docs</a>
             <a href={REPO} target="_blank" rel="noreferrer" className="hover:text-ink-100 inline-flex items-center gap-1"><Github size={14} /> GitHub</a>
             <a href="#start" className="inline-flex items-center gap-1 hover:text-ink-100">Sign in <ArrowRight size={13} /></a>

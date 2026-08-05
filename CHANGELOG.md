@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+- **The desktop app downloads from the site instead of from GitHub.** "Download
+  desktop app" used to be a link to the releases page, which answers "I want the
+  app" with twenty files: two `.dmg` builds that differ only by a CPU
+  architecture the visitor is expected to know, two `.exe` files of which only
+  one installs anything, and fourteen `.blockmap` and `latest*.yml` files that
+  are the auto-updater's private business. Picking correctly required knowing
+  more about the build system than about the product.
+
+  The landing page now has a download section that names one file and offers it:
+  the platform is detected, the size and version are shown, and the other builds
+  are one disclosure away rather than a page away. On macOS the architecture is
+  read from client hints where the browser provides them (Chromium) and
+  otherwise defaults to Apple silicon with the Intel build offered directly
+  beneath — a guess that is right most of the time and cheap to correct, rather
+  than a detection that quietly hands half of Mac users the wrong file.
+  Android, iOS and iPadOS get no primary button at all: their user-agent strings
+  say "Linux" and "Mac OS X", and a confident button there would hand a phone a
+  desktop installer.
+
+  Each build also gets a stable URL — `/download/mac-arm64`, `/download/win-x64`
+  — that always means "the current build for this platform", so a link in a
+  README or a message does not go stale when a release ships.
+
+  The bytes still come from GitHub's CDN; `/download/:target` answers a 302
+  rather than proxying. Streaming ~150 MB per click through the app server would
+  put every download on the hosting egress bill and hold a connection open for
+  the length of a large file transfer, which is a poor trade for hiding a
+  hostname. The release is resolved through GitHub's API at most once every 15
+  minutes — unauthenticated callers get 60 requests an hour, so asking per page
+  view would exhaust it in a minute of real traffic — and a previously resolved
+  list keeps being served for a day if that API starts failing, since release
+  assets are append-only and a slightly stale list still points at files that
+  exist. If it cannot be resolved at all, the section falls back to the same
+  releases link it replaced.
+
 ### Changed
 - **The landing page now cascades instead of just saying it does.** The old page
   described three tiers in a row of three equal, centred cards — the layout of

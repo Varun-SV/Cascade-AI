@@ -32,6 +32,7 @@ import {
   verifyWebhookSignature, planForStatus, subscriptionFromWebhook,
 } from './billing.js';
 import { HandoffStore, parseHandoffBody } from './handoff.js';
+import { DownloadResolver, isTargetId, isTrustedAssetUrl, RELEASES_PAGE_URL } from './downloads.js';
 import { MAX_DOCUMENT_BYTES, parseDocument, resolveDocumentMime } from './documents.js';
 import { connectorCatalog, getConnector, validateRemoteMcpUrl } from './mcp.js';
 import { McpOAuthFlows, encodeOAuthBlob, resolveRunMcpServers } from './mcp-oauth.js';
@@ -118,7 +119,16 @@ function renderActivatePage(authed: boolean, webOrigin: string, prefill: string)
       <p>Enter the code shown in your terminal or desktop app to sign it in.</p>${body}</main></body></html>`;
 }
 
-export function createApp(env: CloudEnv, store: CloudStore) {
+export interface CreateAppOptions {
+  /**
+   * Overrides the release resolver. Only tests pass this — it keeps the
+   * download routes exercisable without reaching GitHub, which would make the
+   * suite both slow and dependent on someone else's rate limit.
+   */
+  downloads?: DownloadResolver;
+}
+
+export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOptions = {}) {
   const app = express();
   // Behind Railway (and most PaaS) the app sits behind exactly one reverse
   // proxy that sets X-Forwarded-For. Without trusting it, express-rate-limit
@@ -1323,6 +1333,53 @@ export function createApp(env: CloudEnv, store: CloudStore) {
     const convo = store.importConversation(req.session!.userId, parsed.title, parsed.skillId, parsed.messages);
     res.json({ conversation: { id: convo.id, title: convo.title, skillId: convo.skillId } });
   });
+
+  // ── Desktop downloads (cascadeai.in/download/…) ─────
+  // The site serves the installers itself rather than sending visitors to the
+  // GitHub releases page to pick a file out of twenty. See downloads.ts for why
+  // the bytes are still redirected to GitHub's CDN rather than proxied.
+  const downloads = options.downloads ?? new DownloadResolver();
+
+  // The manifest behind the download section: version, per-platform filename
+  // and size. Public and identical for everyone, so it caches at the edge too.
+  app.get('/api/downloads', async (_req, res) => {
+    const manifest = await downloads.get();
+    if (!manifest) {
+      // The site falls back to a plain releases link on this, which is exactly
+      // where it used to send people — a worse experience, not a broken one.
+      res.status(503).json({ error: 'Downloads are temporarily unavailable.', releasesUrl: RELEASES_PAGE_URL });
+      return;
+    }
+    res.set('Cache-Control', 'public, max-age=900');
+    res.json(manifest);
+  });
+
+  // A stable, shareable URL per build: /download/mac-arm64 always means "the
+  // current Apple-silicon build", with no version in the link to go stale.
+  app.get('/download/:target', async (req, res) => {
+    const target = req.params['target'];
+    if (typeof target !== 'string' || !isTargetId(target)) {
+      res.redirect(302, '/#download');
+      return;
+    }
+    const manifest = await downloads.get();
+    const asset = manifest?.targets.find((t) => t.id === target);
+    // Unresolvable (GitHub down, or a release that genuinely lacks this build)
+    // sends the visitor to the releases page rather than a dead end.
+    if (!asset || !isTrustedAssetUrl(asset.url)) {
+      res.redirect(302, RELEASES_PAGE_URL);
+      return;
+    }
+    // Not cached: the target is stable but what it points at changes with every
+    // release, and a browser holding a 302 to an old version would keep
+    // installing it after a new one shipped.
+    res.set('Cache-Control', 'no-store');
+    res.redirect(302, asset.url);
+  });
+
+  // Bare /download is the human-typable form — send it to the section that
+  // explains the choices.
+  app.get(['/download', '/download/'], (_req, res) => res.redirect(302, '/#download'));
 
   // ── Public docs site (cascadeai.in/docs) ─────
   // Registered before the SPA catch-all so /docs serves the documentation page
