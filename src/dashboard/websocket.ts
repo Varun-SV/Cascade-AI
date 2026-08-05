@@ -64,8 +64,17 @@ export class DashboardSocket {
     this.io.emit('cascade:event', ev);
   }
 
-  emitTierStatus(tierId: string, role: string, status: string, sessionId: string, action?: string): void {
-    const payload = { tierId, role, status, action, timestamp: new Date().toISOString(), sessionId };
+  /**
+   * `extra` exists because this signature is positional: every field the tier
+   * emits that is not named here is silently dropped on this path, while the
+   * other two forwarders spread the whole event through. That asymmetry is how
+   * a field can reach the web dashboard from one code path and not another.
+   */
+  emitTierStatus(
+    tierId: string, role: string, status: string, sessionId: string, action?: string,
+    extra?: Record<string, unknown>,
+  ): void {
+    const payload = { tierId, role, status, action, timestamp: new Date().toISOString(), sessionId, ...extra };
     this.io.emit('tier:status', payload);
     this.io.to(`session:${sessionId}`).emit('tier:status', payload);
   }

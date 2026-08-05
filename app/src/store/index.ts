@@ -15,6 +15,14 @@ export interface AgentNode {
   status: 'IDLE' | 'ACTIVE' | 'COMPLETED' | 'FAILED' | 'ESCALATED' | 'BLOCKED';
   progressPct?: number;
   currentAction?: string;
+  /** Graph identity ("s1"), distinct from `id` which is the runtime tier id. */
+  nodeId?: string;
+  /** Graph node ids this one waited for. */
+  dependsOn?: string[];
+  /** Which execution wave it ran in — nodes sharing one ran in parallel. */
+  waveId?: number;
+  /** Titles of the upstream work that stopped it. BLOCKED nodes only. */
+  blockedBy?: string[];
   parentId?: string;
   stream?: string;
   /** The model serving this node (`provider:id`), once the tier resolved it. */

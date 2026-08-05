@@ -249,6 +249,7 @@ export function App() {
     socket.on('tier:status', (data: {
       tierId: string; role: string; label: string; status: string;
       progressPct?: number; currentAction?: string; parentId?: string; sessionId?: string; model?: string;
+      nodeId?: string; dependsOn?: string[]; waveId?: number; blockedBy?: string[];
     }) => {
       // Tag the node with the run's session — always recorded (even for a
       // session not currently on screen) so Cockpit can filter its graph to
@@ -263,6 +264,10 @@ export function App() {
         parentId: data.parentId,
         sessionId: data.sessionId,
         model: data.model,
+        nodeId: data.nodeId,
+        dependsOn: data.dependsOn,
+        waveId: data.waveId,
+        blockedBy: data.blockedBy,
       }));
     });
 
