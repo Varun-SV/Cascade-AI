@@ -12,8 +12,21 @@
 name: CI
 
 on:
+  # NO `branches` filter here, deliberately. It used to be `branches: [main]`,
+  # which silently skipped CI for any pull request based on another branch —
+  # and this repo stacks PRs (open B against A so B's diff shows only its own
+  # work, then retarget B to main once A merges). Such a PR showed ZERO checks
+  # rather than a failure, which reads as "not run yet" and is easy to merge
+  # past. Retargeting does not rescue it either: base changes arrive as
+  # `edited`, which is not in the default type list, so nothing re-fires.
+  #
+  # Running CI on every PR regardless of base costs one extra run per stacked
+  # PR and removes a whole class of "green because nothing ran".
   pull_request:
-    branches: ["main"]
+    # `ready_for_review` is added because a PR opened as a draft and later
+    # marked ready should be re-checked at that moment; the default types
+    # (opened / synchronize / reopened) do not include it.
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: ["main"]
   workflow_dispatch: {}
