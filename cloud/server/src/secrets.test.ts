@@ -18,7 +18,22 @@ describe('at-rest secret encryption', () => {
   it('fails on a tampered ciphertext (GCM auth tag)', () => {
     const blob = encryptAtRest('secret-data', secret);
     const [iv, tag, ct] = blob.split('.');
-    const flipped = ct.slice(0, -2) + (ct.endsWith('A') ? 'B' : 'A') + ct.slice(-1);
-    expect(() => decryptAtRest(`${iv}.${tag}.${flipped}`, secret)).toThrow();
+
+    // Flip a bit in the decoded BYTES rather than editing the base64 text.
+    //
+    // Editing the text is not reliably tampering. `secret-data` is 11 bytes, so
+    // its base64 is 16 characters ending in `=`; the last DATA character
+    // carries only 4 significant bits, and the 2 low bits are padding that
+    // decoding discards. An edit that lands only on those decodes to identical
+    // bytes, GCM verifies happily, and nothing throws.
+    //
+    // The previous version did exactly that: it checked `ct.endsWith('A')` (the
+    // last character, which is always `=`) but replaced the second-to-last, so
+    // the replacement was always `A` — a no-op whenever the ciphertext's final
+    // nibble was already zero. Measured at 1 run in 16, which is how it failed
+    // CI on an unrelated PR.
+    const bytes = Buffer.from(ct!, 'base64');
+    bytes[0] ^= 0x01;
+    expect(() => decryptAtRest(`${iv}.${tag}.${bytes.toString('base64')}`, secret)).toThrow();
   });
 });
