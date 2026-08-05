@@ -126,6 +126,15 @@ export interface ActivityNode {
   progressPct?: number;
   /** Titles of the upstream work that stopped this one. BLOCKED nodes only. */
   blockedBy?: string[];
+  /**
+   * Graph identity — the planner's section/subtask id, a DIFFERENT id space
+   * from `tierId`. `dependsOn` names nodeIds, so a graph view must key on this
+   * one; a live-tier view keys on tierId.
+   */
+  nodeId?: string;
+  dependsOn?: string[];
+  /** Execution wave. Nodes sharing one ran at the same time. */
+  waveId?: number;
   order: number;           // arrival order, for stable display
 }
 
@@ -147,6 +156,11 @@ function mergeActivity(prev: ActivityNode[], e: Record<string, unknown>): Activi
     blockedBy: Array.isArray(e['blockedBy'])
       ? (e['blockedBy'] as unknown[]).filter((c): c is string => typeof c === 'string')
       : cur?.blockedBy,
+    nodeId: str('nodeId') ?? cur?.nodeId,
+    dependsOn: Array.isArray(e['dependsOn'])
+      ? (e['dependsOn'] as unknown[]).filter((d): d is string => typeof d === 'string')
+      : cur?.dependsOn,
+    waveId: typeof e['waveId'] === 'number' ? (e['waveId'] as number) : cur?.waveId,
     order: cur?.order ?? prev.length,
   };
   if (i >= 0) { const copy = [...prev]; copy[i] = node; return copy; }

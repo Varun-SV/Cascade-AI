@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+- **The task graph now leaves the SDK.** `tier:status` carries three new fields:
+  `nodeId`, `dependsOn` and `waveId`. Until now the orchestrator compiled a
+  typed dependency graph, executed it in waves, and then told every surface only
+  who was working — never what anything waited for, nor what ran at the same
+  time as what. `dependsOn` existed solely inside `src/core/orchestration/` and
+  reached no client at all, so no surface could draw the structure even in
+  principle.
+
+  `nodeId` is a **separate id space from `tierId`**, and that distinction is the
+  whole reason the fields are usable. `tierId` identifies a tier *instance*
+  (`T2_a1b2c3d4`, minted per construction); `nodeId` identifies the *work*
+  (`s1`), which is what dependency edges name. Sending `dependsOn` without it
+  would have produced a graph whose every edge pointed at a node that never
+  appears in the stream.
+
+  Both `tier:status` payloads carry them — the terminal-status one and the
+  progress-update one, which are built at different call sites with different
+  shapes. A field on only one arrives intermittently, which is harder to consume
+  than one that never arrives, so a test asserts both.
+
+  Nothing renders a graph yet; this is the data becoming available. Consumers on
+  all four surfaces (CLI tree, desktop store, cloud web activity, dashboard
+  socket) now carry the fields through instead of dropping them, including the
+  one transport that reconstructs the payload from positional arguments and
+  silently discarded anything unnamed.
+
 ### Fixed
 - **Work that was skipped is no longer reported as work that failed.** When a
   section fails, everything downstream of it is skipped rather than run into the

@@ -515,6 +515,10 @@ Return ONLY the JSON array.`;
     for (const a of assignments) {
       const worker = new T3Worker(this.router, this.toolRegistry, this.id);
       if (this.store) worker.setStore(this.store, taskId);
+      // Graph identity is the subtask id, which is what a sibling's dependsOn
+      // names — the worker's own tier id is generated and means nothing to the
+      // graph. The wave is stamped by the execution loop below.
+      worker.setGraphPosition({ nodeId: a.subtaskId, dependsOn: a.dependsOn ?? [] });
       worker.setPeerBus(this.t3PeerBus);
       if (this.permissionEscalator) worker.setPermissionEscalator(this.permissionEscalator);
       if (this.toolCreator) worker.setToolCreator(this.toolCreator);
@@ -713,6 +717,12 @@ Return ONLY the JSON array.`;
       }
 
       wave++;
+      // Stamp before the wave runs, so the first event each worker emits
+      // already carries it. T2 keeps its own loop rather than using
+      // DependencyScheduler (it adds workers mid-run and re-runs waves after
+      // tool synthesis), so the counter is local — but it means the same thing
+      // as the scheduler's, which is what a client needs.
+      for (const id of runnableIds) workerMap.get(id)?.setGraphPosition({ wave });
       this.log(`Wave ${wave}: running ${runnableIds.length} subtask(s) in parallel`);
       this.sendStatusUpdate({
         progressPct: 20 + Math.min(wave * 10, 60),

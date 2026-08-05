@@ -682,6 +682,9 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
       if (this.runBreaker) manager.setRunBreaker(this.runBreaker);
       if (this.escalationCallback) manager.setEscalationCallback(this.escalationCallback);
       manager.setHierarchyContext(`You are a T2 Manager for the section "${section.sectionTitle}". You are part of a COMPLEX task overseen by T1 Administrator.`);
+      // Graph identity and edges are known now; the wave only once the
+      // scheduler reaches this node (see onWaveStart below).
+      manager.setGraphPosition({ nodeId: section.sectionId, dependsOn: section.dependsOn ?? [] });
       if (this.store) {
         manager.setStore(this.store);
       }
@@ -851,6 +854,13 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
     const scheduler = new DependencyScheduler<T1ToT2Assignment, T2Result>(
       compiled.graph,
       {
+        // The wave is the scheduler's own counter, and it is the only place the
+        // parallelism is visible: nodes sharing a wave ran at the same time.
+        // Stamped before the wave executes so the first status event a node
+        // emits already carries it.
+        onWaveStart: (nodes, wave) => {
+          for (const node of nodes) managers[node.ordinal]?.setGraphPosition({ wave });
+        },
         execute: async (node) => {
           const section = node.payload;
           // `ordinal` is the node's index in the original sections array, which
@@ -939,6 +949,13 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
           // broken, when in fact it was deliberately not attempted.
           this.emit('tier:status', {
             tierId: section.sectionId,
+            // A blocked section has no tier instance — it was never
+            // constructed — so its runtime id and its graph id are the same
+            // thing here. Emitting nodeId anyway keeps every node in the
+            // stream addressable in the graph's id space, which is what
+            // dependsOn edges point at.
+            nodeId: section.sectionId,
+            dependsOn: [...(section.dependsOn ?? [])],
             role: 'T2',
             label: section.sectionTitle,
             status: 'BLOCKED',

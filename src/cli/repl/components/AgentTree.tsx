@@ -15,6 +15,11 @@ export interface TierNode {
   // TierStatus, so adding a status to the core type left the tree silently
   // rendering it through whatever default branch it happened to hit.
   status: TierStatus;
+  /** Graph identity + position. Optional: older sessions replay without them. */
+  nodeId?: string;
+  dependsOn?: string[];
+  waveId?: number;
+  blockedBy?: string[];
   currentAction?: string;
   progressPct?: number;
   children?: TierNode[];

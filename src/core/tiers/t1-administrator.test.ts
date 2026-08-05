@@ -29,6 +29,11 @@ function makeTrackingManagers(count: number, active: { n: number; max: number })
       } as T2Result;
     }),
     shareCompletedOutput: vi.fn(),
+    // Real managers inherit this from BaseTier; the double has to carry it too.
+    // The scheduler stamps each node's wave here before the wave runs, and a
+    // double missing the method fails the whole run rather than the assertion,
+    // which is a confusing way to learn the stub has drifted.
+    setGraphPosition: vi.fn(),
   }));
 }
 

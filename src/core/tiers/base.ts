@@ -36,6 +36,21 @@ export abstract class BaseTier extends EventEmitter {
    * which node (Cockpit node panel / Why panel).
    */
   protected servingModel?: string;
+  /**
+   * This tier's identity IN THE TASK GRAPH — the section or subtask id the
+   * planner assigned — plus where it sat in the dependency order.
+   *
+   * `id` and `graphNodeId` are deliberately different id spaces, and both are
+   * needed. `id` identifies this tier INSTANCE ("T2_a1b2c3d4", minted per
+   * construction); `graphNodeId` identifies the WORK ("s1"), which is what
+   * dependency edges point at. Without the distinction a graph view cannot be
+   * drawn at all: `dependsOn` lists section ids, while every running tier
+   * reports a generated tier id, so every edge would name a node that never
+   * appears in the stream.
+   */
+  protected graphNodeId?: string;
+  protected graphDependsOn?: readonly string[];
+  protected graphWave?: number;
 
   constructor(role: TierRole, id?: string, parentId?: string) {
     super();
@@ -48,6 +63,35 @@ export abstract class BaseTier extends EventEmitter {
   /** Mark this tier as the run's presenter (root tier). */
   setPresenter(on = true): void {
     this.isPresenter = on;
+  }
+
+  /**
+   * Record where this tier sits in the compiled task graph.
+   *
+   * Called by whichever tier scheduled this one: the id and edges are known at
+   * construction, the wave only once the scheduler reaches it, so the fields
+   * are set independently rather than all at once.
+   */
+  setGraphPosition(position: { nodeId?: string; dependsOn?: readonly string[]; wave?: number }): void {
+    if (position.nodeId !== undefined) this.graphNodeId = position.nodeId;
+    if (position.dependsOn !== undefined) this.graphDependsOn = [...position.dependsOn];
+    if (position.wave !== undefined) this.graphWave = position.wave;
+  }
+
+  /**
+   * The graph fields, for spreading into a status payload.
+   *
+   * One helper rather than two literals because `tier:status` is emitted from
+   * two different call sites with two different payload shapes; adding a field
+   * to only one of them makes it arrive intermittently, which is worse for a
+   * consumer than never arriving at all.
+   */
+  protected graphFields(): { nodeId?: string; dependsOn?: string[]; waveId?: number } {
+    return {
+      nodeId: this.graphNodeId,
+      dependsOn: this.graphDependsOn ? [...this.graphDependsOn] : undefined,
+      waveId: this.graphWave,
+    };
   }
 
   getStatus(): TierStatus {
@@ -66,6 +110,7 @@ export abstract class BaseTier extends EventEmitter {
       timestamp,
       output,
       model: this.servingModel,
+      ...this.graphFields(),
     };
     this.emit('status', event);
     this.emit('tier:status', event);
@@ -112,6 +157,7 @@ export abstract class BaseTier extends EventEmitter {
       timestamp,
       output: update.output,
       model: this.servingModel,
+      ...this.graphFields(),
     });
   }
 
