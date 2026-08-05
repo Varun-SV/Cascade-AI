@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { CheckCircle2, AlertTriangle, ArrowUpCircle, Cpu, CornerDownRight } from 'lucide-react';
+import { CheckCircle2, AlertTriangle, ArrowUpCircle, Cpu, CornerDownRight, Ban } from 'lucide-react';
 import CascadeMark from '../components/CascadeMark.js';
 import type { ActivityNode } from './useChatSession.js';
 
@@ -16,6 +16,12 @@ function tierMeta(role: string): { name: string; level: number } {
 function StatusIcon({ status }: { status: string }) {
   const s = status.toUpperCase();
   if (s.includes('COMPLETE') || s.includes('DONE')) return <CheckCircle2 size={13} className="text-emerald-400" />;
+  // BLOCKED is terminal, and it is NOT an error — this section was skipped
+  // because something upstream failed, so it spent nothing and broke nothing.
+  // It has to be matched before the generic fallback: matching nothing meant
+  // falling through to the animated mark, which left skipped work looking like
+  // it was still running for the rest of the session.
+  if (s.includes('BLOCK') || s.includes('SKIP')) return <Ban size={13} className="text-ink-500" />;
   if (s.includes('FAIL') || s.includes('ERROR')) return <AlertTriangle size={13} className="text-danger-500" />;
   if (s.includes('ESCALAT')) return <ArrowUpCircle size={13} className="text-amber-400" />;
   return <CascadeMark size={13} />;

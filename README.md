@@ -63,65 +63,37 @@ Other AI CLIs run a single agent. Cascade runs a visible **organization** — an
 
 ## What's New
 
-### v0.13.2 — desktop bugfix round
-- **Live streaming, tool approvals, and file creation work again in the app.** The chat reply streams token-by-token on every route (not just Complex), a **tool-approval modal** now pops for dangerous actions (showing the escalation trail), and approved file writes actually land. Dangerous tools always escalate to you — T2/T1 advise but never final-approve.
-- **New Cockpit controls.** A manual **tier override** (Auto / T1 / T2 / T3) pins a run's root tier; **click any node** to open a live detail panel (role, status, stream, peer messages); coordinating workers now draw an animated **peer edge** in the graph.
-- **Smarter auto-routing.** Explicit multi-step build prompts floor to Complex so genuinely complex work engages the full T1→T2→T3 hierarchy instead of stalling at T2.
-- Plus: the session list loads on connect, long model names stay inside the dropdown, "Check for updates" stays calm mid-release, and the landing page fits phones.
+Cascade has shipped roughly 55 releases since v0.13.2 and is now at **v0.68.0**. Grouped by theme rather than listed one-by-one:
 
-### v0.6 → v0.9.1 — the agentic releases
-- **v0.9.1 — Workers recruit help.** A T3 worker that discovers its task should fan out can call `request_workers` to have its T2 spawn bounded sibling workers (no recursive 4th tier; depth-capped + budget-bounded).
-- **v0.9.0 — Resumability, reflection, smarter local exec.** `/continue` resumes a budget-capped task from its partial state; opt-in **reflection** revises a worker's output against the goal; `t3Execution: auto` runs T3 waves sequentially on local/Ollama tiers and parallel on cloud.
-- **v0.8.0 — Autonomous mode + smarter re-planning.** `/auto` for hands-off runs (safe tools auto-approve, dangerous still gated); T1's reviewer **stops early** when a corrective pass isn't converging; new `/plan` (preview a decomposition) and `/replan`.
-- **v0.7.0 — Boardroom plan review.** Iterative revision (steer → re-plan → re-ask), an AI **plan reviewer**, inline **editable** plans, and a wider gate that can pause Moderate runs too.
-- **v0.6.0 — Live benchmark Auto-routing + fixes.** `Auto` picks the best-value model per task from live public benchmarks + live OpenRouter pricing, with live provider model discovery. Plus the Gemini stale-id 404 self-heal, the Ink-6 paste fix, and run-hang timeouts.
+### v0.68 — a typed task graph, durable resume, and mechanical verification
+- **One dependency scheduler for the whole hierarchy.** T1's section dispatch and T2's subtask execution now both compile onto the same typed task graph (`compileTaskGraph` + `DependencyScheduler`) instead of two separate hand-rolled implementations — pinned by a parity harness across 600 generated graphs so ordering didn't silently change.
+- **Failure-aware dependency contracts.** A section that depends on one that failed is now skipped rather than run into the same wall — reported with the chain that blocked it, and costing no tokens, instead of starting anyway and billing for a run that was doomed before it began. A degraded (`PARTIAL`) result doesn't block; only a hard failure does.
+- **Durable resume across crashes, cancellation, and budget caps.** Checkpoints are now written for every way a run can stop, not just the budget cap, so `/continue` picks a run back up after a crash or Ctrl-C — finished sections are restored as fact and only the remainder gets re-planned.
+- **A deterministic rung on the verification ladder.** Acceptance criteria that can be checked mechanically ("file exists," "contains X") are now settled by looking, before a model is ever asked to grade them — cheaper, faster, and immune to a model believing its own claim that a file was written. Ambiguous criteria still fall through to the model.
+- **The desktop app is now a real download from the site**, not a GitHub releases page listing twenty build artifacts — platform and architecture are detected, size and version are shown, and stable per-platform links (`/download/mac-arm64`, `/download/win-x64`) mean a shared link never goes stale.
 
-<details><summary>Earlier — the visible organization + a flicker-free TUI (v0.5.x)</summary>
+### Cascade Cloud, native login, and one identity across CLI, desktop, and web (v0.20 – v0.45)
+- **Cascade Cloud** launched as a hosted, bring-your-own-key chat surface (`app.cascadeai.in`) — multimodal input, persistent memory, and file generation that now produces real, editable Office documents and charts (`.docx`/`.pptx`/`.xlsx`), not markdown text saved under the wrong extension.
+- **Native login**, rolled out server → CLI → desktop, so `cascade login`, the desktop app, and the web app all authenticate against one account with no OAuth secret shipped in a native client.
+- **Key sync** — provider keys, MCP tokens, and preferences now sync end-to-end encrypted across web, desktop, and CLI; the server holds only ciphertext it cannot read.
+- **MCP connectors gained OAuth** — connecting a server can run a real login-and-authorize flow instead of pasting a token, across cloud web, desktop, and CLI alike.
+- **One visual identity** — a single azure → sky → teal system, matching T1 → T2 → T3, now runs through the CLI banner, the desktop theme, and the web app instead of three different palettes.
 
-### The visible organization + a flicker-free TUI
-- **Delegation savings counter** — live `saved $X (Y%) vs. all-T1` in the StatusBar and `/cost`, plus a one-line receipt after every run (duration · managers · workers · cost · savings).
-- **Agent comms feed** — `/comms` toggles a live ticker of PeerBus traffic (peer messages, broadcasts, file locks, barriers). The events always existed for the web dashboard; the terminal now shows them too.
-- **`/why`** — prints the decision trail for the last run: complexity verdict with the classifier's reason (or which heuristic short-circuited), models per tier, Cascade Auto picks, provider failovers, and escalations.
-- **Boardroom plan approval** — with `planApproval: "always"`, Complex runs pause after T1 plans so you can approve the org chart + estimated cost before any T2 spawns. SDK/headless auto-approve, so default behavior is unchanged.
-- **Flicker fix** — the live area now always fits the viewport (per-panel row budgets, terminal-resize handling, capped panels), which stops Ink's full-screen redraw fallback — the root cause of flicker in long sessions on small/maximized terminals.
-- **Native mouse selection works** — idle repaints no longer wipe an in-progress drag-select; the completed agent tree collapses on your next keystroke instead of an 8s timer. `/copy [n]` copies a response via native clipboard tools with an OSC 52 escape fallback (works over SSH).
-- **`--alt-screen`** — opt-in vim-style alternate-screen mode: flicker-proof by construction, shell restored on exit (even on crashes); history scrolls in-app with PgUp/PgDn.
-- **Ink 6.8 + React 19** — renderer upgrade; Node.js floor rises to **20** (18 is EOL).
+### Cost-aware Auto-routing keeps adding sources and nuance (v0.6 – v0.46)
+- Model-value ranking moved from one hand-curated benchmark table to an aggregator over multiple public sources (Artificial Analysis, LMArena, public leaderboards), normalized onto a common scale and scored conservatively where sources disagree.
+- Point releases now route as their own families (`gpt-5.5` vs. `gpt-5.4-mini`) instead of folding into one shared, less accurate score, and models a provider newly makes available compete in ranking instead of waiting on a hand-edited catalog.
+- Azure deployments with opaque names now get an inferred capability score (size/cost keywords + version), so a multi-deployment setup auto-assigns the strongest model to T1 and the cheapest to T3 instead of handing every tier the same "first available" deployment.
 
-### v0.5.7 — Security hardening pass
-A focused security review of the tool and dashboard surface. All changes are covered by tests (`tsc --noEmit` clean, full suite green).
-- **Dashboard binds to loopback by default** — the server previously listened on all interfaces (`0.0.0.0`), exposing `POST /api/run` (which executes a prompt through the full shell/file/code-interpreter tool set) to the local network. It now binds to `127.0.0.1` via the new `dashboard.host` config field; binding to a public interface requires opting in and prints a warning (louder still if `dashboard.auth` is off).
-- **SSRF protection for `web_fetch`** — agent-supplied URLs are validated against a new SSRF-safe fetch helper: http/https only, hostnames resolved and rejected if they map to loopback / link-local (cloud metadata `169.254.169.254`) / private / CGNAT ranges, and every redirect hop re-validated. Set `CASCADE_ALLOW_LOCAL_FETCH=1` to fetch local URLs. The runtime tool-creator sandbox's `fetch` uses the same guard.
-- **`file_edit` and `git` now require approval** — approval is gated by an allowlist that previously omitted both, so in-place file edits and `git commit`/`checkout`/`push` ran with no prompt while `file_write`/`file_delete` were gated. Both are now in the default approval set.
-- **Code interpreter argument injection fixed** — `run_code` now executes via `execFile` with an argv array instead of interpolating arguments into a shell string, so a crafted `args` value can no longer break out into a second command. Temp scripts are written under the workspace root.
-- **Dashboard JWT pinned to HS256** on both sign and verify (defense-in-depth against algorithm-confusion).
-- **Broadened shell dangerous-command patterns** — the built-in blocklist now tolerates flag reordering / extra whitespace (`rm -fr /`, `rm  -rf  /`) and catches a fork-bomb form. This is defense-in-depth; the approval prompt remains the real gate.
+<details><summary>Earlier — building the agent hierarchy and a flicker-free TUI (v0.5.2 – v0.13.2)</summary>
 
-### v0.5.6 — Wizard scrollable model list + chat scrollback + slash panel fix
-- **Init wizard tier-model picker** — added `limit={8}` to the `SelectInput` so long model lists scroll with ↑/↓ indicators instead of overflowing off-screen.
-- **Chat scrolling restored** — the REPL was still enabling mouse-reporting on mount, which captured wheel events and broke the terminal's native scrollback (where Ink `<Static>` messages live since v0.5.4). Flipped the on-mount sequence to actively disable. Mouse-wheel-up now scrolls the terminal scrollback as expected.
-- **Slash-command suggestion panel** — long descriptions were wrapping to a second line and squishing two entries onto one row. Added `wrap="truncate"` on the description text and bumped the fixed panel height by one row to fit the worst-case content (header + 8 entries + both ↑/↓ indicators).
+### v0.6 → v0.13.2 — the agentic releases
+- Live benchmark Auto-routing (`Auto` picks the best-value model per task from live public benchmarks + live pricing), a boardroom plan-review gate (pause to approve or edit T1's plan before anything spawns), and autonomous `/auto` mode (safe tools run silently, dangerous ones still ask).
+- `/continue` run resumability, and workers recruiting bounded sibling workers (`request_workers`) when a task fans out mid-run.
+- The desktop Cockpit gained live streaming, a tool-approval modal, a manual tier override, and a click-to-inspect node detail panel.
 
-### v0.5.4 — Maximized-terminal flicker fix + orchestrator resilience
-- **Static-based conversation rendering** — completed messages now go to the terminal's native scrollback via Ink `<Static>`; only the live area (status bar, streaming tail, agent tree, input) re-renders per batch. Effectively eliminates the maximized-window flicker on cmd / PowerShell.
-- **`tier:status` throttle** (100 ms) + `React.memo` on AgentTree / StatusBar / HintBar to cut per-event re-render churn.
-- **Auto-clear agent tree** — the tree auto-hides 8 s after a task completes (preserves conversation and cost data); cancelled if a new task starts.
-- **T3 critical-error detection** — rate-limit / auth / forbidden errors now short-circuit the agent loop via a typed `CriticalToolError`; the worker no longer loops 15× on a 429.
-- **T3 stall preserves partial output** via a typed `WorkerStallError` instead of throwing a bare `Error`.
-- **T1 failure summary** — when all sections fail, the user sees the actual root cause (e.g. `[CRITICAL_TOOL_ERROR] grep: 429 Rate limit reached for gpt-5.4-mini`) instead of a generic "all sections encountered errors".
-
-### v0.5.3 — Headless mode and audit fixes
-- **Headless `cascade run` / `-p`** — works in non-TTY contexts (CI, pipes, scripts). Progress → stderr, final answer → stdout. Tool approvals are auto-granted in headless mode.
-- **`cascade models` columns** — long model IDs no longer collide with the provider column.
-- **`/clear` resets cost breakdowns** — per-provider / per-tier maps are reset, not just the totals.
-- **`/config`** — richer output (theme, providers, per-tier models, dashboard port, cascade-auto), guarded against an undefined `config.dashboard`.
-- **Type cleanup** — removed vestigial `ReplMessage` / `ToolCallBlock` interfaces.
-
-### v0.5.2 — Setup wizard redesign + new tools
-- **First-run setup wizard redesigned** to match the Cascade-AI TUI design — themed welcome header, phased step tabs (API Keys → Models → Complete), field boxes, tier cards, and a proper completion screen. All provider/model functionality preserved.
-- **New tools** — `glob`, `grep`, and `web-fetch` available to T3 workers.
-- **Model-performance tracker** — records per-model success/cost stats for scored selection when `cascadeAuto: true`.
-- **Fixes** — removed an accidental `cascade-ai` self-dependency in `package.json`; corrected misleading `/tree` and `/sessions` slash-command descriptions; fixed stale T2/T3 test mocks.
+### v0.5.x — the visible organization
+- The delegation-savings counter (`saved $X vs. all-T1`), the `/comms` peer-traffic feed, `/why` run explanations, and the boardroom approval gate.
+- A dedicated security hardening pass — loopback-only dashboard, SSRF-guarded fetch, sandboxed code execution — and the Ink 6 / React 19 rewrite that fixed the terminal flicker.
 
 </details>
 

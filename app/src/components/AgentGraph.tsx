@@ -18,6 +18,8 @@ const STATUS_COLORS: Record<string, string> = {
   COMPLETED: '#22d47a',
   FAILED: '#f0506e',
   ESCALATED: '#f5b54b',
+  // Muted, deliberately not the error red — skipped is not broken.
+  BLOCKED: '#6b6b78',
   IDLE: '#3a3a46',
 };
 
@@ -26,6 +28,7 @@ const STATUS_LABEL: Record<string, string> = {
   COMPLETED: 'done',
   FAILED: 'failed',
   ESCALATED: 'escalated',
+  BLOCKED: 'skipped',
   IDLE: 'idle',
 };
 

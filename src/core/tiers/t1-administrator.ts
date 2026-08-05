@@ -120,6 +120,20 @@ export interface PlanApprovalMeta {
   critique?: string;
 }
 
+/**
+ * Did this section actually produce content a report can be built from?
+ *
+ * Stated positively on purpose. The three call sites used to spell this out
+ * separately, and one of them phrased it as `status !== 'FAILED'` — which was
+ * only accidentally right while FAILED was the sole unproductive state. Adding
+ * BLOCKED made that negative form silently start counting never-attempted
+ * sections as finished work, feeding empty summaries into the final compile.
+ * A new status should have to opt IN to being treated as output, not opt out.
+ */
+function producedOutput(result: T2Result): boolean {
+  return result.status === 'COMPLETED' || result.status === 'PARTIAL';
+}
+
 export class T1Administrator extends BaseTier {
   private router: CascadeRouter;
   private toolRegistry: ToolRegistry;
@@ -304,8 +318,7 @@ export class T1Administrator extends BaseTier {
     // Step 4: T1 Reviewer Phase — corrective re-plan passes with early-stop.
     let pass = 1;
     const maxReplanPasses = this.config.maxReplanPasses ?? 2;
-    const okCount = (rs: T2Result[]) =>
-      rs.filter((r) => r.status === 'COMPLETED' || r.status === 'PARTIAL').length;
+    const okCount = (rs: T2Result[]) => rs.filter(producedOutput).length;
     while (pass <= maxReplanPasses) {
       const reviewResult = await this.reviewT2Outputs(enrichedPrompt, plan, allT2Results);
       if (reviewResult.approved) {
@@ -374,6 +387,11 @@ Create a CORRECTION PLAN that contains only the new sections needed to fix the i
     plan: TaskPlan,
     t2Results: T2Result[],
   ): Promise<{ approved: boolean; reason?: string }> {
+    // FAILED only, deliberately not BLOCKED. A blocked section was never
+    // attempted, so it has no error of its own to report — and the section that
+    // DID fail is already in this list, which is the one the corrective pass
+    // needs to act on. Counting blocked ones too used to pad this message with
+    // N sections that had nothing wrong with them.
     const failedSections = t2Results.filter(r => r.status === 'FAILED');
     if (failedSections.length > 0) {
       return { 
@@ -480,7 +498,7 @@ In 3-5 terse bullets, flag the most important RISKS, GAPS, or over-/under-decomp
   /** Structured, grounded summary of what's already done — used to keep
    * corrective replan passes from re-emitting completed sections. */
   private summarizeCompletedSections(results: T2Result[]): string {
-    const done = results.filter((r) => r.status === 'COMPLETED' || r.status === 'PARTIAL');
+    const done = results.filter(producedOutput);
     if (done.length === 0) return '';
     const lines = done.map((r) =>
       `- "${r.sectionTitle}" [${r.status}]: ${(r.sectionSummary || '(no summary)').slice(0, 300)}`);
@@ -876,7 +894,14 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
         // PARTIAL is deliberately not a failure: a degraded-but-real section
         // can still feed the one after it, and cancelling that work would cost
         // the user more than letting it try.
-        classify: (_node, result) => (result.status === 'FAILED' ? 'failed' : 'succeeded'),
+        // BLOCKED cannot reach here today — the scheduler settles blocked nodes
+        // through onNodeBlocked and never executes them, so classify only ever
+        // sees results that ran. It is listed anyway because the failure mode if
+        // that ever changes is silent and expensive: a blocked section would
+        // classify as 'succeeded' and release its own dependents, so work that
+        // should have been skipped would run and be billed.
+        classify: (_node, result) =>
+          (result.status === 'FAILED' || result.status === 'BLOCKED' ? 'failed' : 'succeeded'),
         onNodeBlocked: (node, blockedInfo) => {
           // Synthesizing these AFTER scheduler.run() bypassed this lifecycle
           // entirely: blocked sections never advanced progress and their tier
@@ -888,13 +913,16 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
           resultMap.set(node.id, {
             sectionId: section.sectionId,
             sectionTitle: section.sectionTitle,
-            status: 'FAILED',
+            // BLOCKED, not FAILED. This section was never attempted — saying it
+            // failed reports a breakage that did not happen, and hides the one
+            // that did (the upstream section named below).
+            status: 'BLOCKED',
             t3Results: [],
             sectionSummary: '',
             issues: [
-              `${blockedInfo.reason}. This section was not attempted, so no tokens were spent on it. `
-              + `Blocked by: ${blockedInfo.blockedBy.join(', ')}.`,
+              `${blockedInfo.reason}. This section was not attempted, so no tokens were spent on it.`,
             ],
+            blockedBy: { ids: [...blockedInfo.blockedBy], titles: [...blockedInfo.blockedByTitles] },
           } satisfies T2Result);
 
           // A blocked section is finished as far as the run is concerned — it
@@ -906,16 +934,22 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
             status: 'IN_PROGRESS',
           });
           // Terminal status for the node, without ever constructing its manager
-          // or spending a token on it.
+          // or spending a token on it. BLOCKED rather than FAILED: every surface
+          // that renders this was telling the user a section of their work had
+          // broken, when in fact it was deliberately not attempted.
           this.emit('tier:status', {
             tierId: section.sectionId,
             role: 'T2',
-            status: 'FAILED',
+            label: section.sectionTitle,
+            status: 'BLOCKED',
+            blockedBy: [...blockedInfo.blockedByTitles],
+            output: blockedInfo.reason,
           });
           this.emit('section:complete', {
             id: node.id,
             title: section.sectionTitle,
-            status: 'FAILED',
+            status: 'BLOCKED',
+            blockedBy: [...blockedInfo.blockedByTitles],
             output: '',
           });
         },
@@ -960,7 +994,7 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
     plan: TaskPlan,
     t2Results: T2Result[],
   ): Promise<string> {
-    const completedSections = t2Results.filter((r) => r.status !== 'FAILED');
+    const completedSections = t2Results.filter(producedOutput);
 
     if (!completedSections.length) {
       // Aggregate T3 issues across all FAILED sections to surface the root
@@ -993,7 +1027,6 @@ SPEC RULES — each subtask is a self-contained spec slice (workers execute from
       .join('\n\n---\n\n');
 
     const openIssues = t2Results.flatMap((r) => r.issues).filter(Boolean);
-    const failedSections = t2Results.filter((r) => r.status === 'FAILED' || r.status === 'PARTIAL');
 
     const compilePrompt = `Compile a final, coherent response to the user's original request.
 

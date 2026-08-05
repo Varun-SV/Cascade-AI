@@ -150,6 +150,44 @@ describe('T1Administrator.summarizeCompletedSections (corrective replan groundin
       .summarizeCompletedSections([]);
     expect(summary).toBe('');
   });
+
+  it('never claims a BLOCKED section is already done', () => {
+    // A blocked section produced nothing, so telling a corrective replan "do
+    // not redo this" would strand the work permanently — the one thing the
+    // replan exists to pick up.
+    const admin = new T1Administrator({} as CascadeRouter, {} as ToolRegistry, {} as CascadeConfig);
+    const summary = (admin as unknown as { summarizeCompletedSections: (r: T2Result[]) => string })
+      .summarizeCompletedSections([
+        { sectionId: 's1', sectionTitle: 'Implement API', status: 'FAILED', t3Results: [], sectionSummary: '', issues: ['boom'] },
+        { sectionId: 's2', sectionTitle: 'Integration tests', status: 'BLOCKED', t3Results: [], sectionSummary: '', issues: ['skipped'] },
+      ]);
+    expect(summary).toBe('');
+  });
+});
+
+describe('T1Administrator.compileFinalOutput — blocked sections are not content', () => {
+  /**
+   * The regression this pins: `completedSections` was `status !== 'FAILED'`,
+   * which was only accidentally correct while FAILED was the sole unproductive
+   * state. Introducing BLOCKED made every skipped section read as finished
+   * work — so an empty summary was fed to the compile step as though a manager
+   * had written it, and a run whose first section failed stopped reporting
+   * failure at all, because the sections blocked behind it looked like output.
+   */
+  const compile = (admin: T1Administrator, results: T2Result[]) =>
+    (admin as unknown as { compileFinalOutput: (p: string, plan: unknown, r: T2Result[]) => Promise<string> })
+      .compileFinalOutput('build the thing', { sections: [] }, results);
+
+  it('reports failure when every section either failed or was blocked behind it', async () => {
+    const admin = new T1Administrator({} as CascadeRouter, {} as ToolRegistry, {} as CascadeConfig);
+    const out = await compile(admin, [
+      { sectionId: 's1', sectionTitle: 'Implement API', status: 'FAILED', t3Results: [], sectionSummary: '', issues: ['provider 500'] },
+      { sectionId: 's2', sectionTitle: 'Integration tests', status: 'BLOCKED', t3Results: [], sectionSummary: '', issues: ['Required upstream work "Implement API" failed. This section was not attempted, so no tokens were spent on it.'] },
+    ]);
+
+    expect(out).toContain('Task failed');
+    expect(out).toContain('provider 500');
+  });
 });
 
 describe('T1Administrator.reviewT2Outputs (preserve a user-chosen skip)', () => {
