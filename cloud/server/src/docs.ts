@@ -207,7 +207,7 @@ export function renderDocsPage(): string {
 ${body()}
   </main>
 </div>
-<footer>Cascade — multi-tier AI orchestration · <a href="/">Open the app</a> · <a href="/#tiers">How the tiers work</a> · <a href="https://github.com/Varun-SV/Cascade-AI">GitHub</a></footer>
+<footer>Cascade — multi-tier AI orchestration · <a href="/">Open the app</a> · <a href="/#download">Download the desktop app</a> · <a href="/#tiers">How the tiers work</a> · <a href="https://github.com/Varun-SV/Cascade-AI">GitHub</a></footer>
 </body>
 </html>`;
 }
