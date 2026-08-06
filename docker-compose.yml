@@ -3,9 +3,21 @@
 #
 # Quick start:
 #   cp .env.example .env
-#   # then set SESSION_SECRET (see .env.example for how to generate one)
+#   echo "SESSION_SECRET=$(openssl rand -base64 32)" >> .env
+#   echo "CLOUD_DEV_BYPASS=1" >> .env   # see the warning below
 #   docker compose up
 #   # → http://localhost:8787
+#
+# The CLOUD_DEV_BYPASS line is not optional decoration: with both OAuth
+# providers unset and the bypass off, the server starts fine but /api/config
+# reports no enabled login method, so nothing can sign in and the UI is a dead
+# end. One of the two has to be configured.
+#
+# ⚠ CLOUD_DEV_BYPASS is an AUTHENTICATION BYPASS — it accepts any name with no
+# credential, so anyone who can reach the port is in. It is acceptable here
+# only because this file publishes to 127.0.0.1 (see `ports` below). For an
+# instance anyone else can reach, set GITHUB_CLIENT_ID / GOOGLE_CLIENT_ID
+# instead and leave the bypass off.
 #
 # All configuration is read from ./.env (see .env.example for every
 # variable this server understands, straight from cloud/server/src/env.ts).
@@ -32,6 +44,19 @@ services:
       - "127.0.0.1:${PORT:-8787}:${PORT:-8787}"
     env_file:
       - .env
+    environment:
+      # PORT has to be pinned to the SAME interpolated value the `ports` line
+      # above used, or the two can silently disagree.
+      #
+      # Compose interpolates `${PORT}` in `ports` from the invoking shell first,
+      # falling back to the project .env — while `env_file` hands the container
+      # whatever .env says, independently. So a caller with PORT=3000 exported
+      # in their shell and PORT=8787 in .env publishes 3000:3000 while Node
+      # listens on 8787: the container is up, healthy, and unreachable.
+      #
+      # `environment` takes precedence over `env_file`, so this makes the two
+      # sides read from one source and keeps PORT a single working knob.
+      PORT: "${PORT:-8787}"
     volumes:
       # Persists the SQLite DB + per-tenant uploads (DATA_DIR in .env.example
       # points here) across `docker compose down` / image rebuilds. Without
