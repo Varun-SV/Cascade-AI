@@ -1,0 +1,165 @@
+// Upgrade safety for a removed provider type.
+//
+// The failure these guard against is not subtle: narrowing ProviderType makes
+// `validateConfig()` THROW on a file that was valid one version earlier, and
+// ConfigManager.loadConfig() calls it with no recovery — so the CLI dies at
+// startup and the desktop app reports "Could not load Cascade config" with no
+// way to repair it from Settings. Every fixture below is a real 0.70.0-shaped
+// file, not a synthetic one.
+
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  describeCleanup,
+  didCleanupChangeAnything,
+  filterRetiredCredentials,
+  stripRetiredProviders,
+} from './retired-providers.js';
+import { validateConfig } from './validate.js';
+import { ConfigManager } from './index.js';
+
+/** Exactly what `cascade init` wrote for a GitHub Models user on 0.70.0. */
+function config0700(): Record<string, unknown> {
+  return {
+    providers: [
+      { type: 'anthropic', apiKey: 'sk-ant-real' },
+      { type: 'github-models', apiKey: 'github_pat_dead' },
+    ],
+    models: { t1: 'github-models:openai/gpt-4o', t2: 'claude-sonnet-4', t3: 'github-models:meta/Llama-3.3-70B-Instruct' },
+  };
+}
+
+describe('stripRetiredProviders', () => {
+  it('lets a 0.70.0 config that names a retired provider pass validation again', () => {
+    const raw = config0700();
+    // Establish the regression is real before asserting the fix: unmigrated,
+    // this file is rejected outright.
+    expect(() => validateConfig(config0700())).toThrow();
+
+    const cleanup = stripRetiredProviders(raw);
+    expect(cleanup.removed).toEqual(['github-models']);
+    const cfg = validateConfig(raw);
+    expect(cfg.providers.map((p) => p.type)).toEqual(['anthropic']);
+  });
+
+  it('clears tier pins that name the retired provider, and only those', () => {
+    const raw = config0700();
+    const cleanup = stripRetiredProviders(raw);
+    // A pin outlives the provider entry and is just a string, so the provider
+    // filter alone leaves it behind — where it fails every single request with
+    // "provider ... is not available" rather than falling back.
+    expect(cleanup.clearedPins.sort()).toEqual(['t1', 't3']);
+    const cfg = validateConfig(raw);
+    expect(cfg.models?.t1).toBeUndefined();
+    expect(cfg.models?.t3).toBeUndefined();
+    expect(cfg.models?.t2).toBe('claude-sonnet-4'); // untouched
+  });
+
+  it('is a no-op on a config with nothing retired', () => {
+    const raw = { providers: [{ type: 'openai', apiKey: 'k' }], models: { t1: 'gpt-4o' } };
+    const cleanup = stripRetiredProviders(raw);
+    expect(didCleanupChangeAnything(cleanup)).toBe(false);
+    expect(raw.providers).toHaveLength(1);
+    expect(raw.models.t1).toBe('gpt-4o');
+  });
+
+  it('leaves a malformed file for validateConfig to reject, rather than masking it', () => {
+    // If this swallowed junk, a genuinely broken config would produce a
+    // confusing error from the migration instead of the schema's real one.
+    const raw = { providers: 'not-an-array' };
+    expect(didCleanupChangeAnything(stripRetiredProviders(raw))).toBe(false);
+    expect(() => validateConfig(raw)).toThrow();
+  });
+
+  it('does not mistake a model id that merely contains the name for a pin', () => {
+    const raw = { providers: [], models: { t1: 'openai-compatible:github-models-clone' } };
+    expect(stripRetiredProviders(raw).clearedPins).toEqual([]);
+    expect((raw.models as { t1?: string }).t1).toBe('openai-compatible:github-models-clone');
+  });
+
+  it('describes what it did in terms a user can act on', () => {
+    const raw = config0700();
+    const msg = describeCleanup(stripRetiredProviders(raw));
+    expect(msg).toContain('github-models');
+    expect(msg).toContain('T1/T3');
+  });
+});
+
+describe('filterRetiredCredentials', () => {
+  it('drops retired entries from the global credentials store', () => {
+    const { kept, removed } = filterRetiredCredentials([
+      { type: 'anthropic', apiKey: 'k' },
+      { type: 'github-models', apiKey: 'github_pat_dead' },
+    ]);
+    expect(removed).toEqual(['github-models']);
+    expect(kept.map((p) => p.type)).toEqual(['anthropic']);
+  });
+});
+
+describe('ConfigManager — upgrading from a real 0.70.0 install', () => {
+  let dir: string;
+  let globalDir: string;
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-migrate-'));
+    globalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-global-'));
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warn.mockRestore();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(globalDir, { recursive: true, force: true });
+  });
+
+  function writeWorkspaceConfig(cfg: unknown) {
+    fs.mkdirSync(path.join(dir, '.cascade'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.cascade', 'config.json'), JSON.stringify(cfg, null, 2));
+  }
+
+  it('loads instead of throwing, and persists the cleaned config', async () => {
+    writeWorkspaceConfig(config0700());
+    const mgr = new ConfigManager(dir, globalDir);
+
+    await expect(mgr.load()).resolves.toBeUndefined();
+    expect(mgr.getConfig().providers.map((p) => p.type)).toEqual(['anthropic']);
+
+    // Persisted, not just fixed in memory — otherwise every future load
+    // repeats the migration and the warning never stops.
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dir, '.cascade', 'config.json'), 'utf-8'));
+    expect(onDisk.providers.some((p: { type: string }) => p.type === 'github-models')).toBe(false);
+    expect(onDisk.models?.t1).toBeUndefined();
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('github-models'));
+  });
+
+  it('does not let the global credentials store reintroduce the retired entry', async () => {
+    // The regression the workspace-only fix would miss: mergeGlobalCredentials
+    // runs AFTER validation and never passes through the schema, so a stale
+    // ~/.cascade-ai entry lands back in memory moments after the workspace
+    // file was cleaned — and comes back on every load, in every workspace.
+    writeWorkspaceConfig({ providers: [{ type: 'anthropic', apiKey: 'k' }] });
+    fs.writeFileSync(
+      path.join(globalDir, 'credentials.json'),
+      JSON.stringify({ providers: [{ type: 'github-models', apiKey: 'github_pat_dead' }] }),
+    );
+
+    const mgr = new ConfigManager(dir, globalDir);
+    await mgr.load();
+
+    expect(mgr.getConfig().providers.some((p) => p.type === 'github-models')).toBe(false);
+    const creds = JSON.parse(fs.readFileSync(path.join(globalDir, 'credentials.json'), 'utf-8'));
+    expect(creds.providers.some((p: { type: string }) => p.type === 'github-models')).toBe(false);
+  });
+
+  it('leaves a clean install untouched and silent', async () => {
+    writeWorkspaceConfig({ providers: [{ type: 'openai', apiKey: 'k' }] });
+    const mgr = new ConfigManager(dir, globalDir);
+    await mgr.load();
+
+    expect(mgr.getConfig().providers.map((p) => p.type)).toEqual(['openai']);
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('migration'));
+  });
+});

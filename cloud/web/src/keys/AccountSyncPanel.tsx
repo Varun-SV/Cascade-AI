@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Cloud, Loader2, UploadCloud, DownloadCloud } from 'lucide-react';
 import type { ProviderConfig, WebSearchSettings } from '../lib/types.js';
+import { stripRetiredProviders } from '../lib/retired-providers.js';
 import { decryptJSON, encryptJSON, type EncryptedBlob } from './crypto.js';
 import { pullKeySync, pushKeySync } from '../lib/api.js';
 
@@ -25,11 +26,19 @@ function providerSig(p: ProviderConfig): string {
   return [p.type, p.baseUrl ?? '', p.deploymentName ?? '', p.label ?? ''].join(' ');
 }
 
-/** Union local + incoming providers; incoming wins, local-only entries survive. */
+/**
+ * Union local + incoming providers; incoming wins, local-only entries survive.
+ *
+ * The incoming half is filtered for retired provider types. A sync bundle is
+ * a snapshot of whatever the vault held when it was uploaded, so a restore
+ * from before a provider was retired would otherwise reintroduce the dead
+ * entry into a vault that had already been migrated — and keep doing it on
+ * every restore, which reads as the cleanup not working.
+ */
 function mergeProviders(local: ProviderConfig[], incoming: ProviderConfig[]): ProviderConfig[] {
   const map = new Map<string, ProviderConfig>();
   for (const l of local) map.set(providerSig(l), l);
-  for (const i of incoming) map.set(providerSig(i), i);
+  for (const i of stripRetiredProviders(incoming).kept) map.set(providerSig(i), i);
   return [...map.values()];
 }
 

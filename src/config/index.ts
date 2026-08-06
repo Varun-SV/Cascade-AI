@@ -13,6 +13,13 @@ import { loadCascadeMd, type CascadeMdContent } from './cascade-md.js';
 import { MemoryStore } from '../memory/store.js';
 import { validateConfig } from './validate.js';
 import { loadGlobalCredentials, mergeGlobalCredentials, saveGlobalCredentials } from './global-credentials.js';
+import {
+  describeCleanup,
+  didCleanupChangeAnything,
+  filterRetiredCredentials,
+  stripRetiredProviders,
+  type RetiredProviderCleanup,
+} from './retired-providers.js';
 import { disambiguateMcpServerNames, type McpServerRename } from '../tools/tool-name.js';
 import {
   CASCADE_CONFIG_FILE,
@@ -41,6 +48,12 @@ export class ConfigManager {
   private cascadeMd: CascadeMdContent | null = null;
   private workspacePath: string;
   private globalDir: string;
+  /**
+   * Set by loadConfig()/load() when a retired provider was migrated out, so
+   * load() knows to persist the cleaned config and warn once. Cleared after
+   * the warning — a repeat load in the same process has nothing left to say.
+   */
+  private retiredCleanup?: RetiredProviderCleanup;
 
   /** `globalDirOverride` exists for tests — never point it at the real home dir there. */
   constructor(workspacePath = process.cwd(), globalDirOverride?: string) {
@@ -85,12 +98,31 @@ export class ConfigManager {
     // lived only in the workspace config, so pointing the desktop app (or CLI)
     // at a different folder silently "forgot" them all. A workspace entry that
     // carries its own key still wins (per-project override).
-    this.config.providers = mergeGlobalCredentials(this.config.providers, loadGlobalCredentials(this.globalDir));
+    //
+    // Filter the global store as well as the workspace file. This merge runs
+    // AFTER validation and never passes through the schema, so a retired entry
+    // in ~/.cascade-ai/credentials.json would otherwise be reinstated in
+    // memory moments after being cleaned off disk — and would come back on
+    // every load, in every workspace.
+    const globalCreds = filterRetiredCredentials(loadGlobalCredentials(this.globalDir));
+    if (globalCreds.removed.length > 0) {
+      saveGlobalCredentials(this.globalDir, globalCreds.kept);
+      this.retiredCleanup = {
+        removed: [...new Set([...(this.retiredCleanup?.removed ?? []), ...globalCreds.removed])],
+        clearedPins: this.retiredCleanup?.clearedPins ?? [],
+      };
+    }
+    this.config.providers = mergeGlobalCredentials(this.config.providers, globalCreds.kept);
     await this.ensureDefaultIdentity();
     // Persist the rename so it sticks — otherwise the fix applies for this
     // process only and the file on disk (and the next process to read it)
-    // still has the collision.
-    if (mcpNamesChanged) await this.save();
+    // still has the collision. Same for a retired-provider migration: without
+    // the write, every future load repeats it and the warning never stops.
+    if (mcpNamesChanged || this.retiredCleanup) await this.save();
+    if (this.retiredCleanup) {
+      console.warn(describeCleanup(this.retiredCleanup));
+      this.retiredCleanup = undefined; // one notice per process, not per load
+    }
   }
 
   getConfig(): CascadeConfig {
@@ -163,7 +195,16 @@ export class ConfigManager {
     const configPath = path.join(this.workspacePath, CASCADE_CONFIG_FILE);
     try {
       const raw = await fs.readFile(configPath, 'utf-8');
-      return validateConfig(JSON.parse(raw) as unknown);
+      const parsed = JSON.parse(raw) as unknown;
+      // BEFORE validateConfig, not after: the schema no longer accepts a
+      // retired provider type, so validating first turns an upgrade into a
+      // hard CascadeConfigError with no path to repair (see
+      // retired-providers.ts). Stripping first lets the file load, and
+      // `retiredCleanup` tells load() to persist the cleaned version so the
+      // next process does not repeat the work.
+      const cleanup = stripRetiredProviders(parsed);
+      if (didCleanupChangeAnything(cleanup)) this.retiredCleanup = cleanup;
+      return validateConfig(parsed);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         return validateConfig({});

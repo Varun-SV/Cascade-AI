@@ -18,7 +18,7 @@ import ContextApprovalDialog from './chat/ContextApprovalDialog.js';
 import KeyVault from './keys/KeyVault.js';
 import { useChatSession, toChatMessage } from './chat/useChatSession.js';
 import { useAutoTitler } from './chat/useAutoTitler.js';
-import { loadKeys, saveKeys } from './keys/store.js';
+import { loadKeys, saveKeys, takeRetiredProviderNotice } from './keys/store.js';
 import { loadWebSearch, saveWebSearch, webSearchPayload } from './keys/webSearch.js';
 import {
   localModelEnabled, reduceMotionEnabled,
@@ -38,6 +38,12 @@ export default function App() {
   const [user, setUser] = useState<CloudUser | null | undefined>(undefined);
   const [conversations, setConversations] = useState<CloudConversation[]>([]);
   const [providers, setProviders] = useState<ProviderConfig[]>(() => loadKeys());
+  // loadKeys() migrates retired provider types out of the vault as a side
+  // effect. Read the notice in the same initializer pass so it is captured
+  // before any re-render clears it — a key vanishing without explanation
+  // looks like data loss, and the alternative (finding out via a failed run)
+  // is worse.
+  const [retiredNotice, setRetiredNotice] = useState<string | null>(() => takeRetiredProviderNotice());
   const [webSearch, setWebSearch] = useState(() => loadWebSearch());
   const [skills, setSkills] = useState<Skill[]>([]);
   const [skillId, setSkillId] = useState<string>(DEFAULT_SKILL);
@@ -221,6 +227,22 @@ export default function App() {
   return (
     <MotionConfig reducedMotion={reduceMotion ? 'always' : 'user'}>
     <div className="relative flex h-dvh gap-0 overflow-hidden md:gap-3 md:p-3">
+      {retiredNotice && (
+        <div
+          role="status"
+          className="glass absolute inset-x-3 top-3 z-50 flex items-start gap-3 rounded-xl px-4 py-3 text-sm text-ink-100"
+        >
+          <span className="flex-1">{retiredNotice}</span>
+          <button
+            type="button"
+            className="shrink-0 rounded px-2 py-0.5 text-xs text-ink-400 hover:text-ink-100"
+            onClick={() => setRetiredNotice(null)}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Desktop: collapsible floating glass panel */}
       <div
         className={clsx(

@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
-## 0.70.1 - 2026-08-06
+## 0.71.0 - 2026-08-06
 
 ### Removed
 - **The GitHub Models provider is gone, because the service is.** GitHub
@@ -51,9 +51,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   genuinely generic and were kept, with their tests repointed at
   `openai-compatible`: a `provider:owner/model` pin keeps slashes in the model
   id intact, a live-discovered model stays out of Cascade Auto's scored pool
-  while remaining reachable by an explicit pin, and the TPM reservation is
-  capped at the model's real `maxOutputTokens` rather than an uncapped per-call
-  override.
+  while remaining reachable by an explicit pin, the TPM reservation is capped
+  at the model's real `maxOutputTokens` rather than an uncapped per-call
+  override, `getNextFallback()` widens past a dynamically-resolved pin, and
+  `selectVisionModel()` finds a live-discovered vision model.
+
+  **This is a minor bump, not a patch, and deliberately so.** Removing a member
+  from the exported `ProviderType` and from the accepted `providers[].type`
+  values breaks compilation for code that named it. Shipping that as 0.70.1
+  would have handed it to everyone on `^0.70.0` automatically, which for a
+  pre-1.0 package resolves to `>=0.70.0 <0.71.0`.
+
+### Fixed
+- **Upgrading no longer breaks an install that used the retired provider.**
+  Narrowing a type is a build-time change; it does nothing to the values
+  already saved on disk and in browsers, and every one of those stores is read
+  back without validation. Left alone, the removal above would have been
+  actively hostile to exactly the users who had adopted the provider:
+
+  - **The CLI and desktop app would not start.** `ConfigManager.load()` hands
+    the parsed `.cascade/config.json` straight to `validateConfig()`, which
+    *throws* on an unknown provider type — so the CLI died at launch and the
+    desktop app reported "Could not load Cascade config" with no route to
+    repair, because the config manager Settings would repair through never
+    finished constructing. Retired types are now stripped from the raw object
+    *before* validation, and the cleaned file is written back so it happens
+    once.
+  - **The machine-global credential store would put it straight back.**
+    `~/.cascade-ai/credentials.json` is merged in *after* validation and never
+    passes through the schema at all, so cleaning only the workspace file would
+    have fixed nothing for anyone whose key was stored globally — the entry
+    would be gone from disk and back in memory a few lines later, on every
+    load, in every workspace. It is now filtered and rewritten too.
+  - **A tier pin would fail every request.** `models.t1` and friends store a
+    plain `provider:model` string that survives any provider-list filter. A pin
+    naming a retired provider is now cleared, returning that tier to Auto.
+  - **The hosted web app could not chat at all.** The browser key vault is raw
+    JSON in `localStorage`, read back with no validation and sent verbatim on
+    every run — so the server's own provider enum rejected the whole payload
+    until the user happened to open the vault and delete the row by hand.
+    Account sync made it recurrent: a restore merged the decrypted provider
+    array without filtering, reintroducing the dead entry into an
+    already-cleaned vault. Both paths now strip retired types, the cleaned
+    vault is persisted, and a one-time dismissible notice explains what was
+    removed and what to use instead — a key silently disappearing reads as
+    data loss.
 
 ## 0.70.0 - 2026-08-06
 

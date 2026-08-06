@@ -190,3 +190,118 @@ describe('ModelSelector — a live-discovered model stays out of Cascade Auto sc
     expect(selector.selectForTier('T1', 'openai-compatible:openai/gpt-4o')!.provider).toBe('openai-compatible');
   });
 });
+
+describe('ModelSelector — getNextFallback for a dynamically-resolved pin', () => {
+  it('falls over to another usable model when the failed id is not in the static priority chain', () => {
+    // Regression (Codex P2): getNextFallback used to return null outright
+    // whenever the failed model wasn't in the tier's static priority list —
+    // true for EVERY dynamically-resolved pin (an Azure deployment, an
+    // openai-compatible/Ollama id, any live-discovered model). A 429 on such a
+    // pinned model left the run with no fallback at all even when another
+    // configured provider could clearly serve the tier.
+    const selector = new ModelSelector(new Set(['openai-compatible', 'anthropic']));
+    selector.addDynamicModel({
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'openai-compatible',
+      contextWindow: 128_000, isVisionCapable: true,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    });
+    const fallback = selector.getNextFallback('openai/gpt-4o', 'T1');
+    expect(fallback).not.toBeNull();
+    expect(fallback!.provider).toBe('anthropic');
+  });
+
+  it('still returns null when no other provider has anything usable', () => {
+    const selector = new ModelSelector(new Set(['openai-compatible']));
+    selector.addDynamicModel({
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'openai-compatible',
+      contextWindow: 128_000, isVisionCapable: true,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    });
+    expect(selector.getNextFallback('openai/gpt-4o', 'T1')).toBeNull();
+  });
+
+  it('leaves the existing priority-chain walk unchanged for a statically-known model', () => {
+    // The new branch must only fire for currentIdx === -1 — a model that IS in
+    // the chain still walks forward from its own position, not the new "any
+    // usable model" path.
+    const selector = new ModelSelector(new Set(['anthropic', 'openai', 'gemini']));
+    const next = selector.getNextFallback('claude-opus-4', 'T1');
+    expect(next).not.toBeNull();
+    expect(next!.id).not.toBe('claude-opus-4');
+  });
+
+  it('falls to a dynamic model when a STATIC model fails and the rest of its chain is also unusable', () => {
+    // Regression (Codex P2): the "any usable model" widening only fired when
+    // the failed id wasn't in the static chain AT ALL (currentIdx === -1).
+    // A mixed OpenAI + GitHub Models config where OpenAI's own gpt-4o failed
+    // (currentIdx !== -1, so recordFailure('openai', …) had already marked
+    // the whole provider unavailable) walked only the REMAINING static T1
+    // entries — none usable, since they're all 'openai' too — and returned
+    // null outright, even though a discovered model was ready.
+    const selector = new ModelSelector(new Set(['openai-compatible']));
+    selector.addDynamicModel({
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o (via a local endpoint)', provider: 'openai-compatible',
+      contextWindow: 128_000, isVisionCapable: true,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    });
+    // 'gpt-4o' is a real T1_MODEL_PRIORITY entry — its provider ('openai') is
+    // NOT in availableProviders, simulating recordFailure() having just
+    // disabled it, so every remaining static entry the walk reaches is
+    // equally unusable.
+    const fallback = selector.getNextFallback('gpt-4o', 'T1');
+    expect(fallback).not.toBeNull();
+    expect(fallback!.provider).toBe('openai-compatible');
+  });
+});
+
+describe('ModelSelector — selectVisionModel for a dynamically-discovered model', () => {
+  it('finds a live-discovered vision-capable model when nothing in the static priority list matches', () => {
+    // Regression (Codex P2): selectVisionModel() only walked
+    // VISION_MODEL_PRIORITY, a fixed list of static-catalog keys. GitHub
+    // openai-compatible has zero static catalog entries, so such a
+    // configuration failed every vision-required call with "No model
+    // available" even though a vision-capable model was registered and
+    // available — this is the ONLY path a vision-required generate() call
+    // resolves through, ahead of any tier model or explicit override.
+    const selector = new ModelSelector(new Set(['openai-compatible']));
+    selector.addDynamicModel({
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'openai-compatible',
+      contextWindow: 128_000, isVisionCapable: true,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    });
+    const vision = selector.selectVisionModel();
+    expect(vision).not.toBeNull();
+    expect(vision!.provider).toBe('openai-compatible');
+    expect(vision!.id).toBe('openai/gpt-4o');
+  });
+
+  it('ignores a dynamically-discovered model with no vision capability', () => {
+    const selector = new ModelSelector(new Set(['openai-compatible']));
+    selector.addDynamicModel({
+      id: 'meta/Llama-3.3-70B-Instruct', name: 'Llama 3.3 70B', provider: 'openai-compatible',
+      contextWindow: 128_000, isVisionCapable: false,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    });
+    expect(selector.selectVisionModel()).toBeNull();
+  });
+
+  it('still prefers the static VISION_MODEL_PRIORITY list when it has a match', () => {
+    // The dynamic fallback must only fire when the static walk finds nothing —
+    // it must not override an already-working, benchmarked default.
+    const selector = new ModelSelector(new Set(['anthropic', 'openai-compatible']));
+    selector.addDynamicModel({
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'openai-compatible',
+      contextWindow: 128_000, isVisionCapable: true,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
+      maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
+    });
+    const vision = selector.selectVisionModel();
+    expect(vision).not.toBeNull();
+    expect(vision!.provider).toBe('anthropic'); // the static priority list's own vision model wins
+  });
+});
