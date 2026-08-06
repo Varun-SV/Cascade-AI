@@ -319,7 +319,6 @@ export function providersFromEnv(env: CloudEnv): ProviderConfig[] {
   if (env.OPENAI_API_KEY) providers.push({ type: 'openai', apiKey: env.OPENAI_API_KEY });
   const gemini = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
   if (gemini) providers.push({ type: 'gemini', apiKey: gemini });
-  if (env.GITHUB_MODELS_TOKEN) providers.push({ type: 'github-models', apiKey: env.GITHUB_MODELS_TOKEN });
   // Azure is only usable with all three halves — a key with no endpoint or no
   // deployment names no model, and would fail discovery at run time instead of
   // being visibly absent here.

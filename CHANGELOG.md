@@ -18,6 +18,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+## 0.70.1 - 2026-08-06
+
+### Removed
+- **The GitHub Models provider is gone, because the service is.** GitHub
+  [fully retired GitHub Models on 30 July 2026](https://github.blog/changelog/2026-07-01-github-models-is-being-fully-retired-on-july-30-2026/).
+  `models.github.ai` no longer answers, so the provider could not list a single
+  model or serve a single completion — it was an option in every provider
+  picker that could only fail.
+
+  Removed across all four surfaces: the SDK provider and its router, selector,
+  TPM, live-data and profiler wiring; `cascade init`, `cascade doctor` and the
+  REPL's model refresh; the desktop Settings and Onboarding pickers; and the
+  cloud KeyVault, run payload schema and `GITHUB_MODELS_TOKEN` env var. Six
+  named provider types remain.
+
+  **If you pinned a tier to `github-models:<model>`, that pin now fails to
+  resolve and names the provider** rather than silently falling through to
+  something else — repoint it at a provider you have configured.
+
+  **This removes nothing you can still reach.** Anything that speaks the
+  OpenAI chat-completions format is still supported through the
+  `openai-compatible` provider, which takes any base URL, makes the API key
+  optional for local servers, and discovers models live from the endpoint's own
+  `/models`. That covers hosted APIs (Groq, Together, Fireworks, DeepSeek,
+  Mistral, OpenRouter, xAI, Perplexity, Cerebras…) and local runtimes
+  (llama.cpp, LM Studio, vLLM, text-generation-webui) alike. The six named
+  types are the ones with bespoke wire formats or bundled catalogs — not the
+  limit of what Cascade can talk to.
+
+  Several router behaviours that were introduced for this provider are
+  genuinely generic and were kept, with their tests repointed at
+  `openai-compatible`: a `provider:owner/model` pin keeps slashes in the model
+  id intact, a live-discovered model stays out of Cascade Auto's scored pool
+  while remaining reachable by an explicit pin, and the TPM reservation is
+  capped at the model's real `maxOutputTokens` rather than an uncapped per-call
+  override.
+
 ## 0.70.0 - 2026-08-06
 
 ### Added

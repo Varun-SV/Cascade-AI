@@ -60,7 +60,6 @@ function mapProvider(id: string): { type: string | null; baseUrl?: string } {
     case 'anthropic': return { type: 'anthropic' };
     case 'google': case 'gemini': return { type: 'gemini' };
     case 'groq': return { type: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1' };
-    case 'github-models': return { type: 'github-models' };
     case 'openai-compatible': return { type: 'openai-compatible' };
     case 'ollama': return { type: 'ollama' };
     default: return { type: null };

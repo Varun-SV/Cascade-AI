@@ -29,7 +29,7 @@ import { pendingMediaDir, sweepPendingMedia } from './pending-media.js';
 export { tenantScratchDir };
 
 const MAX_HISTORY_MESSAGES = 20;
-const PROVIDER_TYPES = ['anthropic', 'openai', 'gemini', 'azure', 'github-models', 'openai-compatible', 'ollama'] as const;
+const PROVIDER_TYPES = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama'] as const;
 
 // A blank form field submits as '' — plain `.optional()` accepts that as a
 // "defined" empty string rather than absent, and provider clients downstream
@@ -163,7 +163,7 @@ const ChatRunPayloadSchema = z.object({
     )
     .min(1)
     // KeyVault's SELECTABLE_TYPES offers 5 single-instance cloud types
-    // (anthropic, openai, gemini, github-models, openai-compatible) plus
+    // (anthropic, openai, gemini, openai-compatible) plus
     // Azure, which alone supports MULTIPLE deployments (each its own
     // resource/endpoint, one array entry per deployment). 5 singles + 2 Azure
     // deployments = 7, a plausible maximal real config; this bound must track

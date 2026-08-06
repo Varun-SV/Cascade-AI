@@ -272,16 +272,6 @@ export class LiveDataProvider {
    */
   applyLivePricing(models: ModelInfo[]): ModelInfo[] {
     return models.map((m) => {
-      // GitHub Models' $0 is a deliberate, provider-level fact (bundled into the
-      // account's GitHub/Copilot plan, never billed per token) — not a dataset
-      // gap for reconcilePrice to fill in. Its catalog ids are the SAME
-      // owner/model spelling as paid marketplace entries (`openai/gpt-4o` is
-      // also a real, paid row in OpenRouter's live price table), and
-      // resolvePricing() has no pricing-data.json row for this provider at all
-      // (by design — see github-models.ts), so reconcilePrice's "baseline
-      // unknown ⇒ accept the live quote" path would otherwise silently start
-      // pricing free GitHub Models calls as the paid original.
-      if (m.provider === 'github-models') return m;
       // Prefer the canonical base-model id so an Azure deployment (whose id is an
       // arbitrary deployment name) still resolves to the real model's live price.
       const p = this.getLivePrice(m.baseModelId ?? m.id);
@@ -326,16 +316,6 @@ export class LiveDataProvider {
    */
   applyLiveCapabilities(models: ModelInfo[]): ModelInfo[] {
     return models.map((m) => {
-      // Same reasoning as the provider guard in applyLivePricing() above: a
-      // github-models catalog id is the SAME owner/model spelling as the real
-      // OpenRouter entry for the underlying model (`openai/gpt-4o` is both),
-      // so a capability lookup by that id would silently replace the
-      // already-correct, GitHub-specific contextWindow (capped in
-      // github-models.ts to GitHub's real ~8K input quota) with the base
-      // model's much larger real window — reopening the exact "advertised
-      // more input than GitHub will accept" bug that cap exists to close,
-      // on every live-data refresh after the one at discovery time.
-      if (m.provider === 'github-models') return m;
       const c = this.getCapability(m.baseModelId ?? m.id);
       if (!c) return m;
       const next = { ...m };

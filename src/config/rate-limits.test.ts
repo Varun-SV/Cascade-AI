@@ -19,9 +19,9 @@ describe('rateLimits config', () => {
     // silently discarded by every call that goes through validateConfig(),
     // even though the router's own init() reads it.
     const cfg = CascadeConfigSchema.parse({
-      rateLimits: { providerTpm: { 'github-models': 20_000 } },
+      rateLimits: { providerTpm: { 'openai-compatible': 20_000 } },
     });
-    expect(cfg.rateLimits?.providerTpm?.['github-models']).toBe(20_000);
+    expect(cfg.rateLimits?.providerTpm?.['openai-compatible']).toBe(20_000);
   });
 
   it('rejects a non-positive override rather than silently disabling the limiter', () => {

@@ -215,16 +215,16 @@ describe('provider keys (self-host gate)', () => {
 
   it('reads each provider from its CLI-compatible variable', () => {
     const providers = providersFromEnv(envWith({
-      ANTHROPIC_API_KEY: 'a', OPENAI_API_KEY: 'o', GOOGLE_API_KEY: 'g', GITHUB_MODELS_TOKEN: 'gh',
+      ANTHROPIC_API_KEY: 'a', OPENAI_API_KEY: 'o', GOOGLE_API_KEY: 'g',
       AZURE_OPENAI_KEY: 'az', AZURE_OPENAI_ENDPOINT: 'https://x.openai.azure.com', AZURE_OPENAI_DEPLOYMENT: 'dep',
       OPENAI_COMPATIBLE_BASE_URL: 'http://127.0.0.1:1/v1', OLLAMA_BASE_URL: 'http://127.0.0.1:11434',
     }));
     expect(providers.map((p) => p.type)).toEqual([
-      'anthropic', 'openai', 'gemini', 'github-models', 'azure', 'openai-compatible', 'ollama',
+      'anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama',
     ]);
     // Exactly the bound ChatRunPayloadSchema enforces — a fuller env than this
     // would fail the run's own Zod gate rather than this function.
-    expect(providers).toHaveLength(7);
+    expect(providers).toHaveLength(6);
     expect(providers.find((p) => p.type === 'gemini')?.apiKey).toBe('g');
   });
 
