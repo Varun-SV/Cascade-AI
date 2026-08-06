@@ -5,6 +5,99 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+<!-- One `### Added` / `### Changed` / `### Fixed` per release, not per PR.
+     The release workflow copies this whole block verbatim into the GitHub
+     release notes (.github/workflows/release.yml), so appending a fresh
+     heading per merge ships a release page with four "Added" sections — which
+     is what happened to 0.69.0. Add bullets under the existing heading. -->
+
+### Added
+- **`POST /v1/chat/completions` — an OpenAI-compatible endpoint.** Anything that
+  already talks to OpenAI can now talk to Cascade: point a client's `base_url`
+  at a Cascade server's `/v1`, use a Cascade access token as the API key, and
+  the official Python and JS SDKs work unchanged, streaming and not. `GET
+  /v1/models` serves the catalog so clients can discover it.
+
+  **`model` names a routing mode, not a model** — `cascade` (full orchestration,
+  balanced), `cascade-fast` (one mid-tier model, no orchestration) and
+  `cascade-quality` (orchestration biased to quality). Cascade picks a model per
+  subtask; that is the product, so letting a caller name `gpt-4o` would either
+  be a lie or would turn the orchestrator off. An unrecognised name returns a
+  `404 model_not_found` in OpenAI's own error envelope rather than falling back
+  to `auto`, because a request that asked for one thing and silently got billed
+  for a full orchestration has no way to notice. Unsupported parameters (`n > 1`,
+  `logprobs`, `tools`, `response_format`, …) are rejected for the same reason —
+  though their **no-op defaults** (`n: 1`, `top_p: 1`, penalties at `0`) pass
+  through untouched, since that is a wrapper filling in fields rather than a
+  request. `temperature` and `max_tokens` do have an honest home and are mapped
+  onto the per-tier generation knobs.
+
+  **The endpoint runs unattended, and that required removing listeners rather
+  than adding a flag.** The SDK's interactive gates already treat "nobody is
+  listening" as "proceed": `cascade.ts` returns each gate's default the moment
+  `listenerCount(...)` is zero — escalation resolves to `skip`, context approval
+  and plan approval to proceed. The run pipeline attached those listeners
+  unconditionally, which is exactly the wrong shape for an HTTP caller that has
+  no way to answer them: an escalating run would hold the connection open for
+  the full five-minute escalation timeout and then resolve as `timeout` —
+  strictly worse than the `skip` it gets for free with nothing attached. Runs
+  now take an `interactive` flag (default on, so the web UI's gates are
+  untouched) and the HTTP path attaches no gate listener at all. It is invisible
+  in normal use, since it only fires when a worker actually escalates, so a test
+  asserts the listener counts directly instead of waiting to find out.
+
+  **Provider keys are read from the environment only on a single-account
+  instance.** On a self-host the operator and the caller are the same person, so
+  the operator's own keys are the obvious source; the moment a second account
+  exists that key would pay for someone else's runs with no per-user accounting,
+  so it stops — automatically, per request, and logged at boot so the rule is
+  visible rather than inferred. Multi-account instances keep the product's
+  bring-your-own-key model, and any caller can pass keys per request through the
+  SDK's `extra_body`. Either way the request is validated by the same Zod schema
+  the socket path uses, so an API run can never build a payload a socket run
+  could not.
+
+  Streamed deltas come from the presenter tier and are **reconciled** against the
+  run's authoritative output before the stream is allowed to end: identical ends
+  normally, an answer that extends what streamed gets the remainder, and a stream
+  that *diverged* terminates with an error rather than a `stop`. SSE cannot
+  retract bytes already sent, so appending a correction after them would make a
+  client assemble a mangled answer and read it as complete — a visible failure is
+  the better outcome, and both official SDKs raise on it. Every reply carries a
+  `cascade` block naming the tier and model that actually served it and what the
+  routing saved; it rides the terminal frame, so cost is on every stream while
+  the choices-less token-usage frame stays opt-in behind
+  `stream_options.include_usage`, as the streaming shape defines it.
+
+  Reusing the existing run pipeline needed one narrowing: `ChatRunDeps.socket`
+  was typed `socket.io`'s `Socket`, though every use in the file is a
+  fire-and-forget `emit` plus a pair of `on`/`off`. It is now a structural
+  `RunSocket` that a real `Socket` satisfies unchanged, which is what lets the
+  HTTP side supply an SSE-backed implementation instead of forking `runChatTurn`.
+
+  A stateless caller's prior turns ride the run payload as `seedHistory` rather
+  than being written by the route, so they are persisted **inside**
+  `runChatTurn`'s admission boundary. `checkDailyLimit` and `beginRun` run first
+  and deliberately touch nothing before they pass; seeding outside that boundary
+  meant a request over its daily cap returned 429 having already written its
+  whole transcript — repeatable at will, charged to nobody, and invisible until
+  the disk filled.
+
+### Fixed
+- **Parsing an `Authorization: Bearer` header was quadratic in its length.**
+  `/^Bearer\s+(.+)$/` reads as harmless, but `\s+` and `.+` both match a space,
+  so for a value that ultimately fails to match the engine had to try every way
+  of splitting a long run of spaces between them. Measured on the real header
+  path: 10k spaces took 121 ms, 40k took 1.8 s, 120k took 15.9 s — and this runs
+  on every authenticated request, including the unauthenticated attempts, so it
+  is the one input a caller controls for free. The scheme and the token are now
+  split on the first whitespace by index, which has no split to explore and is
+  linear; the parse is otherwise unchanged, down to refusing a value carrying a
+  newline. Found while adding the OpenAI-compatible endpoint above, which routes
+  a second caller through the same function.
+
 ## 0.69.0 - 2026-08-06
 
 ### Added

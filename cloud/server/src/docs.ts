@@ -87,6 +87,27 @@ const SECTIONS: Section[] = [
       the same way.</p>`,
   },
   {
+    id: 'api',
+    title: 'OpenAI-compatible API',
+    html: `
+      <p>Anything that already speaks to OpenAI can speak to Cascade. Point your client's
+      <code>base_url</code> at this server's <code>/v1</code> and use a Cascade access token as
+      the API key — <code>POST /v1/chat/completions</code> and <code>GET /v1/models</code> work
+      with the official SDKs, streaming and non-streaming.</p>
+      <p>The one difference is <code>model</code>: Cascade picks a model per subtask, so the
+      name selects a <b>routing mode</b> rather than a model.</p>
+      <ul>
+        <li><code>cascade</code> — full orchestration, balanced quality against cost.</li>
+        <li><code>cascade-fast</code> — one mid-tier model, no orchestration.</li>
+        <li><code>cascade-quality</code> — full orchestration, biased to quality.</li>
+      </ul>
+      <p>Anything else returns a <code>model_not_found</code> error rather than quietly running
+      something you didn't ask for. Each reply carries the usual <code>usage</code> block plus a
+      <code>cascade</code> object naming the tier and model that actually served it, and what the
+      routing saved. Tools, function calling and <code>n &gt; 1</code> aren't supported yet —
+      unsupported parameters are rejected rather than ignored.</p>`,
+  },
+  {
     id: 'privacy',
     title: 'Privacy & your keys',
     html: `

@@ -17,7 +17,6 @@ import {
 import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ProviderConfig } from '#cascade-ai';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { Socket } from 'socket.io';
 import { z } from 'zod';
 import type { CloudEnv } from './env.js';
 import { resolveRunMcpServers } from './mcp-oauth.js';
@@ -53,6 +52,26 @@ const TierParamSchema = z
 const ChatRunPayloadSchema = z.object({
   conversationId: z.string().optional(),
   prompt: z.string().min(1).max(20_000),
+  // Prior turns to persist as this conversation's history AT CREATION TIME.
+  // Only read when no conversationId is given.
+  //
+  // This exists because a stateless caller (the OpenAI-compatible endpoint)
+  // resends its whole message array every request and has no conversation to
+  // point at. Seeding it here rather than in the route is deliberate:
+  // runChatTurn runs checkDailyLimit + beginRun BEFORE calling this function,
+  // so a request that is over its daily cap or has no concurrency slot is
+  // refused without leaving a conversation and a transcript behind. Importing
+  // in the route put megabytes of messages on disk for a request that then
+  // returned 429 — repeatable, and invisible until storage filled up.
+  seedHistory: z
+    .array(z.object({
+      role: z.enum(['user', 'assistant']),
+      // Same per-message ceiling app.ts applies to a persisted turn, so a
+      // message's size does not depend on which door it came in.
+      content: z.string().min(1).max(500_000),
+    }))
+    .max(200)
+    .optional(),
   // Branching: editing an existing user turn. The new (edited) user message is
   // saved as a SIBLING of this one — same parent, a fresh branch — so the
   // original prompt and its answer aren't overwritten. The server derives the
@@ -67,6 +86,12 @@ const ChatRunPayloadSchema = z.object({
   attachmentIds: z.array(z.string()).max(8).optional(),
   // Selected prompt-preset ("skill"). Unknown ids resolve to no preset.
   skillId: optionalNonEmptyString,
+  // Caller-supplied system instructions. This is where an OpenAI-compatible
+  // request's `system`/`developer` messages land: they steer the run exactly
+  // like a skill preset does, and must NOT be folded into `prompt` — routing
+  // reads the bare user text (see routingPrompt below), so prepending a system
+  // preamble there would make even "hi" classify as Complex.
+  systemPrompt: z.string().max(20_000).optional().transform((v) => (v === '' ? undefined : v)),
   // Run-explorer controls. routingMode biases Cascade Auto; forceTier pins the
   // root tier; webSearch toggles the two hosted tools on/off for this run.
   routingMode: z.enum(['auto', 'quality', 'fast']).optional(),
@@ -151,6 +176,30 @@ export type ChatRunPayload = z.infer<typeof ChatRunPayloadSchema>;
 
 export function parseChatRunPayload(input: unknown): ChatRunPayload {
   return ChatRunPayloadSchema.parse(input);
+}
+
+/**
+ * What a run needs from its transport, and nothing more.
+ *
+ * This was `socket.io`'s `Socket`, which pinned the whole run pipeline to one
+ * transport: every one of the 18 uses in this file is a fire-and-forget `emit`
+ * plus a pair of `on`/`off` for the client's extended-context and escalation
+ * answers. Naming that surface structurally is what lets a second caller — the
+ * OpenAI-compatible HTTP endpoint, which has an SSE response rather than a
+ * socket — reuse `runChatTurn` unchanged instead of forking it. A real
+ * `Socket` satisfies this interface as-is, so the web path is untouched.
+ */
+export interface RunSocket {
+  emit(event: string, payload: unknown): unknown;
+  // `any[]` rather than a narrower tuple because socket.io declares `on`/`off`
+  // as function-valued PROPERTIES, not methods — so strictFunctionTypes checks
+  // them contravariantly and only `any` is assignable in both directions. A
+  // real `Socket` has to satisfy this interface unchanged; that is the whole
+  // point of naming it.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  on(event: string, listener: (...args: any[]) => void): unknown;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  off(event: string, listener: (...args: any[]) => void): unknown;
 }
 
 export interface WebSearchBackend {
@@ -483,7 +532,7 @@ async function resolveDocuments(
   store: CloudStore,
   userId: string,
   conversationId: string,
-  socket: Socket,
+  socket: RunSocket,
 ): Promise<RunDocument[]> {
   const full = (): RunDocument[] => docSources.map((d) => ({ filename: d.filename, text: d.text }));
 
@@ -553,9 +602,28 @@ export interface ChatRunDeps {
   env: CloudEnv;
   store: CloudStore;
   userId: string;
-  socket: Socket;
+  socket: RunSocket;
   /** Aborts the run mid-flight (client "Stop", or socket disconnect). */
   signal?: AbortSignal;
+  /**
+   * Whether a human is on the other end who can answer the SDK's interactive
+   * gates. Default true — the web/socket path, where the user really can click
+   * "retry this section" or "yes, compact".
+   *
+   * `false` is for callers with no back-channel (the OpenAI-compatible HTTP
+   * endpoint: one request, one response, no way to send `escalation:decide`).
+   * It does not turn the gates off — it declines to ATTACH listeners for them,
+   * which is how the SDK already spells "nobody is watching": `cascade.ts`
+   * returns each gate's unattended default the moment `listenerCount(...)` is
+   * zero (escalation → `skip`, context → approve, plan → approve).
+   *
+   * Attaching a listener that never answers is the failure mode this avoids:
+   * the escalation gate then parks for ESCALATION_DECISION_TIMEOUT_MS (5 min)
+   * before resolving as `timeout`, so an HTTP caller would hold a connection
+   * open for five minutes to arrive somewhere strictly worse than the `skip`
+   * it gets for free with no listener at all.
+   */
+  interactive?: boolean;
 }
 
 /** The asset the SDK hands a media sink — inferred so we don't re-declare it. */
@@ -652,12 +720,34 @@ export async function runChatTurn(payload: ChatRunPayload, deps: ChatRunDeps): P
   }
 }
 
+/**
+ * Creates the conversation a run without a conversationId appends to, seeding
+ * it with `seedHistory` when the caller supplied prior turns.
+ *
+ * The re-read after `importConversation` is load-bearing, not defensive: that
+ * method returns the row it captured BEFORE appending the messages, so its
+ * `activeLeafId` is still null. The run hangs the new turn off
+ * `conversation.activeLeafId`, so using the stale row would silently start a
+ * second root branch and drop the whole seeded history from the run's context.
+ */
+function seedConversation(store: CloudStore, userId: string, payload: ChatRunPayload) {
+  const history = payload.seedHistory;
+  if (!history?.length) return store.createConversation(userId, payload.prompt.slice(0, 80));
+  // The first turn names the thread better than the latest one does.
+  const title = history[0]!.content.slice(0, 80);
+  const seeded = store.importConversation(userId, title, null, history);
+  return store.getConversation(seeded.id, userId);
+}
+
 async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Promise<ChatRunResult> {
   const { env, store, userId, socket, signal } = deps;
+  const interactive = deps.interactive !== false;
 
+  // Reached only AFTER runChatTurn's admission guards, so nothing below is
+  // persisted for a request the entitlements refused.
   const conversation = payload.conversationId
     ? store.getConversation(payload.conversationId, userId)
-    : store.createConversation(userId, payload.prompt.slice(0, 80));
+    : seedConversation(store, userId, payload);
   if (!conversation) throw new Error('Conversation not found');
 
   // ── Branch resolution (conversation tree) ──
@@ -747,7 +837,11 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   const builtinSkill = getSkill(payload.skillId);
   const userSkill = !builtinSkill && payload.skillId ? store.getUserSkill(payload.skillId, userId) : null;
   if (userSkill) store.incrementSkillUsage(userSkill.id, userId);
-  const skillSystemPrompt = builtinSkill?.systemPrompt || userSkill?.systemPrompt || undefined;
+  // A caller-supplied system prompt (the OpenAI-compatible endpoint's
+  // `system`/`developer` turns) composes with a selected preset rather than
+  // replacing it — the caller's instructions lead, the preset follows.
+  const presetSystemPrompt = builtinSkill?.systemPrompt || userSkill?.systemPrompt || undefined;
+  const skillSystemPrompt = [payload.systemPrompt, presetSystemPrompt].filter(Boolean).join('\n\n') || undefined;
   const memories = store.listMemories(userId).map((m) => ({ content: m.content, durability: m.durability }));
   // A hosted run can't write files to disk; when the request actually looks
   // file-shaped, steer it to deliver files as `file:`-tagged fenced blocks so
@@ -844,9 +938,11 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   const onCompacted = (e: unknown) =>
     socket.emit('context:compacted', { conversationId: conversation.id, ...(e as object) });
   const onContextDecision = (d: { approved?: boolean }) => cascade.resolveContextApproval(!!d?.approved);
-  cascade.on('context:approval-required', onContextApproval);
-  cascade.on('context:compacted', onCompacted);
-  socket.on('context:decision', onContextDecision);
+  if (interactive) {
+    cascade.on('context:approval-required', onContextApproval);
+    cascade.on('context:compacted', onCompacted);
+    socket.on('context:decision', onContextDecision);
+  }
 
   // A section that escalated is asking a real question, and until now nobody
   // was ever asked it — the run just stopped at "needs a decision" having spent
@@ -872,13 +968,19 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
       );
     }
   };
-  cascade.on('escalation:decision-required', onEscalation);
-  cascade.on('escalation:timeout', onEscalationTimeout);
-  socket.on('escalation:decide', onEscalationDecision);
+  if (interactive) {
+    cascade.on('escalation:decision-required', onEscalation);
+    cascade.on('escalation:timeout', onEscalationTimeout);
+    socket.on('escalation:decide', onEscalationDecision);
+  }
 
   cascade.on('stream:token', onToken);
   cascade.on('tier:status', onStatus);
-  cascade.on('plan:approval-required', onPlan);
+  // The plan gate resolves inline (onPlan calls resolvePlanApproval(true)), so
+  // it is safe either way — but a non-interactive caller has nothing to show
+  // the plan TO, and "no listener" already means proceed. Skipping it keeps the
+  // rule uniform: unattended runs attach no gate listeners at all.
+  if (interactive) cascade.on('plan:approval-required', onPlan);
   cascade.on('log', onLog);
 
   try {

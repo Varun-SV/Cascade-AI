@@ -599,6 +599,19 @@ export class CloudStore {
     return this.deserializeUser(row);
   }
 
+  /**
+   * How many accounts exist on this instance. Used by the OpenAI-compatible
+   * API to decide whether the operator's env provider keys may serve a run:
+   * on a single-account (self-hosted) instance the operator IS the caller, so
+   * their own keys are the obvious source; on an instance with several
+   * accounts those keys would silently bill the operator for everyone else's
+   * runs. See openai-compat.ts.
+   */
+  countUsers(): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS n FROM users').get() as { n: number };
+    return row.n;
+  }
+
   getUserById(id: string): CloudUser | null {
     const row = this.db.prepare('SELECT * FROM users WHERE id = ?').get(id) as DbUserRow | undefined;
     return row ? this.deserializeUser(row) : null;
