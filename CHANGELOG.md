@@ -8,6 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Added
+- **`docker compose up` now self-hosts the web app.** There was no general path
+  to run it: the only Dockerfile was Railway-specific (root user, no
+  healthcheck, driven by `railway.json`), and there was no compose file and no
+  `.env.example` at all — so running the web app yourself meant cloning the
+  monorepo and reverse-engineering the environment from `env.ts`. A root
+  `Dockerfile` (multi-stage, non-root, healthchecked against the real `/health`
+  route), a `docker-compose.yml` with a named volume for the SQLite database and
+  uploads, and an `.env.example` covering all 18 variables the server actually
+  reads now make it one command.
+
+  **The compose file publishes to `127.0.0.1` only, and the sign-in bypass ships
+  commented out.** These two go together: a fresh self-host has no OAuth
+  configured, so the documented way in is `CLOUD_DEV_BYPASS`, which
+  authenticates anyone who can reach the port with no credential at all.
+  Defaulting to `0.0.0.0` with that enabled would hand the whole local network a
+  sign-in-as-anyone endpoint on the first `docker compose up`. Enabling it is
+  now a deliberate, documented step, which also matches how Cascade already
+  binds its CLI dashboard.
+
+  **CI builds and boots the image on every pull request.** The rest of the
+  workflow runs the build commands directly, which proves the code compiles but
+  says nothing about whether the image the README tells people to run actually
+  assembles and starts — a `COPY` pointing at a path that stopped existing would
+  reach users rather than CI. The new job builds it, runs it, waits for
+  `/health`, and asserts `GET /` returns the built SPA shell rather than a 404,
+  since a build stage that silently skipped the web build would still pass a
+  health check.
 - **The task graph now leaves the SDK.** `tier:status` carries three new fields:
   `nodeId`, `dependsOn` and `waveId`. Until now the orchestrator compiled a
   typed dependency graph, executed it in waves, and then told every surface only

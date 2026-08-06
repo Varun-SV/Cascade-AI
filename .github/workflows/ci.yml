@@ -122,3 +122,60 @@ jobs:
       # `build` here is `tsc && vite build`, so this typechecks the SPA too.
       - name: Web build
         run: npm run build -w cascade-cloud-web
+
+  # The self-host path is a supported deployment surface, so it gets built and
+  # booted rather than assumed. Nothing else in this workflow touches the
+  # Dockerfile: the other two jobs run the build commands directly, which
+  # verifies the code compiles but says nothing about whether the image the
+  # README tells people to run actually assembles and starts. A COPY pointing at
+  # a path that stopped existing is the classic way that diverges silently, and
+  # it would reach users rather than CI.
+  docker:
+    name: Self-host image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build -t cascade-selfhost:ci .
+
+      - name: Boot it
+        # Loopback publish mirrors docker-compose.yml. DATA_DIR is set to the
+        # same path the compose volume mounts, so this exercises the real
+        # runtime layout rather than a container-default one.
+        run: |
+          docker run -d --name cascade-ci \
+            -p 127.0.0.1:8787:8787 \
+            -e SESSION_SECRET="ci-session-secret-not-a-real-one" \
+            -e DATA_DIR=/data \
+            cascade-selfhost:ci
+
+      - name: Wait for /health
+        # Polls rather than sleeping a fixed amount: a fixed sleep is either
+        # flaky when the runner is slow or wasted time when it is fast.
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8787/health > /tmp/health.json 2>/dev/null; then
+              echo "healthy after ${i}s: $(cat /tmp/health.json)"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::server never became healthy"
+          docker logs cascade-ci
+          exit 1
+
+      - name: Serves the built web UI
+        # The image is only useful if the SPA made it in — the server serves
+        # cloud/web/dist only when that directory exists, so a build stage that
+        # silently skipped the web build would still pass /health.
+        run: |
+          code=$(curl -s -o /tmp/index.html -w '%{http_code}' http://127.0.0.1:8787/)
+          test "$code" = "200" || { echo "::error::GET / returned $code"; docker logs cascade-ci; exit 1; }
+          grep -qi '<div id="root"' /tmp/index.html \
+            || { echo "::error::GET / did not return the built SPA shell"; head -c 400 /tmp/index.html; exit 1; }
+          echo "SPA shell served"
+
+      - name: Container logs
+        if: always()
+        run: docker logs cascade-ci || true

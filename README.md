@@ -227,6 +227,25 @@ cascade run "explain the auth module in this repo"
 
 ---
 
+## Self-host
+
+Run the Cascade Cloud web app (chat UI + API + socket) yourself, on one port, with no cloud account:
+
+```bash
+cp .env.example .env
+echo "SESSION_SECRET=$(openssl rand -base64 32)" >> .env
+echo "CLOUD_DEV_BYPASS=1" >> .env    # local-only sign-in; see the warning below
+docker compose up                    # → http://localhost:8787
+```
+
+`docker compose up` builds the image, serves the web UI straight from the server (no separate web container), and keeps the SQLite database + uploads in a named volume so a restart doesn't wipe them. `.env.example` documents every variable the server reads (from `cloud/server/src/env.ts`), grouped required-first, each with what it does and what breaks if it's unset.
+
+> **`CLOUD_DEV_BYPASS` is an authentication bypass, not a convenience toggle.** It adds a sign-in button that accepts any name with no credential, so anyone who can reach the port can sign in as anyone. That is why it ships commented out, why the step above is explicit rather than the default, and why `docker-compose.yml` publishes to `127.0.0.1` only. Before putting this on a network anyone else can reach: set `GITHUB_CLIENT_ID`/`GOOGLE_CLIENT_ID` for real OAuth, remove `CLOUD_DEV_BYPASS`, and only then change the port binding.
+
+See the [Dockerfile](Dockerfile) and [docker-compose.yml](docker-compose.yml) for the build/runtime details.
+
+---
+
 ## Configuration
 
 Cascade loads config from `.cascade/config.json` in your project directory.
