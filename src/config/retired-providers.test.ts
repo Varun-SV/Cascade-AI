@@ -19,6 +19,9 @@ import {
 } from './retired-providers.js';
 import { validateConfig } from './validate.js';
 import { ConfigManager } from './index.js';
+import { applySyncBundle, type SyncBundle } from '../cloud/keysync.js';
+import type { ProviderConfig } from '../types.js';
+import type { RetiredProviderCleanup } from './retired-providers.js';
 
 /** Exactly what `cascade init` wrote for a GitHub Models user on 0.70.0. */
 function config0700(): Record<string, unknown> {
@@ -161,5 +164,59 @@ describe('ConfigManager — upgrading from a real 0.70.0 install', () => {
 
     expect(mgr.getConfig().providers.map((p) => p.type)).toEqual(['openai']);
     expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('migration'));
+  });
+});
+
+describe('applySyncBundle — pulling a bundle pushed by 0.70.0', () => {
+  /**
+   * A real pre-0.71 sync blob: the pushing device still had the provider
+   * configured and both tiers pinned to it. Nothing between decrypt and merge
+   * validates either field, which is what made this a third persistence path
+   * on top of the workspace config and the global credentials store.
+   */
+  function bundle0700(): SyncBundle {
+    return {
+      v: 2,
+      providers: [
+        { type: 'anthropic', apiKey: 'sk-ant-real' },
+        { type: 'github-models', apiKey: 'github_pat_dead' } as unknown as ProviderConfig,
+      ],
+      models: { t1: 'github-models:openai/gpt-4o', t2: 'claude-sonnet-4' },
+    };
+  }
+
+  const baseConfig = () => validateConfig({ providers: [{ type: 'openai', apiKey: 'k' }] });
+
+  it('does not reintroduce the retired provider or its pins', () => {
+    const merged = applySyncBundle(bundle0700(), baseConfig());
+    expect(merged.providers.some((p) => (p.type as string) === 'github-models')).toBe(false);
+    expect(merged.providers.some((p) => p.type === 'anthropic')).toBe(true); // the rest still syncs
+    expect(merged.models?.t1).toBeUndefined();
+    expect(merged.models?.t2).toBe('claude-sonnet-4');
+  });
+
+  it('produces a config that still validates, so updateConfig() cannot throw', () => {
+    // The CLI hands this straight to ConfigManager.updateConfig(), which
+    // validates. Before the fix that throw surfaced inside a catch written for
+    // a wrong passphrase, telling the user to re-enter a correct one.
+    const merged = applySyncBundle(bundle0700(), baseConfig());
+    expect(() => validateConfig(merged)).not.toThrow();
+  });
+
+  it('reports what it skipped so the surfaces can explain it', () => {
+    const cleanup: RetiredProviderCleanup = { removed: [], clearedPins: [] };
+    applySyncBundle(bundle0700(), baseConfig(), cleanup);
+    expect(cleanup.removed).toEqual(['github-models']);
+    expect(cleanup.clearedPins).toEqual(['t1']);
+    expect(didCleanupChangeAnything(cleanup)).toBe(true);
+  });
+
+  it('reports nothing for a bundle with nothing retired', () => {
+    const cleanup: RetiredProviderCleanup = { removed: [], clearedPins: [] };
+    const clean: SyncBundle = { v: 2, providers: [{ type: 'gemini', apiKey: 'k' }], models: { t1: 'gemini-2.5-pro' } };
+    const merged = applySyncBundle(clean, baseConfig(), cleanup);
+    expect(didCleanupChangeAnything(cleanup)).toBe(false);
+    expect(merged.models?.t1).toBe('gemini-2.5-pro');
+    expect(merged.providers.some((p) => p.type === 'gemini')).toBe(true);
   });
 });

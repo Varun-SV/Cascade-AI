@@ -96,6 +96,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     vault is persisted, and a one-time dismissible notice explains what was
     removed and what to use instead — a key silently disappearing reads as
     data loss.
+  - **An encrypted account-sync blob would reintroduce it on CLI and desktop.**
+    A sync blob is a snapshot of whatever the pushing device held, so one
+    pushed before the retirement still carries the provider entry *and* the
+    `provider:model` tier pins naming it — and nothing between the decrypt and
+    the merge validated either. On the CLI that surfaced as a validation throw
+    inside a `catch` written for a wrong passphrase, so `cascade sync pull`
+    told the user to check a passphrase that was correct. On desktop the merged
+    values were copied into the **live** config before persisting, reinstating
+    the dead provider for the session and writing a file the next load had to
+    repair. `applySyncBundle()` now sanitises the bundle — the one function all
+    the native surfaces go through — and reports what it dropped, so both can
+    say what was skipped instead of discarding it silently.
+
+  Also fixed: `cascade sync pull` no longer reports every downstream failure as
+  a decryption failure. The `try` scoped only to the decrypt now, so an apply
+  error says what actually went wrong.
 
 ## 0.70.0 - 2026-08-06
 

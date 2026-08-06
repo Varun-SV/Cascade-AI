@@ -194,7 +194,7 @@ contextBridge.exposeInMainWorld('cascade', {
     // Key sync (E2E-encrypted): passphrase stays in the main process; only
     // ciphertext leaves the machine.
     syncPush: (passphrase: string) => ipcRenderer.invoke('cloud:syncPush', passphrase) as Promise<{ ok: boolean; error?: string; version?: number }>,
-    syncPull: (passphrase: string) => ipcRenderer.invoke('cloud:syncPull', passphrase) as Promise<{ ok: boolean; error?: string; empty?: boolean; applied?: boolean }>,
+    syncPull: (passphrase: string) => ipcRenderer.invoke('cloud:syncPull', passphrase) as Promise<{ ok: boolean; error?: string; empty?: boolean; applied?: boolean; skipped?: { removed: string[]; clearedPins: string[] } }>,
   },
 
   // MCP servers — connect a remote server via OAuth (loopback in the main
