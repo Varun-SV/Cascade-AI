@@ -147,6 +147,8 @@ export interface ParsedCompletionRequest {
   /** The final user turn — what this run answers. */
   prompt: string;
   stream: boolean;
+  /** `stream_options.include_usage` — opt-in, per the Chat Completions shape. */
+  includeUsage: boolean;
   temperature?: number;
   maxTokens?: number;
   /** Caller-supplied provider credentials (`extra_body`), when present. */
@@ -267,6 +269,25 @@ export function parseCompletionRequest(
     return { ok: false, status: 400, body: openAiError("'max_tokens' must be a positive integer.", 'invalid_request_error', 'max_tokens') };
   }
 
+  // `stream_options` is only meaningful on a stream, and its one field is
+  // strictly opt-in — see the usage frame in registerOpenAiCompatRoutes.
+  const stream = body['stream'] === true;
+  const rawOptions = body['stream_options'];
+  let includeUsage = false;
+  if (rawOptions !== undefined && rawOptions !== null) {
+    if (typeof rawOptions !== 'object' || Array.isArray(rawOptions)) {
+      return { ok: false, status: 400, body: openAiError("'stream_options' must be an object.", 'invalid_request_error', 'stream_options') };
+    }
+    if (!stream) {
+      return { ok: false, status: 400, body: openAiError("'stream_options' can only be used when 'stream' is true.", 'invalid_request_error', 'stream_options') };
+    }
+    const flag = (rawOptions as { include_usage?: unknown }).include_usage;
+    if (flag !== undefined && typeof flag !== 'boolean') {
+      return { ok: false, status: 400, body: openAiError("'stream_options.include_usage' must be a boolean.", 'invalid_request_error', 'stream_options') };
+    }
+    includeUsage = flag === true;
+  }
+
   return {
     ok: true,
     value: {
@@ -274,7 +295,8 @@ export function parseCompletionRequest(
       ...(systemParts.length ? { systemPrompt: systemParts.join('\n\n') } : {}),
       history: turns.slice(0, -1),
       prompt: last.content,
-      stream: body['stream'] === true,
+      stream,
+      includeUsage,
       ...(temperature !== undefined ? { temperature } : {}),
       ...(maxTokens !== undefined ? { maxTokens } : {}),
       ...(body['providers'] !== undefined ? { providers: body['providers'] } : {}),
@@ -369,50 +391,76 @@ export function describeProviderPolicy(env: CloudEnv, store: CloudStore): string
 
 // ── Streaming ─────────────────────────────────
 
-/** OpenAI's `chat.completion.chunk` envelope. */
+/**
+ * OpenAI's `chat.completion.chunk` envelope. `extra` rides at the top level
+ * (never inside `choices`), which is where the `cascade` block goes on the
+ * terminal frame — a frame that still has `choices[0]`, so a client looping
+ * over `chunk.choices[0].delta` is unaffected by its presence.
+ */
 export function streamChunk(
   id: string,
   created: number,
   model: string,
   delta: Record<string, unknown>,
   finishReason: string | null = null,
+  extra: Record<string, unknown> = {},
 ): string {
   return `data: ${JSON.stringify({
     id, object: 'chat.completion.chunk', created, model,
     choices: [{ index: 0, delta, finish_reason: finishReason }],
+    ...extra,
   })}\n\n`;
 }
 
-/** A usage-only terminal chunk (`choices: []`), the shape OpenAI streams. */
+/**
+ * The usage-only terminal chunk (`choices: []`).
+ *
+ * OPT-IN ONLY — emitted when `stream_options.include_usage` is true, never by
+ * default. It is the one frame in the streaming shape without a `choices[0]`,
+ * so a client that did not ask for it and indexes `chunk.choices[0]` in its
+ * loop would throw on a stream it had every reason to consider ordinary.
+ */
 export function usageChunk(id: string, created: number, model: string, usage: unknown, extra: unknown): string {
   return `data: ${JSON.stringify({
     id, object: 'chat.completion.chunk', created, model, choices: [], usage, cascade: extra,
   })}\n\n`;
 }
 
+/** An error delivered inside an already-open stream, the way OpenAI does it. */
+export function errorFrame(body: OpenAiError): string {
+  return `data: ${JSON.stringify(body)}\n\n`;
+}
+
 /**
- * What still has to be sent so the client's assembled text matches the run's
- * authoritative `output`.
+ * How the streamed deltas relate to the run's authoritative `output`, and
+ * therefore how the stream is allowed to end.
  *
- * Live tokens come from the presenter tier (`primary: true`), which is the
- * user-facing answer — but `output` is what the run actually returned and what
- * was persisted, and the two are only guaranteed equal when nothing
- * post-processed the text. So the stream is reconciled at the end instead of
- * being trusted:
+ * Live tokens come from the presenter tier (`primary: true`) — the user-facing
+ * answer — while `output` is what the run returned and what was persisted. In
+ * practice they are identical: every presenter path streams exactly the chunks
+ * it then returns. But "in practice" is not a contract, so the stream is
+ * checked rather than trusted.
  *
- *  - identical → nothing to send (the common case);
- *  - `output` extends what streamed → send the remainder;
- *  - they diverged → send everything after the common prefix. That over-sends
- *    rather than truncating, which is the right direction: a client that
- *    concatenates deltas ends up with a superset of the answer instead of a
- *    silently clipped one.
+ * The three outcomes are deliberately NOT collapsed into "send a correcting
+ * delta". SSE has no operation that retracts bytes already emitted: for
+ * `streamed = "Hello there"` and `output = "Hello world."`, appending from the
+ * common prefix makes a normal SDK client assemble `"Hello thereworld."` and
+ * then read `finish_reason: "stop"` — corrupted output reported as success,
+ * which is worse than a visible failure. So divergence terminates the stream
+ * with an error and the caller finds out.
  */
-export function trailingDelta(streamed: string, output: string): string {
-  if (output === streamed) return '';
-  if (output.startsWith(streamed)) return output.slice(streamed.length);
-  let i = 0;
-  while (i < streamed.length && i < output.length && streamed[i] === output[i]) i++;
-  return output.slice(i);
+export type StreamReconciliation =
+  /** The stream already carries the whole answer. */
+  | { kind: 'complete' }
+  /** The answer extends what streamed; appending is genuinely correct here. */
+  | { kind: 'append'; text: string }
+  /** Bytes were emitted that are not a prefix of the answer. Unrepairable. */
+  | { kind: 'diverged' };
+
+export function reconcileStream(streamed: string, output: string): StreamReconciliation {
+  if (output === streamed) return { kind: 'complete' };
+  if (output.startsWith(streamed)) return { kind: 'append', text: output.slice(streamed.length) };
+  return { kind: 'diverged' };
 }
 
 /**
@@ -495,8 +543,6 @@ export const OPENAI_COMPAT_JSON_ROUTES = ['/v1/chat/completions'];
 
 /** Same bound as `prompt` in ChatRunPayloadSchema, restated for a clear error. */
 const MAX_PROMPT_CHARS = 20_000;
-/** Mirrors app.ts's MAX_MESSAGE_LEN — the ceiling on any persisted message. */
-const MAX_MESSAGE_CHARS = 500_000;
 
 export function registerOpenAiCompatRoutes(app: Express, env: CloudEnv, store: CloudStore): void {
   console.log(describeProviderPolicy(env, store));
@@ -595,6 +641,15 @@ export function registerOpenAiCompatRoutes(app: Express, env: CloudEnv, store: C
       payload = parseChatRunPayload({
         prompt: request.prompt,
         providers,
+        // Prior turns ride the payload rather than being written here, so they
+        // are persisted INSIDE runChatTurn's admission boundary — a request
+        // refused by the daily cap or the concurrency limit leaves no
+        // conversation and no messages behind. The run then reads them through
+        // the same tree walk the web path uses, and the transcript shows up in
+        // the user's own chat list. A stateless client that resends its whole
+        // array each turn gets one conversation per request; that is the honest
+        // reading of a stateless protocol.
+        ...(request.history.length ? { seedHistory: request.history } : {}),
         ...runControlsForModel(request.model),
         ...(request.systemPrompt ? { systemPrompt: request.systemPrompt } : {}),
         // temperature/max_tokens have an honest home: the per-tier generation
@@ -612,23 +667,6 @@ export function registerOpenAiCompatRoutes(app: Express, env: CloudEnv, store: C
       const message = err instanceof ZodError ? err.issues.map((i) => i.message).join('; ') : String(err);
       res.status(400).json(openAiError(message));
       return;
-    }
-
-    // Prior turns become a real conversation, so history reaches the run
-    // through the same tree walk the web path uses — and the transcript shows
-    // up in the user's own chat list rather than vanishing. A stateless client
-    // that resends its whole array each turn gets one conversation per request;
-    // that is the honest reading of a stateless protocol.
-    if (request.history.length) {
-      const convo = store.importConversation(
-        userId,
-        request.history[0]?.content.slice(0, 80) ?? request.prompt.slice(0, 80),
-        null,
-        // Same per-message ceiling POST /api/conversations/:id/turns applies, so
-        // a persisted turn's size does not depend on which door it came in.
-        request.history.map((m) => ({ role: m.role, content: m.content.slice(0, MAX_MESSAGE_CHARS) })),
-      );
-      payload = { ...payload, conversationId: convo.id };
     }
 
     const id = `chatcmpl-${randomUUID().replace(/-/g, '')}`;
@@ -677,17 +715,38 @@ export function registerOpenAiCompatRoutes(app: Express, env: CloudEnv, store: C
       const result = await runChatTurn(payload, {
         env, store, userId, socket: sink, signal: controller.signal, interactive: false,
       });
-      const tail = trailingDelta(streamed, result.output);
-      if (tail) res.write(streamChunk(id, created, request.model, { content: tail }));
-      res.write(streamChunk(id, created, request.model, {}, 'stop'));
-      // Sent unconditionally rather than only under `stream_options.include_usage`:
-      // these are the run's real, billed token counts, and a caller paying for
-      // an orchestration should not have to opt in to being told what it cost.
-      res.write(usageChunk(id, created, request.model, usageBlock(sink.usage, result), cascadeExtra(result)));
+      const reconciled = reconcileStream(streamed, result.output);
+      if (reconciled.kind === 'diverged') {
+        // Bytes are already on the wire and SSE cannot retract them, so the
+        // only honest ending is a failure. Appending from the common prefix
+        // and then sending `stop` would hand the client a corrupted answer
+        // labelled successful — strictly worse than an error it can see.
+        console.error(
+          `[openai-compat] stream diverged from the run output (streamed ${streamed.length} chars, `
+          + `output ${result.output.length}) — terminating the stream as an error`,
+        );
+        res.write(errorFrame(openAiError(
+          'The streamed response diverged from the completed answer, so this stream is incomplete. '
+            + 'Retry without `stream` to get the authoritative answer in one response.',
+          'server_error', null, 'stream_reconciliation_failed',
+        )));
+      } else {
+        if (reconciled.kind === 'append') {
+          res.write(streamChunk(id, created, request.model, { content: reconciled.text }));
+        }
+        // The `cascade` block rides the terminal frame, which still has a
+        // choices[0] — so what the run cost is available on EVERY stream…
+        res.write(streamChunk(id, created, request.model, {}, 'stop', { cascade: cascadeExtra(result) }));
+        // …while the choices-less usage frame stays opt-in, as the streaming
+        // shape defines it.
+        if (request.includeUsage) {
+          res.write(usageChunk(id, created, request.model, usageBlock(sink.usage, result), cascadeExtra(result)));
+        }
+      }
     } catch (err) {
       // Headers are long gone, so the failure has to travel IN the stream.
       // OpenAI does the same: an error event, then the terminator.
-      res.write(`data: ${JSON.stringify(runFailure(err).body)}\n\n`);
+      res.write(errorFrame(runFailure(err).body));
     }
     res.write('data: [DONE]\n\n');
     res.end();

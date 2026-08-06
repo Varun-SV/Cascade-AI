@@ -130,20 +130,34 @@ dropped; a test asserts a non-primary token never reaches the wire.
 
 But `result.output` is what the run returned and what was persisted, and the two
 are only guaranteed equal when nothing post-processed the text. So the stream is
-**reconciled** at the end (`trailingDelta`) rather than trusted:
+**reconciled** at the end (`reconcileStream`) rather than trusted:
 
-- identical → send nothing (the common case);
-- `output` extends what streamed → send the remainder;
-- they diverged → send everything after the common prefix.
+| outcome | meaning | how the stream ends |
+|---|---|---|
+| `complete` | the deltas already are the answer | terminal `stop` frame |
+| `append` | the answer *extends* what streamed | remainder, then `stop` |
+| `diverged` | bytes were sent that are not a prefix of the answer | **error frame, no `stop`** |
 
-The last case over-sends rather than truncating, deliberately: a client that
-concatenates deltas ends up with a superset of the answer instead of a silently
-clipped one, and a clip is not recoverable by the caller.
+`diverged` deliberately does **not** append a correction. SSE has no operation
+that retracts bytes already emitted: for `streamed = "Hello there"` and
+`output = "Hello world."`, appending from the common prefix makes a normal SDK
+client assemble `"Hello thereworld."` and then read `finish_reason: "stop"` —
+corrupted output reported as success, which is worse than a visible failure.
+Instead the stream terminates with an OpenAI-shaped error frame (`code:
+"stream_reconciliation_failed"`), which both official SDKs raise on, and the
+server logs it. Callers who need a guaranteed answer retry without `stream`.
 
-The terminal usage chunk is sent **unconditionally**, not only under
-`stream_options.include_usage`. Those are the run's real, billed token counts,
-and a caller paying for an orchestration should not have to opt in to being told
-what it cost. Unknown chunk fields are ignored by every OpenAI SDK.
+The choices-less **usage frame is opt-in**, gated on
+`stream_options.include_usage === true`, exactly as the streaming shape defines
+it. It is the one frame without a `choices[0]`, so forcing it into an ordinary
+stream throws in any client that indexes `chunk.choices[0]` in its loop — a
+client that never asked for it has every reason to consider that safe.
+`stream_options` is validated (object, boolean field, stream-only) rather than
+ignored.
+
+Cost is still on **every** stream: the `cascade` extension rides the terminal
+`stop` frame, which does have a `choices[0]`, so it costs no compatibility.
+Token counts follow the OpenAI opt-in.
 
 ## 7. Scope boundaries (v1)
 
@@ -164,10 +178,21 @@ what it cost. Unknown chunk fields are ignored by every OpenAI SDK.
 ## 8. Conversation state
 
 An OpenAI client is stateless and resends its whole `messages` array each turn.
-Prior turns are seeded with `store.importConversation`, so history reaches the
-run through the same tree walk the web path uses and the transcript shows up in
-the user's own chat list. A stateless client therefore gets one conversation per
-request — the honest reading of a stateless protocol, not a bug.
+Prior turns ride the payload as `ChatRunPayload.seedHistory` and are written by
+`runChatTurn`, so history reaches the run through the same tree walk the web
+path uses and the transcript shows up in the user's own chat list. A stateless
+client therefore gets one conversation per request — the honest reading of a
+stateless protocol, not a bug.
+
+**Seeding lives inside the payload, not in the route, and that placement is the
+point.** `runChatTurn` runs `checkDailyLimit` + `beginRun` *before* calling
+`runChatTurnInner`, so nothing is persisted for a request the entitlements
+refuse. Importing in the route put the whole transcript on disk and then
+returned 429 — repeatable at will, unmetered, and invisible until storage filled
+up. `seedConversation` re-reads the conversation after the import because
+`importConversation` returns the row it captured *before* appending the
+messages, so its `activeLeafId` is still null; using the stale row would start a
+second root branch and drop the seeded history from the run's context entirely.
 
 `system` / `developer` turns land in the new `ChatRunPayload.systemPrompt`,
 which composes with a selected skill preset. They are **not** folded into

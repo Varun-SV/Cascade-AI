@@ -60,17 +60,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   could not.
 
   Streamed deltas come from the presenter tier and are **reconciled** against the
-  run's authoritative output at the end, so a client that concatenates them can
-  never end up with a silently clipped answer. Every reply carries the run's real
-  `usage` — unconditionally on the stream too, because a caller paying for an
-  orchestration should not have to opt in to being told what it cost — plus a
-  `cascade` block naming the tier and model that actually served it.
+  run's authoritative output before the stream is allowed to end: identical ends
+  normally, an answer that extends what streamed gets the remainder, and a stream
+  that *diverged* terminates with an error rather than a `stop`. SSE cannot
+  retract bytes already sent, so appending a correction after them would make a
+  client assemble a mangled answer and read it as complete — a visible failure is
+  the better outcome, and both official SDKs raise on it. Every reply carries a
+  `cascade` block naming the tier and model that actually served it and what the
+  routing saved; it rides the terminal frame, so cost is on every stream while
+  the choices-less token-usage frame stays opt-in behind
+  `stream_options.include_usage`, as the streaming shape defines it.
 
   Reusing the existing run pipeline needed one narrowing: `ChatRunDeps.socket`
   was typed `socket.io`'s `Socket`, though every use in the file is a
   fire-and-forget `emit` plus a pair of `on`/`off`. It is now a structural
   `RunSocket` that a real `Socket` satisfies unchanged, which is what lets the
   HTTP side supply an SSE-backed implementation instead of forking `runChatTurn`.
+
+  A stateless caller's prior turns ride the run payload as `seedHistory` rather
+  than being written by the route, so they are persisted **inside**
+  `runChatTurn`'s admission boundary. `checkDailyLimit` and `beginRun` run first
+  and deliberately touch nothing before they pass; seeding outside that boundary
+  meant a request over its daily cap returned 429 having already written its
+  whole transcript — repeatable at will, charged to nobody, and invisible until
+  the disk filled.
 
 ### Fixed
 - **Parsing an `Authorization: Bearer` header was quadratic in its length.**

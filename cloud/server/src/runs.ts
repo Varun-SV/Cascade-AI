@@ -52,6 +52,26 @@ const TierParamSchema = z
 const ChatRunPayloadSchema = z.object({
   conversationId: z.string().optional(),
   prompt: z.string().min(1).max(20_000),
+  // Prior turns to persist as this conversation's history AT CREATION TIME.
+  // Only read when no conversationId is given.
+  //
+  // This exists because a stateless caller (the OpenAI-compatible endpoint)
+  // resends its whole message array every request and has no conversation to
+  // point at. Seeding it here rather than in the route is deliberate:
+  // runChatTurn runs checkDailyLimit + beginRun BEFORE calling this function,
+  // so a request that is over its daily cap or has no concurrency slot is
+  // refused without leaving a conversation and a transcript behind. Importing
+  // in the route put megabytes of messages on disk for a request that then
+  // returned 429 — repeatable, and invisible until storage filled up.
+  seedHistory: z
+    .array(z.object({
+      role: z.enum(['user', 'assistant']),
+      // Same per-message ceiling app.ts applies to a persisted turn, so a
+      // message's size does not depend on which door it came in.
+      content: z.string().min(1).max(500_000),
+    }))
+    .max(200)
+    .optional(),
   // Branching: editing an existing user turn. The new (edited) user message is
   // saved as a SIBLING of this one — same parent, a fresh branch — so the
   // original prompt and its answer aren't overwritten. The server derives the
@@ -700,13 +720,34 @@ export async function runChatTurn(payload: ChatRunPayload, deps: ChatRunDeps): P
   }
 }
 
+/**
+ * Creates the conversation a run without a conversationId appends to, seeding
+ * it with `seedHistory` when the caller supplied prior turns.
+ *
+ * The re-read after `importConversation` is load-bearing, not defensive: that
+ * method returns the row it captured BEFORE appending the messages, so its
+ * `activeLeafId` is still null. The run hangs the new turn off
+ * `conversation.activeLeafId`, so using the stale row would silently start a
+ * second root branch and drop the whole seeded history from the run's context.
+ */
+function seedConversation(store: CloudStore, userId: string, payload: ChatRunPayload) {
+  const history = payload.seedHistory;
+  if (!history?.length) return store.createConversation(userId, payload.prompt.slice(0, 80));
+  // The first turn names the thread better than the latest one does.
+  const title = history[0]!.content.slice(0, 80);
+  const seeded = store.importConversation(userId, title, null, history);
+  return store.getConversation(seeded.id, userId);
+}
+
 async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Promise<ChatRunResult> {
   const { env, store, userId, socket, signal } = deps;
   const interactive = deps.interactive !== false;
 
+  // Reached only AFTER runChatTurn's admission guards, so nothing below is
+  // persisted for a request the entitlements refused.
   const conversation = payload.conversationId
     ? store.getConversation(payload.conversationId, userId)
-    : store.createConversation(userId, payload.prompt.slice(0, 80));
+    : seedConversation(store, userId, payload);
   if (!conversation) throw new Error('Conversation not found');
 
   // ── Branch resolution (conversation tree) ──

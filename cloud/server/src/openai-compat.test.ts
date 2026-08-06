@@ -10,8 +10,8 @@ import { createNativeAccessToken } from './auth/session.js';
 import type { CloudEnv } from './env.js';
 import {
   CASCADE_MODELS, runControlsForModel, isCascadeModel, parseCompletionRequest, findUnsupportedParam,
-  providersFromEnv, providerPolicy, describeProviderPolicy, trailingDelta, usageBlock, streamChunk,
-  usageChunk, HttpRunSink,
+  providersFromEnv, providerPolicy, describeProviderPolicy, reconcileStream, usageBlock, streamChunk,
+  usageChunk, errorFrame, HttpRunSink,
 } from './openai-compat.js';
 import { parseChatRunPayload, runChatTurn, type ChatRunResult } from './runs.js';
 
@@ -45,8 +45,19 @@ vi.mock('#cascade-ai', async (importOriginal) => {
       };
     }
     async close(): Promise<void> { /* nothing to tear down */ }
-    async run(): Promise<unknown> {
+    async run(options: { routingPrompt?: string }): Promise<unknown> {
       for (const ev of GATE_EVENTS) this.gateListenersAtRun[ev] = this.listenerCount(ev);
+      // A prompt-driven escape hatch for the one case that cannot be produced
+      // by a well-behaved run: presenter tokens that are NOT a prefix of the
+      // answer the run then returns.
+      if (options?.routingPrompt?.includes('DIVERGE')) {
+        this.emit('stream:token', { tierId: 'T3', text: 'Hello there', primary: true });
+        return {
+          output: 'Hello world.',
+          sessionId: '', taskId: '', t2Results: [], durationMs: 12,
+          usage: { inputTokens: 11, outputTokens: 3, totalTokens: 14, estimatedCostUsd: 0.001 },
+        };
+      }
       // Two presenter tokens plus one background-worker token: the background
       // one must NOT reach the caller's delta stream.
       this.emit('stream:token', { tierId: 'T3', text: 'Hello ', primary: true });
@@ -269,6 +280,23 @@ describe('SSE framing and usage', () => {
     });
   });
 
+  it('carries an extension at the top level, never inside choices', () => {
+    // The cascade block rides the terminal frame, so a client looping over
+    // chunk.choices[0].delta cannot trip over it.
+    const parsed = JSON.parse(
+      streamChunk('chatcmpl-1', 1, 'cascade', {}, 'stop', { cascade: { tier: 'T3' } }).slice('data: '.length),
+    );
+    expect(parsed.cascade).toEqual({ tier: 'T3' });
+    expect(parsed.choices[0]).toEqual({ index: 0, delta: {}, finish_reason: 'stop' });
+    expect(parsed.choices[0].cascade).toBeUndefined();
+  });
+
+  it('frames an in-stream error the way an SDK detects one', () => {
+    // Both official SDKs raise when a data frame carries an `error` key.
+    const parsed = JSON.parse(errorFrame({ error: { message: 'nope', type: 'server_error', param: null, code: 'x' } }).slice('data: '.length));
+    expect(parsed.error.message).toBe('nope');
+  });
+
   it('frames the terminal usage chunk with an empty choices array', () => {
     const parsed = JSON.parse(
       usageChunk('chatcmpl-1', 1, 'cascade', { total_tokens: 9 }, { tier: 'T3' }).slice('data: '.length),
@@ -302,23 +330,25 @@ describe('SSE framing and usage', () => {
   });
 });
 
-describe('trailingDelta', () => {
-  it('sends nothing when the stream already matches the answer', () => {
-    expect(trailingDelta('Hello world.', 'Hello world.')).toBe('');
+describe('reconcileStream', () => {
+  it('is complete when the stream already carries the whole answer', () => {
+    expect(reconcileStream('Hello world.', 'Hello world.')).toEqual({ kind: 'complete' });
   });
 
-  it('sends the remainder when the answer extends what streamed', () => {
-    expect(trailingDelta('Hello ', 'Hello world.')).toBe('world.');
-    expect(trailingDelta('', 'Hello world.')).toBe('Hello world.');
+  it('appends only when the answer genuinely EXTENDS what streamed', () => {
+    expect(reconcileStream('Hello ', 'Hello world.')).toEqual({ kind: 'append', text: 'world.' });
+    expect(reconcileStream('', 'Hello world.')).toEqual({ kind: 'append', text: 'Hello world.' });
   });
 
-  it('over-sends rather than truncating when the two diverged', () => {
-    // A client that concatenates deltas must never end up with a CLIPPED
-    // answer; a superset is recoverable, a silent truncation is not.
-    const sent = 'Hello there';
-    const tail = trailingDelta(sent, 'Hello world.');
-    expect(tail).toBe('world.');
-    expect(sent + tail).toContain('Hello world.'.slice('Hello '.length));
+  it('reports divergence instead of patching it from the common prefix', () => {
+    // The case that must never become an append: emitting "world." after
+    // "Hello there" makes a client assemble "Hello thereworld." — and SSE has
+    // no way to take back the bytes already sent, so calling that a success
+    // hands the caller corrupted output. It has to surface as a failure.
+    expect(reconcileStream('Hello there', 'Hello world.')).toEqual({ kind: 'diverged' });
+    // Also divergent: the stream ran PAST the answer. Truncation is no more
+    // repairable than substitution.
+    expect(reconcileStream('Hello world. Extra', 'Hello world.')).toEqual({ kind: 'diverged' });
   });
 });
 
@@ -413,15 +443,19 @@ describe('/v1 routes', () => {
     expect(store.getMessages(body.cascade.conversation_id).map((m) => m.role)).toEqual(['user', 'assistant']);
   });
 
+  /** Splits an SSE body into its parsed frames, minus the `[DONE]` terminator. */
+  const framesOf = (raw: string) => {
+    const parts = raw.split('\n\n').filter(Boolean).map((f) => f.replace(/^data: /, ''));
+    expect(parts.at(-1)).toBe('[DONE]');
+    return parts.slice(0, -1).map((f) => JSON.parse(f));
+  };
+
   it('streams OpenAI chunk frames whose deltas concatenate to the answer', async () => {
     const res = await post({ model: 'cascade', messages: [{ role: 'user', content: 'hi' }], stream: true });
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/event-stream');
     const raw = await res.text();
-
-    const frames = raw.split('\n\n').filter(Boolean).map((f) => f.replace(/^data: /, ''));
-    expect(frames.at(-1)).toBe('[DONE]');
-    const events = frames.slice(0, -1).map((f) => JSON.parse(f));
+    const events = framesOf(raw);
     expect(events.every((e) => e.object === 'chat.completion.chunk')).toBe(true);
 
     // First frame opens the message; the background worker's token never appears.
@@ -430,11 +464,67 @@ describe('/v1 routes', () => {
     expect(text).toBe('Hello world.');
     expect(raw).not.toContain('worker noise');
 
-    // Exactly one terminal choice, then a usage-only chunk.
-    expect(events.filter((e) => e.choices[0]?.finish_reason === 'stop')).toHaveLength(1);
+    // Exactly one terminal frame, and it carries the cascade block — so what
+    // the run cost is on every stream without an opt-in frame.
+    const stops = events.filter((e) => e.choices[0]?.finish_reason === 'stop');
+    expect(stops).toHaveLength(1);
+    expect(stops[0].cascade.saved_pct).toBe(40);
+    expect(stops[0].cascade.conversation_id).toBeTruthy();
+  });
+
+  it('does NOT emit the choices-less usage frame unless it was asked for', async () => {
+    // That frame is opt-in in the streaming shape. Forcing it into an ordinary
+    // stream throws in any client that indexes chunk.choices[0] in its loop.
+    for (const body of [
+      { model: 'cascade', messages: [{ role: 'user', content: 'hi' }], stream: true },
+      { model: 'cascade', messages: [{ role: 'user', content: 'hi' }], stream: true, stream_options: { include_usage: false } },
+    ]) {
+      const events = framesOf(await (await post(body)).text());
+      expect(events.every((e) => Array.isArray(e.choices) && e.choices.length === 1), JSON.stringify(body)).toBe(true);
+      expect(events.some((e) => e.usage)).toBe(false);
+    }
+  });
+
+  it('emits it when stream_options.include_usage is true', async () => {
+    const events = framesOf(await (await post({
+      model: 'cascade', messages: [{ role: 'user', content: 'hi' }],
+      stream: true, stream_options: { include_usage: true },
+    })).text());
     const last = events.at(-1);
     expect(last.choices).toEqual([]);
     expect(last.usage).toEqual({ prompt_tokens: 11, completion_tokens: 3, total_tokens: 14 });
+    // It comes AFTER the terminal frame, never instead of it.
+    expect(events.at(-2).choices[0].finish_reason).toBe('stop');
+  });
+
+  it('validates stream_options rather than ignoring a malformed one', async () => {
+    const cases: Array<[unknown, string]> = [
+      [{ model: 'cascade', messages: [{ role: 'user', content: 'hi' }], stream: true, stream_options: 'yes' }, 'must be an object'],
+      [{ model: 'cascade', messages: [{ role: 'user', content: 'hi' }], stream: true, stream_options: { include_usage: 'yes' } }, 'must be a boolean'],
+      // Meaningless without a stream — OpenAI rejects this too.
+      [{ model: 'cascade', messages: [{ role: 'user', content: 'hi' }], stream_options: { include_usage: true } }, "'stream' is true"],
+    ];
+    for (const [body, needle] of cases) {
+      const res = await post(body);
+      expect(res.status, JSON.stringify(body)).toBe(400);
+      expect((await res.json()).error.message).toContain(needle);
+    }
+  });
+
+  // ── The other thing a stream must never do ──
+  it('terminates a DIVERGENT stream as an error, never as a successful stop', async () => {
+    const res = await post({ model: 'cascade', messages: [{ role: 'user', content: 'DIVERGE please' }], stream: true });
+    const events = framesOf(await res.text());
+
+    // No success signal: appending a correction after bytes the client cannot
+    // un-receive would assemble "Hello thereworld." and label it complete.
+    expect(events.some((e) => e.choices?.[0]?.finish_reason === 'stop')).toBe(false);
+    const error = events.at(-1);
+    expect(error.error.code).toBe('stream_reconciliation_failed');
+    // Nothing was appended after the divergent text.
+    const text = events.map((e) => e.choices?.[0]?.delta?.content ?? '').join('');
+    expect(text).toBe('Hello there');
+    expect(text).not.toContain('world.');
   });
 
   // ── The regression this endpoint exists to avoid ──
@@ -473,21 +563,6 @@ describe('/v1 routes', () => {
     expect(gates['escalation:timeout']).toBe(1);
     expect(gates['context:approval-required']).toBe(1);
     expect(gates['plan:approval-required']).toBe(1);
-  });
-
-  it('seeds prior turns as history rather than dropping them', async () => {
-    const res = await post({
-      model: 'cascade',
-      messages: [
-        { role: 'system', content: 'Be terse.' },
-        { role: 'user', content: 'what is 2+2' },
-        { role: 'assistant', content: '4' },
-        { role: 'user', content: 'and times 3?' },
-      ],
-    });
-    const body = await res.json();
-    const messages = store.getMessages(body.cascade.conversation_id);
-    expect(messages.map((m) => m.content)).toEqual(['what is 2+2', '4', 'and times 3?', 'Hello world.']);
   });
 
   it('rejects an unknown model, unsupported params and a non-user last turn before running anything', async () => {
@@ -545,5 +620,47 @@ describe('/v1 routes', () => {
     const res = await post({ model: 'cascade', messages: [{ role: 'user', content: 'hi' }] });
     expect(res.status).toBe(429);
     expect((await res.json()).error.type).toBe('rate_limit_error');
+  });
+
+  // ── Persistence stays behind the admission guards ──
+  it('persists NOTHING when a history-bearing request is refused by the daily cap', async () => {
+    // Prior turns ride the payload rather than being written by the route, so
+    // they are seeded inside runChatTurn — after checkDailyLimit/beginRun. When
+    // the route did the import itself, every rejected retry left a conversation
+    // and its whole transcript on disk: repeatable, unmetered, and invisible
+    // until storage filled up.
+    for (let i = 0; i < 20; i++) store.incrementUsage(userId, new Date().toISOString().slice(0, 10));
+    const history = Array.from({ length: 12 }, (_, i) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content: 'x'.repeat(20_000),
+    }));
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const res = await post({
+        model: 'cascade',
+        messages: [...history, { role: 'user', content: 'and now?' }],
+      });
+      expect(res.status).toBe(429);
+    }
+
+    expect(store.listConversations(userId)).toEqual([]);
+    expect(h.made).toHaveLength(0);
+  });
+
+  it('still seeds that history when the request IS admitted', async () => {
+    const res = await post({
+      model: 'cascade',
+      messages: [
+        { role: 'user', content: 'what is 2+2' },
+        { role: 'assistant', content: '4' },
+        { role: 'user', content: 'and times 3?' },
+      ],
+    });
+    const body = await res.json();
+    // The seeded turns are the run's history AND the persisted transcript — the
+    // reply hangs off the last of them rather than starting a second branch.
+    expect(store.getActivePath(body.cascade.conversation_id).map((m) => m.content))
+      .toEqual(['what is 2+2', '4', 'and times 3?', 'Hello world.']);
+    expect(store.listConversations(userId)[0]!.title).toBe('what is 2+2');
   });
 });
