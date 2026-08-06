@@ -43,6 +43,8 @@ Other AI CLIs run a single agent. Cascade runs a visible **organization** — an
 - [Features](#features)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+- [Self-host](#self-host)
+- [OpenAI-compatible API](#openai-compatible-api)
 - [Configuration](#configuration)
 - [AI Providers](#ai-providers)
 - [Tools](#tools)
@@ -243,6 +245,39 @@ docker compose up                    # → http://localhost:8787
 > **`CLOUD_DEV_BYPASS` is an authentication bypass, not a convenience toggle.** It adds a sign-in button that accepts any name with no credential, so anyone who can reach the port can sign in as anyone. That is why it ships commented out, why the step above is explicit rather than the default, and why `docker-compose.yml` publishes to `127.0.0.1` only. Before putting this on a network anyone else can reach: set `GITHUB_CLIENT_ID`/`GOOGLE_CLIENT_ID` for real OAuth, remove `CLOUD_DEV_BYPASS`, and only then change the port binding.
 
 See the [Dockerfile](Dockerfile) and [docker-compose.yml](docker-compose.yml) for the build/runtime details.
+
+---
+
+## OpenAI-compatible API
+
+Anything that already talks to OpenAI can talk to Cascade. Point the client's `base_url` at your server's `/v1` and use a Cascade access token as the API key — `POST /v1/chat/completions` and `GET /v1/models` work with the official SDKs, streaming and not.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(api_key=CASCADE_ACCESS_TOKEN, base_url="http://localhost:8787/v1")
+
+reply = client.chat.completions.create(
+    model="cascade",                                    # a routing mode, not a model
+    messages=[{"role": "user", "content": "Compare Postgres and SQLite for a CLI tool."}],
+)
+print(reply.choices[0].message.content)
+print(reply.cascade)   # which tier + model actually served it, and what routing saved
+```
+
+`model` names a **routing mode**, because Cascade picks a model per subtask — that is the product:
+
+| `model` | what runs |
+| --- | --- |
+| `cascade` | full orchestration, balanced quality against cost |
+| `cascade-fast` | one mid-tier model, no orchestration |
+| `cascade-quality` | full orchestration, biased to quality |
+
+Anything else returns `404 model_not_found` rather than quietly running something you didn't ask for. Unsupported parameters (`n > 1`, `logprobs`, `tools`, `response_format`, …) are **rejected**, not ignored — a silently dropped parameter returns a response that looks successful and is wrong. `temperature` and `max_tokens` are honoured, applied across tiers.
+
+**Provider keys.** On a **single-account** instance — a self-host, where the operator and the caller are the same person — the endpoint uses the provider keys in your `.env` (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, …; the same names the CLI reads). The moment a second account exists this stops automatically, because the operator's key would otherwise pay for everyone else's runs. Any instance can also take keys per request via the SDK's `extra_body={"providers": [...]}`.
+
+`/v1` is for server-side clients: `Authorization` is not allowed cross-origin, so a browser-side SDK is deliberately not served. Tools/function calling and image inputs are not in v1 — Cascade's tools run server-side, and attachments go through `POST /api/uploads`.
 
 ---
 

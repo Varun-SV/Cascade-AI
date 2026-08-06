@@ -54,6 +54,33 @@ const EnvSchema = z.object({
   // Display-only price string for the Pro plan (actual price lives on the
   // Razorpay Plan). Shown on the Upgrade page.
   RAZORPAY_PRICE_LABEL: z.string().default('₹499 / month'),
+
+  // ── Provider keys for the OpenAI-compatible API (SELF-HOST ONLY) ──
+  // These are the operator's OWN provider credentials, and the only thing that
+  // reads them is POST /v1/chat/completions — the socket path stays strictly
+  // bring-your-own-key, with keys held in the browser and travelling with each
+  // run request (see runs.ts).
+  //
+  // They are gated on the instance having a single account, because on a
+  // multi-account instance "the operator's key" and "the caller" are different
+  // people and every request would bill the operator. openai-compat.ts makes
+  // that check explicitly and logs the outcome at boot. Names deliberately
+  // match the CLI's own env-key discovery (src/config/index.ts) so one .env
+  // serves both.
+  ANTHROPIC_API_KEY: z.string().optional(),
+  OPENAI_API_KEY: z.string().optional(),
+  // The CLI accepts either spelling for Gemini; GEMINI_API_KEY wins.
+  GEMINI_API_KEY: z.string().optional(),
+  GOOGLE_API_KEY: z.string().optional(),
+  GITHUB_MODELS_TOKEN: z.string().optional(),
+  AZURE_OPENAI_KEY: z.string().optional(),
+  AZURE_OPENAI_ENDPOINT: z.string().optional(),
+  AZURE_OPENAI_DEPLOYMENT: z.string().optional(),
+  AZURE_OPENAI_API_VERSION: z.string().optional(),
+  OPENAI_COMPATIBLE_BASE_URL: z.string().optional(),
+  OPENAI_COMPATIBLE_API_KEY: z.string().optional(),
+  OPENAI_COMPATIBLE_MODEL: z.string().optional(),
+  OLLAMA_BASE_URL: z.string().optional(),
 });
 
 export type CloudEnv = z.infer<typeof EnvSchema>;

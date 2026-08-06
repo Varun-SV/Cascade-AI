@@ -40,6 +40,7 @@ import {
   BrokerFlows, getBrokerProvider, brokerConfigured, brokeredConnectorIds,
   brokerAuthorizeUrl, brokerExchangeCode,
 } from './connect-broker.js';
+import { registerOpenAiCompatRoutes, OPENAI_COMPAT_JSON_ROUTES } from './openai-compat.js';
 
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
@@ -148,7 +149,10 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   const webhookRaw = express.raw({ type: '*/*', limit: '1mb' });
   // Routes that accept large bodies (file saves, chat/memory imports) run their
   // own 16mb parser; keep them off the tight 100kb default.
-  const rawBodyRoutes = new Set(['/api/uploads', '/api/billing/webhook', '/api/files', '/api/memories/import']);
+  const rawBodyRoutes = new Set([
+    '/api/uploads', '/api/billing/webhook', '/api/files', '/api/memories/import',
+    ...OPENAI_COMPAT_JSON_ROUTES,
+  ]);
   app.use((req, res, next) => {
     if (rawBodyRoutes.has(req.path)) { next(); return; }
     express.json()(req, res, next);
@@ -1390,6 +1394,11 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   });
   // Any deeper /docs/* path (there are no sub-pages yet) redirects to the index.
   app.get('/docs/*', (_req, res) => res.redirect(302, '/docs'));
+
+  // ── OpenAI-compatible API (/v1) ──────────────
+  // Registered before the SPA catch-all so an SDK client gets JSON rather than
+  // the app shell. See openai-compat.ts.
+  registerOpenAiCompatRoutes(app, env, store);
 
   // ── Serve the built SPA ──────────────────────
   // In dev, cloud/web runs its own Vite server (proxying /api, /auth,
