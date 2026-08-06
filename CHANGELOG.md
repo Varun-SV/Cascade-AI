@@ -72,6 +72,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RunSocket` that a real `Socket` satisfies unchanged, which is what lets the
   HTTP side supply an SSE-backed implementation instead of forking `runChatTurn`.
 
+### Fixed
+- **Parsing an `Authorization: Bearer` header was quadratic in its length.**
+  `/^Bearer\s+(.+)$/` reads as harmless, but `\s+` and `.+` both match a space,
+  so for a value that ultimately fails to match the engine had to try every way
+  of splitting a long run of spaces between them. Measured on the real header
+  path: 10k spaces took 121 ms, 40k took 1.8 s, 120k took 15.9 s — and this runs
+  on every authenticated request, including the unauthenticated attempts, so it
+  is the one input a caller controls for free. The scheme and the token are now
+  split on the first whitespace by index, which has no split to explore and is
+  linear; the parse is otherwise unchanged, down to refusing a value carrying a
+  newline. Found while adding the OpenAI-compatible endpoint above, which routes
+  a second caller through the same function.
+
 ## 0.69.0 - 2026-08-06
 
 ### Added

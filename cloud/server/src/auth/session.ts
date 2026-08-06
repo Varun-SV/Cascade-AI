@@ -77,11 +77,31 @@ export interface AuthedRequest extends Request {
   session?: CloudSession;
 }
 
-/** Extract a Bearer token from an Authorization header, if present. */
+/**
+ * Extract a Bearer token from an Authorization header, if present.
+ *
+ * Split on the first run of whitespace rather than matching the scheme and the
+ * token with one regex. `/^Bearer\s+(.+)$/` reads as harmless, but `\s+` and
+ * `.+` BOTH match a space: for a value that ultimately fails to match, the
+ * engine has to try every way of splitting a long run of spaces between them,
+ * which is quadratic in the header's length (CodeQL `js/polynomial-redos`).
+ * This runs on every authenticated request, including the unauthenticated
+ * attempts, so it is the one place a caller controls the input for free.
+ * Indexing has no split to explore and is linear.
+ *
+ * Behaviour is unchanged: case-insensitive scheme, one-or-more whitespace
+ * separator, surrounding whitespace trimmed, and a value carrying a CR/LF is
+ * refused — the old `.` could not cross a newline either.
+ */
 export function bearerToken(header: string | undefined): string | null {
   if (!header) return null;
-  const m = /^Bearer\s+(.+)$/i.exec(header.trim());
-  return m ? m[1]!.trim() : null;
+  const trimmed = header.trim();
+  const sep = trimmed.search(/\s/);
+  if (sep === -1) return null;
+  if (trimmed.slice(0, sep).toLowerCase() !== 'bearer') return null;
+  const token = trimmed.slice(sep).trim();
+  if (!token || token.includes('\n') || token.includes('\r')) return null;
+  return token;
 }
 
 export function sessionMiddleware(secret: string, required = true) {
