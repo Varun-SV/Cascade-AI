@@ -67,9 +67,25 @@ jobs:
             }
             flag { print }
           ' CHANGELOG.md > RELEASE_NOTES.md || true
-          # Fall back to a stub if the changelog has no matching section.
+          # No matching section is a MISTAKE, so stop here rather than publish.
+          #
+          # This used to fall back to a "Release vX.Y.Z" stub, and that fallback
+          # is exactly how v0.70.0 shipped with no notes at all: the version was
+          # bumped to 0.70.0 while the changelog heading still read
+          # "## Unreleased", which matches no version, so the awk above returned
+          # nothing and the stub was published over 93 lines of real notes. The
+          # job stayed green, so nothing said the notes had been dropped until
+          # someone read the release page.
+          #
+          # Failing costs a re-run when the heading is forgotten. The stub cost
+          # a permanently wrong public release, which cannot be fixed by re-
+          # running: the "already exists" check below skips a release that is
+          # there, so the only repair is editing it by hand.
           if ! grep -q "[^[:space:]]" RELEASE_NOTES.md 2>/dev/null; then
-            printf 'Release v%s\n' "$VERSION" > RELEASE_NOTES.md
+            echo "::error::CHANGELOG.md has no section for $VERSION. Rename the '## Unreleased' heading to '## $VERSION - $(date -u +%Y-%m-%d)' in the same commit that bumps package.json, then re-run."
+            echo "----- headings found -----"
+            grep '^## ' CHANGELOG.md | head -5
+            exit 1
           fi
           echo "----- release notes -----"
           cat RELEASE_NOTES.md

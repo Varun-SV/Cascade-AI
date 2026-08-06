@@ -11,7 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      The release workflow copies this whole block verbatim into the GitHub
      release notes (.github/workflows/release.yml), so appending a fresh
      heading per merge ships a release page with four "Added" sections — which
-     is what happened to 0.69.0. Add bullets under the existing heading. -->
+     is what happened to 0.69.0. Add bullets under the existing heading.
+
+     RENAME THIS HEADING to `## <version> - <date>` in the same commit that
+     bumps package.json. The workflow matches sections by version prefix, so
+     a bumped version with the heading still reading "Unreleased" matches
+     nothing — which is how 0.70.0 published with an empty stub for notes. -->
+
+## 0.70.0 - 2026-08-06
 
 ### Added
 - **`POST /v1/chat/completions` — an OpenAI-compatible endpoint.** Anything that
