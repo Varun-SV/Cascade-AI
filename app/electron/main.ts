@@ -412,7 +412,11 @@ function registerIPC(): void {
 
   ipcMain.handle('cascade:setConfig', async (_e, cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string }) => {
     try {
-      saveDesktopMeta({ provider: cfg.provider, workspace: cfg.workspace, onboarding_done: true });
+      // `onboarding_done` is written AFTER the provider write below, not
+      // before, and only when something usable actually landed. Marking it
+      // done unconditionally claimed success for a wizard run that saved
+      // nothing — the user picked Ollama, no provider was written, and the
+      // wizard simply returned on the next launch with no explanation.
       // Write the key into the live Cascade config (same object the running
       // DashboardServer holds), then persist it — the next chat run picks it up
       // immediately with no backend restart.
@@ -421,16 +425,39 @@ function registerIPC(): void {
       // Prefer a user-supplied base URL (Azure / OpenAI-compatible endpoint) over
       // the provider's built-in default — onboarding used to drop it entirely.
       const baseUrl = cfg.baseUrl?.trim() || mapped.baseUrl;
-      if (type && cfg.apiKey && cascadeConfig && configManager) {
+      // Ollama and a bare openai-compatible endpoint are legitimately
+      // KEYLESS — the wizard advertises Ollama as "no API key needed" — so
+      // requiring cfg.apiKey silently discarded exactly the two choices a
+      // user with no keys can make. This mirrors the SDK's own
+      // KEY_OPTIONAL_PROVIDER_TYPES.
+      const keyOptional = type === 'ollama' || type === 'openai-compatible';
+      if (type && (cfg.apiKey || keyOptional) && cascadeConfig && configManager) {
         if (!Array.isArray(cascadeConfig.providers)) cascadeConfig.providers = [];
         const existing = cascadeConfig.providers.find((p: { type: string }) => p.type === type);
         if (existing) {
           existing.apiKey = cfg.apiKey;
           if (baseUrl) existing.baseUrl = baseUrl;
         } else {
-          cascadeConfig.providers.push({ type, apiKey: cfg.apiKey, ...(baseUrl ? { baseUrl } : {}) });
+          cascadeConfig.providers.push({
+            type,
+            ...(cfg.apiKey ? { apiKey: cfg.apiKey } : {}),
+            ...(baseUrl ? { baseUrl } : {}),
+          });
         }
         await configManager.save();
+      }
+
+      // Only now, and only if the config can actually serve a run. "Auto" maps
+      // to no provider type at all, so completing on it would leave an empty
+      // list behind a "setup finished" flag — the exact combination that used
+      // to open the app into a dead state.
+      const { hasUsableProvider } = loadCore();
+      if (hasUsableProvider(cascadeConfig?.providers)) {
+        saveDesktopMeta({ provider: cfg.provider, workspace: cfg.workspace, onboarding_done: true });
+      } else {
+        // Remember the choice so the wizard is not re-answered from scratch,
+        // but leave onboarding open so the user is told it did not take.
+        saveDesktopMeta({ provider: cfg.provider, workspace: cfg.workspace, onboarding_done: false });
       }
     } catch (err) {
       console.warn('[main] setConfig failed:', err);

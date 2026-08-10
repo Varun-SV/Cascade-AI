@@ -428,3 +428,48 @@ describe('retirement ordering (review round 5)', () => {
     expect(mgr.getConfig().providers.map((p) => p.type)).not.toContain('ollama');
   });
 });
+
+describe('cache purge is not gated on a migration (review round 7)', () => {
+  let dir: string;
+  let globalDir: string;
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-r7-'));
+    globalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-r7-g-'));
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warn.mockRestore();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(globalDir, { recursive: true, force: true });
+  });
+
+  it('clears retired rows for a user who cleaned their config before upgrading', async () => {
+    // No migration fires for them — retiredCleanup stays unset — but the rows
+    // are still in cascade.db, and the REPL reads any non-empty, non-stale
+    // cache as authoritative. Gating the purge on the migration left exactly
+    // this user with zero models for the providers they DO have.
+    fs.mkdirSync(path.join(dir, '.cascade'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '.cascade', 'config.json'),
+      JSON.stringify({ providers: [{ type: 'openai', apiKey: 'k' }] }),
+    );
+
+    // Seed a stale row, then reload: the second load must clear it even though
+    // nothing was migrated.
+    const first = new ConfigManager(dir, globalDir);
+    await first.load();
+    first.getStore().upsertCachedModel({
+      id: 'openai/gpt-4o', name: 'GPT-4o', provider: 'github-models' as never,
+      contextWindow: 8_000, isVisionCapable: false,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0,
+      maxOutputTokens: 4_000, supportsStreaming: true, isLocal: false,
+    });
+    expect(first.getStore().getCachedModels()).toHaveLength(1);
+
+    const second = new ConfigManager(dir, globalDir);
+    await second.load();
+    expect(second.getStore().getCachedModels()).toHaveLength(0);
+  });
+});

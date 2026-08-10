@@ -154,6 +154,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Applied" — the CLI, desktop and web restore paths all explain it now, so
   none of them is the one place a key vanishes unannounced.
 
+  **Desktop onboarding can now save the keyless options it advertises.**
+  `cascade:setConfig` only wrote a provider when an API key was present, so
+  picking Ollama — described in the wizard as "no API key needed" — saved
+  nothing, while the "setup finished" flag was written regardless. The wizard
+  therefore claimed success for a run that changed nothing. Keyless types are
+  saved without a key now, and completion is recorded only when the config can
+  actually serve a run, so "Auto" (which maps to no provider at all) no longer
+  closes setup over an empty list.
+
+  **Stale cached models are cleared even when nothing was migrated.** The purge
+  was gated on a migration having fired, which missed the person who had
+  already deleted the provider from their config before upgrading: no
+  migration, but the rows were still in the database, and the REPL treats any
+  non-empty, non-stale cache as authoritative — so the providers they *did*
+  have showed no models for a day. Rows for known retired types are now cleared
+  on every load.
+
   **The desktop reopens setup when the migration leaves it with nothing.** Its
   "onboarding finished" flag recorded that setup was completed once; it said
   nothing about whether the provider chosen then still exists. So a desktop

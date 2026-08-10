@@ -17,6 +17,7 @@ import {
   describeCleanup,
   didCleanupChangeAnything,
   filterRetiredCredentials,
+  RETIRED_PROVIDER_TYPES,
   stripRetiredProviders,
   type RetiredProviderCleanup,
 } from './retired-providers.js';
@@ -140,10 +141,15 @@ export class ConfigManager {
     // loadCache() only re-discovers when the cache is EMPTY or >24h old — so
     // leftover rows read as "populated" and the providers that replaced it
     // show zero models until they age out.
-    if (this.retiredCleanup) {
-      for (const type of this.retiredCleanup.removed) {
-        try { this.store.purgeCachedModelsForRetiredProvider(type); } catch { /* the cache is disposable */ }
-      }
+    // Unconditional over every KNOWN retired type, not just the ones this load
+    // happened to migrate. Someone who deleted the provider from their config
+    // before upgrading has no migration to trigger on, yet their cache still
+    // holds the rows — and the REPL reads any non-empty, non-stale cache as
+    // authoritative, so the providers they DO have show zero models until the
+    // 24-hour expiry. A delete of rows that are not there costs one no-op
+    // statement per retired type.
+    for (const type of Object.keys(RETIRED_PROVIDER_TYPES)) {
+      try { this.store.purgeCachedModelsForRetiredProvider(type); } catch { /* the cache is disposable */ }
     }
 
     await this.ensureDefaultIdentity();
