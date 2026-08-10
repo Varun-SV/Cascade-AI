@@ -105,7 +105,6 @@ export class ConfigManager {
     this.cascadeMd = await loadCascadeMd(this.workspacePath);
     this.keystore = new Keystore(path.join(this.globalDir, GLOBAL_KEYSTORE_FILE));
     this.store = new MemoryStore(path.join(this.workspacePath, CASCADE_DB_FILE));
-    await this.injectEnvKeys();
     // Fill in machine-global credentials (~/.cascade-ai/credentials.json) so
     // keys entered once are available in EVERY workspace — previously keys
     // lived only in the workspace config, so pointing the desktop app (or CLI)
@@ -131,6 +130,7 @@ export class ConfigManager {
         clearedPins: this.retiredCleanup?.clearedPins ?? [],
       };
     }
+    await this.injectEnvKeys();
     this.config.providers = mergeGlobalCredentials(this.config.providers, globalCreds.kept);
 
     // Purge AFTER both stores have been cleaned, not at store construction:
@@ -288,6 +288,12 @@ export class ConfigManager {
     // accepts it without checking the daemon exists, so both the setup wizard
     // and the headless no-providers guard are skipped and the run reaches the
     // router with no usable model.
+    // Both halves of the retirement cleanup — the workspace file (loadConfig)
+    // and the global credential store (filtered just above) — are accumulated
+    // into `retiredCleanup` BEFORE this runs. That ordering is load-bearing:
+    // when the retired provider lived only in ~/.cascade-ai, computing this
+    // any earlier saw an unset flag, called it a fresh install, and appended
+    // the keyless Ollama entry this branch exists to prevent.
     const wasEmpty = this.config.providers.length === 0;
     const emptiedByRetirement = wasEmpty && !!this.retiredCleanup;
 

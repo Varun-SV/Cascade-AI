@@ -154,6 +154,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Applied" — the CLI, desktop and web restore paths all explain it now, so
   none of them is the one place a key vanishes unannounced.
 
+  The notice now reaches the CLI as a startup message inside the REPL rather
+  than a console line the screen clear erases a moment later, and a vault whose
+  cleaned copy cannot be written back still returns the keys it just parsed —
+  a refused `localStorage` write used to discard every provider for the
+  session, which is a far worse outcome than migrating again next load.
+
   And the hosted server no longer fails a run outright because the client is
   older than it is. A browser tab left open across a deploy keeps sending its
   in-memory provider list until the page is reloaded, and the localStorage

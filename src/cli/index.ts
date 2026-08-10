@@ -344,6 +344,10 @@ async function startRepl(options: {
   }
 
   let config = cm.getConfig();
+  // Taken BEFORE the setup wizard may reload the config, which would consume
+  // the notice with nothing to show it. Rendered inside the REPL below, since
+  // the screen clear between here and Ink erases anything printed now.
+  const startupNotice = cm.takeRetiredNotice();
 
   // First-run detection: no providers configured → launch setup wizard
   const needsSetup = !hasUsableProvider(config.providers);
@@ -380,6 +384,7 @@ async function startRepl(options: {
       themeName: options.theme ?? config.theme ?? DEFAULT_THEME,
       initialPrompt: options.prompt,
       identityName: options.identity,
+      startupNotice,
       altScreen: useAltScreen,
     }),
     { exitOnCtrlC: false },

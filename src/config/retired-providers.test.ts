@@ -392,3 +392,39 @@ describe('migration must not strand a usable install (review round 4)', () => {
     expect(store.purgeCachedModelsForRetiredProvider('github-models')).toBe(1);
   });
 });
+
+describe('retirement ordering (review round 5)', () => {
+  let dir: string;
+  let globalDir: string;
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-r5-'));
+    globalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-r5-g-'));
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warn.mockRestore();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(globalDir, { recursive: true, force: true });
+  });
+
+  it('does not fake a fresh install when the retired entry was only in the global store', async () => {
+    // Both halves of the cleanup must be known before injectEnvKeys() decides.
+    // With the global filter running afterwards, this case saw an unset flag,
+    // called it a first run, and appended a keyless Ollama entry — which
+    // hasUsableProvider() accepts without checking the daemon, so the setup
+    // wizard never runs and the router starts with nothing usable.
+    fs.mkdirSync(path.join(dir, '.cascade'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.cascade', 'config.json'), JSON.stringify({ providers: [] }));
+    fs.writeFileSync(
+      path.join(globalDir, 'credentials.json'),
+      JSON.stringify({ providers: [{ type: 'github-models', apiKey: 'dead' }] }),
+    );
+
+    const mgr = new ConfigManager(dir, globalDir);
+    await mgr.load();
+
+    expect(mgr.getConfig().providers.map((p) => p.type)).not.toContain('ollama');
+  });
+});

@@ -39,7 +39,13 @@ export function loadKeys(): ProviderConfig[] {
     const { kept, removed } = stripRetiredProviders(parsed);
     if (removed.length > 0) {
       retiredNotice = describeRetiredRemoval(removed);
-      saveKeys(kept);
+      // Best-effort. localStorage can refuse a write (quota, a security policy,
+      // Safari private mode) and letting that throw would fall to the catch
+      // below and return [] — discarding every provider that had just parsed
+      // cleanly, so the user cannot chat at all. The migration is a
+      // convenience; the keys are the point. Worst case it runs again next
+      // load.
+      try { saveKeys(kept); } catch { /* re-migrate next load */ }
     }
     return kept;
   } catch {
