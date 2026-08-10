@@ -34,11 +34,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validation error and no acknowledgement, and the message simply never
   answers. The browser now checks the size itself, just under the boundary and
   in UTF-8 bytes rather than characters, and says how large the message is and
-  what to do about it. Length is still bounded where it belongs: extended
+  what to do about it. The authoritative check runs on the encoded payload, not
+  the raw text — socket.io JSON-encodes what it sends, and encoding is not
+  length-preserving, so text made largely of quotes or backslashes nearly
+  doubles on the wire and would otherwise sail past a raw-byte check straight
+  into the silent drop. Length is still bounded where it belongs: extended
   context compacts oversized input, and the per-run token and cost caps bound
   what a long prompt can spend.
 
+  `POST /v1/chat/completions` had its own copy of the same 20,000-character
+  bound, which would have left it the one path still answering
+  `context_length_exceeded` for a prompt everything else accepts. Removed; that
+  route's own 4 MB body limit, with its own error, is the real bound.
+
 ### Fixed
+- **A hosted run no longer fails a node for work it actually did.** Asking for
+  a document could end with the run announcing a file write, producing no file
+  anyone could find, and then failing the step with "Worker stalled waiting for
+  artifact creation. Requesting dynamic tool generation from T2 Manager". Two
+  causes, and the file usually did get written:
+
+  Artifact verification resolved a promised filename against `process.cwd()`,
+  which is the workspace only in a plain CLI run. The hosted server runs with
+  its working directory at the app while the run's workspace is the tenant's
+  scratch directory, and the desktop app's is the application bundle rather
+  than the folder you chose. So the tool wrote `<workspace>/report.docx` and
+  the check looked for `<cwd>/report.docx`, found nothing, retried, and threw.
+  Verification now asks the tool registry for the root every tool was
+  configured with, which is by definition where the file went.
+
+  And `generate_document` was registered in hosted runs at all. It registers
+  outside the `enabledTools` allowlist deliberately — that list guards tools
+  reaching the machine, and this one only writes into the run's own workspace —
+  but a hosted workspace is an ephemeral scratch directory with no route
+  serving a file out of it. Its presence also made the worker *require* a file
+  artifact, so a subtask naming a filename was held to a standard it could not
+  meet. Hosted runs deliver files through the `file:` fence instead, which the
+  browser already renders into a real .docx/.pptx/.xlsx on download.
+
 - **A validation error now names the field it is about.** The whole message a
   user got was `String must contain at most 20000 character(s); Number must be
   less than or equal to 200000; Number must be less than or equal to 200000;
@@ -84,6 +117,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read back at startup, so a restart begins warm. What comes off disk is
   re-validated against the same trust check a fetched manifest gets, since the
   site renders those URLs as links.
+
+- **Transferring a chat between devices no longer shortens it.** The handoff
+  courier sliced every message at 20,000 characters — mirroring the prompt cap
+  removed above — so a transferred conversation containing a pasted document
+  arrived with only its opening, persisted as the whole turn, with nothing
+  anywhere saying so. It now refuses a transfer it cannot carry rather than
+  quietly changing what the conversation says.
 
 - Dropped the stale `GITHUB_MODELS_TOKEN` entry from the server's
   `.env.example`, missed when the provider was removed in 0.71.0.

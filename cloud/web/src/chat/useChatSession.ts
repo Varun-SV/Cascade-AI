@@ -8,7 +8,7 @@ import {
   maxTokensPerRun, maxCostPerRunUsd, rememberSessions, defaultRoutingBias, defaultWebSearch,
 } from '../lib/prefs.js';
 import { refreshPendingMedia } from '../lib/pendingMedia.js';
-import { promptTooLargeError } from '../lib/limits.js';
+import { promptTooLargeError, payloadTooLargeError } from '../lib/limits.js';
 import { detectLocalModelCapability } from '../lib/localModel/capability.js';
 import { warmLocalModel } from '../lib/localModel/engine.js';
 import { classifyLocalComplexity } from '../lib/localModel/classifier.js';
@@ -449,9 +449,7 @@ export function useChatSession(
       }
 
       const emitRun = (complexityHint?: 'Simple' | 'Moderate' | 'Complex') => {
-        socket.emit(
-          'chat:run',
-          {
+        const payload = {
             conversationId,
             prompt: text,
             providers,
@@ -481,9 +479,29 @@ export function useChatSession(
             // sibling. Omitted for a normal send (append at the active leaf).
             editOfMessageId: branch?.editOfMessageId,
             regenerateFromUserMessageId: branch?.regenerateFromUserMessageId,
-          },
-          onAck,
-        );
+        };
+        // The authoritative size check, on what actually goes on the wire.
+        // socket.io JSON-encodes the payload and encoding is not
+        // length-preserving — a prompt of backslashes or quotes nearly doubles
+        // — so the byte check on the raw text above cannot bound the frame by
+        // itself. Past the ceiling the frame is dropped with no ack at all, so
+        // this has to be caught here or not at all.
+        const tooBig = payloadTooLargeError(payload);
+        if (tooBig) {
+          setBusy(false);
+          setStatus(null);
+          setMessages((prev) => prev.filter((m) => !m.streaming));
+          setError(tooBig);
+          // An edit or regenerate has ALREADY truncated the transcript
+          // optimistically by the time this runs (editMessage pre-checks the
+          // raw text, but encoding can push a payload over on its own). Nothing
+          // was sent, so the server's copy is still the truth — pull it back
+          // rather than leaving the user staring at a shortened conversation
+          // they cannot recover.
+          if (conversationId && branch) void reloadActivePath(conversationId);
+          return;
+        }
+        socket.emit('chat:run', payload, onAck);
       };
 
       const onAck = (ack: ChatRunAck) => {
@@ -633,6 +651,13 @@ export function useChatSession(
     const idx = messages.findIndex((m) => m.id === messageId);
     const target = messages[idx];
     if (!target || target.role !== 'user') return;
+    // Size-checked BEFORE the optimistic truncation below, not after. runChat
+    // rejects an oversized message by returning early — which, once this has
+    // already dropped the edited turn and everything after it, would leave the
+    // transcript permanently shortened for a send that never happened and was
+    // never persisted, with no reload to restore it.
+    const tooLarge = promptTooLargeError(newText.trim());
+    if (tooLarge) { setError(tooLarge); return; }
     // Optimistic: keep everything BEFORE the edited turn, then add the new one.
     setMessages(messages.slice(0, idx));
     runChat(newText, target.attachments, true, false, { editOfMessageId: target.id });

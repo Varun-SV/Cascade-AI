@@ -5,7 +5,7 @@
 // has to be what says "too long".
 
 import { describe, it, expect } from 'vitest';
-import { byteLength, formatBytes, promptTooLargeError, MAX_PROMPT_BYTES, MAX_SOCKET_FRAME_BYTES } from './limits.js';
+import { byteLength, formatBytes, promptTooLargeError, payloadTooLargeError, MAX_PROMPT_BYTES, MAX_SOCKET_FRAME_BYTES } from './limits.js';
 
 describe('byteLength', () => {
   it('counts UTF-8 bytes, not UTF-16 units', () => {
@@ -56,5 +56,34 @@ describe('formatBytes', () => {
     expect(formatBytes(512)).toBe('512 B');
     expect(formatBytes(2048)).toBe('2 KB');
     expect(formatBytes(1024 * 1024 * 2)).toBe('2.0 MB');
+  });
+});
+
+describe('payloadTooLargeError', () => {
+  it('passes an ordinary payload', () => {
+    expect(payloadTooLargeError({ prompt: 'hello', providers: [] })).toBeNull();
+  });
+
+  it('catches JSON escaping that the raw-text check cannot see', () => {
+    // The gap the raw check has by construction: socket.io JSON-encodes the
+    // payload, and a backslash becomes two characters. 1.1 MB of backslashes
+    // is under the 1.9 MB raw limit and over it once encoded — and past the
+    // frame ceiling socket.io drops the frame with no ack, so the send hangs
+    // silently rather than erroring.
+    const evil = '\\'.repeat(1_100_000);
+    expect(promptTooLargeError(evil)).toBeNull();          // raw check: fine
+    expect(payloadTooLargeError({ prompt: evil })).toBeTruthy(); // encoded: not
+  });
+
+  it('counts the whole payload, not just the prompt', () => {
+    const half = 'x'.repeat(MAX_PROMPT_BYTES - 1000);
+    expect(payloadTooLargeError({ prompt: half })).toBeNull();
+    expect(payloadTooLargeError({ prompt: half, systemPrompt: half })).toBeTruthy();
+  });
+
+  it('lets an unserializable payload through rather than inventing a size error', () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic['self'] = cyclic;
+    expect(payloadTooLargeError(cyclic)).toBeNull();
   });
 });

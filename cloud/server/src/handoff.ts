@@ -38,7 +38,14 @@ interface HandoffRecord extends HandoffSnapshot {
 
 export const HANDOFF_TTL_MS = 15 * 60 * 1000;
 const MAX_MESSAGES = 200;
-const MAX_CONTENT_LEN = 20_000; // mirrors the chat:run prompt ceiling
+// Mirrors the ceiling app.ts applies to a PERSISTED turn (MAX_MESSAGE_LEN), not
+// the old chat:run prompt cap — that cap is gone, so a turn this courier has to
+// carry can legitimately be a whole pasted document. At 20,000 a long message
+// was silently sliced: the far device received the opening of a stack trace,
+// persisted it as the whole turn, and the conversation quietly changed meaning
+// with nothing said. MAX_TOTAL_CHARS below still bounds the transfer, and it
+// REFUSES rather than truncating, which is the behaviour a courier should have.
+const MAX_CONTENT_LEN = 500_000;
 const MAX_TOTAL_CHARS = 500_000;
 const MAX_TITLE_LEN = 200;
 const MAX_SKILL_ID_LEN = 64;
@@ -94,11 +101,15 @@ export function parseHandoffBody(body: unknown): HandoffSnapshot | { error: stri
     const content = (m as { content?: unknown }).content;
     if (role !== 'user' && role !== 'assistant') continue;
     if (typeof content !== 'string') continue;
-    const trimmed = content.slice(0, MAX_CONTENT_LEN);
-    if (!trimmed.trim()) continue; // skip blank turns (e.g. an aborted stream)
-    total += trimmed.length;
+    // Refused, not sliced. Truncating a turn changes what the conversation
+    // SAYS, and the far device has no way to know it happened — it persists the
+    // fragment as the whole message. An explicit refusal is recoverable; a
+    // silently shortened transcript is not.
+    if (content.length > MAX_CONTENT_LEN) return { error: 'This chat is too large to transfer' };
+    if (!content.trim()) continue; // skip blank turns (e.g. an aborted stream)
+    total += content.length;
     if (total > MAX_TOTAL_CHARS) return { error: 'This chat is too large to transfer' };
-    messages.push({ role, content: trimmed });
+    messages.push({ role, content });
   }
 
   if (messages.length === 0) return { error: 'Nothing to continue — this chat has no messages yet' };

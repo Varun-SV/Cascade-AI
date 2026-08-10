@@ -1200,6 +1200,26 @@ export class T3Worker extends BaseTier {
     return shouldRequireArtifact(this.assignment, this.tools.map((t) => t.name));
   }
 
+  /**
+   * Where a file a tool wrote actually lives.
+   *
+   * This used to be `process.cwd()`, which is only the workspace in a plain
+   * CLI run. The hosted server runs with cwd at the app directory while the
+   * run's workspace is the tenant's scratch dir, and Electron's cwd is the app
+   * bundle rather than the folder the user picked. So the tool wrote
+   * `<workspace>/report.docx`, verification stat'd `<cwd>/report.docx`, found
+   * nothing, and the worker looped and then threw WorkerStallError — surfacing
+   * as "no file was created" on a file that had in fact been created, followed
+   * by a failed node. Asking the registry is exact: it is the same root every
+   * registered tool was configured with (registry.registerDefaults).
+   */
+  private artifactRoot(): string {
+    // Optional-called: an embedder can supply anything satisfying the registry
+    // surface this tier uses, and falling back to the old behaviour is better
+    // than throwing inside verification.
+    return this.toolRegistry.getWorkspaceRoot?.() ?? process.cwd();
+  }
+
   private extractArtifactPaths(assignment: T2ToT3Assignment): string[] {
     // Spec-declared files verify deterministically; regex over the prose is
     // the fallback for plans that didn't declare them.
@@ -1220,7 +1240,7 @@ ${assignment.expectedOutput}`;
     const execAsync = promisify(exec);
 
     for (const artifactPath of artifactPaths) {
-      const absolutePath = path.resolve(process.cwd(), artifactPath);
+      const absolutePath = path.resolve(this.artifactRoot(), artifactPath);
       try {
         const stat = await fs.stat(absolutePath);
         if (!stat.isFile()) {
@@ -1370,7 +1390,7 @@ ${current}`,
   private async checkAcceptance(assignment: T2ToT3Assignment): Promise<AcceptanceResult[]> {
     const criteria = assignment.acceptance ?? [];
     if (!criteria.length) return [];
-    const resolve = (target: string) => path.resolve(process.cwd(), target);
+    const resolve = (target: string) => path.resolve(this.artifactRoot(), target);
     return evaluateAcceptance(criteria, assignment.files ?? [], {
       stat: async (target) => {
         try {

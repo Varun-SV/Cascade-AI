@@ -46,9 +46,44 @@ export function formatBytes(n: number): string {
  * Returns an error message when `text` is too large to send, or null when it
  * is fine. Phrased so the user knows what to do — the failure is about the
  * size of this one message, not about their account or the server.
+ *
+ * This is the CHEAP, EARLY check, and it is deliberately not the only one.
+ * Measuring the raw text cannot bound the frame on its own: socket.io's default
+ * parser JSON-encodes the payload, and encoding is not length-preserving — a
+ * backslash, a quote or a control character becomes two characters, so text
+ * made mostly of them nearly doubles on the wire. 1.1 MB of backslashes passes
+ * this check and produces a ~2.2 MB frame. `payloadTooLargeError` below is the
+ * authoritative one; this exists so an obviously oversized paste is rejected
+ * before the UI does any work for it.
  */
 export function promptTooLargeError(text: string): string | null {
   const size = byteLength(text);
   if (size <= MAX_PROMPT_BYTES) return null;
+  return tooLargeMessage(size);
+}
+
+/**
+ * The real check: measures what will actually be put on the wire.
+ *
+ * socket.io wraps the payload in a small packet envelope (packet type, event
+ * name, namespace, ack id) on top of this, which is why the budget is the
+ * ~200 KB-under-2 MB `MAX_PROMPT_BYTES` rather than the frame ceiling itself.
+ * Returns null when the payload is fine.
+ */
+export function payloadTooLargeError(payload: unknown): string | null {
+  let size: number;
+  try {
+    size = byteLength(JSON.stringify(payload) ?? '');
+  } catch {
+    // A payload that cannot be serialized is not one we can size. Let it
+    // through — socket.io's own encoder is the thing that will complain, and
+    // inventing a size error here would be a confusing lie.
+    return null;
+  }
+  if (size <= MAX_PROMPT_BYTES) return null;
+  return tooLargeMessage(size);
+}
+
+function tooLargeMessage(size: number): string {
   return `That message is ${formatBytes(size)}, over the ${formatBytes(MAX_PROMPT_BYTES)} limit for a single message. Send it in smaller pieces, or attach it as a file.`;
 }

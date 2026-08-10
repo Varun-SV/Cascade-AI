@@ -564,3 +564,35 @@ describe('missingVisualEvidence — "you asked for a picture, is there one?"', (
     expect(missingVisualEvidence(ASKS, 'Here is what a chart would show.', [], ['web_search'])).toBeNull();
   });
 });
+
+describe('artifact verification resolves against the run workspace', () => {
+  it('ToolRegistry reports the root its tools were configured with', async () => {
+    // The seam the worker now asks. Before this, verifyArtifacts() resolved
+    // promised filenames against process.cwd() — which is the workspace only
+    // in a plain CLI run. On the hosted server cwd is the app directory while
+    // the workspace is the tenant's scratch dir, and under Electron cwd is the
+    // app bundle rather than the folder the user picked. So generate_document
+    // wrote <workspace>/report.docx, verification stat'd <cwd>/report.docx,
+    // found nothing, and the worker threw WorkerStallError ("Requesting
+    // dynamic tool generation from T2 Manager") — a failed node for a file
+    // that had in fact been written.
+    const { ToolRegistry } = await import('../../tools/registry.js');
+    const registry = new ToolRegistry({ enabledTools: [] }, '/srv/data/tenants/u1');
+    expect(registry.getWorkspaceRoot()).toBe('/srv/data/tenants/u1');
+  });
+
+  it('defaults to the process directory when no root was given', async () => {
+    const { ToolRegistry } = await import('../../tools/registry.js');
+    expect(new ToolRegistry({ enabledTools: [] }).getWorkspaceRoot()).toBe(process.cwd());
+  });
+
+  it('still requires an artifact when generate_document IS present', () => {
+    // The other half of the same bug: generate_document is in ARTIFACT_TOOLS,
+    // and it registers outside the enabledTools allowlist — so a hosted run
+    // had it, and therefore had the requirement, without any way to deliver
+    // the file. The cloud now names it in disabledTools; a desktop run, which
+    // has a real workspace, keeps both the tool and the check.
+    expect(shouldRequireArtifact({ files: ['deck.pptx'] }, ['generate_document'])).toBe(true);
+    expect(shouldRequireArtifact({ files: ['deck.pptx'] }, ['web_search'])).toBe(false);
+  });
+});

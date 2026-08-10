@@ -32,6 +32,25 @@ describe('buildCloudConfig', () => {
     }
   });
 
+  it('always disables generate_document, which a hosted run cannot deliver', () => {
+    // It registers OUTSIDE the enabledTools allowlist (that list guards tools
+    // reaching the machine; this one only writes into the run's own workspace),
+    // so a hosted run got it regardless — with an ephemeral per-tenant scratch
+    // dir and no route serving a file out of it. Its mere presence also made
+    // the worker REQUIRE a file artifact (ARTIFACT_TOOLS), so a subtask naming
+    // "report.docx" wrote one nobody could fetch and then failed verification,
+    // ending as "Worker stalled waiting for artifact creation. Requesting
+    // dynamic tool generation from T2 Manager" — a failed node for work done.
+    expect(buildCloudConfig([], 0.5).tools?.disabledTools).toContain('generate_document');
+  });
+
+  it("keeps the user's own deselections alongside it, without duplicating", () => {
+    const config = buildCloudConfig([], 0.5, { disabledTools: ['web_fetch', 'generate_document'] });
+    const denied = config.tools?.disabledTools ?? [];
+    expect(denied).toContain('web_fetch');
+    expect(denied.filter((t) => t === 'generate_document')).toHaveLength(1);
+  });
+
   it('disables telemetry and fact extraction, and passes the cost cap through', () => {
     const config = buildCloudConfig([], 1.23);
     expect(config.telemetry?.enabled).toBe(false);

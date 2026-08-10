@@ -54,6 +54,23 @@ describe('parseHandoffBody', () => {
     expect(parseHandoffBody({ messages })).toEqual({ error: expect.any(String) });
   });
 
+  it('carries a long message intact instead of silently slicing it', () => {
+    // The per-message bound used to mirror the old 20,000-character chat:run
+    // prompt cap. That cap is gone, so a turn this courier has to carry can
+    // legitimately be a whole pasted document — and truncating one changes what
+    // the conversation SAYS, with the far device persisting the fragment as the
+    // whole message and nothing anywhere saying it happened.
+    const long = 'a'.repeat(120_000);
+    const out = parseHandoffBody({ messages: [{ role: 'user', content: long }] });
+    expect('error' in out).toBe(false);
+    expect((out as { messages: Array<{ content: string }> }).messages[0]!.content).toHaveLength(120_000);
+  });
+
+  it('refuses a single message past the per-message bound rather than trimming it', () => {
+    const tooBig = 'a'.repeat(500_001);
+    expect(parseHandoffBody({ messages: [{ role: 'user', content: tooBig }] })).toEqual({ error: expect.any(String) });
+  });
+
   it('rejects too many messages', () => {
     const messages = Array.from({ length: 201 }, () => ({ role: 'user' as const, content: 'x' }));
     expect(parseHandoffBody({ messages })).toEqual({ error: expect.any(String) });

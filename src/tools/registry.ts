@@ -83,6 +83,19 @@ export class ToolRegistry extends EventEmitter {
   }
 
   /**
+   * The directory every registered tool resolves relative paths against.
+   *
+   * Exposed so a caller that has to reason about a file a tool WROTE can look
+   * in the same place the tool wrote it. `process.cwd()` is not that place
+   * outside a plain CLI run: the hosted server's cwd is the app directory
+   * while the run's workspace is the tenant's scratch dir, and Electron's cwd
+   * is the app bundle rather than the user's chosen folder.
+   */
+  getWorkspaceRoot(): string {
+    return this.workspaceRoot;
+  }
+
+  /**
    * Wait until a named tool is registered, resolving immediately if it already exists.
    * T3 workers can call this after encountering a missing-tool error to resume
    * automatically once T2 synthesizes the tool.

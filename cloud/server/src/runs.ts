@@ -382,7 +382,22 @@ export function buildCloudConfig(
       // Per-tool selection. Deselected tools are left UNREGISTERED rather than
       // refused at call time, so the model never sees them and can't propose a
       // tool the user has turned off.
-      ...(controls.disabledTools?.length ? { disabledTools: controls.disabledTools } : {}),
+      //
+      // `generate_document` is always in this list, on top of whatever the user
+      // deselected. It registers OUTSIDE the `enabledTools` allowlist (that
+      // list is a blast-radius control for tools reaching the machine, and this
+      // one only writes into the run's own workspace), so a hosted run got it
+      // whether or not it could do anything useful with it — and it cannot:
+      // the workspace here is an ephemeral per-tenant scratch dir with no route
+      // that serves a file out of it. Worse, its presence made the worker
+      // REQUIRE a file artifact (it is in ARTIFACT_TOOLS), so a subtask naming
+      // "report.docx" wrote one nobody could fetch, failed verification, and
+      // ended as "Worker stalled waiting for artifact creation. Requesting
+      // dynamic tool generation from T2 Manager" — a failed node for work that
+      // had actually been done. Hosted runs deliver files through the `file:`
+      // fence instead (see FILE_DELIVERY_GUIDANCE), which the browser renders
+      // into a real .docx/.pptx/.xlsx on download.
+      disabledTools: [...new Set([...(controls.disabledTools ?? []), 'generate_document'])],
     },
     ...(webSearchOn && hasBackend
       ? { webSearch: { searxngUrl: wsc!.searxngUrl, braveApiKey: wsc!.braveApiKey, tavilyApiKey: wsc!.tavilyApiKey } }
