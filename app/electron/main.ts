@@ -69,7 +69,7 @@ function mapProvider(id: string): { type: string | null; baseUrl?: string } {
 // ─── Backend ─────────────────────────────────────────────────────────────────
 // Resolve the cascade-ai core package (built CommonJS output). In dev it lives at
 // the repo's ../dist; in a packaged app it's bundled under resources/cascade-core.
-function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string }> | undefined) => boolean; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response> } {
+function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined) => boolean; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response> } {
   // Dev: the repo's external-deps build (node_modules resolves the requires).
   // Packaged: the self-contained `desktop-core.cjs` bundle (no node_modules to
   // resolve from — every JS dep is bundled in; only native modules like
@@ -456,7 +456,18 @@ function registerIPC(): void {
       // Persisted either way: the choice is remembered so the wizard is not
       // re-answered from scratch, but onboarding stays OPEN when nothing
       // usable landed.
-      saveDesktopMeta({ provider: cfg.provider, workspace: cfg.workspace, onboarding_done: onboardingDone });
+      // A BLANK workspace is omitted, not written. saveDesktopMeta merges, so
+      // leaving the key out keeps whatever the install already had. The wizard
+      // calls setConfig twice — once from handleVerify, BEFORE the workspace
+      // step is even shown — so an unconditional write erased the existing
+      // directory the moment a reopened setup verified a key, and the next
+      // launch silently fell back to the home directory.
+      const workspace = cfg.workspace?.trim();
+      saveDesktopMeta({
+        provider: cfg.provider,
+        ...(workspace ? { workspace } : {}),
+        onboarding_done: onboardingDone,
+      });
       // RETURNED, not just persisted. The renderer holds onboarding state in
       // its own Redux store and was closing the wizard regardless — so this
       // guard previously took effect only after an app restart, and the

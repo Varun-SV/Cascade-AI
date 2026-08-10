@@ -212,6 +212,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before the "at least one" check, so "nothing left to run with" remains an
   error rather than becoming a silent empty run.
 
+- **An Anthropic OAuth login no longer reads as "no providers configured".**
+  `cascade link` stores an adopted subscription token in `authToken`, and the
+  Anthropic provider accepts it as readily as an API key — but the shared "is
+  anything usable?" check counted only `apiKey`. So an install whose single
+  credential came from `cascade link` was treated as unconfigured everywhere
+  that check is asked: `cascade run` aborted with "No providers configured. Run
+  `cascade init` first", the REPL relaunched the setup wizard on every start,
+  and the desktop app now reopened its full-screen wizard over a config that
+  runs fine. A token counts as a credential.
+
+- **A reopened desktop setup no longer forgets your workspace.** The wizard
+  started its directory field blank, which was right when it only ever ran on a
+  first launch — but it now reopens on configured machines when a migration
+  empties the provider list. Its first save fires from the key-verification
+  step, *before* the workspace question is even shown, so the blank overwrote
+  the stored directory and the next launch silently fell back to the home
+  directory. The field is seeded from the existing workspace, and a blank value
+  is no longer written over a saved one on either side of the IPC boundary.
+
 ## 0.70.0 - 2026-08-06
 
 ### Added

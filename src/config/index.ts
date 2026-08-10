@@ -36,9 +36,16 @@ import {
 // points (src/cli/index.ts) so they can't drift out of sync with what the
 // setup wizard actually allows to be saved as a complete config.
 const KEY_OPTIONAL_PROVIDER_TYPES = new Set(['ollama', 'openai-compatible']);
-export function hasUsableProvider(providers: Array<{ type: string; apiKey?: string }> | undefined): boolean {
+export function hasUsableProvider(
+  providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined,
+): boolean {
   if (!providers?.length) return false;
-  return providers.some((p) => KEY_OPTIONAL_PROVIDER_TYPES.has(p.type) || !!p.apiKey);
+  // `authToken` counts as a credential, not just `apiKey`. `cascade link`
+  // stores an adopted Anthropic OAuth token there (cli/commands/link.ts) and
+  // AnthropicProvider.isAvailable() runs on it happily — so ignoring it here
+  // declared a working install unconfigured: `cascade run` aborted with "No
+  // providers configured" and the desktop reopened the full-screen wizard.
+  return providers.some((p) => KEY_OPTIONAL_PROVIDER_TYPES.has(p.type) || !!p.apiKey || !!p.authToken);
 }
 
 export class ConfigManager {

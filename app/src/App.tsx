@@ -167,6 +167,9 @@ export function App() {
   const { backendPort, authToken, helpContext, showSettings, onboardingDone, backendError, view, sessionId, runSessionId } = useAppSelector((s) => s.app);
   // Local, not redux: read once at startup and shown on exactly one screen.
   const [migrationNotice, setMigrationNotice] = useState<string | undefined>();
+  // The workspace this install already had. Only onboarding consumes it, to
+  // avoid presenting a reopened wizard with a blank directory field.
+  const [savedWorkspace, setSavedWorkspace] = useState('');
   const socketRef = useRef<Socket | null>(null);
   // The socket-setup effect below only re-runs when backendPort/authToken
   // change (not on every session switch) — its handlers need the LIVE
@@ -185,6 +188,7 @@ export function App() {
       window.cascade.getConfig().then((cfg) => {
         dispatch(setOnboardingDone(cfg.onboardingDone));
         if (cfg.migrationNotice) setMigrationNotice(cfg.migrationNotice);
+        if (cfg.workspace) setSavedWorkspace(cfg.workspace);
       }).catch(() => {
         dispatch(setOnboardingDone(true)); // fail-open in dev
       });
@@ -417,7 +421,7 @@ export function App() {
     // The notice rides into onboarding rather than a toast: this is the screen
     // the user has been sent to BECAUSE their provider was removed, so the
     // explanation belongs next to the thing they are being asked to redo.
-    return <OnboardingView notice={migrationNotice} />;
+    return <OnboardingView notice={migrationNotice} initialWorkspace={savedWorkspace} />;
   }
 
   return (
