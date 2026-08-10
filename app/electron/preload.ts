@@ -68,7 +68,7 @@ contextBridge.exposeInMainWorld('cascade', {
     onboardingDone: boolean;
   }>,
   setConfig: (cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string }) =>
-    ipcRenderer.invoke('cascade:setConfig', cfg) as Promise<void>,
+    ipcRenderer.invoke('cascade:setConfig', cfg) as Promise<{ onboardingDone: boolean }>,
 
   // Settings panel: backend-independent read/write of keys, per-tier models,
   // budget (incl. daily/session caps), and the allowlisted "advanced" knobs.

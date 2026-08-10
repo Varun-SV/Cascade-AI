@@ -452,16 +452,21 @@ function registerIPC(): void {
       // list behind a "setup finished" flag — the exact combination that used
       // to open the app into a dead state.
       const { hasUsableProvider } = loadCore();
-      if (hasUsableProvider(cascadeConfig?.providers)) {
-        saveDesktopMeta({ provider: cfg.provider, workspace: cfg.workspace, onboarding_done: true });
-      } else {
-        // Remember the choice so the wizard is not re-answered from scratch,
-        // but leave onboarding open so the user is told it did not take.
-        saveDesktopMeta({ provider: cfg.provider, workspace: cfg.workspace, onboarding_done: false });
-      }
+      const onboardingDone = hasUsableProvider(cascadeConfig?.providers);
+      // Persisted either way: the choice is remembered so the wizard is not
+      // re-answered from scratch, but onboarding stays OPEN when nothing
+      // usable landed.
+      saveDesktopMeta({ provider: cfg.provider, workspace: cfg.workspace, onboarding_done: onboardingDone });
+      // RETURNED, not just persisted. The renderer holds onboarding state in
+      // its own Redux store and was closing the wizard regardless — so this
+      // guard previously took effect only after an app restart, and the
+      // current window walked straight into providerless chat.
+      return { onboardingDone };
     } catch (err) {
       console.warn('[main] setConfig failed:', err);
     }
+    // A failure above leaves onboarding open rather than claiming success.
+    return { onboardingDone: false };
   });
 
   // Settings panel — a backend-independent path to read/write keys, per-tier

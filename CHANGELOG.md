@@ -154,6 +154,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Applied" — the CLI, desktop and web restore paths all explain it now, so
   none of them is the one place a key vanishes unannounced.
 
+  **The desktop explains the migration whether or not setup reopens.** The
+  notice was routed only into the onboarding screen, which appears solely when
+  *nothing* usable is left — but the common case is a provider removed while
+  others remain, where onboarding never opens and the one-shot notice was
+  consumed and discarded. It now also shows as a dismissible bar in the normal
+  app shell, so a vanished key or a reset tier pin is explained in the case
+  that affects most people.
+
+  **A rejected setup no longer closes anyway.** Refusing to mark onboarding
+  complete happened in the Electron main process, while the wizard's own Redux
+  state closed the screen 1.2 seconds later regardless — so the guard only took
+  effect after an app restart and the live window walked into providerless
+  chat. The completion decision is returned to the renderer and the wizard
+  honours it, staying open with a reason when a choice leaves nothing usable.
+
   **Desktop onboarding can now save the keyless options it advertises.**
   `cascade:setConfig` only wrote a provider when an API key was present, so
   picking Ollama — described in the wizard as "no API key needed" — saved

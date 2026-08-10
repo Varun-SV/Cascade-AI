@@ -62,6 +62,7 @@ const PROVIDERS: Provider[] = [
 ];
 
 export function OnboardingView({ notice }: { notice?: string } = {}) {
+  const [saveError, setSaveError] = useState<string | null>(null);
   const dispatch = useAppDispatch();
   const [step, setStep] = useState<Step>('welcome');
   const [selectedProvider, setSelectedProvider] = useState<Provider | null>(null);
@@ -101,15 +102,27 @@ export function OnboardingView({ notice }: { notice?: string } = {}) {
 
   const handleFinish = async () => {
     setSaving(true);
+    // Default false: if the bridge is missing or the call throws, nothing was
+    // saved, and closing the wizard on that would drop the user into a chat
+    // with no provider.
+    let done = false;
     try {
       if (window.cascade?.setConfig) {
-        await window.cascade.setConfig({ provider: selectedProvider?.id ?? '', apiKey, workspace, baseUrl: baseUrl || undefined });
+        const r = await window.cascade.setConfig({ provider: selectedProvider?.id ?? '', apiKey, workspace, baseUrl: baseUrl || undefined });
+        done = Boolean(r?.onboardingDone);
       }
-    } catch { /* ignore */ }
+    } catch { /* leave `done` false — see above */ }
     dispatch(setWorkspacePath(workspace));
+    setSaving(false);
+    if (!done) {
+      // "Auto" maps to no provider at all, and a keyless pick can fail to
+      // persist. Say so and stay put rather than closing over an empty list.
+      setSaveError('That choice did not leave a usable provider configured. Pick a provider and enter its key, or choose Ollama if you run it locally.');
+      return;
+    }
+    setSaveError(null);
     setStep('done');
     setTimeout(() => dispatch(setOnboardingDone(true)), 1200);
-    setSaving(false);
   };
 
   const browseWorkspace = async () => {
@@ -131,6 +144,17 @@ export function OnboardingView({ notice }: { notice?: string } = {}) {
       animation: 'fadeIn 0.4s var(--ease)',
       zIndex: 1000,
     }}>
+      {saveError && (
+        <div role="alert" style={{
+          maxWidth: 520, marginBottom: 16, padding: '10px 14px',
+          border: '1px solid var(--danger, #b4443a)', borderRadius: 10,
+          background: 'var(--bg-elev)', color: 'var(--danger, #b4443a)',
+          fontSize: 13, lineHeight: 1.5, textAlign: 'center',
+        }}>
+          {saveError}
+        </div>
+      )}
+
       {/* Why you are seeing this again, when you had already finished setup. */}
       {notice && (
         <div role="status" style={{

@@ -71,7 +71,7 @@ declare global {
       setWorkspace(dir: string): Promise<{ ok: boolean }>;
       onBackendStatus(cb: (s: { port: number; token: string; error: string | null }) => void): void;
       getConfig(): Promise<{ provider: string; apiKey: string; workspace: string; onboardingDone: boolean; migrationNotice?: string }>;
-      setConfig(cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string }): Promise<void>;
+      setConfig(cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string }): Promise<{ onboardingDone: boolean }>;
       getSettings(): Promise<{ models: Record<string, string>; budget: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; providersWithKey: string[]; endpoints: Record<string, string>; azureDeployments?: Array<{ label?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string; hasKey: boolean }>; webSearch?: { searxngUrl?: string; hasBraveKey: boolean; hasTavilyKey: boolean }; advanced?: Record<string, unknown> }>;
       updateSettings(data: { keys?: Record<string, string | undefined>; models?: Record<string, string | undefined>; budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; endpoints?: Record<string, string | undefined>; azureDeployments?: Array<{ label?: string; apiKey?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string }>; webSearch?: { searxngUrl?: string; braveApiKey?: string; tavilyApiKey?: string }; advanced?: Record<string, unknown> }): Promise<{ ok: boolean; error?: string; models?: Record<string, string>; budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; providersWithKey?: string[]; advanced?: Record<string, unknown> }>;
       selectDirectory(): Promise<string | null>;
@@ -422,6 +422,31 @@ export function App() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
+      {/* The onboarding path above only runs when NOTHING usable is left. The
+          common case is a provider removed while others remain — onboarding
+          never opens, and routing the notice only there meant the majority of
+          affected users saw no explanation at all for a vanished key or a
+          reset tier pin. */}
+      {migrationNotice && (
+        <div role="status" style={{
+          display: 'flex', alignItems: 'center', gap: 12,
+          padding: '8px 14px', fontSize: 13,
+          background: 'var(--bg-elev)', color: 'var(--text-dim)',
+          borderBottom: '1px solid var(--border)',
+        }}>
+          <span style={{ flex: 1 }}>{migrationNotice}</span>
+          <button
+            type="button"
+            onClick={() => setMigrationNotice(undefined)}
+            style={{
+              background: 'none', border: 'none', cursor: 'pointer',
+              color: 'var(--text-dim)', fontSize: 12, padding: '2px 6px',
+            }}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
       <TitleBar />
       {backendError && (
         <div role="alert" style={{
