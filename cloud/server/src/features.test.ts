@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { buildRunPrompt, parseChatRunPayload, wantsFileDelivery, FILE_DELIVERY_GUIDANCE } from './runs.js';
+import { buildRunPrompt, parseChatRunPayload, formatZodError, wantsFileDelivery, FILE_DELIVERY_GUIDANCE } from './runs.js';
+import { ZodError } from 'zod';
 import { getSkill, skillCatalog } from './skills.js';
 
 describe('buildRunPrompt', () => {
@@ -141,5 +142,59 @@ describe('parseChatRunPayload — attachments & skill', () => {
     const parsed = parseChatRunPayload({ ...base, skillId: '' });
     expect(parsed.skillId).toBeUndefined();
     expect(() => parseChatRunPayload({ ...base, attachmentIds: ['1', '2', '3', '4', '5', '6', '7', '8', '9'] })).toThrow();
+  });
+});
+
+describe('parseChatRunPayload — prompt length and error messages', () => {
+  const base = { providers: [{ type: 'anthropic', apiKey: 'sk' }] };
+
+  it('accepts a prompt far past the old 20k-character cap', () => {
+    // The cap rejected exactly the inputs Cascade is for — a pasted document,
+    // a long stack trace, a whole file — and did it on every message, so chat
+    // was simply unusable for them. The transport's 2 MB frame limit is the
+    // only ceiling that has to exist, and the client guards under it.
+    const long = 'x'.repeat(200_000);
+    expect(parseChatRunPayload({ ...base, prompt: long }).prompt).toHaveLength(200_000);
+  });
+
+  it('accepts a system prompt past the old cap too', () => {
+    const long = 'y'.repeat(50_000);
+    expect(parseChatRunPayload({ ...base, prompt: 'hi', systemPrompt: long }).systemPrompt).toHaveLength(50_000);
+  });
+
+  it('still rejects an empty prompt', () => {
+    expect(() => parseChatRunPayload({ ...base, prompt: '' })).toThrow();
+  });
+
+  it('names the failing field, so an error says which setting is wrong', () => {
+    // The whole bug report was four anonymous sentences — three identical —
+    // with nothing pointing at the field. `issue.message` describes the
+    // CONSTRAINT and never the path, so joining messages alone is unusable
+    // when several fields fail at once.
+    let message = '';
+    try {
+      parseChatRunPayload({
+        ...base,
+        prompt: 'hi',
+        tierParams: { t1: { maxTokens: 2_000_000 }, t2: { maxTokens: 2_000_000 } },
+      });
+    } catch (err) {
+      message = formatZodError(err as ZodError);
+    }
+    expect(message).toContain('tierParams.t1.maxTokens');
+    expect(message).toContain('tierParams.t2.maxTokens');
+  });
+
+  it('renders array indices as indices, and keeps a pathless issue readable', () => {
+    let message = '';
+    try {
+      parseChatRunPayload({ ...base, prompt: 'hi', attachmentIds: [1] });
+    } catch (err) {
+      message = formatZodError(err as ZodError);
+    }
+    expect(message).toContain('attachmentIds[0]');
+
+    const bare = new ZodError([{ code: 'custom', path: [], message: 'whole thing is wrong' }]);
+    expect(formatZodError(bare)).toBe('whole thing is wrong');
   });
 });

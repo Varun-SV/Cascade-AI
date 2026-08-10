@@ -17,7 +17,7 @@ import {
 import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ProviderConfig } from '#cascade-ai';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { z } from 'zod';
+import { z, type ZodError } from 'zod';
 import type { CloudEnv } from './env.js';
 import { resolveRunMcpServers } from './mcp-oauth.js';
 import type { CloudAttachment, CloudStore } from './db.js';
@@ -58,7 +58,20 @@ const TierParamSchema = z
 // persisted server-side (see db.ts: no api key column anywhere).
 const ChatRunPayloadSchema = z.object({
   conversationId: z.string().optional(),
-  prompt: z.string().min(1).max(20_000),
+  // Deliberately unbounded above the minimum. The 20k-character cap that used
+  // to be here rejected exactly the long inputs Cascade is for — a pasted
+  // document, a stack trace, a whole file — and the transport already imposes
+  // the only ceiling that has to exist: socket.ts sets `maxHttpBufferSize` to
+  // 2 MB, so a frame past that is refused before it reaches this schema. The
+  // client guards just under that boundary with a message the user can act on
+  // (see MAX_PROMPT_BYTES in cloud/web), because socket.io drops an oversized
+  // frame at the transport layer with no ack at all — the run simply never
+  // answers.
+  //
+  // A very long prompt can still exhaust a model's context or a run's budget.
+  // That is handled where it belongs: extended context compacts oversized
+  // input, and maxTokensPerRun/maxCostPerRunUsd bound the spend.
+  prompt: z.string().min(1),
   // Prior turns to persist as this conversation's history AT CREATION TIME.
   // Only read when no conversationId is given.
   //
@@ -98,7 +111,11 @@ const ChatRunPayloadSchema = z.object({
   // like a skill preset does, and must NOT be folded into `prompt` — routing
   // reads the bare user text (see routingPrompt below), so prepending a system
   // preamble there would make even "hi" classify as Complex.
-  systemPrompt: z.string().max(20_000).optional().transform((v) => (v === '' ? undefined : v)),
+  // Uncapped for the same reason as `prompt` above: a system preamble
+  // assembled from an OpenAI-compatible request's `system`/`developer`
+  // messages is routinely longer than 20k characters, and the transport cap
+  // already bounds the request as a whole.
+  systemPrompt: z.string().optional().transform((v) => (v === '' ? undefined : v)),
   // Run-explorer controls. routingMode biases Cascade Auto; forceTier pins the
   // root tier; webSearch toggles the two hosted tools on/off for this run.
   routingMode: z.enum(['auto', 'quality', 'fast']).optional(),
@@ -206,6 +223,35 @@ export type ChatRunPayload = z.infer<typeof ChatRunPayloadSchema>;
 
 export function parseChatRunPayload(input: unknown): ChatRunPayload {
   return ChatRunPayloadSchema.parse(input);
+}
+
+/**
+ * Renders a `ZodError` as a message a user can act on.
+ *
+ * Zod's `issue.message` describes the CONSTRAINT and never the field, so
+ * joining messages alone produced things like "String must contain at most
+ * 20000 character(s); Number must be less than or equal to 200000; Number must
+ * be less than or equal to 200000; Number must be less than or equal to
+ * 200000" — four anonymous sentences, three of them identical, with nothing
+ * saying which of ~20 fields each one is about. That was the entire error a
+ * user got for every message they sent, and it is not enough to find the
+ * setting that is wrong. `issue.path` is the missing half.
+ *
+ * A path of `['tierParams', 't1', 'maxTokens']` renders as
+ * `tierParams.t1.maxTokens`; array indices render as `providers[2]`. An issue
+ * with an empty path (a whole-object refinement) keeps just its message rather
+ * than gaining an empty prefix.
+ */
+export function formatZodError(err: ZodError): string {
+  return err.issues
+    .map((i) => {
+      const path = i.path.reduce<string>(
+        (acc, seg) => (typeof seg === 'number' ? `${acc}[${seg}]` : acc ? `${acc}.${seg}` : String(seg)),
+        '',
+      );
+      return path ? `${path}: ${i.message}` : i.message;
+    })
+    .join('; ');
 }
 
 /**

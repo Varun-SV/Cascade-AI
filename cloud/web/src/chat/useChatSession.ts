@@ -8,6 +8,7 @@ import {
   maxTokensPerRun, maxCostPerRunUsd, rememberSessions, defaultRoutingBias, defaultWebSearch,
 } from '../lib/prefs.js';
 import { refreshPendingMedia } from '../lib/pendingMedia.js';
+import { promptTooLargeError } from '../lib/limits.js';
 import { detectLocalModelCapability } from '../lib/localModel/capability.js';
 import { warmLocalModel } from '../lib/localModel/engine.js';
 import { classifyLocalComplexity } from '../lib/localModel/classifier.js';
@@ -427,6 +428,13 @@ export function useChatSession(
     ) => {
       const text = prompt.trim();
       if (!socket || busy || !text) return;
+      // Checked BEFORE anything is emitted or optimistically rendered. Past
+      // the socket.io frame ceiling the server never acks — the transport
+      // drops the frame before a handler sees it — so without this the send
+      // spins forever with no error. Saying so here is the only place it can
+      // be said. See lib/limits.ts.
+      const tooLarge = promptTooLargeError(text);
+      if (tooLarge) { setError(tooLarge); return; }
       setBusy(true);
       setError(null);
       setStatus('Sizing up the task…');

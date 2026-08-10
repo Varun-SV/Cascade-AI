@@ -1342,7 +1342,14 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   // The site serves the installers itself rather than sending visitors to the
   // GitHub releases page to pick a file out of twenty. See downloads.ts for why
   // the bytes are still redirected to GitHub's CDN rather than proxied.
-  const downloads = options.downloads ?? new DownloadResolver();
+  // Authenticated when a token is configured, and warm-started from DATA_DIR:
+  // the cache used to be in-process only, so a redeploy began with nothing and
+  // a single rate-limited first fetch put the whole download section behind
+  // its "temporarily unavailable" fallback with no stale copy to serve.
+  const downloads = options.downloads ?? new DownloadResolver(fetch, Date.now, {
+    token: env.GITHUB_API_TOKEN,
+    cacheFile: path.join(path.resolve(env.DATA_DIR), 'downloads-manifest.json'),
+  });
 
   // The manifest behind the download section: version, per-platform filename
   // and size. Public and identical for everyone, so it caches at the edge too.

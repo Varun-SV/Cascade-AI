@@ -8,7 +8,7 @@ import Modal from './Modal.js';
 import { detectLocalModelCapability } from '../lib/localModel/capability.js';
 import {
   localModelEnabled, setLocalModelEnabled, reduceMotionEnabled, setReduceMotionEnabled,
-  fastAnswerModel, setFastAnswerModel, tierParams, setTierParams,
+  fastAnswerModel, setFastAnswerModel, tierParams, setTierParams, MAX_TIER_MAX_TOKENS,
   extendedContext, setExtendedContext, shareLearning, setShareLearning,
   rememberSessions, setRememberSessions,
   maxTokensPerRun, setMaxTokensPerRun, maxCostPerRunUsd, setMaxCostPerRunUsd,
@@ -37,11 +37,12 @@ function TierParamRow({ tier, value, onChange }: {
         <span className="font-semibold">{tier.label}</span>
       </span>
       <input
-        type="number" min={1} step={64} inputMode="numeric"
+        type="number" min={1} max={MAX_TIER_MAX_TOKENS} step={64} inputMode="numeric"
         aria-label={`${tier.label} max tokens`}
         value={value.maxTokens ?? ''}
         onChange={(e) => onChange({ ...value, maxTokens: numOr(e.target.value) })}
-        placeholder="max tokens"
+        placeholder={`max tokens (≤${MAX_TIER_MAX_TOKENS.toLocaleString()})`}
+        title={`Server limit: ${MAX_TIER_MAX_TOKENS.toLocaleString()} tokens per tier`}
         className="w-24 rounded-md border border-elev/10 bg-elev/[0.04] px-2 py-1 text-xs text-ink-100 outline-none placeholder:text-ink-500 focus:border-accent-500/40"
       />
       <input

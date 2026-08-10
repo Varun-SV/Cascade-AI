@@ -18,6 +18,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+## 0.72.0 - 2026-08-10
+
+### Changed
+- **The 20,000-character limit on a prompt is gone.** It rejected exactly the
+  inputs Cascade exists for — a pasted document, a full stack trace, a whole
+  file — and it did so on every attempt, so for those messages the product
+  simply did not work. `systemPrompt` loses the same cap, which a preamble
+  assembled from an OpenAI-compatible request's `system`/`developer` messages
+  routinely exceeds.
+
+  A ceiling still exists, because the transport has one: socket.io is
+  configured with a 2 MB frame limit. That limit fails in the worst possible
+  way — an oversized frame is dropped before any handler runs, so there is no
+  validation error and no acknowledgement, and the message simply never
+  answers. The browser now checks the size itself, just under the boundary and
+  in UTF-8 bytes rather than characters, and says how large the message is and
+  what to do about it. Length is still bounded where it belongs: extended
+  context compacts oversized input, and the per-run token and cost caps bound
+  what a long prompt can spend.
+
+### Fixed
+- **A validation error now names the field it is about.** The whole message a
+  user got was `String must contain at most 20000 character(s); Number must be
+  less than or equal to 200000; Number must be less than or equal to 200000;
+  Number must be less than or equal to 200000` — four anonymous sentences,
+  three of them identical, describing constraints on none-of-them-says-which
+  of about twenty fields. Zod's `issue.message` describes the constraint and
+  never the path, and both the socket handler and the OpenAI-compatible
+  endpoint joined messages alone. They now render the path too, so the same
+  failure reads `tierParams.t1.maxTokens: Number must be less than or equal to
+  200000`.
+
+- **A per-tier token limit set too high no longer breaks every message.** The
+  server caps `maxTokens` at 200,000 per tier; the Settings input was
+  `min={1}` with no maximum, and the preference store accepted anything above
+  zero. So a larger value saved without complaint and then failed validation
+  on every single run — and because the error did not name the field, there
+  was nothing connecting a chat that had stopped working to a number in a
+  panel the user had no reason to suspect. The input now carries the limit and
+  the store clamps to it.
+
+  Clamping on save alone would have fixed nothing for anyone already affected:
+  their value is in `localStorage` and is only ever read back, never rewritten
+  unless they happen to reopen Settings and save. Redeploying the server does
+  not touch it either — it is in the browser. So the value is clamped on READ
+  as well, which repairs an existing one on the next page load.
+
+- **The download buttons stop falling back to a GitHub link after a redeploy.**
+  This was not a regression in the buttons; it is the designed fallback firing
+  because the release lookup could not resolve. Two causes, both fixed:
+
+  The call to GitHub's API was unauthenticated, which is limited to 60 requests
+  per hour **per IP** — and a shared host's egress IP is shared with every
+  other tenant on it, so the budget could be spent by traffic that has nothing
+  to do with this service. A `GITHUB_API_TOKEN` (no scopes required; it reads a
+  public release) raises that to 5,000/hour and makes it ours. Unset, the old
+  unauthenticated behaviour is unchanged.
+
+  And the cache was in-process only, so it could not help a process that had
+  not already succeeded once. A redeploy started cold, and the 24-hour
+  stale-serving window had nothing to fall back to if that first fetch failed —
+  which is exactly when the fallback is most visible. The last good manifest is
+  now written under `DATA_DIR` (atomically, via a temp file and rename) and
+  read back at startup, so a restart begins warm. What comes off disk is
+  re-validated against the same trust check a fetched manifest gets, since the
+  site renders those URLs as links.
+
+- Dropped the stale `GITHUB_MODELS_TOKEN` entry from the server's
+  `.env.example`, missed when the provider was removed in 0.71.0.
+
 ## 0.71.0 - 2026-08-06
 
 ### Removed

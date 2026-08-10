@@ -33,7 +33,7 @@ import type { CloudEnv } from './env.js';
 import type { CloudStore } from './db.js';
 import { bearerToken, verifySessionToken } from './auth/session.js';
 import {
-  parseChatRunPayload, runChatTurn, type ChatRunPayload, type ChatRunResult, type RunSocket,
+  formatZodError, parseChatRunPayload, runChatTurn, type ChatRunPayload, type ChatRunResult, type RunSocket,
 } from './runs.js';
 
 // ── Models ────────────────────────────────────
@@ -663,7 +663,7 @@ export function registerOpenAiCompatRoutes(app: Express, env: CloudEnv, store: C
           : {}),
       });
     } catch (err) {
-      const message = err instanceof ZodError ? err.issues.map((i) => i.message).join('; ') : String(err);
+      const message = err instanceof ZodError ? formatZodError(err) : String(err);
       res.status(400).json(openAiError(message));
       return;
     }

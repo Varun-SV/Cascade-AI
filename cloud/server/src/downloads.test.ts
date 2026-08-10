@@ -1,7 +1,10 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   DownloadResolver, buildManifest, classifyAsset, isTargetId, isTrustedAssetUrl,
-  TARGET_META, CACHE_TTL_MS, CACHE_STALE_MS, REFRESH_RETRY_MS,
+  TARGET_META, CACHE_TTL_MS, CACHE_STALE_MS, REFRESH_RETRY_MS, RELEASES_PAGE_URL,
 } from './downloads.js';
 
 /**
@@ -209,6 +212,11 @@ describe('DownloadResolver', () => {
     const resolver = new DownloadResolver(fetchImpl as unknown as typeof fetch);
 
     const all = Promise.all([resolver.get(), resolver.get(), resolver.get()]);
+    // Waits for the call rather than assuming it happens within one microtask
+    // of get(): the resolver reads its on-disk warm start first, so how many
+    // ticks precede the fetch is an implementation detail this test should not
+    // encode. Releasing early left the promise pending and timed the test out.
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalled());
     release(okResponse(realRelease()));
     const results = await all;
 
@@ -294,5 +302,99 @@ describe('DownloadResolver', () => {
   it('returns null rather than throwing on malformed JSON', async () => {
     const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => { throw new Error('bad json'); } } as unknown as Response));
     expect(await new DownloadResolver(fetchImpl as unknown as typeof fetch).get()).toBeNull();
+  });
+});
+
+describe('DownloadResolver — authentication and the on-disk warm start', () => {
+  let dir: string;
+
+  beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-dl-')); });
+  afterEach(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+
+  const cacheFile = () => path.join(dir, 'downloads-manifest.json');
+
+  it('sends no Authorization header when no token is configured', async () => {
+    const fetchImpl = vi.fn(async () => okResponse(realRelease()));
+    await new DownloadResolver(fetchImpl as unknown as typeof fetch).get();
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect((init.headers as Record<string, string>)['Authorization']).toBeUndefined();
+  });
+
+  it('authenticates the release lookup when a token is configured', async () => {
+    // Unauthenticated the API allows 60/hour PER IP, and a shared host's
+    // egress IP is shared with every other tenant on it — which is how a
+    // redeploy could land straight into a rate limit nothing here caused.
+    const fetchImpl = vi.fn(async () => okResponse(realRelease()));
+    await new DownloadResolver(fetchImpl as unknown as typeof fetch, Date.now, { token: 'ghp_x' }).get();
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect((init.headers as Record<string, string>)['Authorization']).toBe('Bearer ghp_x');
+    // The headers GitHub requires are still sent alongside it.
+    expect((init.headers as Record<string, string>)['User-Agent']).toBeTruthy();
+  });
+
+  it('treats a blank token as no token, rather than sending "Bearer "', async () => {
+    const fetchImpl = vi.fn(async () => okResponse(realRelease()));
+    await new DownloadResolver(fetchImpl as unknown as typeof fetch, Date.now, { token: '  ' }).get();
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect((init.headers as Record<string, string>)['Authorization']).toBeUndefined();
+  });
+
+  it('persists a resolved manifest so the next process starts warm', async () => {
+    const fetchImpl = vi.fn(async () => okResponse(realRelease()));
+    const first = new DownloadResolver(fetchImpl as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() });
+    expect((await first.get())!.version).toBe('0.68.0');
+    // The write is fire-and-forget, so let it land before reading it back.
+    await vi.waitFor(() => expect(fs.existsSync(cacheFile())).toBe(true));
+
+    // A NEW process (new resolver, no memory) whose very first fetch fails.
+    // Before the warm start this was the "downloads unavailable" case: the
+    // 24h stale window needs a prior success IN THIS PROCESS to fall back to.
+    const failing = vi.fn(async () => { throw new Error('rate limited'); });
+    const second = new DownloadResolver(failing as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() });
+    expect((await second.get())!.version).toBe('0.68.0');
+  });
+
+  it('still expires the warm-started copy once it is genuinely ancient', async () => {
+    let now = 1_000;
+    const fetchImpl = vi.fn(async () => okResponse(realRelease()));
+    const first = new DownloadResolver(fetchImpl as unknown as typeof fetch, () => now, { cacheFile: cacheFile() });
+    await first.get();
+    await vi.waitFor(() => expect(fs.existsSync(cacheFile())).toBe(true));
+
+    now += CACHE_STALE_MS + 1;
+    const failing = vi.fn(async () => { throw new Error('down'); });
+    const second = new DownloadResolver(failing as unknown as typeof fetch, () => now, { cacheFile: cacheFile() });
+    expect(await second.get()).toBeNull();
+  });
+
+  it('ignores a corrupt cache file instead of failing the lookup', async () => {
+    fs.writeFileSync(cacheFile(), '{"manifest":{"version":"0.6', 'utf8');
+    const fetchImpl = vi.fn(async () => okResponse(realRelease()));
+    const resolver = new DownloadResolver(fetchImpl as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() });
+    expect((await resolver.get())!.version).toBe('0.68.0');
+  });
+
+  it('drops stored targets whose URL is not one we would redirect to', async () => {
+    // The file sits on a volume, and /api/downloads hands its URLs to the page
+    // as links. A stored entry gets the same trust check a fetched one does.
+    fs.writeFileSync(cacheFile(), JSON.stringify({
+      fetchedAt: Date.now(),
+      manifest: {
+        version: '9.9.9',
+        releasedAt: null,
+        releasesUrl: 'https://evil.example/releases',
+        targets: [
+          { id: 'mac-arm64', os: 'mac', label: 'macOS', detail: 'Apple silicon', filename: 'x.dmg', sizeBytes: 1, url: 'https://evil.example/x.dmg' },
+          { id: 'win-x64', os: 'windows', label: 'Windows', detail: 'Installer', filename: 'y.exe', sizeBytes: 2, url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v9.9.9/y.exe' },
+        ],
+      },
+    }), 'utf8');
+
+    const failing = vi.fn(async () => { throw new Error('down'); });
+    const manifest = await new DownloadResolver(failing as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() }).get();
+
+    expect(manifest!.targets.map((t) => t.id)).toEqual(['win-x64']);
+    // releasesUrl is always ours, never whatever the file claimed.
+    expect(manifest!.releasesUrl).toBe(RELEASES_PAGE_URL);
   });
 });
