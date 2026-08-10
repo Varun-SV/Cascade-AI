@@ -113,6 +113,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a decryption failure. The `try` scoped only to the decrypt now, so an apply
   error says what actually went wrong.
 
+- **The migration itself no longer leaks credentials into the workspace.** It
+  used to persist through the same `save()` that runs at the end of config
+  load — by which point the in-memory config has been enriched with keys from
+  the environment and from the machine-global credential store (kept `0600` in
+  `~/.cascade-ai`). Serializing that enriched object wrote those secrets into
+  `.cascade/config.json`, which may be `0644`, for a project that never had
+  them: opening any workspace after upgrading would copy a global OpenAI key
+  into it. The cleaned file is now written from the *raw* parsed config inside
+  `loadConfig()`, before any enrichment happens.
+
+  The hazard predates this release — the same late `save()` already ran for the
+  MCP-rename migration — but a retirement fires for every upgrading user rather
+  than on a rare name collision, which is what made it worth closing here.
+
+  Four more edges in the same migration, all of which would have made an
+  upgrade worse rather than better:
+  - **A read-only config directory aborted startup.** The write is best-effort
+    now, matching how credential syncing already treats an unwritable home: the
+    in-memory config is clean, so the run proceeds and migrates again next
+    launch.
+  - **A pin written in another case survived.** `GitHub-Models:openai/gpt-4o`
+    was a *valid* pin, because pin parsing lowercases the provider prefix. The
+    migration compared raw case and stranded exactly those, leaving the router
+    to reject the pin or misread the literal id as another provider's.
+  - **Losing your only provider looked like a fresh install.** An emptied list
+    made the config manager inject a keyless Ollama entry, which counts as
+    "usable" without checking the daemon exists — so both the setup wizard and
+    the headless no-providers guard were skipped and the run reached the router
+    with no model at all.
+  - **Cached models for the retired provider blocked discovery.** The REPL only
+    re-discovers when its cache is empty or a day old, so leftover rows read as
+    "populated" and the providers that replaced it showed zero models. They are
+    purged on migration.
+
+  The notice is also retained for a UI to display rather than only logged: the
+  REPL clears the terminal immediately after loading, and the desktop emits
+  from a process with nothing to draw on. Desktop sync now reports what a
+  pre-upgrade blob had removed from it, instead of saying only "Applied".
+
 ## 0.70.0 - 2026-08-06
 
 ### Added

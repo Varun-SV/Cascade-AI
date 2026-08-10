@@ -220,3 +220,91 @@ describe('applySyncBundle — pulling a bundle pushed by 0.70.0', () => {
     expect(merged.providers.some((p) => p.type === 'gemini')).toBe(true);
   });
 });
+
+describe('migration hardening (review round 3)', () => {
+  let dir: string;
+  let globalDir: string;
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-harden-'));
+    globalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-harden-g-'));
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warn.mockRestore();
+    delete process.env['OPENAI_API_KEY'];
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(globalDir, { recursive: true, force: true });
+  });
+
+  const write = (cfg: unknown) => {
+    fs.mkdirSync(path.join(dir, '.cascade'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.cascade', 'config.json'), JSON.stringify(cfg, null, 2));
+  };
+  const onDisk = () => JSON.parse(fs.readFileSync(path.join(dir, '.cascade', 'config.json'), 'utf-8'));
+
+  it('never writes env or global credentials into the workspace file', async () => {
+    // The migration used to persist via save() at the END of load(), by which
+    // point this.config had been enriched with env keys and the 0600 global
+    // credential store — copying secrets into a workspace file that may be
+    // 0644, for a project that never had them.
+    process.env['OPENAI_API_KEY'] = 'sk-openai-from-env';
+    write({ providers: [{ type: 'github-models', apiKey: 'github_pat_dead' }, { type: 'anthropic', apiKey: 'sk-ws' }] });
+    fs.writeFileSync(
+      path.join(globalDir, 'credentials.json'),
+      JSON.stringify({ providers: [{ type: 'gemini', apiKey: 'sk-gemini-global' }] }),
+    );
+
+    await new ConfigManager(dir, globalDir).load();
+
+    const serialized = JSON.stringify(onDisk());
+    expect(serialized).not.toContain('sk-openai-from-env');
+    expect(serialized).not.toContain('sk-gemini-global');
+    // The workspace's OWN key is untouched, and the retired entry is gone.
+    expect(serialized).toContain('sk-ws');
+    expect(serialized).not.toContain('github-models');
+  });
+
+  it('still loads when the config directory cannot be written', async () => {
+    write({ providers: [{ type: 'github-models', apiKey: 'x' }, { type: 'openai', apiKey: 'k' }] });
+    fs.chmodSync(path.join(dir, '.cascade'), 0o500); // read+execute, no write
+    try {
+      const mgr = new ConfigManager(dir, globalDir);
+      // A read-only mount must not abort startup: the in-memory config is
+      // already clean, so the run proceeds and migrates again next launch.
+      await expect(mgr.load()).resolves.toBeUndefined();
+      expect(mgr.getConfig().providers.map((p) => p.type)).toEqual(['openai']);
+    } finally {
+      fs.chmodSync(path.join(dir, '.cascade'), 0o700);
+    }
+  });
+
+  it('clears a pin whose provider prefix was written in another case', () => {
+    // selector.ts's resolveDynamicModel lowercases the prefix, so this was a
+    // valid pin. Matching case-sensitively would strand it.
+    const raw = { providers: [], models: { t1: 'GitHub-Models:openai/gpt-4o' } };
+    expect(stripRetiredProviders(raw).clearedPins).toEqual(['t1']);
+    expect((raw.models as { t1?: string }).t1).toBeUndefined();
+  });
+
+  it('does not treat a migration-emptied provider list as a fresh install', async () => {
+    // A fresh install gets a keyless Ollama entry, which hasUsableProvider()
+    // accepts without checking the daemon — so both the setup wizard and the
+    // headless "No providers configured" guard would be skipped, and the run
+    // would reach the router with no usable model.
+    write({ providers: [{ type: 'github-models', apiKey: 'github_pat_dead' }] });
+    const mgr = new ConfigManager(dir, globalDir);
+    await mgr.load();
+    expect(mgr.getConfig().providers).toHaveLength(0);
+  });
+
+  it('retains the notice for a UI to show, since console output gets cleared', async () => {
+    write({ providers: [{ type: 'github-models', apiKey: 'x' }] });
+    const mgr = new ConfigManager(dir, globalDir);
+    await mgr.load();
+    const notice = mgr.takeRetiredNotice();
+    expect(notice).toContain('github-models');
+    expect(mgr.takeRetiredNotice()).toBeUndefined(); // once, not every render
+  });
+});

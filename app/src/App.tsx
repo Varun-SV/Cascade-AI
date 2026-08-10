@@ -121,7 +121,7 @@ declare global {
         renameConversation(id: string, title: string): Promise<{ ok: boolean; error?: string }>;
         deleteConversation(id: string): Promise<{ ok: boolean; error?: string }>;
         syncPush(passphrase: string): Promise<{ ok: boolean; error?: string; version?: number }>;
-        syncPull(passphrase: string): Promise<{ ok: boolean; error?: string; empty?: boolean; applied?: boolean }>;
+        syncPull(passphrase: string): Promise<{ ok: boolean; error?: string; empty?: boolean; applied?: boolean; skipped?: { removed: string[]; clearedPins: string[] } }>;
       };
       mcp?: {
         list(): Promise<{ servers: Array<{ name: string; target: string; kind: 'oauth' | 'token' | 'local' | 'open' }> }>;

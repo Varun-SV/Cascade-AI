@@ -597,6 +597,20 @@ export class MemoryStore {
     return rows.map(r => JSON.parse(r.metadata));
   }
 
+  /**
+   * Deletes cached rows for a provider type that no longer exists in
+   * `ProviderType`, so it takes a raw string rather than the union.
+   *
+   * Needed because the cache outlives the code: the REPL's loadCache() only
+   * re-discovers when the cache is EMPTY or older than 24h, so rows left
+   * behind by a removed provider read as "cache populated" and suppress
+   * discovery for the providers that replaced it — `/model` then shows a
+   * configured provider with zero models until the rows age out.
+   */
+  purgeCachedModelsForRetiredProvider(providerType: string): number {
+    return this.db.prepare('DELETE FROM model_cache WHERE provider = ?').run(providerType).changes;
+  }
+
   clearModelCache(provider?: ProviderType): void {
     if (provider) {
       this.db.prepare('DELETE FROM model_cache WHERE provider = ?').run(provider);

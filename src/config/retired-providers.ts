@@ -77,7 +77,13 @@ export function stripRetiredProviders(raw: unknown): RetiredProviderCleanup {
     for (const tier of ['t1', 't2', 't3'] as const) {
       const pin = tiers[tier];
       if (typeof pin !== 'string') continue;
-      const prefix = pin.slice(0, pin.indexOf(':'));
+      // Lowercased to match how the pin is actually parsed: selector.ts's
+      // resolveDynamicModel() does `parts[0].toLowerCase()`, so a hand-written
+      // `GitHub-Models:openai/gpt-4o` was a VALID pin. Comparing the raw case
+      // here would leave exactly those pins behind after their provider is
+      // gone — and a leftover pin is worse than none, because the router then
+      // either rejects it or misreads the literal id as another provider's.
+      const prefix = pin.slice(0, pin.indexOf(':')).toLowerCase();
       if (pin.includes(':') && isRetiredProviderType(prefix)) {
         delete tiers[tier];
         cleanup.clearedPins.push(tier);
