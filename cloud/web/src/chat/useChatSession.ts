@@ -444,8 +444,12 @@ export function useChatSession(
       setKnowledgeNotice(null);
       setActivity([]);
       streamingRef.current = '';
+      // Id kept so the rejection path below can take this turn back out. It is
+      // optimistic — nothing has been sent yet — and a send that never happens
+      // must not leave a bubble behind that vanishes on the next refresh.
+      const optimisticUserId = crypto.randomUUID();
       if (appendUser) {
-        setMessages((prev) => [...prev, { id: crypto.randomUUID(), role: 'user', content: text, attachments }]);
+        setMessages((prev) => [...prev, { id: optimisticUserId, role: 'user', content: text, attachments }]);
       }
 
       const emitRun = (complexityHint?: 'Simple' | 'Moderate' | 'Complex') => {
@@ -490,7 +494,11 @@ export function useChatSession(
         if (tooBig) {
           setBusy(false);
           setStatus(null);
-          setMessages((prev) => prev.filter((m) => !m.streaming));
+          // Drops the streaming placeholder AND the user turn appended above.
+          // A fresh send has no `branch`, so nothing reloads it away — the
+          // bubble would sit there looking sent, having never been emitted or
+          // persisted, until a refresh silently removed it.
+          setMessages((prev) => prev.filter((m) => !m.streaming && m.id !== optimisticUserId));
           setError(tooBig);
           // An edit or regenerate has ALREADY truncated the transcript
           // optimistically by the time this runs (editMessage pre-checks the

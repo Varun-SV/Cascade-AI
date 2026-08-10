@@ -123,7 +123,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed above — so a transferred conversation containing a pasted document
   arrived with only its opening, persisted as the whole turn, with nothing
   anywhere saying so. It now refuses a transfer it cannot carry rather than
-  quietly changing what the conversation says.
+  quietly changing what the conversation says — and both handoff routes get a
+  body parser sized to what they accept, since they ran through the 100 KB
+  default and would have rejected a long transfer at the middleware before any
+  of that validation could speak.
 
 - Dropped the stale `GITHUB_MODELS_TOKEN` entry from the server's
   `.env.example`, missed when the provider was removed in 0.71.0.

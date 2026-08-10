@@ -368,6 +368,26 @@ describe('cloud/server app', () => {
     ]);
   });
 
+  it('handoff: carries a transcript larger than the default body limit', async () => {
+    // The per-message bound is 500,000 characters, but both handoff routes ran
+    // through the app-level express.json() default of 100kb — so a long chat
+    // 413'd at the middleware and the validator never got to say anything. The
+    // raised limit was unreachable until these routes got a parser sized to it.
+    const long = 'a'.repeat(150_000);
+    const created = await fetch(`${baseUrl}/api/handoff`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: long }] }),
+    });
+    expect(created.status).toBe(200);
+
+    const { code } = (await created.json()) as { code: string };
+    const read = await fetch(`${baseUrl}/api/handoff/${code}`);
+    const snap = (await read.json()) as { messages: Array<{ content: string }> };
+    // Carried whole, not trimmed to fit.
+    expect(snap.messages[0]!.content).toHaveLength(150_000);
+  });
+
   it('handoff: rejects an empty transcript and 404s an unknown code', async () => {
     const empty = await fetch(`${baseUrl}/api/handoff`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [] }),

@@ -147,10 +147,20 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   // The Razorpay webhook signature is an HMAC of the RAW request body, so that
   // route needs the unparsed bytes — capture them and skip the JSON parser.
   const webhookRaw = express.raw({ type: '*/*', limit: '1mb' });
-  // Routes that accept large bodies (file saves, chat/memory imports) run their
-  // own 16mb parser; keep them off the tight 100kb default.
+  // A transferred chat is bounded by parseHandoffBody at 500,000 characters,
+  // which JSON-escapes to roughly 1 MB — well over the 100kb default, so both
+  // handoff routes used to 413 before that validation could run and say
+  // anything useful. Sized to what the validator will actually accept rather
+  // than reusing the 16mb upload parser: POST /api/handoff is UNAUTHENTICATED
+  // (rate-limited only, the code in the URL being the whole secret), so its
+  // body ceiling is a memory-exposure surface and belongs as tight as the
+  // feature allows.
+  const handoffJson = express.json({ limit: '2mb' });
+  // Routes that accept large bodies (file saves, chat/memory imports, chat
+  // handoff) run their own parser; keep them off the tight 100kb default.
   const rawBodyRoutes = new Set([
     '/api/uploads', '/api/billing/webhook', '/api/files', '/api/memories/import',
+    '/api/handoff', '/api/conversations/import',
     ...OPENAI_COMPAT_JSON_ROUTES,
   ]);
   app.use((req, res, next) => {
@@ -1313,7 +1323,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     message: { error: 'Too many attempts. Slow down.' },
   });
 
-  app.post('/api/handoff', handoffCreateLimiter, (req, res) => {
+  app.post('/api/handoff', handoffCreateLimiter, handoffJson, (req, res) => {
     const parsed = parseHandoffBody(req.body);
     if ('error' in parsed) { res.status(400).json({ error: parsed.error }); return; }
     const { code, expiresAt } = handoffs.create(parsed);
@@ -1331,7 +1341,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   // Seed a NEW conversation from a redeemed transcript — the web side of a
   // redeem. Authenticated + owner-scoped: the imported chat becomes the
   // caller's own conversation, ready to continue in the cloud.
-  app.post('/api/conversations/import', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+  app.post('/api/conversations/import', sessionMiddleware(env.SESSION_SECRET), handoffJson, (req: AuthedRequest, res) => {
     const parsed = parseHandoffBody(req.body);
     if ('error' in parsed) { res.status(400).json({ error: parsed.error }); return; }
     const convo = store.importConversation(req.session!.userId, parsed.title, parsed.skillId, parsed.messages);
