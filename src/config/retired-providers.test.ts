@@ -266,17 +266,31 @@ describe('migration hardening (review round 3)', () => {
     expect(serialized).not.toContain('github-models');
   });
 
-  it('still loads when the config directory cannot be written', async () => {
+  // Root ignores permission bits, so the chmod below denies nothing and the
+  // test would assert its own setup rather than the behaviour. Skipping is
+  // honest; passing vacuously under root is not — that is exactly how the
+  // first version of this test passed locally and failed in CI.
+  const asRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  it.skipIf(asRoot)('still loads when the migration cannot be written back', async () => {
     write({ providers: [{ type: 'github-models', apiKey: 'x' }, { type: 'openai', apiKey: 'k' }] });
-    fs.chmodSync(path.join(dir, '.cascade'), 0o500); // read+execute, no write
+    // Only the config FILE is made unwritable, not its directory. Making the
+    // whole `.cascade` directory read-only would also block the SQLite store
+    // that load() opens inside it, which fails for reasons that have nothing
+    // to do with this migration — the assertion would then be testing a
+    // constraint the hardening never claimed to remove.
+    const cfgFile = path.join(dir, '.cascade', 'config.json');
+    fs.chmodSync(cfgFile, 0o400);
     try {
       const mgr = new ConfigManager(dir, globalDir);
-      // A read-only mount must not abort startup: the in-memory config is
-      // already clean, so the run proceeds and migrates again next launch.
+      // The in-memory config is already clean, so the run proceeds and simply
+      // migrates again next launch rather than refusing to start.
       await expect(mgr.load()).resolves.toBeUndefined();
       expect(mgr.getConfig().providers.map((p) => p.type)).toEqual(['openai']);
+      // And the file genuinely was not rewritten — otherwise this would be
+      // passing because the write succeeded, not because it was tolerated.
+      expect(JSON.stringify(onDisk())).toContain('github-models');
     } finally {
-      fs.chmodSync(path.join(dir, '.cascade'), 0o700);
+      fs.chmodSync(cfgFile, 0o600);
     }
   });
 
