@@ -623,3 +623,29 @@ describe('runChatTurn (stub-provider integration)', () => {
     expect(store.listConversations(user.id)).toEqual([]);
   });
 });
+
+describe('ChatRunPayloadSchema — a client that predates a provider removal', () => {
+  it('ignores a retired provider instead of rejecting the whole run', () => {
+    // A browser tab open across the rollout keeps sending its in-memory list
+    // until the page is reloaded, and the localStorage migration only runs in
+    // freshly loaded assets. Rejecting the payload breaks every run from that
+    // tab even though it also carries a usable provider.
+    const parsed = parseChatRunPayload({
+      prompt: 'hi',
+      providers: [
+        { type: 'github-models', apiKey: 'dead' },
+        { type: 'anthropic', apiKey: 'sk-real' },
+      ],
+    });
+    expect(parsed.providers.map((p) => p.type)).toEqual(['anthropic']);
+  });
+
+  it('still rejects a payload whose only provider was retired', () => {
+    // Filtering happens before .min(1), so "nothing usable left" is still an
+    // error — the run genuinely has nothing to execute with.
+    expect(() => parseChatRunPayload({
+      prompt: 'hi',
+      providers: [{ type: 'github-models', apiKey: 'dead' }],
+    })).toThrow();
+  });
+});

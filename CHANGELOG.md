@@ -149,8 +149,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The notice is also retained for a UI to display rather than only logged: the
   REPL clears the terminal immediately after loading, and the desktop emits
-  from a process with nothing to draw on. Desktop sync now reports what a
-  pre-upgrade blob had removed from it, instead of saying only "Applied".
+  from a process with nothing to draw on. Both desktop and browser sync now
+  report what a pre-upgrade blob had removed from it, instead of saying only
+  "Applied" — the CLI, desktop and web restore paths all explain it now, so
+  none of them is the one place a key vanishes unannounced.
+
+  And the hosted server no longer fails a run outright because the client is
+  older than it is. A browser tab left open across a deploy keeps sending its
+  in-memory provider list until the page is reloaded, and the localStorage
+  migration only runs in freshly loaded assets — so the narrowed enum rejected
+  every run from that tab even when it also carried a working provider. The
+  retired type is filtered out of the payload before validation instead. A
+  request whose *only* provider was retired is still rejected: the filter runs
+  before the "at least one" check, so "nothing left to run with" remains an
+  error rather than becoming a silent empty run.
 
 ## 0.70.0 - 2026-08-06
 

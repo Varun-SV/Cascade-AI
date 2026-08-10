@@ -322,3 +322,73 @@ describe('migration hardening (review round 3)', () => {
     expect(mgr.takeRetiredNotice()).toBeUndefined(); // once, not every render
   });
 });
+
+describe('migration must not strand a usable install (review round 4)', () => {
+  let dir: string;
+  let globalDir: string;
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-r4-'));
+    globalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-r4-g-'));
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warn.mockRestore();
+    delete process.env['OPENAI_API_KEY'];
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(globalDir, { recursive: true, force: true });
+  });
+
+  const write = (cfg: unknown) => {
+    fs.mkdirSync(path.join(dir, '.cascade'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.cascade', 'config.json'), JSON.stringify(cfg, null, 2));
+  };
+
+  it('still adopts an environment key when retirement emptied the list', async () => {
+    // The first attempt at the fresh-install guard suppressed env discovery
+    // too, so a user holding a perfectly usable OPENAI_API_KEY was left with
+    // nothing and a "No providers configured" exit — worse than the bug it
+    // was fixing.
+    process.env['OPENAI_API_KEY'] = 'sk-env';
+    write({ providers: [{ type: 'github-models', apiKey: 'dead' }] });
+
+    const mgr = new ConfigManager(dir, globalDir);
+    await mgr.load();
+
+    const types = mgr.getConfig().providers.map((p) => p.type);
+    expect(types).toContain('openai');
+    // …but still no phantom Ollama: that fallback is for a genuine fresh
+    // install, and hasUsableProvider() accepts it without checking the daemon.
+    expect(types).not.toContain('ollama');
+  });
+
+  it('adds the Ollama fallback on a genuine fresh install', async () => {
+    // The other side of the same branch — the guard must not suppress this.
+    const mgr = new ConfigManager(dir, globalDir);
+    await mgr.load();
+    expect(mgr.getConfig().providers.map((p) => p.type)).toContain('ollama');
+  });
+
+  it('purges the model cache when the retired entry lived only in the global store', async () => {
+    // The purge originally ran at store construction, before the global
+    // credential filter had told us anything was retired — so exactly this
+    // case slipped through and stale rows kept suppressing discovery.
+    write({ providers: [{ type: 'anthropic', apiKey: 'k' }] });
+    fs.writeFileSync(
+      path.join(globalDir, 'credentials.json'),
+      JSON.stringify({ providers: [{ type: 'github-models', apiKey: 'dead' }] }),
+    );
+
+    const mgr = new ConfigManager(dir, globalDir);
+    await mgr.load();
+    const store = mgr.getStore();
+    store.upsertCachedModel({
+      id: 'openai/gpt-4o', name: 'GPT-4o', provider: 'github-models' as never,
+      contextWindow: 8_000, isVisionCapable: false,
+      inputCostPer1kTokens: 0, outputCostPer1kTokens: 0,
+      maxOutputTokens: 4_000, supportsStreaming: true, isLocal: false,
+    });
+    expect(store.purgeCachedModelsForRetiredProvider('github-models')).toBe(1);
+  });
+});

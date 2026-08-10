@@ -105,15 +105,6 @@ export class ConfigManager {
     this.cascadeMd = await loadCascadeMd(this.workspacePath);
     this.keystore = new Keystore(path.join(this.globalDir, GLOBAL_KEYSTORE_FILE));
     this.store = new MemoryStore(path.join(this.workspacePath, CASCADE_DB_FILE));
-    // The model cache outlives the provider. Rows for a retired type would
-    // otherwise keep the REPL's loadCache() believing the cache is populated
-    // (it only re-discovers when EMPTY or >24h old), so the providers that
-    // replaced it would show zero models until the rows aged out.
-    if (this.retiredCleanup) {
-      for (const type of this.retiredCleanup.removed) {
-        try { this.store.purgeCachedModelsForRetiredProvider(type); } catch { /* cache is disposable */ }
-      }
-    }
     await this.injectEnvKeys();
     // Fill in machine-global credentials (~/.cascade-ai/credentials.json) so
     // keys entered once are available in EVERY workspace — previously keys
@@ -141,6 +132,20 @@ export class ConfigManager {
       };
     }
     this.config.providers = mergeGlobalCredentials(this.config.providers, globalCreds.kept);
+
+    // Purge AFTER both stores have been cleaned, not at store construction:
+    // a retired provider that existed ONLY in ~/.cascade-ai/credentials.json
+    // is not known until the filter above runs, and purging earlier would skip
+    // exactly that case. The model cache outlives the provider, and the REPL's
+    // loadCache() only re-discovers when the cache is EMPTY or >24h old — so
+    // leftover rows read as "populated" and the providers that replaced it
+    // show zero models until they age out.
+    if (this.retiredCleanup) {
+      for (const type of this.retiredCleanup.removed) {
+        try { this.store.purgeCachedModelsForRetiredProvider(type); } catch { /* the cache is disposable */ }
+      }
+    }
+
     await this.ensureDefaultIdentity();
     // Persist the rename so it sticks — otherwise the fix applies for this
     // process only and the file on disk (and the next process to read it)
@@ -269,13 +274,22 @@ export class ConfigManager {
   }
 
   private async injectEnvKeys(): Promise<void> {
-    // An empty list means "fresh install" ONLY if nothing was just removed.
-    // After a retirement migration it means "we took your only provider away",
-    // and treating that as a first run silently appends a keyless Ollama entry
-    // — which hasUsableProvider() accepts without checking the daemon exists,
-    // so the setup wizard and the headless "No providers configured" guard are
-    // both skipped and the run reaches the router with no usable model.
-    const isFirstRun = this.config.providers.length === 0 && !this.retiredCleanup;
+    // Two different questions, previously conflated into one `isFirstRun`.
+    //
+    // "Is the list empty?" governs whether an environment key may seed a new
+    // provider entry — and that must stay true after a retirement, or a user
+    // whose only provider was retired but who has OPENAI_API_KEY exported ends
+    // up with NOTHING and a "No providers configured" exit, holding a perfectly
+    // usable credential.
+    //
+    // "Is this a genuine fresh install?" governs the keyless Ollama fallback
+    // only. After a retirement an empty list means "we just took your provider
+    // away", and appending Ollama there is actively harmful: hasUsableProvider()
+    // accepts it without checking the daemon exists, so both the setup wizard
+    // and the headless no-providers guard are skipped and the run reaches the
+    // router with no usable model.
+    const wasEmpty = this.config.providers.length === 0;
+    const emptiedByRetirement = wasEmpty && !!this.retiredCleanup;
 
     const envProviders: Array<{ env: string; type: CascadeConfig['providers'][0]['type'] }> = [
       { env: 'ANTHROPIC_API_KEY', type: 'anthropic' },
@@ -289,14 +303,14 @@ export class ConfigManager {
       if (!key) continue;
       const existing = this.config.providers.find((p) => p.type === type);
       
-      if (!existing && isFirstRun) {
+      if (!existing && wasEmpty) {
         this.config.providers.push({ type, apiKey: key });
       } else if (existing && !existing.apiKey) {
         existing.apiKey = key;
       }
     }
 
-    if (isFirstRun && !this.config.providers.find((p) => p.type === 'ollama')) {
+    if (wasEmpty && !emptiedByRetirement && !this.config.providers.find((p) => p.type === 'ollama')) {
       this.config.providers.push({ type: 'ollama' });
     }
   }

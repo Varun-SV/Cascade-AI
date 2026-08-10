@@ -35,11 +35,19 @@ function providerSig(p: ProviderConfig): string {
  * entry into a vault that had already been migrated — and keep doing it on
  * every restore, which reads as the cleanup not working.
  */
-function mergeProviders(local: ProviderConfig[], incoming: ProviderConfig[]): ProviderConfig[] {
+function mergeProviders(
+  local: ProviderConfig[],
+  incoming: ProviderConfig[],
+): { merged: ProviderConfig[]; removed: string[] } {
   const map = new Map<string, ProviderConfig>();
   for (const l of local) map.set(providerSig(l), l);
-  for (const i of stripRetiredProviders(incoming).kept) map.set(providerSig(i), i);
-  return [...map.values()];
+  const { kept, removed } = stripRetiredProviders(incoming);
+  for (const i of kept) map.set(providerSig(i), i);
+  // `removed` is returned rather than dropped so the restore can SAY a synced
+  // key was skipped. The CLI and desktop pull paths both explain it; the
+  // browser staying silent would be the one surface where a key disappears
+  // with no reason given.
+  return { merged: [...map.values()], removed };
 }
 
 /** Rebuild the web's `backend` discriminator from whichever key is present. */
@@ -87,9 +95,17 @@ export default function AccountSyncPanel({ keys, webSearch, onRestoreKeys, onRes
       const { blob, updatedAt } = await pullKeySync();
       if (!blob) { setStatus('Nothing synced to your account yet.'); return; }
       const bundle = await decryptJSON<WebSyncBundle>(blob as EncryptedBlob, passphrase);
-      if (bundle.providers) onRestoreKeys(mergeProviders(keys, bundle.providers));
+      let skippedProviders: string[] = [];
+      if (bundle.providers) {
+        const { merged, removed } = mergeProviders(keys, bundle.providers);
+        skippedProviders = removed;
+        onRestoreKeys(merged);
+      }
       if (bundle.webSearch) onRestoreWebSearch(toWebSearch(bundle.webSearch));
-      setStatus(`Restored from your account${updatedAt ? ` (synced ${relativeTime(updatedAt)})` : ''}.`);
+      const skippedNote = skippedProviders.length
+        ? ` Skipped ${skippedProviders.join(', ')} — no longer supported.`
+        : '';
+      setStatus(`Restored from your account${updatedAt ? ` (synced ${relativeTime(updatedAt)})` : ''}.${skippedNote}`);
     } catch {
       // AES-GCM's auth-tag check is what fails on a wrong passphrase — say so
       // plainly rather than surfacing a raw WebCrypto "OperationError".
