@@ -222,6 +222,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the desktop app now reopened its full-screen wizard over a config that
   runs fine. A token counts as a credential.
 
+- **A sync pull no longer claims it reset a tier pin it left alone.** Stripping
+  a dead pin out of the incoming bundle is not the same as clearing it in the
+  result: the merge is `{ ...config.models, ...bundle.models }`, so deleting an
+  incoming key just lets the receiving device's own pin for that tier through.
+  Keeping that local pin is right — it is still valid, and discarding it
+  because a stale remote snapshot happened to name a dead provider for the same
+  tier would be data loss caused by garbage input — but the CLI and desktop
+  then announced "reset T1 to Auto" over a pin that was still in place and
+  still in effect. The report is now derived from the merged result, and a pin
+  that survives the merge still naming a retired provider is cleared there,
+  since that one is dead whichever side it arrived from. Native-only: the
+  browser's sync bundle carries no tier pins.
+
 - **A reopened desktop setup no longer forgets your workspace.** The wizard
   started its directory field blank, which was right when it only ever ran on a
   first launch — but it now reopens on configured machines when a migration

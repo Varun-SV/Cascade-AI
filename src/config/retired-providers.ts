@@ -66,32 +66,46 @@ export function stripRetiredProviders(raw: unknown): RetiredProviderCleanup {
     cfg['providers'] = kept;
   }
 
-  // A tier pin outlives the provider entry and is stored as a plain
-  // `provider:model` string, so it survives the filter above untouched. Left
-  // in place it resolves to nothing and fails the run with "provider ... is
-  // not available" on every single request — the pin has to go too, and
-  // clearing it returns that tier to Auto, which is the working default.
-  const models = cfg['models'];
-  if (typeof models === 'object' && models !== null) {
-    const tiers = models as Record<string, unknown>;
-    for (const tier of ['t1', 't2', 't3'] as const) {
-      const pin = tiers[tier];
-      if (typeof pin !== 'string') continue;
-      // Lowercased to match how the pin is actually parsed: selector.ts's
-      // resolveDynamicModel() does `parts[0].toLowerCase()`, so a hand-written
-      // `GitHub-Models:openai/gpt-4o` was a VALID pin. Comparing the raw case
-      // here would leave exactly those pins behind after their provider is
-      // gone — and a leftover pin is worse than none, because the router then
-      // either rejects it or misreads the literal id as another provider's.
-      const prefix = pin.slice(0, pin.indexOf(':')).toLowerCase();
-      if (pin.includes(':') && isRetiredProviderType(prefix)) {
-        delete tiers[tier];
-        cleanup.clearedPins.push(tier);
-      }
-    }
-  }
+  cleanup.clearedPins = clearRetiredPins(cfg['models']);
 
   return cleanup;
+}
+
+/**
+ * Clears `provider:model` tier pins naming a retired provider, mutating the
+ * given models object in place and returning the tier keys it cleared.
+ *
+ * Split out from `stripRetiredProviders` because the sync merge has to ask the
+ * question a second time, about a DIFFERENT object: stripping the incoming
+ * bundle says nothing about what the merged result ends up pinned to (see
+ * `applySyncBundle`). Takes `unknown` for the same reason its caller does —
+ * it runs on raw, not-yet-validated data.
+ */
+export function clearRetiredPins(models: unknown): string[] {
+  // A tier pin outlives the provider entry and is stored as a plain
+  // `provider:model` string, so it survives a `providers[]` filter untouched.
+  // Left in place it resolves to nothing and fails the run with "provider ...
+  // is not available" on every single request — the pin has to go too, and
+  // clearing it returns that tier to Auto, which is the working default.
+  const cleared: string[] = [];
+  if (typeof models !== 'object' || models === null) return cleared;
+  const tiers = models as Record<string, unknown>;
+  for (const tier of ['t1', 't2', 't3'] as const) {
+    const pin = tiers[tier];
+    if (typeof pin !== 'string') continue;
+    // Lowercased to match how the pin is actually parsed: selector.ts's
+    // resolveDynamicModel() does `parts[0].toLowerCase()`, so a hand-written
+    // `GitHub-Models:openai/gpt-4o` was a VALID pin. Comparing the raw case
+    // here would leave exactly those pins behind after their provider is
+    // gone — and a leftover pin is worse than none, because the router then
+    // either rejects it or misreads the literal id as another provider's.
+    const prefix = pin.slice(0, pin.indexOf(':')).toLowerCase();
+    if (pin.includes(':') && isRetiredProviderType(prefix)) {
+      delete tiers[tier];
+      cleared.push(tier);
+    }
+  }
+  return cleared;
 }
 
 /**

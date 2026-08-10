@@ -211,6 +211,43 @@ describe('applySyncBundle — pulling a bundle pushed by 0.70.0', () => {
     expect(didCleanupChangeAnything(cleanup)).toBe(true);
   });
 
+  it('keeps the receiving device\'s own pin rather than resetting the tier', () => {
+    // The strip deletes `t1` from the BUNDLE, and the merge is
+    // `{ ...config.models, ...bundle.models }` — so a local pin for the same
+    // tier comes through. That is the outcome we want: the local pin is valid,
+    // and dropping it because a stale remote snapshot named a dead provider
+    // for that tier would be data loss caused by garbage input.
+    const local = validateConfig({
+      providers: [{ type: 'openai', apiKey: 'k' }],
+      models: { t1: 'openai:gpt-4o' },
+    });
+    const cleanup: RetiredProviderCleanup = { removed: [], clearedPins: [] };
+    const merged = applySyncBundle(bundle0700(), local, cleanup);
+
+    expect(merged.models?.t1).toBe('openai:gpt-4o');
+    // …and the report has to match: claiming T1 was "reset to Auto" told the
+    // user a pin was gone while it was still in place and still in effect.
+    expect(cleanup.clearedPins).toEqual([]);
+    expect(cleanup.removed).toEqual(['github-models']);
+  });
+
+  it('clears a retired pin that reaches the merged config from the LOCAL side', () => {
+    // Defense in depth. The local config is normally migrated at load, but a
+    // pin that survives the merge still naming a retired provider is dead
+    // whichever side it came from, and this is the last point before the
+    // result is handed back to be persisted.
+    const local = { ...validateConfig({ providers: [{ type: 'openai', apiKey: 'k' }] }), models: { t3: 'github-models:openai/gpt-4o' } };
+    const cleanup: RetiredProviderCleanup = { removed: [], clearedPins: [] };
+    const clean: SyncBundle = { v: 2, providers: [{ type: 'gemini', apiKey: 'k' }] };
+    const merged = applySyncBundle(clean, local, cleanup);
+
+    expect(merged.models?.t3).toBeUndefined();
+    expect(cleanup.clearedPins).toEqual(['t3']);
+    // The caller's own config is not mutated on the way through: with no
+    // `models` in the bundle, `next.models` is still that same object.
+    expect(local.models.t3).toBe('github-models:openai/gpt-4o');
+  });
+
   it('reports nothing for a bundle with nothing retired', () => {
     const cleanup: RetiredProviderCleanup = { removed: [], clearedPins: [] };
     const clean: SyncBundle = { v: 2, providers: [{ type: 'gemini', apiKey: 'k' }], models: { t1: 'gemini-2.5-pro' } };
