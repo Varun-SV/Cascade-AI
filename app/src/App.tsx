@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
 // The embedded backend's Socket.IO server encodes packets with the msgpack
 // parser (see src/dashboard/websocket.ts). The client MUST use the same parser
@@ -70,7 +70,7 @@ declare global {
       restartBackend(): Promise<{ port: number; token: string; error: string | null }>;
       setWorkspace(dir: string): Promise<{ ok: boolean }>;
       onBackendStatus(cb: (s: { port: number; token: string; error: string | null }) => void): void;
-      getConfig(): Promise<{ provider: string; apiKey: string; workspace: string; onboardingDone: boolean }>;
+      getConfig(): Promise<{ provider: string; apiKey: string; workspace: string; onboardingDone: boolean; migrationNotice?: string }>;
       setConfig(cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string }): Promise<void>;
       getSettings(): Promise<{ models: Record<string, string>; budget: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; providersWithKey: string[]; endpoints: Record<string, string>; azureDeployments?: Array<{ label?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string; hasKey: boolean }>; webSearch?: { searxngUrl?: string; hasBraveKey: boolean; hasTavilyKey: boolean }; advanced?: Record<string, unknown> }>;
       updateSettings(data: { keys?: Record<string, string | undefined>; models?: Record<string, string | undefined>; budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; endpoints?: Record<string, string | undefined>; azureDeployments?: Array<{ label?: string; apiKey?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string }>; webSearch?: { searxngUrl?: string; braveApiKey?: string; tavilyApiKey?: string }; advanced?: Record<string, unknown> }): Promise<{ ok: boolean; error?: string; models?: Record<string, string>; budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; providersWithKey?: string[]; advanced?: Record<string, unknown> }>;
@@ -165,6 +165,8 @@ export interface CloudUser { id: string; email: string | null; name: string | nu
 export function App() {
   const dispatch = useAppDispatch();
   const { backendPort, authToken, helpContext, showSettings, onboardingDone, backendError, view, sessionId, runSessionId } = useAppSelector((s) => s.app);
+  // Local, not redux: read once at startup and shown on exactly one screen.
+  const [migrationNotice, setMigrationNotice] = useState<string | undefined>();
   const socketRef = useRef<Socket | null>(null);
   // The socket-setup effect below only re-runs when backendPort/authToken
   // change (not on every session switch) — its handlers need the LIVE
@@ -182,6 +184,7 @@ export function App() {
     if (window.cascade?.getConfig) {
       window.cascade.getConfig().then((cfg) => {
         dispatch(setOnboardingDone(cfg.onboardingDone));
+        if (cfg.migrationNotice) setMigrationNotice(cfg.migrationNotice);
       }).catch(() => {
         dispatch(setOnboardingDone(true)); // fail-open in dev
       });
@@ -411,7 +414,10 @@ export function App() {
 
   // Show onboarding full-screen on first run
   if (!onboardingDone) {
-    return <OnboardingView />;
+    // The notice rides into onboarding rather than a toast: this is the screen
+    // the user has been sent to BECAUSE their provider was removed, so the
+    // explanation belongs next to the thing they are being asked to redo.
+    return <OnboardingView notice={migrationNotice} />;
   }
 
   return (

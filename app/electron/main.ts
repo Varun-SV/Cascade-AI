@@ -69,7 +69,7 @@ function mapProvider(id: string): { type: string | null; baseUrl?: string } {
 // ─── Backend ─────────────────────────────────────────────────────────────────
 // Resolve the cascade-ai core package (built CommonJS output). In dev it lives at
 // the repo's ../dist; in a packaged app it's bundled under resources/cascade-core.
-function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response> } {
+function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string }> | undefined) => boolean; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response> } {
   // Dev: the repo's external-deps build (node_modules resolves the requires).
   // Packaged: the self-contained `desktop-core.cjs` bundle (no node_modules to
   // resolve from — every JS dep is bundled in; only native modules like
@@ -385,13 +385,26 @@ function registerIPC(): void {
       const meta = loadDesktopMeta();
       const provider = (meta.provider as string) ?? '';
       const workspace = (meta.workspace as string) ?? '';
-      const onboardingDone = Boolean(meta.onboarding_done);
+      // Derived, not just read back. The stored flag records that onboarding
+      // was COMPLETED once; it says nothing about whether the provider chosen
+      // then still exists. A retirement migration can empty the list under a
+      // finished install, and trusting the flag alone opens the app with no
+      // provider, no wizard and no explanation. Asking the same question the
+      // CLI asks (hasUsableProvider) reopens onboarding exactly when there is
+      // nothing to run with, whatever emptied it.
+      const { hasUsableProvider } = loadCore();
+      const onboardingDone = Boolean(meta.onboarding_done)
+        && hasUsableProvider(cascadeConfig?.providers);
+      // Surfaced here because the Electron main process has no UI of its own:
+      // ConfigManager only logs the migration to a console nobody reads, so
+      // the renderer has to be told why the provider vanished.
+      const migrationNotice = configManager?.takeRetiredNotice?.() ?? undefined;
       let apiKey = '';
       const { type } = mapProvider(provider);
       if (type && cascadeConfig?.providers) {
         apiKey = cascadeConfig.providers.find((p: { type: string; apiKey?: string }) => p.type === type)?.apiKey ?? '';
       }
-      return { provider, apiKey, workspace, onboardingDone };
+      return { provider, apiKey, workspace, onboardingDone, migrationNotice };
     } catch {
       return { provider: '', apiKey: '', workspace: '', onboardingDone: false };
     }

@@ -154,6 +154,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Applied" — the CLI, desktop and web restore paths all explain it now, so
   none of them is the one place a key vanishes unannounced.
 
+  **The desktop reopens setup when the migration leaves it with nothing.** Its
+  "onboarding finished" flag recorded that setup was completed once; it said
+  nothing about whether the provider chosen then still exists. So a desktop
+  install whose only provider was GitHub Models opened straight into the app
+  with no provider, no wizard, and no explanation. The flag is now combined
+  with the same "is anything usable?" check the CLI makes, so setup reopens
+  whenever there is nothing to run with — whatever emptied the list — and the
+  migration notice is shown on that screen, next to the thing the user is being
+  asked to redo.
+
   The notice now reaches the CLI as a startup message inside the REPL rather
   than a console line the screen clear erases a moment later, and a vault whose
   cleaned copy cannot be written back still returns the keys it just parsed —

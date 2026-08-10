@@ -61,7 +61,7 @@ const PROVIDERS: Provider[] = [
   },
 ];
 
-export function OnboardingView() {
+export function OnboardingView({ notice }: { notice?: string } = {}) {
   const dispatch = useAppDispatch();
   const [step, setStep] = useState<Step>('welcome');
   const [selectedProvider, setSelectedProvider] = useState<Provider | null>(null);
@@ -131,6 +131,18 @@ export function OnboardingView() {
       animation: 'fadeIn 0.4s var(--ease)',
       zIndex: 1000,
     }}>
+      {/* Why you are seeing this again, when you had already finished setup. */}
+      {notice && (
+        <div role="status" style={{
+          maxWidth: 520, marginBottom: 24, padding: '10px 14px',
+          border: '1px solid var(--border)', borderRadius: 10,
+          background: 'var(--bg-elev)', color: 'var(--text-dim)',
+          fontSize: 13, lineHeight: 1.5, textAlign: 'center',
+        }}>
+          {notice}
+        </div>
+      )}
+
       {/* Logo */}
       <div style={{ marginBottom: 32, textAlign: 'center' }}>
         <div style={{
