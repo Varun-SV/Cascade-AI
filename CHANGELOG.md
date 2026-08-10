@@ -18,6 +18,242 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+## 0.71.0 - 2026-08-06
+
+### Removed
+- **The GitHub Models provider is gone, because the service is.** GitHub
+  [fully retired GitHub Models on 30 July 2026](https://github.blog/changelog/2026-07-01-github-models-is-being-fully-retired-on-july-30-2026/).
+  `models.github.ai` no longer answers, so the provider could not list a single
+  model or serve a single completion — it was an option in every provider
+  picker that could only fail.
+
+  Removed across all four surfaces: the SDK provider and its router, selector,
+  TPM, live-data and profiler wiring; `cascade init`, `cascade doctor` and the
+  REPL's model refresh; the desktop Settings and Onboarding pickers; and the
+  cloud KeyVault, run payload schema and `GITHUB_MODELS_TOKEN` env var. Six
+  named provider types remain.
+
+  **If you pinned a tier to `github-models:<model>`, that pin now fails to
+  resolve and names the provider** rather than silently falling through to
+  something else — repoint it at a provider you have configured.
+
+  **This removes nothing you can still reach.** Anything that speaks the
+  OpenAI chat-completions format is still supported through the
+  `openai-compatible` provider, which takes any base URL, makes the API key
+  optional for local servers, and discovers models live from the endpoint's own
+  `/models`. That covers hosted APIs (Groq, Together, Fireworks, DeepSeek,
+  Mistral, OpenRouter, xAI, Perplexity, Cerebras…) and local runtimes
+  (llama.cpp, LM Studio, vLLM, text-generation-webui) alike. The six named
+  types are the ones with bespoke wire formats or bundled catalogs — not the
+  limit of what Cascade can talk to.
+
+  Several router behaviours that were introduced for this provider are
+  genuinely generic and were kept, with their tests repointed at
+  `openai-compatible`: a `provider:owner/model` pin keeps slashes in the model
+  id intact, a live-discovered model stays out of Cascade Auto's scored pool
+  while remaining reachable by an explicit pin, the TPM reservation is capped
+  at the model's real `maxOutputTokens` rather than an uncapped per-call
+  override, `getNextFallback()` widens past a dynamically-resolved pin, and
+  `selectVisionModel()` finds a live-discovered vision model.
+
+  **This is a minor bump, not a patch, and deliberately so.** Removing a member
+  from the exported `ProviderType` and from the accepted `providers[].type`
+  values breaks compilation for code that named it. Shipping that as 0.70.1
+  would have handed it to everyone on `^0.70.0` automatically, which for a
+  pre-1.0 package resolves to `>=0.70.0 <0.71.0`.
+
+### Fixed
+- **Upgrading no longer breaks an install that used the retired provider.**
+  Narrowing a type is a build-time change; it does nothing to the values
+  already saved on disk and in browsers, and every one of those stores is read
+  back without validation. Left alone, the removal above would have been
+  actively hostile to exactly the users who had adopted the provider:
+
+  - **The CLI and desktop app would not start.** `ConfigManager.load()` hands
+    the parsed `.cascade/config.json` straight to `validateConfig()`, which
+    *throws* on an unknown provider type — so the CLI died at launch and the
+    desktop app reported "Could not load Cascade config" with no route to
+    repair, because the config manager Settings would repair through never
+    finished constructing. Retired types are now stripped from the raw object
+    *before* validation, and the cleaned file is written back so it happens
+    once.
+  - **The machine-global credential store would put it straight back.**
+    `~/.cascade-ai/credentials.json` is merged in *after* validation and never
+    passes through the schema at all, so cleaning only the workspace file would
+    have fixed nothing for anyone whose key was stored globally — the entry
+    would be gone from disk and back in memory a few lines later, on every
+    load, in every workspace. It is now filtered and rewritten too.
+  - **A tier pin would fail every request.** `models.t1` and friends store a
+    plain `provider:model` string that survives any provider-list filter. A pin
+    naming a retired provider is now cleared, returning that tier to Auto.
+  - **The hosted web app could not chat at all.** The browser key vault is raw
+    JSON in `localStorage`, read back with no validation and sent verbatim on
+    every run — so the server's own provider enum rejected the whole payload
+    until the user happened to open the vault and delete the row by hand.
+    Account sync made it recurrent: a restore merged the decrypted provider
+    array without filtering, reintroducing the dead entry into an
+    already-cleaned vault. Both paths now strip retired types, the cleaned
+    vault is persisted, and a one-time dismissible notice explains what was
+    removed and what to use instead — a key silently disappearing reads as
+    data loss.
+  - **An encrypted account-sync blob would reintroduce it on CLI and desktop.**
+    A sync blob is a snapshot of whatever the pushing device held, so one
+    pushed before the retirement still carries the provider entry *and* the
+    `provider:model` tier pins naming it — and nothing between the decrypt and
+    the merge validated either. On the CLI that surfaced as a validation throw
+    inside a `catch` written for a wrong passphrase, so `cascade sync pull`
+    told the user to check a passphrase that was correct. On desktop the merged
+    values were copied into the **live** config before persisting, reinstating
+    the dead provider for the session and writing a file the next load had to
+    repair. `applySyncBundle()` now sanitises the bundle — the one function all
+    the native surfaces go through — and reports what it dropped, so both can
+    say what was skipped instead of discarding it silently.
+
+  Also fixed: `cascade sync pull` no longer reports every downstream failure as
+  a decryption failure. The `try` scoped only to the decrypt now, so an apply
+  error says what actually went wrong.
+
+- **The migration itself no longer leaks credentials into the workspace.** It
+  used to persist through the same `save()` that runs at the end of config
+  load — by which point the in-memory config has been enriched with keys from
+  the environment and from the machine-global credential store (kept `0600` in
+  `~/.cascade-ai`). Serializing that enriched object wrote those secrets into
+  `.cascade/config.json`, which may be `0644`, for a project that never had
+  them: opening any workspace after upgrading would copy a global OpenAI key
+  into it. The cleaned file is now written from the *raw* parsed config inside
+  `loadConfig()`, before any enrichment happens.
+
+  The hazard predates this release — the same late `save()` already ran for the
+  MCP-rename migration — but a retirement fires for every upgrading user rather
+  than on a rare name collision, which is what made it worth closing here.
+
+  Four more edges in the same migration, all of which would have made an
+  upgrade worse rather than better:
+  - **A read-only config directory aborted startup.** The write is best-effort
+    now, matching how credential syncing already treats an unwritable home: the
+    in-memory config is clean, so the run proceeds and migrates again next
+    launch.
+  - **A pin written in another case survived.** `GitHub-Models:openai/gpt-4o`
+    was a *valid* pin, because pin parsing lowercases the provider prefix. The
+    migration compared raw case and stranded exactly those, leaving the router
+    to reject the pin or misread the literal id as another provider's.
+  - **Losing your only provider looked like a fresh install.** An emptied list
+    made the config manager inject a keyless Ollama entry, which counts as
+    "usable" without checking the daemon exists — so both the setup wizard and
+    the headless no-providers guard were skipped and the run reached the router
+    with no model at all.
+  - **Cached models for the retired provider blocked discovery.** The REPL only
+    re-discovers when its cache is empty or a day old, so leftover rows read as
+    "populated" and the providers that replaced it showed zero models. They are
+    purged on migration.
+
+  The notice is also retained for a UI to display rather than only logged: the
+  REPL clears the terminal immediately after loading, and the desktop emits
+  from a process with nothing to draw on. Both desktop and browser sync now
+  report what a pre-upgrade blob had removed from it, instead of saying only
+  "Applied" — the CLI, desktop and web restore paths all explain it now, so
+  none of them is the one place a key vanishes unannounced.
+
+  **The desktop explains the migration whether or not setup reopens.** The
+  notice was routed only into the onboarding screen, which appears solely when
+  *nothing* usable is left — but the common case is a provider removed while
+  others remain, where onboarding never opens and the one-shot notice was
+  consumed and discarded. It now also shows as a dismissible bar in the normal
+  app shell, so a vanished key or a reset tier pin is explained in the case
+  that affects most people.
+
+  **A rejected setup no longer closes anyway.** Refusing to mark onboarding
+  complete happened in the Electron main process, while the wizard's own Redux
+  state closed the screen 1.2 seconds later regardless — so the guard only took
+  effect after an app restart and the live window walked into providerless
+  chat. The completion decision is returned to the renderer and the wizard
+  honours it, staying open with a reason when a choice leaves nothing usable.
+
+  **Desktop onboarding can now save the keyless options it advertises.**
+  `cascade:setConfig` only wrote a provider when an API key was present, so
+  picking Ollama — described in the wizard as "no API key needed" — saved
+  nothing, while the "setup finished" flag was written regardless. The wizard
+  therefore claimed success for a run that changed nothing. Keyless types are
+  saved without a key now, and completion is recorded only when the config can
+  actually serve a run, so "Auto" (which maps to no provider at all) no longer
+  closes setup over an empty list.
+
+  **Stale cached models are cleared even when nothing was migrated.** The purge
+  was gated on a migration having fired, which missed the person who had
+  already deleted the provider from their config before upgrading: no
+  migration, but the rows were still in the database, and the REPL treats any
+  non-empty, non-stale cache as authoritative — so the providers they *did*
+  have showed no models for a day. Rows for known retired types are now cleared
+  on every load.
+
+  **The desktop reopens setup when the migration leaves it with nothing.** Its
+  "onboarding finished" flag recorded that setup was completed once; it said
+  nothing about whether the provider chosen then still exists. So a desktop
+  install whose only provider was GitHub Models opened straight into the app
+  with no provider, no wizard, and no explanation. The flag is now combined
+  with the same "is anything usable?" check the CLI makes, so setup reopens
+  whenever there is nothing to run with — whatever emptied the list — and the
+  migration notice is shown on that screen, next to the thing the user is being
+  asked to redo.
+
+  The notice now reaches the CLI as a startup message inside the REPL rather
+  than a console line the screen clear erases a moment later, and a vault whose
+  cleaned copy cannot be written back still returns the keys it just parsed —
+  a refused `localStorage` write used to discard every provider for the
+  session, which is a far worse outcome than migrating again next load.
+
+  And the hosted server no longer fails a run outright because the client is
+  older than it is. A browser tab left open across a deploy keeps sending its
+  in-memory provider list until the page is reloaded, and the localStorage
+  migration only runs in freshly loaded assets — so the narrowed enum rejected
+  every run from that tab even when it also carried a working provider. The
+  retired type is filtered out of the payload before validation instead. A
+  request whose *only* provider was retired is still rejected: the filter runs
+  before the "at least one" check, so "nothing left to run with" remains an
+  error rather than becoming a silent empty run.
+
+- **An Anthropic OAuth login no longer reads as "no providers configured".**
+  `cascade link` stores an adopted subscription token in `authToken`, and the
+  Anthropic provider accepts it as readily as an API key — but the shared "is
+  anything usable?" check counted only `apiKey`. So an install whose single
+  credential came from `cascade link` was treated as unconfigured everywhere
+  that check is asked: `cascade run` aborted with "No providers configured. Run
+  `cascade init` first", the REPL relaunched the setup wizard on every start,
+  and the desktop app now reopened its full-screen wizard over a config that
+  runs fine. A token counts as a credential.
+
+- **A second config load no longer inherits the first one's migration.** The
+  "what did this load migrate out?" flag was set but never reset, and two
+  places read it as a statement about the load in progress. `startRepl()`
+  reloads through the same config manager after its setup wizard, so the
+  migration was announced a second time over a file that was already clean —
+  and, worse, an empty provider list on that later load was read as "emptied by
+  the retirement", which suppresses the keyless Ollama fallback. The same
+  instance therefore behaved differently from a freshly constructed one on
+  identical files. It is now reset on entry to every load.
+
+- **A sync pull no longer claims it reset a tier pin it left alone.** Stripping
+  a dead pin out of the incoming bundle is not the same as clearing it in the
+  result: the merge is `{ ...config.models, ...bundle.models }`, so deleting an
+  incoming key just lets the receiving device's own pin for that tier through.
+  Keeping that local pin is right — it is still valid, and discarding it
+  because a stale remote snapshot happened to name a dead provider for the same
+  tier would be data loss caused by garbage input — but the CLI and desktop
+  then announced "reset T1 to Auto" over a pin that was still in place and
+  still in effect. The report is now derived from the merged result, and a pin
+  that survives the merge still naming a retired provider is cleared there,
+  since that one is dead whichever side it arrived from. Native-only: the
+  browser's sync bundle carries no tier pins.
+
+- **A reopened desktop setup no longer forgets your workspace.** The wizard
+  started its directory field blank, which was right when it only ever ran on a
+  first launch — but it now reopens on configured machines when a migration
+  empties the provider list. Its first save fires from the key-verification
+  step, *before* the workspace question is even shown, so the blank overwrote
+  the stored directory and the next launch silently fell back to the home
+  directory. The field is seeded from the existing workspace, and a blank value
+  is no longer written over a saved one on either side of the IPC boundary.
+
 ## 0.70.0 - 2026-08-06
 
 ### Added

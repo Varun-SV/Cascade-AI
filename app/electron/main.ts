@@ -60,7 +60,6 @@ function mapProvider(id: string): { type: string | null; baseUrl?: string } {
     case 'anthropic': return { type: 'anthropic' };
     case 'google': case 'gemini': return { type: 'gemini' };
     case 'groq': return { type: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1' };
-    case 'github-models': return { type: 'github-models' };
     case 'openai-compatible': return { type: 'openai-compatible' };
     case 'ollama': return { type: 'ollama' };
     default: return { type: null };
@@ -70,7 +69,7 @@ function mapProvider(id: string): { type: string | null; baseUrl?: string } {
 // ─── Backend ─────────────────────────────────────────────────────────────────
 // Resolve the cascade-ai core package (built CommonJS output). In dev it lives at
 // the repo's ../dist; in a packaged app it's bundled under resources/cascade-core.
-function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response> } {
+function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined) => boolean; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response> } {
   // Dev: the repo's external-deps build (node_modules resolves the requires).
   // Packaged: the self-contained `desktop-core.cjs` bundle (no node_modules to
   // resolve from — every JS dep is bundled in; only native modules like
@@ -386,13 +385,26 @@ function registerIPC(): void {
       const meta = loadDesktopMeta();
       const provider = (meta.provider as string) ?? '';
       const workspace = (meta.workspace as string) ?? '';
-      const onboardingDone = Boolean(meta.onboarding_done);
+      // Derived, not just read back. The stored flag records that onboarding
+      // was COMPLETED once; it says nothing about whether the provider chosen
+      // then still exists. A retirement migration can empty the list under a
+      // finished install, and trusting the flag alone opens the app with no
+      // provider, no wizard and no explanation. Asking the same question the
+      // CLI asks (hasUsableProvider) reopens onboarding exactly when there is
+      // nothing to run with, whatever emptied it.
+      const { hasUsableProvider } = loadCore();
+      const onboardingDone = Boolean(meta.onboarding_done)
+        && hasUsableProvider(cascadeConfig?.providers);
+      // Surfaced here because the Electron main process has no UI of its own:
+      // ConfigManager only logs the migration to a console nobody reads, so
+      // the renderer has to be told why the provider vanished.
+      const migrationNotice = configManager?.takeRetiredNotice?.() ?? undefined;
       let apiKey = '';
       const { type } = mapProvider(provider);
       if (type && cascadeConfig?.providers) {
         apiKey = cascadeConfig.providers.find((p: { type: string; apiKey?: string }) => p.type === type)?.apiKey ?? '';
       }
-      return { provider, apiKey, workspace, onboardingDone };
+      return { provider, apiKey, workspace, onboardingDone, migrationNotice };
     } catch {
       return { provider: '', apiKey: '', workspace: '', onboardingDone: false };
     }
@@ -400,7 +412,11 @@ function registerIPC(): void {
 
   ipcMain.handle('cascade:setConfig', async (_e, cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string }) => {
     try {
-      saveDesktopMeta({ provider: cfg.provider, workspace: cfg.workspace, onboarding_done: true });
+      // `onboarding_done` is written AFTER the provider write below, not
+      // before, and only when something usable actually landed. Marking it
+      // done unconditionally claimed success for a wizard run that saved
+      // nothing — the user picked Ollama, no provider was written, and the
+      // wizard simply returned on the next launch with no explanation.
       // Write the key into the live Cascade config (same object the running
       // DashboardServer holds), then persist it — the next chat run picks it up
       // immediately with no backend restart.
@@ -409,20 +425,59 @@ function registerIPC(): void {
       // Prefer a user-supplied base URL (Azure / OpenAI-compatible endpoint) over
       // the provider's built-in default — onboarding used to drop it entirely.
       const baseUrl = cfg.baseUrl?.trim() || mapped.baseUrl;
-      if (type && cfg.apiKey && cascadeConfig && configManager) {
+      // Ollama and a bare openai-compatible endpoint are legitimately
+      // KEYLESS — the wizard advertises Ollama as "no API key needed" — so
+      // requiring cfg.apiKey silently discarded exactly the two choices a
+      // user with no keys can make. This mirrors the SDK's own
+      // KEY_OPTIONAL_PROVIDER_TYPES.
+      const keyOptional = type === 'ollama' || type === 'openai-compatible';
+      if (type && (cfg.apiKey || keyOptional) && cascadeConfig && configManager) {
         if (!Array.isArray(cascadeConfig.providers)) cascadeConfig.providers = [];
         const existing = cascadeConfig.providers.find((p: { type: string }) => p.type === type);
         if (existing) {
           existing.apiKey = cfg.apiKey;
           if (baseUrl) existing.baseUrl = baseUrl;
         } else {
-          cascadeConfig.providers.push({ type, apiKey: cfg.apiKey, ...(baseUrl ? { baseUrl } : {}) });
+          cascadeConfig.providers.push({
+            type,
+            ...(cfg.apiKey ? { apiKey: cfg.apiKey } : {}),
+            ...(baseUrl ? { baseUrl } : {}),
+          });
         }
         await configManager.save();
       }
+
+      // Only now, and only if the config can actually serve a run. "Auto" maps
+      // to no provider type at all, so completing on it would leave an empty
+      // list behind a "setup finished" flag — the exact combination that used
+      // to open the app into a dead state.
+      const { hasUsableProvider } = loadCore();
+      const onboardingDone = hasUsableProvider(cascadeConfig?.providers);
+      // Persisted either way: the choice is remembered so the wizard is not
+      // re-answered from scratch, but onboarding stays OPEN when nothing
+      // usable landed.
+      // A BLANK workspace is omitted, not written. saveDesktopMeta merges, so
+      // leaving the key out keeps whatever the install already had. The wizard
+      // calls setConfig twice — once from handleVerify, BEFORE the workspace
+      // step is even shown — so an unconditional write erased the existing
+      // directory the moment a reopened setup verified a key, and the next
+      // launch silently fell back to the home directory.
+      const workspace = cfg.workspace?.trim();
+      saveDesktopMeta({
+        provider: cfg.provider,
+        ...(workspace ? { workspace } : {}),
+        onboarding_done: onboardingDone,
+      });
+      // RETURNED, not just persisted. The renderer holds onboarding state in
+      // its own Redux store and was closing the wizard regardless — so this
+      // guard previously took effect only after an app restart, and the
+      // current window walked straight into providerless chat.
+      return { onboardingDone };
     } catch (err) {
       console.warn('[main] setConfig failed:', err);
     }
+    // A failure above leaves onboarding open rather than claiming success.
+    return { onboardingDone: false };
   });
 
   // Settings panel — a backend-independent path to read/write keys, per-tier

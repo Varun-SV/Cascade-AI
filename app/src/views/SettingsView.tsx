@@ -61,7 +61,6 @@ const TIER_PROVIDERS: ProviderDef[] = [
   { id: 'gemini', label: 'Google Gemini', models: ['gemini-2.0-flash', 'gemini-2.0-pro'] },
   // No static catalog (models.github.ai's catalog is fully live-discovered),
   // same treatment as azure/openai-compatible/ollama below.
-  { id: 'github-models', label: 'GitHub Models', models: [], freeText: true },
   { id: 'openai-compatible', label: 'OpenAI-Compatible', models: [], freeText: true },
   { id: 'ollama', label: 'Ollama (local)', models: [], freeText: true },
 ];
@@ -117,7 +116,6 @@ export function SettingsView({ socket }: Props) {
   const [anthropicKey, setAnthropicKey] = useState('');
   const [openaiKey, setOpenaiKey] = useState('');
   const [geminiKey, setGeminiKey] = useState('');
-  const [githubModelsKey, setGithubModelsKey] = useState('');
   const [providersWithKey, setProvidersWithKey] = useState<string[]>([]);
   // OpenAI-compatible (vLLM / llama.cpp / LM Studio …) key + endpoint, and Ollama endpoint.
   const [ocKey, setOcKey] = useState('');
@@ -264,7 +262,7 @@ export function SettingsView({ socket }: Props) {
   const save = async () => {
     setSaveError('');
     const payload = {
-      keys: { anthropic: anthropicKey || undefined, openai: openaiKey || undefined, gemini: geminiKey || undefined, 'github-models': githubModelsKey || undefined, 'openai-compatible': ocKey || undefined },
+      keys: { anthropic: anthropicKey || undefined, openai: openaiKey || undefined, gemini: geminiKey || undefined, 'openai-compatible': ocKey || undefined },
       models: { t1: composeOverride(t1), t2: composeOverride(t2), t3: composeOverride(t3) },
       budget: {
         maxCostPerRun: maxCost ? parseFloat(maxCost) : undefined,
@@ -372,7 +370,6 @@ export function SettingsView({ socket }: Props) {
                 { id: 'anthropic', label: 'Anthropic', val: anthropicKey, set: setAnthropicKey, placeholder: 'sk-ant-…' },
                 { id: 'openai', label: 'OpenAI', val: openaiKey, set: setOpenaiKey, placeholder: 'sk-…' },
                 { id: 'gemini', label: 'Google', val: geminiKey, set: setGeminiKey, placeholder: 'AIza…' },
-                { id: 'github-models', label: 'GitHub Models', val: githubModelsKey, set: setGithubModelsKey, placeholder: 'github_pat_… (fine-grained PAT, "models: read")' },
               ].map(({ id, label, val, set, placeholder }) => (
                 <div key={label}>
                   <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>

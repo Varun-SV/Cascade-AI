@@ -68,7 +68,7 @@ contextBridge.exposeInMainWorld('cascade', {
     onboardingDone: boolean;
   }>,
   setConfig: (cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string }) =>
-    ipcRenderer.invoke('cascade:setConfig', cfg) as Promise<void>,
+    ipcRenderer.invoke('cascade:setConfig', cfg) as Promise<{ onboardingDone: boolean }>,
 
   // Settings panel: backend-independent read/write of keys, per-tier models,
   // budget (incl. daily/session caps), and the allowlisted "advanced" knobs.
@@ -194,7 +194,7 @@ contextBridge.exposeInMainWorld('cascade', {
     // Key sync (E2E-encrypted): passphrase stays in the main process; only
     // ciphertext leaves the machine.
     syncPush: (passphrase: string) => ipcRenderer.invoke('cloud:syncPush', passphrase) as Promise<{ ok: boolean; error?: string; version?: number }>,
-    syncPull: (passphrase: string) => ipcRenderer.invoke('cloud:syncPull', passphrase) as Promise<{ ok: boolean; error?: string; empty?: boolean; applied?: boolean }>,
+    syncPull: (passphrase: string) => ipcRenderer.invoke('cloud:syncPull', passphrase) as Promise<{ ok: boolean; error?: string; empty?: boolean; applied?: boolean; skipped?: { removed: string[]; clearedPins: string[] } }>,
   },
 
   // MCP servers — connect a remote server via OAuth (loopback in the main

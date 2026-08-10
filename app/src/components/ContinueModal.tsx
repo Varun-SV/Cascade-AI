@@ -250,7 +250,18 @@ function SyncBlock() {
       const r = kind === 'push' ? await api.syncPush(pass) : await api.syncPull(pass);
       if (!r.ok) { setStatus(r.error || 'Sync failed.'); return; }
       if (kind === 'push') setStatus(`Synced to your account${'version' in r && r.version ? ` (v${r.version})` : ''}.`);
-      else setStatus('empty' in r && r.empty ? 'Nothing synced to your account yet.' : 'Applied your synced settings here.');
+      else if ('empty' in r && r.empty) setStatus('Nothing synced to your account yet.');
+      else {
+        // A blob pushed by an older version can carry settings this build no
+        // longer supports; applySyncBundle drops them. Saying only "Applied"
+        // would let a provider or a pinned tier disappear with no explanation
+        // — which is what the cleanup reporting exists to prevent.
+        const skipped = 'skipped' in r ? r.skipped : undefined;
+        const parts: string[] = [];
+        if (skipped?.removed.length) parts.push(`skipped ${skipped.removed.join(', ')} (no longer supported)`);
+        if (skipped?.clearedPins.length) parts.push(`reset ${skipped.clearedPins.map((t) => t.toUpperCase()).join('/')} to Auto`);
+        setStatus(parts.length ? `Applied your synced settings here — ${parts.join('; ')}.` : 'Applied your synced settings here.');
+      }
     } catch (e) {
       setStatus(e instanceof Error ? e.message : 'Sync failed.');
     } finally {

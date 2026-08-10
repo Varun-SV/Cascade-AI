@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Check, Eye, EyeOff, ChevronRight, FolderOpen } from 'lucide-react';
 import { useAppDispatch, setOnboardingDone, setWorkspacePath } from '../store/index.js';
 
@@ -46,12 +46,6 @@ const PROVIDERS: Provider[] = [
     keyPlaceholder: 'gsk_...',
   },
   {
-    id: 'github-models',
-    name: 'GitHub Models',
-    description: 'OpenAI, Meta, DeepSeek & more — via your GitHub/Copilot account',
-    keyPlaceholder: 'github_pat_... (fine-grained, "models: read")',
-  },
-  {
     id: 'openai-compatible',
     name: 'OpenAI-Compatible',
     description: 'Azure, Mistral, Together, Perplexity, LM Studio…',
@@ -67,7 +61,8 @@ const PROVIDERS: Provider[] = [
   },
 ];
 
-export function OnboardingView() {
+export function OnboardingView({ notice, initialWorkspace }: { notice?: string; initialWorkspace?: string } = {}) {
+  const [saveError, setSaveError] = useState<string | null>(null);
   const dispatch = useAppDispatch();
   const [step, setStep] = useState<Step>('welcome');
   const [selectedProvider, setSelectedProvider] = useState<Provider | null>(null);
@@ -76,7 +71,22 @@ export function OnboardingView() {
   const [showKey, setShowKey] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [verifyError, setVerifyError] = useState('');
-  const [workspace, setWorkspace] = useState('');
+  // Seeded from the install's existing workspace, not blank. Onboarding is no
+  // longer only a first run: a retirement migration reopens it on a configured
+  // machine, and starting the field empty made the user re-answer a question
+  // they had already answered — or, if they skipped past it, silently reset
+  // their workspace to the home directory.
+  const [workspace, setWorkspace] = useState(initialWorkspace ?? '');
+  // Set once the user edits the field, so a late-arriving `initialWorkspace`
+  // can seed an untouched field without overwriting what they just typed.
+  const workspaceTouched = useRef(false);
+  useEffect(() => {
+    if (initialWorkspace && !workspaceTouched.current) setWorkspace(initialWorkspace);
+  }, [initialWorkspace]);
+  const editWorkspace = (value: string) => {
+    workspaceTouched.current = true;
+    setWorkspace(value);
+  };
   const [saving, setSaving] = useState(false);
 
   const handleProviderContinue = () => {
@@ -107,21 +117,36 @@ export function OnboardingView() {
 
   const handleFinish = async () => {
     setSaving(true);
+    // Default false: if the bridge is missing or the call throws, nothing was
+    // saved, and closing the wizard on that would drop the user into a chat
+    // with no provider.
+    let done = false;
     try {
       if (window.cascade?.setConfig) {
-        await window.cascade.setConfig({ provider: selectedProvider?.id ?? '', apiKey, workspace, baseUrl: baseUrl || undefined });
+        const r = await window.cascade.setConfig({ provider: selectedProvider?.id ?? '', apiKey, workspace, baseUrl: baseUrl || undefined });
+        done = Boolean(r?.onboardingDone);
       }
-    } catch { /* ignore */ }
-    dispatch(setWorkspacePath(workspace));
+    } catch { /* leave `done` false — see above */ }
+    // Guarded for the same reason main's setConfig omits a blank workspace:
+    // dispatching '' here would blank the renderer's path while the main
+    // process kept the real one, and the two would disagree until restart.
+    if (workspace) dispatch(setWorkspacePath(workspace));
+    setSaving(false);
+    if (!done) {
+      // "Auto" maps to no provider at all, and a keyless pick can fail to
+      // persist. Say so and stay put rather than closing over an empty list.
+      setSaveError('That choice did not leave a usable provider configured. Pick a provider and enter its key, or choose Ollama if you run it locally.');
+      return;
+    }
+    setSaveError(null);
     setStep('done');
     setTimeout(() => dispatch(setOnboardingDone(true)), 1200);
-    setSaving(false);
   };
 
   const browseWorkspace = async () => {
     if (window.cascade?.selectDirectory) {
       const dir = await window.cascade.selectDirectory();
-      if (dir) setWorkspace(dir);
+      if (dir) editWorkspace(dir);
     }
   };
 
@@ -137,6 +162,29 @@ export function OnboardingView() {
       animation: 'fadeIn 0.4s var(--ease)',
       zIndex: 1000,
     }}>
+      {saveError && (
+        <div role="alert" style={{
+          maxWidth: 520, marginBottom: 16, padding: '10px 14px',
+          border: '1px solid var(--danger, #b4443a)', borderRadius: 10,
+          background: 'var(--bg-elev)', color: 'var(--danger, #b4443a)',
+          fontSize: 13, lineHeight: 1.5, textAlign: 'center',
+        }}>
+          {saveError}
+        </div>
+      )}
+
+      {/* Why you are seeing this again, when you had already finished setup. */}
+      {notice && (
+        <div role="status" style={{
+          maxWidth: 520, marginBottom: 24, padding: '10px 14px',
+          border: '1px solid var(--border)', borderRadius: 10,
+          background: 'var(--bg-elev)', color: 'var(--text-dim)',
+          fontSize: 13, lineHeight: 1.5, textAlign: 'center',
+        }}>
+          {notice}
+        </div>
+      )}
+
       {/* Logo */}
       <div style={{ marginBottom: 32, textAlign: 'center' }}>
         <div style={{
@@ -348,7 +396,7 @@ export function OnboardingView() {
                 <input
                   type="text"
                   value={workspace}
-                  onChange={(e) => setWorkspace(e.target.value)}
+                  onChange={(e) => editWorkspace(e.target.value)}
                   placeholder="/Users/you/projects"
                   style={{
                     flex: 1, padding: '9px 12px',
@@ -372,7 +420,7 @@ export function OnboardingView() {
                 </button>
               </div>
               <button
-                onClick={() => setWorkspace(window.navigator.userAgent.includes('Win') ? 'C:\\Users' : (process?.env?.HOME ?? '/home'))}
+                onClick={() => editWorkspace(window.navigator.userAgent.includes('Win') ? 'C:\\Users' : (process?.env?.HOME ?? '/home'))}
                 style={{
                   marginTop: 6, background: 'none', border: 'none',
                   color: 'var(--accent)', fontSize: 11.5, cursor: 'pointer', padding: 0,

@@ -87,7 +87,7 @@ interface CoreExports {
   CloudClient: CloudClientCtor;
   DEFAULT_CLOUD_URL: string;
   gatherSyncBundle: (config: Cfg) => unknown;
-  applySyncBundle: (bundle: unknown, config: Cfg) => Cfg;
+  applySyncBundle: (bundle: unknown, config: Cfg, cleanup?: { removed: string[]; clearedPins: string[] }) => Cfg;
   encryptSyncBlob: (data: unknown, passphrase: string) => Promise<EncBlob>;
   decryptSyncBlob: (blob: EncBlob, passphrase: string) => Promise<unknown>;
   connectMcpWithLoopbackOAuth: (opts: { serverUrl: string; store: McpFileStore; openUrl: (u: string) => void; clientName?: string }) => Promise<unknown>;
@@ -299,7 +299,11 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
     try {
       const { decryptSyncBlob, applySyncBundle } = core();
       const bundle = await decryptSyncBlob(blob, pass);
-      const merged = applySyncBundle(bundle, cfg);
+      // A blob pushed by an older build can carry a provider this version no
+      // longer supports. applySyncBundle strips it; collect what went so the
+      // renderer can say so rather than a key appearing to vanish.
+      const cleanup = { removed: [] as string[], clearedPins: [] as string[] };
+      const merged = applySyncBundle(bundle, cfg, cleanup);
       // Apply onto the live config object in place so the running backend picks
       // it up without a restart (mirrors cascade:updateSettings), then persist.
       cfg.providers = merged.providers;
@@ -321,7 +325,13 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
       cfg.extendedContext = merged.extendedContext;
       cfg.autonomy = merged.autonomy;
       await hooks.persistConfig();
-      return { ok: true, applied: true };
+      return {
+        ok: true,
+        applied: true,
+        ...(cleanup.removed.length || cleanup.clearedPins.length
+          ? { skipped: { removed: cleanup.removed, clearedPins: cleanup.clearedPins } }
+          : {}),
+      };
     } catch {
       // AES-GCM's auth-tag check is what fails on a wrong passphrase.
       return { ok: false, error: 'Could not decrypt — check your passphrase.' };

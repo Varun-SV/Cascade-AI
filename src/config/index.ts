@@ -13,6 +13,14 @@ import { loadCascadeMd, type CascadeMdContent } from './cascade-md.js';
 import { MemoryStore } from '../memory/store.js';
 import { validateConfig } from './validate.js';
 import { loadGlobalCredentials, mergeGlobalCredentials, saveGlobalCredentials } from './global-credentials.js';
+import {
+  describeCleanup,
+  didCleanupChangeAnything,
+  filterRetiredCredentials,
+  RETIRED_PROVIDER_TYPES,
+  stripRetiredProviders,
+  type RetiredProviderCleanup,
+} from './retired-providers.js';
 import { disambiguateMcpServerNames, type McpServerRename } from '../tools/tool-name.js';
 import {
   CASCADE_CONFIG_FILE,
@@ -28,9 +36,16 @@ import {
 // points (src/cli/index.ts) so they can't drift out of sync with what the
 // setup wizard actually allows to be saved as a complete config.
 const KEY_OPTIONAL_PROVIDER_TYPES = new Set(['ollama', 'openai-compatible']);
-export function hasUsableProvider(providers: Array<{ type: string; apiKey?: string }> | undefined): boolean {
+export function hasUsableProvider(
+  providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined,
+): boolean {
   if (!providers?.length) return false;
-  return providers.some((p) => KEY_OPTIONAL_PROVIDER_TYPES.has(p.type) || !!p.apiKey);
+  // `authToken` counts as a credential, not just `apiKey`. `cascade link`
+  // stores an adopted Anthropic OAuth token there (cli/commands/link.ts) and
+  // AnthropicProvider.isAvailable() runs on it happily — so ignoring it here
+  // declared a working install unconfigured: `cascade run` aborted with "No
+  // providers configured" and the desktop reopened the full-screen wizard.
+  return providers.some((p) => KEY_OPTIONAL_PROVIDER_TYPES.has(p.type) || !!p.apiKey || !!p.authToken);
 }
 
 export class ConfigManager {
@@ -41,6 +56,30 @@ export class ConfigManager {
   private cascadeMd: CascadeMdContent | null = null;
   private workspacePath: string;
   private globalDir: string;
+  /**
+   * What THIS load migrated out, if anything. Strictly per-load state: reset
+   * at the top of every `load()`, because two places read it as a statement
+   * about the load in progress — `injectEnvKeys()` asks whether an empty
+   * provider list was emptied by a retirement, and the end of `load()` warns
+   * and builds the user-facing notice from it. Left set, a second `load()` on
+   * the same instance (`startRepl()` does one after its setup wizard) would
+   * re-announce a migration that already happened and suppress the Ollama
+   * fallback for a list that is empty for some unrelated reason.
+   */
+  private retiredCleanup?: RetiredProviderCleanup;
+  /**
+   * Human-readable migration notice held for a UI to display. `console.warn`
+   * is not sufficient: the REPL clears the TTY immediately after load(), and
+   * the desktop emits from the main process where nothing is rendered.
+   */
+  private pendingRetiredNotice?: string;
+
+  /** Returns the pending migration notice once, then forgets it. */
+  takeRetiredNotice(): string | undefined {
+    const n = this.pendingRetiredNotice;
+    this.pendingRetiredNotice = undefined;
+    return n;
+  }
 
   /** `globalDirOverride` exists for tests — never point it at the real home dir there. */
   constructor(workspacePath = process.cwd(), globalDirOverride?: string) {
@@ -49,6 +88,8 @@ export class ConfigManager {
   }
 
   async load(): Promise<void> {
+    // Note: loadConfig() resets `retiredCleanup` on entry, so everything below
+    // reads this load's result and never a previous one's.
     this.config = await this.loadConfig();
     // Desktop and CLI share this one config file, and only the desktop's OAuth
     // connect flow ever checked for a colliding sanitized tool prefix —
@@ -79,18 +120,70 @@ export class ConfigManager {
     this.cascadeMd = await loadCascadeMd(this.workspacePath);
     this.keystore = new Keystore(path.join(this.globalDir, GLOBAL_KEYSTORE_FILE));
     this.store = new MemoryStore(path.join(this.workspacePath, CASCADE_DB_FILE));
-    await this.injectEnvKeys();
     // Fill in machine-global credentials (~/.cascade-ai/credentials.json) so
     // keys entered once are available in EVERY workspace — previously keys
     // lived only in the workspace config, so pointing the desktop app (or CLI)
     // at a different folder silently "forgot" them all. A workspace entry that
     // carries its own key still wins (per-project override).
-    this.config.providers = mergeGlobalCredentials(this.config.providers, loadGlobalCredentials(this.globalDir));
+    //
+    // Filter the global store as well as the workspace file. This merge runs
+    // AFTER validation and never passes through the schema, so a retired entry
+    // in ~/.cascade-ai/credentials.json would otherwise be reinstated in
+    // memory moments after being cleaned off disk — and would come back on
+    // every load, in every workspace.
+    const globalCreds = filterRetiredCredentials(loadGlobalCredentials(this.globalDir));
+    if (globalCreds.removed.length > 0) {
+      // Best-effort, like save()'s own global-store sync: an unwritable home
+      // must not abort startup when the in-memory list is already clean.
+      try {
+        saveGlobalCredentials(this.globalDir, globalCreds.kept);
+      } catch (err) {
+        console.warn(`Could not rewrite the global credential store: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      this.retiredCleanup = {
+        removed: [...new Set([...(this.retiredCleanup?.removed ?? []), ...globalCreds.removed])],
+        clearedPins: this.retiredCleanup?.clearedPins ?? [],
+      };
+    }
+    await this.injectEnvKeys();
+    this.config.providers = mergeGlobalCredentials(this.config.providers, globalCreds.kept);
+
+    // Purge AFTER both stores have been cleaned, not at store construction:
+    // a retired provider that existed ONLY in ~/.cascade-ai/credentials.json
+    // is not known until the filter above runs, and purging earlier would skip
+    // exactly that case. The model cache outlives the provider, and the REPL's
+    // loadCache() only re-discovers when the cache is EMPTY or >24h old — so
+    // leftover rows read as "populated" and the providers that replaced it
+    // show zero models until they age out.
+    // Unconditional over every KNOWN retired type, not just the ones this load
+    // happened to migrate. Someone who deleted the provider from their config
+    // before upgrading has no migration to trigger on, yet their cache still
+    // holds the rows — and the REPL reads any non-empty, non-stale cache as
+    // authoritative, so the providers they DO have show zero models until the
+    // 24-hour expiry. A delete of rows that are not there costs one no-op
+    // statement per retired type.
+    for (const type of Object.keys(RETIRED_PROVIDER_TYPES)) {
+      try { this.store.purgeCachedModelsForRetiredProvider(type); } catch { /* the cache is disposable */ }
+    }
+
     await this.ensureDefaultIdentity();
     // Persist the rename so it sticks — otherwise the fix applies for this
     // process only and the file on disk (and the next process to read it)
     // still has the collision.
+    //
+    // The retired-provider migration is deliberately NOT saved here: it was
+    // already written from the raw file inside loadConfig(), before this
+    // config was enriched with env and machine-global credentials. Saving it
+    // here would push those secrets into the workspace file (see loadConfig).
     if (mcpNamesChanged) await this.save();
+    if (this.retiredCleanup) {
+      // console.warn alone is not enough — startRepl() clears the TTY right
+      // after load() returns, and the desktop main process has no UI at all.
+      // Keep the notice so each surface can show it once it has somewhere to
+      // draw; the log line stays for headless runs.
+      console.warn(describeCleanup(this.retiredCleanup));
+      this.pendingRetiredNotice = describeCleanup(this.retiredCleanup);
+    }
   }
 
   getConfig(): CascadeConfig {
@@ -148,7 +241,6 @@ export class ConfigManager {
       // `models: read` scope this provider needs. Adopting it would wire up a
       // provider that 403s on its first real call — a confusing failure for
       // something that is meant to be explicit opt-in BYOK.
-      'github-models': 'GITHUB_MODELS_TOKEN',
     };
     const envKey = envMap[provider];
     if (envKey && process.env[envKey]) return process.env[envKey];
@@ -161,10 +253,44 @@ export class ConfigManager {
   }
 
   private async loadConfig(): Promise<CascadeConfig> {
+    // Reset on entry, not after the notice is built at the end of load(), so
+    // the flag cannot outlive the load that set it even if that load throws
+    // part way through. It lives here rather than in load() because this is
+    // its only other writer — and because assigning `undefined` in load()
+    // narrows the property to `never` for the reads further down it.
+    this.retiredCleanup = undefined;
     const configPath = path.join(this.workspacePath, CASCADE_CONFIG_FILE);
     try {
       const raw = await fs.readFile(configPath, 'utf-8');
-      return validateConfig(JSON.parse(raw) as unknown);
+      const parsed = JSON.parse(raw) as unknown;
+      // BEFORE validateConfig, not after: the schema no longer accepts a
+      // retired provider type, so validating first turns an upgrade into a
+      // hard CascadeConfigError with no path to repair (see
+      // retired-providers.ts). Stripping first lets the file load, and
+      // `retiredCleanup` tells load() to persist the cleaned version so the
+      // next process does not repeat the work.
+      const cleanup = stripRetiredProviders(parsed);
+      if (didCleanupChangeAnything(cleanup)) {
+        this.retiredCleanup = cleanup;
+        // Persist HERE, from the raw parsed file, not via save() at the end of
+        // load(). By then `this.config` has been enriched by injectEnvKeys()
+        // and mergeGlobalCredentials(), and save() serializes the whole object
+        // — so writing there would copy environment keys and machine-global
+        // credentials (kept 0600 in ~/.cascade-ai) into a workspace file that
+        // may be 0644, for projects that never had them. The migration must
+        // not be a credential-exfiltration path.
+        //
+        // Best-effort: a read-only config directory (a container mount, a
+        // locked-down home) must not abort load(). The in-memory config is
+        // already clean and the run can proceed; we simply migrate again next
+        // launch. Matches how save() already treats an unwritable global store.
+        try {
+          await fs.writeFile(configPath, JSON.stringify(parsed, null, 2), 'utf-8');
+        } catch (err) {
+          console.warn(`Could not persist the retired-provider migration: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      return validateConfig(parsed);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         return validateConfig({});
@@ -174,16 +300,34 @@ export class ConfigManager {
   }
 
   private async injectEnvKeys(): Promise<void> {
-    const isFirstRun = this.config.providers.length === 0;
+    // Two different questions, previously conflated into one `isFirstRun`.
+    //
+    // "Is the list empty?" governs whether an environment key may seed a new
+    // provider entry — and that must stay true after a retirement, or a user
+    // whose only provider was retired but who has OPENAI_API_KEY exported ends
+    // up with NOTHING and a "No providers configured" exit, holding a perfectly
+    // usable credential.
+    //
+    // "Is this a genuine fresh install?" governs the keyless Ollama fallback
+    // only. After a retirement an empty list means "we just took your provider
+    // away", and appending Ollama there is actively harmful: hasUsableProvider()
+    // accepts it without checking the daemon exists, so both the setup wizard
+    // and the headless no-providers guard are skipped and the run reaches the
+    // router with no usable model.
+    // Both halves of the retirement cleanup — the workspace file (loadConfig)
+    // and the global credential store (filtered just above) — are accumulated
+    // into `retiredCleanup` BEFORE this runs. That ordering is load-bearing:
+    // when the retired provider lived only in ~/.cascade-ai, computing this
+    // any earlier saw an unset flag, called it a fresh install, and appended
+    // the keyless Ollama entry this branch exists to prevent.
+    const wasEmpty = this.config.providers.length === 0;
+    const emptiedByRetirement = wasEmpty && !!this.retiredCleanup;
 
     const envProviders: Array<{ env: string; type: CascadeConfig['providers'][0]['type'] }> = [
       { env: 'ANTHROPIC_API_KEY', type: 'anthropic' },
       { env: 'OPENAI_API_KEY', type: 'openai' },
       { env: 'GOOGLE_API_KEY', type: 'gemini' },
       { env: 'AZURE_OPENAI_KEY', type: 'azure' },
-      // See getApiKey() above for why this is GITHUB_MODELS_TOKEN and never
-      // the ambient GITHUB_TOKEN.
-      { env: 'GITHUB_MODELS_TOKEN', type: 'github-models' },
     ];
 
     for (const { env, type } of envProviders) {
@@ -191,14 +335,14 @@ export class ConfigManager {
       if (!key) continue;
       const existing = this.config.providers.find((p) => p.type === type);
       
-      if (!existing && isFirstRun) {
+      if (!existing && wasEmpty) {
         this.config.providers.push({ type, apiKey: key });
       } else if (existing && !existing.apiKey) {
         existing.apiKey = key;
       }
     }
 
-    if (isFirstRun && !this.config.providers.find((p) => p.type === 'ollama')) {
+    if (wasEmpty && !emptiedByRetirement && !this.config.providers.find((p) => p.type === 'ollama')) {
       this.config.providers.push({ type: 'ollama' });
     }
   }

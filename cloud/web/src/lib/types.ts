@@ -1,4 +1,4 @@
-export type ProviderType = 'anthropic' | 'openai' | 'gemini' | 'azure' | 'github-models' | 'openai-compatible' | 'ollama';
+export type ProviderType = 'anthropic' | 'openai' | 'gemini' | 'azure' | 'openai-compatible' | 'ollama';
 
 export interface ProviderConfig {
   type: ProviderType;

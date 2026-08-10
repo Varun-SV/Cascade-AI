@@ -12,6 +12,7 @@ import { spawn } from 'node:child_process';
 import { CloudClient, DEFAULT_CLOUD_URL, type CloudMessage } from '../../cloud/client.js';
 import { encryptJSON, decryptJSON } from '../../cloud/keysync-crypto.js';
 import { gatherSyncBundle, applySyncBundle, type SyncBundle } from '../../cloud/keysync.js';
+import { describeCleanup, didCleanupChangeAnything, type RetiredProviderCleanup } from '../../config/retired-providers.js';
 import { ConfigManager } from '../../config/index.js';
 
 function resolveServerUrl(flagServer?: string): string {
@@ -267,15 +268,32 @@ export async function syncPullCommand(): Promise<void> {
   console.log(chalk.magenta('\n  ◈ Apply your synced settings to this device\n'));
   const pass = await promptHidden('  Passphrase: ');
   if (!pass) { console.log(chalk.dim('\n  Cancelled.\n')); return; }
+  // Scoped to the decrypt alone. It used to wrap the apply as well, so a
+  // config-validation failure downstream was reported as "check your
+  // passphrase" — sending the user to re-enter a passphrase that was right.
+  let bundle: SyncBundle;
   try {
-    const bundle = await decryptJSON<SyncBundle>(blob, pass);
-    const cm = new ConfigManager(process.cwd());
-    await cm.load();
-    await cm.updateConfig(applySyncBundle(bundle, cm.getConfig()));
-    console.log(chalk.green('\n  ✓ Applied your synced settings. Your keys are ready here.\n'));
+    bundle = await decryptJSON<SyncBundle>(blob, pass);
   } catch {
     // AES-GCM's auth-tag check is what fails on a wrong passphrase.
     console.log(chalk.red('\n  Could not decrypt — check your passphrase and try again.\n'));
+    process.exitCode = 1;
+    return;
+  }
+  try {
+    const cm = new ConfigManager(process.cwd());
+    await cm.load();
+    const cleanup: RetiredProviderCleanup = { removed: [], clearedPins: [] };
+    await cm.updateConfig(applySyncBundle(bundle, cm.getConfig(), cleanup));
+    console.log(chalk.green('\n  ✓ Applied your synced settings. Your keys are ready here.\n'));
+    // Say what was dropped. A bundle pushed by an older version can carry a
+    // provider this build no longer supports; silently discarding it looks
+    // like the sync lost a key.
+    if (didCleanupChangeAnything(cleanup)) {
+      console.log(chalk.yellow(`  ${describeCleanup(cleanup)}\n`));
+    }
+  } catch (err) {
+    console.log(chalk.red(`\n  Could not apply your synced settings: ${err instanceof Error ? err.message : String(err)}\n`));
     process.exitCode = 1;
   }
 }

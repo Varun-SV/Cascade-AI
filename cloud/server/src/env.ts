@@ -72,7 +72,6 @@ const EnvSchema = z.object({
   // The CLI accepts either spelling for Gemini; GEMINI_API_KEY wins.
   GEMINI_API_KEY: z.string().optional(),
   GOOGLE_API_KEY: z.string().optional(),
-  GITHUB_MODELS_TOKEN: z.string().optional(),
   AZURE_OPENAI_KEY: z.string().optional(),
   AZURE_OPENAI_ENDPOINT: z.string().optional(),
   AZURE_OPENAI_DEPLOYMENT: z.string().optional(),

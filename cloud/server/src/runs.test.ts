@@ -297,36 +297,25 @@ describe('parseChatRunPayload', () => {
     expect(parsed.prompt).toBe('hi');
   });
 
-  it('accepts github-models as a provider type, with its owner-prefixed model field', () => {
-    const parsed = parseChatRunPayload({
-      prompt: 'hi',
-      providers: [{ type: 'github-models', apiKey: 'ghp_test', model: 'openai/gpt-4o' }],
-    });
-    expect(parsed.providers[0]).toEqual({ type: 'github-models', apiKey: 'ghp_test', model: 'openai/gpt-4o' });
-  });
-
-  it('accepts a maximal real KeyVault config: 5 single-instance types plus 2 Azure deployments', () => {
-    // Regression (Codex P2): KeyVault's SELECTABLE_TYPES offers 5 single-
-    // instance cloud types (anthropic, openai, gemini, github-models,
-    // openai-compatible) plus Azure, which alone supports multiple
-    // deployments (one array entry each). Adding github-models as a 5th
-    // single type grew the plausible maximum from 6 (4 singles + 2 Azure) to
-    // 7 (5 singles + 2 Azure) — a config KeyVault will happily save but that
-    // used to fail every chat:run at this Zod gate before ever reaching
-    // buildCloudConfig.
+  it('accepts a maximal real KeyVault config: 4 single-instance types plus 2 Azure deployments', () => {
+    // Regression (Codex P2): KeyVault's SELECTABLE_TYPES offers single-instance
+    // cloud types (anthropic, openai, gemini, openai-compatible) plus Azure,
+    // which alone supports multiple deployments (one array entry each). The
+    // plausible maximum is therefore 6 — a config KeyVault will happily save
+    // but that used to fail every chat:run at this Zod gate before ever
+    // reaching buildCloudConfig. This pins the bound to the real UI.
     const parsed = parseChatRunPayload({
       prompt: 'hi',
       providers: [
         { type: 'anthropic', apiKey: 'k' },
         { type: 'openai', apiKey: 'k' },
         { type: 'gemini', apiKey: 'k' },
-        { type: 'github-models', apiKey: 'k' },
         { type: 'openai-compatible', baseUrl: 'http://127.0.0.1:1/v1' },
         { type: 'azure', apiKey: 'k', baseUrl: 'https://a.openai.azure.com', deploymentName: 'dep-a' },
         { type: 'azure', apiKey: 'k', baseUrl: 'https://b.openai.azure.com', deploymentName: 'dep-b' },
       ],
     });
-    expect(parsed.providers).toHaveLength(7);
+    expect(parsed.providers).toHaveLength(6);
   });
 
   it('still rejects a providers array beyond the raised bound', () => {
@@ -632,5 +621,31 @@ describe('runChatTurn (stub-provider integration)', () => {
     ).rejects.toThrow(/Daily run limit reached/);
 
     expect(store.listConversations(user.id)).toEqual([]);
+  });
+});
+
+describe('ChatRunPayloadSchema — a client that predates a provider removal', () => {
+  it('ignores a retired provider instead of rejecting the whole run', () => {
+    // A browser tab open across the rollout keeps sending its in-memory list
+    // until the page is reloaded, and the localStorage migration only runs in
+    // freshly loaded assets. Rejecting the payload breaks every run from that
+    // tab even though it also carries a usable provider.
+    const parsed = parseChatRunPayload({
+      prompt: 'hi',
+      providers: [
+        { type: 'github-models', apiKey: 'dead' },
+        { type: 'anthropic', apiKey: 'sk-real' },
+      ],
+    });
+    expect(parsed.providers.map((p) => p.type)).toEqual(['anthropic']);
+  });
+
+  it('still rejects a payload whose only provider was retired', () => {
+    // Filtering happens before .min(1), so "nothing usable left" is still an
+    // error — the run genuinely has nothing to execute with.
+    expect(() => parseChatRunPayload({
+      prompt: 'hi',
+      providers: [{ type: 'github-models', apiKey: 'dead' }],
+    })).toThrow();
   });
 });

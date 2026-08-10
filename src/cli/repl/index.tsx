@@ -233,6 +233,15 @@ interface ReplProps {
   themeName: string;
   initialPrompt?: string;
   identityName?: string;
+  /**
+   * A config-migration notice to show once at startup.
+   *
+   * Passed in rather than logged by ConfigManager, because the CLI clears the
+   * TTY between load() and this component mounting — anything written to the
+   * console in between is erased before it can be read, which is exactly how a
+   * silently-removed provider goes unnoticed.
+   */
+  startupNotice?: string;
   /** Alternate-screen mode: no terminal scrollback, so history renders as an in-app transcript. */
   altScreen?: boolean;
 }
@@ -248,10 +257,6 @@ async function refreshModelCache(store: MemoryStore, providers: CascadeConfig['p
       else if (provider.type === 'anthropic') instance = new AnthropicProvider(provider, dummyModel);
       else if (provider.type === 'ollama') instance = new OllamaProvider(provider, dummyModel);
       else if (provider.type === 'openai-compatible') instance = new OpenAICompatibleProvider(provider, dummyModel);
-      else if (provider.type === 'github-models') {
-        const { GitHubModelsProvider } = await import('../../providers/github-models.js');
-        instance = new GitHubModelsProvider(provider, dummyModel);
-      }
       else if (provider.type === 'azure') {
         const { AzureOpenAIProvider } = await import('../../providers/azure.js');
         instance = new AzureOpenAIProvider(provider, dummyModel);
@@ -264,7 +269,7 @@ async function refreshModelCache(store: MemoryStore, providers: CascadeConfig['p
   }
 }
 
-export function Repl({ config, workspacePath, themeName, initialPrompt, identityName, altScreen = false }: ReplProps): React.ReactElement {
+export function Repl({ config, workspacePath, themeName, initialPrompt, identityName, startupNotice, altScreen = false }: ReplProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [theme, setTheme] = useState<Theme>(() => getTheme(themeName));
@@ -485,13 +490,29 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     }
     setCurrentIdentityId(initialIdentityId);
     const loadCache = async () => {
+      const toMap = (models: ModelInfo[]) => {
+        const map = new Map<ProviderType, ModelInfo[]>();
+        for (const m of models) { const list = map.get(m.provider) ?? []; list.push(m); map.set(m.provider, list); }
+        return map;
+      };
       const models = store.getCachedModels();
-      const map = new Map<ProviderType, ModelInfo[]>();
-      for (const m of models) { const list = map.get(m.provider) ?? []; list.push(m); map.set(m.provider, list); }
-      setCachedModels(map);
-      if (models.length === 0 || store.getCacheAge() > 24 * 60 * 60 * 1000) await refreshModelCache(store, config.providers);
+      setCachedModels(toMap(models));
+      if (models.length === 0 || store.getCacheAge() > 24 * 60 * 60 * 1000) {
+        await refreshModelCache(store, config.providers);
+        // Re-read: the map above was built from the cache as it was BEFORE the
+        // refresh, so without this `/model` shows whatever was there at launch
+        // — nothing, on a first run or right after a migration purged the rows
+        // — until some other process happens to reload it.
+        setCachedModels(toMap(store.getCachedModels()));
+      }
     };
     loadCache();
+    if (startupNotice) {
+      dispatch({
+        type: 'ADD_MESSAGE',
+        message: { id: randomUUID(), role: 'system', content: `⚠ ${startupNotice}`, timestamp: new Date().toISOString() },
+      });
+    }
     store.createSession({ id: sessionIdRef.current, title: 'Cascade Session', createdAt: startedAtRef.current, updatedAt: startedAtRef.current, identityId: config.defaultIdentityId ?? 'default', workspacePath, messages: [], metadata: { totalTokens: 0, totalCostUsd: 0, modelsUsed: [], toolsUsed: [], taskCount: 0 } });
     persistRuntimeSession('ACTIVE');
     // Signed in? Prepare to mirror finished turns into a shared cloud session
@@ -1521,7 +1542,7 @@ async function validateConfiguredModels(config: CascadeConfig): Promise<string |
 export function inferProviderFromModelId(id: string, providers: CascadeConfig['providers']): ProviderType | null {
   if (id.includes(':')) {
     const prefix = id.split(':')[0]!.toLowerCase();
-    const validProviders = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama', 'github-models'];
+    const validProviders = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama'];
     if (validProviders.includes(prefix)) {
       return prefix as ProviderType;
     }

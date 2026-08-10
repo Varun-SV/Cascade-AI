@@ -10,8 +10,7 @@ export type ProviderType =
   | 'gemini'
   | 'azure'
   | 'openai-compatible'
-  | 'ollama'
-  | 'github-models';
+  | 'ollama';
 
 export interface ModelInfo {
   id: string;

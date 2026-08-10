@@ -176,38 +176,38 @@ describe('CascadeRouter — rate-limit failover retry', () => {
   });
 });
 
-describe('CascadeRouter — GitHub Models wiring', () => {
+describe('CascadeRouter — live-discovered provider wiring (openai-compatible)', () => {
   it('synthesizes a seed model and builds a GitHubModelsProvider for it', async () => {
-    // GitHub Models has no static MODELS catalog entries (its catalog is served
-    // live), so without a synthesized seed `detectAvailableProviders` would skip
+    // openai-compatible has no static MODELS catalog entries (its models are
+    // served live by whatever endpoint the user pointed at), so without a synthesized seed `detectAvailableProviders` would skip
     // the provider outright and it could never be probed or listed — the exact
-    // failure openai-compatible/azure already carry a seed to avoid.
-    const { GitHubModelsProvider } = await import('../../providers/github-models.js');
+    // failure the synthesized seed exists to avoid.
+    const { OpenAICompatibleProvider } = await import('../../providers/openai-compatible.js');
     const router = new CascadeRouter();
     const internals = router as unknown as Record<string, (...args: unknown[]) => unknown>;
 
-    const seed = internals['getAnyModelForProvider']!('github-models') as { provider: string } | undefined;
+    const seed = internals['getAnyModelForProvider']!('openai-compatible') as { provider: string } | undefined;
     expect(seed).toBeDefined();
-    expect(seed!.provider).toBe('github-models');
+    expect(seed!.provider).toBe('openai-compatible');
 
-    const provider = internals['createProvider']!({ type: 'github-models', apiKey: 'ghp_test' }, seed);
-    expect(provider).toBeInstanceOf(GitHubModelsProvider);
+    const provider = internals['createProvider']!({ type: 'openai-compatible', apiKey: 'k', baseUrl: 'http://127.0.0.1:9999/v1' }, seed);
+    expect(provider).toBeInstanceOf(OpenAICompatibleProvider);
   });
 
   it('detectAvailableProviders marks it available/unavailable from the catalog probe', async () => {
-    const { GitHubModelsProvider } = await import('../../providers/github-models.js');
+    const { OpenAICompatibleProvider } = await import('../../providers/openai-compatible.js');
     const router = new CascadeRouter();
     const detect = (router as unknown as Record<string, (...a: unknown[]) => Promise<Set<string>>>)['detectAvailableProviders']!;
-    const cfgs = [{ type: 'github-models', apiKey: 'ghp_test' }];
+    const cfgs = [{ type: 'openai-compatible', apiKey: 'k', baseUrl: 'http://127.0.0.1:9999/v1' }];
 
-    const ok = vi.spyOn(GitHubModelsProvider.prototype, 'isAvailable').mockResolvedValue(true);
-    expect((await detect.call(router, cfgs)).has('github-models')).toBe(true);
+    const ok = vi.spyOn(OpenAICompatibleProvider.prototype, 'isAvailable').mockResolvedValue(true);
+    expect((await detect.call(router, cfgs)).has('openai-compatible')).toBe(true);
     ok.mockResolvedValue(false);
-    expect((await detect.call(router, cfgs)).has('github-models')).toBe(false);
+    expect((await detect.call(router, cfgs)).has('openai-compatible')).toBe(false);
     ok.mockRestore();
   });
 
-  it('names the provider in the error when a github-models pin cannot be resolved', async () => {
+  it('names the provider in the error when a pin cannot be resolved', async () => {
     // A `tier: 'provider:model'` pin that can't resolve should say WHICH
     // provider is unreachable; an unrecognised prefix falls through to a
     // generic "could not be loaded" that gives the user nothing to act on.
@@ -216,40 +216,40 @@ describe('CascadeRouter — GitHub Models wiring', () => {
       vi.fn().mockResolvedValue(new Set());
 
     await expect(router.init(makeConfig({
-      providers: [{ type: 'github-models', apiKey: 'ghp_test' }],
-      models: { t1: 'github-models:openai/gpt-4o' },
-    }))).rejects.toThrow(/provider 'github-models' is not available/);
+      providers: [{ type: 'openai-compatible', apiKey: 'k', baseUrl: 'http://127.0.0.1:9999/v1' }],
+      models: { t1: 'openai-compatible:openai/gpt-4o' },
+    }))).rejects.toThrow(/provider 'openai-compatible' is not available/);
   });
 
-  it('re-discovers the GitHub Models catalog on a live-data refresh', async () => {
-    const { GitHubModelsProvider } = await import('../../providers/github-models.js');
+  it('re-discovers a live provider model list on a live-data refresh', async () => {
+    const { OpenAICompatibleProvider } = await import('../../providers/openai-compatible.js');
     const router = new CascadeRouter();
     (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
       vi.fn().mockResolvedValue(new Set());
-    const avail = vi.spyOn(GitHubModelsProvider.prototype, 'isAvailable').mockResolvedValue(true);
-    const list = vi.spyOn(GitHubModelsProvider.prototype, 'listModels').mockResolvedValue([{
-      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'github-models',
+    const avail = vi.spyOn(OpenAICompatibleProvider.prototype, 'isAvailable').mockResolvedValue(true);
+    const list = vi.spyOn(OpenAICompatibleProvider.prototype, 'listModels').mockResolvedValue([{
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'openai-compatible',
       contextWindow: 128_000, isVisionCapable: true,
       inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
       maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
     }]);
 
-    await router.init(makeConfig({ providers: [{ type: 'github-models', apiKey: 'ghp_test' }] }));
+    await router.init(makeConfig({ providers: [{ type: 'openai-compatible', apiKey: 'k', baseUrl: 'http://127.0.0.1:9999/v1' }] }));
     // Availability is only consulted inside discovery, so mark it directly the
     // way a successful probe would have.
     (router as unknown as { selector: { markProviderAvailable(p: string): void } }).selector
-      .markProviderAvailable('github-models');
+      .markProviderAvailable('openai-compatible');
     await (router as unknown as Record<string, () => Promise<void>>)['discoverProviderModels']!();
 
     expect(list).toHaveBeenCalled();
-    expect(router.getAvailableModels().some((m) => m.id === 'openai/gpt-4o' && m.provider === 'github-models')).toBe(true);
+    expect(router.getAvailableModels().some((m) => m.id === 'openai/gpt-4o' && m.provider === 'openai-compatible')).toBe(true);
     avail.mockRestore();
     list.mockRestore();
   });
 
-  it('fills an Auto tier AND binds a real provider when GitHub Models is the only configured provider', async () => {
+  it('fills an Auto tier AND binds a real provider when a live-discovered provider is the only one configured', async () => {
     // Regression (Codex P1): relying solely on the background refreshLiveData()
-    // path left every tier permanently empty for a github-models-only config —
+    // path left every tier permanently empty for a live-discovery-only config —
     // Auto tier fill in init() ran before any catalog model was registered, and
     // applyLivePricing() (the background path's only tier-refresh point) only
     // refreshes a tier model that ALREADY exists, never fills one that was
@@ -258,23 +258,23 @@ describe('CascadeRouter — GitHub Models wiring', () => {
     // calls ensureProvider(), so getProvider(model) would return undefined and
     // generate() would throw "No provider for model ...". A real init() +
     // real generate() exercises both halves end to end.
-    const { GitHubModelsProvider } = await import('../../providers/github-models.js');
-    const avail = vi.spyOn(GitHubModelsProvider.prototype, 'isAvailable').mockResolvedValue(true);
-    const list = vi.spyOn(GitHubModelsProvider.prototype, 'listModels').mockResolvedValue([{
-      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'github-models',
+    const { OpenAICompatibleProvider } = await import('../../providers/openai-compatible.js');
+    const avail = vi.spyOn(OpenAICompatibleProvider.prototype, 'isAvailable').mockResolvedValue(true);
+    const list = vi.spyOn(OpenAICompatibleProvider.prototype, 'listModels').mockResolvedValue([{
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'openai-compatible',
       contextWindow: 128_000, isVisionCapable: true,
       inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
       maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
     }]);
-    const stream = vi.spyOn(GitHubModelsProvider.prototype, 'generateStream').mockResolvedValue({
+    const stream = vi.spyOn(OpenAICompatibleProvider.prototype, 'generateStream').mockResolvedValue({
       content: 'pong', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
     } as never);
 
     const router = new CascadeRouter();
-    await router.init(makeConfig({ providers: [{ type: 'github-models', apiKey: 'ghp_test' }] }));
+    await router.init(makeConfig({ providers: [{ type: 'openai-compatible', apiKey: 'k', baseUrl: 'http://127.0.0.1:9999/v1' }] }));
 
     const t1 = router.getModelForTier('T1');
-    expect(t1?.provider).toBe('github-models');
+    expect(t1?.provider).toBe('openai-compatible');
     expect(t1?.id).toBe('openai/gpt-4o');
 
     const result = await router.generate('T1', { messages: [{ role: 'user', content: 'hi' }] });
@@ -289,7 +289,7 @@ describe('CascadeRouter — GitHub Models wiring', () => {
   it('binds a real provider for a vision model reached only through selectVisionModel()', async () => {
     // Regression (Codex): selectVisionModel()'s "widen past the static
     // catalog" fallback lets it return a live-discovered model that was never
-    // the tier-fill winner — here, two github-models catalog entries are
+    // the tier-fill winner — here, two live-discovered entries are
     // discovered, so init()'s tier-fill (which only binds ONE model per tier)
     // binds the non-vision model, leaving the vision-capable one unbound.
     // requireVision=true then resolves to that unbound model via
@@ -297,28 +297,28 @@ describe('CascadeRouter — GitHub Models wiring', () => {
     // without ever having called ensureProvider() for it on this path —
     // throwing "No provider for model ..." even though the provider config
     // was perfectly valid.
-    const { GitHubModelsProvider } = await import('../../providers/github-models.js');
-    const avail = vi.spyOn(GitHubModelsProvider.prototype, 'isAvailable').mockResolvedValue(true);
-    const list = vi.spyOn(GitHubModelsProvider.prototype, 'listModels').mockResolvedValue([
+    const { OpenAICompatibleProvider } = await import('../../providers/openai-compatible.js');
+    const avail = vi.spyOn(OpenAICompatibleProvider.prototype, 'isAvailable').mockResolvedValue(true);
+    const list = vi.spyOn(OpenAICompatibleProvider.prototype, 'listModels').mockResolvedValue([
       {
-        id: 'meta/Llama-3.3-70B-Instruct', name: 'Llama 3.3 70B', provider: 'github-models',
+        id: 'meta/Llama-3.3-70B-Instruct', name: 'Llama 3.3 70B', provider: 'openai-compatible',
         contextWindow: 8_000, isVisionCapable: false,
         inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
         maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
       },
       {
-        id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'github-models',
+        id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'openai-compatible',
         contextWindow: 8_000, isVisionCapable: true,
         inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
         maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
       },
     ]);
-    const stream = vi.spyOn(GitHubModelsProvider.prototype, 'generateStream').mockResolvedValue({
+    const stream = vi.spyOn(OpenAICompatibleProvider.prototype, 'generateStream').mockResolvedValue({
       content: 'i see it', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
     } as never);
 
     const router = new CascadeRouter();
-    await router.init(makeConfig({ providers: [{ type: 'github-models', apiKey: 'ghp_test' }] }));
+    await router.init(makeConfig({ providers: [{ type: 'openai-compatible', apiKey: 'k', baseUrl: 'http://127.0.0.1:9999/v1' }] }));
 
     // Tier-fill bound the non-vision model, not the vision-capable one.
     expect(router.getModelForTier('T1')?.id).toBe('meta/Llama-3.3-70B-Instruct');
@@ -340,34 +340,33 @@ describe('CascadeRouter — GitHub Models wiring', () => {
   it('caps the TPM reservation at the model maxOutputTokens, not an uncapped per-call override', async () => {
     // Regression (Codex P2): the reservation was `options.maxTokens ??
     // model.maxOutputTokens`, so an explicit per-call maxTokens ABOVE the
-    // model's own cap (T1's final compilation step asks for 8,000; GitHub
-    // Models' listModels() sets maxOutputTokens to its real ~4K per-request
-    // ceiling) inflated the TPM reservation past what the provider's
+    // model's own cap (T1's final compilation step asks for 8,000, while an
+    // endpoint's listModels() may report a much lower real per-request ceiling) inflated the TPM reservation past what the provider's
     // generateStream() override will actually clamp the request down to —
     // silently reserving the bucket's ENTIRE 8,000-token default budget for
     // one call instead of the intended ~4,512, exactly the invariant
-    // DEFAULT_PROVIDER_TPM['github-models']'s own comment documents.
-    const { GitHubModelsProvider } = await import('../../providers/github-models.js');
-    const avail = vi.spyOn(GitHubModelsProvider.prototype, 'isAvailable').mockResolvedValue(true);
-    const list = vi.spyOn(GitHubModelsProvider.prototype, 'listModels').mockResolvedValue([{
-      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'github-models',
+    // DEFAULT_PROVIDER_TPM['openai-compatible']'s own comment documents.
+    const { OpenAICompatibleProvider } = await import('../../providers/openai-compatible.js');
+    const avail = vi.spyOn(OpenAICompatibleProvider.prototype, 'isAvailable').mockResolvedValue(true);
+    const list = vi.spyOn(OpenAICompatibleProvider.prototype, 'listModels').mockResolvedValue([{
+      id: 'openai/gpt-4o', name: 'OpenAI GPT-4o', provider: 'openai-compatible',
       contextWindow: 8_000, isVisionCapable: false,
       inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, pricingUnknown: false,
       maxOutputTokens: 4_000, supportsStreaming: true, supportsToolUse: true, isLocal: false,
     }]);
-    const stream = vi.spyOn(GitHubModelsProvider.prototype, 'generateStream').mockResolvedValue({
+    const stream = vi.spyOn(OpenAICompatibleProvider.prototype, 'generateStream').mockResolvedValue({
       content: 'ok', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
     } as never);
 
     const router = new CascadeRouter();
-    await router.init(makeConfig({ providers: [{ type: 'github-models', apiKey: 'ghp_test' }] }));
+    await router.init(makeConfig({ providers: [{ type: 'openai-compatible', apiKey: 'k', baseUrl: 'http://127.0.0.1:9999/v1' }] }));
 
     const limiter = (router as unknown as { tpmLimiter: TpmLimiter }).tpmLimiter;
     const acquire = vi.spyOn(limiter, 'acquire');
 
     await router.generate('T1', { messages: [{ role: 'user', content: 'hi' }], maxTokens: 8_000 });
 
-    expect(acquire).toHaveBeenCalledWith('github-models', 4_512); // min(8000, 4000) + 512, not 8000 + 512
+    expect(acquire).toHaveBeenCalledWith('openai-compatible', 4_512); // min(8000, 4000) + 512, not 8000 + 512
 
     avail.mockRestore();
     list.mockRestore();
@@ -377,16 +376,16 @@ describe('CascadeRouter — GitHub Models wiring', () => {
 
   it('picks up a config.rateLimits.providerTpm override through real schema validation', async () => {
     // Regression (Codex P2): rateLimits wasn't declared on CascadeConfigSchema,
-    // so a config-file override for github-models' conservative default was
+    // so a config-file override for a provider's default was
     // silently stripped before the router ever saw it. Parse through the REAL
     // schema (not a hand-built object) so this fails again if that stripping
     // regresses.
     const raw = {
-      providers: [{ type: 'github-models', apiKey: 'ghp_test' }],
-      rateLimits: { providerTpm: { 'github-models': 50_000 } },
+      providers: [{ type: 'openai-compatible', apiKey: 'k', baseUrl: 'http://127.0.0.1:9999/v1' }],
+      rateLimits: { providerTpm: { 'openai-compatible': 50_000 } },
     };
     const parsed = CascadeConfigSchema.parse(raw) as unknown as CascadeConfig;
-    expect(parsed.rateLimits?.providerTpm?.['github-models']).toBe(50_000); // schema didn't strip it
+    expect(parsed.rateLimits?.providerTpm?.['openai-compatible']).toBe(50_000); // schema didn't strip it
 
     const router = new CascadeRouter();
     (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
@@ -394,16 +393,16 @@ describe('CascadeRouter — GitHub Models wiring', () => {
     await router.init(parsed);
 
     const limiter = (router as unknown as { tpmLimiter: TpmLimiter }).tpmLimiter;
-    expect(limiter.snapshot()['github-models']!.tokensPerMinute).toBe(50_000);
+    expect(limiter.snapshot()['openai-compatible']!.tokensPerMinute).toBe(50_000);
   });
 
   it('falls back to the conservative default when no override is configured', async () => {
     const router = new CascadeRouter();
     (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
       vi.fn().mockResolvedValue(new Set());
-    await router.init(makeConfig({ providers: [{ type: 'github-models', apiKey: 'ghp_test' }] }));
+    await router.init(makeConfig({ providers: [{ type: 'openai-compatible', apiKey: 'k', baseUrl: 'http://127.0.0.1:9999/v1' }] }));
 
     const limiter = (router as unknown as { tpmLimiter: TpmLimiter }).tpmLimiter;
-    expect(limiter.snapshot()['github-models']!.tokensPerMinute).toBe(DEFAULT_PROVIDER_TPM['github-models']);
+    expect(limiter.snapshot()['openai-compatible']!.tokensPerMinute).toBe(DEFAULT_PROVIDER_TPM['openai-compatible']);
   });
 });

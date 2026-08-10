@@ -29,7 +29,14 @@ import { pendingMediaDir, sweepPendingMedia } from './pending-media.js';
 export { tenantScratchDir };
 
 const MAX_HISTORY_MESSAGES = 20;
-const PROVIDER_TYPES = ['anthropic', 'openai', 'gemini', 'azure', 'github-models', 'openai-compatible', 'ollama'] as const;
+const PROVIDER_TYPES = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama'] as const;
+
+/**
+ * Types this server used to accept and no longer does. Filtered out of an
+ * incoming payload rather than rejected, so a client that predates the removal
+ * degrades to "that provider is ignored" instead of "nothing works".
+ */
+const RETIRED_PROVIDER_TYPES = new Set<string>(['github-models']);
 
 // A blank form field submits as '' — plain `.optional()` accepts that as a
 // "defined" empty string rather than absent, and provider clients downstream
@@ -150,26 +157,49 @@ const ChatRunPayloadSchema = z.object({
     })
     .optional(),
   providers: z
-    .array(
-      z.object({
-        type: z.enum(PROVIDER_TYPES),
-        label: optionalNonEmptyString,
-        apiKey: optionalNonEmptyString,
-        baseUrl: optionalNonEmptyString,
-        deploymentName: optionalNonEmptyString,
-        apiVersion: optionalNonEmptyString,
-        model: optionalNonEmptyString,
-      }),
-    )
-    .min(1)
-    // KeyVault's SELECTABLE_TYPES offers 5 single-instance cloud types
-    // (anthropic, openai, gemini, github-models, openai-compatible) plus
-    // Azure, which alone supports MULTIPLE deployments (each its own
-    // resource/endpoint, one array entry per deployment). 5 singles + 2 Azure
-    // deployments = 7, a plausible maximal real config; this bound must track
-    // that count whenever a provider type is added to SELECTABLE_TYPES, or a
-    // KeyVault-saved config silently fails every chat:run at this Zod gate.
-    .max(7),
+    .preprocess(
+      // Drop provider types this build no longer supports BEFORE the enum
+      // sees them. A browser tab that was already open across the rollout
+      // keeps sending its in-memory list until the page is reloaded, and the
+      // localStorage migration only runs in freshly loaded assets — so
+      // without this, every run from that tab fails outright even when it
+      // also carries a perfectly usable provider. Being liberal at a version
+      // boundary is the same posture the config and sync migrations take.
+      //
+      // Filtering here rather than after validation matters: `.min(1)` below
+      // then judges what remains, so a payload whose ONLY provider was retired
+      // is still rejected — it genuinely has nothing to run with — while one
+      // that also carries a usable provider proceeds on that provider alone.
+      (v) => (Array.isArray(v)
+        ? v.filter((p) => !RETIRED_PROVIDER_TYPES.has(String((p as { type?: unknown } | null)?.type ?? '')))
+        : v),
+      z
+        .array(
+          z.object({
+            type: z.enum(PROVIDER_TYPES),
+            label: optionalNonEmptyString,
+            apiKey: optionalNonEmptyString,
+            baseUrl: optionalNonEmptyString,
+            deploymentName: optionalNonEmptyString,
+            apiVersion: optionalNonEmptyString,
+            model: optionalNonEmptyString,
+          }),
+        )
+        .min(1)
+        // KeyVault's SELECTABLE_TYPES offers 4 single-instance cloud types
+        // (anthropic, openai, gemini, openai-compatible) plus Azure, which
+        // alone supports MULTIPLE deployments — each its own resource and
+        // endpoint, one array entry per deployment. So the ceiling is really
+        // "the singles, plus however many Azure deployments you run".
+        //
+        // Deliberately NOT lowered when github-models was removed. The bound
+        // exists to stop an absurd payload, not to state the exact shape of a
+        // maximal config, and tightening it to match today's dropdown would
+        // start rejecting a config that was valid before — 4 singles plus 3
+        // Azure deployments, say. A cap that shrinks under users is worse than
+        // one with a little slack.
+        .max(7),
+    ),
 });
 
 export type ChatRunPayload = z.infer<typeof ChatRunPayloadSchema>;

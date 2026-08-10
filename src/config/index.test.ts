@@ -245,4 +245,17 @@ describe('hasUsableProvider (CLI re-init bug fix)', () => {
   it('returns true when a key-requiring provider actually has a key', () => {
     expect(hasUsableProvider([{ type: 'anthropic', apiKey: 'sk-ant-x' }])).toBe(true);
   });
+
+  it('returns true for an Anthropic OAuth token adopted by `cascade link`', () => {
+    // cli/commands/link.ts stores a discovered OAuth credential in authToken,
+    // NOT apiKey, and AnthropicProvider.isAvailable() accepts either. Counting
+    // only apiKey called that working install unconfigured: `cascade run`
+    // aborted with "No providers configured" and the desktop reopened the
+    // full-screen wizard over a config that runs fine.
+    expect(hasUsableProvider([{ type: 'anthropic', authToken: 'sk-ant-oat-x' }])).toBe(true);
+  });
+
+  it('still returns false for a provider with neither key nor token', () => {
+    expect(hasUsableProvider([{ type: 'anthropic', apiKey: '', authToken: '' }])).toBe(false);
+  });
 });
