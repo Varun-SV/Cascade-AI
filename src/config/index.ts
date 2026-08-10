@@ -57,9 +57,14 @@ export class ConfigManager {
   private workspacePath: string;
   private globalDir: string;
   /**
-   * Set by loadConfig()/load() when a retired provider was migrated out, so
-   * load() knows to persist the cleaned config and warn once. Cleared after
-   * the warning — a repeat load in the same process has nothing left to say.
+   * What THIS load migrated out, if anything. Strictly per-load state: reset
+   * at the top of every `load()`, because two places read it as a statement
+   * about the load in progress — `injectEnvKeys()` asks whether an empty
+   * provider list was emptied by a retirement, and the end of `load()` warns
+   * and builds the user-facing notice from it. Left set, a second `load()` on
+   * the same instance (`startRepl()` does one after its setup wizard) would
+   * re-announce a migration that already happened and suppress the Ollama
+   * fallback for a list that is empty for some unrelated reason.
    */
   private retiredCleanup?: RetiredProviderCleanup;
   /**
@@ -83,6 +88,8 @@ export class ConfigManager {
   }
 
   async load(): Promise<void> {
+    // Note: loadConfig() resets `retiredCleanup` on entry, so everything below
+    // reads this load's result and never a previous one's.
     this.config = await this.loadConfig();
     // Desktop and CLI share this one config file, and only the desktop's OAuth
     // connect flow ever checked for a colliding sanitized tool prefix —
@@ -246,6 +253,12 @@ export class ConfigManager {
   }
 
   private async loadConfig(): Promise<CascadeConfig> {
+    // Reset on entry, not after the notice is built at the end of load(), so
+    // the flag cannot outlive the load that set it even if that load throws
+    // part way through. It lives here rather than in load() because this is
+    // its only other writer — and because assigning `undefined` in load()
+    // narrows the property to `never` for the reads further down it.
+    this.retiredCleanup = undefined;
     const configPath = path.join(this.workspacePath, CASCADE_CONFIG_FILE);
     try {
       const raw = await fs.readFile(configPath, 'utf-8');

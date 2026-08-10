@@ -510,3 +510,63 @@ describe('cache purge is not gated on a migration (review round 7)', () => {
     expect(second.getStore().getCachedModels()).toHaveLength(0);
   });
 });
+
+describe('retiredCleanup is per-load state (review round 11)', () => {
+  let dir: string;
+  let globalDir: string;
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-r11-'));
+    globalDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-r11-g-'));
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warn.mockRestore();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(globalDir, { recursive: true, force: true });
+  });
+
+  const write = (cfg: unknown) => {
+    fs.mkdirSync(path.join(dir, '.cascade'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.cascade', 'config.json'), JSON.stringify(cfg));
+  };
+
+  const migrationWarnings = () =>
+    warn.mock.calls.filter((c) => String(c[0]).includes('config migration')).length;
+
+  it('does not re-announce the migration on a second load of the same instance', async () => {
+    // startRepl() reloads through the SAME ConfigManager after its setup
+    // wizard. The file on disk is already clean by then, so nothing is
+    // migrated — but the flag from the first load was never reset, and the
+    // end of load() rebuilt the notice and logged it a second time.
+    write({ providers: [{ type: 'github-models', apiKey: 'dead' }] });
+
+    const mgr = new ConfigManager(dir, globalDir);
+    await mgr.load();
+    expect(migrationWarnings()).toBe(1);
+    expect(mgr.takeRetiredNotice()).toContain('github-models');
+
+    await mgr.load();
+    expect(migrationWarnings()).toBe(1);
+    expect(mgr.takeRetiredNotice()).toBeUndefined();
+  });
+
+  it('restores the Ollama fallback on a later load that is empty for its own reasons', async () => {
+    // The sharper half. injectEnvKeys() reads the flag as "this load's empty
+    // provider list was emptied by the retirement", which is the one case that
+    // must NOT get a keyless Ollama entry. Held over from a previous load it
+    // suppressed the fallback for a genuinely empty config — leaving nothing
+    // usable and nothing to fall back to.
+    write({ providers: [{ type: 'github-models', apiKey: 'dead' }] });
+
+    const mgr = new ConfigManager(dir, globalDir);
+    await mgr.load();
+    expect(mgr.getConfig().providers.map((p) => p.type)).not.toContain('ollama');
+
+    // Second load: the config is clean now, so an empty list is just an empty
+    // list and the fresh-install fallback applies.
+    await mgr.load();
+    expect(mgr.getConfig().providers.map((p) => p.type)).toContain('ollama');
+  });
+});

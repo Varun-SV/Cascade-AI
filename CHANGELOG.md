@@ -222,6 +222,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the desktop app now reopened its full-screen wizard over a config that
   runs fine. A token counts as a credential.
 
+- **A second config load no longer inherits the first one's migration.** The
+  "what did this load migrate out?" flag was set but never reset, and two
+  places read it as a statement about the load in progress. `startRepl()`
+  reloads through the same config manager after its setup wizard, so the
+  migration was announced a second time over a file that was already clean —
+  and, worse, an empty provider list on that later load was read as "emptied by
+  the retirement", which suppresses the keyless Ollama fallback. The same
+  instance therefore behaved differently from a freshly constructed one on
+  identical files. It is now reset on entry to every load.
+
 - **A sync pull no longer claims it reset a tier pin it left alone.** Stripping
   a dead pin out of the incoming bundle is not the same as clearing it in the
   result: the merge is `{ ...config.models, ...bundle.models }`, so deleting an
