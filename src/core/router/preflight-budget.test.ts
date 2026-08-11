@@ -320,6 +320,39 @@ describe('preflight budget', () => {
     expect(size('A'.repeat(2_000))).toBe(size('A'.repeat(4_000_000)));
   });
 
+  it('does not submit a call that was admitted before a sibling killed the run', async () => {
+    // A wave's calls pass the top-of-method guard together, then sit in the
+    // TPM bucket or the local queue. If a sibling trips the ceiling while they
+    // wait, every one of them used to go on and spend against a run that is
+    // already over and whose output will be discarded.
+    const router = await makeRouter({ maxCostPerRunUsd: 1.0 });
+    const r = router as unknown as {
+      tierModels: Map<string, ModelInfo>;
+      runBudgetExceeded: boolean;
+      runBudgetExceededReason: string;
+      reservedCostUsd: number;
+      tpmLimiter: { acquire: (p: string, n: number) => Promise<void> } | undefined;
+    };
+    r.tierModels.set('T3', PRICED);
+    let submitted = 0;
+    (router as unknown as { getProvider: (m: ModelInfo) => unknown }).getProvider = () => ({
+      generate: async () => { submitted++; return { content: 'x', usage: { inputTokens: 1, outputTokens: 1 } }; },
+    });
+    // Stand in for a long wait: the sibling trips the ceiling while parked.
+    r.tpmLimiter = {
+      acquire: async () => {
+        r.runBudgetExceeded = true;
+        r.runBudgetExceededReason = 'Per-task cost cap reached';
+      },
+    };
+
+    await expect(router.generate('T3', { messages: [{ role: 'user', content: 'hi' }] }))
+      .rejects.toThrow(/cost cap/);
+    expect(submitted).toBe(0);
+    // …and it did not walk off with the allowance it had reserved.
+    expect(r.reservedCostUsd).toBeCloseTo(0, 10);
+  });
+
   it('reports a preflight refusal the same way a post-hoc overrun is reported', async () => {
     // A worker that catches BudgetExceededError turns it into a FAILED result,
     // so the run-level flag is what tells the surfaces why.

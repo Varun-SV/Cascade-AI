@@ -733,6 +733,20 @@ export class CascadeRouter extends EventEmitter {
     }
 
     try {
+      // Re-checked HERE, not only at the top of this method. Between that
+      // check and this point a call can sit for a long time in the TPM bucket
+      // or the local-inference queue, and a SIBLING in the same T3 wave can
+      // trip the per-task ceiling while it waits. Without this, every call
+      // already admitted goes on to submit and spend against a run that is
+      // already over and whose output will be discarded — which is most of a
+      // wave, and most of the cap. Throwing inside the try releases both the
+      // reservation and the queue slot on the way out.
+      if (this.runBudgetExceeded) {
+        throw new CascadeRouter.BudgetExceededError(
+          this.runBudgetExceededReason ?? 'Per-task budget exceeded.',
+        );
+      }
+
       let result: GenerateResult;
 
       // Every provider call below is time-boxed with withTimeoutAbort, which

@@ -68,6 +68,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   moment a cap was set — leaving those to the post-hoc stop as before. And it
   does nothing at all when no cap is configured.
 
+  A call already admitted when a sibling trips the ceiling no longer submits.
+  The kill switch was checked when a call entered the router, but a request can
+  then sit for a long time in the rate-limit bucket or the local-inference
+  queue, and one member of a parallel wave can exhaust the budget while the
+  others wait. Every one of them went on to spend against a run that was
+  already over and whose output would be discarded. It is re-checked
+  immediately before submission.
+
   An admitted call HOLDS its estimate against the budget until it settles.
   Checking against spent-so-far alone is a time-of-check/time-of-use hole that
   the common case walks straight into: a T2 wave launches its T3 workers
