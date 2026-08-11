@@ -2067,7 +2067,16 @@ ${prompt}`
       ? selector.selectForTier(tier, options.fastAnswerModel)
       : (selector.getCandidatesForTier(tier)[0] ?? selector.selectForTier(tier));
     if (!model) {
-      throw new Error('No model is available for a fast answer — add a provider API key first.');
+      // "Add an API key" is the wrong instruction for a user who has one and
+      // whose provider failed its startup probe — it points at the one thing
+      // that is not broken. Say which provider failed and what it said.
+      const failures = this.router.providerProbeFailures();
+      throw new Error(
+        failures.length
+          ? 'No model is available for a fast answer. '
+            + failures.map((f) => `${f.provider}: ${f.reason}`).join('; ')
+          : 'No model is available for a fast answer — add a provider API key first.',
+      );
     }
     this.recordDecision(
       'model',

@@ -2,7 +2,7 @@
 //  Cascade AI — router OpenAI-compatible discovery
 // ─────────────────────────────────────────────
 
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { CascadeRouter } from './index.js';
@@ -407,5 +407,67 @@ describe('CascadeRouter — live-discovered provider wiring (openai-compatible)'
 
     const limiter = (router as unknown as { tpmLimiter: TpmLimiter }).tpmLimiter;
     expect(limiter.snapshot()['openai-compatible']!.tokensPerMinute).toBe(DEFAULT_PROVIDER_TPM['openai-compatible']);
+  });
+});
+
+describe('CascadeRouter — a failed probe explains itself', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('records why each configured provider was rejected', async () => {
+    // The reported symptom was two messages that together said nothing: the
+    // router guessing "bad key, wrong endpoint/deployment, or unreachable",
+    // then the CLI telling a user who had just entered a working key to add
+    // one. The reason the API gave has to survive to the surface.
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      statusText: 'Bad Request',
+      json: async () => ({ error: { message: 'API key not valid. Please pass a valid API key.' } }),
+    })) as unknown as typeof fetch);
+
+    const router = new CascadeRouter();
+    await router.init(makeConfig({ providers: [{ type: 'gemini', apiKey: 'bad-key' }] }));
+
+    const failures = router.providerProbeFailures();
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.provider).toBe('gemini');
+    expect(failures[0]!.reason).toContain('API key not valid');
+  });
+
+  it('reports nothing when the probe passes', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        models: [{
+          name: 'models/gemini-2.5-flash',
+          displayName: 'Gemini 2.5 Flash',
+          inputTokenLimit: 1_000_000,
+          outputTokenLimit: 8192,
+          supportedGenerationMethods: ['generateContent'],
+        }],
+      }),
+    })) as unknown as typeof fetch);
+
+    const router = new CascadeRouter();
+    await router.init(makeConfig({ providers: [{ type: 'gemini', apiKey: 'good-key' }] }));
+
+    expect(router.providerProbeFailures()).toEqual([]);
+    // And the provider is genuinely usable, which is the point of the probe.
+    expect(router.getAvailableModels().some((m) => m.provider === 'gemini')).toBe(true);
+  });
+
+  it('is cleared by a later init, so a fixed key does not keep reporting the old failure', async () => {
+    const router = new CascadeRouter();
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false, status: 403, statusText: 'Forbidden', json: async () => ({}),
+    })) as unknown as typeof fetch);
+    await router.init(makeConfig({ providers: [{ type: 'gemini', apiKey: 'bad' }] }));
+    expect(router.providerProbeFailures()).toHaveLength(1);
+
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true, json: async () => ({ models: [] }),
+    })) as unknown as typeof fetch);
+    await router.init(makeConfig({ providers: [{ type: 'gemini', apiKey: 'good' }] }));
+    expect(router.providerProbeFailures()).toEqual([]);
   });
 });

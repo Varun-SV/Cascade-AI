@@ -102,3 +102,86 @@ describe('GeminiProvider — model listing filters out non-text models', () => {
 
   afterEach(() => vi.unstubAllGlobals());
 });
+
+describe('GeminiProvider — availability is about the KEY, not one model', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** The catalogue's first Gemini entry, which is what the router probes with. */
+  const CATALOGUE_SEED: ModelInfo = { ...MODEL, id: 'gemini-2.0-flash' };
+
+  it('does not condemn the provider because one model id is unreachable', async () => {
+    // The old probe called countTokens() against whichever model the router
+    // seeded it with. A key that cannot reach THAT model — retired, not enabled
+    // for the project, on another API version — failed, and since every later
+    // step is gated on the verdict, the real model list was never fetched and
+    // Gemini vanished from a working key.
+    const countTokens = vi.fn(async () => { throw new Error('404 model not found'); });
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        models: [{
+          name: 'models/gemini-2.5-flash',
+          displayName: 'Gemini 2.5 Flash',
+          inputTokenLimit: 1_000_000,
+          outputTokenLimit: 8192,
+          supportedGenerationMethods: ['generateContent'],
+        }],
+      }),
+    })) as unknown as typeof fetch;
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider = new GeminiProvider({ type: 'gemini', apiKey: 'test' }, CATALOGUE_SEED);
+    (provider as unknown as { client: { models: { countTokens: unknown } } })
+      .client.models.countTokens = countTokens;
+
+    await expect(provider.isAvailable()).resolves.toBe(true);
+    expect(countTokens).not.toHaveBeenCalled();
+  });
+
+  it('sends the key in a header, never in the URL', async () => {
+    // A query string carries into proxy logs, error reports and shell history,
+    // and this one would carry the key with it.
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ models: [] }) })) as unknown as typeof fetch;
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider = new GeminiProvider({ type: 'gemini', apiKey: 'super-secret-key' }, MODEL);
+    await provider.isAvailable();
+
+    const [url, init] = (fetchMock as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0]!;
+    expect(url).not.toContain('super-secret-key');
+    expect((init.headers as Record<string, string>)['x-goog-api-key']).toBe('super-secret-key');
+  });
+
+  it('reports what the API said instead of three guesses', async () => {
+    // "bad key, wrong endpoint/deployment, or unreachable" names three
+    // different fixes and identifies none of them. Google's own message does.
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      statusText: 'Bad Request',
+      json: async () => ({ error: { message: 'API key not valid. Please pass a valid API key.' } }),
+    })) as unknown as typeof fetch;
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider = new GeminiProvider({ type: 'gemini', apiKey: 'bad' }, MODEL);
+    await expect(provider.isAvailable()).rejects.toThrow(/API key not valid/);
+  });
+
+  it('still fails a key the API rejects', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 403,
+      statusText: 'Forbidden',
+      json: async () => { throw new Error('no body'); },
+    })) as unknown as typeof fetch;
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider = new GeminiProvider({ type: 'gemini', apiKey: 'bad' }, MODEL);
+    await expect(provider.isAvailable()).rejects.toThrow(/HTTP 403/);
+  });
+
+  it('says so plainly when no key is configured at all', async () => {
+    const provider = new GeminiProvider({ type: 'gemini' }, MODEL);
+    await expect(provider.isAvailable()).rejects.toThrow(/no Gemini API key/);
+  });
+});

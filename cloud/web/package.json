@@ -1,6 +1,6 @@
 {
   "name": "cascade-cloud-web",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Cascade Cloud — hosted chat SPA (login, KeyVault, streaming chat)",
   "author": "Varun SV",
   "license": "MIT",

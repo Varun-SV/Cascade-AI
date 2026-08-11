@@ -18,6 +18,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+## 0.74.0 - 2026-08-11
+
+### Fixed
+- **A working Gemini API key no longer reads as no key at all.** Setting a
+  Gemini key in the CLI could produce two messages that, together, said nothing
+  true: `provider "gemini" is not available: availability check returned false
+  (bad key, wrong endpoint/deployment, or unreachable)`, and then `No model is
+  available for a fast answer — add a provider API key first` — about a key that
+  was present and worked elsewhere.
+
+  Gemini's availability probe was the only one that asked whether ONE PARTICULAR
+  MODEL answered. It called `countTokens` against whichever model the router
+  seeded it with, which is the first Gemini entry in the bundled catalogue
+  (`gemini-2.0-flash`). A key that cannot reach that one model — retired, not
+  enabled for the key's project, served on a different API version — failed the
+  probe, and because everything downstream is gated on the verdict (both the
+  startup model validation and the live model discovery return early for an
+  "unavailable" provider) the account's real model list was never fetched. One
+  unreachable model id erased the whole provider. It now asks the account-level
+  question instead — the same question OpenAI's probe asks, and the same request
+  discovery already makes.
+
+  It also no longer swallows the reason. `catch { return false }` discarded the
+  only thing that would have identified the problem, leaving a three-way guess
+  in its place; the API's own message ("API key not valid", "API has not been
+  used in project X", "location is not supported") now reaches the log, and each
+  of those points at a different fix. The router keeps what the probe reported,
+  so a run that finds no usable model names the provider that failed and what it
+  said, rather than telling a user with a key in hand to go and add one.
+
+### Changed
+- **The Gemini API key travels in a header rather than the URL.** Model
+  discovery passed it as a `?key=` query parameter, which carries into proxy
+  logs, error reports and shell history. It goes in `x-goog-api-key` now.
+
 ## 0.73.0 - 2026-08-11
 
 ### Fixed

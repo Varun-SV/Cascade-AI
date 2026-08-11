@@ -66,6 +66,24 @@ export function toGeminiFunctionCalls(toolCalls: readonly ToolCall[]): Part[] {
   } as Part));
 }
 
+/**
+ * The API's own explanation, when it gives one.
+ *
+ * Google returns `{error:{message}}` with a genuinely useful string — "API key
+ * not valid", "API has not been used in project X", "location is not
+ * supported" — and each points at a different fix. Reporting only the status
+ * code turns all of them into the same shrug.
+ */
+async function describeGeminiError(resp: Response): Promise<string> {
+  try {
+    const body = await resp.json() as { error?: { message?: string; status?: string } };
+    const detail = body?.error?.message ?? body?.error?.status;
+    return detail ? ` — ${detail}` : '';
+  } catch {
+    return '';
+  }
+}
+
 export class GeminiProvider extends BaseProvider {
   private client: GoogleGenAI;
 
@@ -174,9 +192,7 @@ export class GeminiProvider extends BaseProvider {
 
   async listModels(): Promise<ModelInfo[]> {
     try {
-      const resp = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models?key=${this.config.apiKey}`,
-      );
+      const resp = await this.fetchModelList();
       if (!resp.ok) {
         // Invalid key / network error — fall back to the built-in model list
         // instead of crashing downstream consumers with a shape mismatch.
@@ -226,19 +242,54 @@ export class GeminiProvider extends BaseProvider {
     }
   }
 
+  /**
+   * Is this KEY usable — not "does one particular model answer".
+   *
+   * This used to call countTokens() against `this.model.id`, which the router
+   * fills from the first Gemini entry in the bundled catalogue. That made the
+   * whole provider's fate depend on one hard-coded model id: a key that cannot
+   * reach that one model — retired, not enabled for the key's project, served
+   * on a different API version — failed the probe, and because every later step
+   * is gated on the result (`validateCloudProviderModels` and
+   * `discoverProviderModels` both return early for an unavailable provider) the
+   * real model list was never fetched. Gemini vanished entirely, and the CLI
+   * reported "add a provider API key first" about a key that was present and
+   * working.
+   *
+   * Listing models asks the account-level question instead, the same one
+   * OpenAI's probe asks, and it is the same request `listModels()` already
+   * makes for discovery.
+   *
+   * Throws rather than returning false. The router logs the reason it catches,
+   * and "bad key, wrong endpoint/deployment, or unreachable" — three guesses,
+   * no answer — is what made this take a user report to find. A swallowed probe
+   * error is the same defect that once hid a misconfigured Azure deployment.
+   */
   async isAvailable(): Promise<boolean> {
-    try {
-      await this.client.models.countTokens({
-        model: this.model.id,
-        contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
-      });
-      return true;
-    } catch {
-      return false;
-    }
+    if (!this.config.apiKey) throw new Error('no Gemini API key configured');
+    const resp = await this.fetchModelList();
+    if (resp.ok) return true;
+    throw new Error(
+      `Gemini rejected the API key: HTTP ${resp.status} ${resp.statusText}`.trim() +
+      `${await describeGeminiError(resp)}`,
+    );
   }
 
   // ── Private ──────────────────────────────────
+
+  /**
+   * The account's model list. One place so the availability probe and
+   * discovery cannot ask different questions of the same endpoint.
+   *
+   * The key goes in a header, not the query string: a URL carries into proxy
+   * logs, error reports and shell history, and this one would carry the key
+   * with it.
+   */
+  private fetchModelList(): Promise<Response> {
+    return fetch('https://generativelanguage.googleapis.com/v1beta/models', {
+      headers: { 'x-goog-api-key': this.config.apiKey ?? '' },
+    });
+  }
 
   private buildContents(
     messages: ConversationMessage[],
