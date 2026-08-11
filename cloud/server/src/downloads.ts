@@ -215,6 +215,35 @@ interface CacheEntry {
 }
 
 /**
+ * The path prefix every asset of OUR releases sits under.
+ *
+ * Derived from RELEASES_PAGE_URL rather than written out again, so the owner
+ * and repo appear once in this file.
+ */
+const RELEASE_DOWNLOAD_PREFIX =
+  `${new URL(RELEASES_PAGE_URL).pathname.replace(/\/releases\/latest$/, '')}/releases/download/`;
+
+/**
+ * True for a URL that is an asset of a CASCADE release, not merely of github.com.
+ *
+ * `isTrustedAssetUrl` checks only the host, which is the right question for a
+ * payload that came from our own release endpoint. It is not the right question
+ * for the cache file: anyone can create a repository and publish a release asset
+ * called `Cascade-AI-0.72.0-arm64.dmg`, and such a URL passes the host check,
+ * classifies as a target, and matches its own filename — so every consistency
+ * check in this module can hold while the bytes belong to a stranger. What
+ * makes an asset ours is the repository path, and nothing else here asks about
+ * provenance.
+ */
+export function isCascadeReleaseAsset(url: string): boolean {
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { return false; }
+  if (parsed.protocol !== 'https:') return false;
+  if (parsed.hostname !== 'github.com') return false;
+  return parsed.pathname.startsWith(RELEASE_DOWNLOAD_PREFIX);
+}
+
+/**
  * True when a URL's last path segment IS the given filename.
  *
  * GitHub builds `browser_download_url` by appending the asset name, so this
@@ -275,7 +304,9 @@ function parseStoredEntry(raw: unknown): CacheEntry | null {
     if (typeof t.id !== 'string' || !isTargetId(t.id)) continue;
     if (typeof t.filename !== 'string' || !t.filename) continue;
     if (typeof t.sizeBytes !== 'number' || !Number.isFinite(t.sizeBytes) || t.sizeBytes <= 0) continue;
-    if (typeof t.url !== 'string' || !isTrustedAssetUrl(t.url)) continue;
+    // The STRICTER check, not isTrustedAssetUrl: a stored entry has to be an
+    // asset of a Cascade release, not of any repository on github.com.
+    if (typeof t.url !== 'string' || !isCascadeReleaseAsset(t.url)) continue;
     // The filename has to still CLASSIFY as the target it claims to be. Each
     // field was checked on its own, so an entry labelled `mac-arm64` whose
     // filename was a Windows installer passed — its URL is a genuine GitHub

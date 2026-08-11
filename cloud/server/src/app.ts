@@ -32,7 +32,7 @@ import {
   verifyWebhookSignature, planForStatus, subscriptionFromWebhook,
 } from './billing.js';
 import { HandoffStore, parseHandoffBody } from './handoff.js';
-import { DownloadResolver, isTargetId, isTrustedAssetUrl, RELEASES_PAGE_URL } from './downloads.js';
+import { DownloadResolver, isTargetId, isCascadeReleaseAsset, RELEASES_PAGE_URL } from './downloads.js';
 import { MAX_DOCUMENT_BYTES, parseDocument, resolveDocumentMime } from './documents.js';
 import { connectorCatalog, getConnector, validateRemoteMcpUrl } from './mcp.js';
 import { McpOAuthFlows, encodeOAuthBlob, resolveRunMcpServers } from './mcp-oauth.js';
@@ -1401,7 +1401,12 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     const asset = manifest?.targets.find((t) => t.id === target);
     // Unresolvable (GitHub down, or a release that genuinely lacks this build)
     // sends the visitor to the releases page rather than a dead end.
-    if (!asset || !isTrustedAssetUrl(asset.url)) {
+    // Re-checked at the redirect, and with the STRICT check: this is the point
+    // where a visitor's browser is actually sent somewhere, so "an asset of a
+    // Cascade release" is the question that matters, not "some URL on
+    // github.com". Both manifest sources already guarantee it; this is the last
+    // gate before it becomes someone's download.
+    if (!asset || !isCascadeReleaseAsset(asset.url)) {
       res.redirect(302, RELEASES_PAGE_URL);
       return;
     }

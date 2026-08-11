@@ -508,6 +508,46 @@ describe('DownloadResolver — authentication and the on-disk warm start', () =>
     expect(manifest!.targets.map((t) => t.id)).toEqual(['linux-appimage']);
   });
 
+  it("rejects a stored asset from someone else's GitHub repository", async () => {
+    // Every consistency check in the module can hold while the bytes belong to
+    // a stranger: anyone may create a repo and publish a release asset named
+    // Cascade-AI-0.72.0-arm64.dmg. It classifies as mac-arm64, its basename
+    // matches its filename, and the host is github.com — so provenance is the
+    // one thing none of the other checks asks about.
+    fs.writeFileSync(cacheFile(), JSON.stringify({
+      fetchedAt: Date.now(),
+      manifest: {
+        version: '0.72.0', releasedAt: null,
+        targets: [
+          { id: 'mac-arm64', filename: 'Cascade-AI-0.72.0-arm64.dmg', sizeBytes: 10,
+            url: 'https://github.com/someone-else/lookalike/releases/download/v0.72.0/Cascade-AI-0.72.0-arm64.dmg' },
+          { id: 'linux-deb', filename: 'cascade-ai-desktop_0.68.0_amd64.deb', sizeBytes: 20,
+            url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/cascade-ai-desktop_0.68.0_amd64.deb' },
+        ],
+      },
+    }), 'utf8');
+
+    const failing = vi.fn(async () => { throw new Error('down'); });
+    const manifest = await new DownloadResolver(failing as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() }).get();
+    expect(manifest!.targets.map((t) => t.id)).toEqual(['linux-deb']);
+  });
+
+  it('rejects a stored asset from a path that only starts like ours', async () => {
+    fs.writeFileSync(cacheFile(), JSON.stringify({
+      fetchedAt: Date.now(),
+      manifest: {
+        version: '0.68.0', releasedAt: null,
+        targets: [{ id: 'mac-arm64', filename: 'Cascade-AI-0.68.0-arm64.dmg', sizeBytes: 10,
+          url: 'https://github.com/Varun-SV/Cascade-AI-evil/releases/download/v0.68.0/Cascade-AI-0.68.0-arm64.dmg' }],
+      },
+    }), 'utf8');
+
+    const fetchImpl = vi.fn(async () => okResponse(realRelease()));
+    // Nothing usable came off disk, so it falls through to a real fetch.
+    expect((await new DownloadResolver(fetchImpl as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() }).get())!.version).toBe('0.68.0');
+    expect(fetchImpl).toHaveBeenCalled();
+  });
+
   it('drops a stored target with a zero or negative size', async () => {
     fs.writeFileSync(cacheFile(), JSON.stringify({
       fetchedAt: Date.now(),
