@@ -18,6 +18,7 @@ import type {
   ModelInfo,
   ProviderConfig,
   StreamChunk,
+  ToolDefinition,
   ToolCall,
 } from '../types.js';
 import { MODELS } from '../constants.js';
@@ -25,6 +26,45 @@ import { BaseProvider } from './base.js';
 import { withResolvedPricing } from '../core/router/pricing.js';
 import { isChatModel } from './model-filter.js';
 import { toGeminiParameters } from './gemini-schema.js';
+
+/**
+ * Tool definitions in the shape this provider actually submits.
+ *
+ * Exported so the router's budget preflight sizes what goes on the wire rather
+ * than what the caller passed. That matters more here than anywhere else: the
+ * sanitiser below strips exactly the metadata a large MCP schema is mostly made
+ * of, so charging the raw JSON refuses budgets over bytes Gemini never sees.
+ * One function, used by the request and the estimate alike.
+ */
+export function toGeminiTools(tools: readonly ToolDefinition[]): FunctionDeclaration[] {
+  return tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    // Convert, never cast. Gemini's parameters field is an OpenAPI subset
+    // that 400s on unknown keys, and MCP servers ship schemas carrying their
+    // own extensions (GitHub's adds `x-mcp-header` to every header-bound
+    // property). Casting sent those through verbatim and every request failed
+    // before the model saw it. See providers/gemini-schema.ts.
+    parameters: toGeminiParameters(tool.inputSchema) as FunctionDeclaration['parameters'],
+  }));
+}
+
+/**
+ * An assistant turn's tool calls in the shape this provider actually submits.
+ *
+ * Gemini's envelope carries no call id — the parts are matched to their
+ * responses by function name — so this is the one provider where the history
+ * costs LESS than Cascade's normalized form, and sizing that form refused
+ * budgets over ids never sent.
+ */
+export function toGeminiFunctionCalls(toolCalls: readonly ToolCall[]): Part[] {
+  return toolCalls.map((tc) => ({
+    functionCall: {
+      name: tc.name,
+      args: tc.input as Record<string, unknown>,
+    },
+  } as Part));
+}
 
 export class GeminiProvider extends BaseProvider {
   private client: GoogleGenAI;
@@ -55,7 +95,7 @@ export class GeminiProvider extends BaseProvider {
           { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
         ],
         tools: options.tools?.length
-          ? [{ functionDeclarations: options.tools.map(this.convertTool) }]
+          ? [{ functionDeclarations: toGeminiTools(options.tools) }]
           : undefined,
         abortSignal: options.signal,
       },
@@ -249,14 +289,7 @@ export class GeminiProvider extends BaseProvider {
         if (textContent) parts.push({ text: textContent });
 
         // Tool calls → functionCall parts
-        for (const tc of m.toolCalls ?? []) {
-          parts.push({
-            functionCall: {
-              name: tc.name,
-              args: tc.input as Record<string, unknown>,
-            },
-          } as Part);
-        }
+        parts.push(...toGeminiFunctionCalls(m.toolCalls ?? []));
 
         if (parts.length > 0) {
           contents.push({ role: 'model', parts });
@@ -316,20 +349,4 @@ export class GeminiProvider extends BaseProvider {
     return parts;
   }
 
-  private convertTool(tool: {
-    name: string;
-    description: string;
-    inputSchema: Record<string, unknown>;
-  }): FunctionDeclaration {
-    return {
-      name: tool.name,
-      description: tool.description,
-      // Convert, never cast. Gemini's parameters field is an OpenAPI subset
-      // that 400s on unknown keys, and MCP servers ship schemas carrying their
-      // own extensions (GitHub's adds `x-mcp-header` to every header-bound
-      // property). Casting sent those through verbatim and every request failed
-      // before the model saw it. See providers/gemini-schema.ts.
-      parameters: toGeminiParameters(tool.inputSchema) as FunctionDeclaration['parameters'],
-    };
-  }
 }

@@ -11,6 +11,8 @@ import type {
   ModelInfo,
   ProviderConfig,
   StreamChunk,
+  ToolCall,
+  ToolDefinition,
 } from '../types.js';
 import { MODELS } from '../constants.js';
 import { BaseProvider } from './base.js';
@@ -40,6 +42,48 @@ export function isParamShapeError(err: unknown): boolean {
   );
 }
 
+/**
+ * Tool definitions in the shape this provider actually submits.
+ *
+ * Exported because the router's budget preflight has to size a request before
+ * it is sent, and the envelope is not free: `{type, function:{...}}` around
+ * every definition is a few tokens each, which a large MCP server turns into
+ * hundreds. Sharing the one function means the estimate cannot drift from the
+ * request — the alternative, a second copy over in the router, is exactly how
+ * it drifted before.
+ */
+export function toOpenAITools(tools: readonly ToolDefinition[]): OpenAI.Chat.ChatCompletionTool[] {
+  return tools.map((t) => ({
+    type: 'function' as const,
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: t.inputSchema,
+    },
+  }));
+}
+
+/**
+ * An assistant turn's tool calls in the shape this provider actually submits.
+ *
+ * Note `arguments`: the input object is serialized to a STRING and then
+ * embedded in JSON, so every quote inside it is escaped a second time. Sizing
+ * the raw object instead under-counted a history of tool calls by most of that
+ * escaping, which is the direction that lets a request slip a cap.
+ */
+export function toOpenAIToolCalls(
+  toolCalls: readonly ToolCall[],
+): OpenAI.Chat.ChatCompletionMessageToolCall[] {
+  return toolCalls.map((tc) => ({
+    id: tc.id,
+    type: 'function' as const,
+    function: {
+      name: tc.name,
+      arguments: JSON.stringify(tc.input),
+    },
+  }));
+}
+
 export class OpenAIProvider extends BaseProvider {
   protected client: OpenAI;
   /** Once we learn (from the model id or an API error) that this deployment
@@ -65,14 +109,7 @@ export class OpenAIProvider extends BaseProvider {
     onChunk: (chunk: StreamChunk) => void,
   ): Promise<GenerateResult> {
     const messages = this.convertMessages(options.messages, options.systemPrompt);
-    const tools = options.tools?.map((t) => ({
-      type: 'function' as const,
-      function: {
-        name: t.name,
-        description: t.description,
-        parameters: t.inputSchema,
-      },
-    }));
+    const tools = options.tools && toOpenAITools(options.tools);
 
     let fullContent = '';
     let inputTokens = 0;
@@ -252,14 +289,7 @@ export class OpenAIProvider extends BaseProvider {
           result.push({
             role: 'assistant',
             content: m.content || '',
-            tool_calls: m.toolCalls.map((toolCall) => ({
-              id: toolCall.id,
-              type: 'function',
-              function: {
-                name: toolCall.name,
-                arguments: JSON.stringify(toolCall.input),
-              },
-            })),
+            tool_calls: toOpenAIToolCalls(m.toolCalls),
           } as any);
         } else {
           result.push({ role: m.role as 'user' | 'assistant', content: m.content });

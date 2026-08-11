@@ -765,6 +765,12 @@ export class T3Worker extends BaseTier {
         maxTokens: 4096,
         ...(subtaskModel ? { model: subtaskModel } : {}),
         featureTag: this.assignment?.sectionTitle,
+        // The wave signal, so cancel-and-respawn reaches the request that is
+        // RUNNING rather than only stopping the worker at its next checkpoint.
+        // It is a superset of the run signal the router injects when this is
+        // absent (T2 composes it from that signal plus its own per-wave one),
+        // so wiring it here loses no cancellation and adds the wave's.
+        ...(this.signal ? { signal: this.signal } : {}),
         ...(this.localOnlyMatch ? { forceLocal: true } : {}),
       };
 
@@ -1385,6 +1391,7 @@ ${current}`,
           systemPrompt: this.systemPromptOverride + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
           maxTokens: 4096,
           featureTag: assignment.sectionTitle,
+          ...(this.signal ? { signal: this.signal } : {}),
           ...(this.localOnlyMatch ? { forceLocal: true } : {}),
         });
         const next = (improved.content ?? '').trim();
@@ -1455,6 +1462,7 @@ Reply with JSON: { "completeness": "pass"|"fail", "correctness": "pass"|"fail", 
       maxTokens: 500,
       systemPrompt: this.systemPromptOverride + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
       featureTag: assignment.sectionTitle,
+      ...(this.signal ? { signal: this.signal } : {}),
       ...(this.localOnlyMatch ? { forceLocal: true } : {}),
     });
 
@@ -1510,6 +1518,7 @@ ${output.slice(0, 4000)}`;
         messages: [{ role: 'user', content: prompt }],
         maxTokens: 300,
         temperature: 0,
+        ...(this.signal ? { signal: this.signal } : {}),
         ...(this.localOnlyMatch ? { forceLocal: true } : {}),
       });
       const match = /\[[\s\S]*\]/.exec(result.content);

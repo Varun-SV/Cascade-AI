@@ -11,6 +11,8 @@ import type {
   ModelInfo,
   ProviderConfig,
   StreamChunk,
+  ToolCall,
+  ToolDefinition,
 } from '../types.js';
 import { MODELS } from '../constants.js';
 import { BaseProvider } from './base.js';
@@ -25,6 +27,39 @@ function anthropicThinkingParam(modelId: string, maxTokens: number): { thinking?
   const budget = Math.min(8000, maxTokens - 1024);
   if (budget < 1024) return {};
   return { thinking: { type: 'enabled', budget_tokens: budget } };
+}
+
+/**
+ * Tool definitions in the shape this provider actually submits.
+ *
+ * Exported so the router's budget preflight sizes the request the provider
+ * will send rather than the one the caller passed — `inputSchema` goes as
+ * `input_schema`, and the estimate has to agree with the wire, not with
+ * itself. One function, used by both, so the two cannot drift.
+ */
+export function toAnthropicTools(tools: readonly ToolDefinition[]): Anthropic.Tool[] {
+  return tools.map((t) => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.inputSchema as Anthropic.Tool['input_schema'],
+  }));
+}
+
+/**
+ * An assistant turn's tool calls in the shape this provider actually submits.
+ *
+ * Exported for the same reason as the tool definitions: the budget preflight
+ * has to size the envelope the provider adds, not Cascade's normalized
+ * `{id,name,input}`. Sharing the function means the estimate cannot drift from
+ * the request.
+ */
+export function toAnthropicToolUse(toolCalls: readonly ToolCall[]): Anthropic.ToolUseBlockParam[] {
+  return toolCalls.map((tc) => ({
+    type: 'tool_use' as const,
+    id: tc.id,
+    name: tc.name,
+    input: tc.input,
+  }));
 }
 
 export class AnthropicProvider extends BaseProvider {
@@ -56,11 +91,7 @@ export class AnthropicProvider extends BaseProvider {
     onChunk: (chunk: StreamChunk) => void,
   ): Promise<GenerateResult> {
     const messages = this.convertMessages(options.messages);
-    const tools = options.tools?.map((t) => ({
-      name: t.name,
-      description: t.description,
-      input_schema: t.inputSchema as Anthropic.Tool['input_schema'],
-    }));
+    const tools = options.tools && toAnthropicTools(options.tools);
 
     let fullContent = '';
     let inputTokens = 0;
@@ -221,14 +252,7 @@ export class AnthropicProvider extends BaseProvider {
         if (text) content.push({ type: 'text', text });
 
         // Tool calls → tool_use blocks
-        for (const tc of m.toolCalls ?? []) {
-          content.push({
-            type: 'tool_use',
-            id: tc.id,
-            name: tc.name,
-            input: tc.input,
-          });
-        }
+        content.push(...toAnthropicToolUse(m.toolCalls ?? []));
 
         if (content.length > 0) {
           result.push({ role: 'assistant', content });

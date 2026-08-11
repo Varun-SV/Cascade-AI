@@ -4,7 +4,7 @@
 
 import type { ModelInfo, TokenUsage } from '../types.js';
 import { MODELS } from '../constants.js';
-import { resolvePricing, type PricingProvider } from '../core/router/pricing.js';
+import { resolvePricing, hasContextBands, type PricingProvider } from '../core/router/pricing.js';
 
 export interface ResolvedPricing {
   /** USD per 1k input tokens. */
@@ -35,9 +35,52 @@ export interface ResolvedPricing {
  * discovered preview model used to fall through to 0 here and be reported as
  * free; it now reports as untracked so the number on screen is honest and the
  * budget code knows its total is an undercount.
+ *
+ * `opts.inputTokens` selects the CONTEXT BAND where a model has one. Several
+ * long-context models charge more past a threshold — Gemini 3.1 Pro is $2/M up
+ * to 200K input and $4/M above it — and the dataset carries those bands
+ * (pricing.ts `tierFor`). Omitting the size resolved the cheapest band
+ * unconditionally, so a long call was both estimated and BILLED at half rate in
+ * our own accounting.
  */
-export function resolveModelPricing(model: ModelInfo): ResolvedPricing {
+export function resolveModelPricing(
+  model: ModelInfo,
+  opts: { inputTokens?: number } = {},
+): ResolvedPricing {
   if (model.isLocal) return { input: 0, output: 0, unknown: false };
+
+  // Banded models are asked of the DATASET first, ahead of the stamped fields.
+  // Those fields are not user intent for such a model — both the bundled
+  // catalogue and withResolvedPricing() stamp them by resolving the dataset with
+  // no input size, which always lands on the cheapest band. Preferring them
+  // here made `opts.inputTokens` inert for every model that carries a price,
+  // i.e. almost all of them, so a >200K call was still priced at the small-call
+  // rate in both the preflight estimate and the post-call accounting.
+  if (opts.inputTokens != null && hasContextBands(model)) {
+    const banded = resolvePricing(model, { inputTokens: opts.inputTokens });
+    const base = resolvePricing(model, { inputTokens: 0 });
+    if (!banded.unknown && !base.unknown) {
+      // The band is applied as a MULTIPLIER on whatever price the model
+      // carries, not as a replacement for it. Live pricing (LiveDataProvider's
+      // applyLivePricing) writes a fresher reconciled rate into these same
+      // fields, and returning the bundled dataset's number outright would throw
+      // that away for precisely the banded models — accepting requests at a
+      // stale rate and reporting the wrong spend afterwards. Scaling keeps the
+      // fresher figure and still charges the larger band.
+      const scale = (stamped: number, baseRate: number): number =>
+        stamped > 0 && baseRate > 0 ? stamped / baseRate : 1;
+      const inScale = scale(model.inputCostPer1kTokens, base.input);
+      const outScale = scale(model.outputCostPer1kTokens, base.output);
+      return {
+        input: banded.input * inScale,
+        output: banded.output * outScale,
+        unknown: false,
+        ...(banded.estimatedFromProvider
+          ? { estimatedFromProvider: banded.estimatedFromProvider }
+          : {}),
+      };
+    }
+  }
 
   if (model.inputCostPer1kTokens > 0 || model.outputCostPer1kTokens > 0) {
     return {
@@ -47,7 +90,7 @@ export function resolveModelPricing(model: ModelInfo): ResolvedPricing {
     };
   }
 
-  const fromDataset = resolvePricing(model);
+  const fromDataset = resolvePricing(model, { inputTokens: opts.inputTokens });
   if (!fromDataset.unknown) {
     return {
       input: fromDataset.input,
@@ -78,7 +121,9 @@ export function calculateCost(
   outputTokens: number,
   model: ModelInfo,
 ): number {
-  const { input, output } = resolveModelPricing(model);
+  // Same band selection as buildTokenUsage — these two must not disagree about
+  // what a call costs.
+  const { input, output } = resolveModelPricing(model, { inputTokens });
   return (inputTokens / 1000) * input + (outputTokens / 1000) * output;
 }
 
@@ -87,7 +132,8 @@ export function buildTokenUsage(
   outputTokens: number,
   model: ModelInfo,
 ): TokenUsage {
-  const { input, output, unknown } = resolveModelPricing(model);
+  // Priced at the band this call's input actually lands in, not the cheapest.
+  const { input, output, unknown } = resolveModelPricing(model, { inputTokens });
   return {
     inputTokens,
     outputTokens,

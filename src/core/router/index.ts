@@ -2,11 +2,12 @@
 //  Cascade AI — Model Router
 // ─────────────────────────────────────────────
 
-import EventEmitter from 'node:events';
+import EventEmitter, { setMaxListeners } from 'node:events';
 import crypto from 'node:crypto';
 import type {
   CascadeConfig,
   GenerateOptions,
+  ConversationMessage,
   GenerateResult,
   ModelInfo,
   ProviderConfig,
@@ -31,8 +32,10 @@ import type { TaskAnalyzer } from './task-analyzer.js';
 import type { FeedbackSource } from './feedback-prior.js';
 import { DeadModelStore } from './dead-models.js';
 import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
-import { buildTokenUsage } from '../../utils/cost.js';
-import { withTimeout, CascadeCancelledError } from '../../utils/retry.js';
+import { buildTokenUsage, resolveModelPricing } from '../../utils/cost.js';
+import { estimateTokens, contentToText, CHARS_PER_TOKEN } from '../context/compaction.js';
+import { withTimeout, withTimeoutAbort, anySignal, CascadeCancelledError } from '../../utils/retry.js';
+import { wireProfile, geminiImageCopies } from './wire-profile.js';
 import { ModelProfiler } from './model-profiler.js';
 import type { MemoryStore } from '../../memory/store.js';
 import { computeDelegationSavings, type DelegationSavings } from './savings.js';
@@ -105,6 +108,125 @@ export interface RouterStats {
 // key's real models is a one-time cost even though the hosted server creates a
 // fresh router per request. In-memory + TTL-bounded; only a hash of the key is
 // stored, never the key itself.
+/**
+ * Tokens charged for an image whose bytes we cannot see (a URL reference, or a
+ * block shaped differently than expected). Around what a mid-size photo costs
+ * on the common vision models — high enough that a budget check notices the
+ * image, low enough that one picture cannot refuse a run on its own.
+ */
+const IMAGE_TOKENS_FALLBACK = 1_500;
+
+/**
+ * The most an image can cost, however many bytes arrive.
+ *
+ * Vision providers downscale before billing — Anthropic caps around 1.15
+ * megapixels, roughly 1,600 tokens, and OpenAI's high-detail tiling lands in
+ * the same range — so image cost does NOT grow with file size the way a naive
+ * bytes-per-token estimate implies. Left unbounded, a 20 MB screenshot would
+ * be charged tens of thousands of tokens it will never incur, and refuse runs
+ * that would have completed fine.
+ */
+const IMAGE_TOKENS_MAX = 2_000;
+
+/**
+ * Tokens booked for one image, whatever its bytes say.
+ *
+ * Byte length is not a proxy for what a vision model charges, in either
+ * direction: providers bill from DECODED dimensions, so a heavily compressed
+ * PNG — a large solid-colour screenshot is the easy example — can be a few
+ * kilobytes and still be billed near the megapixel maximum, while a 20 MB photo
+ * is downscaled to that same ceiling. Sizing from bytes therefore undercounts
+ * exactly the images that would slip a tight cap.
+ *
+ * Decoding dimensions would mean parsing image headers inside the budget path.
+ * The honest alternative is what the providers effectively do: charge a flat
+ * rate per image, at the top of the range they bill in, so no real image falls
+ * below what was reserved for it.
+ */
+const IMAGE_TOKENS_EACH = IMAGE_TOKENS_MAX;
+
+function safeJson(value: unknown): string {
+  try { return JSON.stringify(value) ?? ''; } catch { return ''; }
+}
+
+/**
+ * A token estimate that does not undercount dense scripts.
+ *
+ * `estimateTokens` divides by four, which suits English and is what the
+ * compaction budgeter wants. It is wrong in the UNSAFE direction for CJK,
+ * emoji and similar, which commonly cost about a token per character — so a
+ * prompt full of them is underestimated roughly fourfold, and an underestimate
+ * in an enforcement path is a cap that silently does not hold. Taking the
+ * larger of the two counts leaves ASCII exactly as it was.
+ */
+/**
+ * A fresh per-run abort controller, with room for the listeners a run attaches.
+ *
+ * Every billable call chains to this signal, so a T3 wave adds one listener per
+ * call in flight — a wave wider than Node's default ceiling of 10 logged a
+ * MaxListenersExceededWarning and made an ordinary parallel run look like a
+ * leak. `Cascade.run()` already raises the limit on the caller's own signal for
+ * exactly this fan-out; the signal the router owns needs the same, and the same
+ * number, or only half the problem is fixed. The listeners are removed as their
+ * calls settle.
+ */
+function newRunAbort(): AbortController {
+  const controller = new AbortController();
+  setMaxListeners(64, controller.signal);
+  return controller;
+}
+
+/**
+ * Framing every provider adds around each turn — role markers, message
+ * delimiters, chat-template scaffolding. Four tokens a message is the figure
+ * OpenAI documents for its own format and the others are the same order.
+ * Without it a long history of short turns reserved about a token each while
+ * the provider billed several times that.
+ */
+const TOKENS_PER_MESSAGE_FRAMING = 4;
+
+/**
+ * ASCII is left at four characters per token, deliberately.
+ *
+ * Review raised that token-dense ASCII — base64, hashes, minified data —
+ * tokenizes closer to two or three characters per token, so this can
+ * under-count it. That is true, and it is not worth what correcting it costs:
+ * the only cheap discriminator is whitespace ratio, and it cannot tell a
+ * base64 blob from a long URL, a pasted code block, or a run of one repeated
+ * character (which compresses to almost nothing). Raising the rate for all of
+ * them inflates every large paste by more than half and refuses runs that
+ * would have completed — the failure this whole check is meant to avoid.
+ *
+ * The honest fix is a real tokenizer, not a better guess. Until then the
+ * residual is a bounded under-count on machine data, caught by the post-call
+ * ceiling as it always was.
+ */
+function guardTokens(text: string): number {
+  if (!text) return 0;
+  // The bound for the non-ASCII part is its UTF-8 BYTE count, not its
+  // character count. Production tokenizers are byte-level BPE, so a token can
+  // never span fewer than one byte — bytes are a true ceiling, where "one
+  // token per code point" was only a guess, and a wrong one for emoji: a ZWJ
+  // sequence is several code points and can cost several tokens each.
+  let asciiChars = 0;
+  let denseBytes = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0)!;
+    if (cp <= 0x7f) { asciiChars++; continue; }
+    denseBytes += cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
+  }
+  // The two parts are SUMMED, not raced. Taking the larger of the two was a
+  // hole in exactly the input this guard exists for: a document mixing prose
+  // with CJK charged whichever half was bigger and the other half for nothing,
+  // so a megabyte of ASCII alongside 100,000 CJK characters reserved about
+  // 325,000 tokens against a real cost near 400,000 — and adding more prose to
+  // such a prompt did not move the estimate at all until it overtook the dense
+  // part. Neither bound changes on its own: pure ASCII is the same rate it was,
+  // and pure dense text is the same byte ceiling.
+  if (denseBytes === 0) return estimateTokens(text);
+  return Math.ceil(asciiChars / CHARS_PER_TOKEN) + denseBytes;
+}
+
 const DISCOVERY_TTL_MS = 15 * 60 * 1000;
 const DISCOVERY_TIMEOUT_MS = 4_000;
 interface DiscoveryEntry { ids: string[]; models: ModelInfo[]; at: number }
@@ -171,6 +293,33 @@ export class CascadeRouter extends EventEmitter {
   // start of every `cascade run`, independent of the session-wide budget.
   private runTokens = 0;
   private runCostUsd = 0;
+  /**
+   * Budget held for calls that are IN FLIGHT — admitted by the preflight check
+   * but not yet counted by recordStats. Without these, concurrent calls all
+   * measure themselves against the same unspent allowance and are all admitted.
+   * Released when each call settles; reset by beginRun() alongside the totals.
+   */
+  private reservedTokens = 0;
+  private reservedCostUsd = 0;
+  /**
+   * Fires when this run's budget is spent, cancelling work already in flight.
+   *
+   * The kill switch was previously only a flag, which stops calls that have
+   * not yet submitted. A parallel wave's earlier members are already at the
+   * provider by then, and they carried on generating for a run whose output
+   * would be discarded. Every provider call chains to this, so tripping the
+   * ceiling reaches the requests that are running, not just the ones queued.
+   */
+  private runAbort = newRunAbort();
+  /**
+   * Bumped by every beginRun(). A release handle remembers the generation it
+   * was issued in and does nothing if that has moved on: beginRun() zeroes the
+   * counters, so a call still in flight from the previous run would otherwise
+   * subtract its estimate from the NEW run's totals and drive them negative —
+   * leaving later preflights believing there is more allowance than the cap
+   * actually holds, which is worse than no gate at all.
+   */
+  private runGeneration = 0;
   private runBudgetExceeded = false;
   private runBudgetExceededReason: string | undefined;
   /**
@@ -420,7 +569,9 @@ export class CascadeRouter extends EventEmitter {
       // Direct provider call, NOT this.generate(): failover there could silently
       // answer from a different model and record a wrong verdict.
       const provider = this.createProvider(cfg as ProviderConfig, model);
-      const result = await withTimeout(provider.generate({
+      // Aborting, like every other billable call: a probe that times out
+      // should stop, not keep generating in the background on the user's key.
+      const result = await withTimeoutAbort((signal) => provider.generate({
         messages: [{ role: 'user', content: "Call the echo tool with text set to 'ping'. Use the tool; do not answer in prose." }],
         tools: [{
           name: 'echo',
@@ -429,6 +580,7 @@ export class CascadeRouter extends EventEmitter {
         }],
         maxTokens: 80,
         temperature: 0,
+        signal,
       }), 30_000, 'tool-support probe timed out');
       return (result.toolCalls?.length ?? 0) > 0;
     } catch {
@@ -565,12 +717,26 @@ export class CascadeRouter extends EventEmitter {
       );
     }
 
+    // ── Pin this call to the run it starts in ─────────────────
+    //
+    // A run can end and the next one begin while this call is still in flight:
+    // beginRun() swaps the generation, the abort controller and the per-run
+    // counters together, and setRunSignal() replaces the cancel signal. Every
+    // read below happens after at least one await, so reading the fields
+    // directly would have a straggler consult the NEXT run's state — chaining
+    // to its abort signal, charging its allowance, and cancelling its wave on a
+    // verdict about a run that is already over. Captured once, here, before the
+    // first await.
+    const runGeneration = this.runGeneration;
+    const runAbort = this.runAbort;
+    const runSignal = this.runSignal;
+
     // ── Apply per-tier token + temperature limits ──────────────
     options = applyTierLimits(options, tier, this.config?.tierLimits);
     // Inject the run's abort signal so the provider can abort the in-flight
     // request the moment a cancel fires (instant cancellation).
-    if (this.runSignal && !options.signal) {
-      options = { ...options, signal: this.runSignal };
+    if (runSignal && !options.signal) {
+      options = { ...options, signal: runSignal };
     }
     // Per-call override (Cascade Auto per-subtask routing) wins over the shared
     // tier model, except when a vision model is explicitly required.
@@ -616,6 +782,15 @@ export class CascadeRouter extends EventEmitter {
     const provider = this.getProvider(model);
     if (!provider) throw new Error(`No provider for model ${model.id}`);
 
+    // Refuse a call whose INPUT alone cannot fit the remaining budget, before
+    // spending it. Placed ahead of the TPM wait: there is no point queueing for
+    // provider capacity on a call we are about to decline.
+    //
+    // Returns a release handle: the estimate is RESERVED against the budget
+    // until the call settles, so concurrent calls cannot each be admitted
+    // against the same unspent allowance.
+    let releaseReservation: (() => void) | undefined = this.enforcePreflightBudget(model, options);
+
     // Per-provider TPM guard: pause this call until the token bucket has
     // enough budget to cover the estimated input+output tokens. Prevents
     // sudden bursts of parallel T3 spawns from overshooting a provider's
@@ -628,7 +803,26 @@ export class CascadeRouter extends EventEmitter {
     const requestedTokens = options.maxTokens ?? model.maxOutputTokens ?? 1024;
     const estimatedTokens = Math.min(requestedTokens, model.maxOutputTokens ?? requestedTokens) + 512;
     if (this.tpmLimiter) {
-      await this.tpmLimiter.acquire(model.provider, estimatedTokens);
+      // Cancellable, on every signal that can make this call pointless — not
+      // just the budget one. The bucket can hold a call for most of a refill
+      // interval, and in that window the run can be cancelled, the wave
+      // respawned (T2 aborts its own per-wave signal to do that), or the
+      // ceiling tripped by a sibling. Watching only the router's controller
+      // left an ordinary cancel parked here for up to a minute, because
+      // nothing but the budget aborts that one.
+      const wait = anySignal([options.signal, runAbort.signal]);
+      try {
+        await this.tpmLimiter.acquire(model.provider, estimatedTokens, wait.signal);
+      } catch (err) {
+        // The reservation is taken above and the try/finally that frees it does
+        // not start until below, so bailing out here would strand it for the
+        // rest of the run — shrinking every later call's allowance over a
+        // request that was never submitted anywhere.
+        releaseReservation?.();
+        throw this.asAbortFailure(err, options.signal, runSignal);
+      } finally {
+        wait.release();
+      }
     }
 
     const useStream = Boolean(onChunk) && model.supportsStreaming && typeof provider.generateStream === 'function';
@@ -640,59 +834,115 @@ export class CascadeRouter extends EventEmitter {
       const inferenceTimeoutMs = this.config.localInferenceTimeoutMs ?? 300_000;
       // Allow up to half the inference timeout to wait in the queue itself.
       const queueWaitMs = Math.round(inferenceTimeoutMs / 2);
-      releaseLocalSlot = await this.localQueue.acquire(queueWaitMs);
+      // Same reasoning as the rate-limit wait, and a longer window to be stuck
+      // in: with the default concurrency of 1 this holds a call for up to 150
+      // seconds, and until the signal was wired through, neither a cancel nor
+      // a spent budget got it out — it waited for a slot it would drop the
+      // instant it was given one.
+      const wait = anySignal([options.signal, runAbort.signal]);
+      try {
+        releaseLocalSlot = await this.localQueue.acquire(queueWaitMs, wait.signal);
+      } catch (err) {
+        // The reservation is taken above but the try/finally that frees it does
+        // not start until below, so a queue timeout here used to strand it for
+        // the rest of the run — shrinking every later call's allowance, and
+        // eventually tripping the budget flag, over a request that was never
+        // submitted to anything.
+        releaseReservation?.();
+        throw this.asAbortFailure(err, options.signal, runSignal);
+      } finally {
+        wait.release();
+      }
     }
 
     try {
+      // Re-checked HERE, not only at the top of this method. Between that
+      // check and this point a call can sit for a long time in the TPM bucket
+      // or the local-inference queue, and a SIBLING in the same T3 wave can
+      // trip the per-task ceiling while it waits. Without this, every call
+      // already admitted goes on to submit and spend against a run that is
+      // already over and whose output will be discarded — which is most of a
+      // wave, and most of the cap. Throwing inside the try releases both the
+      // reservation and the queue slot on the way out.
+      //
+      // Read only while this call's run is still the current one: after
+      // beginRun() the flag describes a DIFFERENT run, and refusing a
+      // straggler because the next task's budget is spent — or letting one
+      // through because it is not — are both wrong answers to a question
+      // about the wrong run.
+      if (runGeneration === this.runGeneration && this.runBudgetExceeded) {
+        // Hand the rate-limit capacity back. acquire() already deducted it,
+        // and the bucket outlives beginRun() — keeping tokens that were never
+        // spent would throttle the NEXT run for up to a refill interval over a
+        // request that was never submitted.
+        this.tpmLimiter?.refund(model.provider, estimatedTokens);
+        throw new CascadeRouter.BudgetExceededError(
+          this.runBudgetExceededReason ?? 'Per-task budget exceeded.',
+        );
+      }
+
       let result: GenerateResult;
 
+      // Every provider call below is time-boxed with withTimeoutAbort, which
+      // CANCELS the request when the clock runs out instead of merely racing
+      // it. Providers all honour options.signal already; nothing was handing
+      // them one. That is what made a timed-out request keep generating and
+      // keep billing with its usage never reported — and what the abandoned
+      // attempt accounting, the retry preflight and the second reservation all
+      // existed to paper over. Those are gone: the first request is on its way
+      // down before the fallback starts.
       if (model.isLocal) {
         // Apply a hard timeout to local inference calls so a slow/overloaded
         // model doesn't block the worker indefinitely.
         const inferenceTimeoutMs = this.config.localInferenceTimeoutMs ?? 300_000;
-        const inferencePromise = useStream && onChunk
-          ? provider.generateStream(options, (chunk) => {
-              const text = typeof chunk?.text === 'string' ? chunk.text : '';
-              if (text) onChunk({ ...chunk, text });
-            })
-          : provider.generate(options);
-        result = await withTimeout(
-          inferencePromise,
+        result = await withTimeoutAbort(
+          (signal) => (useStream && onChunk
+            ? provider.generateStream({ ...options, signal }, (chunk) => {
+                const text = typeof chunk?.text === 'string' ? chunk.text : '';
+                if (text) onChunk({ ...chunk, text });
+              })
+            : provider.generate({ ...options, signal })),
           inferenceTimeoutMs,
           `Local model ${model.id} inference timed out after ${inferenceTimeoutMs}ms`,
+          [options.signal, runAbort.signal],
         );
       } else if (useStream && onChunk) {
         // Cloud streaming MUST be time-boxed: a stalled SSE connection (TCP open,
         // no terminal chunk) would otherwise hang the whole run with no output.
         const cloudTimeoutMs = this.config.cloudInferenceTimeoutMs ?? 120_000;
         try {
-          result = await withTimeout(
-            provider.generateStream(options, (chunk) => {
+          result = await withTimeoutAbort(
+            (signal) => provider.generateStream({ ...options, signal }, (chunk) => {
               const text = typeof chunk?.text === 'string' ? chunk.text : '';
               if (text) onChunk({ ...chunk, text });
             }),
             cloudTimeoutMs,
             `Model ${model.id} stream timed out after ${cloudTimeoutMs}ms`,
+            [options.signal, runAbort.signal],
           );
         } catch (streamErr) {
           // Cancelled mid-stream — propagate the abort, don't retry.
-          if ((streamErr instanceof Error && streamErr.name === 'AbortError') || this.runSignal?.aborted || options.signal?.aborted) {
+          if ((streamErr instanceof Error && streamErr.name === 'AbortError') || runSignal?.aborted || options.signal?.aborted) {
             throw streamErr;
           }
           // Stream stalled or errored — fall back to a (also time-boxed)
           // non-streaming call rather than letting a hung stream freeze the run.
-          result = await withTimeout(
-            provider.generate(options),
+          // The stalled attempt has been aborted by now, so this is the only
+          // request in flight and the reservation taken above still covers it.
+          result = await withTimeoutAbort(
+            (signal) => provider.generate({ ...options, signal }),
             cloudTimeoutMs,
             `Model ${model.id} inference timed out after ${cloudTimeoutMs}ms`,
+            [options.signal, runAbort.signal],
           );
         }
       } else {
         const cloudTimeoutMs = this.config.cloudInferenceTimeoutMs ?? 120_000;
-        result = await withTimeout(
-          provider.generate(options),
+        result = await withTimeoutAbort(
+          (signal) => provider.generate({ ...options, signal }),
           cloudTimeoutMs,
           `Model ${model.id} inference timed out after ${cloudTimeoutMs}ms`,
+          [options.signal, runAbort.signal],
         );
       }
 
@@ -720,17 +970,22 @@ export class CascadeRouter extends EventEmitter {
       }
 
       // Add to tracking
-      this.recordStats(tier, model, result.usage, options.featureTag);
+      this.recordStats(tier, model, result.usage, options.featureTag, runGeneration);
       // On success, signal the failover manager so that a provider which
       // previously tripped a rate-limit can be immediately re-enabled rather
       // than waiting the full backoff window to expire.
       this.failover.recordSuccess(model.provider);
       return result;
     } catch (err) {
+      // A budget abort also cancels the in-flight request, but it is NOT a
+      // user cancellation: it must keep saying it ran out of budget, or the
+      // reason the run stopped is lost on the way up. Checked first, because
+      // the abort below would otherwise swallow it.
+      if (err instanceof CascadeRouter.BudgetExceededError) throw err;
       // A cancelled run aborts the in-flight provider request. Surface it as a
       // cancellation so it propagates like the checkpoint-based cancel (graceful
       // stop + partial output upstream) rather than being retried/failed-over.
-      if ((err instanceof Error && err.name === 'AbortError') || this.runSignal?.aborted || options.signal?.aborted) {
+      if ((err instanceof Error && err.name === 'AbortError') || runSignal?.aborted || options.signal?.aborted) {
         throw new CascadeCancelledError('Run cancelled');
       }
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -750,6 +1005,12 @@ export class CascadeRouter extends EventEmitter {
           // model (which may itself be local) can acquire its own slot.
           releaseLocalSlot?.();
           releaseLocalSlot = undefined;
+          // Same reasoning for the budget reservation: the retry re-runs the
+          // preflight and reserves for itself, so holding this one across it
+          // would charge the run twice for one logical call and could refuse a
+          // failover that fits.
+          releaseReservation?.();
+          releaseReservation = undefined;
           // Clear a per-subtask pin (Cascade Auto's explicit `options.model`)
           // that pointed at the now-rate-limited model — otherwise the
           // recursive call's `options.model ?? this.tierModels.get(tier)`
@@ -788,6 +1049,12 @@ export class CascadeRouter extends EventEmitter {
           });
           releaseLocalSlot?.();
           releaseLocalSlot = undefined;
+          // Same reasoning for the budget reservation: the retry re-runs the
+          // preflight and reserves for itself, so holding this one across it
+          // would charge the run twice for one logical call and could refuse a
+          // failover that fits.
+          releaseReservation?.();
+          releaseReservation = undefined;
           // Clear a per-subtask override that pointed at the dead model so the
           // recursive call resolves the tier's next-best model, and carry the
           // depth so the chain is bounded.
@@ -801,6 +1068,11 @@ export class CascadeRouter extends EventEmitter {
       throw err;
     } finally {
       releaseLocalSlot?.();
+      // Actual usage has been recorded by now (recordStats on the success
+      // path), so the reservation must go or it would double-count against
+      // every later call in the run.
+      releaseReservation?.();
+      releaseReservation = undefined;
     }
   }
 
@@ -1231,7 +1503,20 @@ export class CascadeRouter extends EventEmitter {
     return undefined;
   }
 
-  private recordStats(tier: TierRole, model: ModelInfo, usage: TokenUsage, featureTag?: string): void {
+  /**
+   * `runGeneration` is the generation the call was ADMITTED in — see
+   * `generate()`. Session-wide accounting always applies (the spend is real
+   * whenever it lands), but the per-RUN ceiling is only meaningful for the run
+   * the call belongs to, so a straggler from a finished run is left out of it.
+   * Omitted by the direct callers in tests, which have no run to straddle.
+   */
+  private recordStats(
+    tier: TierRole,
+    model: ModelInfo,
+    usage: TokenUsage,
+    featureTag?: string,
+    runGeneration?: number,
+  ): void {
     this.stats.totalTokens += usage.totalTokens;
     this.stats.totalCostUsd += usage.estimatedCostUsd;
     this.sessionCostUsd += usage.estimatedCostUsd;
@@ -1272,12 +1557,27 @@ export class CascadeRouter extends EventEmitter {
     }
 
     // ── Per-run accounting (hard per-task ceiling) ──
-    this.runTokens += usage.totalTokens;
-    this.runCostUsd += usage.estimatedCostUsd;
+    //
+    // Skipped for a call admitted under a PREVIOUS run. beginRun() zeroes
+    // runTokens/runCostUsd for the new task, so adding a straggler's usage
+    // charges the old run's spend to the new run's allowance — and worse, if
+    // that pushes it over, enforceRunBudget() aborts `this.runAbort`, which is
+    // now the NEW run's controller, cancelling a wave of work that has nothing
+    // to do with the call that just returned. Same class of bug as the
+    // reservation release handles, and scoped the same way.
+    //
+    // Everything above this line is session-wide and is recorded either way:
+    // the money left the account whichever run asked for it, and the session
+    // cap must not be escapable by crossing a task boundary.
+    const currentRun = runGeneration === undefined || runGeneration === this.runGeneration;
+    if (currentRun) {
+      this.runTokens += usage.totalTokens;
+      this.runCostUsd += usage.estimatedCostUsd;
+    }
 
     // ── Budget enforcement & warning (atomic state transitions) ─
     this.updateBudgetState();
-    this.enforceRunBudget();
+    if (currentRun) this.enforceRunBudget();
   }
 
   /**
@@ -1288,8 +1588,242 @@ export class CascadeRouter extends EventEmitter {
   beginRun(): void {
     this.runTokens = 0;
     this.runCostUsd = 0;
+    // A run that ended mid-flight (cancelled, crashed) can leave a reservation
+    // behind; starting the next one with it still held would shrink that run's
+    // allowance for no reason.
+    this.reservedTokens = 0;
+    this.reservedCostUsd = 0;
+    // A fresh switch: the previous run's abort must not cancel this one's work.
+    this.runAbort = newRunAbort();
+    // Invalidates every release handle the previous run handed out.
+    this.runGeneration++;
     this.runBudgetExceeded = false;
     this.runBudgetExceededReason = undefined;
+  }
+
+  /**
+   * Refuse a call whose input alone cannot fit what is left of the run budget.
+   *
+   * `enforceRunBudget()` below runs AFTER a call returns, which makes the caps
+   * a stop rather than a pre-authorisation: the tokens are already bought by
+   * the time it looks. That was tolerable while a prompt could not exceed
+   * 20,000 characters, and stopped being so when that cap was removed in
+   * 0.72.0 — a multi-megabyte prompt is billed in full on the very first call
+   * (the complexity classifier sends the whole thing), and no ceiling
+   * configured downstream can give that money back.
+   *
+   * Deliberately narrow, because a false refusal is worse than a late stop:
+   *
+   *   • INPUT ONLY. What a call returns is not knowable in advance, and
+   *     charging a worst-case `maxTokens` of output against the budget would
+   *     decline runs that would have finished comfortably. Input is the part
+   *     that is already determined, and it is the part the removed cap used to
+   *     bound.
+   *   • Compared against what REMAINS (`cap - spent`), not the whole cap, so a
+   *     call is judged on the budget it can actually draw from.
+   *   • Skipped when the model has no usable price. An estimate cannot be made,
+   *     and refusing on ignorance would break every self-hosted and local model
+   *     the moment a cost cap is set. The post-hoc stop still applies there.
+   *   • Skipped entirely when no cap is configured — there is nothing to
+   *     pre-authorise against.
+   *
+   * The message names the cap AND the estimate, because "too expensive" with
+   * no numbers gives the user nothing to change.
+   */
+  private enforcePreflightBudget(
+    model: ModelInfo,
+    options: GenerateOptions,
+  ): (() => void) | undefined {
+    const budget = this.config?.budget;
+    const maxCost = budget?.maxCostPerRunUsd;
+    const maxTokens = budget?.maxTokensPerRun;
+    if (maxCost == null && maxTokens == null) return undefined;
+
+    const inputTokens = this.estimateInputTokens(options, model);
+
+    if (maxTokens != null) {
+      // Against spent AND reserved — see the reservation note below.
+      const remaining = maxTokens - this.runTokens - this.reservedTokens;
+      if (inputTokens > remaining) {
+        this.failPreflight(
+          `This request's input is about ${inputTokens.toLocaleString()} tokens, but only `
+          + `${Math.max(0, remaining).toLocaleString()} of the per-task cap of `
+          + `${maxTokens.toLocaleString()} remain. Shorten the input, or raise `
+          + 'budget.maxTokensPerRun.',
+        );
+      }
+    }
+
+    let estimatedUsd = 0;
+    if (maxCost != null) {
+      // Priced at the CONTEXT BAND this input lands in. Several long-context
+      // models charge more past a threshold, and resolving the cheapest band
+      // unconditionally under-estimated exactly the large calls this check
+      // exists to catch.
+      const { input: inputPer1k, unknown } = resolveModelPricing(model, { inputTokens });
+      if (!unknown && inputPer1k > 0) {
+        estimatedUsd = (inputTokens / 1000) * inputPer1k;
+        const remaining = maxCost - this.runCostUsd - this.reservedCostUsd;
+        if (estimatedUsd > remaining) {
+          this.failPreflight(
+            `Sending this request to ${model.provider}:${model.id} would cost about `
+            + `$${estimatedUsd.toFixed(4)} in input alone (~${inputTokens.toLocaleString()} tokens), `
+            + `and only $${Math.max(0, remaining).toFixed(4)} of the per-task cap of `
+            + `$${maxCost.toFixed(4)} remains. Shorten the input, choose a cheaper model, `
+            + 'or raise budget.maxCostPerRunUsd.',
+          );
+        }
+      }
+    }
+
+    // ── Reserve until this call settles ──
+    //
+    // Checking against spent-so-far alone is a time-of-check/time-of-use hole
+    // the common case walks straight into: T2 launches a T3 wave through
+    // Promise.allSettled, so every call in it reaches this check before any
+    // response has updated runCostUsd. Each would see the same untouched
+    // allowance, all would be admitted, and the run would bill several times
+    // the cap before the post-hoc stop noticed. Holding the estimate against
+    // the budget for the duration of the call makes the wave queue behind
+    // itself instead.
+    this.reservedTokens += inputTokens;
+    this.reservedCostUsd += estimatedUsd;
+    const generation = this.runGeneration;
+    let released = false;
+    return () => {
+      // A handle from a previous run refunds nothing: beginRun() already
+      // zeroed the counters it was drawn against.
+      if (released || generation !== this.runGeneration) return;
+      released = true;
+      this.reservedTokens -= inputTokens;
+      this.reservedCostUsd -= estimatedUsd;
+    };
+  }
+
+  /**
+   * What this call will send, in tokens.
+   *
+   * Text is the bulk of it, but not all of it: providers bill the serialized
+   * TOOL DEFINITIONS on every native-tool call (Anthropic sends each name,
+   * description and input schema), and an image is billed by its own size
+   * rather than as the `[image]` placeholder `contentToText` reduces it to. A
+   * tool-heavy or vision request could therefore pass either cap while its real
+   * input already exceeded the allowance.
+   */
+  private estimateInputTokens(options: GenerateOptions, model: ModelInfo): number {
+    let tokens = guardTokens(options.systemPrompt ?? '');
+    let images = 0;
+
+    // What the PROVIDER will send, not what the caller passed. Every provider
+    // drops, rewrites or duplicates some of a request on the way out, and the
+    // differences are large enough to matter in both directions: charging for
+    // content that is discarded refuses runs that would have completed, and
+    // skipping content that is sent leaves the cap unenforced. The rules live
+    // in wire-profile.ts, derived by reading each serializer end to end.
+    const wire = wireProfile(model.provider);
+    const countsImage = (img: { type?: string } | undefined): boolean =>
+      wire.sendsUrlImages || img?.type === 'base64';
+
+    for (const message of options.messages) {
+      if (wire.dropsMessage(message)) continue;
+      tokens += TOKENS_PER_MESSAGE_FRAMING;
+      if (typeof message.content === 'string') {
+        tokens += guardTokens(message.content);
+      } else {
+        switch (wire.blockHandling(message)) {
+          case 'blocks':
+            for (const block of message.content) {
+              // A block type the conversion has no branch for is dropped —
+              // a tool_result block in a user turn is the real case, and
+              // contentToText expands its whole payload, so charging it
+              // refused runs over data no provider submits.
+              if (!wire.sendsBlock(block)) continue;
+              if (block.type === 'image') {
+                if (countsImage(block.image)) images++;
+                continue;
+              }
+              tokens += guardTokens(contentToText([block]));
+            }
+            break;
+          case 'stringified':
+            // JSON.stringify()d whole — an image block's base64 payload goes
+            // on the wire in full, so it is charged by its real size rather
+            // than the flat per-image rate.
+            tokens += guardTokens(safeJson(message.content));
+            break;
+          case 'dropped':
+            // Reduced to '' by the provider: neither the text blocks nor the
+            // images reach the request, so none of it is billed. The turn
+            // itself is still sent, so its framing stands.
+            break;
+        }
+      }
+      // An assistant turn's TOOL CALLS are not in `content` — they are a
+      // separate field, and providers serialize them back into the next
+      // request. After a model emitted a large argument object, the following
+      // call passed preflight without reserving a byte of it.
+      //
+      // Sized in the provider's own envelope, like the tool definitions above.
+      // Cascade's normalized `{id,name,input}` is nobody's wire format: OpenAI
+      // serializes `input` to a string and embeds it, so every quote inside is
+      // escaped twice over, while Gemini drops the id entirely. Across a long
+      // tool-using history that difference runs to thousands of tokens.
+      if (message.toolCalls?.length && wire.sendsToolCalls(message)) {
+        tokens += guardTokens(safeJson(wire.sizeToolCalls(message.toolCalls)));
+      }
+      // The id that ties a tool result back to its call. Short, but there is
+      // one per tool result and a tool-heavy history has many.
+      if (message.toolCallId && message.role === 'tool' && wire.sendsToolCallId) {
+        tokens += guardTokens(message.toolCallId);
+      }
+    }
+
+    // Tool DEFINITIONS ride on every native-tool call — each name, description
+    // and input schema in full. Sized as the provider will actually send them:
+    // Gemini rewrites every schema through its own sanitiser first, and a large
+    // MCP schema is mostly the metadata that strips out.
+    if (options.tools?.length) {
+      tokens += guardTokens(safeJson(wire.sizeTools(options.tools)));
+    }
+
+    // The top-level `images` field is read by GeminiProvider alone — every
+    // other provider builds its request from `messages` and never looks at it.
+    // Counting it for all of them charged 2,000 tokens apiece for bytes that
+    // are not submitted, which refuses runs over input the provider never
+    // sees; not counting it at all left Gemini's vision path unreserved.
+    if (wire.readsTopLevelImages) {
+      const topLevel = (options.images ?? []).filter(countsImage).length;
+      images += topLevel * geminiImageCopies(options.messages);
+    }
+    tokens += images * IMAGE_TOKENS_EACH;
+
+    return tokens;
+  }
+
+  /**
+   * Report a wait that ended because something asked it to stop, the same way
+   * the provider call below reports one.
+   *
+   * The queue waits sit OUTSIDE the try/catch that maps aborts, so without
+   * this a cancellation surfaced as whatever the queue happened to throw and
+   * was retried or failed over like an ordinary error. A budget abort keeps
+   * saying it ran out of budget — otherwise the reason the run stopped is lost
+   * on the way up — and anything else that was aborted becomes a cancellation.
+   */
+  private asAbortFailure(err: unknown, callSignal?: AbortSignal, runSignal?: AbortSignal): unknown {
+    if (err instanceof CascadeRouter.BudgetExceededError) return err;
+    if (err instanceof CascadeCancelledError) return err;
+    if (callSignal?.aborted || runSignal?.aborted) return new CascadeCancelledError('Run cancelled');
+    return err;
+  }
+
+  /** Trips the same run-level flag a post-hoc overrun does, and reports it the same way. */
+  private failPreflight(reason: string): never {
+    this.runBudgetExceeded = true;
+    this.runBudgetExceededReason = reason;
+    this.runAbort.abort(new CascadeRouter.BudgetExceededError(reason));
+    this.emit('budget:exceeded', { reason, spentUsd: this.sessionCostUsd });
+    throw new CascadeRouter.BudgetExceededError(reason);
   }
 
   /**
@@ -1310,6 +1844,9 @@ export class CascadeRouter extends EventEmitter {
       : `Per-task cost cap of $${maxCost!.toFixed(4)} reached (spent $${this.runCostUsd.toFixed(4)}). Stopping this run to avoid runaway cost.`;
     this.runBudgetExceeded = true;
     this.runBudgetExceededReason = reason;
+    // Reaches the calls already at the provider, not only the ones still
+    // queued behind this one.
+    this.runAbort.abort(new CascadeRouter.BudgetExceededError(reason));
     this.emit('budget:exceeded', { reason, spentUsd: this.sessionCostUsd });
     throw new CascadeRouter.BudgetExceededError(reason);
   }

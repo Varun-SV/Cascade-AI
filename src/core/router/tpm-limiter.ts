@@ -31,6 +31,25 @@ interface Bucket {
  * tokens are available. Setting TPM to Infinity disables limiting for that
  * provider (used for local Ollama by default).
  */
+/** The reason a signal carries, as an Error the caller can act on. */
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error('Aborted while waiting for rate-limit capacity');
+}
+
+/** setTimeout that also wakes on abort, and always cleans up after itself. */
+function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+  });
+}
+
 export class TpmLimiter {
   private buckets: Map<ProviderType, Bucket> = new Map();
 
@@ -51,9 +70,14 @@ export class TpmLimiter {
    * are reported back via `refund` when short, or simply settled at the next
    * refill.
    */
-  async acquire(provider: ProviderType, estimatedTokens: number): Promise<void> {
+  async acquire(provider: ProviderType, estimatedTokens: number, signal?: AbortSignal): Promise<void> {
     const bucket = this.buckets.get(provider);
     if (!bucket || bucket.tokensPerMinute === Number.POSITIVE_INFINITY) return;
+    // A caller can be held here for most of a refill interval. When the reason
+    // it was waiting has gone away — the run cancelled, or its budget spent by
+    // a sibling — it should stop waiting rather than sit out the full window
+    // for a call that will be thrown away the moment it is admitted.
+    if (signal?.aborted) throw abortReason(signal);
 
     // Clamp a single request to the bucket capacity so it can never be
     // impossible to fulfil.
@@ -68,7 +92,8 @@ export class TpmLimiter {
       const deficit = want - bucket.available;
       // Wait just long enough to accumulate the deficit.
       const waitMs = Math.max(50, Math.ceil((deficit / bucket.tokensPerMinute) * 60_000));
-      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      await sleepUnlessAborted(waitMs, signal);
+      if (signal?.aborted) throw abortReason(signal);
     }
   }
 

@@ -57,3 +57,29 @@ describe('TpmLimiter', () => {
     expect(DEFAULT_PROVIDER_TPM['ollama']).toBe(Number.POSITIVE_INFINITY);
   });
 });
+
+describe('cancellation', () => {
+  it('stops waiting when the signal aborts, instead of sitting out the refill', async () => {
+    // A caller can be held here for most of a refill interval. When the run
+    // that was waiting has already been cancelled or has spent its budget,
+    // waiting out the window admits a call that is thrown away immediately.
+    const limiter = new TpmLimiter({ anthropic: 1_000 });
+    await limiter.acquire('anthropic', 1_000);          // drain the bucket
+
+    const ac = new AbortController();
+    const blocked = limiter.acquire('anthropic', 1_000, ac.signal);
+    ac.abort(new Error('run budget spent'));
+    await expect(blocked).rejects.toThrow('run budget spent');
+  });
+
+  it('refuses immediately when the signal is already aborted', async () => {
+    const limiter = new TpmLimiter({ anthropic: 1_000 });
+    await expect(limiter.acquire('anthropic', 10, AbortSignal.abort(new Error('gone'))))
+      .rejects.toThrow('gone');
+  });
+
+  it('is unaffected when no signal is supplied', async () => {
+    const limiter = new TpmLimiter({ anthropic: 1_000 });
+    await expect(limiter.acquire('anthropic', 10)).resolves.toBeUndefined();
+  });
+});

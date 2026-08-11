@@ -226,6 +226,28 @@ export function findPricing(
   return null;
 }
 
+/**
+ * True when this model's price depends on how large the input is.
+ *
+ * The stamped `inputCostPer1kTokens` on a ModelInfo is only ever the CHEAPEST
+ * band — both the bundled catalogue and `withResolvedPricing` below resolve it
+ * without an input size — so for a banded model that field cannot answer "what
+ * will this call cost". Callers that know the size ask this first and go to the
+ * dataset when it says yes.
+ */
+export function hasContextBands(
+  model: Pick<ModelInfo, 'id' | 'provider' | 'isLocal' | 'baseModelId'>,
+): boolean {
+  if (model.isLocal) return false;
+  const fallbackProviders: PricingProvider[] =
+    model.provider === 'azure' ? ['openai'] : model.provider === 'gemini' ? ['vertex'] : [];
+  const match = findPricing(model.id, model.provider as PricingProvider, {
+    baseModelId: model.baseModelId,
+    fallbackProviders,
+  });
+  return (match?.entry.tiers?.length ?? 0) > 1;
+}
+
 /** Every entry in the dataset — for `cascade models`, docs and tests. */
 export function allPricingEntries(): readonly ModelPricingEntry[] {
   return DATASET.entries;

@@ -129,6 +129,90 @@ export async function withTimeout<T>(
   }
 }
 
+/**
+ * Time-box an operation and actually CANCEL it when the clock runs out.
+ *
+ * `withTimeout` above races a promise it did not create, so it cannot stop the
+ * work: on timeout the caller gets an error while the original request keeps
+ * running — and for a model call that means it keeps generating and keeps
+ * billing, invisibly, with its usage never reported anywhere. Everything built
+ * to compensate for that (charging an estimate for the abandoned attempt,
+ * re-checking the budget before the retry, holding a second reservation) exists
+ * only because the request was never cancelled.
+ *
+ * This takes a FACTORY instead of a promise so it can hand in a signal. On
+ * timeout the signal aborts first and the rejection follows, so the provider
+ * sees the cancellation before the caller sees the error. A caller's own signal
+ * is chained in, so a cancelled run still aborts everything beneath it.
+ *
+ * Aborting is a request, not a refund: a provider that has already begun a
+ * completion may still charge for it. What changes is that we stop paying for
+ * output nobody will ever read, and stop doing it for the full length of a
+ * second request that was racing the first.
+ */
+export async function withTimeoutAbort<T>(
+  run: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  errorMessage = 'Operation timed out',
+  outer?: AbortSignal | ReadonlyArray<AbortSignal | undefined>,
+): Promise<T> {
+  // Several signals can want this call stopped — the caller's own cancellation
+  // and the router's per-run kill switch — and any of them firing should end
+  // it. Taking a list rather than one avoids AbortSignal.any(), which is not
+  // available on every runtime this ships to.
+  const outers = (Array.isArray(outer) ? outer : [outer])
+    .filter((sig): sig is AbortSignal => sig !== undefined);
+  const controller = new AbortController();
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let rejectRace: ((err: unknown) => void) | undefined;
+
+  // Aborting the inner controller is a request to the operation; it is not a
+  // guarantee the operation settles, and some do not honour a signal at all.
+  // Racing an explicit rejection is what actually returns control to the
+  // caller — without it, cancelling a run left the router waiting out the full
+  // inference timeout (two minutes by default) for a call nobody wanted any
+  // more, which is the opposite of the instant cancel this is here to provide.
+  // Reject FIRST, then abort. The operation's own abort handler usually
+  // rejects too, and Promise.race reports whichever settles first — so
+  // aborting first meant the caller saw the provider's generic "aborted"
+  // instead of the real reason (a run cancellation, or a budget ceiling that
+  // needs to keep saying so on the way up). Rejecting first claims the race;
+  // the abort on the next line is still synchronous, so it reaches the
+  // operation before any continuation of ours runs.
+  const settle = (reason: Error): void => {
+    rejectRace?.(reason);
+    controller.abort(reason);
+  };
+
+  const abortOuter = (): void => {
+    const fired = outers.find((sig) => sig.aborted);
+    settle(fired?.reason instanceof Error ? fired.reason : new CascadeCancelledError('Run cancelled'));
+  };
+
+  const failPromise = new Promise<never>((_, reject) => {
+    rejectRace = reject;
+    timer = setTimeout(() => settle(new Error(errorMessage)), timeoutMs);
+  });
+
+  try {
+    // Already cancelled: do NOT call the factory. Racing it against an
+    // immediate rejection still runs it, and `run` is what dials the provider
+    // — so a call the caller had already given up on was being placed anyway,
+    // with whatever synchronous work that entails, purely to lose a race a
+    // microtask later.
+    if (outers.some((sig) => sig.aborted)) {
+      abortOuter();
+      return await failPromise;
+    }
+    for (const sig of outers) sig.addEventListener('abort', abortOuter, { once: true });
+    return await Promise.race([run(controller.signal), failPromise]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    for (const sig of outers) sig.removeEventListener('abort', abortOuter);
+  }
+}
+
 // ── Helpers ────────────────────────────────────
 
 function defaultIsRetryable(err: Error): boolean {
@@ -156,4 +240,42 @@ function defaultIsRetryable(err: Error): boolean {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((res) => setTimeout(res, ms));
+}
+
+/**
+ * One signal that fires when any of these do.
+ *
+ * `AbortSignal.any()` would be a line, but it is not available on every
+ * runtime this ships to. Returns `undefined` when there is nothing to listen
+ * to, so callers keep whatever fast path they have for the no-signal case, and
+ * returns the sole signal unwrapped when there is only one — no extra
+ * controller, no extra listener.
+ *
+ * `release()` detaches the listeners and MUST be called when the wait is over.
+ * Without it, a long-lived caller signal accumulates one listener per wait,
+ * which is both a leak and, past ten, a MaxListenersExceededWarning.
+ */
+export function anySignal(
+  sources: ReadonlyArray<AbortSignal | undefined>,
+): { signal?: AbortSignal; release: () => void } {
+  const live = sources.filter((s): s is AbortSignal => s !== undefined);
+  if (live.length === 0) return { release: () => {} };
+  if (live.length === 1) return { signal: live[0], release: () => {} };
+
+  const controller = new AbortController();
+  function detach(): void {
+    for (const s of live) s.removeEventListener('abort', onAbort);
+  }
+  function onAbort(): void {
+    const fired = live.find((s) => s.aborted);
+    controller.abort(fired?.reason instanceof Error ? fired.reason : new CascadeCancelledError('Run cancelled'));
+    detach();
+  }
+
+  if (live.some((s) => s.aborted)) {
+    onAbort();
+    return { signal: controller.signal, release: detach };
+  }
+  for (const s of live) s.addEventListener('abort', onAbort, { once: true });
+  return { signal: controller.signal, release: detach };
 }

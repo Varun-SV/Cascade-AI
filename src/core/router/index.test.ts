@@ -366,7 +366,10 @@ describe('CascadeRouter — live-discovered provider wiring (openai-compatible)'
 
     await router.generate('T1', { messages: [{ role: 'user', content: 'hi' }], maxTokens: 8_000 });
 
-    expect(acquire).toHaveBeenCalledWith('openai-compatible', 4_512); // min(8000, 4000) + 512, not 8000 + 512
+    // Asserted on the first two arguments rather than the whole call: acquire
+    // also takes the run's abort signal now, and this test is about the token
+    // reservation, not the arity.
+    expect(acquire.mock.calls[0]?.slice(0, 2)).toEqual(['openai-compatible', 4_512]); // min(8000, 4000) + 512, not 8000 + 512
 
     avail.mockRestore();
     list.mockRestore();

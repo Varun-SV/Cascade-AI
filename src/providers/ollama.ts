@@ -9,6 +9,7 @@ import type {
   ModelInfo,
   ProviderConfig,
   StreamChunk,
+  ToolDefinition,
   ToolCall,
 } from '../types.js';
 import { OLLAMA_BASE_URL } from '../constants.js';
@@ -65,6 +66,47 @@ function isToolCapable(modelName: string): boolean {
 
 // ── Provider ───────────────────────────────────
 
+/**
+ * Tool definitions in the shape this provider actually submits.
+ *
+ * Ollama takes the OpenAI envelope, but it is kept as its own function rather
+ * than reusing that one: they are separate wire formats that happen to agree
+ * today, and sharing would quietly change this provider the day OpenAI's
+ * changes. Exported so the budget preflight sizes what is really sent — the
+ * per-tool envelope is a few tokens each, which a large MCP server turns into
+ * hundreds.
+ */
+export function toOllamaTools(tools: readonly ToolDefinition[]): Array<{
+  type: 'function';
+  function: { name: string; description: string; parameters: Record<string, unknown> };
+}> {
+  return tools.map((t) => ({
+    type: 'function' as const,
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: t.inputSchema,
+    },
+  }));
+}
+
+/**
+ * An assistant turn's tool calls in the shape this provider actually submits.
+ *
+ * Unlike the OpenAI envelope it copies elsewhere, this one carries no call id
+ * and passes `arguments` as an object rather than a serialized string.
+ */
+export function toOllamaToolCalls(toolCalls: readonly ToolCall[]): Array<{
+  function: { name: string; arguments: Record<string, unknown> };
+}> {
+  return toolCalls.map((tc) => ({
+    function: {
+      name: tc.name,
+      arguments: tc.input,
+    },
+  }));
+}
+
 export class OllamaProvider extends BaseProvider {
   private baseUrl: string;
 
@@ -85,14 +127,7 @@ export class OllamaProvider extends BaseProvider {
     const messages = this.convertMessages(options.messages, options.systemPrompt);
 
     // Convert tools to Ollama/OpenAI-compatible format when provided
-    const ollamaTools = options.tools?.map((t) => ({
-      type: 'function' as const,
-      function: {
-        name: t.name,
-        description: t.description,
-        parameters: t.inputSchema,
-      },
-    }));
+    const ollamaTools = options.tools && toOllamaTools(options.tools);
 
     const response = await fetch(`${this.baseUrl}/api/chat`, {
       method: 'POST',
@@ -305,12 +340,7 @@ export class OllamaProvider extends BaseProvider {
         result.push({
           role: 'assistant',
           content: typeof m.content === 'string' ? m.content : '',
-          tool_calls: m.toolCalls.map((tc) => ({
-            function: {
-              name: tc.name,
-              arguments: tc.input,
-            },
-          })),
+          tool_calls: toOllamaToolCalls(m.toolCalls),
         });
         continue;
       }

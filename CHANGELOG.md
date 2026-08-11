@@ -18,6 +18,213 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+## 0.73.0 - 2026-08-11
+
+### Fixed
+- **A timed-out model call is now cancelled, not just abandoned.** Every
+  provider request was time-boxed by racing it against a timer. Losing that
+  race told the caller the call had failed; it did nothing to the request,
+  which carried on generating and billing against the user's key with its usage
+  never reported anywhere. Nothing was reading it by then either. The stream
+  path made this visible — a stalled stream falls back to a non-streaming call,
+  so two full submissions of the same input could be in flight and billable at
+  once — but it applied to every timeout in the router, including the local
+  inference path and the tool-support probe.
+
+  Every provider already honoured an abort signal; nothing was handing them
+  one. They are now given a signal that fires when the clock runs out, before
+  the caller is told, so the first request is on its way down before any
+  fallback starts. A caller's own signal chains in, so cancelling a run still
+  aborts everything beneath it. Aborting is a request rather than a refund — a
+  provider mid-completion may still charge for it — but the run stops paying
+  for output nobody will read, and stops paying for it twice.
+
+  This also removes the accounting that existed only to compensate: charging an
+  estimate for the abandoned attempt, re-checking the budget before the retry,
+  and holding a second reservation across it.
+
+- **The per-run cost cap now refuses a request it cannot afford, instead of
+  paying for it and stopping afterwards.** Both per-run ceilings were checked
+  after a model call returned, which made them a stop rather than a
+  pre-authorisation — the tokens were already bought by the time anything
+  counted them. That was tolerable while a prompt could not exceed 20,000
+  characters. Removing that cap in 0.72.0 made it matter: the complexity
+  classifier sends the whole prompt on the very first call, so a multi-megabyte
+  input to a priced model was billed in full before any ceiling looked, and no
+  configured cap could give it back.
+
+  A request whose input alone cannot fit what remains of the budget is now
+  declined before it is sent, and the message names both the cap and the
+  estimate — "would cost about $1.87 in input alone (~623,000 tokens), and only
+  $0.50 of the per-task cap of $2.00 remains" — because "too expensive" with no
+  numbers gives nobody anything to change.
+
+  Deliberately narrow, since a false refusal is worse than a late stop. It
+  counts input only: what a call returns is not knowable in advance, and
+  reserving a worst-case output allowance would decline runs that would have
+  finished comfortably. It judges against what remains rather than the whole
+  cap. It skips a model with no usable price — an estimate cannot be made, and
+  refusing on ignorance would break every local and self-hosted model the
+  moment a cap was set — leaving those to the post-hoc stop as before. And it
+  does nothing at all when no cap is configured.
+
+  Tripping the ceiling now cancels work already in flight, not just work still
+  queued. A parallel wave's earlier members are at the provider by the time a
+  later one runs out of budget, and they carried on generating for a run whose
+  output would be discarded. The router holds a per-run abort that every
+  provider call chains to, so the ceiling reaches the requests that are
+  running. A budget abort still reports itself as a budget failure rather than
+  a cancellation — otherwise the reason the run stopped is lost on the way up.
+  That signal is given room for the listeners a wave attaches to it; at Node's
+  default of ten, an ordinary parallel run logged a `MaxListenersExceededWarning`
+  and looked like a leak. The same applies to the two other things a wave shares
+  — the per-wave abort signal T2 composes for cancel-and-respawn, and the peer
+  bus every worker in a section subscribes to, whose listener count is simply
+  the wave width.
+
+- **Cancelling a T3 wave now reaches the model call that is running.** T2 aborts
+  a per-wave signal to cancel and respawn a wave, and that signal reached the
+  workers' tool calls but not the generation itself — only one of the five model
+  calls in a worker passed it through. So a respawned wave left its predecessor
+  generating and billing, stopping only at the next checkpoint. All of them pass
+  it now. It is a superset of the run signal the router injects when a call
+  supplies none, so nothing that was cancellable before has become less so.
+
+- **A cancelled call no longer waits out the queue it was sitting in.** Two
+  places hold a request before it is submitted — the per-provider rate-limit
+  bucket and the local-inference queue — and both could hold it for a long
+  time: most of a refill interval for the first, and half the inference timeout
+  (150 seconds by default, at the default concurrency of one) for the second.
+  Neither was watching the caller's own signal, and the local queue was
+  watching no signal at all. So cancelling a run, or a manager respawning a
+  wave, left those calls parked for the full window before anything noticed —
+  waiting for capacity they would drop the instant they received it. Both waits
+  now end as soon as any of the signals that make the call pointless fires, and
+  a call that leaves the local queue this way gives up its place rather than
+  taking a slot on the way out. The reservation it was holding is released too;
+  previously a request that never reached a provider could shrink every later
+  call's allowance for the rest of the run.
+
+  A call already admitted when a sibling trips the ceiling no longer submits.
+  The kill switch was checked when a call entered the router, but a request can
+  then sit for a long time in the rate-limit bucket or the local-inference
+  queue, and one member of a parallel wave can exhaust the budget while the
+  others wait. Every one of them went on to spend against a run that was
+  already over and whose output would be discarded. It is re-checked
+  immediately before submission.
+
+  An admitted call HOLDS its estimate against the budget until it settles.
+  Checking against spent-so-far alone is a time-of-check/time-of-use hole that
+  the common case walks straight into: a T2 wave launches its T3 workers
+  concurrently, so every call reaches the check before any response has updated
+  the total. Each would see the same untouched allowance, all would be
+  admitted, and the run could bill several times the cap before the post-hoc
+  stop noticed.
+
+  The estimate also counts what the provider actually bills: serialized tool
+  definitions, which Anthropic and others send in full on every native-tool
+  call; an assistant turn's tool calls, which are a separate field from its
+  content and are serialized back into the next request; images arriving either
+  nested in a message or, for the one provider that reads that field, on the
+  top-level `images` option; and dense scripts —
+  CJK and emoji cost about a token per character, where the
+  four-characters-per-token rule used elsewhere underestimates them fourfold,
+  and an underestimate in an enforcement path is a cap that does not hold; and
+  the per-turn framing every provider wraps around a message, without which a
+  long history of short turns reserved about a token each.
+
+  What gets billed is provider-specific, and the estimate now says so in one
+  place instead of several. Every provider rewrites a request on the way out,
+  and the differences are not small: Anthropic discards system-role history
+  outright, which is where compaction puts its summary of the entire
+  conversation; Gemini drops URL image attachments, folds system turns into the
+  next user turn, rewrites every tool schema through a sanitiser that strips
+  the metadata a large MCP schema is mostly made of, and attaches a top-level
+  image twice in one particular shape of history; Anthropic and Gemini both
+  ignore block content on an assistant turn entirely, and Gemini on a system
+  turn; OpenAI ignores it on system and tool turns, and drops an assistant
+  turn's tool calls when its content is a block array; a tool result carrying
+  blocks is JSON-stringified whole by three of the four, base64 image payload
+  included, so it costs its real size rather than the flat per-image rate.
+
+  Tool definitions AND an assistant turn's historical tool calls are sized by
+  the provider's own conversion function rather than a description of it. No provider sends a definition as it was given —
+  OpenAI and Ollama wrap each one in a function envelope, Anthropic renames the
+  schema field, Gemini rewrites the schema entirely — and the omitted envelope
+  is a few tokens per tool, which a large MCP server turns into hundreds, always
+  in the direction that lets a request slip a tight cap. Tool calls diverge
+  further still: OpenAI serializes the argument object to a string and embeds
+  that in JSON, so every quote inside is escaped twice over, while Gemini sends
+  no call id at all. Those conversions are now shared with the providers
+  outright, so the estimate is not a copy of what gets sent; it is the same
+  function.
+
+  A `tool_result` block sitting in a user turn is no longer charged. Every
+  provider's array conversion has a branch for text and a branch for images and
+  nothing else — the block is dropped by all four — but the estimator expanded
+  its whole payload, so a tool-heavy history could be refused over data no
+  provider ever sees. On a tool-role turn, where the array is serialized whole,
+  it is still counted, because there it really is sent.
+
+  Mixed-script input is measured by adding its parts rather than taking the
+  larger one. Prose was bounded by character count and dense scripts by UTF-8
+  bytes, and the guard returned whichever was bigger — so a document combining
+  the two was charged for one half and nothing for the other, and adding more
+  prose to a CJK-heavy prompt did not move the estimate at all until it
+  overtook the dense part. Neither bound changed on its own.
+
+  Each of those was found the same way — one at a time, in review, after the
+  estimate was already wrong in production-shaped input — because the rules
+  lived as one-off provider conditionals scattered through the estimator with
+  nothing tying them to the code they modelled. They are now a single table
+  (`core/router/wire-profile.ts`) derived by reading each serializer end to
+  end, and its rows are tested by running the real serializers over a marked
+  message and looking for the marker in what comes out. A provider that changes
+  how it builds a request now fails a test rather than quietly biasing every
+  budget decision.
+
+  Per-run accounting is scoped to the run that asked for it. A call still in
+  flight when the next task begins was charged to that task's fresh allowance,
+  and if its usage pushed the total past the ceiling, the abort that followed
+  cancelled the new run's work — a wave that had spent nothing — over a verdict
+  about a run that was already finished. Session totals are unaffected: the
+  money left the account whichever run asked for it, and a task boundary must
+  not become a way to spend past the session cap.
+
+  Token-dense ASCII — base64, hashes, minified data — is knowingly left at the
+  prose rate. It tokenizes more densely than that, but the only cheap way to
+  spot it is whitespace ratio, which cannot tell a payload from a long URL, a
+  pasted code block, or a repeated character that compresses to almost
+  nothing. Raising the rate for all of them refuses runs that would have
+  completed. The residual under-count is caught by the post-call ceiling, as
+  it always was.
+
+  Images are charged a flat rate rather than sized from their bytes. Providers
+  bill from decoded dimensions, so byte length misleads in both directions: a
+  heavily compressed screenshot can be a few kilobytes and still be billed near
+  the megapixel maximum, while a 20 MB photo is downscaled to that same
+  ceiling. Sizing from bytes undercounted exactly the images that would slip a
+  tight cap.
+
+- **A long call is no longer priced at the short-call rate.** Several
+  long-context models charge more past a threshold — Gemini 3.1 Pro is $2 per
+  million input tokens up to 200K and $4 above it — and the pricing dataset
+  carries those bands. Nothing was passing the input size in to select one, so
+  the cheapest band was resolved unconditionally. That understated the preflight
+  estimate for exactly the large calls it exists to catch, and, because the same
+  function backs `buildTokenUsage`, it also understated the spend Cascade
+  reported for those calls after the fact.
+
+  Selecting the band means asking the pricing dataset, not the model object.
+  Both the bundled catalogue and the discovery path stamp a model's price by
+  resolving that dataset with no input size, which always lands on the cheapest
+  band — so the stamped field is not an answer to "what will this call cost",
+  and preferring it made the input size irrelevant for every model carrying a
+  price, which is nearly all of them. The band is applied as a multiplier on
+  whatever price the model carries rather than as a replacement, so a fresher
+  rate fetched by live pricing survives instead of being silently swapped for
+  the bundled one.
+
 ## 0.72.0 - 2026-08-10
 
 ### Changed
