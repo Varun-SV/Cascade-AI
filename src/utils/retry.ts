@@ -241,3 +241,41 @@ function defaultIsRetryable(err: Error): boolean {
 function sleep(ms: number): Promise<void> {
   return new Promise((res) => setTimeout(res, ms));
 }
+
+/**
+ * One signal that fires when any of these do.
+ *
+ * `AbortSignal.any()` would be a line, but it is not available on every
+ * runtime this ships to. Returns `undefined` when there is nothing to listen
+ * to, so callers keep whatever fast path they have for the no-signal case, and
+ * returns the sole signal unwrapped when there is only one — no extra
+ * controller, no extra listener.
+ *
+ * `release()` detaches the listeners and MUST be called when the wait is over.
+ * Without it, a long-lived caller signal accumulates one listener per wait,
+ * which is both a leak and, past ten, a MaxListenersExceededWarning.
+ */
+export function anySignal(
+  sources: ReadonlyArray<AbortSignal | undefined>,
+): { signal?: AbortSignal; release: () => void } {
+  const live = sources.filter((s): s is AbortSignal => s !== undefined);
+  if (live.length === 0) return { release: () => {} };
+  if (live.length === 1) return { signal: live[0], release: () => {} };
+
+  const controller = new AbortController();
+  function detach(): void {
+    for (const s of live) s.removeEventListener('abort', onAbort);
+  }
+  function onAbort(): void {
+    const fired = live.find((s) => s.aborted);
+    controller.abort(fired?.reason instanceof Error ? fired.reason : new CascadeCancelledError('Run cancelled'));
+    detach();
+  }
+
+  if (live.some((s) => s.aborted)) {
+    onAbort();
+    return { signal: controller.signal, release: detach };
+  }
+  for (const s of live) s.addEventListener('abort', onAbort, { once: true });
+  return { signal: controller.signal, release: detach };
+}

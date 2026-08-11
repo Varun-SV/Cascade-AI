@@ -748,6 +748,90 @@ describe('preflight budget', () => {
     expect(router.budgetExceededInfo()?.reason).toMatch(/Session budget/);
   });
 
+  // ── Cancellable waits ───────────────────────
+  //
+  // Two places hold a call before it is submitted: the rate-limit bucket and
+  // the local-inference queue. Both can hold it for a long time — most of a
+  // refill interval, or half the inference timeout — so both have to watch
+  // every signal that can make the call pointless, not just the budget one.
+  // Watching a subset means waiting out the whole window for a request that
+  // will be thrown away the moment it is admitted.
+
+  it('leaves the rate-limit queue when the caller cancels', async () => {
+    const router = await makeRouter({ maxCostPerRunUsd: 1.0 });
+    const r = router as unknown as {
+      tierModels: Map<string, ModelInfo>;
+      tpmLimiter: { acquire: (p: string, t: number, s?: AbortSignal) => Promise<void> };
+    };
+    r.tierModels.set('T3', PRICED);
+
+    let held!: AbortSignal | undefined;
+    let waiting!: () => void;
+    const atLimiter = new Promise<void>((resolve) => { waiting = resolve; });
+    r.tpmLimiter = {
+      acquire: (_p, _t, signal) => new Promise((_resolve, reject) => {
+        held = signal;
+        waiting();
+        signal?.addEventListener('abort', () => reject(new Error('left the bucket')), { once: true });
+      }),
+    };
+    (router as unknown as { getProvider: (m: ModelInfo) => unknown }).getProvider = () => ({
+      generate: async () => ({ content: '', usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } }),
+    });
+
+    const controller = new AbortController();
+    const inFlight = router.generate('T3', {
+      messages: [{ role: 'user', content: 'work' }],
+      signal: controller.signal,
+    });
+    await atLimiter;
+    expect(held).toBeDefined();
+    expect(held!.aborted).toBe(false);
+
+    controller.abort();
+    await expect(inFlight).rejects.toThrow(/cancel/i);
+    // And nothing is left reserved against a call that never went anywhere.
+    expect((router as unknown as { reservedCostUsd: number }).reservedCostUsd).toBe(0);
+  });
+
+  it('leaves the local-inference queue when the caller cancels', async () => {
+    // Concurrency of 1, so the second call is parked behind the first for up
+    // to half the inference timeout — 150 seconds by default.
+    const router = await makeRouter({ maxCostPerRunUsd: 1.0 });
+    (router as unknown as { tierModels: Map<string, ModelInfo> }).tierModels.set('T3', UNPRICED);
+    let release!: () => void;
+    const firstHeld = new Promise<void>((resolve) => { release = resolve; });
+    (router as unknown as { getProvider: (m: ModelInfo) => unknown }).getProvider = () => ({
+      generate: async () => {
+        await firstHeld;
+        return { content: '', usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } };
+      },
+    });
+
+    const first = router.generate('T3', { messages: [{ role: 'user', content: 'one' }] });
+    await vi.waitFor(() => {
+      expect((router as unknown as { localQueue: { activeCount: number } }).localQueue.activeCount).toBe(1);
+    });
+
+    const controller = new AbortController();
+    const second = router.generate('T3', {
+      messages: [{ role: 'user', content: 'two' }],
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => {
+      expect((router as unknown as { localQueue: { queueDepth: number } }).localQueue.queueDepth).toBe(1);
+    });
+
+    controller.abort();
+    await expect(second).rejects.toThrow(/cancel/i);
+    // The abandoned waiter must not have taken a slot on its way out, or the
+    // queue would be permanently one short.
+    expect((router as unknown as { localQueue: { queueDepth: number } }).localQueue.queueDepth).toBe(0);
+    release();
+    await first;
+    expect((router as unknown as { localQueue: { activeCount: number } }).localQueue.activeCount).toBe(0);
+  });
+
   it('gives the run signal enough listeners for a wave to chain to', async () => {
     // Every billable call adds an 'abort' listener to the router's own signal.
     // At Node's default of 10 an ordinary parallel wave logged a

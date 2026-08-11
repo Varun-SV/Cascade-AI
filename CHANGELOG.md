@@ -69,8 +69,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does nothing at all when no cap is configured.
 
   Tripping the ceiling now cancels work already in flight, not just work still
-  queued — including calls parked in the rate limiter, which could otherwise
-  sit out most of a refill interval for a run that was already dead. A parallel wave's earlier members are at the provider by the time a
+  queued. A parallel wave's earlier members are at the provider by the time a
   later one runs out of budget, and they carried on generating for a run whose
   output would be discarded. The router holds a per-run abort that every
   provider call chains to, so the ceiling reaches the requests that are
@@ -79,6 +78,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   That signal is given room for the listeners a wave attaches to it; at Node's
   default of ten, an ordinary parallel run logged a `MaxListenersExceededWarning`
   and looked like a leak.
+
+- **A cancelled call no longer waits out the queue it was sitting in.** Two
+  places hold a request before it is submitted — the per-provider rate-limit
+  bucket and the local-inference queue — and both could hold it for a long
+  time: most of a refill interval for the first, and half the inference timeout
+  (150 seconds by default, at the default concurrency of one) for the second.
+  Neither was watching the caller's own signal, and the local queue was
+  watching no signal at all. So cancelling a run, or a manager respawning a
+  wave, left those calls parked for the full window before anything noticed —
+  waiting for capacity they would drop the instant they received it. Both waits
+  now end as soon as any of the signals that make the call pointless fires, and
+  a call that leaves the local queue this way gives up its place rather than
+  taking a slot on the way out. The reservation it was holding is released too;
+  previously a request that never reached a provider could shrink every later
+  call's allowance for the rest of the run.
 
   A call already admitted when a sibling trips the ceiling no longer submits.
   The kill switch was checked when a call entered the router, but a request can
@@ -121,6 +135,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turn's tool calls when its content is a block array; a tool result carrying
   blocks is JSON-stringified whole by three of the four, base64 image payload
   included, so it costs its real size rather than the flat per-image rate.
+
+  Tool definitions are sized by the provider's own conversion function rather
+  than a description of it. No provider sends a definition as it was given —
+  OpenAI and Ollama wrap each one in a function envelope, Anthropic renames the
+  schema field, Gemini rewrites the schema entirely — and the omitted envelope
+  is a few tokens per tool, which a large MCP server turns into hundreds, always
+  in the direction that lets a request slip a tight cap. Those conversions are
+  now shared with the providers outright, so the estimate is not a copy of what
+  gets sent; it is the same function.
 
   Each of those was found the same way — one at a time, in review, after the
   estimate was already wrong in production-shaped input — because the rules

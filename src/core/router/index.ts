@@ -34,7 +34,7 @@ import { DeadModelStore } from './dead-models.js';
 import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
 import { buildTokenUsage, resolveModelPricing } from '../../utils/cost.js';
 import { estimateTokens, contentToText } from '../context/compaction.js';
-import { withTimeout, withTimeoutAbort, CascadeCancelledError } from '../../utils/retry.js';
+import { withTimeout, withTimeoutAbort, anySignal, CascadeCancelledError } from '../../utils/retry.js';
 import { wireProfile, geminiImageCopies } from './wire-profile.js';
 import { ModelProfiler } from './model-profiler.js';
 import type { MemoryStore } from '../../memory/store.js';
@@ -792,11 +792,26 @@ export class CascadeRouter extends EventEmitter {
     const requestedTokens = options.maxTokens ?? model.maxOutputTokens ?? 1024;
     const estimatedTokens = Math.min(requestedTokens, model.maxOutputTokens ?? requestedTokens) + 512;
     if (this.tpmLimiter) {
-      // Cancellable: the bucket can hold a call for most of a refill interval,
-      // and a sibling can trip the ceiling while it waits. Without the signal
-      // the whole wave stayed parked for up to a minute after the run was
-      // already dead.
-      await this.tpmLimiter.acquire(model.provider, estimatedTokens, runAbort.signal);
+      // Cancellable, on every signal that can make this call pointless — not
+      // just the budget one. The bucket can hold a call for most of a refill
+      // interval, and in that window the run can be cancelled, the wave
+      // respawned (T2 aborts its own per-wave signal to do that), or the
+      // ceiling tripped by a sibling. Watching only the router's controller
+      // left an ordinary cancel parked here for up to a minute, because
+      // nothing but the budget aborts that one.
+      const wait = anySignal([options.signal, runAbort.signal]);
+      try {
+        await this.tpmLimiter.acquire(model.provider, estimatedTokens, wait.signal);
+      } catch (err) {
+        // The reservation is taken above and the try/finally that frees it does
+        // not start until below, so bailing out here would strand it for the
+        // rest of the run — shrinking every later call's allowance over a
+        // request that was never submitted anywhere.
+        releaseReservation?.();
+        throw this.asAbortFailure(err, options.signal, runSignal);
+      } finally {
+        wait.release();
+      }
     }
 
     const useStream = Boolean(onChunk) && model.supportsStreaming && typeof provider.generateStream === 'function';
@@ -808,8 +823,14 @@ export class CascadeRouter extends EventEmitter {
       const inferenceTimeoutMs = this.config.localInferenceTimeoutMs ?? 300_000;
       // Allow up to half the inference timeout to wait in the queue itself.
       const queueWaitMs = Math.round(inferenceTimeoutMs / 2);
+      // Same reasoning as the rate-limit wait, and a longer window to be stuck
+      // in: with the default concurrency of 1 this holds a call for up to 150
+      // seconds, and until the signal was wired through, neither a cancel nor
+      // a spent budget got it out — it waited for a slot it would drop the
+      // instant it was given one.
+      const wait = anySignal([options.signal, runAbort.signal]);
       try {
-        releaseLocalSlot = await this.localQueue.acquire(queueWaitMs);
+        releaseLocalSlot = await this.localQueue.acquire(queueWaitMs, wait.signal);
       } catch (err) {
         // The reservation is taken above but the try/finally that frees it does
         // not start until below, so a queue timeout here used to strand it for
@@ -817,7 +838,9 @@ export class CascadeRouter extends EventEmitter {
         // eventually tripping the budget flag, over a request that was never
         // submitted to anything.
         releaseReservation?.();
-        throw err;
+        throw this.asAbortFailure(err, options.signal, runSignal);
+      } finally {
+        wait.release();
       }
     }
 
@@ -1748,6 +1771,23 @@ export class CascadeRouter extends EventEmitter {
     tokens += images * IMAGE_TOKENS_EACH;
 
     return tokens;
+  }
+
+  /**
+   * Report a wait that ended because something asked it to stop, the same way
+   * the provider call below reports one.
+   *
+   * The queue waits sit OUTSIDE the try/catch that maps aborts, so without
+   * this a cancellation surfaced as whatever the queue happened to throw and
+   * was retried or failed over like an ordinary error. A budget abort keeps
+   * saying it ran out of budget — otherwise the reason the run stopped is lost
+   * on the way up — and anything else that was aborted becomes a cancellation.
+   */
+  private asAbortFailure(err: unknown, callSignal?: AbortSignal, runSignal?: AbortSignal): unknown {
+    if (err instanceof CascadeRouter.BudgetExceededError) return err;
+    if (err instanceof CascadeCancelledError) return err;
+    if (callSignal?.aborted || runSignal?.aborted) return new CascadeCancelledError('Run cancelled');
+    return err;
   }
 
   /** Trips the same run-level flag a post-hoc overrun does, and reports it the same way. */

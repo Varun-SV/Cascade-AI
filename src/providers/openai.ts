@@ -11,6 +11,7 @@ import type {
   ModelInfo,
   ProviderConfig,
   StreamChunk,
+  ToolDefinition,
 } from '../types.js';
 import { MODELS } from '../constants.js';
 import { BaseProvider } from './base.js';
@@ -40,6 +41,27 @@ export function isParamShapeError(err: unknown): boolean {
   );
 }
 
+/**
+ * Tool definitions in the shape this provider actually submits.
+ *
+ * Exported because the router's budget preflight has to size a request before
+ * it is sent, and the envelope is not free: `{type, function:{...}}` around
+ * every definition is a few tokens each, which a large MCP server turns into
+ * hundreds. Sharing the one function means the estimate cannot drift from the
+ * request — the alternative, a second copy over in the router, is exactly how
+ * it drifted before.
+ */
+export function toOpenAITools(tools: readonly ToolDefinition[]): OpenAI.Chat.ChatCompletionTool[] {
+  return tools.map((t) => ({
+    type: 'function' as const,
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: t.inputSchema,
+    },
+  }));
+}
+
 export class OpenAIProvider extends BaseProvider {
   protected client: OpenAI;
   /** Once we learn (from the model id or an API error) that this deployment
@@ -65,14 +87,7 @@ export class OpenAIProvider extends BaseProvider {
     onChunk: (chunk: StreamChunk) => void,
   ): Promise<GenerateResult> {
     const messages = this.convertMessages(options.messages, options.systemPrompt);
-    const tools = options.tools?.map((t) => ({
-      type: 'function' as const,
-      function: {
-        name: t.name,
-        description: t.description,
-        parameters: t.inputSchema,
-      },
-    }));
+    const tools = options.tools && toOpenAITools(options.tools);
 
     let fullContent = '';
     let inputTokens = 0;

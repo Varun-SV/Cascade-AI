@@ -1,5 +1,8 @@
-import type { ConversationMessage, ProviderType } from '../../types.js';
-import { toGeminiParameters } from '../../providers/gemini-schema.js';
+import type { ConversationMessage, ProviderType, ToolDefinition } from '../../types.js';
+import { toAnthropicTools } from '../../providers/anthropic.js';
+import { toGeminiTools } from '../../providers/gemini.js';
+import { toOllamaTools } from '../../providers/ollama.js';
+import { toOpenAITools } from '../../providers/openai.js';
 
 /**
  * What each provider actually PUTS ON THE WIRE.
@@ -50,23 +53,28 @@ import { toGeminiParameters } from '../../providers/gemini-schema.js';
  *   sendsToolCalls       assistant turns only, everywhere. OpenAI additionally
  *                        requires STRING content: its array branch pushes the
  *                        parts and never attaches `tool_calls`.
- *   sizeTools            Gemini rewrites every input schema through
- *                        toGeminiParameters (stripping $defs, $schema,
- *                        additionalProperties and MCP vendor extensions);
- *                        the rest send the schema verbatim.
+ *   sizeTools            the PROVIDER'S OWN conversion, imported rather than
+ *                        described. No provider sends a definition as it was
+ *                        given: OpenAI and Ollama wrap each in
+ *                        `{type:'function', function:{...}}`, Anthropic renames
+ *                        `inputSchema` to `input_schema`, and Gemini rewrites
+ *                        the schema through a sanitiser that strips $defs,
+ *                        $schema, additionalProperties and MCP vendor
+ *                        extensions. Sizing the raw definitions instead missed
+ *                        a per-tool envelope — a few tokens each, but hundreds
+ *                        across a large MCP server, and always in the direction
+ *                        that lets a request slip a tight cap.
  *
- * When a provider's serializer changes, change the row here and the estimator
- * follows. `wire-profile.test.ts` asserts the rows against the real providers.
+ * Where a rule can be shared with the provider outright — as `sizeTools` is —
+ * that is better than describing it here, because a shared function cannot
+ * drift at all. The rest are conditions inside a serializer with no seam to
+ * export, so they are mirrored, and `wire-profile.test.ts` checks each row by
+ * running the real serializer rather than by asserting the table against
+ * itself.
  */
 
 /** How a provider serializes one message's array content. */
 export type BlockHandling = 'blocks' | 'dropped' | 'stringified';
-
-export interface WireToolDefinition {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-}
 
 export interface WireProfile {
   /**
@@ -84,10 +92,8 @@ export interface WireProfile {
   /** Whether the top-level `options.images` field is read at all. */
   readonly readsTopLevelImages: boolean;
   /** Tool definitions shaped as this provider will actually serialize them. */
-  sizeTools(tools: readonly WireToolDefinition[]): unknown;
+  sizeTools(tools: readonly ToolDefinition[]): unknown;
 }
-
-const identityTools = (tools: readonly WireToolDefinition[]): unknown => tools;
 
 const ANTHROPIC: WireProfile = {
   // convertMessages: `if (m.role === 'system') continue` — history system
@@ -105,7 +111,7 @@ const ANTHROPIC: WireProfile = {
   sendsToolCalls: (m) => m.role === 'assistant',
   sendsUrlImages: true,
   readsTopLevelImages: false,
-  sizeTools: identityTools,
+  sizeTools: toAnthropicTools,
 };
 
 const GEMINI: WireProfile = {
@@ -121,11 +127,7 @@ const GEMINI: WireProfile = {
   sendsToolCalls: (m) => m.role === 'assistant',
   sendsUrlImages: false,
   readsTopLevelImages: true,
-  sizeTools: (tools) => tools.map((t) => ({
-    name: t.name,
-    description: t.description,
-    parameters: toGeminiParameters(t.inputSchema),
-  })),
+  sizeTools: toGeminiTools,
 };
 
 const OPENAI: WireProfile = {
@@ -142,7 +144,7 @@ const OPENAI: WireProfile = {
   sendsToolCalls: (m) => m.role === 'assistant' && typeof m.content === 'string',
   sendsUrlImages: true,
   readsTopLevelImages: false,
-  sizeTools: identityTools,
+  sizeTools: toOpenAITools,
 };
 
 const OLLAMA: WireProfile = {
@@ -160,7 +162,7 @@ const OLLAMA: WireProfile = {
   // submitted too (as a URL string in the `images` array).
   sendsUrlImages: true,
   readsTopLevelImages: false,
-  sizeTools: identityTools,
+  sizeTools: toOllamaTools,
 };
 
 const PROFILES: Record<ProviderType, WireProfile> = {

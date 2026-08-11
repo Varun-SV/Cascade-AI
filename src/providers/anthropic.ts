@@ -11,6 +11,7 @@ import type {
   ModelInfo,
   ProviderConfig,
   StreamChunk,
+  ToolDefinition,
 } from '../types.js';
 import { MODELS } from '../constants.js';
 import { BaseProvider } from './base.js';
@@ -25,6 +26,22 @@ function anthropicThinkingParam(modelId: string, maxTokens: number): { thinking?
   const budget = Math.min(8000, maxTokens - 1024);
   if (budget < 1024) return {};
   return { thinking: { type: 'enabled', budget_tokens: budget } };
+}
+
+/**
+ * Tool definitions in the shape this provider actually submits.
+ *
+ * Exported so the router's budget preflight sizes the request the provider
+ * will send rather than the one the caller passed — `inputSchema` goes as
+ * `input_schema`, and the estimate has to agree with the wire, not with
+ * itself. One function, used by both, so the two cannot drift.
+ */
+export function toAnthropicTools(tools: readonly ToolDefinition[]): Anthropic.Tool[] {
+  return tools.map((t) => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.inputSchema as Anthropic.Tool['input_schema'],
+  }));
 }
 
 export class AnthropicProvider extends BaseProvider {
@@ -56,11 +73,7 @@ export class AnthropicProvider extends BaseProvider {
     onChunk: (chunk: StreamChunk) => void,
   ): Promise<GenerateResult> {
     const messages = this.convertMessages(options.messages);
-    const tools = options.tools?.map((t) => ({
-      name: t.name,
-      description: t.description,
-      input_schema: t.inputSchema as Anthropic.Tool['input_schema'],
-    }));
+    const tools = options.tools && toAnthropicTools(options.tools);
 
     let fullContent = '';
     let inputTokens = 0;

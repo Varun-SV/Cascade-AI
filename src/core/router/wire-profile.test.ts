@@ -3,10 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { AnthropicProvider } from '../../providers/anthropic.js';
-import { GeminiProvider } from '../../providers/gemini.js';
-import { OpenAIProvider } from '../../providers/openai.js';
-import { OllamaProvider } from '../../providers/ollama.js';
+import { AnthropicProvider, toAnthropicTools } from '../../providers/anthropic.js';
+import { GeminiProvider, toGeminiTools } from '../../providers/gemini.js';
+import { OpenAIProvider, toOpenAITools } from '../../providers/openai.js';
+import { OllamaProvider, toOllamaTools } from '../../providers/ollama.js';
 import { wireProfile, geminiImageCopies } from './wire-profile.js';
 import type { BlockHandling } from './wire-profile.js';
 import type {
@@ -14,6 +14,7 @@ import type {
   MessageContent,
   ModelInfo,
   ProviderType,
+  ToolDefinition,
 } from '../../types.js';
 
 /**
@@ -252,23 +253,24 @@ describe('wire profile — sendsUrlImages, against the real serializers', () => 
   });
 });
 
+const here = path.dirname(fileURLToPath(import.meta.url));
+const providerDir = path.join(here, '..', '..', 'providers');
+const FILES: Record<ProviderType, string> = {
+  anthropic: 'anthropic.ts',
+  gemini: 'gemini.ts',
+  openai: 'openai.ts',
+  azure: 'azure.ts',
+  'openai-compatible': 'openai-compatible.ts',
+  ollama: 'ollama.ts',
+};
+const providerSource = (provider: ProviderType): string =>
+  fs.readFileSync(path.join(providerDir, FILES[provider]), 'utf8');
+
 describe('wire profile — readsTopLevelImages, against the provider sources', () => {
   // `options.images` is passed to the serializer only by Gemini, so no
   // serializer-level probe can show the difference. Reading the sources is the
   // check that actually catches the drift: the day another provider starts
   // reading the field, its profile row has to change with it.
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const providerDir = path.join(here, '..', '..', 'providers');
-
-  const FILES: Record<ProviderType, string> = {
-    anthropic: 'anthropic.ts',
-    gemini: 'gemini.ts',
-    openai: 'openai.ts',
-    azure: 'azure.ts',
-    'openai-compatible': 'openai-compatible.ts',
-    ollama: 'ollama.ts',
-  };
-
   for (const [provider, file] of Object.entries(FILES) as [ProviderType, string][]) {
     it(`${provider}: ${
       wireProfile(provider).readsTopLevelImages ? 'reads' : 'never reads'
@@ -279,8 +281,8 @@ describe('wire profile — readsTopLevelImages, against the provider sources', (
   }
 });
 
-describe('wire profile — sizeTools matches the provider conversion', () => {
-  const tool = {
+describe('wire profile — sizeTools is the provider\'s own conversion', () => {
+  const tool: ToolDefinition = {
     name: 'search',
     description: 'Search things',
     inputSchema: {
@@ -291,21 +293,56 @@ describe('wire profile — sizeTools matches the provider conversion', () => {
     },
   };
 
-  it('gemini sizes tools as its own sanitiser will send them', () => {
-    const converted = (new GeminiProvider({ type: 'gemini', apiKey: 'k' } as never, model('gemini')) as never as {
-      convertTool(t: typeof tool): unknown;
-    }).convertTool(tool);
-    expect(wireProfile('gemini').sizeTools([tool])).toEqual([converted]);
-    // And the sanitiser really does strip the metadata a large MCP schema is
-    // mostly made of, so sizing the raw JSON would over-charge.
-    expect(JSON.stringify(converted)).not.toContain('x-mcp-header');
-    expect(JSON.stringify(converted)).not.toContain('$schema');
+  // Not "the estimate matches the request" but "the estimate IS the request":
+  // one function, called by the provider when it builds the call and by the
+  // estimator when it sizes it. A mirrored copy is what drifted before.
+  const SHARED: Array<[ProviderType, unknown, string]> = [
+    ['anthropic', toAnthropicTools, 'toAnthropicTools'],
+    ['gemini', toGeminiTools, 'toGeminiTools'],
+    ['openai', toOpenAITools, 'toOpenAITools'],
+    ['azure', toOpenAITools, 'toOpenAITools'],
+    ['openai-compatible', toOpenAITools, 'toOpenAITools'],
+    ['ollama', toOllamaTools, 'toOllamaTools'],
+  ];
+
+  for (const [provider, fn, name] of SHARED) {
+    it(`${provider}: sizes with ${name} itself, not a copy of it`, () => {
+      expect(wireProfile(provider).sizeTools).toBe(fn);
+    });
+  }
+
+  for (const provider of ['anthropic', 'gemini', 'openai', 'ollama'] as const) {
+    it(`${provider}: builds its request with that same function`, () => {
+      // If someone inlines the mapping back into generateStream, the shared
+      // function stops being what goes on the wire and this fails.
+      const name = SHARED.find(([p]) => p === provider)![2];
+      expect(providerSource(provider)).toMatch(new RegExp(`${name}\\(options\\.tools\\)`));
+    });
+  }
+
+  it('openai and ollama wrap every definition in a function envelope', () => {
+    // Missing this was worth a few tokens per tool — and hundreds across a
+    // large MCP server, always in the direction that lets a request slip a cap.
+    for (const provider of ['openai', 'azure', 'openai-compatible', 'ollama'] as const) {
+      const sized = JSON.stringify(wireProfile(provider).sizeTools([tool]));
+      expect(sized).toContain('"type":"function"');
+      expect(sized).toContain('"parameters":');
+      expect(sized).not.toContain('"inputSchema"');
+      expect(sized.length).toBeGreaterThan(JSON.stringify([tool]).length);
+    }
   });
 
-  it('every other provider sends the schema verbatim', () => {
-    for (const provider of ['anthropic', 'openai', 'azure', 'openai-compatible', 'ollama'] as const) {
-      expect(wireProfile(provider).sizeTools([tool])).toEqual([tool]);
-    }
+  it('anthropic renames inputSchema to input_schema', () => {
+    const sized = JSON.stringify(wireProfile('anthropic').sizeTools([tool]));
+    expect(sized).toContain('"input_schema"');
+    expect(sized).not.toContain('"inputSchema"');
+  });
+
+  it('gemini sanitises the schema, so sizing the raw JSON would over-charge', () => {
+    const sized = JSON.stringify(wireProfile('gemini').sizeTools([tool]));
+    expect(sized).not.toContain('x-mcp-header');
+    expect(sized).not.toContain('$schema');
+    expect(sized.length).toBeLessThan(JSON.stringify([tool]).length);
   });
 });
 

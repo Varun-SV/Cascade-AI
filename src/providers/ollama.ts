@@ -9,6 +9,7 @@ import type {
   ModelInfo,
   ProviderConfig,
   StreamChunk,
+  ToolDefinition,
   ToolCall,
 } from '../types.js';
 import { OLLAMA_BASE_URL } from '../constants.js';
@@ -65,6 +66,30 @@ function isToolCapable(modelName: string): boolean {
 
 // ── Provider ───────────────────────────────────
 
+/**
+ * Tool definitions in the shape this provider actually submits.
+ *
+ * Ollama takes the OpenAI envelope, but it is kept as its own function rather
+ * than reusing that one: they are separate wire formats that happen to agree
+ * today, and sharing would quietly change this provider the day OpenAI's
+ * changes. Exported so the budget preflight sizes what is really sent — the
+ * per-tool envelope is a few tokens each, which a large MCP server turns into
+ * hundreds.
+ */
+export function toOllamaTools(tools: readonly ToolDefinition[]): Array<{
+  type: 'function';
+  function: { name: string; description: string; parameters: Record<string, unknown> };
+}> {
+  return tools.map((t) => ({
+    type: 'function' as const,
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: t.inputSchema,
+    },
+  }));
+}
+
 export class OllamaProvider extends BaseProvider {
   private baseUrl: string;
 
@@ -85,14 +110,7 @@ export class OllamaProvider extends BaseProvider {
     const messages = this.convertMessages(options.messages, options.systemPrompt);
 
     // Convert tools to Ollama/OpenAI-compatible format when provided
-    const ollamaTools = options.tools?.map((t) => ({
-      type: 'function' as const,
-      function: {
-        name: t.name,
-        description: t.description,
-        parameters: t.inputSchema,
-      },
-    }));
+    const ollamaTools = options.tools && toOllamaTools(options.tools);
 
     const response = await fetch(`${this.baseUrl}/api/chat`, {
       method: 'POST',
