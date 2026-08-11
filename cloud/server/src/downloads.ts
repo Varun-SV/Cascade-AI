@@ -52,6 +52,9 @@ const REFRESH_RETRY_MS = 2 * 60 * 1000;
 /** GitHub rejects API requests without one. */
 const USER_AGENT = 'cascade-ai-cloud';
 
+/** How far ahead of now a persisted `fetchedAt` may sit before it is junk. */
+const CLOCK_SKEW_TOLERANCE_MS = 5 * 60 * 1000;
+
 /** Every build a person can install, in the order the site lists them. */
 export const TARGET_IDS = [
   'mac-arm64', 'mac-x64', 'win-x64',
@@ -234,7 +237,15 @@ interface CacheEntry {
 function parseStoredEntry(raw: unknown): CacheEntry | null {
   if (typeof raw !== 'object' || raw === null) return null;
   const { manifest, fetchedAt } = raw as { manifest?: unknown; fetchedAt?: unknown };
+  // A timestamp in the FUTURE is rejected, not just a malformed one. Both the
+  // freshness and staleness checks in get() are `now - fetchedAt`, so a future
+  // value makes that age negative — which reads as "fetched moments ago"
+  // forever, pinning the site to one obsolete release with the 15-minute TTL
+  // never able to expire it. A host clock corrected backwards is enough to
+  // produce one. The tolerance absorbs ordinary skew between the writing and
+  // reading process without admitting a value that could wedge the cache.
   if (typeof fetchedAt !== 'number' || !Number.isFinite(fetchedAt)) return null;
+  if (fetchedAt > Date.now() + CLOCK_SKEW_TOLERANCE_MS) return null;
   if (typeof manifest !== 'object' || manifest === null) return null;
   const m = manifest as Partial<DownloadManifest>;
   if (typeof m.version !== 'string' || !Array.isArray(m.targets)) return null;

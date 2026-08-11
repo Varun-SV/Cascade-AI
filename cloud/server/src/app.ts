@@ -172,7 +172,13 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     ...OPENAI_COMPAT_JSON_ROUTES,
   ]);
   app.use((req, res, next) => {
-    if (rawBodyRoutes.has(req.path)) { next(); return; }
+    // Trailing slash normalised before the lookup. Express routing is
+    // non-strict by default, so POST /api/handoff/ reaches the same handler as
+    // POST /api/handoff — but `req.path` keeps the slash and missed this exact
+    // set, sending that request through the 100kb default parser and 413ing a
+    // long transcript on one of two URLs Express otherwise treats as the same.
+    const routePath = req.path.length > 1 ? req.path.replace(/\/+$/, '') : req.path;
+    if (rawBodyRoutes.has(routePath)) { next(); return; }
     express.json()(req, res, next);
   });
 

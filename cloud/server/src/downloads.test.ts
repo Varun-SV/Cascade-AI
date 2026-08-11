@@ -367,6 +367,43 @@ describe('DownloadResolver — authentication and the on-disk warm start', () =>
     expect(await second.get()).toBeNull();
   });
 
+  it('ignores a cache file whose timestamp is in the future', async () => {
+    // Both the freshness and staleness checks are `now - fetchedAt`, so a
+    // future value makes the age negative — which reads as "just fetched"
+    // forever and pins the site to one obsolete release, with the 15-minute
+    // TTL unable to expire it. A host clock corrected backwards produces one.
+    fs.writeFileSync(cacheFile(), JSON.stringify({
+      fetchedAt: Date.now() + 365 * 24 * 60 * 60 * 1000,
+      manifest: {
+        version: '0.1.0', releasedAt: null,
+        targets: [{ id: 'mac-arm64', os: 'mac', label: 'macOS', detail: 'Apple silicon',
+          filename: 'old.dmg', sizeBytes: 10,
+          url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.1.0/old.dmg' }],
+      },
+    }), 'utf8');
+
+    const fetchImpl = vi.fn(async () => okResponse(realRelease()));
+    const manifest = await new DownloadResolver(fetchImpl as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() }).get();
+    // The stale-future copy was discarded and a real fetch happened.
+    expect(manifest!.version).toBe('0.68.0');
+    expect(fetchImpl).toHaveBeenCalled();
+  });
+
+  it('still accepts a timestamp a little ahead, for ordinary clock skew', async () => {
+    fs.writeFileSync(cacheFile(), JSON.stringify({
+      fetchedAt: Date.now() + 30_000,
+      manifest: {
+        version: '0.68.0', releasedAt: null,
+        targets: [{ id: 'mac-arm64', os: 'mac', label: 'macOS', detail: 'Apple silicon',
+          filename: 'x.dmg', sizeBytes: 10,
+          url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/x.dmg' }],
+      },
+    }), 'utf8');
+
+    const failing = vi.fn(async () => { throw new Error('down'); });
+    expect((await new DownloadResolver(failing as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() }).get())!.version).toBe('0.68.0');
+  });
+
   it('ignores a corrupt cache file instead of failing the lookup', async () => {
     fs.writeFileSync(cacheFile(), '{"manifest":{"version":"0.6', 'utf8');
     const fetchImpl = vi.fn(async () => okResponse(realRelease()));

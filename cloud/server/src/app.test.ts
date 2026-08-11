@@ -403,6 +403,20 @@ describe('cloud/server app', () => {
     expect(created.status).toBe(200);
   });
 
+  it('handoff: the trailing-slash URL gets the same body limit', async () => {
+    // Express routing is non-strict, so /api/handoff/ reaches the same handler
+    // — but req.path keeps the slash, so the exact-match parser exemption
+    // missed it and the 100kb default 413'd a long transcript on one of two
+    // URLs Express otherwise treats as identical.
+    const long = 'a'.repeat(150_000);
+    const created = await fetch(`${baseUrl}/api/handoff/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: long }] }),
+    });
+    expect(created.status).toBe(200);
+  });
+
   it('handoff: rejects an empty transcript and 404s an unknown code', async () => {
     const empty = await fetch(`${baseUrl}/api/handoff`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [] }),
