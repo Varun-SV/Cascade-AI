@@ -31,7 +31,8 @@ import type { TaskAnalyzer } from './task-analyzer.js';
 import type { FeedbackSource } from './feedback-prior.js';
 import { DeadModelStore } from './dead-models.js';
 import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
-import { buildTokenUsage } from '../../utils/cost.js';
+import { buildTokenUsage, resolveModelPricing } from '../../utils/cost.js';
+import { estimateTokens, messagesTokens } from '../context/compaction.js';
 import { withTimeout, CascadeCancelledError } from '../../utils/retry.js';
 import { ModelProfiler } from './model-profiler.js';
 import type { MemoryStore } from '../../memory/store.js';
@@ -615,6 +616,11 @@ export class CascadeRouter extends EventEmitter {
 
     const provider = this.getProvider(model);
     if (!provider) throw new Error(`No provider for model ${model.id}`);
+
+    // Refuse a call whose INPUT alone cannot fit the remaining budget, before
+    // spending it. Placed ahead of the TPM wait: there is no point queueing for
+    // provider capacity on a call we are about to decline.
+    this.enforcePreflightBudget(model, options);
 
     // Per-provider TPM guard: pause this call until the token bucket has
     // enough budget to cover the estimated input+output tokens. Prevents
@@ -1290,6 +1296,81 @@ export class CascadeRouter extends EventEmitter {
     this.runCostUsd = 0;
     this.runBudgetExceeded = false;
     this.runBudgetExceededReason = undefined;
+  }
+
+  /**
+   * Refuse a call whose input alone cannot fit what is left of the run budget.
+   *
+   * `enforceRunBudget()` below runs AFTER a call returns, which makes the caps
+   * a stop rather than a pre-authorisation: the tokens are already bought by
+   * the time it looks. That was tolerable while a prompt could not exceed
+   * 20,000 characters, and stopped being so when that cap was removed in
+   * 0.72.0 — a multi-megabyte prompt is billed in full on the very first call
+   * (the complexity classifier sends the whole thing), and no ceiling
+   * configured downstream can give that money back.
+   *
+   * Deliberately narrow, because a false refusal is worse than a late stop:
+   *
+   *   • INPUT ONLY. What a call returns is not knowable in advance, and
+   *     charging a worst-case `maxTokens` of output against the budget would
+   *     decline runs that would have finished comfortably. Input is the part
+   *     that is already determined, and it is the part the removed cap used to
+   *     bound.
+   *   • Compared against what REMAINS (`cap - spent`), not the whole cap, so a
+   *     call is judged on the budget it can actually draw from.
+   *   • Skipped when the model has no usable price. An estimate cannot be made,
+   *     and refusing on ignorance would break every self-hosted and local model
+   *     the moment a cost cap is set. The post-hoc stop still applies there.
+   *   • Skipped entirely when no cap is configured — there is nothing to
+   *     pre-authorise against.
+   *
+   * The message names the cap AND the estimate, because "too expensive" with
+   * no numbers gives the user nothing to change.
+   */
+  private enforcePreflightBudget(model: ModelInfo, options: GenerateOptions): void {
+    const budget = this.config?.budget;
+    const maxCost = budget?.maxCostPerRunUsd;
+    const maxTokens = budget?.maxTokensPerRun;
+    if (maxCost == null && maxTokens == null) return;
+
+    const inputTokens =
+      messagesTokens(options.messages) + estimateTokens(options.systemPrompt ?? '');
+
+    if (maxTokens != null) {
+      const remaining = maxTokens - this.runTokens;
+      if (inputTokens > remaining) {
+        this.failPreflight(
+          `This request's input is about ${inputTokens.toLocaleString()} tokens, but only `
+          + `${Math.max(0, remaining).toLocaleString()} of the per-task cap of `
+          + `${maxTokens.toLocaleString()} remain. Shorten the input, or raise `
+          + 'budget.maxTokensPerRun.',
+        );
+      }
+    }
+
+    if (maxCost != null) {
+      const { input: inputPer1k, unknown } = resolveModelPricing(model);
+      if (unknown || inputPer1k <= 0) return;
+      const estimatedUsd = (inputTokens / 1000) * inputPer1k;
+      const remaining = maxCost - this.runCostUsd;
+      if (estimatedUsd > remaining) {
+        this.failPreflight(
+          `Sending this request to ${model.provider}:${model.id} would cost about `
+          + `$${estimatedUsd.toFixed(4)} in input alone (~${inputTokens.toLocaleString()} tokens), `
+          + `and only $${Math.max(0, remaining).toFixed(4)} of the per-task cap of `
+          + `$${maxCost.toFixed(4)} remains. Shorten the input, choose a cheaper model, `
+          + 'or raise budget.maxCostPerRunUsd.',
+        );
+      }
+    }
+  }
+
+  /** Trips the same run-level flag a post-hoc overrun does, and reports it the same way. */
+  private failPreflight(reason: string): never {
+    this.runBudgetExceeded = true;
+    this.runBudgetExceededReason = reason;
+    this.emit('budget:exceeded', { reason, spentUsd: this.sessionCostUsd });
+    throw new CascadeRouter.BudgetExceededError(reason);
   }
 
   /**

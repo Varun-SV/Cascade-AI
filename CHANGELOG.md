@@ -18,6 +18,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+## 0.73.0 - 2026-08-11
+
+### Fixed
+- **The per-run cost cap now refuses a request it cannot afford, instead of
+  paying for it and stopping afterwards.** Both per-run ceilings were checked
+  after a model call returned, which made them a stop rather than a
+  pre-authorisation — the tokens were already bought by the time anything
+  counted them. That was tolerable while a prompt could not exceed 20,000
+  characters. Removing that cap in 0.72.0 made it matter: the complexity
+  classifier sends the whole prompt on the very first call, so a multi-megabyte
+  input to a priced model was billed in full before any ceiling looked, and no
+  configured cap could give it back.
+
+  A request whose input alone cannot fit what remains of the budget is now
+  declined before it is sent, and the message names both the cap and the
+  estimate — "would cost about $1.87 in input alone (~623,000 tokens), and only
+  $0.50 of the per-task cap of $2.00 remains" — because "too expensive" with no
+  numbers gives nobody anything to change.
+
+  Deliberately narrow, since a false refusal is worse than a late stop. It
+  counts input only: what a call returns is not knowable in advance, and
+  reserving a worst-case output allowance would decline runs that would have
+  finished comfortably. It judges against what remains rather than the whole
+  cap. It skips a model with no usable price — an estimate cannot be made, and
+  refusing on ignorance would break every local and self-hosted model the
+  moment a cap was set — leaving those to the post-hoc stop as before. And it
+  does nothing at all when no cap is configured.
+
 ## 0.72.0 - 2026-08-10
 
 ### Changed

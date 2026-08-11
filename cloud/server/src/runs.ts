@@ -68,13 +68,11 @@ const ChatRunPayloadSchema = z.object({
   // frame at the transport layer with no ack at all — the run simply never
   // answers.
   //
-  // A very long prompt can still exhaust a model's context or a run's budget.
-  // Extended context compacts oversized input, and maxTokensPerRun /
-  // maxCostPerRunUsd stop the run once exceeded — but they are checked AFTER
-  // each model call returns (router/index.ts records usage post-call), so they
-  // are a stop rather than a pre-authorisation: one very large input can carry
-  // a single call past the cap before the run halts. Bounding that properly
-  // needs a preflight estimate of input cost, which does not exist yet.
+  // A very long prompt can still exhaust a model's context, but no longer its
+  // budget unnoticed: extended context compacts oversized input, and
+  // maxTokensPerRun / maxCostPerRunUsd are now checked BEFORE a call as well as
+  // after it (router/index.ts enforcePreflightBudget), so a request whose input
+  // alone cannot fit the remaining allowance is declined rather than paid for.
   prompt: z.string().min(1),
   // Prior turns to persist as this conversation's history AT CREATION TIME.
   // Only read when no conversationId is given.
