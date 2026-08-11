@@ -162,6 +162,23 @@ describe('parseChatRunPayload — prompt length and error messages', () => {
     expect(parseChatRunPayload({ ...base, prompt: 'hi', systemPrompt: long }).systemPrompt).toHaveLength(50_000);
   });
 
+  it('accepts as history the same long turn it accepts as a prompt', () => {
+    // The two describe the SAME turns from opposite ends: a stateless caller
+    // resends its whole message array, so this request's prompt is the next
+    // request's history. A ceiling on one and not the other meant a long
+    // prompt succeeded once and then failed validation on every follow-up —
+    // and runChatTurn persists the prompt verbatim, so the stored transcript
+    // really did contain a turn the schema would have refused to replay.
+    const long = 'z'.repeat(600_000);
+    const parsed = parseChatRunPayload({ ...base, prompt: long, seedHistory: [{ role: 'user', content: long }] });
+    expect(parsed.seedHistory![0]!.content).toHaveLength(600_000);
+  });
+
+  it('still bounds how MANY history turns a request may seed', () => {
+    const many = Array.from({ length: 201 }, () => ({ role: 'user' as const, content: 'x' }));
+    expect(() => parseChatRunPayload({ ...base, prompt: 'hi', seedHistory: many })).toThrow();
+  });
+
   it('still rejects an empty prompt', () => {
     expect(() => parseChatRunPayload({ ...base, prompt: '' })).toThrow();
   });

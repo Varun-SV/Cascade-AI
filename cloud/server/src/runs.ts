@@ -86,9 +86,20 @@ const ChatRunPayloadSchema = z.object({
   seedHistory: z
     .array(z.object({
       role: z.enum(['user', 'assistant']),
-      // Same per-message ceiling app.ts applies to a persisted turn, so a
-      // message's size does not depend on which door it came in.
-      content: z.string().min(1).max(500_000),
+      // Uncapped, matching `prompt` above. These two fields describe the SAME
+      // turns from opposite ends: a stateless caller resends its whole message
+      // array every request, so the prompt accepted on one call arrives as
+      // history on the next. A ceiling here that `prompt` does not share meant
+      // an accepted, persisted prompt could succeed exactly once and then fail
+      // validation on every follow-up in that conversation — and runChatTurn
+      // stores the prompt verbatim, so the transcript really did contain a
+      // turn this schema would refuse to replay.
+      //
+      // Nothing here is unbounded in practice: the array is capped at 200
+      // entries below, and the whole payload is bounded by its transport —
+      // 4 MB on the OpenAI-compatible route's body parser, 2 MB on the socket
+      // frame. Those are the limits that can actually be enforced.
+      content: z.string().min(1),
     }))
     .max(200)
     .optional(),
