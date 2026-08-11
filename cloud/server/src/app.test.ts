@@ -368,6 +368,55 @@ describe('cloud/server app', () => {
     ]);
   });
 
+  it('handoff: carries a transcript larger than the default body limit', async () => {
+    // The per-message bound is 500,000 characters, but both handoff routes ran
+    // through the app-level express.json() default of 100kb — so a long chat
+    // 413'd at the middleware and the validator never got to say anything. The
+    // raised limit was unreachable until these routes got a parser sized to it.
+    const long = 'a'.repeat(150_000);
+    const created = await fetch(`${baseUrl}/api/handoff`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: long }] }),
+    });
+    expect(created.status).toBe(200);
+
+    const { code } = (await created.json()) as { code: string };
+    const read = await fetch(`${baseUrl}/api/handoff/${code}`);
+    const snap = (await read.json()) as { messages: Array<{ content: string }> };
+    // Carried whole, not trimmed to fit.
+    expect(snap.messages[0]!.content).toHaveLength(150_000);
+  });
+
+  it('handoff: accepts a transcript whose JSON encoding is far larger than its length', async () => {
+    // A limit the product advertises has to be one it can actually accept.
+    // JSON renders a low control character as a six-byte \u0000, so a
+    // transcript the validator calls valid can reach ~2.9 MiB on the wire —
+    // past the first parser ceiling chosen for typical text, which would have
+    // 413'd a transfer that passes every documented bound.
+    const controlHeavy = '\u0000'.repeat(400_000);
+    const created = await fetch(`${baseUrl}/api/handoff`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: controlHeavy }] }),
+    });
+    expect(created.status).toBe(200);
+  });
+
+  it('handoff: the trailing-slash URL gets the same body limit', async () => {
+    // Express routing is non-strict, so /api/handoff/ reaches the same handler
+    // — but req.path keeps the slash, so the exact-match parser exemption
+    // missed it and the 100kb default 413'd a long transcript on one of two
+    // URLs Express otherwise treats as identical.
+    const long = 'a'.repeat(150_000);
+    const created = await fetch(`${baseUrl}/api/handoff/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: long }] }),
+    });
+    expect(created.status).toBe(200);
+  });
+
   it('handoff: rejects an empty transcript and 404s an unknown code', async () => {
     const empty = await fetch(`${baseUrl}/api/handoff`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [] }),

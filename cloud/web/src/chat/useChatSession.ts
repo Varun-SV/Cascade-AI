@@ -8,6 +8,7 @@ import {
   maxTokensPerRun, maxCostPerRunUsd, rememberSessions, defaultRoutingBias, defaultWebSearch,
 } from '../lib/prefs.js';
 import { refreshPendingMedia } from '../lib/pendingMedia.js';
+import { promptTooLargeError, payloadTooLargeError } from '../lib/limits.js';
 import { detectLocalModelCapability } from '../lib/localModel/capability.js';
 import { warmLocalModel } from '../lib/localModel/engine.js';
 import { classifyLocalComplexity } from '../lib/localModel/classifier.js';
@@ -427,6 +428,21 @@ export function useChatSession(
     ) => {
       const text = prompt.trim();
       if (!socket || busy || !text) return;
+      // The transcript as it stood BEFORE any optimistic mutation. `messages`
+      // is captured from the render this callback was built in, and the
+      // callers that mutate (editMessage, regenerate) call setMessages and
+      // then this function in the same handler — so React has not re-rendered
+      // and this is still the pre-mutation array. Kept explicitly rather than
+      // relied on implicitly, because it is what restores the view if the send
+      // is refused below.
+      const transcriptBeforeSend = messages;
+      // Checked BEFORE anything is emitted or optimistically rendered. Past
+      // the socket.io frame ceiling the server never acks — the transport
+      // drops the frame before a handler sees it — so without this the send
+      // spins forever with no error. Saying so here is the only place it can
+      // be said. See lib/limits.ts.
+      const tooLarge = promptTooLargeError(text);
+      if (tooLarge) { setError(tooLarge); return; }
       setBusy(true);
       setError(null);
       setStatus('Sizing up the task…');
@@ -436,14 +452,16 @@ export function useChatSession(
       setKnowledgeNotice(null);
       setActivity([]);
       streamingRef.current = '';
+      // Id kept so the rejection path below can take this turn back out. It is
+      // optimistic — nothing has been sent yet — and a send that never happens
+      // must not leave a bubble behind that vanishes on the next refresh.
+      const optimisticUserId = crypto.randomUUID();
       if (appendUser) {
-        setMessages((prev) => [...prev, { id: crypto.randomUUID(), role: 'user', content: text, attachments }]);
+        setMessages((prev) => [...prev, { id: optimisticUserId, role: 'user', content: text, attachments }]);
       }
 
       const emitRun = (complexityHint?: 'Simple' | 'Moderate' | 'Complex') => {
-        socket.emit(
-          'chat:run',
-          {
+        const payload = {
             conversationId,
             prompt: text,
             providers,
@@ -473,9 +491,33 @@ export function useChatSession(
             // sibling. Omitted for a normal send (append at the active leaf).
             editOfMessageId: branch?.editOfMessageId,
             regenerateFromUserMessageId: branch?.regenerateFromUserMessageId,
-          },
-          onAck,
-        );
+        };
+        // The authoritative size check, on what actually goes on the wire.
+        // socket.io JSON-encodes the payload and encoding is not
+        // length-preserving — a prompt of backslashes or quotes nearly doubles
+        // — so the byte check on the raw text above cannot bound the frame by
+        // itself. Past the ceiling the frame is dropped with no ack at all, so
+        // this has to be caught here or not at all.
+        const tooBig = payloadTooLargeError(payload);
+        if (tooBig) {
+          setBusy(false);
+          setStatus(null);
+          setError(tooBig);
+          // Put the transcript back exactly as it was. Nothing was emitted or
+          // persisted, so the pre-send array is authoritative and restoring it
+          // covers every caller in one step: a fresh send loses the optimistic
+          // user turn, and an edit or regenerate — which truncate before
+          // calling this — get their hidden reply and later turns back.
+          //
+          // Restored LOCALLY rather than re-fetched. Recovery went through
+          // reloadActivePath, whose getMessages call swallows its own failure
+          // by design, so a network blip left the conversation looking
+          // permanently shortened for an operation that never happened. A
+          // value already in memory cannot fail to arrive.
+          setMessages(transcriptBeforeSend);
+          return;
+        }
+        socket.emit('chat:run', payload, onAck);
       };
 
       const onAck = (ack: ChatRunAck) => {
@@ -612,6 +654,14 @@ export function useChatSession(
       ? messages.find((m) => m.id === assistant.parentId)
       : [...messages].reverse().find((m) => m.role === 'user');
     if (!userMsg) return;
+    // Size-checked BEFORE the optimistic truncation, exactly as editMessage is.
+    // The turn being re-run was accepted by whichever door it came in — a
+    // conversation created through /v1/chat/completions can hold a prompt above
+    // this client's limit and under that route's own 4 MB one — so runChat can
+    // legitimately refuse it here. Refusing after the slice would hide the
+    // existing reply and every later turn until a manual refresh.
+    const tooLarge = promptTooLargeError(userMsg.content);
+    if (tooLarge) { setError(tooLarge); return; }
     // Optimistic: show the path up to & including the user turn, then stream.
     const idx = messages.findIndex((m) => m.id === userMsg.id);
     setMessages(messages.slice(0, idx + 1));
@@ -625,6 +675,13 @@ export function useChatSession(
     const idx = messages.findIndex((m) => m.id === messageId);
     const target = messages[idx];
     if (!target || target.role !== 'user') return;
+    // Size-checked BEFORE the optimistic truncation below, not after. runChat
+    // rejects an oversized message by returning early — which, once this has
+    // already dropped the edited turn and everything after it, would leave the
+    // transcript permanently shortened for a send that never happened and was
+    // never persisted, with no reload to restore it.
+    const tooLarge = promptTooLargeError(newText.trim());
+    if (tooLarge) { setError(tooLarge); return; }
     // Optimistic: keep everything BEFORE the edited turn, then add the new one.
     setMessages(messages.slice(0, idx));
     runChat(newText, target.attachments, true, false, { editOfMessageId: target.id });

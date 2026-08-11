@@ -33,7 +33,7 @@ import type { CloudEnv } from './env.js';
 import type { CloudStore } from './db.js';
 import { bearerToken, verifySessionToken } from './auth/session.js';
 import {
-  parseChatRunPayload, runChatTurn, type ChatRunPayload, type ChatRunResult, type RunSocket,
+  formatZodError, parseChatRunPayload, runChatTurn, type ChatRunPayload, type ChatRunResult, type RunSocket,
 } from './runs.js';
 
 // ── Models ────────────────────────────────────
@@ -540,9 +540,6 @@ export function cascadeExtra(result: ChatRunResult) {
  */
 export const OPENAI_COMPAT_JSON_ROUTES = ['/v1/chat/completions'];
 
-/** Same bound as `prompt` in ChatRunPayloadSchema, restated for a clear error. */
-const MAX_PROMPT_CHARS = 20_000;
-
 export function registerOpenAiCompatRoutes(app: Express, env: CloudEnv, store: CloudStore): void {
   console.log(describeProviderPolicy(env, store));
 
@@ -612,13 +609,14 @@ export function registerOpenAiCompatRoutes(app: Express, env: CloudEnv, store: C
     if (!parsed.ok) { res.status(parsed.status).json(parsed.body); return; }
     const request = parsed.value;
 
-    if (request.prompt.length > MAX_PROMPT_CHARS) {
-      res.status(400).json(openAiError(
-        `The last user message is ${request.prompt.length} characters; the limit is ${MAX_PROMPT_CHARS}.`,
-        'invalid_request_error', 'messages', 'context_length_exceeded',
-      ));
-      return;
-    }
+    // No length check here any more. This used to restate ChatRunPayloadSchema's
+    // 20,000-character `prompt` bound so the error could be an OpenAI-shaped
+    // one; that bound is gone (a pasted document is the normal case, not an
+    // abuse), and a copy left behind would have made this endpoint the one
+    // place still answering `context_length_exceeded` for a prompt the socket
+    // path now accepts. This route's own 4 MB body parser (completionsJson
+    // below) is the real bound, and it already answers an OpenAI-shaped 413;
+    // the run's token/cost ceilings bound what a long prompt spends.
 
     // Provider credentials: the request's own (extra_body) if it carried them,
     // otherwise the operator's env keys when this is a single-account instance.
@@ -663,7 +661,7 @@ export function registerOpenAiCompatRoutes(app: Express, env: CloudEnv, store: C
           : {}),
       });
     } catch (err) {
-      const message = err instanceof ZodError ? err.issues.map((i) => i.message).join('; ') : String(err);
+      const message = err instanceof ZodError ? formatZodError(err) : String(err);
       res.status(400).json(openAiError(message));
       return;
     }

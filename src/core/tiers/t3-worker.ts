@@ -1200,6 +1200,26 @@ export class T3Worker extends BaseTier {
     return shouldRequireArtifact(this.assignment, this.tools.map((t) => t.name));
   }
 
+  /**
+   * Where a file a tool wrote actually lives.
+   *
+   * This used to be `process.cwd()`, which is only the workspace in a plain
+   * CLI run. The hosted server runs with cwd at the app directory while the
+   * run's workspace is the tenant's scratch dir, and Electron's cwd is the app
+   * bundle rather than the folder the user picked. So the tool wrote
+   * `<workspace>/report.docx`, verification stat'd `<cwd>/report.docx`, found
+   * nothing, and the worker looped and then threw WorkerStallError — surfacing
+   * as "no file was created" on a file that had in fact been created, followed
+   * by a failed node. Asking the registry is exact: it is the same root every
+   * registered tool was configured with (registry.registerDefaults).
+   */
+  private artifactRoot(): string {
+    // Optional-called: an embedder can supply anything satisfying the registry
+    // surface this tier uses, and falling back to the old behaviour is better
+    // than throwing inside verification.
+    return this.toolRegistry.getWorkspaceRoot?.() ?? process.cwd();
+  }
+
   private extractArtifactPaths(assignment: T2ToT3Assignment): string[] {
     // Spec-declared files verify deterministically; regex over the prose is
     // the fallback for plans that didn't declare them.
@@ -1215,12 +1235,12 @@ ${assignment.expectedOutput}`;
     if (!artifactPaths.length) return { ok: true, issues: [] };
 
     const issues: string[] = [];
-    const { exec } = await import('node:child_process');
+    const { execFile } = await import('node:child_process');
     const { promisify } = await import('node:util');
-    const execAsync = promisify(exec);
+    const execFileAsync = promisify(execFile);
 
     for (const artifactPath of artifactPaths) {
-      const absolutePath = path.resolve(process.cwd(), artifactPath);
+      const absolutePath = path.resolve(this.artifactRoot(), artifactPath);
       try {
         const stat = await fs.stat(absolutePath);
         if (!stat.isFile()) {
@@ -1263,20 +1283,35 @@ ${assignment.expectedOutput}`;
           continue;
         }
 
-        // Semantic checks
+        // Semantic checks, run through execFile with an ARGV ARRAY rather than
+        // interpolated into a shell command line — the same reasoning as
+        // tools/interpreter.ts. The path comes from the run's workspace, which
+        // on desktop is a folder the user picked: `/Users/me/My Project/out.ts`
+        // split into two arguments and reported perfectly good output as a
+        // semantic error, and a name carrying shell metacharacters was worse
+        // than that. Nothing reaches a shell now.
         const ext = path.extname(absolutePath).toLowerCase();
-        try {
-          if (ext === '.ts' || ext === '.tsx') {
-            await execAsync(`npx tsc --noEmit ${absolutePath}`, { timeout: 10000 });
-          } else if (ext === '.js' || ext === '.jsx') {
-            await execAsync(`node --check ${absolutePath}`, { timeout: 10000 });
-          } else if (ext === '.py') {
-            await execAsync(`python -m py_compile ${absolutePath}`, { timeout: 10000 });
+        // `node --check` runs the interpreter already executing this, so it
+        // needs no lookup and cannot be shadowed.
+        const check: { cmd: string; args: string[] } | null =
+          ext === '.ts' || ext === '.tsx' ? { cmd: 'npx', args: ['tsc', '--noEmit', absolutePath] }
+          : ext === '.js' || ext === '.jsx' ? { cmd: process.execPath, args: ['--check', absolutePath] }
+          : ext === '.py' ? { cmd: 'python', args: ['-m', 'py_compile', absolutePath] }
+          : null;
+        if (check) {
+          try {
+            await execFileAsync(check.cmd, check.args, { timeout: 10000 });
+          } catch (err: unknown) {
+            const code = (err as { code?: unknown }).code;
+            // The checker not being installed says nothing about the artifact.
+            // Reporting it as a defect failed verification on any machine
+            // without a Python or npx on PATH — and on Windows, where Node
+            // refuses to launch a `.cmd` without a shell, that was every
+            // TypeScript artifact. A missing toolchain skips the check.
+            if (code === 'ENOENT' || code === 'EINVAL') continue;
+            const e = err as { stderr?: string; stdout?: string };
+            issues.push(`Semantic error in ${artifactPath}:\n${e.stderr || String(err)}\n${e.stdout || ''}`);
           }
-        } catch (err: any) {
-          const stderr = err?.stderr || String(err);
-          const stdout = err?.stdout || '';
-          issues.push(`Semantic error in ${artifactPath}:\n${stderr}\n${stdout}`);
         }
       } catch {
         issues.push(`Required artifact was not created: ${artifactPath}`);
@@ -1370,7 +1405,7 @@ ${current}`,
   private async checkAcceptance(assignment: T2ToT3Assignment): Promise<AcceptanceResult[]> {
     const criteria = assignment.acceptance ?? [];
     if (!criteria.length) return [];
-    const resolve = (target: string) => path.resolve(process.cwd(), target);
+    const resolve = (target: string) => path.resolve(this.artifactRoot(), target);
     return evaluateAcceptance(criteria, assignment.files ?? [], {
       stat: async (target) => {
         try {

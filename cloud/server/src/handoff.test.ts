@@ -54,9 +54,85 @@ describe('parseHandoffBody', () => {
     expect(parseHandoffBody({ messages })).toEqual({ error: expect.any(String) });
   });
 
+  it('carries a long message intact instead of silently slicing it', () => {
+    // The per-message bound used to mirror the old 20,000-character chat:run
+    // prompt cap. That cap is gone, so a turn this courier has to carry can
+    // legitimately be a whole pasted document — and truncating one changes what
+    // the conversation SAYS, with the far device persisting the fragment as the
+    // whole message and nothing anywhere saying it happened.
+    const long = 'a'.repeat(120_000);
+    const out = parseHandoffBody({ messages: [{ role: 'user', content: long }] });
+    expect('error' in out).toBe(false);
+    expect((out as { messages: Array<{ content: string }> }).messages[0]!.content).toHaveLength(120_000);
+  });
+
+  it('refuses a single message past the per-message bound rather than trimming it', () => {
+    const tooBig = 'a'.repeat(500_001);
+    expect(parseHandoffBody({ messages: [{ role: 'user', content: tooBig }] })).toEqual({ error: expect.any(String) });
+  });
+
   it('rejects too many messages', () => {
     const messages = Array.from({ length: 201 }, () => ({ role: 'user' as const, content: 'x' }));
     expect(parseHandoffBody({ messages })).toEqual({ error: expect.any(String) });
+  });
+});
+
+describe('HandoffStore aggregate memory budget', () => {
+  const bigSnapshot = () => ({
+    title: 'big', skillId: null,
+    // 400k characters — near the per-transfer ceiling, which the 4mb body
+    // parser now makes genuinely reachable.
+    messages: [{ role: 'user' as const, content: 'a'.repeat(400_000) }],
+  });
+
+  it('counts BYTES, not UTF-16 code units', () => {
+    // V8 keeps a string with any non-Latin-1 character at two bytes per code
+    // unit, so a budget expressed in characters silently permits twice the
+    // memory it names the moment a transcript is not plain ASCII — which, for
+    // a courier carrying arbitrary chat text, is routine.
+    const store = new HandoffStore();
+    store.create({ title: null, skillId: null, messages: [{ role: 'user', content: 'a'.repeat(1_000) }] });
+    expect(store.storedByteCount()).toBe(2_000);
+  });
+
+  it('accounts for what it is holding, and releases it on eviction', () => {
+    const store = new HandoffStore();
+    store.create(bigSnapshot());
+    expect(store.storedByteCount()).toBeGreaterThan(800_000);
+    const one = store.storedByteCount();
+    store.create(bigSnapshot());
+    expect(store.storedByteCount()).toBe(one * 2);
+  });
+
+  it('releases the budget when a record expires', () => {
+    let now = 1_000;
+    const store = new HandoffStore(() => now);
+    store.create(bigSnapshot());
+    expect(store.storedByteCount()).toBeGreaterThan(0);
+    now += HANDOFF_TTL_MS + 1;
+    expect(store.storedByteCount()).toBe(0);
+    expect(store.size()).toBe(0);
+  });
+
+  it('stays bounded under sustained large writes rather than growing without limit', () => {
+    // A record COUNT does not bound memory once one snapshot can be large, and
+    // the create endpoint is unauthenticated with a per-IP limiter — requests
+    // spread across addresses are not paced by it at all. 5,000 records at the
+    // per-transfer ceiling is ~2.5 GB held for the full 15-minute TTL.
+    const store = new HandoffStore();
+    for (let i = 0; i < 2_000; i++) store.create(bigSnapshot());
+    // Well under what an unbounded store would be holding by now (~1.6 GB).
+    expect(store.storedByteCount()).toBeLessThanOrEqual(256 * 1024 * 1024);
+    // And it is still serving: eviction dropped the oldest, not everything.
+    expect(store.size()).toBeGreaterThan(0);
+  });
+
+  it('still honours the record-count ceiling for many small transfers', () => {
+    const store = new HandoffStore();
+    for (let i = 0; i < 5_050; i++) {
+      store.create({ title: null, skillId: null, messages: [{ role: 'user', content: 'x' }] });
+    }
+    expect(store.size()).toBeLessThanOrEqual(5_000);
   });
 });
 

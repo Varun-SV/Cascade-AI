@@ -23,6 +23,9 @@
 // that in a minute of ordinary traffic and then serve errors, so the cache is a
 // correctness requirement rather than an optimisation.
 
+import fs from 'node:fs/promises';
+import path from 'node:path';
+
 const RELEASE_API_URL = 'https://api.github.com/repos/Varun-SV/Cascade-AI/releases/latest';
 const RELEASES_PAGE_URL = 'https://github.com/Varun-SV/Cascade-AI/releases/latest';
 
@@ -48,6 +51,9 @@ const REFRESH_RETRY_MS = 2 * 60 * 1000;
 
 /** GitHub rejects API requests without one. */
 const USER_AGENT = 'cascade-ai-cloud';
+
+/** How far ahead of now a persisted `fetchedAt` may sit before it is junk. */
+const CLOCK_SKEW_TOLERANCE_MS = 5 * 60 * 1000;
 
 /** Every build a person can install, in the order the site lists them. */
 export const TARGET_IDS = [
@@ -209,6 +215,146 @@ interface CacheEntry {
 }
 
 /**
+ * The path prefix every asset of OUR releases sits under.
+ *
+ * Derived from RELEASES_PAGE_URL rather than written out again, so the owner
+ * and repo appear once in this file.
+ */
+const RELEASE_DOWNLOAD_PREFIX =
+  `${new URL(RELEASES_PAGE_URL).pathname.replace(/\/releases\/latest$/, '')}/releases/download/`;
+
+/**
+ * True for a URL that is an asset of a CASCADE release, not merely of github.com.
+ *
+ * `isTrustedAssetUrl` checks only the host, which is the right question for a
+ * payload that came from our own release endpoint. It is not the right question
+ * for the cache file: anyone can create a repository and publish a release asset
+ * called `Cascade-AI-0.72.0-arm64.dmg`, and such a URL passes the host check,
+ * classifies as a target, and matches its own filename — so every consistency
+ * check in this module can hold while the bytes belong to a stranger. What
+ * makes an asset ours is the repository path, and nothing else here asks about
+ * provenance.
+ */
+export function isCascadeReleaseAsset(url: string): boolean {
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { return false; }
+  if (parsed.protocol !== 'https:') return false;
+  if (parsed.hostname !== 'github.com') return false;
+  return parsed.pathname.startsWith(RELEASE_DOWNLOAD_PREFIX);
+}
+
+/**
+ * True when a URL's last path segment IS the given filename.
+ *
+ * GitHub builds `browser_download_url` by appending the asset name, so this
+ * holds for anything buildManifest() produced — which is why the check lives on
+ * the STORED path only: the cache file is what sits on a volume an operator can
+ * edit, while the API response is already trusted for the asset list itself.
+ * Decoded, so a name carrying a space or a `+` still matches its escaped form.
+ */
+function urlPointsAt(url: string, filename: string): boolean {
+  try {
+    const last = new URL(url).pathname.split('/').pop() ?? '';
+    return decodeURIComponent(last) === filename;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Re-validates a manifest read back from disk.
+ *
+ * The file is ours, but it can be truncated by a crash mid-write, left behind
+ * by an older format, or edited on a volume an operator has shell access to.
+ * The asset URLs in it are rendered as links by the site, so they go through
+ * the same trust check a freshly fetched manifest does — `/download/:target`
+ * re-checks before redirecting, but `/api/downloads` hands the list to the
+ * page as-is.
+ *
+ * Only the three fields that genuinely VARY per release are taken from the
+ * file: filename, size and url. `os`, `label` and `detail` are constants keyed
+ * by the target id (TARGET_META), so they are rebuilt from the validated id
+ * rather than trusted — the same reasoning as `releasesUrl` below. Reading
+ * them from disk would let a stale or hand-edited entry reach the page with,
+ * say, no `os`, and the download section indexes its icon map by that field:
+ * an undefined lookup throws while rendering and takes the whole section down,
+ * which is a worse outcome than the missing-manifest fallback this warm start
+ * exists to avoid.
+ */
+function parseStoredEntry(raw: unknown): CacheEntry | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const { manifest, fetchedAt } = raw as { manifest?: unknown; fetchedAt?: unknown };
+  // A timestamp in the FUTURE is rejected, not just a malformed one. Both the
+  // freshness and staleness checks in get() are `now - fetchedAt`, so a future
+  // value makes that age negative — which reads as "fetched moments ago"
+  // forever, pinning the site to one obsolete release with the 15-minute TTL
+  // never able to expire it. A host clock corrected backwards is enough to
+  // produce one. The tolerance absorbs ordinary skew between the writing and
+  // reading process without admitting a value that could wedge the cache.
+  if (typeof fetchedAt !== 'number' || !Number.isFinite(fetchedAt)) return null;
+  if (fetchedAt > Date.now() + CLOCK_SKEW_TOLERANCE_MS) return null;
+  if (typeof manifest !== 'object' || manifest === null) return null;
+  const m = manifest as Partial<DownloadManifest>;
+  if (typeof m.version !== 'string' || !Array.isArray(m.targets)) return null;
+
+  const targets: DownloadTarget[] = [];
+  for (const raw of m.targets) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const t = raw as Partial<DownloadTarget>;
+    if (typeof t.id !== 'string' || !isTargetId(t.id)) continue;
+    if (typeof t.filename !== 'string' || !t.filename) continue;
+    if (typeof t.sizeBytes !== 'number' || !Number.isFinite(t.sizeBytes) || t.sizeBytes <= 0) continue;
+    // The STRICTER check, not isTrustedAssetUrl: a stored entry has to be an
+    // asset of a Cascade release, not of any repository on github.com.
+    if (typeof t.url !== 'string' || !isCascadeReleaseAsset(t.url)) continue;
+    // The filename has to still CLASSIFY as the target it claims to be. Each
+    // field was checked on its own, so an entry labelled `mac-arm64` whose
+    // filename was a Windows installer passed — its URL is a genuine GitHub
+    // one, and the metadata is rebuilt from the id — and the site would then
+    // offer that .exe to Mac visitors under a macOS label, with
+    // `/download/mac-arm64` redirecting to it. Re-deriving the id from the
+    // filename is the check that ties the two together.
+    if (classifyAsset(t.filename) !== t.id) continue;
+    // …and the URL has to point at THAT filename. Classifying the filename ties
+    // it to the id, but left the url free: an entry with a genuine `.dmg`
+    // filename and a github.com URL ending in the Windows installer passed both
+    // checks, and `/download/mac-arm64` would then redirect a Mac visitor to
+    // that .exe. The three fields only mean anything together.
+    if (!urlPointsAt(t.url, t.filename)) continue;
+    const meta = TARGET_META.find((candidate) => candidate.id === t.id);
+    if (!meta) continue;
+    targets.push({ ...meta, filename: t.filename, sizeBytes: t.sizeBytes, url: t.url });
+  }
+  if (targets.length === 0) return null;
+
+  return {
+    fetchedAt,
+    manifest: {
+      version: m.version,
+      releasedAt: typeof m.releasedAt === 'string' ? m.releasedAt : null,
+      targets,
+      // Always ours, never the file's — a stored value has no reason to differ
+      // and every reason not to be trusted with where visitors are sent.
+      releasesUrl: RELEASES_PAGE_URL,
+    },
+  };
+}
+
+export interface DownloadResolverOptions {
+  /**
+   * A GitHub token for the release lookup. Needs no scopes — it reads a public
+   * release — and only raises the rate limit. Omitted in tests and in local dev.
+   */
+  token?: string;
+  /**
+   * Where to keep the last good manifest so a restart starts warm. Lives under
+   * DATA_DIR, which is a persistent volume in the hosted deployment. Omitted
+   * means memory-only, which is the old behaviour.
+   */
+  cacheFile?: string;
+}
+
+/**
  * Resolves the latest release, cached.
  *
  * A single instance is enough — the manifest is public and identical for every
@@ -229,13 +375,17 @@ export class DownloadResolver {
    * visitor wait for a doomed request before they get the stale answer.
    */
   private lastAttemptAt: number | null = null;
+  /** Guards the one-time warm start; set before awaiting so it cannot double-run. */
+  private diskRead: Promise<void> | null = null;
 
   constructor(
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly now: () => number = Date.now,
+    private readonly options: DownloadResolverOptions = {},
   ) {}
 
   async get(): Promise<DownloadManifest | null> {
+    await this.warmStart();
     const cached = this.cache;
     if (cached && this.now() - cached.fetchedAt < CACHE_TTL_MS) return cached.manifest;
 
@@ -264,6 +414,60 @@ export class DownloadResolver {
     return null;
   }
 
+  /**
+   * Seeds the in-memory cache from disk, once, before the first lookup.
+   *
+   * Without this the cache is purely in-process, so it can only ever help a
+   * process that has already succeeded at least once. A redeploy starts cold,
+   * and if that first fetch fails — a rate limit is the likely reason, see
+   * `authHeaders` — `CACHE_STALE_MS` has nothing to fall back TO and the site
+   * shows its "downloads unavailable" fallback until GitHub answers again.
+   * That is precisely when the fallback is least wanted and most visible.
+   */
+  private async warmStart(): Promise<void> {
+    this.diskRead ??= (async () => {
+      const file = this.options.cacheFile;
+      if (!file) return;
+      try {
+        const entry = parseStoredEntry(JSON.parse(await fs.readFile(file, 'utf8')));
+        // Never overwrites a live result: a refresh may have landed while this
+        // read was in flight, and the fetched copy is the newer one.
+        if (entry && !this.cache) this.cache = entry;
+      } catch { /* no file yet, or unreadable — a cold start is still correct */ }
+    })();
+    await this.diskRead;
+  }
+
+  /** Best-effort write-through, so the NEXT process starts warm. */
+  private async persist(entry: CacheEntry): Promise<void> {
+    const file = this.options.cacheFile;
+    if (!file) return;
+    try {
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      // Written to a temp file and renamed: a crash partway through a direct
+      // write leaves truncated JSON that the next boot cannot parse, which
+      // costs exactly the warm start this exists to provide.
+      const tmp = `${file}.${process.pid}.tmp`;
+      await fs.writeFile(tmp, JSON.stringify(entry), 'utf8');
+      await fs.rename(tmp, file);
+    } catch { /* an unwritable DATA_DIR must not break downloads */ }
+  }
+
+  /**
+   * Authorization for the GitHub API when a token is configured.
+   *
+   * Unauthenticated, the API allows 60 requests per hour PER IP — and on a
+   * shared host (Railway) that IP is shared with every other tenant on the
+   * same egress, so the real allowance is some unknown fraction of 60 that
+   * this service never sees coming. A token raises it to 5,000/hour and, more
+   * importantly, makes it OURS rather than the neighbourhood's. The token
+   * needs no scopes: it reads a public release.
+   */
+  private authHeaders(): Record<string, string> {
+    const token = this.options.token?.trim();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }
+
   private async refresh(): Promise<DownloadManifest | null> {
     try {
       const res = await this.fetchImpl(RELEASE_API_URL, {
@@ -271,12 +475,17 @@ export class DownloadResolver {
           Accept: 'application/vnd.github+json',
           'User-Agent': USER_AGENT,
           'X-GitHub-Api-Version': '2022-11-28',
+          ...this.authHeaders(),
         },
       });
       if (!res.ok) return null;
       const manifest = buildManifest(await res.json());
       if (!manifest) return null;
-      this.cache = { manifest, fetchedAt: this.now() };
+      const entry = { manifest, fetchedAt: this.now() };
+      this.cache = entry;
+      // Not awaited: a slow or failing disk must not hold up the response that
+      // already has its answer. Failures are swallowed inside persist().
+      void this.persist(entry);
       return manifest;
     } catch {
       // Network failure, malformed JSON, DNS — all the same to a caller that

@@ -34,17 +34,62 @@ export interface HandoffSnapshot {
 interface HandoffRecord extends HandoffSnapshot {
   createdAt: number;
   expiresAt: number;
+  /** Size counted against MAX_TOTAL_BYTES_STORED, kept so eviction can refund it. */
+  bytes: number;
+}
+
+/**
+ * Worst-case bytes one snapshot occupies once retained.
+ *
+ * Counted in BYTES, not characters. V8 stores a string with any non-Latin-1
+ * character as two bytes per UTF-16 code unit, so a character budget silently
+ * permits twice the memory it names the moment a transcript is not plain ASCII
+ * — and a courier that carries arbitrary chat text will routinely see one. Two
+ * bytes per code unit is the worst case, and being conservative for a
+ * pure-ASCII transcript is the right direction to err for an unauthenticated
+ * store.
+ */
+const BYTES_PER_CODE_UNIT = 2;
+function snapshotBytes(s: HandoffSnapshot): number {
+  let units = (s.title?.length ?? 0) + (s.skillId?.length ?? 0);
+  for (const m of s.messages) units += m.content.length;
+  return units * BYTES_PER_CODE_UNIT;
 }
 
 export const HANDOFF_TTL_MS = 15 * 60 * 1000;
 const MAX_MESSAGES = 200;
-const MAX_CONTENT_LEN = 20_000; // mirrors the chat:run prompt ceiling
+// Mirrors the ceiling app.ts applies to a PERSISTED turn (MAX_MESSAGE_LEN), not
+// the old chat:run prompt cap — that cap is gone, so a turn this courier has to
+// carry can legitimately be a whole pasted document. At 20,000 a long message
+// was silently sliced: the far device received the opening of a stack trace,
+// persisted it as the whole turn, and the conversation quietly changed meaning
+// with nothing said. MAX_TOTAL_CHARS below still bounds the transfer, and it
+// REFUSES rather than truncating, which is the behaviour a courier should have.
+const MAX_CONTENT_LEN = 500_000;
 const MAX_TOTAL_CHARS = 500_000;
 const MAX_TITLE_LEN = 200;
 const MAX_SKILL_ID_LEN = 64;
 // Bounds memory for a courier that anyone can POST to (rate-limited too). Well
 // above any realistic count of simultaneously-pending handoffs.
 const MAX_RECORDS = 5_000;
+
+/**
+ * Total bytes this store will hold across ALL live records.
+ *
+ * A record count alone does not bound memory once a single snapshot can be
+ * large: 5,000 records at the 500,000-character per-message ceiling is about
+ * 2.5 GB held for the full 15-minute TTL, and the create endpoint is
+ * UNAUTHENTICATED with a per-IP rate limit, so requests spread across source
+ * addresses are not paced by it at all. Two ceilings are needed because they
+ * bound different shapes of abuse — many tiny records, or few enormous ones —
+ * and only the pair covers both.
+ *
+ * 256 MB is far above any genuine simultaneous-handoff load (a real transcript
+ * is a few KB, so this is thousands of them) and far below what would trouble
+ * the process. Measured with snapshotBytes(), so the number means what it says
+ * whatever script the transcript is written in.
+ */
+const MAX_TOTAL_BYTES_STORED = 256 * 1024 * 1024;
 
 // Unambiguous alphabet — no O/0, I/1/L — so a code read off one screen and typed
 // on another device doesn't get transcribed wrong. 31 symbols, 8 chars ≈ 40 bits.
@@ -94,11 +139,15 @@ export function parseHandoffBody(body: unknown): HandoffSnapshot | { error: stri
     const content = (m as { content?: unknown }).content;
     if (role !== 'user' && role !== 'assistant') continue;
     if (typeof content !== 'string') continue;
-    const trimmed = content.slice(0, MAX_CONTENT_LEN);
-    if (!trimmed.trim()) continue; // skip blank turns (e.g. an aborted stream)
-    total += trimmed.length;
+    // Refused, not sliced. Truncating a turn changes what the conversation
+    // SAYS, and the far device has no way to know it happened — it persists the
+    // fragment as the whole message. An explicit refusal is recoverable; a
+    // silently shortened transcript is not.
+    if (content.length > MAX_CONTENT_LEN) return { error: 'This chat is too large to transfer' };
+    if (!content.trim()) continue; // skip blank turns (e.g. an aborted stream)
+    total += content.length;
     if (total > MAX_TOTAL_CHARS) return { error: 'This chat is too large to transfer' };
-    messages.push({ role, content: trimmed });
+    messages.push({ role, content });
   }
 
   if (messages.length === 0) return { error: 'Nothing to continue — this chat has no messages yet' };
@@ -107,6 +156,8 @@ export function parseHandoffBody(body: unknown): HandoffSnapshot | { error: stri
 
 export class HandoffStore {
   private records = new Map<string, HandoffRecord>();
+  /** Running total of stored bytes, kept in step with `records`. */
+  private storedBytes = 0;
 
   constructor(private now: () => number = Date.now) {}
 
@@ -115,12 +166,22 @@ export class HandoffStore {
     this.sweep();
     if (this.records.size >= MAX_RECORDS) this.evictOldest();
 
+    // Evict until the incoming snapshot fits the aggregate budget as well as
+    // the record count. Oldest-first, matching the count-based eviction: a
+    // record close to expiry is the cheapest to lose, and the sender still
+    // holds its code for the few minutes it had left.
+    const incoming = snapshotBytes(snapshot);
+    while (this.records.size > 0 && this.storedBytes + incoming > MAX_TOTAL_BYTES_STORED) {
+      this.evictOldest();
+    }
+
     let key = generateCode();
     while (this.records.has(key)) key = generateCode(); // collisions are astronomically rare
 
     const createdAt = this.now();
     const expiresAt = createdAt + HANDOFF_TTL_MS;
-    this.records.set(key, { ...snapshot, createdAt, expiresAt });
+    this.records.set(key, { ...snapshot, createdAt, expiresAt, bytes: incoming });
+    this.storedBytes += incoming;
     return { code: formatCode(key), expiresAt };
   }
 
@@ -143,10 +204,16 @@ export class HandoffStore {
     return this.records.size;
   }
 
+  /** Test/introspection helper — bytes currently held across live records. */
+  storedByteCount(): number {
+    this.sweep();
+    return this.storedBytes;
+  }
+
   private sweep(): void {
     const t = this.now();
     for (const [key, rec] of this.records) {
-      if (rec.expiresAt <= t) this.records.delete(key);
+      if (rec.expiresAt <= t) this.drop(key, rec);
     }
   }
 
@@ -156,6 +223,13 @@ export class HandoffStore {
     for (const [key, rec] of this.records) {
       if (rec.createdAt < oldest) { oldest = rec.createdAt; oldestKey = key; }
     }
-    if (oldestKey) this.records.delete(oldestKey);
+    const rec = oldestKey === null ? undefined : this.records.get(oldestKey);
+    if (oldestKey !== null && rec) this.drop(oldestKey, rec);
+  }
+
+  /** The only removal path, so `storedBytes` cannot drift from `records`. */
+  private drop(key: string, rec: HandoffRecord): void {
+    this.records.delete(key);
+    this.storedBytes -= rec.bytes;
   }
 }

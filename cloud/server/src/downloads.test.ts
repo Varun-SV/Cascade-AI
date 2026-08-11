@@ -1,7 +1,10 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   DownloadResolver, buildManifest, classifyAsset, isTargetId, isTrustedAssetUrl,
-  TARGET_META, CACHE_TTL_MS, CACHE_STALE_MS, REFRESH_RETRY_MS,
+  TARGET_META, CACHE_TTL_MS, CACHE_STALE_MS, REFRESH_RETRY_MS, RELEASES_PAGE_URL,
 } from './downloads.js';
 
 /**
@@ -209,6 +212,11 @@ describe('DownloadResolver', () => {
     const resolver = new DownloadResolver(fetchImpl as unknown as typeof fetch);
 
     const all = Promise.all([resolver.get(), resolver.get(), resolver.get()]);
+    // Waits for the call rather than assuming it happens within one microtask
+    // of get(): the resolver reads its on-disk warm start first, so how many
+    // ticks precede the fetch is an implementation detail this test should not
+    // encode. Releasing early left the promise pending and timed the test out.
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalled());
     release(okResponse(realRelease()));
     const results = await all;
 
@@ -294,5 +302,290 @@ describe('DownloadResolver', () => {
   it('returns null rather than throwing on malformed JSON', async () => {
     const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => { throw new Error('bad json'); } } as unknown as Response));
     expect(await new DownloadResolver(fetchImpl as unknown as typeof fetch).get()).toBeNull();
+  });
+});
+
+describe('DownloadResolver — authentication and the on-disk warm start', () => {
+  let dir: string;
+
+  beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-dl-')); });
+  afterEach(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+
+  const cacheFile = () => path.join(dir, 'downloads-manifest.json');
+
+  it('sends no Authorization header when no token is configured', async () => {
+    const fetchImpl = vi.fn(async () => okResponse(realRelease()));
+    await new DownloadResolver(fetchImpl as unknown as typeof fetch).get();
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect((init.headers as Record<string, string>)['Authorization']).toBeUndefined();
+  });
+
+  it('authenticates the release lookup when a token is configured', async () => {
+    // Unauthenticated the API allows 60/hour PER IP, and a shared host's
+    // egress IP is shared with every other tenant on it — which is how a
+    // redeploy could land straight into a rate limit nothing here caused.
+    const fetchImpl = vi.fn(async () => okResponse(realRelease()));
+    await new DownloadResolver(fetchImpl as unknown as typeof fetch, Date.now, { token: 'ghp_x' }).get();
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect((init.headers as Record<string, string>)['Authorization']).toBe('Bearer ghp_x');
+    // The headers GitHub requires are still sent alongside it.
+    expect((init.headers as Record<string, string>)['User-Agent']).toBeTruthy();
+  });
+
+  it('treats a blank token as no token, rather than sending "Bearer "', async () => {
+    const fetchImpl = vi.fn(async () => okResponse(realRelease()));
+    await new DownloadResolver(fetchImpl as unknown as typeof fetch, Date.now, { token: '  ' }).get();
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect((init.headers as Record<string, string>)['Authorization']).toBeUndefined();
+  });
+
+  it('persists a resolved manifest so the next process starts warm', async () => {
+    const fetchImpl = vi.fn(async () => okResponse(realRelease()));
+    const first = new DownloadResolver(fetchImpl as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() });
+    expect((await first.get())!.version).toBe('0.68.0');
+    // The write is fire-and-forget, so let it land before reading it back.
+    await vi.waitFor(() => expect(fs.existsSync(cacheFile())).toBe(true));
+
+    // A NEW process (new resolver, no memory) whose very first fetch fails.
+    // Before the warm start this was the "downloads unavailable" case: the
+    // 24h stale window needs a prior success IN THIS PROCESS to fall back to.
+    const failing = vi.fn(async () => { throw new Error('rate limited'); });
+    const second = new DownloadResolver(failing as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() });
+    expect((await second.get())!.version).toBe('0.68.0');
+  });
+
+  it('still expires the warm-started copy once it is genuinely ancient', async () => {
+    let now = 1_000;
+    const fetchImpl = vi.fn(async () => okResponse(realRelease()));
+    const first = new DownloadResolver(fetchImpl as unknown as typeof fetch, () => now, { cacheFile: cacheFile() });
+    await first.get();
+    await vi.waitFor(() => expect(fs.existsSync(cacheFile())).toBe(true));
+
+    now += CACHE_STALE_MS + 1;
+    const failing = vi.fn(async () => { throw new Error('down'); });
+    const second = new DownloadResolver(failing as unknown as typeof fetch, () => now, { cacheFile: cacheFile() });
+    expect(await second.get()).toBeNull();
+  });
+
+  it('ignores a cache file whose timestamp is in the future', async () => {
+    // Both the freshness and staleness checks are `now - fetchedAt`, so a
+    // future value makes the age negative — which reads as "just fetched"
+    // forever and pins the site to one obsolete release, with the 15-minute
+    // TTL unable to expire it. A host clock corrected backwards produces one.
+    fs.writeFileSync(cacheFile(), JSON.stringify({
+      fetchedAt: Date.now() + 365 * 24 * 60 * 60 * 1000,
+      manifest: {
+        version: '0.1.0', releasedAt: null,
+        targets: [{ id: 'mac-arm64', os: 'mac', label: 'macOS', detail: 'Apple silicon',
+          filename: 'Cascade-AI-0.1.0-arm64.dmg', sizeBytes: 10,
+          url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.1.0/Cascade-AI-0.1.0-arm64.dmg' }],
+      },
+    }), 'utf8');
+
+    const fetchImpl = vi.fn(async () => okResponse(realRelease()));
+    const manifest = await new DownloadResolver(fetchImpl as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() }).get();
+    // The stale-future copy was discarded and a real fetch happened.
+    expect(manifest!.version).toBe('0.68.0');
+    expect(fetchImpl).toHaveBeenCalled();
+  });
+
+  it('still accepts a timestamp a little ahead, for ordinary clock skew', async () => {
+    fs.writeFileSync(cacheFile(), JSON.stringify({
+      fetchedAt: Date.now() + 30_000,
+      manifest: {
+        version: '0.68.0', releasedAt: null,
+        targets: [{ id: 'mac-arm64', os: 'mac', label: 'macOS', detail: 'Apple silicon',
+          filename: 'Cascade-AI-0.68.0-arm64.dmg', sizeBytes: 10,
+          url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/Cascade-AI-0.68.0-arm64.dmg' }],
+      },
+    }), 'utf8');
+
+    const failing = vi.fn(async () => { throw new Error('down'); });
+    expect((await new DownloadResolver(failing as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() }).get())!.version).toBe('0.68.0');
+  });
+
+  it('ignores a corrupt cache file instead of failing the lookup', async () => {
+    fs.writeFileSync(cacheFile(), '{"manifest":{"version":"0.6', 'utf8');
+    const fetchImpl = vi.fn(async () => okResponse(realRelease()));
+    const resolver = new DownloadResolver(fetchImpl as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() });
+    expect((await resolver.get())!.version).toBe('0.68.0');
+  });
+
+  it('rebuilds fixed target metadata rather than trusting what the file says', async () => {
+    // os/label/detail are constants keyed by the target id, so they never come
+    // off disk. A stale or hand-edited entry missing `os` used to pass
+    // validation and reach the page, where the download section indexes its
+    // icon map by that field — an undefined lookup throws while rendering and
+    // takes the whole section down, which is worse than the missing-manifest
+    // fallback the warm start exists to avoid.
+    fs.writeFileSync(cacheFile(), JSON.stringify({
+      fetchedAt: Date.now(),
+      manifest: {
+        version: '0.68.0',
+        releasedAt: null,
+        targets: [
+          // No os, a non-string label, junk detail — all reconstructed.
+          { id: 'mac-arm64', label: 42, detail: null, filename: 'Cascade-AI-0.68.0-arm64.dmg', sizeBytes: 10,
+            url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/Cascade-AI-0.68.0-arm64.dmg' },
+        ],
+      },
+    }), 'utf8');
+
+    const failing = vi.fn(async () => { throw new Error('down'); });
+    const manifest = await new DownloadResolver(failing as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() }).get();
+
+    const target = manifest!.targets[0]!;
+    expect(target.os).toBe('mac');
+    expect(target.label).toBe('macOS');
+    expect(target.detail).toBe('Apple silicon');
+    // The genuinely per-release fields still come from the file.
+    expect(target.filename).toBe('Cascade-AI-0.68.0-arm64.dmg');
+    expect(target.sizeBytes).toBe(10);
+  });
+
+  it('rejects a stored target whose filename is not that target', async () => {
+    // Every field validated on its own, which is not enough: an entry labelled
+    // mac-arm64 whose filename is a Windows installer has a genuine GitHub URL
+    // and gets macOS metadata rebuilt onto it — so the site would offer that
+    // .exe to Mac visitors and /download/mac-arm64 would redirect to it.
+    fs.writeFileSync(cacheFile(), JSON.stringify({
+      fetchedAt: Date.now(),
+      manifest: {
+        version: '0.68.0', releasedAt: null,
+        targets: [
+          { id: 'mac-arm64', filename: 'Cascade-AI-Setup-0.68.0.exe', sizeBytes: 10,
+            url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/Cascade-AI-Setup-0.68.0.exe' },
+          { id: 'linux-deb', filename: 'cascade-ai-desktop_0.68.0_amd64.deb', sizeBytes: 20,
+            url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/cascade-ai-desktop_0.68.0_amd64.deb' },
+        ],
+      },
+    }), 'utf8');
+
+    const failing = vi.fn(async () => { throw new Error('down'); });
+    const manifest = await new DownloadResolver(failing as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() }).get();
+    // The mismatched entry is gone; the honest one survives.
+    expect(manifest!.targets.map((t) => t.id)).toEqual(['linux-deb']);
+  });
+
+  it('rejects a stored target whose URL points at a different asset', async () => {
+    // Classifying the filename ties it to the id but leaves the URL free. An
+    // entry with a genuine .dmg filename and a github.com URL ending in the
+    // Windows installer passed both checks — and /download/mac-arm64 would
+    // then have redirected a Mac visitor to that .exe. The three fields only
+    // mean anything together.
+    fs.writeFileSync(cacheFile(), JSON.stringify({
+      fetchedAt: Date.now(),
+      manifest: {
+        version: '0.68.0', releasedAt: null,
+        targets: [
+          { id: 'mac-arm64', filename: 'Cascade-AI-0.68.0-arm64.dmg', sizeBytes: 10,
+            url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/Cascade-AI-Setup-0.68.0.exe' },
+          { id: 'linux-deb', filename: 'cascade-ai-desktop_0.68.0_amd64.deb', sizeBytes: 20,
+            url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/cascade-ai-desktop_0.68.0_amd64.deb' },
+        ],
+      },
+    }), 'utf8');
+
+    const failing = vi.fn(async () => { throw new Error('down'); });
+    const manifest = await new DownloadResolver(failing as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() }).get();
+    expect(manifest!.targets.map((t) => t.id)).toEqual(['linux-deb']);
+  });
+
+  it('accepts a stored URL whose filename is percent-encoded', async () => {
+    // GitHub escapes a name carrying a space; decoding is what keeps that a
+    // match rather than a spurious rejection.
+    fs.writeFileSync(cacheFile(), JSON.stringify({
+      fetchedAt: Date.now(),
+      manifest: {
+        version: '0.68.0', releasedAt: null,
+        targets: [{ id: 'linux-appimage', filename: 'Cascade AI-0.68.0.AppImage', sizeBytes: 20,
+          url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/Cascade%20AI-0.68.0.AppImage' }],
+      },
+    }), 'utf8');
+
+    const failing = vi.fn(async () => { throw new Error('down'); });
+    const manifest = await new DownloadResolver(failing as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() }).get();
+    expect(manifest!.targets.map((t) => t.id)).toEqual(['linux-appimage']);
+  });
+
+  it("rejects a stored asset from someone else's GitHub repository", async () => {
+    // Every consistency check in the module can hold while the bytes belong to
+    // a stranger: anyone may create a repo and publish a release asset named
+    // Cascade-AI-0.72.0-arm64.dmg. It classifies as mac-arm64, its basename
+    // matches its filename, and the host is github.com — so provenance is the
+    // one thing none of the other checks asks about.
+    fs.writeFileSync(cacheFile(), JSON.stringify({
+      fetchedAt: Date.now(),
+      manifest: {
+        version: '0.72.0', releasedAt: null,
+        targets: [
+          { id: 'mac-arm64', filename: 'Cascade-AI-0.72.0-arm64.dmg', sizeBytes: 10,
+            url: 'https://github.com/someone-else/lookalike/releases/download/v0.72.0/Cascade-AI-0.72.0-arm64.dmg' },
+          { id: 'linux-deb', filename: 'cascade-ai-desktop_0.68.0_amd64.deb', sizeBytes: 20,
+            url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/cascade-ai-desktop_0.68.0_amd64.deb' },
+        ],
+      },
+    }), 'utf8');
+
+    const failing = vi.fn(async () => { throw new Error('down'); });
+    const manifest = await new DownloadResolver(failing as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() }).get();
+    expect(manifest!.targets.map((t) => t.id)).toEqual(['linux-deb']);
+  });
+
+  it('rejects a stored asset from a path that only starts like ours', async () => {
+    fs.writeFileSync(cacheFile(), JSON.stringify({
+      fetchedAt: Date.now(),
+      manifest: {
+        version: '0.68.0', releasedAt: null,
+        targets: [{ id: 'mac-arm64', filename: 'Cascade-AI-0.68.0-arm64.dmg', sizeBytes: 10,
+          url: 'https://github.com/Varun-SV/Cascade-AI-evil/releases/download/v0.68.0/Cascade-AI-0.68.0-arm64.dmg' }],
+      },
+    }), 'utf8');
+
+    const fetchImpl = vi.fn(async () => okResponse(realRelease()));
+    // Nothing usable came off disk, so it falls through to a real fetch.
+    expect((await new DownloadResolver(fetchImpl as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() }).get())!.version).toBe('0.68.0');
+    expect(fetchImpl).toHaveBeenCalled();
+  });
+
+  it('drops a stored target with a zero or negative size', async () => {
+    fs.writeFileSync(cacheFile(), JSON.stringify({
+      fetchedAt: Date.now(),
+      manifest: {
+        version: '0.68.0', releasedAt: null,
+        targets: [{ id: 'mac-arm64', os: 'mac', label: 'macOS', detail: 'Apple silicon',
+          filename: 'Cascade-AI-0.68.0-arm64.dmg', sizeBytes: 0,
+          url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/Cascade-AI-0.68.0-arm64.dmg' }],
+      },
+    }), 'utf8');
+
+    const fetchImpl = vi.fn(async () => okResponse(realRelease()));
+    // Nothing usable came off disk, so it falls through to a real fetch.
+    expect((await new DownloadResolver(fetchImpl as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() }).get())!.version).toBe('0.68.0');
+    expect(fetchImpl).toHaveBeenCalled();
+  });
+
+  it('drops stored targets whose URL is not one we would redirect to', async () => {
+    // The file sits on a volume, and /api/downloads hands its URLs to the page
+    // as links. A stored entry gets the same trust check a fetched one does.
+    fs.writeFileSync(cacheFile(), JSON.stringify({
+      fetchedAt: Date.now(),
+      manifest: {
+        version: '9.9.9',
+        releasedAt: null,
+        releasesUrl: 'https://evil.example/releases',
+        targets: [
+          { id: 'mac-arm64', os: 'mac', label: 'macOS', detail: 'Apple silicon', filename: 'Cascade-AI-0.68.0-arm64.dmg', sizeBytes: 1, url: 'https://evil.example/x.dmg' },
+          { id: 'win-x64', os: 'windows', label: 'Windows', detail: 'Installer', filename: 'Cascade-AI-Setup-9.9.9.exe', sizeBytes: 2, url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v9.9.9/Cascade-AI-Setup-9.9.9.exe' },
+        ],
+      },
+    }), 'utf8');
+
+    const failing = vi.fn(async () => { throw new Error('down'); });
+    const manifest = await new DownloadResolver(failing as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() }).get();
+
+    expect(manifest!.targets.map((t) => t.id)).toEqual(['win-x64']);
+    // releasesUrl is always ours, never whatever the file claimed.
+    expect(manifest!.releasesUrl).toBe(RELEASES_PAGE_URL);
   });
 });

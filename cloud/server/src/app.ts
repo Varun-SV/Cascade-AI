@@ -32,7 +32,7 @@ import {
   verifyWebhookSignature, planForStatus, subscriptionFromWebhook,
 } from './billing.js';
 import { HandoffStore, parseHandoffBody } from './handoff.js';
-import { DownloadResolver, isTargetId, isTrustedAssetUrl, RELEASES_PAGE_URL } from './downloads.js';
+import { DownloadResolver, isTargetId, isCascadeReleaseAsset, RELEASES_PAGE_URL } from './downloads.js';
 import { MAX_DOCUMENT_BYTES, parseDocument, resolveDocumentMime } from './documents.js';
 import { connectorCatalog, getConnector, validateRemoteMcpUrl } from './mcp.js';
 import { McpOAuthFlows, encodeOAuthBlob, resolveRunMcpServers } from './mcp-oauth.js';
@@ -147,14 +147,38 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   // The Razorpay webhook signature is an HMAC of the RAW request body, so that
   // route needs the unparsed bytes — capture them and skip the JSON parser.
   const webhookRaw = express.raw({ type: '*/*', limit: '1mb' });
-  // Routes that accept large bodies (file saves, chat/memory imports) run their
-  // own 16mb parser; keep them off the tight 100kb default.
+  // A transferred chat is bounded by parseHandoffBody at 500,000 characters.
+  // Both handoff routes used to run through the 100kb default, so a long
+  // transfer 413'd at the middleware and that validation never got to say
+  // anything useful.
+  //
+  // Sized for the WORST-CASE encoding of what the validator accepts, not the
+  // typical one. Ordinary chat text escapes to about its own length, but JSON
+  // renders a low control character as a six-byte `\u0000` escape, so 500,000 accepted
+  // characters can reach ~2.9 MiB on the wire. At 2mb the parser would still
+  // have refused a transcript the validator calls valid — a limit the product
+  // advertises has to be one the product can actually accept.
+  //
+  // Deliberately not the 16mb upload parser: POST /api/handoff is
+  // UNAUTHENTICATED (rate-limited to 15/min, the code in the URL being the
+  // whole secret), so its body ceiling is a memory-exposure surface and stays
+  // as tight as the advertised limit allows.
+  const handoffJson = express.json({ limit: '4mb' });
+  // Routes that accept large bodies (file saves, chat/memory imports, chat
+  // handoff) run their own parser; keep them off the tight 100kb default.
   const rawBodyRoutes = new Set([
     '/api/uploads', '/api/billing/webhook', '/api/files', '/api/memories/import',
+    '/api/handoff', '/api/conversations/import',
     ...OPENAI_COMPAT_JSON_ROUTES,
   ]);
   app.use((req, res, next) => {
-    if (rawBodyRoutes.has(req.path)) { next(); return; }
+    // Trailing slash normalised before the lookup. Express routing is
+    // non-strict by default, so POST /api/handoff/ reaches the same handler as
+    // POST /api/handoff — but `req.path` keeps the slash and missed this exact
+    // set, sending that request through the 100kb default parser and 413ing a
+    // long transcript on one of two URLs Express otherwise treats as the same.
+    const routePath = req.path.length > 1 ? req.path.replace(/\/+$/, '') : req.path;
+    if (rawBodyRoutes.has(routePath)) { next(); return; }
     express.json()(req, res, next);
   });
 
@@ -1313,7 +1337,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     message: { error: 'Too many attempts. Slow down.' },
   });
 
-  app.post('/api/handoff', handoffCreateLimiter, (req, res) => {
+  app.post('/api/handoff', handoffCreateLimiter, handoffJson, (req, res) => {
     const parsed = parseHandoffBody(req.body);
     if ('error' in parsed) { res.status(400).json({ error: parsed.error }); return; }
     const { code, expiresAt } = handoffs.create(parsed);
@@ -1331,7 +1355,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   // Seed a NEW conversation from a redeemed transcript — the web side of a
   // redeem. Authenticated + owner-scoped: the imported chat becomes the
   // caller's own conversation, ready to continue in the cloud.
-  app.post('/api/conversations/import', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+  app.post('/api/conversations/import', sessionMiddleware(env.SESSION_SECRET), handoffJson, (req: AuthedRequest, res) => {
     const parsed = parseHandoffBody(req.body);
     if ('error' in parsed) { res.status(400).json({ error: parsed.error }); return; }
     const convo = store.importConversation(req.session!.userId, parsed.title, parsed.skillId, parsed.messages);
@@ -1342,7 +1366,14 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   // The site serves the installers itself rather than sending visitors to the
   // GitHub releases page to pick a file out of twenty. See downloads.ts for why
   // the bytes are still redirected to GitHub's CDN rather than proxied.
-  const downloads = options.downloads ?? new DownloadResolver();
+  // Authenticated when a token is configured, and warm-started from DATA_DIR:
+  // the cache used to be in-process only, so a redeploy began with nothing and
+  // a single rate-limited first fetch put the whole download section behind
+  // its "temporarily unavailable" fallback with no stale copy to serve.
+  const downloads = options.downloads ?? new DownloadResolver(fetch, Date.now, {
+    token: env.GITHUB_API_TOKEN,
+    cacheFile: path.join(path.resolve(env.DATA_DIR), 'downloads-manifest.json'),
+  });
 
   // The manifest behind the download section: version, per-platform filename
   // and size. Public and identical for everyone, so it caches at the edge too.
@@ -1370,7 +1401,12 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     const asset = manifest?.targets.find((t) => t.id === target);
     // Unresolvable (GitHub down, or a release that genuinely lacks this build)
     // sends the visitor to the releases page rather than a dead end.
-    if (!asset || !isTrustedAssetUrl(asset.url)) {
+    // Re-checked at the redirect, and with the STRICT check: this is the point
+    // where a visitor's browser is actually sent somewhere, so "an asset of a
+    // Cascade release" is the question that matters, not "some URL on
+    // github.com". Both manifest sources already guarantee it; this is the last
+    // gate before it becomes someone's download.
+    if (!asset || !isCascadeReleaseAsset(asset.url)) {
       res.redirect(302, RELEASES_PAGE_URL);
       return;
     }

@@ -118,11 +118,49 @@ export const setUiMode = (v: UiMode) => writeString(UI_MODE_KEY, v);
 export interface TierParam { maxTokens?: number; temperature?: number }
 export interface TierParams { t1?: TierParam; t2?: TierParam; t3?: TierParam }
 
+/**
+ * Per-tier output ceiling the SERVER accepts — `TierParamSchema` in
+ * cloud/server/src/runs.ts caps `maxTokens` at 200_000. Mirrored here because
+ * nothing on this side used to know it: the field was `min={1}` with no max,
+ * and this module stored anything above zero. A value past the cap therefore
+ * saved happily and then failed validation on EVERY run, with an error that
+ * did not name the field — so the setting that broke chat was three scrolls
+ * away in a panel the user had no reason to suspect.
+ */
+export const MAX_TIER_MAX_TOKENS = 200_000;
+
+/** Clamps one tier's knobs to what the server will accept; drops junk. */
+function normalizeTierParam(p?: TierParam): TierParam | undefined {
+  if (!p) return undefined;
+  const out: TierParam = {};
+  if (typeof p.maxTokens === 'number' && p.maxTokens > 0) {
+    out.maxTokens = Math.min(Math.floor(p.maxTokens), MAX_TIER_MAX_TOKENS);
+  }
+  if (typeof p.temperature === 'number' && p.temperature >= 0 && p.temperature <= 2) {
+    out.temperature = p.temperature;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+function normalizeTierParams(v: TierParams): TierParams {
+  const cleaned: TierParams = {};
+  for (const tier of ['t1', 't2', 't3'] as const) {
+    const p = normalizeTierParam(v[tier]);
+    if (p) cleaned[tier] = p;
+  }
+  return cleaned;
+}
+
 /** Read the stored per-tier params (empty object when unset/corrupt). */
 export function tierParams(): TierParams {
   try {
     const raw = localStorage.getItem(TIER_PARAMS_KEY);
-    return raw ? (JSON.parse(raw) as TierParams) : {};
+    // Clamped on READ, not only on write. An out-of-range value that is
+    // already in localStorage is never written again — it is only ever read —
+    // so clamping the setter alone would leave everyone it already broke
+    // broken, with a redeploy doing nothing because the bad value lives in
+    // their browser. Normalizing here heals them on the next page load.
+    return raw ? normalizeTierParams(JSON.parse(raw) as TierParams) : {};
   } catch {
     return {};
   }
@@ -130,18 +168,7 @@ export function tierParams(): TierParams {
 
 /** Persist per-tier params, pruning empty tiers/fields so unset knobs stay unset. */
 export function setTierParams(v: TierParams): void {
-  const prune = (p?: TierParam): TierParam | undefined => {
-    if (!p) return undefined;
-    const out: TierParam = {};
-    if (typeof p.maxTokens === 'number' && p.maxTokens > 0) out.maxTokens = Math.floor(p.maxTokens);
-    if (typeof p.temperature === 'number' && p.temperature >= 0 && p.temperature <= 2) out.temperature = p.temperature;
-    return Object.keys(out).length ? out : undefined;
-  };
-  const cleaned: TierParams = {};
-  for (const tier of ['t1', 't2', 't3'] as const) {
-    const p = prune(v[tier]);
-    if (p) cleaned[tier] = p;
-  }
+  const cleaned = normalizeTierParams(v);
   try {
     if (Object.keys(cleaned).length) localStorage.setItem(TIER_PARAMS_KEY, JSON.stringify(cleaned));
     else localStorage.removeItem(TIER_PARAMS_KEY);

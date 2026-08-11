@@ -8,7 +8,7 @@ import { ZodError } from 'zod';
 import { parseCookies, verifySessionToken, SESSION_COOKIE_NAME } from './auth/session.js';
 import type { CloudEnv } from './env.js';
 import type { CloudStore } from './db.js';
-import { parseChatRunPayload, runChatTurn, type ChatRunResult } from './runs.js';
+import { formatZodError, parseChatRunPayload, runChatTurn, type ChatRunResult } from './runs.js';
 
 interface CloudSocketData {
   userId: string;
@@ -65,7 +65,7 @@ export function attachSocket(httpServer: HttpServer, env: CloudEnv, store: Cloud
         });
         ack?.(result);
       } catch (err) {
-        const message = err instanceof ZodError ? err.issues.map((i) => i.message).join('; ') : err instanceof Error ? err.message : String(err);
+        const message = err instanceof ZodError ? formatZodError(err) : err instanceof Error ? err.message : String(err);
         ack?.({ error: message });
       } finally {
         activeRuns.delete(controller);

@@ -18,6 +18,136 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+## 0.72.0 - 2026-08-10
+
+### Changed
+- **The 20,000-character limit on a prompt is gone.** It rejected exactly the
+  inputs Cascade exists for — a pasted document, a full stack trace, a whole
+  file — and it did so on every attempt, so for those messages the product
+  simply did not work. `systemPrompt` loses the same cap, which a preamble
+  assembled from an OpenAI-compatible request's `system`/`developer` messages
+  routinely exceeds.
+
+  A ceiling still exists, because the transport has one: socket.io is
+  configured with a 2 MB frame limit. That limit fails in the worst possible
+  way — an oversized frame is dropped before any handler runs, so there is no
+  validation error and no acknowledgement, and the message simply never
+  answers. The browser now checks the size itself, just under the boundary and
+  in UTF-8 bytes rather than characters, and says how large the message is and
+  what to do about it. The authoritative check runs on the encoded payload, not
+  the raw text — socket.io JSON-encodes what it sends, and encoding is not
+  length-preserving, so text made largely of quotes or backslashes nearly
+  doubles on the wire and would otherwise sail past a raw-byte check straight
+  into the silent drop.
+
+  Spend is still bounded, but not perfectly: extended context compacts
+  oversized input, and the per-run token and cost caps stop a run once they are
+  exceeded. Those caps are checked after each model call returns, so a single
+  very large input can carry one call past the cap before anything halts the
+  run — the ceiling behaves as a stop, not as a pre-authorisation. On a priced
+  large-context model a multi-megabyte prompt is the case where that gap is
+  worth knowing about.
+
+  `POST /v1/chat/completions` had its own copy of the same 20,000-character
+  bound, which would have left it the one path still answering
+  `context_length_exceeded` for a prompt everything else accepts. Removed; that
+  route's own 4 MB body limit, with its own error, is the real bound.
+
+### Fixed
+- **A hosted run no longer fails a node for work it actually did.** Asking for
+  a document could end with the run announcing a file write, producing no file
+  anyone could find, and then failing the step with "Worker stalled waiting for
+  artifact creation. Requesting dynamic tool generation from T2 Manager". Two
+  causes, and the file usually did get written:
+
+  Artifact verification resolved a promised filename against `process.cwd()`,
+  which is the workspace only in a plain CLI run. The hosted server runs with
+  its working directory at the app while the run's workspace is the tenant's
+  scratch directory, and the desktop app's is the application bundle rather
+  than the folder you chose. So the tool wrote `<workspace>/report.docx` and
+  the check looked for `<cwd>/report.docx`, found nothing, retried, and threw.
+  Verification now asks the tool registry for the root every tool was
+  configured with, which is by definition where the file went.
+
+  And `generate_document` was registered in hosted runs at all. It registers
+  outside the `enabledTools` allowlist deliberately — that list guards tools
+  reaching the machine, and this one only writes into the run's own workspace —
+  but a hosted workspace is an ephemeral scratch directory with no route
+  serving a file out of it. Its presence also made the worker *require* a file
+  artifact, so a subtask naming a filename was held to a standard it could not
+  meet. Hosted runs deliver files through the `file:` fence instead, which the
+  browser already renders into a real .docx/.pptx/.xlsx on download.
+
+- **A validation error now names the field it is about.** The whole message a
+  user got was `String must contain at most 20000 character(s); Number must be
+  less than or equal to 200000; Number must be less than or equal to 200000;
+  Number must be less than or equal to 200000` — four anonymous sentences,
+  three of them identical, describing constraints on none-of-them-says-which
+  of about twenty fields. Zod's `issue.message` describes the constraint and
+  never the path, and both the socket handler and the OpenAI-compatible
+  endpoint joined messages alone. They now render the path too, so the same
+  failure reads `tierParams.t1.maxTokens: Number must be less than or equal to
+  200000`.
+
+- **A per-tier token limit set too high no longer breaks every message.** The
+  server caps `maxTokens` at 200,000 per tier; the Settings input was
+  `min={1}` with no maximum, and the preference store accepted anything above
+  zero. So a larger value saved without complaint and then failed validation
+  on every single run — and because the error did not name the field, there
+  was nothing connecting a chat that had stopped working to a number in a
+  panel the user had no reason to suspect. The input now carries the limit and
+  the store clamps to it.
+
+  Clamping on save alone would have fixed nothing for anyone already affected:
+  their value is in `localStorage` and is only ever read back, never rewritten
+  unless they happen to reopen Settings and save. Redeploying the server does
+  not touch it either — it is in the browser. So the value is clamped on READ
+  as well, which repairs an existing one on the next page load.
+
+- **The download buttons stop falling back to a GitHub link after a redeploy.**
+  This was not a regression in the buttons; it is the designed fallback firing
+  because the release lookup could not resolve. Two causes, both fixed:
+
+  The call to GitHub's API was unauthenticated, which is limited to 60 requests
+  per hour **per IP** — and a shared host's egress IP is shared with every
+  other tenant on it, so the budget could be spent by traffic that has nothing
+  to do with this service. A `GITHUB_API_TOKEN` (no scopes required; it reads a
+  public release) raises that to 5,000/hour and makes it ours. Unset, the old
+  unauthenticated behaviour is unchanged.
+
+  And the cache was in-process only, so it could not help a process that had
+  not already succeeded once. A redeploy started cold, and the 24-hour
+  stale-serving window had nothing to fall back to if that first fetch failed —
+  which is exactly when the fallback is most visible. The last good manifest is
+  now written under `DATA_DIR` (atomically, via a temp file and rename) and
+  read back at startup, so a restart begins warm. What comes off disk is
+  re-validated against the same trust check a fetched manifest gets, since the
+  site renders those URLs as links.
+
+- **The handoff courier is bounded by memory, not just by record count.** The
+  store capped how many pending transfers it held (5,000) but not how large
+  they could be — fine while the body parser held each one under 100 KB, and no
+  longer fine now that the parser accepts what the validator advertises. At the
+  per-transfer ceiling that is roughly 2.5 GB retained for the full 15-minute
+  expiry, on an endpoint that needs no account and whose rate limit is per-IP,
+  so spreading requests across addresses walks straight past it. There is now
+  an aggregate character budget alongside the record count: the two bound
+  different shapes of load — many small transfers, or few enormous ones — and
+  only the pair covers both.
+
+- **Transferring a chat between devices no longer shortens it.** The handoff
+  courier sliced every message at 20,000 characters — mirroring the prompt cap
+  removed above — so a transferred conversation containing a pasted document
+  arrived with only its opening, persisted as the whole turn, with nothing
+  anywhere saying so. It now refuses a transfer it cannot carry rather than
+  quietly changing what the conversation says — and both handoff routes get a
+  body parser sized to what they accept, since they ran through the 100 KB
+  default and would have rejected a long transfer at the middleware before any
+  of that validation could speak.
+
+- Dropped the stale `GITHUB_MODELS_TOKEN` entry from the server's
+  `.env.example`, missed when the provider was removed in 0.71.0.
+
 ## 0.71.0 - 2026-08-06
 
 ### Removed

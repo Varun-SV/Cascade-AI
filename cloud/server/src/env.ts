@@ -36,6 +36,14 @@ const EnvSchema = z.object({
   // OAuth App is the only way to make it one-click. Unset → token-paste fallback.
   CONNECT_GITHUB_CLIENT_ID: z.string().optional(),
   CONNECT_GITHUB_CLIENT_SECRET: z.string().optional(),
+  // Read-only token for the desktop-download resolver's release lookup
+  // (downloads.ts). Needs NO scopes — it reads a public release — and exists
+  // only to move that call off the unauthenticated 60-per-hour-per-IP limit,
+  // which on a shared host is shared with every other tenant on the same
+  // egress IP. Unset is supported and means the old unauthenticated behaviour.
+  // Not one of the OAuth pairs above: GitHub stopped accepting client
+  // id/secret as API credentials in 2021, so those cannot serve here.
+  GITHUB_API_TOKEN: z.string().optional(),
   CLOUD_DEV_BYPASS: z
     .string()
     .optional()

@@ -647,6 +647,19 @@ describe('/v1 routes', () => {
     expect(h.made).toHaveLength(0);
   });
 
+  it('accepts a last user message past the old 20,000-character cap', async () => {
+    // This endpoint restated ChatRunPayloadSchema's prompt bound so it could
+    // answer an OpenAI-shaped `context_length_exceeded`. That bound is gone,
+    // and a copy left behind here would have made /v1 the one path still
+    // refusing a prompt the socket path now accepts. The route's own 4 MB body
+    // parser is the real bound, and it has its own 413.
+    const res = await post({
+      model: 'cascade',
+      messages: [{ role: 'user', content: 'x'.repeat(50_000) }],
+    });
+    expect(res.status).not.toBe(400);
+  });
+
   it('still seeds that history when the request IS admitted', async () => {
     const res = await post({
       model: 'cascade',
