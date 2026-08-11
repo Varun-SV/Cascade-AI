@@ -428,6 +428,14 @@ export function useChatSession(
     ) => {
       const text = prompt.trim();
       if (!socket || busy || !text) return;
+      // The transcript as it stood BEFORE any optimistic mutation. `messages`
+      // is captured from the render this callback was built in, and the
+      // callers that mutate (editMessage, regenerate) call setMessages and
+      // then this function in the same handler — so React has not re-rendered
+      // and this is still the pre-mutation array. Kept explicitly rather than
+      // relied on implicitly, because it is what restores the view if the send
+      // is refused below.
+      const transcriptBeforeSend = messages;
       // Checked BEFORE anything is emitted or optimistically rendered. Past
       // the socket.io frame ceiling the server never acks — the transport
       // drops the frame before a handler sees it — so without this the send
@@ -494,19 +502,19 @@ export function useChatSession(
         if (tooBig) {
           setBusy(false);
           setStatus(null);
-          // Drops the streaming placeholder AND the user turn appended above.
-          // A fresh send has no `branch`, so nothing reloads it away — the
-          // bubble would sit there looking sent, having never been emitted or
-          // persisted, until a refresh silently removed it.
-          setMessages((prev) => prev.filter((m) => !m.streaming && m.id !== optimisticUserId));
           setError(tooBig);
-          // An edit or regenerate has ALREADY truncated the transcript
-          // optimistically by the time this runs (editMessage pre-checks the
-          // raw text, but encoding can push a payload over on its own). Nothing
-          // was sent, so the server's copy is still the truth — pull it back
-          // rather than leaving the user staring at a shortened conversation
-          // they cannot recover.
-          if (conversationId && branch) void reloadActivePath(conversationId);
+          // Put the transcript back exactly as it was. Nothing was emitted or
+          // persisted, so the pre-send array is authoritative and restoring it
+          // covers every caller in one step: a fresh send loses the optimistic
+          // user turn, and an edit or regenerate — which truncate before
+          // calling this — get their hidden reply and later turns back.
+          //
+          // Restored LOCALLY rather than re-fetched. Recovery went through
+          // reloadActivePath, whose getMessages call swallows its own failure
+          // by design, so a network blip left the conversation looking
+          // permanently shortened for an operation that never happened. A
+          // value already in memory cannot fail to arrive.
+          setMessages(transcriptBeforeSend);
           return;
         }
         socket.emit('chat:run', payload, onAck);

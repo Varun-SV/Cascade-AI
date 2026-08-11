@@ -38,9 +38,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the raw text — socket.io JSON-encodes what it sends, and encoding is not
   length-preserving, so text made largely of quotes or backslashes nearly
   doubles on the wire and would otherwise sail past a raw-byte check straight
-  into the silent drop. Length is still bounded where it belongs: extended
-  context compacts oversized input, and the per-run token and cost caps bound
-  what a long prompt can spend.
+  into the silent drop.
+
+  Spend is still bounded, but not perfectly: extended context compacts
+  oversized input, and the per-run token and cost caps stop a run once they are
+  exceeded. Those caps are checked after each model call returns, so a single
+  very large input can carry one call past the cap before anything halts the
+  run — the ceiling behaves as a stop, not as a pre-authorisation. On a priced
+  large-context model a multi-megabyte prompt is the case where that gap is
+  worth knowing about.
 
   `POST /v1/chat/completions` had its own copy of the same 20,000-character
   bound, which would have left it the one path still answering
@@ -117,6 +123,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read back at startup, so a restart begins warm. What comes off disk is
   re-validated against the same trust check a fetched manifest gets, since the
   site renders those URLs as links.
+
+- **The handoff courier is bounded by memory, not just by record count.** The
+  store capped how many pending transfers it held (5,000) but not how large
+  they could be — fine while the body parser held each one under 100 KB, and no
+  longer fine now that the parser accepts what the validator advertises. At the
+  per-transfer ceiling that is roughly 2.5 GB retained for the full 15-minute
+  expiry, on an endpoint that needs no account and whose rate limit is per-IP,
+  so spreading requests across addresses walks straight past it. There is now
+  an aggregate character budget alongside the record count: the two bound
+  different shapes of load — many small transfers, or few enormous ones — and
+  only the pair covers both.
 
 - **Transferring a chat between devices no longer shortens it.** The handoff
   courier sliced every message at 20,000 characters — mirroring the prompt cap

@@ -34,6 +34,15 @@ export interface HandoffSnapshot {
 interface HandoffRecord extends HandoffSnapshot {
   createdAt: number;
   expiresAt: number;
+  /** Size counted against MAX_TOTAL_CHARS_STORED, kept so eviction can refund it. */
+  chars: number;
+}
+
+/** What one snapshot costs against the aggregate budget. */
+function snapshotChars(s: HandoffSnapshot): number {
+  let total = (s.title?.length ?? 0) + (s.skillId?.length ?? 0);
+  for (const m of s.messages) total += m.content.length;
+  return total;
 }
 
 export const HANDOFF_TTL_MS = 15 * 60 * 1000;
@@ -52,6 +61,23 @@ const MAX_SKILL_ID_LEN = 64;
 // Bounds memory for a courier that anyone can POST to (rate-limited too). Well
 // above any realistic count of simultaneously-pending handoffs.
 const MAX_RECORDS = 5_000;
+
+/**
+ * Total characters this store will hold across ALL live records.
+ *
+ * A record count alone does not bound memory once a single snapshot can be
+ * large: 5,000 records at the 500,000-character per-message ceiling is about
+ * 2.5 GB held for the full 15-minute TTL, and the create endpoint is
+ * UNAUTHENTICATED with a per-IP rate limit, so requests spread across source
+ * addresses are not paced by it at all. Two ceilings are needed because they
+ * bound different shapes of abuse — many tiny records, or few enormous ones —
+ * and only the pair covers both.
+ *
+ * 256 MB is far above any genuine simultaneous-handoff load (a real transcript
+ * is a few KB, so this is thousands of them) and far below what would trouble
+ * the process.
+ */
+const MAX_TOTAL_CHARS_STORED = 256 * 1024 * 1024;
 
 // Unambiguous alphabet — no O/0, I/1/L — so a code read off one screen and typed
 // on another device doesn't get transcribed wrong. 31 symbols, 8 chars ≈ 40 bits.
@@ -118,6 +144,8 @@ export function parseHandoffBody(body: unknown): HandoffSnapshot | { error: stri
 
 export class HandoffStore {
   private records = new Map<string, HandoffRecord>();
+  /** Running total of stored characters, kept in step with `records`. */
+  private storedChars = 0;
 
   constructor(private now: () => number = Date.now) {}
 
@@ -126,12 +154,22 @@ export class HandoffStore {
     this.sweep();
     if (this.records.size >= MAX_RECORDS) this.evictOldest();
 
+    // Evict until the incoming snapshot fits the aggregate budget as well as
+    // the record count. Oldest-first, matching the count-based eviction: a
+    // record close to expiry is the cheapest to lose, and the sender still
+    // holds its code for the few minutes it had left.
+    const incoming = snapshotChars(snapshot);
+    while (this.records.size > 0 && this.storedChars + incoming > MAX_TOTAL_CHARS_STORED) {
+      this.evictOldest();
+    }
+
     let key = generateCode();
     while (this.records.has(key)) key = generateCode(); // collisions are astronomically rare
 
     const createdAt = this.now();
     const expiresAt = createdAt + HANDOFF_TTL_MS;
-    this.records.set(key, { ...snapshot, createdAt, expiresAt });
+    this.records.set(key, { ...snapshot, createdAt, expiresAt, chars: incoming });
+    this.storedChars += incoming;
     return { code: formatCode(key), expiresAt };
   }
 
@@ -154,10 +192,16 @@ export class HandoffStore {
     return this.records.size;
   }
 
+  /** Test/introspection helper — characters currently held across live records. */
+  storedCharCount(): number {
+    this.sweep();
+    return this.storedChars;
+  }
+
   private sweep(): void {
     const t = this.now();
     for (const [key, rec] of this.records) {
-      if (rec.expiresAt <= t) this.records.delete(key);
+      if (rec.expiresAt <= t) this.drop(key, rec);
     }
   }
 
@@ -167,6 +211,13 @@ export class HandoffStore {
     for (const [key, rec] of this.records) {
       if (rec.createdAt < oldest) { oldest = rec.createdAt; oldestKey = key; }
     }
-    if (oldestKey) this.records.delete(oldestKey);
+    const rec = oldestKey === null ? undefined : this.records.get(oldestKey);
+    if (oldestKey !== null && rec) this.drop(oldestKey, rec);
+  }
+
+  /** The only removal path, so `storedChars` cannot drift from `records`. */
+  private drop(key: string, rec: HandoffRecord): void {
+    this.records.delete(key);
+    this.storedChars -= rec.chars;
   }
 }
