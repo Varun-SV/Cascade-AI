@@ -10,6 +10,7 @@
 // whole thing — with no ceiling able to give the money back.
 
 import { describe, expect, it, vi } from 'vitest';
+import { getMaxListeners } from 'node:events';
 import { CascadeRouter } from './index.js';
 import type { CascadeConfig, ModelInfo } from '../../types.js';
 
@@ -653,5 +654,131 @@ describe('preflight budget', () => {
     expect(() => preflight(router, PRICED, HUGE)).toThrow();
     expect(seen).toHaveLength(1);
     expect(router.budgetExceededInfo()?.reason).toContain('would cost about');
+  });
+
+  // ── Run scoping ─────────────────────────────
+  //
+  // Everything a call touches between admission and settling can be swapped by
+  // beginRun() while it is in flight: the counters, the abort controller, the
+  // cancel signal. Reading any of them AFTER the await hands a straggler the
+  // NEXT run's state.
+
+  /** A call that is at the provider and stays there until `finish` is called. */
+  async function callInFlight(router: CascadeRouter, usage: { inputTokens: number; outputTokens: number }): Promise<{
+    settled: Promise<unknown>;
+    finish: () => void;
+  }> {
+    (router as unknown as { tierModels: Map<string, ModelInfo> }).tierModels.set('T3', PRICED);
+    let submitted!: () => void;
+    let finish!: () => void;
+    const atProvider = new Promise<void>((resolve) => { submitted = resolve; });
+    const held = new Promise<void>((resolve) => { finish = resolve; });
+    (router as unknown as { getProvider: (m: ModelInfo) => unknown }).getProvider = () => ({
+      generate: async () => {
+        submitted();
+        await held;
+        return {
+          content: 'done',
+          usage: { ...usage, totalTokens: usage.inputTokens + usage.outputTokens },
+        };
+      },
+    });
+    const settled = router.generate('T3', { messages: [{ role: 'user', content: 'work' }] });
+    await atProvider;
+    return { settled, finish };
+  }
+
+  it('does not charge a previous run\'s straggler to the new run\'s ceiling', async () => {
+    // beginRun() zeroes runTokens/runCostUsd. Adding a late arrival's usage to
+    // them bills the old task's spend against the new task's allowance.
+    const router = await makeRouter({ maxTokensPerRun: 10_000 });
+    const { settled, finish } = await callInFlight(router, { inputTokens: 50_000, outputTokens: 50_000 });
+
+    router.beginRun();                     // the next task starts
+    finish();
+    await settled;
+
+    const r = router as unknown as { runTokens: number; runCostUsd: number };
+    expect(r.runTokens).toBe(0);
+    expect(r.runCostUsd).toBe(0);
+    // The spend is still real, and the SESSION totals still carry it — only the
+    // per-task ceiling is scoped to the task.
+    expect(router.getStats().totalTokens).toBe(100_000);
+  });
+
+  it('does not cancel the new run\'s work over a previous run\'s overrun', async () => {
+    // The straggler's usage would trip the ceiling. Before this was scoped,
+    // enforceRunBudget() aborted `this.runAbort` — which by then belonged to
+    // the run that had just started — killing a wave that had spent nothing.
+    const router = await makeRouter({ maxTokensPerRun: 10_000 });
+    const { settled, finish } = await callInFlight(router, { inputTokens: 50_000, outputTokens: 50_000 });
+
+    router.beginRun();
+    const fresh = (router as unknown as { runAbort: AbortController }).runAbort;
+    finish();
+    await settled;
+
+    expect(fresh.signal.aborted).toBe(false);
+    expect(router.budgetExceededInfo()).toBeNull();
+  });
+
+  it('still enforces the ceiling for a call that belongs to the current run', async () => {
+    // The scoping must not become a way to spend past the cap: same usage, no
+    // beginRun() in between, and the ceiling trips as it always did.
+    const router = await makeRouter({ maxTokensPerRun: 10_000 });
+    const { settled, finish } = await callInFlight(router, { inputTokens: 50_000, outputTokens: 50_000 });
+
+    const current = (router as unknown as { runAbort: AbortController }).runAbort;
+    finish();
+    await expect(settled).rejects.toThrow(/Per-task token cap/);
+
+    expect(current.signal.aborted).toBe(true);
+    expect(router.budgetExceededInfo()?.reason).toMatch(/Per-task token cap/);
+  });
+
+  it('leaves the session cap enforceable across a task boundary', async () => {
+    // Per-RUN accounting is scoped to the run; the session budget is not, or a
+    // task boundary would be a way to spend past it indefinitely.
+    const router = await makeRouter({ sessionBudgetUsd: 0.01 });
+    const { settled, finish } = await callInFlight(router, { inputTokens: 50_000, outputTokens: 50_000 });
+
+    router.beginRun();
+    finish();
+    await expect(settled).rejects.toThrow(/Session budget/);
+    expect(router.budgetExceededInfo()?.reason).toMatch(/Session budget/);
+  });
+
+  it('gives the run signal enough listeners for a wave to chain to', async () => {
+    // Every billable call adds an 'abort' listener to the router's own signal.
+    // At Node's default of 10 an ordinary parallel wave logged a
+    // MaxListenersExceededWarning and looked like a leak.
+    const router = await makeRouter({ maxCostPerRunUsd: 1.0 });
+    const signalOf = () => (router as unknown as { runAbort: AbortController }).runAbort.signal;
+    expect(getMaxListeners(signalOf())).toBeGreaterThan(10);
+    // And beginRun() installs a fresh controller, which needs the same room.
+    router.beginRun();
+    expect(getMaxListeners(signalOf())).toBeGreaterThan(10);
+
+    const warnings: string[] = [];
+    const emitWarning = vi.spyOn(process, 'emitWarning').mockImplementation((w: string | Error) => {
+      warnings.push(w instanceof Error ? w.name : String(w));
+    });
+    try {
+      (router as unknown as { tierModels: Map<string, ModelInfo> }).tierModels.set('T3', PRICED);
+      // The point here is the listener fan-out, not the rate limiter: a wave
+      // this wide would otherwise sit in the token bucket waiting for refill.
+      (router as unknown as { tpmLimiter: unknown }).tpmLimiter = undefined;
+      (router as unknown as { getProvider: (m: ModelInfo) => unknown }).getProvider = () => ({
+        generate: async () => ({
+          content: 'ok',
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        }),
+      });
+      await Promise.all(Array.from({ length: 24 }, () =>
+        router.generate('T3', { messages: [{ role: 'user', content: 'go' }] })));
+    } finally {
+      emitWarning.mockRestore();
+    }
+    expect(warnings).not.toContain('MaxListenersExceededWarning');
   });
 });

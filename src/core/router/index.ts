@@ -2,7 +2,7 @@
 //  Cascade AI — Model Router
 // ─────────────────────────────────────────────
 
-import EventEmitter from 'node:events';
+import EventEmitter, { setMaxListeners } from 'node:events';
 import crypto from 'node:crypto';
 import type {
   CascadeConfig,
@@ -35,7 +35,7 @@ import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
 import { buildTokenUsage, resolveModelPricing } from '../../utils/cost.js';
 import { estimateTokens, contentToText } from '../context/compaction.js';
 import { withTimeout, withTimeoutAbort, CascadeCancelledError } from '../../utils/retry.js';
-import { toGeminiParameters } from '../../providers/gemini-schema.js';
+import { wireProfile, geminiImageCopies } from './wire-profile.js';
 import { ModelProfiler } from './model-profiler.js';
 import type { MemoryStore } from '../../memory/store.js';
 import { computeDelegationSavings, type DelegationSavings } from './savings.js';
@@ -160,36 +160,20 @@ function safeJson(value: unknown): string {
  * larger of the two counts leaves ASCII exactly as it was.
  */
 /**
- * How many times Gemini will submit each top-level image: once, or twice.
+ * A fresh per-run abort controller, with room for the listeners a run attaches.
  *
- * buildContents() passes `extraImages` to a user turn when `contents` is still
- * EMPTY, and attaches them again to the last user turn once it is not — so two
- * copies are sent only when the first content entry is itself a user turn and
- * a later user turn follows it. Counting user roles alone got this wrong: a
- * history opening with a system, assistant or tool message already fills
- * `contents`, so those images are attached once, and charging for two refuses
- * requests over a copy that is never submitted.
- *
- * Mirrors the provider's own conditions rather than guessing at them, which
- * means tracking which messages actually produce a content entry: a system
- * message with text, a tool result, or an assistant turn with text or tool
- * calls. An empty system or assistant message produces nothing and is skipped
- * there too.
+ * Every billable call chains to this signal, so a T3 wave adds one listener per
+ * call in flight — a wave wider than Node's default ceiling of 10 logged a
+ * MaxListenersExceededWarning and made an ordinary parallel run look like a
+ * leak. `Cascade.run()` already raises the limit on the caller's own signal for
+ * exactly this fan-out; the signal the router owns needs the same, and the same
+ * number, or only half the problem is fixed. The listeners are removed as their
+ * calls settle.
  */
-function geminiImageCopies(messages: ConversationMessage[]): number {
-  for (const m of messages) {
-    if (m.role === 'user') {
-      // First content entry is this user turn: it takes a copy, and the last
-      // user turn takes another — unless this IS the last one.
-      const laterUserTurn = messages.slice(messages.indexOf(m) + 1).some((x) => x.role === 'user');
-      return laterUserTurn ? 2 : 1;
-    }
-    const text = typeof m.content === 'string' ? m.content : '';
-    if (m.role === 'system' && text.trim()) return 1;       // fills contents first
-    if (m.role === 'tool') return 1;                        // always pushes
-    if (m.role === 'assistant' && (text || m.toolCalls?.length)) return 1;
-  }
-  return 1;
+function newRunAbort(): AbortController {
+  const controller = new AbortController();
+  setMaxListeners(64, controller.signal);
+  return controller;
 }
 
 /**
@@ -315,7 +299,7 @@ export class CascadeRouter extends EventEmitter {
    * would be discarded. Every provider call chains to this, so tripping the
    * ceiling reaches the requests that are running, not just the ones queued.
    */
-  private runAbort = new AbortController();
+  private runAbort = newRunAbort();
   /**
    * Bumped by every beginRun(). A release handle remembers the generation it
    * was issued in and does nothing if that has moved on: beginRun() zeroes the
@@ -722,12 +706,26 @@ export class CascadeRouter extends EventEmitter {
       );
     }
 
+    // ── Pin this call to the run it starts in ─────────────────
+    //
+    // A run can end and the next one begin while this call is still in flight:
+    // beginRun() swaps the generation, the abort controller and the per-run
+    // counters together, and setRunSignal() replaces the cancel signal. Every
+    // read below happens after at least one await, so reading the fields
+    // directly would have a straggler consult the NEXT run's state — chaining
+    // to its abort signal, charging its allowance, and cancelling its wave on a
+    // verdict about a run that is already over. Captured once, here, before the
+    // first await.
+    const runGeneration = this.runGeneration;
+    const runAbort = this.runAbort;
+    const runSignal = this.runSignal;
+
     // ── Apply per-tier token + temperature limits ──────────────
     options = applyTierLimits(options, tier, this.config?.tierLimits);
     // Inject the run's abort signal so the provider can abort the in-flight
     // request the moment a cancel fires (instant cancellation).
-    if (this.runSignal && !options.signal) {
-      options = { ...options, signal: this.runSignal };
+    if (runSignal && !options.signal) {
+      options = { ...options, signal: runSignal };
     }
     // Per-call override (Cascade Auto per-subtask routing) wins over the shared
     // tier model, except when a vision model is explicitly required.
@@ -798,7 +796,7 @@ export class CascadeRouter extends EventEmitter {
       // and a sibling can trip the ceiling while it waits. Without the signal
       // the whole wave stayed parked for up to a minute after the run was
       // already dead.
-      await this.tpmLimiter.acquire(model.provider, estimatedTokens, this.runAbort.signal);
+      await this.tpmLimiter.acquire(model.provider, estimatedTokens, runAbort.signal);
     }
 
     const useStream = Boolean(onChunk) && model.supportsStreaming && typeof provider.generateStream === 'function';
@@ -832,7 +830,13 @@ export class CascadeRouter extends EventEmitter {
       // already over and whose output will be discarded — which is most of a
       // wave, and most of the cap. Throwing inside the try releases both the
       // reservation and the queue slot on the way out.
-      if (this.runBudgetExceeded) {
+      //
+      // Read only while this call's run is still the current one: after
+      // beginRun() the flag describes a DIFFERENT run, and refusing a
+      // straggler because the next task's budget is spent — or letting one
+      // through because it is not — are both wrong answers to a question
+      // about the wrong run.
+      if (runGeneration === this.runGeneration && this.runBudgetExceeded) {
         // Hand the rate-limit capacity back. acquire() already deducted it,
         // and the bucket outlives beginRun() — keeping tokens that were never
         // spent would throttle the NEXT run for up to a refill interval over a
@@ -866,7 +870,7 @@ export class CascadeRouter extends EventEmitter {
             : provider.generate({ ...options, signal })),
           inferenceTimeoutMs,
           `Local model ${model.id} inference timed out after ${inferenceTimeoutMs}ms`,
-          [options.signal, this.runAbort.signal],
+          [options.signal, runAbort.signal],
         );
       } else if (useStream && onChunk) {
         // Cloud streaming MUST be time-boxed: a stalled SSE connection (TCP open,
@@ -880,11 +884,11 @@ export class CascadeRouter extends EventEmitter {
             }),
             cloudTimeoutMs,
             `Model ${model.id} stream timed out after ${cloudTimeoutMs}ms`,
-            [options.signal, this.runAbort.signal],
+            [options.signal, runAbort.signal],
           );
         } catch (streamErr) {
           // Cancelled mid-stream — propagate the abort, don't retry.
-          if ((streamErr instanceof Error && streamErr.name === 'AbortError') || this.runSignal?.aborted || options.signal?.aborted) {
+          if ((streamErr instanceof Error && streamErr.name === 'AbortError') || runSignal?.aborted || options.signal?.aborted) {
             throw streamErr;
           }
           // Stream stalled or errored — fall back to a (also time-boxed)
@@ -895,7 +899,7 @@ export class CascadeRouter extends EventEmitter {
             (signal) => provider.generate({ ...options, signal }),
             cloudTimeoutMs,
             `Model ${model.id} inference timed out after ${cloudTimeoutMs}ms`,
-            [options.signal, this.runAbort.signal],
+            [options.signal, runAbort.signal],
           );
         }
       } else {
@@ -904,7 +908,7 @@ export class CascadeRouter extends EventEmitter {
           (signal) => provider.generate({ ...options, signal }),
           cloudTimeoutMs,
           `Model ${model.id} inference timed out after ${cloudTimeoutMs}ms`,
-          [options.signal, this.runAbort.signal],
+          [options.signal, runAbort.signal],
         );
       }
 
@@ -932,7 +936,7 @@ export class CascadeRouter extends EventEmitter {
       }
 
       // Add to tracking
-      this.recordStats(tier, model, result.usage, options.featureTag);
+      this.recordStats(tier, model, result.usage, options.featureTag, runGeneration);
       // On success, signal the failover manager so that a provider which
       // previously tripped a rate-limit can be immediately re-enabled rather
       // than waiting the full backoff window to expire.
@@ -947,7 +951,7 @@ export class CascadeRouter extends EventEmitter {
       // A cancelled run aborts the in-flight provider request. Surface it as a
       // cancellation so it propagates like the checkpoint-based cancel (graceful
       // stop + partial output upstream) rather than being retried/failed-over.
-      if ((err instanceof Error && err.name === 'AbortError') || this.runSignal?.aborted || options.signal?.aborted) {
+      if ((err instanceof Error && err.name === 'AbortError') || runSignal?.aborted || options.signal?.aborted) {
         throw new CascadeCancelledError('Run cancelled');
       }
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -1465,7 +1469,20 @@ export class CascadeRouter extends EventEmitter {
     return undefined;
   }
 
-  private recordStats(tier: TierRole, model: ModelInfo, usage: TokenUsage, featureTag?: string): void {
+  /**
+   * `runGeneration` is the generation the call was ADMITTED in — see
+   * `generate()`. Session-wide accounting always applies (the spend is real
+   * whenever it lands), but the per-RUN ceiling is only meaningful for the run
+   * the call belongs to, so a straggler from a finished run is left out of it.
+   * Omitted by the direct callers in tests, which have no run to straddle.
+   */
+  private recordStats(
+    tier: TierRole,
+    model: ModelInfo,
+    usage: TokenUsage,
+    featureTag?: string,
+    runGeneration?: number,
+  ): void {
     this.stats.totalTokens += usage.totalTokens;
     this.stats.totalCostUsd += usage.estimatedCostUsd;
     this.sessionCostUsd += usage.estimatedCostUsd;
@@ -1506,12 +1523,27 @@ export class CascadeRouter extends EventEmitter {
     }
 
     // ── Per-run accounting (hard per-task ceiling) ──
-    this.runTokens += usage.totalTokens;
-    this.runCostUsd += usage.estimatedCostUsd;
+    //
+    // Skipped for a call admitted under a PREVIOUS run. beginRun() zeroes
+    // runTokens/runCostUsd for the new task, so adding a straggler's usage
+    // charges the old run's spend to the new run's allowance — and worse, if
+    // that pushes it over, enforceRunBudget() aborts `this.runAbort`, which is
+    // now the NEW run's controller, cancelling a wave of work that has nothing
+    // to do with the call that just returned. Same class of bug as the
+    // reservation release handles, and scoped the same way.
+    //
+    // Everything above this line is session-wide and is recorded either way:
+    // the money left the account whichever run asked for it, and the session
+    // cap must not be escapable by crossing a task boundary.
+    const currentRun = runGeneration === undefined || runGeneration === this.runGeneration;
+    if (currentRun) {
+      this.runTokens += usage.totalTokens;
+      this.runCostUsd += usage.estimatedCostUsd;
+    }
 
     // ── Budget enforcement & warning (atomic state transitions) ─
     this.updateBudgetState();
-    this.enforceRunBudget();
+    if (currentRun) this.enforceRunBudget();
   }
 
   /**
@@ -1528,7 +1560,7 @@ export class CascadeRouter extends EventEmitter {
     this.reservedTokens = 0;
     this.reservedCostUsd = 0;
     // A fresh switch: the previous run's abort must not cancel this one's work.
-    this.runAbort = new AbortController();
+    this.runAbort = newRunAbort();
     // Invalidates every release handle the previous run handed out.
     this.runGeneration++;
     this.runBudgetExceeded = false;
@@ -1648,54 +1680,60 @@ export class CascadeRouter extends EventEmitter {
     let tokens = guardTokens(options.systemPrompt ?? '');
     let images = 0;
 
-    // Providers that drop system-role HISTORY (Anthropic's convertMessages
-    // skips them outright — only options.systemPrompt is sent as system input)
-    // must not be charged for it. Compaction really does emit such a message,
-    // and it holds a summary of the whole conversation, so charging content
-    // that is never submitted refuses runs over input the provider never sees.
-    const dropsSystemHistory = model.provider === 'anthropic';
-    // Gemini's buildContents() adds an image only when it carries base64 bytes;
-    // a URL attachment is dropped, never submitted, and never billed. Charging
-    // the flat per-image rate for one refuses runs over an image the provider
-    // silently discards.
-    const dropsUrlImages = model.provider === 'gemini';
+    // What the PROVIDER will send, not what the caller passed. Every provider
+    // drops, rewrites or duplicates some of a request on the way out, and the
+    // differences are large enough to matter in both directions: charging for
+    // content that is discarded refuses runs that would have completed, and
+    // skipping content that is sent leaves the cap unenforced. The rules live
+    // in wire-profile.ts, derived by reading each serializer end to end.
+    const wire = wireProfile(model.provider);
     const countsImage = (img: { type?: string } | undefined): boolean =>
-      !dropsUrlImages || img?.type === 'base64';
+      wire.sendsUrlImages || img?.type === 'base64';
 
     for (const message of options.messages) {
-      if (dropsSystemHistory && message.role === 'system') continue;
+      if (wire.dropsMessage(message)) continue;
       tokens += TOKENS_PER_MESSAGE_FRAMING;
       if (typeof message.content === 'string') {
         tokens += guardTokens(message.content);
       } else {
-        for (const block of message.content) {
-          if (block.type === 'image') {
-            if (countsImage(block.image)) images++;
-            continue;
-          }
-          tokens += guardTokens(contentToText([block]));
+        switch (wire.blockHandling(message)) {
+          case 'blocks':
+            for (const block of message.content) {
+              if (block.type === 'image') {
+                if (countsImage(block.image)) images++;
+                continue;
+              }
+              tokens += guardTokens(contentToText([block]));
+            }
+            break;
+          case 'stringified':
+            // JSON.stringify()d whole — an image block's base64 payload goes
+            // on the wire in full, so it is charged by its real size rather
+            // than the flat per-image rate.
+            tokens += guardTokens(safeJson(message.content));
+            break;
+          case 'dropped':
+            // Reduced to '' by the provider: neither the text blocks nor the
+            // images reach the request, so none of it is billed. The turn
+            // itself is still sent, so its framing stands.
+            break;
         }
       }
       // An assistant turn's TOOL CALLS are not in `content` — they are a
-      // separate field, and every provider serializes them back into the next
+      // separate field, and providers serialize them back into the next
       // request. After a model emitted a large argument object, the following
       // call passed preflight without reserving a byte of it.
-      if (message.toolCalls?.length) tokens += guardTokens(safeJson(message.toolCalls));
+      if (message.toolCalls?.length && wire.sendsToolCalls(message)) {
+        tokens += guardTokens(safeJson(message.toolCalls));
+      }
     }
 
-    // Tool DEFINITIONS ride on every native-tool call — Anthropic and the rest
-    // send each name, description and input schema in full.
+    // Tool DEFINITIONS ride on every native-tool call — each name, description
+    // and input schema in full. Sized as the provider will actually send them:
+    // Gemini rewrites every schema through its own sanitiser first, and a large
+    // MCP schema is mostly the metadata that strips out.
     if (options.tools?.length) {
-      // Sized as the provider will actually send them. Gemini strips $defs,
-      // $schema, additionalProperties and MCP vendor extensions from every
-      // input schema before submitting, and a large MCP schema is mostly that
-      // metadata — charging the raw JSON refused budgets over bytes the
-      // provider never sees. Uses the provider's own sanitiser rather than a
-      // second implementation of it, so the two cannot drift.
-      const sized = model.provider === 'gemini'
-        ? options.tools.map((t) => ({ name: t.name, description: t.description, parameters: toGeminiParameters(t.inputSchema) }))
-        : options.tools;
-      tokens += guardTokens(safeJson(sized));
+      tokens += guardTokens(safeJson(wire.sizeTools(options.tools)));
     }
 
     // The top-level `images` field is read by GeminiProvider alone — every
@@ -1703,7 +1741,7 @@ export class CascadeRouter extends EventEmitter {
     // Counting it for all of them charged 2,000 tokens apiece for bytes that
     // are not submitted, which refuses runs over input the provider never
     // sees; not counting it at all left Gemini's vision path unreserved.
-    if (model.provider === 'gemini') {
+    if (wire.readsTopLevelImages) {
       const topLevel = (options.images ?? []).filter(countsImage).length;
       images += topLevel * geminiImageCopies(options.messages);
     }

@@ -1,0 +1,380 @@
+import { describe, it, expect } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { AnthropicProvider } from '../../providers/anthropic.js';
+import { GeminiProvider } from '../../providers/gemini.js';
+import { OpenAIProvider } from '../../providers/openai.js';
+import { OllamaProvider } from '../../providers/ollama.js';
+import { wireProfile, geminiImageCopies } from './wire-profile.js';
+import type { BlockHandling } from './wire-profile.js';
+import type {
+  ConversationMessage,
+  MessageContent,
+  ModelInfo,
+  ProviderType,
+} from '../../types.js';
+
+/**
+ * These tests exist because the preflight estimator kept being wrong in ways
+ * unit tests could not see: it modelled what a provider sends, the provider
+ * changed or was misread, and nothing failed — the estimate was simply off,
+ * refusing runs over content that is discarded or admitting ones over content
+ * that is not.
+ *
+ * So nothing here asserts the table against itself. Every row is checked by
+ * running the REAL provider serializer over a marked message and looking for
+ * the marker in what comes out. If a provider's convertMessages/buildContents
+ * changes, these fail, and the estimator is corrected before it can drift.
+ */
+
+const TEXT_MARKER = 'WIRE_PROFILE_TEXT_MARKER';
+const IMAGE_MARKER = 'WIREPROFILEIMAGEMARKERBASE64';
+const URL_MARKER = 'https://example.invalid/WIRE_PROFILE_URL_MARKER.png';
+const TOOL_CALL_MARKER = 'wire_profile_tool_call_marker';
+
+/**
+ * The caller's own block array, verbatim — what a JSON.stringify()ing provider
+ * puts on the wire and what no real conversion produces. Present twice over:
+ * once as-is, and once escaped, since a stringified array lands inside a JSON
+ * string value in the serialized request.
+ */
+function rawBlockShapes(blocks: MessageContent[]): string[] {
+  const raw = JSON.stringify(blocks);
+  return [raw, JSON.stringify(raw).slice(1, -1)];
+}
+
+const ROLES = ['system', 'user', 'assistant', 'tool'] as const;
+const PROVIDERS: ProviderType[] = ['anthropic', 'gemini', 'openai', 'ollama'];
+
+function model(provider: ProviderType): ModelInfo {
+  return {
+    id: 'test-model',
+    name: 'Test Model',
+    provider,
+    contextWindow: 100_000,
+    isVisionCapable: true,
+    inputCostPer1kTokens: 0.001,
+    outputCostPer1kTokens: 0.002,
+    maxOutputTokens: 4096,
+    supportsStreaming: true,
+    isLocal: provider === 'ollama',
+  };
+}
+
+/**
+ * Runs the provider's own message serializer. These are private — reaching
+ * past that is the point: a test that went through generate() would need the
+ * network, and a reimplementation here would drift exactly like the estimator
+ * did.
+ */
+function serialize(provider: ProviderType, messages: ConversationMessage[]): unknown[] {
+  const cfg = { type: provider, apiKey: 'test-key' } as never;
+  const m = model(provider);
+  switch (provider) {
+    case 'anthropic':
+      return (new AnthropicProvider(cfg, m) as never as {
+        convertMessages(x: ConversationMessage[]): unknown[];
+      }).convertMessages(messages);
+    case 'gemini':
+      return (new GeminiProvider(cfg, m) as never as {
+        buildContents(x: ConversationMessage[]): unknown[];
+      }).buildContents(messages);
+    case 'ollama':
+      return (new OllamaProvider(cfg, m) as never as {
+        convertMessages(x: ConversationMessage[]): unknown[];
+      }).convertMessages(messages);
+    default:
+      return (new OpenAIProvider(cfg, m) as never as {
+        convertMessages(x: ConversationMessage[]): unknown[];
+      }).convertMessages(messages);
+  }
+}
+
+function serializedJson(provider: ProviderType, messages: ConversationMessage[]): string {
+  return JSON.stringify(serialize(provider, messages));
+}
+
+const markedBlocks = (): MessageContent[] => ([
+  { type: 'text', text: TEXT_MARKER },
+  { type: 'image', image: { type: 'base64', data: IMAGE_MARKER, mimeType: 'image/png' } },
+]);
+
+/** What the provider ACTUALLY did with this message's array content. */
+function observedBlockHandling(provider: ProviderType, message: ConversationMessage): BlockHandling {
+  const out = serializedJson(provider, [message]);
+  // A stringified array keeps the caller's own block shape verbatim — that is
+  // what distinguishes it from a real conversion, which rewrites images into
+  // the provider's format (`source`, `image_url`, `inlineData`, `images[]`).
+  const blocks = Array.isArray(message.content) ? message.content : [];
+  if (rawBlockShapes(blocks).some((shape) => out.includes(shape))) return 'stringified';
+  if (!out.includes(TEXT_MARKER) && !out.includes(IMAGE_MARKER)) return 'dropped';
+  return 'blocks';
+}
+
+// ── The rows ───────────────────────────────────
+
+describe('wire profile — dropsMessage, against the real serializers', () => {
+  for (const provider of PROVIDERS) {
+    for (const role of ROLES) {
+      it(`${provider}: a ${role} turn with string content is ${
+        wireProfile(provider).dropsMessage({ role, content: TEXT_MARKER }) ? 'dropped' : 'submitted'
+      }`, () => {
+        const message: ConversationMessage = {
+          role,
+          content: TEXT_MARKER,
+          ...(role === 'tool' ? { toolCallId: 'call_1' } : {}),
+        };
+        const submitted = serializedJson(provider, [message]).includes(TEXT_MARKER);
+        expect(wireProfile(provider).dropsMessage(message)).toBe(!submitted);
+      });
+    }
+  }
+
+  it('gemini drops a whitespace-only system turn but keeps one with text', () => {
+    const blank: ConversationMessage = { role: 'system', content: '   \n ' };
+    const filled: ConversationMessage = { role: 'system', content: TEXT_MARKER };
+    expect(serialize('gemini', [blank])).toHaveLength(0);
+    expect(wireProfile('gemini').dropsMessage(blank)).toBe(true);
+    expect(serializedJson('gemini', [filled])).toContain(TEXT_MARKER);
+    expect(wireProfile('gemini').dropsMessage(filled)).toBe(false);
+  });
+
+  it('anthropic drops system history entirely — the compaction-summary case', () => {
+    // Compaction emits a system message holding a summary of the whole
+    // conversation. convertMessages skips it, so charging it refuses runs over
+    // input the provider never sees.
+    expect(serialize('anthropic', [{ role: 'system', content: TEXT_MARKER }])).toHaveLength(0);
+  });
+});
+
+describe('wire profile — blockHandling, against the real serializers', () => {
+  for (const provider of PROVIDERS) {
+    for (const role of ROLES) {
+      const message: ConversationMessage = {
+        role,
+        content: markedBlocks(),
+        ...(role === 'tool' ? { toolCallId: 'call_1' } : {}),
+      };
+      const wire = wireProfile(provider);
+      // Where the whole message is dropped, blockHandling is never consulted.
+      if (wire.dropsMessage(message)) continue;
+      it(`${provider}: array content on a ${role} turn is ${wire.blockHandling(message)}`, () => {
+        expect(wire.blockHandling(message)).toBe(observedBlockHandling(provider, message));
+      });
+    }
+  }
+
+  it('ollama drops assistant blocks only when the turn carries tool calls', () => {
+    const withCalls: ConversationMessage = {
+      role: 'assistant',
+      content: markedBlocks(),
+      toolCalls: [{ id: 'c1', name: TOOL_CALL_MARKER, input: {} }],
+    };
+    const without: ConversationMessage = { role: 'assistant', content: markedBlocks() };
+    expect(observedBlockHandling('ollama', withCalls)).toBe('dropped');
+    expect(wireProfile('ollama').blockHandling(withCalls)).toBe('dropped');
+    expect(observedBlockHandling('ollama', without)).toBe('blocks');
+    expect(wireProfile('ollama').blockHandling(without)).toBe('blocks');
+  });
+
+  it('a stringified tool result carries the image bytes in full', () => {
+    // Not the flat per-image rate: the base64 payload really is on the wire,
+    // so it is charged by its real size.
+    const message: ConversationMessage = {
+      role: 'tool',
+      content: markedBlocks(),
+      toolCallId: 'call_1',
+    };
+    for (const provider of ['anthropic', 'gemini', 'ollama'] as const) {
+      expect(serializedJson(provider, [message])).toContain(IMAGE_MARKER);
+      expect(wireProfile(provider).blockHandling(message)).toBe('stringified');
+    }
+  });
+});
+
+describe('wire profile — sendsToolCalls, against the real serializers', () => {
+  const withCalls = (content: string | MessageContent[]): ConversationMessage => ({
+    role: 'assistant',
+    content,
+    toolCalls: [{ id: 'c1', name: TOOL_CALL_MARKER, input: { q: 'x' } }],
+  });
+
+  for (const provider of PROVIDERS) {
+    it(`${provider}: serializes an assistant turn's tool calls (string content)`, () => {
+      const message = withCalls('hello');
+      const sent = serializedJson(provider, [message]).includes(TOOL_CALL_MARKER);
+      expect(wireProfile(provider).sendsToolCalls(message)).toBe(sent);
+      expect(sent).toBe(true);
+    });
+  }
+
+  it('openai drops tool calls on an assistant turn with array content', () => {
+    // The tool_calls branch sits inside `if (typeof m.content === 'string')`;
+    // array content falls through to the parts branch and never attaches them.
+    const message = withCalls(markedBlocks());
+    expect(serializedJson('openai', [message])).not.toContain(TOOL_CALL_MARKER);
+    expect(wireProfile('openai').sendsToolCalls(message)).toBe(false);
+  });
+
+  it('no provider serializes tool calls hung on a non-assistant turn', () => {
+    for (const provider of PROVIDERS) {
+      const message: ConversationMessage = {
+        role: 'user',
+        content: 'hello',
+        toolCalls: [{ id: 'c1', name: TOOL_CALL_MARKER, input: {} }],
+      };
+      expect(serializedJson(provider, [message])).not.toContain(TOOL_CALL_MARKER);
+      expect(wireProfile(provider).sendsToolCalls(message)).toBe(false);
+    }
+  });
+});
+
+describe('wire profile — sendsUrlImages, against the real serializers', () => {
+  const urlImage: ConversationMessage = {
+    role: 'user',
+    content: [{ type: 'image', image: { type: 'url', data: URL_MARKER, mimeType: 'image/png' } }],
+  };
+
+  for (const provider of PROVIDERS) {
+    it(`${provider}: a URL image attachment is ${
+      wireProfile(provider).sendsUrlImages ? 'submitted' : 'discarded'
+    }`, () => {
+      const sent = serializedJson(provider, [urlImage]).includes(URL_MARKER);
+      expect(wireProfile(provider).sendsUrlImages).toBe(sent);
+    });
+  }
+
+  it('gemini alone discards it — inlineData is emitted for base64 only', () => {
+    expect(serializedJson('gemini', [urlImage])).not.toContain(URL_MARKER);
+    expect(wireProfile('gemini').sendsUrlImages).toBe(false);
+  });
+});
+
+describe('wire profile — readsTopLevelImages, against the provider sources', () => {
+  // `options.images` is passed to the serializer only by Gemini, so no
+  // serializer-level probe can show the difference. Reading the sources is the
+  // check that actually catches the drift: the day another provider starts
+  // reading the field, its profile row has to change with it.
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const providerDir = path.join(here, '..', '..', 'providers');
+
+  const FILES: Record<ProviderType, string> = {
+    anthropic: 'anthropic.ts',
+    gemini: 'gemini.ts',
+    openai: 'openai.ts',
+    azure: 'azure.ts',
+    'openai-compatible': 'openai-compatible.ts',
+    ollama: 'ollama.ts',
+  };
+
+  for (const [provider, file] of Object.entries(FILES) as [ProviderType, string][]) {
+    it(`${provider}: ${
+      wireProfile(provider).readsTopLevelImages ? 'reads' : 'never reads'
+    } options.images`, () => {
+      const source = fs.readFileSync(path.join(providerDir, file), 'utf8');
+      expect(/\boptions\.images\b/.test(source)).toBe(wireProfile(provider).readsTopLevelImages);
+    });
+  }
+});
+
+describe('wire profile — sizeTools matches the provider conversion', () => {
+  const tool = {
+    name: 'search',
+    description: 'Search things',
+    inputSchema: {
+      type: 'object',
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      additionalProperties: false,
+      properties: { q: { type: 'string', 'x-mcp-header': 'X-Q' } },
+    },
+  };
+
+  it('gemini sizes tools as its own sanitiser will send them', () => {
+    const converted = (new GeminiProvider({ type: 'gemini', apiKey: 'k' } as never, model('gemini')) as never as {
+      convertTool(t: typeof tool): unknown;
+    }).convertTool(tool);
+    expect(wireProfile('gemini').sizeTools([tool])).toEqual([converted]);
+    // And the sanitiser really does strip the metadata a large MCP schema is
+    // mostly made of, so sizing the raw JSON would over-charge.
+    expect(JSON.stringify(converted)).not.toContain('x-mcp-header');
+    expect(JSON.stringify(converted)).not.toContain('$schema');
+  });
+
+  it('every other provider sends the schema verbatim', () => {
+    for (const provider of ['anthropic', 'openai', 'azure', 'openai-compatible', 'ollama'] as const) {
+      expect(wireProfile(provider).sizeTools([tool])).toEqual([tool]);
+    }
+  });
+});
+
+describe('wire profile — provider coverage', () => {
+  it('has a row for every ProviderType', () => {
+    // Azure and openai-compatible extend OpenAIProvider without overriding
+    // convertMessages, so they share its row by construction.
+    const all: ProviderType[] = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama'];
+    for (const provider of all) expect(wireProfile(provider)).toBeDefined();
+    expect(wireProfile('azure')).toBe(wireProfile('openai'));
+    expect(wireProfile('openai-compatible')).toBe(wireProfile('openai'));
+  });
+
+  it('falls back to the OpenAI shape for an unknown provider', () => {
+    expect(wireProfile('brand-new' as ProviderType)).toBe(wireProfile('openai'));
+  });
+});
+
+describe('geminiImageCopies — mirrors buildContents', () => {
+  const img = { type: 'base64' as const, data: IMAGE_MARKER, mimeType: 'image/png' as const };
+
+  /** How many inlineData parts buildContents really emits for one extra image. */
+  function observedCopies(messages: ConversationMessage[]): number {
+    const contents = (new GeminiProvider({ type: 'gemini', apiKey: 'k' } as never, model('gemini')) as never as {
+      buildContents(m: ConversationMessage[], extra?: typeof img[]): unknown[];
+    }).buildContents(messages, [img]);
+    return JSON.stringify(contents).split(IMAGE_MARKER).length - 1;
+  }
+
+  const cases: Array<[string, ConversationMessage[]]> = [
+    ['a single user turn', [{ role: 'user', content: 'hi' }]],
+    ['two user turns', [{ role: 'user', content: 'hi' }, { role: 'user', content: 'again' }]],
+    ['led by a system turn', [
+      { role: 'system', content: 'ctx' },
+      { role: 'user', content: 'hi' },
+      { role: 'user', content: 'again' },
+    ]],
+    ['led by an EMPTY system turn', [
+      { role: 'system', content: '   ' },
+      { role: 'user', content: 'hi' },
+      { role: 'user', content: 'again' },
+    ]],
+    ['led by an assistant turn', [
+      { role: 'assistant', content: 'sure' },
+      { role: 'user', content: 'hi' },
+      { role: 'user', content: 'again' },
+    ]],
+    ['led by an EMPTY assistant turn', [
+      { role: 'assistant', content: '' },
+      { role: 'user', content: 'hi' },
+      { role: 'user', content: 'again' },
+    ]],
+    ['led by a tool result', [
+      { role: 'tool', content: 'out', toolCallId: 'c1' },
+      { role: 'user', content: 'hi' },
+      { role: 'user', content: 'again' },
+    ]],
+    ['no user turn at all', [{ role: 'assistant', content: 'sure' }]],
+  ];
+
+  for (const [label, messages] of cases) {
+    it(`${label}: charges what buildContents attaches`, () => {
+      const observed = observedCopies(messages);
+      // Never charge for a copy the provider does not send; never leave one
+      // unreserved. The one exception is a history with no user turn at all,
+      // where the image is dropped outright and the estimator's floor of 1 is
+      // a deliberate over-count of a case that cannot arise in a real request.
+      if (observed === 0) expect(geminiImageCopies(messages)).toBe(1);
+      else expect(geminiImageCopies(messages)).toBe(observed);
+    });
+  }
+});

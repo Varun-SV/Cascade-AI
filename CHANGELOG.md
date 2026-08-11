@@ -76,6 +76,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider call chains to, so the ceiling reaches the requests that are
   running. A budget abort still reports itself as a budget failure rather than
   a cancellation — otherwise the reason the run stopped is lost on the way up.
+  That signal is given room for the listeners a wave attaches to it; at Node's
+  default of ten, an ordinary parallel run logged a `MaxListenersExceededWarning`
+  and looked like a leak.
 
   A call already admitted when a sibling trips the ceiling no longer submits.
   The kill switch was checked when a call entered the router, but a request can
@@ -104,6 +107,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and an underestimate in an enforcement path is a cap that does not hold; and
   the per-turn framing every provider wraps around a message, without which a
   long history of short turns reserved about a token each.
+
+  What gets billed is provider-specific, and the estimate now says so in one
+  place instead of several. Every provider rewrites a request on the way out,
+  and the differences are not small: Anthropic discards system-role history
+  outright, which is where compaction puts its summary of the entire
+  conversation; Gemini drops URL image attachments, folds system turns into the
+  next user turn, rewrites every tool schema through a sanitiser that strips
+  the metadata a large MCP schema is mostly made of, and attaches a top-level
+  image twice in one particular shape of history; Anthropic and Gemini both
+  ignore block content on an assistant turn entirely, and Gemini on a system
+  turn; OpenAI ignores it on system and tool turns, and drops an assistant
+  turn's tool calls when its content is a block array; a tool result carrying
+  blocks is JSON-stringified whole by three of the four, base64 image payload
+  included, so it costs its real size rather than the flat per-image rate.
+
+  Each of those was found the same way — one at a time, in review, after the
+  estimate was already wrong in production-shaped input — because the rules
+  lived as one-off provider conditionals scattered through the estimator with
+  nothing tying them to the code they modelled. They are now a single table
+  (`core/router/wire-profile.ts`) derived by reading each serializer end to
+  end, and its rows are tested by running the real serializers over a marked
+  message and looking for the marker in what comes out. A provider that changes
+  how it builds a request now fails a test rather than quietly biasing every
+  budget decision.
+
+  Per-run accounting is scoped to the run that asked for it. A call still in
+  flight when the next task begins was charged to that task's fresh allowance,
+  and if its usage pushed the total past the ceiling, the abort that followed
+  cancelled the new run's work — a wave that had spent nothing — over a verdict
+  about a run that was already finished. Session totals are unaffected: the
+  money left the account whichever run asked for it, and a task boundary must
+  not become a way to spend past the session cap.
 
   Token-dense ASCII — base64, hashes, minified data — is knowingly left at the
   prose rate. It tokenizes more densely than that, but the only cheap way to
