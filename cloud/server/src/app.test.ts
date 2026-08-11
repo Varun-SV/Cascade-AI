@@ -388,6 +388,21 @@ describe('cloud/server app', () => {
     expect(snap.messages[0]!.content).toHaveLength(150_000);
   });
 
+  it('handoff: accepts a transcript whose JSON encoding is far larger than its length', async () => {
+    // A limit the product advertises has to be one it can actually accept.
+    // JSON renders a low control character as a six-byte \u0000, so a
+    // transcript the validator calls valid can reach ~2.9 MiB on the wire —
+    // past the first parser ceiling chosen for typical text, which would have
+    // 413'd a transfer that passes every documented bound.
+    const controlHeavy = '\u0000'.repeat(400_000);
+    const created = await fetch(`${baseUrl}/api/handoff`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: controlHeavy }] }),
+    });
+    expect(created.status).toBe(200);
+  });
+
   it('handoff: rejects an empty transcript and 404s an unknown code', async () => {
     const empty = await fetch(`${baseUrl}/api/handoff`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [] }),

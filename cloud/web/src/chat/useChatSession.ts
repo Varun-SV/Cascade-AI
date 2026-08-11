@@ -646,6 +646,14 @@ export function useChatSession(
       ? messages.find((m) => m.id === assistant.parentId)
       : [...messages].reverse().find((m) => m.role === 'user');
     if (!userMsg) return;
+    // Size-checked BEFORE the optimistic truncation, exactly as editMessage is.
+    // The turn being re-run was accepted by whichever door it came in — a
+    // conversation created through /v1/chat/completions can hold a prompt above
+    // this client's limit and under that route's own 4 MB one — so runChat can
+    // legitimately refuse it here. Refusing after the slice would hide the
+    // existing reply and every later turn until a manual refresh.
+    const tooLarge = promptTooLargeError(userMsg.content);
+    if (tooLarge) { setError(tooLarge); return; }
     // Optimistic: show the path up to & including the user turn, then stream.
     const idx = messages.findIndex((m) => m.id === userMsg.id);
     setMessages(messages.slice(0, idx + 1));

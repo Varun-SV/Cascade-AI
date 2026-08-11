@@ -147,15 +147,23 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   // The Razorpay webhook signature is an HMAC of the RAW request body, so that
   // route needs the unparsed bytes — capture them and skip the JSON parser.
   const webhookRaw = express.raw({ type: '*/*', limit: '1mb' });
-  // A transferred chat is bounded by parseHandoffBody at 500,000 characters,
-  // which JSON-escapes to roughly 1 MB — well over the 100kb default, so both
-  // handoff routes used to 413 before that validation could run and say
-  // anything useful. Sized to what the validator will actually accept rather
-  // than reusing the 16mb upload parser: POST /api/handoff is UNAUTHENTICATED
-  // (rate-limited only, the code in the URL being the whole secret), so its
-  // body ceiling is a memory-exposure surface and belongs as tight as the
-  // feature allows.
-  const handoffJson = express.json({ limit: '2mb' });
+  // A transferred chat is bounded by parseHandoffBody at 500,000 characters.
+  // Both handoff routes used to run through the 100kb default, so a long
+  // transfer 413'd at the middleware and that validation never got to say
+  // anything useful.
+  //
+  // Sized for the WORST-CASE encoding of what the validator accepts, not the
+  // typical one. Ordinary chat text escapes to about its own length, but JSON
+  // renders a low control character as a six-byte ` `, so 500,000 accepted
+  // characters can reach ~2.9 MiB on the wire. At 2mb the parser would still
+  // have refused a transcript the validator calls valid — a limit the product
+  // advertises has to be one the product can actually accept.
+  //
+  // Deliberately not the 16mb upload parser: POST /api/handoff is
+  // UNAUTHENTICATED (rate-limited to 15/min, the code in the URL being the
+  // whole secret), so its body ceiling is a memory-exposure surface and stays
+  // as tight as the advertised limit allows.
+  const handoffJson = express.json({ limit: '4mb' });
   // Routes that accept large bodies (file saves, chat/memory imports, chat
   // handoff) run their own parser; keep them off the tight 100kb default.
   const rawBodyRoutes = new Set([
