@@ -215,6 +215,24 @@ interface CacheEntry {
 }
 
 /**
+ * True when a URL's last path segment IS the given filename.
+ *
+ * GitHub builds `browser_download_url` by appending the asset name, so this
+ * holds for anything buildManifest() produced — which is why the check lives on
+ * the STORED path only: the cache file is what sits on a volume an operator can
+ * edit, while the API response is already trusted for the asset list itself.
+ * Decoded, so a name carrying a space or a `+` still matches its escaped form.
+ */
+function urlPointsAt(url: string, filename: string): boolean {
+  try {
+    const last = new URL(url).pathname.split('/').pop() ?? '';
+    return decodeURIComponent(last) === filename;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Re-validates a manifest read back from disk.
  *
  * The file is ours, but it can be truncated by a crash mid-write, left behind
@@ -266,6 +284,12 @@ function parseStoredEntry(raw: unknown): CacheEntry | null {
     // `/download/mac-arm64` redirecting to it. Re-deriving the id from the
     // filename is the check that ties the two together.
     if (classifyAsset(t.filename) !== t.id) continue;
+    // …and the URL has to point at THAT filename. Classifying the filename ties
+    // it to the id, but left the url free: an entry with a genuine `.dmg`
+    // filename and a github.com URL ending in the Windows installer passed both
+    // checks, and `/download/mac-arm64` would then redirect a Mac visitor to
+    // that .exe. The three fields only mean anything together.
+    if (!urlPointsAt(t.url, t.filename)) continue;
     const meta = TARGET_META.find((candidate) => candidate.id === t.id);
     if (!meta) continue;
     targets.push({ ...meta, filename: t.filename, sizeBytes: t.sizeBytes, url: t.url });

@@ -467,6 +467,47 @@ describe('DownloadResolver — authentication and the on-disk warm start', () =>
     expect(manifest!.targets.map((t) => t.id)).toEqual(['linux-deb']);
   });
 
+  it('rejects a stored target whose URL points at a different asset', async () => {
+    // Classifying the filename ties it to the id but leaves the URL free. An
+    // entry with a genuine .dmg filename and a github.com URL ending in the
+    // Windows installer passed both checks — and /download/mac-arm64 would
+    // then have redirected a Mac visitor to that .exe. The three fields only
+    // mean anything together.
+    fs.writeFileSync(cacheFile(), JSON.stringify({
+      fetchedAt: Date.now(),
+      manifest: {
+        version: '0.68.0', releasedAt: null,
+        targets: [
+          { id: 'mac-arm64', filename: 'Cascade-AI-0.68.0-arm64.dmg', sizeBytes: 10,
+            url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/Cascade-AI-Setup-0.68.0.exe' },
+          { id: 'linux-deb', filename: 'cascade-ai-desktop_0.68.0_amd64.deb', sizeBytes: 20,
+            url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/cascade-ai-desktop_0.68.0_amd64.deb' },
+        ],
+      },
+    }), 'utf8');
+
+    const failing = vi.fn(async () => { throw new Error('down'); });
+    const manifest = await new DownloadResolver(failing as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() }).get();
+    expect(manifest!.targets.map((t) => t.id)).toEqual(['linux-deb']);
+  });
+
+  it('accepts a stored URL whose filename is percent-encoded', async () => {
+    // GitHub escapes a name carrying a space; decoding is what keeps that a
+    // match rather than a spurious rejection.
+    fs.writeFileSync(cacheFile(), JSON.stringify({
+      fetchedAt: Date.now(),
+      manifest: {
+        version: '0.68.0', releasedAt: null,
+        targets: [{ id: 'linux-appimage', filename: 'Cascade AI-0.68.0.AppImage', sizeBytes: 20,
+          url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/Cascade%20AI-0.68.0.AppImage' }],
+      },
+    }), 'utf8');
+
+    const failing = vi.fn(async () => { throw new Error('down'); });
+    const manifest = await new DownloadResolver(failing as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() }).get();
+    expect(manifest!.targets.map((t) => t.id)).toEqual(['linux-appimage']);
+  });
+
   it('drops a stored target with a zero or negative size', async () => {
     fs.writeFileSync(cacheFile(), JSON.stringify({
       fetchedAt: Date.now(),
