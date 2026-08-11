@@ -21,6 +21,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## 0.73.0 - 2026-08-11
 
 ### Fixed
+- **A timed-out model call is now cancelled, not just abandoned.** Every
+  provider request was time-boxed by racing it against a timer. Losing that
+  race told the caller the call had failed; it did nothing to the request,
+  which carried on generating and billing against the user's key with its usage
+  never reported anywhere. Nothing was reading it by then either. The stream
+  path made this visible — a stalled stream falls back to a non-streaming call,
+  so two full submissions of the same input could be in flight and billable at
+  once — but it applied to every timeout in the router, including the local
+  inference path and the tool-support probe.
+
+  Every provider already honoured an abort signal; nothing was handing them
+  one. They are now given a signal that fires when the clock runs out, before
+  the caller is told, so the first request is on its way down before any
+  fallback starts. A caller's own signal chains in, so cancelling a run still
+  aborts everything beneath it. Aborting is a request rather than a refund — a
+  provider mid-completion may still charge for it — but the run stops paying
+  for output nobody will read, and stops paying for it twice.
+
+  This also removes the accounting that existed only to compensate: charging an
+  estimate for the abandoned attempt, re-checking the budget before the retry,
+  and holding a second reservation across it.
+
 - **The per-run cost cap now refuses a request it cannot afford, instead of
   paying for it and stopping afterwards.** Both per-run ceilings were checked
   after a model call returned, which made them a stop rather than a
@@ -45,12 +67,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refusing on ignorance would break every local and self-hosted model the
   moment a cap was set — leaving those to the post-hoc stop as before. And it
   does nothing at all when no cap is configured.
-
-  A stream attempt abandoned for the non-streaming fallback is charged as an
-  estimate rather than forgotten. The provider accepted it and will bill for it,
-  but no usage report for it ever arrives — only the fallback's does — so
-  releasing its reservation handed that spend back to the run as though it had
-  never happened.
 
   An admitted call HOLDS its estimate against the budget until it settles.
   Checking against spent-so-far alone is a time-of-check/time-of-use hole that

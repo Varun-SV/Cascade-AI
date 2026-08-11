@@ -33,7 +33,7 @@ import { DeadModelStore } from './dead-models.js';
 import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
 import { buildTokenUsage, resolveModelPricing } from '../../utils/cost.js';
 import { estimateTokens, contentToText } from '../context/compaction.js';
-import { withTimeout, CascadeCancelledError } from '../../utils/retry.js';
+import { withTimeout, withTimeoutAbort, CascadeCancelledError } from '../../utils/retry.js';
 import { ModelProfiler } from './model-profiler.js';
 import type { MemoryStore } from '../../memory/store.js';
 import { computeDelegationSavings, type DelegationSavings } from './savings.js';
@@ -487,7 +487,9 @@ export class CascadeRouter extends EventEmitter {
       // Direct provider call, NOT this.generate(): failover there could silently
       // answer from a different model and record a wrong verdict.
       const provider = this.createProvider(cfg as ProviderConfig, model);
-      const result = await withTimeout(provider.generate({
+      // Aborting, like every other billable call: a probe that times out
+      // should stop, not keep generating in the background on the user's key.
+      const result = await withTimeoutAbort((signal) => provider.generate({
         messages: [{ role: 'user', content: "Call the echo tool with text set to 'ping'. Use the tool; do not answer in prose." }],
         tools: [{
           name: 'echo',
@@ -496,6 +498,7 @@ export class CascadeRouter extends EventEmitter {
         }],
         maxTokens: 80,
         temperature: 0,
+        signal,
       }), 30_000, 'tool-support probe timed out');
       return (result.toolCalls?.length ?? 0) > 0;
     } catch {
@@ -732,33 +735,42 @@ export class CascadeRouter extends EventEmitter {
     try {
       let result: GenerateResult;
 
+      // Every provider call below is time-boxed with withTimeoutAbort, which
+      // CANCELS the request when the clock runs out instead of merely racing
+      // it. Providers all honour options.signal already; nothing was handing
+      // them one. That is what made a timed-out request keep generating and
+      // keep billing with its usage never reported — and what the abandoned
+      // attempt accounting, the retry preflight and the second reservation all
+      // existed to paper over. Those are gone: the first request is on its way
+      // down before the fallback starts.
       if (model.isLocal) {
         // Apply a hard timeout to local inference calls so a slow/overloaded
         // model doesn't block the worker indefinitely.
         const inferenceTimeoutMs = this.config.localInferenceTimeoutMs ?? 300_000;
-        const inferencePromise = useStream && onChunk
-          ? provider.generateStream(options, (chunk) => {
-              const text = typeof chunk?.text === 'string' ? chunk.text : '';
-              if (text) onChunk({ ...chunk, text });
-            })
-          : provider.generate(options);
-        result = await withTimeout(
-          inferencePromise,
+        result = await withTimeoutAbort(
+          (signal) => (useStream && onChunk
+            ? provider.generateStream({ ...options, signal }, (chunk) => {
+                const text = typeof chunk?.text === 'string' ? chunk.text : '';
+                if (text) onChunk({ ...chunk, text });
+              })
+            : provider.generate({ ...options, signal })),
           inferenceTimeoutMs,
           `Local model ${model.id} inference timed out after ${inferenceTimeoutMs}ms`,
+          options.signal,
         );
       } else if (useStream && onChunk) {
         // Cloud streaming MUST be time-boxed: a stalled SSE connection (TCP open,
         // no terminal chunk) would otherwise hang the whole run with no output.
         const cloudTimeoutMs = this.config.cloudInferenceTimeoutMs ?? 120_000;
         try {
-          result = await withTimeout(
-            provider.generateStream(options, (chunk) => {
+          result = await withTimeoutAbort(
+            (signal) => provider.generateStream({ ...options, signal }, (chunk) => {
               const text = typeof chunk?.text === 'string' ? chunk.text : '';
               if (text) onChunk({ ...chunk, text });
             }),
             cloudTimeoutMs,
             `Model ${model.id} stream timed out after ${cloudTimeoutMs}ms`,
+            options.signal,
           );
         } catch (streamErr) {
           // Cancelled mid-stream — propagate the abort, don't retry.
@@ -767,58 +779,22 @@ export class CascadeRouter extends EventEmitter {
           }
           // Stream stalled or errored — fall back to a (also time-boxed)
           // non-streaming call rather than letting a hung stream freeze the run.
-          //
-          // This is a SECOND physical submission of the same input, and the
-          // provider bills it as one: the preflight above cleared the first
-          // attempt only. Re-checking here refuses a retry the remaining budget
-          // cannot afford instead of quietly doubling the input spend. The
-          // first attempt's reservation is still held, so this is measured
-          // against an allowance that already accounts for it.
-          //
-          // Note this does not make the double-spend disappear — `withTimeout`
-          // races the original promise rather than aborting it, so a timed-out
-          // first request may still be running and billable at the provider.
-          // Aborting it properly means threading an AbortController through
-          // every provider call, which is a wider change than this one.
-          // Set HERE, not on the fallback's success. The stream is already
-          // abandoned by this point and the provider will bill for it whatever
-          // happens next — gating the charge on the fallback completing meant a
-          // fallback that itself failed released both reservations and left the
-          // stream's spend uncounted, after which the failover path could
-          // submit yet another request against allowance already consumed.
-          const streamAbandoned = true;
-          const releaseRetry = this.enforcePreflightBudget(model, options);
-          try {
-            result = await withTimeout(
-              provider.generate(options),
-              cloudTimeoutMs,
-              `Model ${model.id} inference timed out after ${cloudTimeoutMs}ms`,
-            );
-          } finally {
-            // The abandoned attempt was accepted by the provider and is
-            // billable, but no usage for it will ever arrive — recordStats sees
-            // only the fallback's response. Releasing its reservation without
-            // charging anything would hand that spend back as though it had not
-            // happened.
-            if (streamAbandoned) {
-              try {
-                this.chargeUnreportedAttempt(tier, model, options);
-              } catch {
-                // recordStats can trip the budget and throw. The flag it sets
-                // is what matters — the next call fails fast on it — and
-                // letting the throw escape a finally would replace whatever
-                // the fallback itself was reporting.
-              }
-            }
-            releaseRetry?.();
-          }
+          // The stalled attempt has been aborted by now, so this is the only
+          // request in flight and the reservation taken above still covers it.
+          result = await withTimeoutAbort(
+            (signal) => provider.generate({ ...options, signal }),
+            cloudTimeoutMs,
+            `Model ${model.id} inference timed out after ${cloudTimeoutMs}ms`,
+            options.signal,
+          );
         }
       } else {
         const cloudTimeoutMs = this.config.cloudInferenceTimeoutMs ?? 120_000;
-        result = await withTimeout(
-          provider.generate(options),
+        result = await withTimeoutAbort(
+          (signal) => provider.generate({ ...options, signal }),
           cloudTimeoutMs,
           `Model ${model.id} inference timed out after ${cloudTimeoutMs}ms`,
+          options.signal,
         );
       }
 
@@ -1577,28 +1553,6 @@ export class CascadeRouter extends EventEmitter {
     tokens += images * IMAGE_TOKENS_EACH;
 
     return tokens;
-  }
-
-  /**
-   * Books an estimate for a submission the provider accepted but never
-   * reported — the stream attempt abandoned in favour of the non-streaming
-   * fallback. `withTimeout` races that request rather than aborting it, so it
-   * may still be running and billing; either way its usage never reaches
-   * recordStats, and leaving it uncounted lets the run spend it twice.
-   */
-  private chargeUnreportedAttempt(tier: TierRole, model: ModelInfo, options: GenerateOptions): void {
-    const inputTokens = this.estimateInputTokens(options);
-    // Booked through recordStats rather than by hand. A hand-rolled version
-    // updated the two per-RUN totals and none of the rest — not sessionCostUsd,
-    // not stats.totalCostUsd, not the session budget state — so the attempt
-    // vanished from reported spend the moment beginRun() cleared the run
-    // fields, and repeated stream fallbacks could walk past sessionBudgetUsd
-    // while the router still believed it was under. Going through the one
-    // function that owns this bookkeeping is what stops the two drifting again.
-    //
-    // Input only: the response was abandoned, so its output is not merely
-    // unknown but never arrived.
-    this.recordStats(tier, model, buildTokenUsage(inputTokens, 0, model), options.featureTag);
   }
 
   /** Trips the same run-level flag a post-hoc overrun does, and reports it the same way. */

@@ -129,6 +129,59 @@ export async function withTimeout<T>(
   }
 }
 
+/**
+ * Time-box an operation and actually CANCEL it when the clock runs out.
+ *
+ * `withTimeout` above races a promise it did not create, so it cannot stop the
+ * work: on timeout the caller gets an error while the original request keeps
+ * running — and for a model call that means it keeps generating and keeps
+ * billing, invisibly, with its usage never reported anywhere. Everything built
+ * to compensate for that (charging an estimate for the abandoned attempt,
+ * re-checking the budget before the retry, holding a second reservation) exists
+ * only because the request was never cancelled.
+ *
+ * This takes a FACTORY instead of a promise so it can hand in a signal. On
+ * timeout the signal aborts first and the rejection follows, so the provider
+ * sees the cancellation before the caller sees the error. A caller's own signal
+ * is chained in, so a cancelled run still aborts everything beneath it.
+ *
+ * Aborting is a request, not a refund: a provider that has already begun a
+ * completion may still charge for it. What changes is that we stop paying for
+ * output nobody will ever read, and stop doing it for the full length of a
+ * second request that was racing the first.
+ */
+export async function withTimeoutAbort<T>(
+  run: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  errorMessage = 'Operation timed out',
+  outer?: AbortSignal,
+): Promise<T> {
+  const controller = new AbortController();
+  const abortOuter = () => controller.abort(outer?.reason);
+  if (outer) {
+    if (outer.aborted) controller.abort(outer.reason);
+    else outer.addEventListener('abort', abortOuter, { once: true });
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      // Abort BEFORE rejecting: the caller's catch may start a fallback
+      // immediately, and the point of this is that the first request is
+      // already on its way down by then.
+      controller.abort(new Error(errorMessage));
+      reject(new Error(errorMessage));
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([run(controller.signal), timeoutPromise]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    outer?.removeEventListener('abort', abortOuter);
+  }
+}
+
 // ── Helpers ────────────────────────────────────
 
 function defaultIsRetryable(err: Error): boolean {

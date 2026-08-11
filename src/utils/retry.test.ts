@@ -3,7 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { describe, expect, it, vi } from 'vitest';
-import { withRetry, withTimeout, CascadeToolError } from './retry.js';
+import { withRetry, withTimeout, withTimeoutAbort, CascadeToolError } from './retry.js';
 
 // ── withRetry ─────────────────────────────────
 
@@ -140,5 +140,78 @@ describe('withTimeout', () => {
   it('propagates rejection from the original promise', async () => {
     const failing = Promise.reject(new Error('original error'));
     await expect(withTimeout(failing, 1_000)).rejects.toThrow('original error');
+  });
+});
+
+describe('withTimeoutAbort', () => {
+  it('cancels the operation instead of merely racing it', async () => {
+    // withTimeout races a promise it did not create, so it cannot stop the
+    // work: for a model call the request kept generating and kept billing,
+    // with its usage never reported anywhere.
+    let seen: AbortSignal | undefined;
+    const p = withTimeoutAbort(
+      (signal) => { seen = signal; return new Promise<never>(() => { /* never settles */ }); },
+      10,
+      'timed out',
+    );
+    await expect(p).rejects.toThrow('timed out');
+    expect(seen?.aborted).toBe(true);
+  });
+
+  it('aborts BEFORE the rejection reaches the caller', async () => {
+    // The caller's catch may start a fallback immediately; the first request
+    // has to be on its way down by then, or both are in flight at once.
+    let abortedWhenRejected: boolean | undefined;
+    let seen: AbortSignal | undefined;
+    try {
+      await withTimeoutAbort(
+        (signal) => { seen = signal; return new Promise<never>(() => {}); },
+        10,
+        'timed out',
+      );
+    } catch {
+      abortedWhenRejected = seen?.aborted;
+    }
+    expect(abortedWhenRejected).toBe(true);
+  });
+
+  it('passes a live signal through and leaves it unaborted on success', async () => {
+    let seen: AbortSignal | undefined;
+    const value = await withTimeoutAbort(
+      (signal) => { seen = signal; return Promise.resolve('ok'); },
+      1_000,
+      'timed out',
+    );
+    expect(value).toBe('ok');
+    expect(seen?.aborted).toBe(false);
+  });
+
+  it('chains an outer signal, so a cancelled run aborts what is beneath it', async () => {
+    const outer = new AbortController();
+    let seen: AbortSignal | undefined;
+    const p = withTimeoutAbort(
+      (signal) => { seen = signal; return new Promise<never>(() => {}); },
+      10_000,
+      'timed out',
+      outer.signal,
+    );
+    outer.abort(new Error('run cancelled'));
+    expect(seen?.aborted).toBe(true);
+    // The inner promise never settles on its own; the provider is what rejects
+    // on abort in real use, so just assert the signal propagated.
+    void p.catch(() => {});
+  });
+
+  it('aborts immediately when the outer signal is already aborted', async () => {
+    const outer = AbortSignal.abort(new Error('already gone'));
+    let seen: AbortSignal | undefined;
+    const p = withTimeoutAbort(
+      (signal) => { seen = signal; return new Promise<never>(() => {}); },
+      10_000,
+      'timed out',
+      outer,
+    );
+    expect(seen?.aborted).toBe(true);
+    void p.catch(() => {});
   });
 });
