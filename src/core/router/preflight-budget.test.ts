@@ -283,12 +283,13 @@ describe('preflight budget', () => {
     })).toThrow(/would cost about/);
   });
 
-  it('counts top-level options.images, not only nested blocks', async () => {
-    // GeminiProvider feeds options.images straight into buildContents(), so a
-    // whole vision path was going unreserved.
+  it('counts top-level options.images for the provider that sends them', async () => {
+    // GeminiProvider feeds options.images straight into buildContents(), so
+    // that vision path would otherwise go unreserved…
     const router = await makeRouter({ maxTokensPerRun: 5_000 });
-    const r = router as unknown as { enforcePreflightBudget: (m: ModelInfo, o: unknown) => unknown };
-    expect(() => r.enforcePreflightBudget(PRICED, {
+    const r = router as unknown as { enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined };
+    const gemini = { ...PRICED, provider: 'gemini' } as ModelInfo;
+    const payload = {
       messages: [{ role: 'user', content: 'describe these' }],
       images: [
         { type: 'base64', data: 'A'.repeat(100), mimeType: 'image/png' },
@@ -296,7 +297,13 @@ describe('preflight budget', () => {
         { type: 'base64', data: 'A'.repeat(100), mimeType: 'image/png' },
       ],
       maxTokens: 40,
-    })).toThrow(/per-task cap/);
+    };
+    expect(() => r.enforcePreflightBudget(gemini, payload)).toThrow(/per-task cap/);
+
+    // …and is NOT charged to a provider that never reads the field. Every
+    // other provider builds its request from `messages` alone, so charging
+    // 2,000 tokens an image refuses runs over bytes never submitted.
+    expect(() => r.enforcePreflightBudget(PRICED, payload)).not.toThrow();
   });
 
   it('charges a tiny compressed image the same as a large one', async () => {

@@ -1594,10 +1594,12 @@ export class CascadeRouter extends EventEmitter {
     // send each name, description and input schema in full.
     if (options.tools?.length) tokens += guardTokens(safeJson(options.tools));
 
-    // Images arrive two ways: nested in message content, or on the top-level
-    // `images` field, which GeminiProvider feeds straight into buildContents().
-    // Counting only the first left a whole vision path unreserved.
-    images += options.images?.length ?? 0;
+    // The top-level `images` field is read by GeminiProvider alone — every
+    // other provider builds its request from `messages` and never looks at it.
+    // Counting it for all of them charged 2,000 tokens apiece for bytes that
+    // are not submitted, which refuses runs over input the provider never
+    // sees; not counting it at all left Gemini's vision path unreserved.
+    if (model.provider === 'gemini') images += options.images?.length ?? 0;
     tokens += images * IMAGE_TOKENS_EACH;
 
     return tokens;

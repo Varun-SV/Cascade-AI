@@ -96,7 +96,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   definitions, which Anthropic and others send in full on every native-tool
   call; an assistant turn's tool calls, which are a separate field from its
   content and are serialized back into the next request; images arriving either
-  nested in a message or on the top-level `images` field; and dense scripts —
+  nested in a message or, for the one provider that reads that field, on the
+  top-level `images` option; and dense scripts —
   CJK and emoji cost about a token per character, where the
   four-characters-per-token rule used elsewhere underestimates them fourfold,
   and an underestimate in an enforcement path is a cap that does not hold.
