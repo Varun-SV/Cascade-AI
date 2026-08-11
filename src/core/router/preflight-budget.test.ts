@@ -191,12 +191,10 @@ describe('preflight budget', () => {
     })).toThrow(/would cost about/);
   });
 
-  it('sizes an image by its bytes, not by the "[image]" placeholder', async () => {
-    // The block nests an ImageAttachment — `block.image.data`, not
-    // `block.data`. An earlier version of this test built the flattened shape,
-    // which is not a valid MessageContent, so it passed while the estimator
-    // was reading a field that never exists and every real image silently took
-    // the fallback.
+  it('charges an image as an image, not as the "[image]" placeholder', async () => {
+    // The block nests an ImageAttachment. An earlier version of this test
+    // built a flattened shape, which is not a valid MessageContent, so it
+    // passed while the estimator read a field that never exists.
     const router = await makeRouter({ maxCostPerRunUsd: 0.0005 });
     const r = router as unknown as { enforcePreflightBudget: (m: ModelInfo, o: unknown) => unknown };
     expect(() => r.enforcePreflightBudget(PRICED, {
@@ -209,34 +207,6 @@ describe('preflight budget', () => {
       }],
       maxTokens: 40,
     })).toThrow(/would cost about/);
-  });
-
-  it('charges a base64 image far more than the no-bytes fallback', async () => {
-    // The assertion the previous test could not make: a real image has to move
-    // the estimate, not land on the same fixed number an unreadable one does.
-    const router = await makeRouter({ maxCostPerRunUsd: 100 });
-    const r = router as unknown as {
-      enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined;
-      reservedTokens: number;
-    };
-    const size = (content: unknown) => {
-      const release = r.enforcePreflightBudget(PRICED, { messages: [{ role: 'user', content }], maxTokens: 40 });
-      const n = r.reservedTokens;
-      release!();
-      return n;
-    };
-
-    const small = size([{ type: 'image', image: { type: 'base64', data: 'A'.repeat(20_000), mimeType: 'image/png' } }]);
-    const large = size([{ type: 'image', image: { type: 'base64', data: 'A'.repeat(4_000_000), mimeType: 'image/png' } }]);
-    const byUrl = size([{ type: 'image', image: { type: 'url', data: 'https://example.com/a.png', mimeType: 'image/png' } }]);
-
-    // A real image moves the estimate with its size…
-    expect(large).toBeGreaterThan(small);
-    expect(large).toBeGreaterThan(byUrl);
-    // …but not without limit: providers downscale before billing, so a huge
-    // file does not cost proportionally more, and pretending it does would
-    // refuse runs that would have completed.
-    expect(large).toBeLessThan(3_000);
   });
 
   it('still charges a url-referenced image something, not nothing', async () => {
@@ -274,6 +244,80 @@ describe('preflight budget', () => {
     await expect(router.generate('T3', { messages: [{ role: 'user', content: 'hello' }] }))
       .rejects.toThrow(/queue wait timed out/);
     expect(r.reservedTokens).toBe(0);
+  });
+
+  it('does not undercount CJK, which costs about a token per character', async () => {
+    // estimateTokens divides by four, which suits English. For dense scripts
+    // that underestimates roughly fourfold — and an underestimate in an
+    // enforcement path is a cap that silently does not hold.
+    const router = await makeRouter({ maxTokensPerRun: 1_000_000 });
+    const r = router as unknown as {
+      enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined;
+      reservedTokens: number;
+    };
+    const size = (text: string) => {
+      const release = r.enforcePreflightBudget(PRICED, { messages: [{ role: 'user', content: text }], maxTokens: 40 });
+      const n = r.reservedTokens;
+      release!();
+      return n;
+    };
+
+    expect(size('速'.repeat(10_000))).toBeGreaterThanOrEqual(10_000);
+    // ASCII is left exactly where it was — no inflation of ordinary prompts.
+    expect(size('a'.repeat(10_000))).toBe(2_500);
+  });
+
+  it('counts an assistant turn\'s tool calls, which ride into the next request', async () => {
+    const router = await makeRouter({ maxCostPerRunUsd: 0.0005 });
+    const r = router as unknown as { enforcePreflightBudget: (m: ModelInfo, o: unknown) => unknown };
+    expect(() => r.enforcePreflightBudget(PRICED, {
+      messages: [
+        { role: 'user', content: 'go' },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: '1', name: 'write', input: { body: 'b'.repeat(60_000) } }],
+        },
+      ],
+      maxTokens: 40,
+    })).toThrow(/would cost about/);
+  });
+
+  it('counts top-level options.images, not only nested blocks', async () => {
+    // GeminiProvider feeds options.images straight into buildContents(), so a
+    // whole vision path was going unreserved.
+    const router = await makeRouter({ maxTokensPerRun: 5_000 });
+    const r = router as unknown as { enforcePreflightBudget: (m: ModelInfo, o: unknown) => unknown };
+    expect(() => r.enforcePreflightBudget(PRICED, {
+      messages: [{ role: 'user', content: 'describe these' }],
+      images: [
+        { type: 'base64', data: 'A'.repeat(100), mimeType: 'image/png' },
+        { type: 'base64', data: 'A'.repeat(100), mimeType: 'image/png' },
+        { type: 'base64', data: 'A'.repeat(100), mimeType: 'image/png' },
+      ],
+      maxTokens: 40,
+    })).toThrow(/per-task cap/);
+  });
+
+  it('charges a tiny compressed image the same as a large one', async () => {
+    // Providers bill from DECODED dimensions, so a heavily compressed PNG can
+    // be a few kilobytes and still billed near the megapixel maximum. Sizing
+    // from bytes undercut exactly the images that would slip a tight cap.
+    const router = await makeRouter({ maxTokensPerRun: 1_000_000 });
+    const r = router as unknown as {
+      enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined;
+      reservedTokens: number;
+    };
+    const size = (data: string) => {
+      const release = r.enforcePreflightBudget(PRICED, {
+        messages: [{ role: 'user', content: [{ type: 'image', image: { type: 'base64', data, mimeType: 'image/png' } }] }],
+        maxTokens: 40,
+      });
+      const n = r.reservedTokens;
+      release!();
+      return n;
+    };
+    expect(size('A'.repeat(2_000))).toBe(size('A'.repeat(4_000_000)));
   });
 
   it('reports a preflight refusal the same way a post-hoc overrun is reported', async () => {

@@ -58,10 +58,22 @@ export function resolveModelPricing(
   // rate in both the preflight estimate and the post-call accounting.
   if (opts.inputTokens != null && hasContextBands(model)) {
     const banded = resolvePricing(model, { inputTokens: opts.inputTokens });
-    if (!banded.unknown) {
+    const base = resolvePricing(model, { inputTokens: 0 });
+    if (!banded.unknown && !base.unknown) {
+      // The band is applied as a MULTIPLIER on whatever price the model
+      // carries, not as a replacement for it. Live pricing (LiveDataProvider's
+      // applyLivePricing) writes a fresher reconciled rate into these same
+      // fields, and returning the bundled dataset's number outright would throw
+      // that away for precisely the banded models — accepting requests at a
+      // stale rate and reporting the wrong spend afterwards. Scaling keeps the
+      // fresher figure and still charges the larger band.
+      const scale = (stamped: number, baseRate: number): number =>
+        stamped > 0 && baseRate > 0 ? stamped / baseRate : 1;
+      const inScale = scale(model.inputCostPer1kTokens, base.input);
+      const outScale = scale(model.outputCostPer1kTokens, base.output);
       return {
-        input: banded.input,
-        output: banded.output,
+        input: banded.input * inScale,
+        output: banded.output * outScale,
         unknown: false,
         ...(banded.estimatedFromProvider
           ? { estimatedFromProvider: banded.estimatedFromProvider }

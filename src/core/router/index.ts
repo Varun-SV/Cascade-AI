@@ -32,7 +32,7 @@ import type { FeedbackSource } from './feedback-prior.js';
 import { DeadModelStore } from './dead-models.js';
 import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
 import { buildTokenUsage, resolveModelPricing } from '../../utils/cost.js';
-import { estimateTokens, messagesTokens } from '../context/compaction.js';
+import { estimateTokens, contentToText } from '../context/compaction.js';
 import { withTimeout, CascadeCancelledError } from '../../utils/retry.js';
 import { ModelProfiler } from './model-profiler.js';
 import type { MemoryStore } from '../../memory/store.js';
@@ -125,6 +125,44 @@ const IMAGE_TOKENS_FALLBACK = 1_500;
  * that would have completed fine.
  */
 const IMAGE_TOKENS_MAX = 2_000;
+
+/**
+ * Tokens booked for one image, whatever its bytes say.
+ *
+ * Byte length is not a proxy for what a vision model charges, in either
+ * direction: providers bill from DECODED dimensions, so a heavily compressed
+ * PNG — a large solid-colour screenshot is the easy example — can be a few
+ * kilobytes and still be billed near the megapixel maximum, while a 20 MB photo
+ * is downscaled to that same ceiling. Sizing from bytes therefore undercounts
+ * exactly the images that would slip a tight cap.
+ *
+ * Decoding dimensions would mean parsing image headers inside the budget path.
+ * The honest alternative is what the providers effectively do: charge a flat
+ * rate per image, at the top of the range they bill in, so no real image falls
+ * below what was reserved for it.
+ */
+const IMAGE_TOKENS_EACH = IMAGE_TOKENS_MAX;
+
+function safeJson(value: unknown): string {
+  try { return JSON.stringify(value) ?? ''; } catch { return ''; }
+}
+
+/**
+ * A token estimate that does not undercount dense scripts.
+ *
+ * `estimateTokens` divides by four, which suits English and is what the
+ * compaction budgeter wants. It is wrong in the UNSAFE direction for CJK,
+ * emoji and similar, which commonly cost about a token per character — so a
+ * prompt full of them is underestimated roughly fourfold, and an underestimate
+ * in an enforcement path is a cap that silently does not hold. Taking the
+ * larger of the two counts leaves ASCII exactly as it was.
+ */
+function guardTokens(text: string): number {
+  if (!text) return 0;
+  let dense = 0;
+  for (const ch of text) if (ch.codePointAt(0)! > 0x7f) dense++;
+  return Math.max(estimateTokens(text), dense);
+}
 
 const DISCOVERY_TTL_MS = 15 * 60 * 1000;
 const DISCOVERY_TIMEOUT_MS = 4_000;
@@ -743,13 +781,23 @@ export class CascadeRouter extends EventEmitter {
           // Aborting it properly means threading an AbortController through
           // every provider call, which is a wider change than this one.
           const releaseRetry = this.enforcePreflightBudget(model, options);
+          let keepRetryEstimate = false;
           try {
             result = await withTimeout(
               provider.generate(options),
               cloudTimeoutMs,
               `Model ${model.id} inference timed out after ${cloudTimeoutMs}ms`,
             );
+            // The abandoned attempt was accepted by the provider and is
+            // billable, but no usage for it will ever arrive — recordStats sees
+            // only this fallback's response. Releasing both reservations would
+            // hand that spend back to the run as though it never happened, and
+            // a later call could then reuse an allowance that is already gone.
+            // Converting the estimate into recorded spend is the closest thing
+            // to the truth available without a usage report.
+            keepRetryEstimate = true;
           } finally {
+            if (keepRetryEstimate) this.chargeUnreportedAttempt(model, options);
             releaseRetry?.();
           }
         }
@@ -1487,40 +1535,50 @@ export class CascadeRouter extends EventEmitter {
    * input already exceeded the allowance.
    */
   private estimateInputTokens(options: GenerateOptions): number {
-    let tokens = messagesTokens(options.messages) + estimateTokens(options.systemPrompt ?? '');
-
-    if (options.tools?.length) {
-      try {
-        tokens += estimateTokens(JSON.stringify(options.tools));
-      } catch {
-        // A schema that will not serialize is not one we can size; the text
-        // total still stands.
-      }
-    }
+    let tokens = guardTokens(options.systemPrompt ?? '');
+    let images = 0;
 
     for (const message of options.messages) {
-      if (typeof message.content === 'string') continue;
-      for (const block of message.content) {
-        if (block.type !== 'image') continue;
-        // The bytes live at `block.image.data` — MessageContent nests an
-        // ImageAttachment rather than flattening it. Reading `block.data` gave
-        // every real image the fallback below, which is the number this was
-        // meant to stop relying on.
-        //
-        // Base64 carries ~3 bytes per 4 characters, and vision models bill
-        // roughly a token per 750 image bytes at common resolutions. Rough on
-        // purpose — the alternative was counting an image as the 7 characters
-        // of "[image]", which is wrong by three orders of magnitude. A `url`
-        // attachment carries a link rather than the picture, so its length says
-        // nothing about the image and it takes the fallback.
-        const attachment = block.image;
-        tokens += attachment?.type === 'base64' && attachment.data
-          ? Math.min(Math.ceil((attachment.data.length * 0.75) / 750), IMAGE_TOKENS_MAX)
-          : IMAGE_TOKENS_FALLBACK;
+      if (typeof message.content === 'string') {
+        tokens += guardTokens(message.content);
+      } else {
+        for (const block of message.content) {
+          if (block.type === 'image') { images++; continue; }
+          tokens += guardTokens(contentToText([block]));
+        }
       }
+      // An assistant turn's TOOL CALLS are not in `content` — they are a
+      // separate field, and every provider serializes them back into the next
+      // request. After a model emitted a large argument object, the following
+      // call passed preflight without reserving a byte of it.
+      if (message.toolCalls?.length) tokens += guardTokens(safeJson(message.toolCalls));
     }
 
+    // Tool DEFINITIONS ride on every native-tool call — Anthropic and the rest
+    // send each name, description and input schema in full.
+    if (options.tools?.length) tokens += guardTokens(safeJson(options.tools));
+
+    // Images arrive two ways: nested in message content, or on the top-level
+    // `images` field, which GeminiProvider feeds straight into buildContents().
+    // Counting only the first left a whole vision path unreserved.
+    images += options.images?.length ?? 0;
+    tokens += images * IMAGE_TOKENS_EACH;
+
     return tokens;
+  }
+
+  /**
+   * Books an estimate for a submission the provider accepted but never
+   * reported — the stream attempt abandoned in favour of the non-streaming
+   * fallback. `withTimeout` races that request rather than aborting it, so it
+   * may still be running and billing; either way its usage never reaches
+   * recordStats, and leaving it uncounted lets the run spend it twice.
+   */
+  private chargeUnreportedAttempt(model: ModelInfo, options: GenerateOptions): void {
+    const inputTokens = this.estimateInputTokens(options);
+    const { input: inputPer1k, unknown } = resolveModelPricing(model, { inputTokens });
+    this.runTokens += inputTokens;
+    if (!unknown && inputPer1k > 0) this.runCostUsd += (inputTokens / 1000) * inputPer1k;
   }
 
   /** Trips the same run-level flag a post-hoc overrun does, and reports it the same way. */

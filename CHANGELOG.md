@@ -46,6 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   moment a cap was set — leaving those to the post-hoc stop as before. And it
   does nothing at all when no cap is configured.
 
+  A stream attempt abandoned for the non-streaming fallback is charged as an
+  estimate rather than forgotten. The provider accepted it and will bill for it,
+  but no usage report for it ever arrives — only the fallback's does — so
+  releasing its reservation handed that spend back to the run as though it had
+  never happened.
+
   An admitted call HOLDS its estimate against the budget until it settles.
   Checking against spent-so-far alone is a time-of-check/time-of-use hole that
   the common case walks straight into: a T2 wave launches its T3 workers
@@ -56,11 +62,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The estimate also counts what the provider actually bills: serialized tool
   definitions, which Anthropic and others send in full on every native-tool
-  call, and images by their byte size rather than as the seven-character
-  `[image]` placeholder they used to be flattened to. An image's contribution is
-  capped: vision providers downscale before billing, so cost does not grow with
-  file size, and charging a 20 MB screenshot as though it did would refuse runs
-  that would have completed.
+  call; an assistant turn's tool calls, which are a separate field from its
+  content and are serialized back into the next request; images arriving either
+  nested in a message or on the top-level `images` field; and dense scripts —
+  CJK and emoji cost about a token per character, where the
+  four-characters-per-token rule used elsewhere underestimates them fourfold,
+  and an underestimate in an enforcement path is a cap that does not hold.
+
+  Images are charged a flat rate rather than sized from their bytes. Providers
+  bill from decoded dimensions, so byte length misleads in both directions: a
+  heavily compressed screenshot can be a few kilobytes and still be billed near
+  the megapixel maximum, while a 20 MB photo is downscaled to that same
+  ceiling. Sizing from bytes undercounted exactly the images that would slip a
+  tight cap.
 
 - **A long call is no longer priced at the short-call rate.** Several
   long-context models charge more past a threshold — Gemini 3.1 Pro is $2 per
@@ -76,7 +90,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolving that dataset with no input size, which always lands on the cheapest
   band — so the stamped field is not an answer to "what will this call cost",
   and preferring it made the input size irrelevant for every model carrying a
-  price, which is nearly all of them.
+  price, which is nearly all of them. The band is applied as a multiplier on
+  whatever price the model carries rather than as a replacement, so a fresher
+  rate fetched by live pricing survives instead of being silently swapped for
+  the bundled one.
 
 ## 0.72.0 - 2026-08-10
 
