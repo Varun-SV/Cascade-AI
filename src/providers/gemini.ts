@@ -49,6 +49,23 @@ export function toGeminiTools(tools: readonly ToolDefinition[]): FunctionDeclara
   }));
 }
 
+/**
+ * An assistant turn's tool calls in the shape this provider actually submits.
+ *
+ * Gemini's envelope carries no call id — the parts are matched to their
+ * responses by function name — so this is the one provider where the history
+ * costs LESS than Cascade's normalized form, and sizing that form refused
+ * budgets over ids never sent.
+ */
+export function toGeminiFunctionCalls(toolCalls: readonly ToolCall[]): Part[] {
+  return toolCalls.map((tc) => ({
+    functionCall: {
+      name: tc.name,
+      args: tc.input as Record<string, unknown>,
+    },
+  } as Part));
+}
+
 export class GeminiProvider extends BaseProvider {
   private client: GoogleGenAI;
 
@@ -272,14 +289,7 @@ export class GeminiProvider extends BaseProvider {
         if (textContent) parts.push({ text: textContent });
 
         // Tool calls → functionCall parts
-        for (const tc of m.toolCalls ?? []) {
-          parts.push({
-            functionCall: {
-              name: tc.name,
-              args: tc.input as Record<string, unknown>,
-            },
-          } as Part);
-        }
+        parts.push(...toGeminiFunctionCalls(m.toolCalls ?? []));
 
         if (parts.length > 0) {
           contents.push({ role: 'model', parts });

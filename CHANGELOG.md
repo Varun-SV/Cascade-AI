@@ -77,7 +77,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a cancellation — otherwise the reason the run stopped is lost on the way up.
   That signal is given room for the listeners a wave attaches to it; at Node's
   default of ten, an ordinary parallel run logged a `MaxListenersExceededWarning`
-  and looked like a leak.
+  and looked like a leak. The same applies to the two other things a wave shares
+  — the per-wave abort signal T2 composes for cancel-and-respawn, and the peer
+  bus every worker in a section subscribes to, whose listener count is simply
+  the wave width.
+
+- **Cancelling a T3 wave now reaches the model call that is running.** T2 aborts
+  a per-wave signal to cancel and respawn a wave, and that signal reached the
+  workers' tool calls but not the generation itself — only one of the five model
+  calls in a worker passed it through. So a respawned wave left its predecessor
+  generating and billing, stopping only at the next checkpoint. All of them pass
+  it now. It is a superset of the run signal the router injects when a call
+  supplies none, so nothing that was cancellable before has become less so.
 
 - **A cancelled call no longer waits out the queue it was sitting in.** Two
   places hold a request before it is submitted — the per-provider rate-limit
@@ -136,14 +147,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   blocks is JSON-stringified whole by three of the four, base64 image payload
   included, so it costs its real size rather than the flat per-image rate.
 
-  Tool definitions are sized by the provider's own conversion function rather
-  than a description of it. No provider sends a definition as it was given —
+  Tool definitions AND an assistant turn's historical tool calls are sized by
+  the provider's own conversion function rather than a description of it. No provider sends a definition as it was given —
   OpenAI and Ollama wrap each one in a function envelope, Anthropic renames the
   schema field, Gemini rewrites the schema entirely — and the omitted envelope
   is a few tokens per tool, which a large MCP server turns into hundreds, always
-  in the direction that lets a request slip a tight cap. Those conversions are
-  now shared with the providers outright, so the estimate is not a copy of what
-  gets sent; it is the same function.
+  in the direction that lets a request slip a tight cap. Tool calls diverge
+  further still: OpenAI serializes the argument object to a string and embeds
+  that in JSON, so every quote inside is escaped twice over, while Gemini sends
+  no call id at all. Those conversions are now shared with the providers
+  outright, so the estimate is not a copy of what gets sent; it is the same
+  function.
+
+  A `tool_result` block sitting in a user turn is no longer charged. Every
+  provider's array conversion has a branch for text and a branch for images and
+  nothing else — the block is dropped by all four — but the estimator expanded
+  its whole payload, so a tool-heavy history could be refused over data no
+  provider ever sees. On a tool-role turn, where the array is serialized whole,
+  it is still counted, because there it really is sent.
+
+  Mixed-script input is measured by adding its parts rather than taking the
+  larger one. Prose was bounded by character count and dense scripts by UTF-8
+  bytes, and the guard returned whichever was bigger — so a document combining
+  the two was charged for one half and nothing for the other, and adding more
+  prose to a CJK-heavy prompt did not move the estimate at all until it
+  overtook the dense part. Neither bound changed on its own.
 
   Each of those was found the same way — one at a time, in review, after the
   estimate was already wrong in production-shaped input — because the rules

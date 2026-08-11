@@ -11,6 +11,7 @@ import type {
   ModelInfo,
   ProviderConfig,
   StreamChunk,
+  ToolCall,
   ToolDefinition,
 } from '../types.js';
 import { MODELS } from '../constants.js';
@@ -41,6 +42,23 @@ export function toAnthropicTools(tools: readonly ToolDefinition[]): Anthropic.To
     name: t.name,
     description: t.description,
     input_schema: t.inputSchema as Anthropic.Tool['input_schema'],
+  }));
+}
+
+/**
+ * An assistant turn's tool calls in the shape this provider actually submits.
+ *
+ * Exported for the same reason as the tool definitions: the budget preflight
+ * has to size the envelope the provider adds, not Cascade's normalized
+ * `{id,name,input}`. Sharing the function means the estimate cannot drift from
+ * the request.
+ */
+export function toAnthropicToolUse(toolCalls: readonly ToolCall[]): Anthropic.ToolUseBlockParam[] {
+  return toolCalls.map((tc) => ({
+    type: 'tool_use' as const,
+    id: tc.id,
+    name: tc.name,
+    input: tc.input,
   }));
 }
 
@@ -234,14 +252,7 @@ export class AnthropicProvider extends BaseProvider {
         if (text) content.push({ type: 'text', text });
 
         // Tool calls → tool_use blocks
-        for (const tc of m.toolCalls ?? []) {
-          content.push({
-            type: 'tool_use',
-            id: tc.id,
-            name: tc.name,
-            input: tc.input,
-          });
-        }
+        content.push(...toAnthropicToolUse(m.toolCalls ?? []));
 
         if (content.length > 0) {
           result.push({ role: 'assistant', content });

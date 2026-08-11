@@ -90,6 +90,23 @@ export function toOllamaTools(tools: readonly ToolDefinition[]): Array<{
   }));
 }
 
+/**
+ * An assistant turn's tool calls in the shape this provider actually submits.
+ *
+ * Unlike the OpenAI envelope it copies elsewhere, this one carries no call id
+ * and passes `arguments` as an object rather than a serialized string.
+ */
+export function toOllamaToolCalls(toolCalls: readonly ToolCall[]): Array<{
+  function: { name: string; arguments: Record<string, unknown> };
+}> {
+  return toolCalls.map((tc) => ({
+    function: {
+      name: tc.name,
+      arguments: tc.input,
+    },
+  }));
+}
+
 export class OllamaProvider extends BaseProvider {
   private baseUrl: string;
 
@@ -323,12 +340,7 @@ export class OllamaProvider extends BaseProvider {
         result.push({
           role: 'assistant',
           content: typeof m.content === 'string' ? m.content : '',
-          tool_calls: m.toolCalls.map((tc) => ({
-            function: {
-              name: tc.name,
-              arguments: tc.input,
-            },
-          })),
+          tool_calls: toOllamaToolCalls(m.toolCalls),
         });
         continue;
       }

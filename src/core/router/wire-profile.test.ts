@@ -3,10 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { AnthropicProvider, toAnthropicTools } from '../../providers/anthropic.js';
-import { GeminiProvider, toGeminiTools } from '../../providers/gemini.js';
-import { OpenAIProvider, toOpenAITools } from '../../providers/openai.js';
-import { OllamaProvider, toOllamaTools } from '../../providers/ollama.js';
+import { AnthropicProvider, toAnthropicTools, toAnthropicToolUse } from '../../providers/anthropic.js';
+import { GeminiProvider, toGeminiTools, toGeminiFunctionCalls } from '../../providers/gemini.js';
+import { OpenAIProvider, toOpenAITools, toOpenAIToolCalls } from '../../providers/openai.js';
+import { OllamaProvider, toOllamaTools, toOllamaToolCalls } from '../../providers/ollama.js';
 import { wireProfile, geminiImageCopies } from './wire-profile.js';
 import type { BlockHandling } from './wire-profile.js';
 import type {
@@ -412,6 +412,110 @@ describe('geminiImageCopies — mirrors buildContents', () => {
       // a deliberate over-count of a case that cannot arise in a real request.
       if (observed === 0) expect(geminiImageCopies(messages)).toBe(1);
       else expect(geminiImageCopies(messages)).toBe(observed);
+    });
+  }
+});
+
+describe('wire profile — sendsBlock, against the real serializers', () => {
+  // Every provider's user-array conversion has a branch for text and a branch
+  // for image, and nothing else. A tool_result block sitting in a user turn is
+  // therefore never submitted — and contentToText expands its whole payload,
+  // so charging it refused runs over data nobody sees.
+  const toolResultBlock: MessageContent = {
+    type: 'tool_result',
+    toolCallId: 'call_1',
+    content: TEXT_MARKER,
+  };
+
+  for (const provider of PROVIDERS) {
+    it(`${provider}: drops a tool_result block from a user turn`, () => {
+      const message: ConversationMessage = { role: 'user', content: [toolResultBlock] };
+      expect(serializedJson(provider, [message])).not.toContain(TEXT_MARKER);
+      expect(wireProfile(provider).sendsBlock(toolResultBlock)).toBe(false);
+    });
+
+    it(`${provider}: keeps text and image blocks on a user turn`, () => {
+      const message: ConversationMessage = { role: 'user', content: markedBlocks() };
+      const out = serializedJson(provider, [message]);
+      expect(out).toContain(TEXT_MARKER);
+      expect(out).toContain(IMAGE_MARKER);
+      for (const block of markedBlocks()) {
+        expect(wireProfile(provider).sendsBlock(block)).toBe(true);
+      }
+    });
+  }
+
+  it('a stringified tool result still carries every block, dropped types included', () => {
+    // The whole array is JSON.stringify()d there, so nothing is filtered and
+    // the tool_result payload really is billed.
+    const message: ConversationMessage = {
+      role: 'tool',
+      content: [toolResultBlock],
+      toolCallId: 'call_1',
+    };
+    for (const provider of ['anthropic', 'gemini', 'ollama'] as const) {
+      expect(wireProfile(provider).blockHandling(message)).toBe('stringified');
+      expect(serializedJson(provider, [message])).toContain(TEXT_MARKER);
+    }
+  });
+});
+
+describe('wire profile — sizeToolCalls is the provider\'s own conversion', () => {
+  const toolCalls = [{ id: 'call_abc123', name: 'search', input: { q: 'a "quoted" value' } }];
+
+  const SHARED_CALLS: Array<[ProviderType, unknown, string]> = [
+    ['anthropic', toAnthropicToolUse, 'toAnthropicToolUse'],
+    ['gemini', toGeminiFunctionCalls, 'toGeminiFunctionCalls'],
+    ['openai', toOpenAIToolCalls, 'toOpenAIToolCalls'],
+    ['azure', toOpenAIToolCalls, 'toOpenAIToolCalls'],
+    ['openai-compatible', toOpenAIToolCalls, 'toOpenAIToolCalls'],
+    ['ollama', toOllamaToolCalls, 'toOllamaToolCalls'],
+  ];
+
+  for (const [provider, fn, name] of SHARED_CALLS) {
+    it(`${provider}: sizes with ${name} itself, not a copy of it`, () => {
+      expect(wireProfile(provider).sizeToolCalls).toBe(fn);
+    });
+  }
+
+  for (const provider of ['anthropic', 'gemini', 'openai', 'ollama'] as const) {
+    it(`${provider}: serializes an assistant turn with that same function`, () => {
+      const name = SHARED_CALLS.find(([p]) => p === provider)![2];
+      expect(providerSource(provider)).toMatch(new RegExp(`${name}\\(`));
+      // And the shape it produces really is what lands in the request.
+      const message: ConversationMessage = { role: 'assistant', content: 'hi', toolCalls };
+      const sized = JSON.stringify(wireProfile(provider).sizeToolCalls(toolCalls));
+      const sent = serializedJson(provider, [message]);
+      expect(sent).toContain(sized.slice(1, -1));
+    });
+  }
+
+  it('openai double-escapes the argument object, which costs more than the raw form', () => {
+    const sized = JSON.stringify(wireProfile('openai').sizeToolCalls(toolCalls));
+    expect(sized).toContain('\\"');
+    expect(sized.length).toBeGreaterThan(JSON.stringify(toolCalls).length);
+  });
+
+  it('gemini drops the call id, which costs less than the raw form', () => {
+    const sized = JSON.stringify(wireProfile('gemini').sizeToolCalls(toolCalls));
+    expect(sized).not.toContain('call_abc123');
+    expect(sized.length).toBeLessThan(JSON.stringify(toolCalls).length);
+  });
+});
+
+describe('wire profile — sendsToolCallId, against the real serializers', () => {
+  const ID_MARKER = 'wire_profile_tool_call_id';
+  for (const provider of PROVIDERS) {
+    it(`${provider}: a tool result's id is ${
+      wireProfile(provider).sendsToolCallId ? 'submitted' : 'discarded'
+    }`, () => {
+      const message: ConversationMessage = {
+        role: 'tool',
+        content: 'output',
+        toolCallId: ID_MARKER,
+      };
+      const sent = serializedJson(provider, [message]).includes(ID_MARKER);
+      expect(wireProfile(provider).sendsToolCallId).toBe(sent);
     });
   }
 });

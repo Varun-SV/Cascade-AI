@@ -33,7 +33,7 @@ import type { FeedbackSource } from './feedback-prior.js';
 import { DeadModelStore } from './dead-models.js';
 import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
 import { buildTokenUsage, resolveModelPricing } from '../../utils/cost.js';
-import { estimateTokens, contentToText } from '../context/compaction.js';
+import { estimateTokens, contentToText, CHARS_PER_TOKEN } from '../context/compaction.js';
 import { withTimeout, withTimeoutAbort, anySignal, CascadeCancelledError } from '../../utils/retry.js';
 import { wireProfile, geminiImageCopies } from './wire-profile.js';
 import { ModelProfiler } from './model-profiler.js';
@@ -202,18 +202,29 @@ const TOKENS_PER_MESSAGE_FRAMING = 4;
  * ceiling as it always was.
  */
 function guardTokens(text: string): number {
+  if (!text) return 0;
   // The bound for the non-ASCII part is its UTF-8 BYTE count, not its
   // character count. Production tokenizers are byte-level BPE, so a token can
   // never span fewer than one byte — bytes are a true ceiling, where "one
   // token per code point" was only a guess, and a wrong one for emoji: a ZWJ
   // sequence is several code points and can cost several tokens each.
+  let asciiChars = 0;
   let denseBytes = 0;
   for (const ch of text) {
     const cp = ch.codePointAt(0)!;
-    if (cp <= 0x7f) continue;
+    if (cp <= 0x7f) { asciiChars++; continue; }
     denseBytes += cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
   }
-  return Math.max(estimateTokens(text), denseBytes);
+  // The two parts are SUMMED, not raced. Taking the larger of the two was a
+  // hole in exactly the input this guard exists for: a document mixing prose
+  // with CJK charged whichever half was bigger and the other half for nothing,
+  // so a megabyte of ASCII alongside 100,000 CJK characters reserved about
+  // 325,000 tokens against a real cost near 400,000 — and adding more prose to
+  // such a prompt did not move the estimate at all until it overtook the dense
+  // part. Neither bound changes on its own: pure ASCII is the same rate it was,
+  // and pure dense text is the same byte ceiling.
+  if (denseBytes === 0) return estimateTokens(text);
+  return Math.ceil(asciiChars / CHARS_PER_TOKEN) + denseBytes;
 }
 
 const DISCOVERY_TTL_MS = 15 * 60 * 1000;
@@ -1722,6 +1733,11 @@ export class CascadeRouter extends EventEmitter {
         switch (wire.blockHandling(message)) {
           case 'blocks':
             for (const block of message.content) {
+              // A block type the conversion has no branch for is dropped —
+              // a tool_result block in a user turn is the real case, and
+              // contentToText expands its whole payload, so charging it
+              // refused runs over data no provider submits.
+              if (!wire.sendsBlock(block)) continue;
               if (block.type === 'image') {
                 if (countsImage(block.image)) images++;
                 continue;
@@ -1746,8 +1762,19 @@ export class CascadeRouter extends EventEmitter {
       // separate field, and providers serialize them back into the next
       // request. After a model emitted a large argument object, the following
       // call passed preflight without reserving a byte of it.
+      //
+      // Sized in the provider's own envelope, like the tool definitions above.
+      // Cascade's normalized `{id,name,input}` is nobody's wire format: OpenAI
+      // serializes `input` to a string and embeds it, so every quote inside is
+      // escaped twice over, while Gemini drops the id entirely. Across a long
+      // tool-using history that difference runs to thousands of tokens.
       if (message.toolCalls?.length && wire.sendsToolCalls(message)) {
-        tokens += guardTokens(safeJson(message.toolCalls));
+        tokens += guardTokens(safeJson(wire.sizeToolCalls(message.toolCalls)));
+      }
+      // The id that ties a tool result back to its call. Short, but there is
+      // one per tool result and a tool-heavy history has many.
+      if (message.toolCallId && message.role === 'tool' && wire.sendsToolCallId) {
+        tokens += guardTokens(message.toolCallId);
       }
     }
 

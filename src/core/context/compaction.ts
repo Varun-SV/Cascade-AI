@@ -23,9 +23,17 @@ export type Summarize = (input: string, instruction: string) => Promise<string>;
  * headroom), not for billing. Never returns less than a whole token for
  * non-empty text.
  */
+/**
+ * Characters per token for ordinary prose. Exported so callers that need to
+ * size PART of a string — the router's budget guard splits ASCII from dense
+ * scripts and bounds each on its own terms — apply the same rate rather than
+ * hard-coding a second copy of it.
+ */
+export const CHARS_PER_TOKEN = 4;
+
 export function estimateTokens(text: string): number {
   if (!text) return 0;
-  return Math.max(1, Math.ceil(text.length / 4));
+  return Math.max(1, Math.ceil(text.length / CHARS_PER_TOKEN));
 }
 
 /** Flatten a message's content (string or blocks) to plain text for budgeting. */

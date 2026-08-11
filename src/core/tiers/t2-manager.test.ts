@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
+import { getMaxListeners } from 'node:events';
 import type { GenerateResult, T1ToT2Assignment, ToolDefinition } from '../../types.js';
 import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
@@ -469,5 +470,62 @@ describe('T2 decomposition prompt — media generation capability awareness', ()
 
     expect(captured.systemPrompt).not.toContain('MEDIA GENERATION');
     expect(captured.systemPrompt).not.toContain('peerT3Ids');
+  });
+});
+
+describe('T2 wave signal — listener headroom', () => {
+  it('gives the shared wave signal room for one listener per call', async () => {
+    // Every worker in a wave shares this signal, and every provider call
+    // beneath them attaches its own 'abort' listener to it. At Node's default
+    // ceiling of ten, a wave wider than that logged a
+    // MaxListenersExceededWarning on a perfectly ordinary run.
+    const seen = new Set<AbortSignal>();
+    const warnings: string[] = [];
+
+    const router = {
+      generate: vi.fn(async (_tier: string, options: { signal?: AbortSignal; messages: unknown[] }) => {
+        if (options.signal) {
+          seen.add(options.signal);
+          // Stand in for what withTimeoutAbort does on every billable call.
+          options.signal.addEventListener('abort', () => {}, { once: true });
+        }
+        const latest = options.messages[options.messages.length - 1] as { content?: unknown };
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        return makeResult('done');
+      }),
+      getModelForTier: () => undefined,
+    } as unknown as CascadeRouter;
+
+    // A wave comfortably wider than the default ceiling, with no dependencies
+    // so all of them run at once.
+    const assignment = makeAssignment();
+    assignment.t3Subtasks = Array.from({ length: 16 }, (_, i) => ({
+      subtaskId: `sub-${i}`,
+      subtaskTitle: `Subtask ${i}`,
+      description: 'Do the thing',
+      expectedOutput: 'Output',
+      constraints: [],
+      peerT3Ids: [],
+      dependsOn: [],
+    }));
+
+    const emitWarning = vi.spyOn(process, 'emitWarning').mockImplementation((w: string | Error) => {
+      warnings.push(w instanceof Error ? `${w.name}: ${w.message}` : String(w));
+    });
+    try {
+      const manager = new T2Manager(router, makeToolRegistry(), 't1-root');
+      await manager.execute(assignment, 'task-wave');
+    } finally {
+      emitWarning.mockRestore();
+    }
+
+    // Nothing in a wide wave should look like a leak — not the shared signal,
+    // and not the peer bus every worker in the section subscribes to.
+    expect(warnings.filter((w) => w.startsWith('MaxListenersExceededWarning'))).toEqual([]);
+    expect(seen.size).toBeGreaterThan(0);
+    for (const signal of seen) expect(getMaxListeners(signal)).toBeGreaterThan(10);
   });
 });

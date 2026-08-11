@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { randomUUID } from 'node:crypto';
+import { setMaxListeners } from 'node:events';
 import type {
   ConversationMessage,
   EscalationPayload,
@@ -740,6 +741,13 @@ Return ONLY the JSON array.`;
       const waveSignal = AbortSignal.any(
         [this.signal, this.waveAbortController.signal].filter(Boolean) as AbortSignal[],
       );
+      // Every worker in the wave shares this signal, and each provider call
+      // beneath them attaches its own 'abort' listener to it. A wave wider
+      // than Node's default ceiling of ten therefore logged a
+      // MaxListenersExceededWarning on a perfectly ordinary run — the same
+      // fan-out already accounted for on the top-level run signal and the
+      // router's per-run one. The listeners come off as their calls settle.
+      setMaxListeners(64, waveSignal);
 
       // Execute this wave — parallel for cloud, sequential for local (t3Execution).
       const runOne = async (id: string) => {

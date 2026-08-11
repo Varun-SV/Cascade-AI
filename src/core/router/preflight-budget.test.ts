@@ -56,6 +56,9 @@ function preflight(router: CascadeRouter, model: ModelInfo, prompt: string, syst
   });
 }
 
+/** What the estimator books for one message's role markers and delimiters. */
+const TURN_FRAMING = 4;
+
 // ~4 chars per token, so a megabyte of text is ~250k tokens ≈ $0.75 at $3/M.
 const HUGE = 'x'.repeat(1_000_000);
 
@@ -266,6 +269,104 @@ describe('preflight budget', () => {
     expect(size('速'.repeat(10_000))).toBeGreaterThanOrEqual(10_000);
     // ASCII is left exactly where it was — no inflation of ordinary prompts.
     expect(size('a'.repeat(10_000))).toBe(2_504); // + one message's framing
+  });
+
+  /** The estimate the preflight reserves for one set of options. */
+  async function sizeOptions(model: ModelInfo, options: Record<string, unknown>): Promise<number> {
+    const router = await makeRouter({ maxTokensPerRun: 100_000_000 });
+    const r = router as unknown as {
+      enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined;
+      reservedTokens: number;
+    };
+    const release = r.enforcePreflightBudget(model, { maxTokens: 40, ...options });
+    const n = r.reservedTokens;
+    release!();
+    return n;
+  }
+
+  it('does not charge a tool_result block that no provider submits', async () => {
+    // Every provider's user-array conversion handles text and image blocks and
+    // nothing else, so a tool_result sitting there is never sent — and
+    // contentToText expands its whole payload, so charging it refused runs
+    // over data nobody sees.
+    const payload = 'r'.repeat(400_000);
+    const withToolResult = await sizeOptions(PRICED, {
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'go' },
+          { type: 'tool_result', toolCallId: 'c1', content: payload },
+        ],
+      }],
+    });
+    const textOnly = await sizeOptions(PRICED, {
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }],
+    });
+    expect(withToolResult).toBe(textOnly);
+
+    // On a TOOL turn the array is stringified whole, so there it really is
+    // billed — the block type is only dropped where the conversion filters it.
+    const onToolTurn = await sizeOptions(PRICED, {
+      messages: [{
+        role: 'tool',
+        toolCallId: 'c1',
+        content: [{ type: 'tool_result', toolCallId: 'c1', content: payload }],
+      }],
+    });
+    expect(onToolTurn).toBeGreaterThan(100_000);
+  });
+
+  it('sizes historical tool calls in the provider\'s own envelope', async () => {
+    // Cascade's normalized {id,name,input} is nobody's wire format. OpenAI
+    // serializes `input` to a string and embeds it, so every quote inside is
+    // escaped twice; Gemini drops the id entirely.
+    const messages = [{
+      role: 'assistant',
+      content: 'calling',
+      toolCalls: Array.from({ length: 40 }, (_, i) => ({
+        id: `call_${i}`,
+        name: 'search',
+        input: { query: 'a "quoted" value', page: i },
+      })),
+    }];
+    const openai = await sizeOptions({ ...PRICED, provider: 'openai' } as ModelInfo, { messages });
+    const gemini = await sizeOptions({ ...PRICED, provider: 'gemini' } as ModelInfo, { messages });
+
+    // The escaping OpenAI adds is real input, and it is charged.
+    expect(openai).toBeGreaterThan(gemini);
+    // Gemini sends no call ids, so it is charged for none.
+    expect(gemini).toBeLessThan(openai * 0.9);
+  });
+
+  it('adds the ASCII and dense-script parts instead of racing them', async () => {
+    // Taking the larger of the two left a hole in exactly the input this guard
+    // exists for: a document mixing prose with CJK charged whichever half was
+    // bigger and the other half for nothing, and adding more prose did not
+    // move the estimate at all until it overtook the dense part.
+    const router = await makeRouter({ maxTokensPerRun: 10_000_000 });
+    const r = router as unknown as {
+      enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined;
+      reservedTokens: number;
+    };
+    const size = (text: string) => {
+      const release = r.enforcePreflightBudget(PRICED, { messages: [{ role: 'user', content: text }], maxTokens: 40 });
+      const n = r.reservedTokens;
+      release!();
+      return n;
+    };
+
+    const ascii = 'a'.repeat(1_200_000);
+    const cjk = '速'.repeat(100_000);
+    const asciiOnly = size(ascii);
+    const cjkOnly = size(cjk);
+    const mixed = size(ascii + cjk);
+
+    // The whole point: the mix costs both parts, not the larger one.
+    expect(mixed).toBeGreaterThan(Math.max(asciiOnly, cjkOnly));
+    expect(mixed).toBe(asciiOnly + cjkOnly - TURN_FRAMING);
+    // Neither bound moved on its own.
+    expect(asciiOnly).toBe(300_000 + TURN_FRAMING);   // 1.2M chars at 4/token
+    expect(cjkOnly).toBe(300_000 + TURN_FRAMING);     // 100k chars at 3 UTF-8 bytes
   });
 
   it('counts an assistant turn\'s tool calls, which ride into the next request', async () => {

@@ -11,6 +11,7 @@ import type {
   ModelInfo,
   ProviderConfig,
   StreamChunk,
+  ToolCall,
   ToolDefinition,
 } from '../types.js';
 import { MODELS } from '../constants.js';
@@ -58,6 +59,27 @@ export function toOpenAITools(tools: readonly ToolDefinition[]): OpenAI.Chat.Cha
       name: t.name,
       description: t.description,
       parameters: t.inputSchema,
+    },
+  }));
+}
+
+/**
+ * An assistant turn's tool calls in the shape this provider actually submits.
+ *
+ * Note `arguments`: the input object is serialized to a STRING and then
+ * embedded in JSON, so every quote inside it is escaped a second time. Sizing
+ * the raw object instead under-counted a history of tool calls by most of that
+ * escaping, which is the direction that lets a request slip a cap.
+ */
+export function toOpenAIToolCalls(
+  toolCalls: readonly ToolCall[],
+): OpenAI.Chat.ChatCompletionMessageToolCall[] {
+  return toolCalls.map((tc) => ({
+    id: tc.id,
+    type: 'function' as const,
+    function: {
+      name: tc.name,
+      arguments: JSON.stringify(tc.input),
     },
   }));
 }
@@ -267,14 +289,7 @@ export class OpenAIProvider extends BaseProvider {
           result.push({
             role: 'assistant',
             content: m.content || '',
-            tool_calls: m.toolCalls.map((toolCall) => ({
-              id: toolCall.id,
-              type: 'function',
-              function: {
-                name: toolCall.name,
-                arguments: JSON.stringify(toolCall.input),
-              },
-            })),
+            tool_calls: toOpenAIToolCalls(m.toolCalls),
           } as any);
         } else {
           result.push({ role: m.role as 'user' | 'assistant', content: m.content });

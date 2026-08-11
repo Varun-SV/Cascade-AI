@@ -1,8 +1,14 @@
-import type { ConversationMessage, ProviderType, ToolDefinition } from '../../types.js';
-import { toAnthropicTools } from '../../providers/anthropic.js';
-import { toGeminiTools } from '../../providers/gemini.js';
-import { toOllamaTools } from '../../providers/ollama.js';
-import { toOpenAITools } from '../../providers/openai.js';
+import type {
+  ConversationMessage,
+  MessageContent,
+  ProviderType,
+  ToolCall,
+  ToolDefinition,
+} from '../../types.js';
+import { toAnthropicTools, toAnthropicToolUse } from '../../providers/anthropic.js';
+import { toGeminiTools, toGeminiFunctionCalls } from '../../providers/gemini.js';
+import { toOllamaTools, toOllamaToolCalls } from '../../providers/ollama.js';
+import { toOpenAITools, toOpenAIToolCalls } from '../../providers/openai.js';
 
 /**
  * What each provider actually PUTS ON THE WIRE.
@@ -87,6 +93,15 @@ export interface WireProfile {
   blockHandling(message: ConversationMessage): BlockHandling;
   /** Whether this message's `toolCalls` are serialized into the request. */
   sendsToolCalls(message: ConversationMessage): boolean;
+  /**
+   * Whether a block of this TYPE survives the array conversion. Orthogonal to
+   * `blockHandling`, which is about the message; this is about the block.
+   */
+  sendsBlock(block: MessageContent): boolean;
+  /** Whether a tool message's `toolCallId` is submitted. */
+  readonly sendsToolCallId: boolean;
+  /** Tool calls shaped as this provider will actually serialize them. */
+  sizeToolCalls(toolCalls: readonly ToolCall[]): unknown;
   /** Whether a `type: 'url'` image attachment is submitted (base64 always is). */
   readonly sendsUrlImages: boolean;
   /** Whether the top-level `options.images` field is read at all. */
@@ -94,6 +109,21 @@ export interface WireProfile {
   /** Tool definitions shaped as this provider will actually serialize them. */
   sizeTools(tools: readonly ToolDefinition[]): unknown;
 }
+
+/**
+ * Every provider's user-array conversion handles TEXT and IMAGE blocks and
+ * nothing else — Anthropic and OpenAI map anything else to empty text, Gemini
+ * skips it, Ollama filters it out. A `tool_result` block sitting in a user
+ * turn's array is therefore never submitted by anyone, and charging its
+ * payload (which `contentToText` expands in full) refused runs over data no
+ * provider sees.
+ *
+ * Shared rather than repeated in four rows because it really is one rule
+ * today. If a provider ever starts sending a third block type, it gets its own
+ * predicate and the test for that row fails until it does.
+ */
+const textAndImageOnly = (block: MessageContent): boolean =>
+  block.type === 'text' || block.type === 'image';
 
 const ANTHROPIC: WireProfile = {
   // convertMessages: `if (m.role === 'system') continue` — history system
@@ -109,6 +139,9 @@ const ANTHROPIC: WireProfile = {
     return 'blocks';
   },
   sendsToolCalls: (m) => m.role === 'assistant',
+  sendsBlock: textAndImageOnly,
+  sendsToolCallId: true,
+  sizeToolCalls: toAnthropicToolUse,
   sendsUrlImages: true,
   readsTopLevelImages: false,
   sizeTools: toAnthropicTools,
@@ -125,6 +158,9 @@ const GEMINI: WireProfile = {
     return 'blocks';
   },
   sendsToolCalls: (m) => m.role === 'assistant',
+  sendsBlock: textAndImageOnly,
+  sendsToolCallId: true,
+  sizeToolCalls: toGeminiFunctionCalls,
   sendsUrlImages: false,
   readsTopLevelImages: true,
   sizeTools: toGeminiTools,
@@ -142,6 +178,9 @@ const OPENAI: WireProfile = {
   // assistant turn with array content falls through to the parts branch and
   // its tool calls are never attached.
   sendsToolCalls: (m) => m.role === 'assistant' && typeof m.content === 'string',
+  sendsBlock: textAndImageOnly,
+  sendsToolCallId: true,
+  sizeToolCalls: toOpenAIToolCalls,
   sendsUrlImages: true,
   readsTopLevelImages: false,
   sizeTools: toOpenAITools,
@@ -160,6 +199,9 @@ const OLLAMA: WireProfile = {
   sendsToolCalls: (m) => m.role === 'assistant',
   // The image split maps `b.image.data` with no check on `type`, so a URL is
   // submitted too (as a URL string in the `images` array).
+  sendsBlock: textAndImageOnly,
+  sendsToolCallId: false,
+  sizeToolCalls: toOllamaToolCalls,
   sendsUrlImages: true,
   readsTopLevelImages: false,
   sizeTools: toOllamaTools,

@@ -31,6 +31,16 @@ interface FileLock {
 }
 
 export class PeerBus extends EventEmitter {
+  constructor() {
+    super();
+    // One bus is shared by every peer in a section, and each subscribes to
+    // 'broadcast' — so the listener count is the WAVE WIDTH, not a constant. At
+    // Node's default ceiling of ten, a section with eleven workers logged a
+    // memory-leak warning on a perfectly ordinary run. The listeners are
+    // expected and bounded by the number of peers.
+    this.setMaxListeners(64);
+  }
+
   private outputs: Map<string, PeerOutput> = new Map();
   private waiters: Map<string, Array<(output: PeerOutput) => void>> = new Map();
   private members: Set<string> = new Set();
