@@ -40,13 +40,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   question instead — the same question OpenAI's probe asks, and the same request
   discovery already makes.
 
+  A failure that says nothing about the credentials — a rate limit, a 5xx, a DNS
+  blip — no longer erases the provider either. Only an authentication status is
+  treated as a verdict on the key; anything else leaves Gemini enabled and is
+  logged as a warning, so a momentary blip at startup cannot cost a user their
+  only provider for the rest of the session. That is the same reasoning already
+  applied to Azure deployments and openai-compatible endpoints: the probe is
+  advisory, and a provider that really is broken fails loudly at generate time
+  with its own concrete error.
+
   It also no longer swallows the reason. `catch { return false }` discarded the
   only thing that would have identified the problem, leaving a three-way guess
   in its place; the API's own message ("API key not valid", "API has not been
   used in project X", "location is not supported") now reaches the log, and each
   of those points at a different fix. The router keeps what the probe reported,
   so a run that finds no usable model names the provider that failed and what it
-  said, rather than telling a user with a key in hand to go and add one.
+  said, rather than telling a user with a key in hand to go and add one. An
+  unresolvable pinned `fastAnswerModel` is reported first and by name, since a
+  stale or mistyped pin fails even when every provider is healthy and leading
+  with an unrelated provider's failure would send the user to fix a setting that
+  is fine.
 
 ### Changed
 - **The Gemini API key travels in a header rather than the URL.** Model

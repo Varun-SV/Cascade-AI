@@ -22,7 +22,7 @@ import type {
   ToolCall,
 } from '../types.js';
 import { MODELS } from '../constants.js';
-import { BaseProvider } from './base.js';
+import { BaseProvider, ProviderUnreachableError } from './base.js';
 import { withResolvedPricing } from '../core/router/pricing.js';
 import { isChatModel } from './model-filter.js';
 import { toGeminiParameters } from './gemini-schema.js';
@@ -64,6 +64,18 @@ export function toGeminiFunctionCalls(toolCalls: readonly ToolCall[]): Part[] {
       args: tc.input as Record<string, unknown>,
     },
   } as Part));
+}
+
+/**
+ * Statuses that are genuinely about the credential.
+ *
+ * 400 belongs here because it is what Google returns for "API key not valid" —
+ * the request itself carries no body to be malformed, so a 400 on a bare model
+ * list is the key. 429 and 5xx deliberately do not: the key can be perfect and
+ * still meet a spent quota or a bad afternoon at Google.
+ */
+function isGeminiAuthStatus(status: number): boolean {
+  return status === 400 || status === 401 || status === 403;
 }
 
 /**
@@ -267,12 +279,30 @@ export class GeminiProvider extends BaseProvider {
    */
   async isAvailable(): Promise<boolean> {
     if (!this.config.apiKey) throw new Error('no Gemini API key configured');
-    const resp = await this.fetchModelList();
+
+    let resp: Response;
+    try {
+      resp = await this.fetchModelList();
+    } catch (err) {
+      // Never reached the API — DNS, a proxy, a reset connection. That is not a
+      // verdict on the key.
+      throw new ProviderUnreachableError(
+        `could not reach the Gemini API: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     if (resp.ok) return true;
-    throw new Error(
-      `Gemini rejected the API key: HTTP ${resp.status} ${resp.statusText}`.trim() +
-      `${await describeGeminiError(resp)}`,
-    );
+
+    const status = `HTTP ${resp.status} ${resp.statusText}`.trim();
+    const detail = await describeGeminiError(resp);
+    // Only an authentication or authorisation status is evidence about the key.
+    // A 429 is a quota that will refill and a 5xx is Google's problem, and
+    // calling either one "your key was rejected" sends the user to regenerate a
+    // credential that was never the issue — the same class of misdirection this
+    // whole change exists to remove, just with a more confident voice.
+    if (isGeminiAuthStatus(resp.status)) {
+      throw new Error(`Gemini rejected the API key: ${status}${detail}`);
+    }
+    throw new ProviderUnreachableError(`Gemini model list failed: ${status}${detail}`);
   }
 
   // ── Private ──────────────────────────────────

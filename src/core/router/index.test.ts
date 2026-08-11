@@ -471,3 +471,37 @@ describe('CascadeRouter — a failed probe explains itself', () => {
     expect(router.providerProbeFailures()).toEqual([]);
   });
 });
+
+describe('CascadeRouter — a transient probe failure does not erase a provider', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('keeps the provider enabled when the probe hits a 503', async () => {
+    // The same reasoning already written out in init() for Azure deployments
+    // and openai-compatible endpoints: a momentary blip must not cost a user
+    // their only provider for the whole session. A genuinely broken one still
+    // fails loudly at generate time with its own concrete error.
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false, status: 503, statusText: 'Service Unavailable', json: async () => ({}),
+    })) as unknown as typeof fetch);
+
+    const router = new CascadeRouter();
+    await router.init(makeConfig({ providers: [{ type: 'gemini', apiKey: 'fine' }] }));
+
+    expect(router.getAvailableModels().some((m) => m.provider === 'gemini')).toBe(true);
+    // And it is not reported as a reason no model is available, because one is.
+    expect(router.providerProbeFailures()).toEqual([]);
+  });
+
+  it('still drops the provider when the key is genuinely rejected', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false, status: 403, statusText: 'Forbidden',
+      json: async () => ({ error: { message: 'API key not valid' } }),
+    })) as unknown as typeof fetch);
+
+    const router = new CascadeRouter();
+    await router.init(makeConfig({ providers: [{ type: 'gemini', apiKey: 'bad' }] }));
+
+    expect(router.getAvailableModels().some((m) => m.provider === 'gemini')).toBe(false);
+    expect(router.providerProbeFailures()[0]?.reason).toContain('API key not valid');
+  });
+});

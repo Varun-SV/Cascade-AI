@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { GeminiProvider } from './gemini.js';
+import { ProviderUnreachableError } from './base.js';
 import type { ModelInfo } from '../types.js';
 
 const MODEL: ModelInfo = {
@@ -178,6 +179,42 @@ describe('GeminiProvider — availability is about the KEY, not one model', () =
 
     const provider = new GeminiProvider({ type: 'gemini', apiKey: 'bad' }, MODEL);
     await expect(provider.isAvailable()).rejects.toThrow(/HTTP 403/);
+  });
+
+  it.each([429, 500, 502, 503])('does not blame the key for HTTP %i', async (status) => {
+    // A spent quota or a bad afternoon at Google says nothing about the
+    // credential. Calling either "your key was rejected" sends the user to
+    // regenerate something that was never the problem — the same misdirection
+    // this change exists to remove, only stated more confidently.
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false, status, statusText: 'Nope', json: async () => ({}),
+    })) as unknown as typeof fetch);
+
+    const provider = new GeminiProvider({ type: 'gemini', apiKey: 'fine' }, MODEL);
+    const err = await provider.isAvailable().catch((e: Error) => e) as Error;
+    expect(err).toBeInstanceOf(ProviderUnreachableError);
+    expect(err.message).not.toMatch(/rejected the API key/);
+    expect(err.message).toContain(String(status));
+  });
+
+  it('treats a network failure as unreachable, not as a bad key', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('ECONNRESET'); }) as unknown as typeof fetch);
+    const provider = new GeminiProvider({ type: 'gemini', apiKey: 'fine' }, MODEL);
+    const err = await provider.isAvailable().catch((e: Error) => e) as Error;
+    expect(err).toBeInstanceOf(ProviderUnreachableError);
+    expect(err.message).toMatch(/could not reach/);
+  });
+
+  it.each([400, 401, 403])('does blame the key for HTTP %i', async (status) => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false, status, statusText: 'Nope',
+      json: async () => ({ error: { message: 'API key not valid' } }),
+    })) as unknown as typeof fetch);
+
+    const provider = new GeminiProvider({ type: 'gemini', apiKey: 'bad' }, MODEL);
+    const err = await provider.isAvailable().catch((e: Error) => e) as Error;
+    expect(err).not.toBeInstanceOf(ProviderUnreachableError);
+    expect(err.message).toMatch(/rejected the API key/);
   });
 
   it('says so plainly when no key is configured at all', async () => {

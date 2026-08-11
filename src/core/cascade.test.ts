@@ -395,6 +395,54 @@ describe('Fast answer (direct single-model path)', () => {
     expect(seenMessages[0]).toEqual({ role: 'assistant', content: '1) A  2) B' });
     expect(seenMessages[seenMessages.length - 1]).toEqual({ role: 'user', content: 'and the second one' });
   });
+
+  describe('when no model resolves, it names the setting to fix', () => {
+    /** A router where nothing resolves, with the given probe failures to report. */
+    function deadRouter(failures: Array<{ provider: string; reason: string }> = []) {
+      return {
+        getSelector: () => ({ getCandidatesForTier: () => [], selectForTier: () => null }),
+        providerProbeFailures: () => failures,
+        setRunSignal: () => {},
+      };
+    }
+
+    it('blames the pinned model, not an unrelated provider that also failed', async () => {
+      // A stale or mistyped fastAnswerModel fails even when every provider is
+      // healthy. Leading with some other provider's probe failure would send
+      // the user to fix a setting that is fine.
+      const cascade = new Cascade(baseConfig, process.cwd());
+      (cascade as any).router = deadRouter([{ provider: 'gemini', reason: 'HTTP 403' }]);
+
+      await expect((cascade as any).runFastAnswer(
+        { prompt: 'hi', fastAnswerModel: 'gpt-4o-typo' }, Date.now(), 'task-pin',
+      )).rejects.toThrow(/pinned model "gpt-4o-typo" could not be resolved/);
+    });
+
+    it('still carries the probe failures as context, since the pin may name that provider', async () => {
+      const cascade = new Cascade(baseConfig, process.cwd());
+      (cascade as any).router = deadRouter([{ provider: 'gemini', reason: 'API key not valid' }]);
+
+      await expect((cascade as any).runFastAnswer(
+        { prompt: 'hi', fastAnswerModel: 'gemini-2.5-flash' }, Date.now(), 'task-pin-2',
+      )).rejects.toThrow(/API key not valid/);
+    });
+
+    it('reports the probe failure when nothing was pinned', async () => {
+      const cascade = new Cascade(baseConfig, process.cwd());
+      (cascade as any).router = deadRouter([{ provider: 'gemini', reason: 'API key not valid' }]);
+
+      await expect((cascade as any).runFastAnswer({ prompt: 'hi' }, Date.now(), 'task-no-pin'))
+        .rejects.toThrow(/gemini: API key not valid/);
+    });
+
+    it('only says "add an API key" when there is genuinely nothing configured', async () => {
+      const cascade = new Cascade(baseConfig, process.cwd());
+      (cascade as any).router = deadRouter([]);
+
+      await expect((cascade as any).runFastAnswer({ prompt: 'hi' }, Date.now(), 'task-empty'))
+        .rejects.toThrow(/add a provider API key first/);
+    });
+  });
 });
 
 describe('Small-talk gate (auto fast answer) + terse option replies', () => {
