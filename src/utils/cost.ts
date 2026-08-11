@@ -4,7 +4,7 @@
 
 import type { ModelInfo, TokenUsage } from '../types.js';
 import { MODELS } from '../constants.js';
-import { resolvePricing, type PricingProvider } from '../core/router/pricing.js';
+import { resolvePricing, hasContextBands, type PricingProvider } from '../core/router/pricing.js';
 
 export interface ResolvedPricing {
   /** USD per 1k input tokens. */
@@ -48,6 +48,27 @@ export function resolveModelPricing(
   opts: { inputTokens?: number } = {},
 ): ResolvedPricing {
   if (model.isLocal) return { input: 0, output: 0, unknown: false };
+
+  // Banded models are asked of the DATASET first, ahead of the stamped fields.
+  // Those fields are not user intent for such a model — both the bundled
+  // catalogue and withResolvedPricing() stamp them by resolving the dataset with
+  // no input size, which always lands on the cheapest band. Preferring them
+  // here made `opts.inputTokens` inert for every model that carries a price,
+  // i.e. almost all of them, so a >200K call was still priced at the small-call
+  // rate in both the preflight estimate and the post-call accounting.
+  if (opts.inputTokens != null && hasContextBands(model)) {
+    const banded = resolvePricing(model, { inputTokens: opts.inputTokens });
+    if (!banded.unknown) {
+      return {
+        input: banded.input,
+        output: banded.output,
+        unknown: false,
+        ...(banded.estimatedFromProvider
+          ? { estimatedFromProvider: banded.estimatedFromProvider }
+          : {}),
+      };
+    }
+  }
 
   if (model.inputCostPer1kTokens > 0 || model.outputCostPer1kTokens > 0) {
     return {

@@ -57,7 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The estimate also counts what the provider actually bills: serialized tool
   definitions, which Anthropic and others send in full on every native-tool
   call, and images by their byte size rather than as the seven-character
-  `[image]` placeholder they used to be flattened to.
+  `[image]` placeholder they used to be flattened to. An image's contribution is
+  capped: vision providers downscale before billing, so cost does not grow with
+  file size, and charging a 20 MB screenshot as though it did would refuse runs
+  that would have completed.
 
 - **A long call is no longer priced at the short-call rate.** Several
   long-context models charge more past a threshold — Gemini 3.1 Pro is $2 per
@@ -67,6 +70,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   estimate for exactly the large calls it exists to catch, and, because the same
   function backs `buildTokenUsage`, it also understated the spend Cascade
   reported for those calls after the fact.
+
+  Selecting the band means asking the pricing dataset, not the model object.
+  Both the bundled catalogue and the discovery path stamp a model's price by
+  resolving that dataset with no input size, which always lands on the cheapest
+  band — so the stamped field is not an answer to "what will this call cost",
+  and preferring it made the input size irrelevant for every model carrying a
+  price, which is nearly all of them.
 
 ## 0.72.0 - 2026-08-10
 

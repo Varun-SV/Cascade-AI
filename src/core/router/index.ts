@@ -114,6 +114,18 @@ export interface RouterStats {
  */
 const IMAGE_TOKENS_FALLBACK = 1_500;
 
+/**
+ * The most an image can cost, however many bytes arrive.
+ *
+ * Vision providers downscale before billing — Anthropic caps around 1.15
+ * megapixels, roughly 1,600 tokens, and OpenAI's high-detail tiling lands in
+ * the same range — so image cost does NOT grow with file size the way a naive
+ * bytes-per-token estimate implies. Left unbounded, a 20 MB screenshot would
+ * be charged tens of thousands of tokens it will never incur, and refuse runs
+ * that would have completed fine.
+ */
+const IMAGE_TOKENS_MAX = 2_000;
+
 const DISCOVERY_TTL_MS = 15 * 60 * 1000;
 const DISCOVERY_TIMEOUT_MS = 4_000;
 interface DiscoveryEntry { ids: string[]; models: ModelInfo[]; at: number }
@@ -666,7 +678,17 @@ export class CascadeRouter extends EventEmitter {
       const inferenceTimeoutMs = this.config.localInferenceTimeoutMs ?? 300_000;
       // Allow up to half the inference timeout to wait in the queue itself.
       const queueWaitMs = Math.round(inferenceTimeoutMs / 2);
-      releaseLocalSlot = await this.localQueue.acquire(queueWaitMs);
+      try {
+        releaseLocalSlot = await this.localQueue.acquire(queueWaitMs);
+      } catch (err) {
+        // The reservation is taken above but the try/finally that frees it does
+        // not start until below, so a queue timeout here used to strand it for
+        // the rest of the run — shrinking every later call's allowance, and
+        // eventually tripping the budget flag, over a request that was never
+        // submitted to anything.
+        releaseReservation?.();
+        throw err;
+      }
     }
 
     try {
@@ -1480,13 +1502,20 @@ export class CascadeRouter extends EventEmitter {
       if (typeof message.content === 'string') continue;
       for (const block of message.content) {
         if (block.type !== 'image') continue;
+        // The bytes live at `block.image.data` — MessageContent nests an
+        // ImageAttachment rather than flattening it. Reading `block.data` gave
+        // every real image the fallback below, which is the number this was
+        // meant to stop relying on.
+        //
         // Base64 carries ~3 bytes per 4 characters, and vision models bill
         // roughly a token per 750 image bytes at common resolutions. Rough on
         // purpose — the alternative was counting an image as the 7 characters
-        // of "[image]", which is wrong by three orders of magnitude.
-        const data = (block as { data?: unknown }).data;
-        tokens += typeof data === 'string' && data.length > 0
-          ? Math.ceil((data.length * 0.75) / 750)
+        // of "[image]", which is wrong by three orders of magnitude. A `url`
+        // attachment carries a link rather than the picture, so its length says
+        // nothing about the image and it takes the fallback.
+        const attachment = block.image;
+        tokens += attachment?.type === 'base64' && attachment.data
+          ? Math.min(Math.ceil((attachment.data.length * 0.75) / 750), IMAGE_TOKENS_MAX)
           : IMAGE_TOKENS_FALLBACK;
       }
     }

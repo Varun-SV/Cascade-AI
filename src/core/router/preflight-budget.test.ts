@@ -192,6 +192,11 @@ describe('preflight budget', () => {
   });
 
   it('sizes an image by its bytes, not by the "[image]" placeholder', async () => {
+    // The block nests an ImageAttachment — `block.image.data`, not
+    // `block.data`. An earlier version of this test built the flattened shape,
+    // which is not a valid MessageContent, so it passed while the estimator
+    // was reading a field that never exists and every real image silently took
+    // the fallback.
     const router = await makeRouter({ maxCostPerRunUsd: 0.0005 });
     const r = router as unknown as { enforcePreflightBudget: (m: ModelInfo, o: unknown) => unknown };
     expect(() => r.enforcePreflightBudget(PRICED, {
@@ -199,24 +204,76 @@ describe('preflight budget', () => {
         role: 'user',
         content: [
           { type: 'text', text: 'what is this?' },
-          { type: 'image', data: 'A'.repeat(4_000_000), mimeType: 'image/png' },
+          { type: 'image', image: { type: 'base64', data: 'A'.repeat(4_000_000), mimeType: 'image/png' } },
         ],
       }],
       maxTokens: 40,
     })).toThrow(/would cost about/);
   });
 
-  it('still charges an image with no inline bytes something, not nothing', async () => {
+  it('charges a base64 image far more than the no-bytes fallback', async () => {
+    // The assertion the previous test could not make: a real image has to move
+    // the estimate, not land on the same fixed number an unreadable one does.
+    const router = await makeRouter({ maxCostPerRunUsd: 100 });
+    const r = router as unknown as {
+      enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined;
+      reservedTokens: number;
+    };
+    const size = (content: unknown) => {
+      const release = r.enforcePreflightBudget(PRICED, { messages: [{ role: 'user', content }], maxTokens: 40 });
+      const n = r.reservedTokens;
+      release!();
+      return n;
+    };
+
+    const small = size([{ type: 'image', image: { type: 'base64', data: 'A'.repeat(20_000), mimeType: 'image/png' } }]);
+    const large = size([{ type: 'image', image: { type: 'base64', data: 'A'.repeat(4_000_000), mimeType: 'image/png' } }]);
+    const byUrl = size([{ type: 'image', image: { type: 'url', data: 'https://example.com/a.png', mimeType: 'image/png' } }]);
+
+    // A real image moves the estimate with its size…
+    expect(large).toBeGreaterThan(small);
+    expect(large).toBeGreaterThan(byUrl);
+    // …but not without limit: providers downscale before billing, so a huge
+    // file does not cost proportionally more, and pretending it does would
+    // refuse runs that would have completed.
+    expect(large).toBeLessThan(3_000);
+  });
+
+  it('still charges a url-referenced image something, not nothing', async () => {
+    // A URL carries a link, not the picture, so its length says nothing about
+    // the image — but the image is still billed, so it cannot count as zero.
     const router = await makeRouter({ maxCostPerRunUsd: 1.0 });
     const r = router as unknown as {
       enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined;
       reservedTokens: number;
     };
     r.enforcePreflightBudget(PRICED, {
-      messages: [{ role: 'user', content: [{ type: 'image', mimeType: 'image/png' }] }],
+      messages: [{ role: 'user', content: [{ type: 'image', image: { type: 'url', data: 'https://example.com/a.png', mimeType: 'image/png' } }] }],
       maxTokens: 40,
     });
     expect(r.reservedTokens).toBeGreaterThan(100);
+  });
+
+  it('releases the reservation when the local queue never admits the call', async () => {
+    // The reservation is taken before the try/finally that frees it, so a
+    // queue timeout used to strand it for the rest of the run — shrinking every
+    // later allowance over a request that was never submitted anywhere.
+    const router = await makeRouter({ maxTokensPerRun: 1_000_000 });
+    const r = router as unknown as {
+      localQueue: { acquire: (ms: number) => Promise<() => void> };
+      reservedTokens: number;
+      tierModels: Map<string, ModelInfo>;
+      config: Record<string, unknown>;
+    };
+    r.localQueue = { acquire: async () => { throw new Error('queue wait timed out'); } };
+    r.tierModels.set('T3', UNPRICED);
+    (router as unknown as { getProvider: (m: ModelInfo) => unknown }).getProvider = () => ({
+      generate: async () => ({ content: '', usage: { inputTokens: 0, outputTokens: 0 } }),
+    });
+
+    await expect(router.generate('T3', { messages: [{ role: 'user', content: 'hello' }] }))
+      .rejects.toThrow(/queue wait timed out/);
+    expect(r.reservedTokens).toBe(0);
   });
 
   it('reports a preflight refusal the same way a post-hoc overrun is reported', async () => {
