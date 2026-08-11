@@ -374,6 +374,55 @@ describe('DownloadResolver — authentication and the on-disk warm start', () =>
     expect((await resolver.get())!.version).toBe('0.68.0');
   });
 
+  it('rebuilds fixed target metadata rather than trusting what the file says', async () => {
+    // os/label/detail are constants keyed by the target id, so they never come
+    // off disk. A stale or hand-edited entry missing `os` used to pass
+    // validation and reach the page, where the download section indexes its
+    // icon map by that field — an undefined lookup throws while rendering and
+    // takes the whole section down, which is worse than the missing-manifest
+    // fallback the warm start exists to avoid.
+    fs.writeFileSync(cacheFile(), JSON.stringify({
+      fetchedAt: Date.now(),
+      manifest: {
+        version: '0.68.0',
+        releasedAt: null,
+        targets: [
+          // No os, a non-string label, junk detail — all reconstructed.
+          { id: 'mac-arm64', label: 42, detail: null, filename: 'x.dmg', sizeBytes: 10,
+            url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/x.dmg' },
+        ],
+      },
+    }), 'utf8');
+
+    const failing = vi.fn(async () => { throw new Error('down'); });
+    const manifest = await new DownloadResolver(failing as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() }).get();
+
+    const target = manifest!.targets[0]!;
+    expect(target.os).toBe('mac');
+    expect(target.label).toBe('macOS');
+    expect(target.detail).toBe('Apple silicon');
+    // The genuinely per-release fields still come from the file.
+    expect(target.filename).toBe('x.dmg');
+    expect(target.sizeBytes).toBe(10);
+  });
+
+  it('drops a stored target with a zero or negative size', async () => {
+    fs.writeFileSync(cacheFile(), JSON.stringify({
+      fetchedAt: Date.now(),
+      manifest: {
+        version: '0.68.0', releasedAt: null,
+        targets: [{ id: 'mac-arm64', os: 'mac', label: 'macOS', detail: 'Apple silicon',
+          filename: 'x.dmg', sizeBytes: 0,
+          url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/x.dmg' }],
+      },
+    }), 'utf8');
+
+    const fetchImpl = vi.fn(async () => okResponse(realRelease()));
+    // Nothing usable came off disk, so it falls through to a real fetch.
+    expect((await new DownloadResolver(fetchImpl as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() }).get())!.version).toBe('0.68.0');
+    expect(fetchImpl).toHaveBeenCalled();
+  });
+
   it('drops stored targets whose URL is not one we would redirect to', async () => {
     // The file sits on a volume, and /api/downloads hands its URLs to the page
     // as links. A stored entry gets the same trust check a fetched one does.

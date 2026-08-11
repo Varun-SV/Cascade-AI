@@ -220,6 +220,16 @@ interface CacheEntry {
  * the same trust check a freshly fetched manifest does — `/download/:target`
  * re-checks before redirecting, but `/api/downloads` hands the list to the
  * page as-is.
+ *
+ * Only the three fields that genuinely VARY per release are taken from the
+ * file: filename, size and url. `os`, `label` and `detail` are constants keyed
+ * by the target id (TARGET_META), so they are rebuilt from the validated id
+ * rather than trusted — the same reasoning as `releasesUrl` below. Reading
+ * them from disk would let a stale or hand-edited entry reach the page with,
+ * say, no `os`, and the download section indexes its icon map by that field:
+ * an undefined lookup throws while rendering and takes the whole section down,
+ * which is a worse outcome than the missing-manifest fallback this warm start
+ * exists to avoid.
  */
 function parseStoredEntry(raw: unknown): CacheEntry | null {
   if (typeof raw !== 'object' || raw === null) return null;
@@ -229,12 +239,18 @@ function parseStoredEntry(raw: unknown): CacheEntry | null {
   const m = manifest as Partial<DownloadManifest>;
   if (typeof m.version !== 'string' || !Array.isArray(m.targets)) return null;
 
-  const targets = m.targets.filter((t): t is DownloadTarget =>
-    typeof t === 'object' && t !== null
-    && typeof (t as DownloadTarget).id === 'string' && isTargetId((t as DownloadTarget).id)
-    && typeof (t as DownloadTarget).filename === 'string'
-    && typeof (t as DownloadTarget).sizeBytes === 'number'
-    && typeof (t as DownloadTarget).url === 'string' && isTrustedAssetUrl((t as DownloadTarget).url));
+  const targets: DownloadTarget[] = [];
+  for (const raw of m.targets) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const t = raw as Partial<DownloadTarget>;
+    if (typeof t.id !== 'string' || !isTargetId(t.id)) continue;
+    if (typeof t.filename !== 'string' || !t.filename) continue;
+    if (typeof t.sizeBytes !== 'number' || !Number.isFinite(t.sizeBytes) || t.sizeBytes <= 0) continue;
+    if (typeof t.url !== 'string' || !isTrustedAssetUrl(t.url)) continue;
+    const meta = TARGET_META.find((candidate) => candidate.id === t.id);
+    if (!meta) continue;
+    targets.push({ ...meta, filename: t.filename, sizeBytes: t.sizeBytes, url: t.url });
+  }
   if (targets.length === 0) return null;
 
   return {

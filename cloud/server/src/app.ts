@@ -154,7 +154,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   //
   // Sized for the WORST-CASE encoding of what the validator accepts, not the
   // typical one. Ordinary chat text escapes to about its own length, but JSON
-  // renders a low control character as a six-byte ` `, so 500,000 accepted
+  // renders a low control character as a six-byte `\u0000` escape, so 500,000 accepted
   // characters can reach ~2.9 MiB on the wire. At 2mb the parser would still
   // have refused a transcript the validator calls valid — a limit the product
   // advertises has to be one the product can actually accept.
