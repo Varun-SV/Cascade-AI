@@ -23,6 +23,7 @@ import { GeminiProvider } from '../../providers/gemini.js';
 import { OllamaProvider } from '../../providers/ollama.js';
 import { OpenAICompatibleProvider } from '../../providers/openai-compatible.js';
 import { OpenAIProvider } from '../../providers/openai.js';
+import { ProviderUnreachableError } from '../../providers/base.js';
 import type { BaseProvider } from '../../providers/base.js';
 import { ModelSelector } from './selector.js';
 import { FailoverManager } from './failover.js';
@@ -1381,8 +1382,25 @@ export class CascadeRouter extends EventEmitter {
 
   // ── Private ──────────────────────────────────
 
+  /**
+   * Why each configured provider failed its availability probe, kept so the
+   * surfaces can say something better than "add an API key" to a user who
+   * already has one. Cleared and refilled by each detectAvailableProviders().
+   */
+  private probeFailures = new Map<ProviderType, string>();
+
+  /**
+   * What stopped the configured providers from being usable, if anything.
+   * Empty when every configured provider passed — or when none was configured,
+   * which is a different problem with a different answer.
+   */
+  providerProbeFailures(): Array<{ provider: ProviderType; reason: string }> {
+    return [...this.probeFailures].map(([provider, reason]) => ({ provider, reason }));
+  }
+
   /** Logs why a configured provider failed its availability probe. */
   private emitProbeFailure(type: ProviderType, reason: string): void {
+    this.probeFailures.set(type, reason);
     console.warn(`[router] provider "${type}" is not available: ${reason}`);
   }
 
@@ -1390,6 +1408,7 @@ export class CascadeRouter extends EventEmitter {
     configs: ProviderConfig[],
   ): Promise<Set<ProviderType>> {
     const available = new Set<ProviderType>();
+    this.probeFailures.clear();
 
     const checks = configs.map(async (cfg) => {
       try {
@@ -1400,10 +1419,23 @@ export class CascadeRouter extends EventEmitter {
         if (ok) available.add(cfg.type);
         else this.emitProbeFailure(cfg.type, 'availability check returned false (bad key, wrong endpoint/deployment, or unreachable)');
       } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        // A failure that says nothing about the credentials — a rate limit, a
+        // 5xx, a DNS blip — leaves the provider USABLE. Erasing it for the whole
+        // session over a momentary blip is the failure this file already
+        // guards against for Azure deployments and openai-compatible endpoints,
+        // and the reasoning is the same: the probe is advisory, and a provider
+        // that really is broken fails loudly at generate time with its own
+        // concrete error, which beats a blanket "no model available" at startup.
+        if (err instanceof ProviderUnreachableError) {
+          available.add(cfg.type);
+          console.warn(`[router] provider "${cfg.type}" probe did not complete: ${reason} — continuing with it enabled`);
+          return;
+        }
         // Don't silently drop the provider — a swallowed probe error is exactly
         // why a misconfigured Azure deployment surfaced only as the downstream
         // "No model available for tier T3". Log the concrete reason.
-        this.emitProbeFailure(cfg.type, err instanceof Error ? err.message : String(err));
+        this.emitProbeFailure(cfg.type, reason);
       }
     });
 

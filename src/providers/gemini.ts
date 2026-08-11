@@ -22,7 +22,7 @@ import type {
   ToolCall,
 } from '../types.js';
 import { MODELS } from '../constants.js';
-import { BaseProvider } from './base.js';
+import { BaseProvider, ProviderUnreachableError } from './base.js';
 import { withResolvedPricing } from '../core/router/pricing.js';
 import { isChatModel } from './model-filter.js';
 import { toGeminiParameters } from './gemini-schema.js';
@@ -64,6 +64,36 @@ export function toGeminiFunctionCalls(toolCalls: readonly ToolCall[]): Part[] {
       args: tc.input as Record<string, unknown>,
     },
   } as Part));
+}
+
+/**
+ * Statuses that are genuinely about the credential.
+ *
+ * 400 belongs here because it is what Google returns for "API key not valid" —
+ * the request itself carries no body to be malformed, so a 400 on a bare model
+ * list is the key. 429 and 5xx deliberately do not: the key can be perfect and
+ * still meet a spent quota or a bad afternoon at Google.
+ */
+function isGeminiAuthStatus(status: number): boolean {
+  return status === 400 || status === 401 || status === 403;
+}
+
+/**
+ * The API's own explanation, when it gives one.
+ *
+ * Google returns `{error:{message}}` with a genuinely useful string — "API key
+ * not valid", "API has not been used in project X", "location is not
+ * supported" — and each points at a different fix. Reporting only the status
+ * code turns all of them into the same shrug.
+ */
+async function describeGeminiError(resp: Response): Promise<string> {
+  try {
+    const body = await resp.json() as { error?: { message?: string; status?: string } };
+    const detail = body?.error?.message ?? body?.error?.status;
+    return detail ? ` — ${detail}` : '';
+  } catch {
+    return '';
+  }
 }
 
 export class GeminiProvider extends BaseProvider {
@@ -174,9 +204,7 @@ export class GeminiProvider extends BaseProvider {
 
   async listModels(): Promise<ModelInfo[]> {
     try {
-      const resp = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models?key=${this.config.apiKey}`,
-      );
+      const resp = await this.fetchModelList();
       if (!resp.ok) {
         // Invalid key / network error — fall back to the built-in model list
         // instead of crashing downstream consumers with a shape mismatch.
@@ -226,19 +254,72 @@ export class GeminiProvider extends BaseProvider {
     }
   }
 
+  /**
+   * Is this KEY usable — not "does one particular model answer".
+   *
+   * This used to call countTokens() against `this.model.id`, which the router
+   * fills from the first Gemini entry in the bundled catalogue. That made the
+   * whole provider's fate depend on one hard-coded model id: a key that cannot
+   * reach that one model — retired, not enabled for the key's project, served
+   * on a different API version — failed the probe, and because every later step
+   * is gated on the result (`validateCloudProviderModels` and
+   * `discoverProviderModels` both return early for an unavailable provider) the
+   * real model list was never fetched. Gemini vanished entirely, and the CLI
+   * reported "add a provider API key first" about a key that was present and
+   * working.
+   *
+   * Listing models asks the account-level question instead, the same one
+   * OpenAI's probe asks, and it is the same request `listModels()` already
+   * makes for discovery.
+   *
+   * Throws rather than returning false. The router logs the reason it catches,
+   * and "bad key, wrong endpoint/deployment, or unreachable" — three guesses,
+   * no answer — is what made this take a user report to find. A swallowed probe
+   * error is the same defect that once hid a misconfigured Azure deployment.
+   */
   async isAvailable(): Promise<boolean> {
+    if (!this.config.apiKey) throw new Error('no Gemini API key configured');
+
+    let resp: Response;
     try {
-      await this.client.models.countTokens({
-        model: this.model.id,
-        contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
-      });
-      return true;
-    } catch {
-      return false;
+      resp = await this.fetchModelList();
+    } catch (err) {
+      // Never reached the API — DNS, a proxy, a reset connection. That is not a
+      // verdict on the key.
+      throw new ProviderUnreachableError(
+        `could not reach the Gemini API: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
+    if (resp.ok) return true;
+
+    const status = `HTTP ${resp.status} ${resp.statusText}`.trim();
+    const detail = await describeGeminiError(resp);
+    // Only an authentication or authorisation status is evidence about the key.
+    // A 429 is a quota that will refill and a 5xx is Google's problem, and
+    // calling either one "your key was rejected" sends the user to regenerate a
+    // credential that was never the issue — the same class of misdirection this
+    // whole change exists to remove, just with a more confident voice.
+    if (isGeminiAuthStatus(resp.status)) {
+      throw new Error(`Gemini rejected the API key: ${status}${detail}`);
+    }
+    throw new ProviderUnreachableError(`Gemini model list failed: ${status}${detail}`);
   }
 
   // ── Private ──────────────────────────────────
+
+  /**
+   * The account's model list. One place so the availability probe and
+   * discovery cannot ask different questions of the same endpoint.
+   *
+   * The key goes in a header, not the query string: a URL carries into proxy
+   * logs, error reports and shell history, and this one would carry the key
+   * with it.
+   */
+  private fetchModelList(): Promise<Response> {
+    return fetch('https://generativelanguage.googleapis.com/v1beta/models', {
+      headers: { 'x-goog-api-key': this.config.apiKey ?? '' },
+    });
+  }
 
   private buildContents(
     messages: ConversationMessage[],

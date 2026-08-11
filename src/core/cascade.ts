@@ -2067,7 +2067,32 @@ ${prompt}`
       ? selector.selectForTier(tier, options.fastAnswerModel)
       : (selector.getCandidatesForTier(tier)[0] ?? selector.selectForTier(tier));
     if (!model) {
-      throw new Error('No model is available for a fast answer — add a provider API key first.');
+      // Name the setting the user actually controls, in the order they can act
+      // on it. An unresolvable PIN comes first: a stale or mistyped
+      // fastAnswerModel fails even when every provider is healthy, and leading
+      // with some unrelated provider's probe failure would send the user to fix
+      // a setting that is fine. Probe failures follow as context, because the
+      // pin may well have named a model on the provider that failed.
+      //
+      // "Add an API key" survives only for the case it describes: nothing
+      // pinned and nothing to report. Telling a user who has a working key to
+      // add one is what made the original bug take a report to find.
+      const failures = this.router.providerProbeFailures();
+      const context = failures.length
+        ? ` Configured providers: ${failures.map((f) => `${f.provider}: ${f.reason}`).join('; ')}`
+        : '';
+      if (options.fastAnswerModel) {
+        throw new Error(
+          `No model is available for a fast answer: the pinned model `
+          + `"${options.fastAnswerModel}" could not be resolved — check it is spelled `
+          + `correctly and served by a configured provider.${context}`,
+        );
+      }
+      throw new Error(
+        failures.length
+          ? `No model is available for a fast answer.${context}`
+          : 'No model is available for a fast answer — add a provider API key first.',
+      );
     }
     this.recordDecision(
       'model',
