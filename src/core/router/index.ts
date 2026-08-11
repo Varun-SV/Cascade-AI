@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import type {
   CascadeConfig,
   GenerateOptions,
+  ConversationMessage,
   GenerateResult,
   ModelInfo,
   ProviderConfig,
@@ -158,6 +159,39 @@ function safeJson(value: unknown): string {
  * in an enforcement path is a cap that silently does not hold. Taking the
  * larger of the two counts leaves ASCII exactly as it was.
  */
+/**
+ * How many times Gemini will submit each top-level image: once, or twice.
+ *
+ * buildContents() passes `extraImages` to a user turn when `contents` is still
+ * EMPTY, and attaches them again to the last user turn once it is not — so two
+ * copies are sent only when the first content entry is itself a user turn and
+ * a later user turn follows it. Counting user roles alone got this wrong: a
+ * history opening with a system, assistant or tool message already fills
+ * `contents`, so those images are attached once, and charging for two refuses
+ * requests over a copy that is never submitted.
+ *
+ * Mirrors the provider's own conditions rather than guessing at them, which
+ * means tracking which messages actually produce a content entry: a system
+ * message with text, a tool result, or an assistant turn with text or tool
+ * calls. An empty system or assistant message produces nothing and is skipped
+ * there too.
+ */
+function geminiImageCopies(messages: ConversationMessage[]): number {
+  for (const m of messages) {
+    if (m.role === 'user') {
+      // First content entry is this user turn: it takes a copy, and the last
+      // user turn takes another — unless this IS the last one.
+      const laterUserTurn = messages.slice(messages.indexOf(m) + 1).some((x) => x.role === 'user');
+      return laterUserTurn ? 2 : 1;
+    }
+    const text = typeof m.content === 'string' ? m.content : '';
+    if (m.role === 'system' && text.trim()) return 1;       // fills contents first
+    if (m.role === 'tool') return 1;                        // always pushes
+    if (m.role === 'assistant' && (text || m.toolCalls?.length)) return 1;
+  }
+  return 1;
+}
+
 /**
  * Framing every provider adds around each turn — role markers, message
  * delimiters, chat-template scaffolding. Four tokens a message is the figure
@@ -1671,11 +1705,7 @@ export class CascadeRouter extends EventEmitter {
     // sees; not counting it at all left Gemini's vision path unreserved.
     if (model.provider === 'gemini') {
       const topLevel = (options.images ?? []).filter(countsImage).length;
-      // buildContents() attaches them to the FIRST content entry and again to
-      // the LAST user message, so with more than one user turn the provider
-      // submits — and bills — two copies of every one.
-      const userTurns = options.messages.filter((m) => m.role === 'user').length;
-      images += topLevel * (userTurns > 1 ? 2 : 1);
+      images += topLevel * geminiImageCopies(options.messages);
     }
     tokens += images * IMAGE_TOKENS_EACH;
 

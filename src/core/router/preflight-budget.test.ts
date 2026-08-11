@@ -579,6 +579,38 @@ describe('preflight budget', () => {
     expect(size(2) - size(1)).toBeGreaterThanOrEqual(1_900);
   });
 
+  it('charges ONE Gemini copy when the history opens with a non-user turn', async () => {
+    // buildContents() only hands extraImages to a user turn while `contents`
+    // is still empty. A leading system, tool or assistant message already
+    // filled it, so the images attach once — charging two refuses a request
+    // over a copy that is never submitted.
+    const router = await makeRouter({ maxTokensPerRun: 1_000_000 });
+    const r = router as unknown as {
+      enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined;
+      reservedTokens: number;
+    };
+    const gemini = { ...PRICED, provider: 'gemini' } as ModelInfo;
+    const images = [{ type: 'base64', data: 'A'.repeat(100), mimeType: 'image/png' }];
+    const size = (messages: unknown[]) => {
+      const release = r.enforcePreflightBudget(gemini, { messages, images, maxTokens: 40 });
+      const n = r.reservedTokens;
+      release!();
+      return n;
+    };
+
+    const twoUserTurns = [{ role: 'user', content: 'a' }, { role: 'user', content: 'b' }];
+    const ledBySystem = [{ role: 'system', content: 'ctx' }, ...twoUserTurns];
+    const ledByAssistant = [{ role: 'assistant', content: 'hello' }, ...twoUserTurns];
+
+    // Same two user turns, but the leading message already filled `contents`.
+    expect(size(ledBySystem)).toBeLessThan(size(twoUserTurns));
+    expect(size(ledByAssistant)).toBeLessThan(size(twoUserTurns));
+
+    // An EMPTY leading system message pushes nothing, so two copies again.
+    const ledByEmptySystem = [{ role: 'system', content: '  ' }, ...twoUserTurns];
+    expect(size(ledByEmptySystem)).toBeGreaterThan(size(ledBySystem));
+  });
+
   it('sizes a Gemini tool schema as the provider will send it', async () => {
     // Gemini strips $defs, $schema, additionalProperties and MCP vendor
     // extensions before submitting. A large MCP schema is mostly that
