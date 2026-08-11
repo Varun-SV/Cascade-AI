@@ -229,16 +229,13 @@ describe('withTimeoutAbort', () => {
     await expect(p).rejects.toThrow('already gone');
   });
 
-  it('aborts immediately when the outer signal is already aborted', async () => {
+  it('never calls the operation when the outer signal is already aborted', async () => {
+    // Racing an immediate rejection still RUNS the factory, and the factory is
+    // what dials the provider — so a call the caller had already given up on
+    // was being placed anyway, purely to lose a race a microtask later.
     const outer = AbortSignal.abort(new Error('already gone'));
-    let seen: AbortSignal | undefined;
-    const p = withTimeoutAbort(
-      (signal) => { seen = signal; return new Promise<never>(() => {}); },
-      10_000,
-      'timed out',
-      outer,
-    );
-    expect(seen?.aborted).toBe(true);
-    void p.catch(() => {});
+    const run = vi.fn(() => new Promise<never>(() => {}));
+    await expect(withTimeoutAbort(run, 10_000, 'timed out', outer)).rejects.toThrow('already gone');
+    expect(run).not.toHaveBeenCalled();
   });
 });

@@ -195,10 +195,17 @@ export async function withTimeoutAbort<T>(
     timer = setTimeout(() => settle(new Error(errorMessage)), timeoutMs);
   });
 
-  if (outers.some((sig) => sig.aborted)) abortOuter();
-  else for (const sig of outers) sig.addEventListener('abort', abortOuter, { once: true });
-
   try {
+    // Already cancelled: do NOT call the factory. Racing it against an
+    // immediate rejection still runs it, and `run` is what dials the provider
+    // — so a call the caller had already given up on was being placed anyway,
+    // with whatever synchronous work that entails, purely to lose a race a
+    // microtask later.
+    if (outers.some((sig) => sig.aborted)) {
+      abortOuter();
+      return await failPromise;
+    }
+    for (const sig of outers) sig.addEventListener('abort', abortOuter, { once: true });
     return await Promise.race([run(controller.signal), failPromise]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);

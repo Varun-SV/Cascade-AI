@@ -486,6 +486,51 @@ describe('preflight budget', () => {
     expect(r.runAbort.signal.aborted).toBe(false);
   });
 
+  it('a release handle from a previous run refunds nothing', async () => {
+    // beginRun() zeroes the counters. A call still in flight from the run
+    // before would otherwise subtract its estimate from the NEW run's totals
+    // and drive them negative — leaving later preflights believing there is
+    // more allowance than the cap holds, which is worse than no gate at all.
+    const router = await makeRouter({ maxCostPerRunUsd: 1.0 });
+    const r = router as unknown as {
+      enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined;
+      reservedCostUsd: number;
+      reservedTokens: number;
+    };
+    const stale = r.enforcePreflightBudget(PRICED, {
+      messages: [{ role: 'user', content: 'q'.repeat(200_000) }], maxTokens: 40,
+    });
+    expect(r.reservedCostUsd).toBeGreaterThan(0);
+
+    router.beginRun();
+    expect(r.reservedCostUsd).toBe(0);
+
+    stale!();                       // the old call finally settles
+    expect(r.reservedCostUsd).toBe(0);   // …and refunds nothing
+    expect(r.reservedTokens).toBe(0);
+    expect(r.reservedCostUsd).not.toBeLessThan(0);
+  });
+
+  it('does not charge Gemini for URL images it drops', async () => {
+    // buildContents() adds an image only when it carries base64 bytes; a URL
+    // attachment is never submitted and never billed.
+    const router = await makeRouter({ maxTokensPerRun: 5_000 });
+    const r = router as unknown as { enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined };
+    const gemini = { ...PRICED, provider: 'gemini' } as ModelInfo;
+    const urls = Array.from({ length: 3 }, () => ({ type: 'url', data: 'https://example.com/a.png', mimeType: 'image/png' }));
+
+    expect(() => r.enforcePreflightBudget(gemini, {
+      messages: [{ role: 'user', content: 'describe these' }], images: urls, maxTokens: 40,
+    })).not.toThrow();
+
+    // The same three as base64 ARE submitted, and are charged.
+    expect(() => r.enforcePreflightBudget(gemini, {
+      messages: [{ role: 'user', content: 'describe these' }],
+      images: urls.map((u) => ({ ...u, type: 'base64', data: 'A'.repeat(100) })),
+      maxTokens: 40,
+    })).toThrow(/per-task cap/);
+  });
+
   it('reports a preflight refusal the same way a post-hoc overrun is reported', async () => {
     // A worker that catches BudgetExceededError turns it into a FAILED result,
     // so the run-level flag is what tells the surfaces why.

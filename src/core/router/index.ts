@@ -257,6 +257,15 @@ export class CascadeRouter extends EventEmitter {
    * ceiling reaches the requests that are running, not just the ones queued.
    */
   private runAbort = new AbortController();
+  /**
+   * Bumped by every beginRun(). A release handle remembers the generation it
+   * was issued in and does nothing if that has moved on: beginRun() zeroes the
+   * counters, so a call still in flight from the previous run would otherwise
+   * subtract its estimate from the NEW run's totals and drive them negative —
+   * leaving later preflights believing there is more allowance than the cap
+   * actually holds, which is worse than no gate at all.
+   */
+  private runGeneration = 0;
   private runBudgetExceeded = false;
   private runBudgetExceededReason: string | undefined;
   /**
@@ -726,7 +735,11 @@ export class CascadeRouter extends EventEmitter {
     const requestedTokens = options.maxTokens ?? model.maxOutputTokens ?? 1024;
     const estimatedTokens = Math.min(requestedTokens, model.maxOutputTokens ?? requestedTokens) + 512;
     if (this.tpmLimiter) {
-      await this.tpmLimiter.acquire(model.provider, estimatedTokens);
+      // Cancellable: the bucket can hold a call for most of a refill interval,
+      // and a sibling can trip the ceiling while it waits. Without the signal
+      // the whole wave stayed parked for up to a minute after the run was
+      // already dead.
+      await this.tpmLimiter.acquire(model.provider, estimatedTokens, this.runAbort.signal);
     }
 
     const useStream = Boolean(onChunk) && model.supportsStreaming && typeof provider.generateStream === 'function';
@@ -1452,6 +1465,8 @@ export class CascadeRouter extends EventEmitter {
     this.reservedCostUsd = 0;
     // A fresh switch: the previous run's abort must not cancel this one's work.
     this.runAbort = new AbortController();
+    // Invalidates every release handle the previous run handed out.
+    this.runGeneration++;
     this.runBudgetExceeded = false;
     this.runBudgetExceededReason = undefined;
   }
@@ -1543,9 +1558,12 @@ export class CascadeRouter extends EventEmitter {
     // itself instead.
     this.reservedTokens += inputTokens;
     this.reservedCostUsd += estimatedUsd;
+    const generation = this.runGeneration;
     let released = false;
     return () => {
-      if (released) return;
+      // A handle from a previous run refunds nothing: beginRun() already
+      // zeroed the counters it was drawn against.
+      if (released || generation !== this.runGeneration) return;
       released = true;
       this.reservedTokens -= inputTokens;
       this.reservedCostUsd -= estimatedUsd;
@@ -1572,6 +1590,13 @@ export class CascadeRouter extends EventEmitter {
     // and it holds a summary of the whole conversation, so charging content
     // that is never submitted refuses runs over input the provider never sees.
     const dropsSystemHistory = model.provider === 'anthropic';
+    // Gemini's buildContents() adds an image only when it carries base64 bytes;
+    // a URL attachment is dropped, never submitted, and never billed. Charging
+    // the flat per-image rate for one refuses runs over an image the provider
+    // silently discards.
+    const dropsUrlImages = model.provider === 'gemini';
+    const countsImage = (img: { type?: string } | undefined): boolean =>
+      !dropsUrlImages || img?.type === 'base64';
 
     for (const message of options.messages) {
       if (dropsSystemHistory && message.role === 'system') continue;
@@ -1579,7 +1604,10 @@ export class CascadeRouter extends EventEmitter {
         tokens += guardTokens(message.content);
       } else {
         for (const block of message.content) {
-          if (block.type === 'image') { images++; continue; }
+          if (block.type === 'image') {
+            if (countsImage(block.image)) images++;
+            continue;
+          }
           tokens += guardTokens(contentToText([block]));
         }
       }
@@ -1599,7 +1627,9 @@ export class CascadeRouter extends EventEmitter {
     // Counting it for all of them charged 2,000 tokens apiece for bytes that
     // are not submitted, which refuses runs over input the provider never
     // sees; not counting it at all left Gemini's vision path unreserved.
-    if (model.provider === 'gemini') images += options.images?.length ?? 0;
+    if (model.provider === 'gemini') {
+      images += (options.images ?? []).filter(countsImage).length;
+    }
     tokens += images * IMAGE_TOKENS_EACH;
 
     return tokens;

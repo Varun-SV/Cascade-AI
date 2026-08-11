@@ -69,7 +69,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does nothing at all when no cap is configured.
 
   Tripping the ceiling now cancels work already in flight, not just work still
-  queued. A parallel wave's earlier members are at the provider by the time a
+  queued — including calls parked in the rate limiter, which could otherwise
+  sit out most of a refill interval for a run that was already dead. A parallel wave's earlier members are at the provider by the time a
   later one runs out of budget, and they carried on generating for a run whose
   output would be discarded. The router holds a per-run abort that every
   provider call chains to, so the ceiling reaches the requests that are
