@@ -157,25 +157,43 @@ export async function withTimeoutAbort<T>(
   outer?: AbortSignal,
 ): Promise<T> {
   const controller = new AbortController();
-  const abortOuter = () => controller.abort(outer?.reason);
-  if (outer) {
-    if (outer.aborted) controller.abort(outer.reason);
-    else outer.addEventListener('abort', abortOuter, { once: true });
-  }
 
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
+  let rejectRace: ((err: unknown) => void) | undefined;
+
+  // Aborting the inner controller is a request to the operation; it is not a
+  // guarantee the operation settles, and some do not honour a signal at all.
+  // Racing an explicit rejection is what actually returns control to the
+  // caller — without it, cancelling a run left the router waiting out the full
+  // inference timeout (two minutes by default) for a call nobody wanted any
+  // more, which is the opposite of the instant cancel this is here to provide.
+  const abortOuter = (): void => {
+    const reason = outer?.reason instanceof Error
+      ? outer.reason
+      : new CascadeCancelledError('Run cancelled');
+    controller.abort(reason);
+    rejectRace?.(reason);
+  };
+
+  const failPromise = new Promise<never>((_, reject) => {
+    rejectRace = reject;
     timer = setTimeout(() => {
       // Abort BEFORE rejecting: the caller's catch may start a fallback
       // immediately, and the point of this is that the first request is
       // already on its way down by then.
-      controller.abort(new Error(errorMessage));
-      reject(new Error(errorMessage));
+      const err = new Error(errorMessage);
+      controller.abort(err);
+      reject(err);
     }, timeoutMs);
   });
 
+  if (outer) {
+    if (outer.aborted) abortOuter();
+    else outer.addEventListener('abort', abortOuter, { once: true });
+  }
+
   try {
-    return await Promise.race([run(controller.signal), timeoutPromise]);
+    return await Promise.race([run(controller.signal), failPromise]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     outer?.removeEventListener('abort', abortOuter);

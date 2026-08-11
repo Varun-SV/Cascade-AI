@@ -159,9 +159,18 @@ function safeJson(value: unknown): string {
  */
 function guardTokens(text: string): number {
   if (!text) return 0;
-  let dense = 0;
-  for (const ch of text) if (ch.codePointAt(0)! > 0x7f) dense++;
-  return Math.max(estimateTokens(text), dense);
+  // The bound for the non-ASCII part is its UTF-8 BYTE count, not its
+  // character count. Production tokenizers are byte-level BPE, so a token can
+  // never span fewer than one byte — bytes are a true ceiling, where "one
+  // token per code point" was only a guess, and a wrong one for emoji: a ZWJ
+  // sequence is several code points and can cost several tokens each.
+  let denseBytes = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0)!;
+    if (cp <= 0x7f) continue;
+    denseBytes += cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
+  }
+  return Math.max(estimateTokens(text), denseBytes);
 }
 
 const DISCOVERY_TTL_MS = 15 * 60 * 1000;
@@ -1468,7 +1477,7 @@ export class CascadeRouter extends EventEmitter {
     const maxTokens = budget?.maxTokensPerRun;
     if (maxCost == null && maxTokens == null) return undefined;
 
-    const inputTokens = this.estimateInputTokens(options);
+    const inputTokens = this.estimateInputTokens(options, model);
 
     if (maxTokens != null) {
       // Against spent AND reserved — see the reservation note below.
@@ -1536,11 +1545,19 @@ export class CascadeRouter extends EventEmitter {
    * tool-heavy or vision request could therefore pass either cap while its real
    * input already exceeded the allowance.
    */
-  private estimateInputTokens(options: GenerateOptions): number {
+  private estimateInputTokens(options: GenerateOptions, model: ModelInfo): number {
     let tokens = guardTokens(options.systemPrompt ?? '');
     let images = 0;
 
+    // Providers that drop system-role HISTORY (Anthropic's convertMessages
+    // skips them outright — only options.systemPrompt is sent as system input)
+    // must not be charged for it. Compaction really does emit such a message,
+    // and it holds a summary of the whole conversation, so charging content
+    // that is never submitted refuses runs over input the provider never sees.
+    const dropsSystemHistory = model.provider === 'anthropic';
+
     for (const message of options.messages) {
+      if (dropsSystemHistory && message.role === 'system') continue;
       if (typeof message.content === 'string') {
         tokens += guardTokens(message.content);
       } else {

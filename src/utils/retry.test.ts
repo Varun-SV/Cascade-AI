@@ -202,6 +202,33 @@ describe('withTimeoutAbort', () => {
     void p.catch(() => {});
   });
 
+  it('returns control promptly when the outer signal aborts', async () => {
+    // Aborting the inner controller is a request to the operation, not a
+    // guarantee it settles — and some operations ignore a signal entirely.
+    // Without racing an explicit rejection, cancelling a run left the caller
+    // waiting out the full inference timeout for a call nobody wanted.
+    const outer = new AbortController();
+    const p = withTimeoutAbort(
+      // Deliberately ignores the signal, like a provider that does not honour one.
+      () => new Promise<never>(() => {}),
+      60_000,
+      'timed out',
+      outer.signal,
+    );
+    outer.abort(new Error('run cancelled'));
+    await expect(p).rejects.toThrow('run cancelled');
+  });
+
+  it('rejects an already-aborted outer signal without waiting for the timeout', async () => {
+    const p = withTimeoutAbort(
+      () => new Promise<never>(() => {}),
+      60_000,
+      'timed out',
+      AbortSignal.abort(new Error('already gone')),
+    );
+    await expect(p).rejects.toThrow('already gone');
+  });
+
   it('aborts immediately when the outer signal is already aborted', async () => {
     const outer = AbortSignal.abort(new Error('already gone'));
     let seen: AbortSignal | undefined;

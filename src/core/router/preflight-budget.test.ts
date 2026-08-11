@@ -353,6 +353,52 @@ describe('preflight budget', () => {
     expect(r.reservedCostUsd).toBeCloseTo(0, 10);
   });
 
+  it('bounds emoji by UTF-8 bytes, which a token can never span fewer of', async () => {
+    // One token per code point was a guess, and wrong for emoji: a ZWJ
+    // sequence is several code points and can cost several tokens each.
+    // Byte-level BPE cannot emit a token shorter than a byte, so bytes are a
+    // real ceiling rather than an estimate.
+    const router = await makeRouter({ maxTokensPerRun: 1_000_000 });
+    const r = router as unknown as {
+      enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined;
+      reservedTokens: number;
+    };
+    const size = (text: string) => {
+      const release = r.enforcePreflightBudget(PRICED, { messages: [{ role: 'user', content: text }], maxTokens: 40 });
+      const n = r.reservedTokens;
+      release!();
+      return n;
+    };
+
+    // A family ZWJ sequence is 4 emoji + 3 joiners; every one is 3-4 bytes.
+    const family = '\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}';
+    expect(size(family.repeat(1_000))).toBeGreaterThan(20_000);
+    // ASCII is untouched: still four characters to the token.
+    expect(size('a'.repeat(10_000))).toBe(2_500);
+  });
+
+  it('does not charge Anthropic for system history it never submits', async () => {
+    // AnthropicProvider.convertMessages() skips system-role history outright —
+    // only options.systemPrompt is sent as system input — and compaction emits
+    // exactly such a message holding a summary of the whole conversation.
+    // Charging it refuses runs over input the provider never sees.
+    const router = await makeRouter({ maxCostPerRunUsd: 0.05 });
+    const r = router as unknown as { enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined };
+    const withSystemHistory = {
+      messages: [
+        { role: 'system', content: 's'.repeat(400_000) },
+        { role: 'user', content: 'go' },
+      ],
+      maxTokens: 40,
+    };
+
+    expect(() => r.enforcePreflightBudget(PRICED, withSystemHistory)).not.toThrow();
+
+    // A provider that DOES submit it is still charged for it.
+    const openai = { ...PRICED, provider: 'openai' } as ModelInfo;
+    expect(() => r.enforcePreflightBudget(openai, withSystemHistory)).toThrow(/would cost about/);
+  });
+
   it('reports a preflight refusal the same way a post-hoc overrun is reported', async () => {
     // A worker that catches BudgetExceededError turns it into a FAILED result,
     // so the run-level flag is what tells the surfaces why.
