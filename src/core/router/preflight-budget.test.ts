@@ -399,6 +399,86 @@ describe('preflight budget', () => {
     expect(() => r.enforcePreflightBudget(openai, withSystemHistory)).toThrow(/would cost about/);
   });
 
+  it('aborts a sibling already at the provider when the budget trips', async () => {
+    // The kill switch used to be only a flag, which stops calls that have not
+    // submitted yet. A wave's earlier members are already at the provider by
+    // then and carried on generating for a run whose output is discarded.
+    const router = await makeRouter({ maxCostPerRunUsd: 1.0 });
+    const r = router as unknown as {
+      tierModels: Map<string, ModelInfo>;
+      enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined;
+    };
+    r.tierModels.set('T3', PRICED);
+
+    let sawAbort = false;
+    let submitted!: () => void;
+    const atProvider = new Promise<void>((resolve) => { submitted = resolve; });
+    (router as unknown as { getProvider: (m: ModelInfo) => unknown }).getProvider = () => ({
+      // A provider that honours the signal, like every real one does.
+      generate: (opts: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+        submitted();
+        opts.signal?.addEventListener('abort', () => {
+          sawAbort = true;
+          reject(new Error('aborted by caller'));
+        }, { once: true });
+      }),
+    });
+
+    const inFlight = router.generate('T3', { messages: [{ role: 'user', content: 'work' }] });
+    // Wait until it is genuinely AT the provider — the point of this test is
+    // the request that has already been submitted, not one still queued.
+    await atProvider;
+    // A sibling now asks for more than the cap and trips the ceiling.
+    expect(() => r.enforcePreflightBudget(PRICED, {
+      messages: [{ role: 'user', content: 'w'.repeat(2_000_000) }], maxTokens: 40,
+    })).toThrow(/would cost about/);
+
+    await expect(inFlight).rejects.toThrow();
+    expect(sawAbort).toBe(true);
+  });
+
+  it('a budget abort still reports as a budget failure, not a cancellation', async () => {
+    // Otherwise the reason the run stopped is lost on the way up: the caller
+    // sees "Run cancelled" for something the user never cancelled.
+    const router = await makeRouter({ maxCostPerRunUsd: 1.0 });
+    const r = router as unknown as {
+      tierModels: Map<string, ModelInfo>;
+      enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined;
+    };
+    r.tierModels.set('T3', PRICED);
+    let submitted!: () => void;
+    const atProvider = new Promise<void>((resolve) => { submitted = resolve; });
+    (router as unknown as { getProvider: (m: ModelInfo) => unknown }).getProvider = () => ({
+      generate: (opts: { signal?: AbortSignal }) => new Promise((_r, reject) => {
+        submitted();
+        opts.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      }),
+    });
+
+    const inFlight = router.generate('T3', { messages: [{ role: 'user', content: 'work' }] });
+    await atProvider;
+    expect(() => r.enforcePreflightBudget(PRICED, {
+      messages: [{ role: 'user', content: 'w'.repeat(2_000_000) }], maxTokens: 40,
+    })).toThrow();
+
+    await expect(inFlight).rejects.toThrow(/cost about|cap of/);
+  });
+
+  it('beginRun() hands the next run a switch the last one did not trip', async () => {
+    const router = await makeRouter({ maxCostPerRunUsd: 0.0001 });
+    const r = router as unknown as {
+      enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined;
+      runAbort: AbortController;
+    };
+    expect(() => r.enforcePreflightBudget(PRICED, {
+      messages: [{ role: 'user', content: 'w'.repeat(200_000) }], maxTokens: 40,
+    })).toThrow();
+    expect(r.runAbort.signal.aborted).toBe(true);
+
+    router.beginRun();
+    expect(r.runAbort.signal.aborted).toBe(false);
+  });
+
   it('reports a preflight refusal the same way a post-hoc overrun is reported', async () => {
     // A worker that catches BudgetExceededError turns it into a FAILED result,
     // so the run-level flag is what tells the surfaces why.

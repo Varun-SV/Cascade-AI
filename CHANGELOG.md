@@ -68,6 +68,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   moment a cap was set — leaving those to the post-hoc stop as before. And it
   does nothing at all when no cap is configured.
 
+  Tripping the ceiling now cancels work already in flight, not just work still
+  queued. A parallel wave's earlier members are at the provider by the time a
+  later one runs out of budget, and they carried on generating for a run whose
+  output would be discarded. The router holds a per-run abort that every
+  provider call chains to, so the ceiling reaches the requests that are
+  running. A budget abort still reports itself as a budget failure rather than
+  a cancellation — otherwise the reason the run stopped is lost on the way up.
+
   A call already admitted when a sibling trips the ceiling no longer submits.
   The kill switch was checked when a call entered the router, but a request can
   then sit for a long time in the rate-limit bucket or the local-inference

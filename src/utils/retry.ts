@@ -154,8 +154,14 @@ export async function withTimeoutAbort<T>(
   run: (signal: AbortSignal) => Promise<T>,
   timeoutMs: number,
   errorMessage = 'Operation timed out',
-  outer?: AbortSignal,
+  outer?: AbortSignal | ReadonlyArray<AbortSignal | undefined>,
 ): Promise<T> {
+  // Several signals can want this call stopped — the caller's own cancellation
+  // and the router's per-run kill switch — and any of them firing should end
+  // it. Taking a list rather than one avoids AbortSignal.any(), which is not
+  // available on every runtime this ships to.
+  const outers = (Array.isArray(outer) ? outer : [outer])
+    .filter((sig): sig is AbortSignal => sig !== undefined);
   const controller = new AbortController();
 
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -167,36 +173,36 @@ export async function withTimeoutAbort<T>(
   // caller — without it, cancelling a run left the router waiting out the full
   // inference timeout (two minutes by default) for a call nobody wanted any
   // more, which is the opposite of the instant cancel this is here to provide.
-  const abortOuter = (): void => {
-    const reason = outer?.reason instanceof Error
-      ? outer.reason
-      : new CascadeCancelledError('Run cancelled');
-    controller.abort(reason);
+  // Reject FIRST, then abort. The operation's own abort handler usually
+  // rejects too, and Promise.race reports whichever settles first — so
+  // aborting first meant the caller saw the provider's generic "aborted"
+  // instead of the real reason (a run cancellation, or a budget ceiling that
+  // needs to keep saying so on the way up). Rejecting first claims the race;
+  // the abort on the next line is still synchronous, so it reaches the
+  // operation before any continuation of ours runs.
+  const settle = (reason: Error): void => {
     rejectRace?.(reason);
+    controller.abort(reason);
+  };
+
+  const abortOuter = (): void => {
+    const fired = outers.find((sig) => sig.aborted);
+    settle(fired?.reason instanceof Error ? fired.reason : new CascadeCancelledError('Run cancelled'));
   };
 
   const failPromise = new Promise<never>((_, reject) => {
     rejectRace = reject;
-    timer = setTimeout(() => {
-      // Abort BEFORE rejecting: the caller's catch may start a fallback
-      // immediately, and the point of this is that the first request is
-      // already on its way down by then.
-      const err = new Error(errorMessage);
-      controller.abort(err);
-      reject(err);
-    }, timeoutMs);
+    timer = setTimeout(() => settle(new Error(errorMessage)), timeoutMs);
   });
 
-  if (outer) {
-    if (outer.aborted) abortOuter();
-    else outer.addEventListener('abort', abortOuter, { once: true });
-  }
+  if (outers.some((sig) => sig.aborted)) abortOuter();
+  else for (const sig of outers) sig.addEventListener('abort', abortOuter, { once: true });
 
   try {
     return await Promise.race([run(controller.signal), failPromise]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
-    outer?.removeEventListener('abort', abortOuter);
+    for (const sig of outers) sig.removeEventListener('abort', abortOuter);
   }
 }
 

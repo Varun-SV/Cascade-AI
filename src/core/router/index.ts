@@ -247,6 +247,16 @@ export class CascadeRouter extends EventEmitter {
    */
   private reservedTokens = 0;
   private reservedCostUsd = 0;
+  /**
+   * Fires when this run's budget is spent, cancelling work already in flight.
+   *
+   * The kill switch was previously only a flag, which stops calls that have
+   * not yet submitted. A parallel wave's earlier members are already at the
+   * provider by then, and they carried on generating for a run whose output
+   * would be discarded. Every provider call chains to this, so tripping the
+   * ceiling reaches the requests that are running, not just the ones queued.
+   */
+  private runAbort = new AbortController();
   private runBudgetExceeded = false;
   private runBudgetExceededReason: string | undefined;
   /**
@@ -779,7 +789,7 @@ export class CascadeRouter extends EventEmitter {
             : provider.generate({ ...options, signal })),
           inferenceTimeoutMs,
           `Local model ${model.id} inference timed out after ${inferenceTimeoutMs}ms`,
-          options.signal,
+          [options.signal, this.runAbort.signal],
         );
       } else if (useStream && onChunk) {
         // Cloud streaming MUST be time-boxed: a stalled SSE connection (TCP open,
@@ -793,7 +803,7 @@ export class CascadeRouter extends EventEmitter {
             }),
             cloudTimeoutMs,
             `Model ${model.id} stream timed out after ${cloudTimeoutMs}ms`,
-            options.signal,
+            [options.signal, this.runAbort.signal],
           );
         } catch (streamErr) {
           // Cancelled mid-stream — propagate the abort, don't retry.
@@ -808,7 +818,7 @@ export class CascadeRouter extends EventEmitter {
             (signal) => provider.generate({ ...options, signal }),
             cloudTimeoutMs,
             `Model ${model.id} inference timed out after ${cloudTimeoutMs}ms`,
-            options.signal,
+            [options.signal, this.runAbort.signal],
           );
         }
       } else {
@@ -817,7 +827,7 @@ export class CascadeRouter extends EventEmitter {
           (signal) => provider.generate({ ...options, signal }),
           cloudTimeoutMs,
           `Model ${model.id} inference timed out after ${cloudTimeoutMs}ms`,
-          options.signal,
+          [options.signal, this.runAbort.signal],
         );
       }
 
@@ -852,6 +862,11 @@ export class CascadeRouter extends EventEmitter {
       this.failover.recordSuccess(model.provider);
       return result;
     } catch (err) {
+      // A budget abort also cancels the in-flight request, but it is NOT a
+      // user cancellation: it must keep saying it ran out of budget, or the
+      // reason the run stopped is lost on the way up. Checked first, because
+      // the abort below would otherwise swallow it.
+      if (err instanceof CascadeRouter.BudgetExceededError) throw err;
       // A cancelled run aborts the in-flight provider request. Surface it as a
       // cancellation so it propagates like the checkpoint-based cancel (graceful
       // stop + partial output upstream) rather than being retried/failed-over.
@@ -1435,6 +1450,8 @@ export class CascadeRouter extends EventEmitter {
     // allowance for no reason.
     this.reservedTokens = 0;
     this.reservedCostUsd = 0;
+    // A fresh switch: the previous run's abort must not cancel this one's work.
+    this.runAbort = new AbortController();
     this.runBudgetExceeded = false;
     this.runBudgetExceededReason = undefined;
   }
@@ -1590,6 +1607,7 @@ export class CascadeRouter extends EventEmitter {
   private failPreflight(reason: string): never {
     this.runBudgetExceeded = true;
     this.runBudgetExceededReason = reason;
+    this.runAbort.abort(new CascadeRouter.BudgetExceededError(reason));
     this.emit('budget:exceeded', { reason, spentUsd: this.sessionCostUsd });
     throw new CascadeRouter.BudgetExceededError(reason);
   }
@@ -1612,6 +1630,9 @@ export class CascadeRouter extends EventEmitter {
       : `Per-task cost cap of $${maxCost!.toFixed(4)} reached (spent $${this.runCostUsd.toFixed(4)}). Stopping this run to avoid runaway cost.`;
     this.runBudgetExceeded = true;
     this.runBudgetExceededReason = reason;
+    // Reaches the calls already at the provider, not only the ones still
+    // queued behind this one.
+    this.runAbort.abort(new CascadeRouter.BudgetExceededError(reason));
     this.emit('budget:exceeded', { reason, spentUsd: this.sessionCostUsd });
     throw new CascadeRouter.BudgetExceededError(reason);
   }
