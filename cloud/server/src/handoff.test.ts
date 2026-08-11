@@ -85,22 +85,32 @@ describe('HandoffStore aggregate memory budget', () => {
     messages: [{ role: 'user' as const, content: 'a'.repeat(400_000) }],
   });
 
+  it('counts BYTES, not UTF-16 code units', () => {
+    // V8 keeps a string with any non-Latin-1 character at two bytes per code
+    // unit, so a budget expressed in characters silently permits twice the
+    // memory it names the moment a transcript is not plain ASCII — which, for
+    // a courier carrying arbitrary chat text, is routine.
+    const store = new HandoffStore();
+    store.create({ title: null, skillId: null, messages: [{ role: 'user', content: 'a'.repeat(1_000) }] });
+    expect(store.storedByteCount()).toBe(2_000);
+  });
+
   it('accounts for what it is holding, and releases it on eviction', () => {
     const store = new HandoffStore();
     store.create(bigSnapshot());
-    expect(store.storedCharCount()).toBeGreaterThan(400_000);
-    const one = store.storedCharCount();
+    expect(store.storedByteCount()).toBeGreaterThan(800_000);
+    const one = store.storedByteCount();
     store.create(bigSnapshot());
-    expect(store.storedCharCount()).toBe(one * 2);
+    expect(store.storedByteCount()).toBe(one * 2);
   });
 
   it('releases the budget when a record expires', () => {
     let now = 1_000;
     const store = new HandoffStore(() => now);
     store.create(bigSnapshot());
-    expect(store.storedCharCount()).toBeGreaterThan(0);
+    expect(store.storedByteCount()).toBeGreaterThan(0);
     now += HANDOFF_TTL_MS + 1;
-    expect(store.storedCharCount()).toBe(0);
+    expect(store.storedByteCount()).toBe(0);
     expect(store.size()).toBe(0);
   });
 
@@ -111,8 +121,8 @@ describe('HandoffStore aggregate memory budget', () => {
     // per-transfer ceiling is ~2.5 GB held for the full 15-minute TTL.
     const store = new HandoffStore();
     for (let i = 0; i < 2_000; i++) store.create(bigSnapshot());
-    // Well under what an unbounded store would be holding by now (~800 MB).
-    expect(store.storedCharCount()).toBeLessThanOrEqual(256 * 1024 * 1024);
+    // Well under what an unbounded store would be holding by now (~1.6 GB).
+    expect(store.storedByteCount()).toBeLessThanOrEqual(256 * 1024 * 1024);
     // And it is still serving: eviction dropped the oldest, not everything.
     expect(store.size()).toBeGreaterThan(0);
   });

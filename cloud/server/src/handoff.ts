@@ -34,15 +34,26 @@ export interface HandoffSnapshot {
 interface HandoffRecord extends HandoffSnapshot {
   createdAt: number;
   expiresAt: number;
-  /** Size counted against MAX_TOTAL_CHARS_STORED, kept so eviction can refund it. */
-  chars: number;
+  /** Size counted against MAX_TOTAL_BYTES_STORED, kept so eviction can refund it. */
+  bytes: number;
 }
 
-/** What one snapshot costs against the aggregate budget. */
-function snapshotChars(s: HandoffSnapshot): number {
-  let total = (s.title?.length ?? 0) + (s.skillId?.length ?? 0);
-  for (const m of s.messages) total += m.content.length;
-  return total;
+/**
+ * Worst-case bytes one snapshot occupies once retained.
+ *
+ * Counted in BYTES, not characters. V8 stores a string with any non-Latin-1
+ * character as two bytes per UTF-16 code unit, so a character budget silently
+ * permits twice the memory it names the moment a transcript is not plain ASCII
+ * — and a courier that carries arbitrary chat text will routinely see one. Two
+ * bytes per code unit is the worst case, and being conservative for a
+ * pure-ASCII transcript is the right direction to err for an unauthenticated
+ * store.
+ */
+const BYTES_PER_CODE_UNIT = 2;
+function snapshotBytes(s: HandoffSnapshot): number {
+  let units = (s.title?.length ?? 0) + (s.skillId?.length ?? 0);
+  for (const m of s.messages) units += m.content.length;
+  return units * BYTES_PER_CODE_UNIT;
 }
 
 export const HANDOFF_TTL_MS = 15 * 60 * 1000;
@@ -63,7 +74,7 @@ const MAX_SKILL_ID_LEN = 64;
 const MAX_RECORDS = 5_000;
 
 /**
- * Total characters this store will hold across ALL live records.
+ * Total bytes this store will hold across ALL live records.
  *
  * A record count alone does not bound memory once a single snapshot can be
  * large: 5,000 records at the 500,000-character per-message ceiling is about
@@ -75,9 +86,10 @@ const MAX_RECORDS = 5_000;
  *
  * 256 MB is far above any genuine simultaneous-handoff load (a real transcript
  * is a few KB, so this is thousands of them) and far below what would trouble
- * the process.
+ * the process. Measured with snapshotBytes(), so the number means what it says
+ * whatever script the transcript is written in.
  */
-const MAX_TOTAL_CHARS_STORED = 256 * 1024 * 1024;
+const MAX_TOTAL_BYTES_STORED = 256 * 1024 * 1024;
 
 // Unambiguous alphabet — no O/0, I/1/L — so a code read off one screen and typed
 // on another device doesn't get transcribed wrong. 31 symbols, 8 chars ≈ 40 bits.
@@ -144,8 +156,8 @@ export function parseHandoffBody(body: unknown): HandoffSnapshot | { error: stri
 
 export class HandoffStore {
   private records = new Map<string, HandoffRecord>();
-  /** Running total of stored characters, kept in step with `records`. */
-  private storedChars = 0;
+  /** Running total of stored bytes, kept in step with `records`. */
+  private storedBytes = 0;
 
   constructor(private now: () => number = Date.now) {}
 
@@ -158,8 +170,8 @@ export class HandoffStore {
     // the record count. Oldest-first, matching the count-based eviction: a
     // record close to expiry is the cheapest to lose, and the sender still
     // holds its code for the few minutes it had left.
-    const incoming = snapshotChars(snapshot);
-    while (this.records.size > 0 && this.storedChars + incoming > MAX_TOTAL_CHARS_STORED) {
+    const incoming = snapshotBytes(snapshot);
+    while (this.records.size > 0 && this.storedBytes + incoming > MAX_TOTAL_BYTES_STORED) {
       this.evictOldest();
     }
 
@@ -168,8 +180,8 @@ export class HandoffStore {
 
     const createdAt = this.now();
     const expiresAt = createdAt + HANDOFF_TTL_MS;
-    this.records.set(key, { ...snapshot, createdAt, expiresAt, chars: incoming });
-    this.storedChars += incoming;
+    this.records.set(key, { ...snapshot, createdAt, expiresAt, bytes: incoming });
+    this.storedBytes += incoming;
     return { code: formatCode(key), expiresAt };
   }
 
@@ -192,10 +204,10 @@ export class HandoffStore {
     return this.records.size;
   }
 
-  /** Test/introspection helper — characters currently held across live records. */
-  storedCharCount(): number {
+  /** Test/introspection helper — bytes currently held across live records. */
+  storedByteCount(): number {
     this.sweep();
-    return this.storedChars;
+    return this.storedBytes;
   }
 
   private sweep(): void {
@@ -215,9 +227,9 @@ export class HandoffStore {
     if (oldestKey !== null && rec) this.drop(oldestKey, rec);
   }
 
-  /** The only removal path, so `storedChars` cannot drift from `records`. */
+  /** The only removal path, so `storedBytes` cannot drift from `records`. */
   private drop(key: string, rec: HandoffRecord): void {
     this.records.delete(key);
-    this.storedChars -= rec.chars;
+    this.storedBytes -= rec.bytes;
   }
 }

@@ -377,8 +377,8 @@ describe('DownloadResolver — authentication and the on-disk warm start', () =>
       manifest: {
         version: '0.1.0', releasedAt: null,
         targets: [{ id: 'mac-arm64', os: 'mac', label: 'macOS', detail: 'Apple silicon',
-          filename: 'old.dmg', sizeBytes: 10,
-          url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.1.0/old.dmg' }],
+          filename: 'Cascade-AI-0.1.0-arm64.dmg', sizeBytes: 10,
+          url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.1.0/Cascade-AI-0.1.0-arm64.dmg' }],
       },
     }), 'utf8');
 
@@ -395,8 +395,8 @@ describe('DownloadResolver — authentication and the on-disk warm start', () =>
       manifest: {
         version: '0.68.0', releasedAt: null,
         targets: [{ id: 'mac-arm64', os: 'mac', label: 'macOS', detail: 'Apple silicon',
-          filename: 'x.dmg', sizeBytes: 10,
-          url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/x.dmg' }],
+          filename: 'Cascade-AI-0.68.0-arm64.dmg', sizeBytes: 10,
+          url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/Cascade-AI-0.68.0-arm64.dmg' }],
       },
     }), 'utf8');
 
@@ -425,8 +425,8 @@ describe('DownloadResolver — authentication and the on-disk warm start', () =>
         releasedAt: null,
         targets: [
           // No os, a non-string label, junk detail — all reconstructed.
-          { id: 'mac-arm64', label: 42, detail: null, filename: 'x.dmg', sizeBytes: 10,
-            url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/x.dmg' },
+          { id: 'mac-arm64', label: 42, detail: null, filename: 'Cascade-AI-0.68.0-arm64.dmg', sizeBytes: 10,
+            url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/Cascade-AI-0.68.0-arm64.dmg' },
         ],
       },
     }), 'utf8');
@@ -439,8 +439,32 @@ describe('DownloadResolver — authentication and the on-disk warm start', () =>
     expect(target.label).toBe('macOS');
     expect(target.detail).toBe('Apple silicon');
     // The genuinely per-release fields still come from the file.
-    expect(target.filename).toBe('x.dmg');
+    expect(target.filename).toBe('Cascade-AI-0.68.0-arm64.dmg');
     expect(target.sizeBytes).toBe(10);
+  });
+
+  it('rejects a stored target whose filename is not that target', async () => {
+    // Every field validated on its own, which is not enough: an entry labelled
+    // mac-arm64 whose filename is a Windows installer has a genuine GitHub URL
+    // and gets macOS metadata rebuilt onto it — so the site would offer that
+    // .exe to Mac visitors and /download/mac-arm64 would redirect to it.
+    fs.writeFileSync(cacheFile(), JSON.stringify({
+      fetchedAt: Date.now(),
+      manifest: {
+        version: '0.68.0', releasedAt: null,
+        targets: [
+          { id: 'mac-arm64', filename: 'Cascade-AI-Setup-0.68.0.exe', sizeBytes: 10,
+            url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/Cascade-AI-Setup-0.68.0.exe' },
+          { id: 'linux-deb', filename: 'cascade-ai-desktop_0.68.0_amd64.deb', sizeBytes: 20,
+            url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/cascade-ai-desktop_0.68.0_amd64.deb' },
+        ],
+      },
+    }), 'utf8');
+
+    const failing = vi.fn(async () => { throw new Error('down'); });
+    const manifest = await new DownloadResolver(failing as unknown as typeof fetch, Date.now, { cacheFile: cacheFile() }).get();
+    // The mismatched entry is gone; the honest one survives.
+    expect(manifest!.targets.map((t) => t.id)).toEqual(['linux-deb']);
   });
 
   it('drops a stored target with a zero or negative size', async () => {
@@ -449,8 +473,8 @@ describe('DownloadResolver — authentication and the on-disk warm start', () =>
       manifest: {
         version: '0.68.0', releasedAt: null,
         targets: [{ id: 'mac-arm64', os: 'mac', label: 'macOS', detail: 'Apple silicon',
-          filename: 'x.dmg', sizeBytes: 0,
-          url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/x.dmg' }],
+          filename: 'Cascade-AI-0.68.0-arm64.dmg', sizeBytes: 0,
+          url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v0.68.0/Cascade-AI-0.68.0-arm64.dmg' }],
       },
     }), 'utf8');
 
@@ -470,8 +494,8 @@ describe('DownloadResolver — authentication and the on-disk warm start', () =>
         releasedAt: null,
         releasesUrl: 'https://evil.example/releases',
         targets: [
-          { id: 'mac-arm64', os: 'mac', label: 'macOS', detail: 'Apple silicon', filename: 'x.dmg', sizeBytes: 1, url: 'https://evil.example/x.dmg' },
-          { id: 'win-x64', os: 'windows', label: 'Windows', detail: 'Installer', filename: 'y.exe', sizeBytes: 2, url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v9.9.9/y.exe' },
+          { id: 'mac-arm64', os: 'mac', label: 'macOS', detail: 'Apple silicon', filename: 'Cascade-AI-0.68.0-arm64.dmg', sizeBytes: 1, url: 'https://evil.example/x.dmg' },
+          { id: 'win-x64', os: 'windows', label: 'Windows', detail: 'Installer', filename: 'Cascade-AI-Setup-9.9.9.exe', sizeBytes: 2, url: 'https://github.com/Varun-SV/Cascade-AI/releases/download/v9.9.9/Cascade-AI-Setup-9.9.9.exe' },
         ],
       },
     }), 'utf8');

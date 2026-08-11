@@ -258,6 +258,14 @@ function parseStoredEntry(raw: unknown): CacheEntry | null {
     if (typeof t.filename !== 'string' || !t.filename) continue;
     if (typeof t.sizeBytes !== 'number' || !Number.isFinite(t.sizeBytes) || t.sizeBytes <= 0) continue;
     if (typeof t.url !== 'string' || !isTrustedAssetUrl(t.url)) continue;
+    // The filename has to still CLASSIFY as the target it claims to be. Each
+    // field was checked on its own, so an entry labelled `mac-arm64` whose
+    // filename was a Windows installer passed — its URL is a genuine GitHub
+    // one, and the metadata is rebuilt from the id — and the site would then
+    // offer that .exe to Mac visitors under a macOS label, with
+    // `/download/mac-arm64` redirecting to it. Re-deriving the id from the
+    // filename is the check that ties the two together.
+    if (classifyAsset(t.filename) !== t.id) continue;
     const meta = TARGET_META.find((candidate) => candidate.id === t.id);
     if (!meta) continue;
     targets.push({ ...meta, filename: t.filename, sizeBytes: t.sizeBytes, url: t.url });
