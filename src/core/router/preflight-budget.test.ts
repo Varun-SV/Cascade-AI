@@ -320,6 +320,33 @@ describe('preflight budget', () => {
     expect(size('A'.repeat(2_000))).toBe(size('A'.repeat(4_000_000)));
   });
 
+  it('books an abandoned stream attempt into SESSION accounting, not just the run', async () => {
+    // A hand-rolled version updated the two per-run totals and none of the
+    // rest, so the attempt vanished the moment beginRun() cleared those fields
+    // — and repeated stream fallbacks could walk past sessionBudgetUsd while
+    // the router still believed it was under.
+    const router = await makeRouter({ maxCostPerRunUsd: 100 });
+    const r = router as unknown as {
+      chargeUnreportedAttempt: (t: string, m: ModelInfo, o: unknown) => void;
+      sessionCostUsd: number;
+      runCostUsd: number;
+    };
+    r.chargeUnreportedAttempt('T3', PRICED, {
+      messages: [{ role: 'user', content: 'q'.repeat(40_000) }], maxTokens: 40,
+    });
+
+    expect(r.runCostUsd).toBeGreaterThan(0);
+    expect(r.sessionCostUsd).toBeGreaterThan(0);
+    expect(router.getStats().totalCostUsd).toBeGreaterThan(0);
+
+    // And it survives the next run starting, which is the part that made it
+    // disappear from reported spend before.
+    const session = r.sessionCostUsd;
+    router.beginRun();
+    expect(r.sessionCostUsd).toBe(session);
+    expect(r.runCostUsd).toBe(0);
+  });
+
   it('reports a preflight refusal the same way a post-hoc overrun is reported', async () => {
     // A worker that catches BudgetExceededError turns it into a FAILED result,
     // so the run-level flag is what tells the surfaces why.

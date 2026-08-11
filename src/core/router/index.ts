@@ -780,24 +780,36 @@ export class CascadeRouter extends EventEmitter {
           // first request may still be running and billable at the provider.
           // Aborting it properly means threading an AbortController through
           // every provider call, which is a wider change than this one.
+          // Set HERE, not on the fallback's success. The stream is already
+          // abandoned by this point and the provider will bill for it whatever
+          // happens next — gating the charge on the fallback completing meant a
+          // fallback that itself failed released both reservations and left the
+          // stream's spend uncounted, after which the failover path could
+          // submit yet another request against allowance already consumed.
+          const streamAbandoned = true;
           const releaseRetry = this.enforcePreflightBudget(model, options);
-          let keepRetryEstimate = false;
           try {
             result = await withTimeout(
               provider.generate(options),
               cloudTimeoutMs,
               `Model ${model.id} inference timed out after ${cloudTimeoutMs}ms`,
             );
+          } finally {
             // The abandoned attempt was accepted by the provider and is
             // billable, but no usage for it will ever arrive — recordStats sees
-            // only this fallback's response. Releasing both reservations would
-            // hand that spend back to the run as though it never happened, and
-            // a later call could then reuse an allowance that is already gone.
-            // Converting the estimate into recorded spend is the closest thing
-            // to the truth available without a usage report.
-            keepRetryEstimate = true;
-          } finally {
-            if (keepRetryEstimate) this.chargeUnreportedAttempt(model, options);
+            // only the fallback's response. Releasing its reservation without
+            // charging anything would hand that spend back as though it had not
+            // happened.
+            if (streamAbandoned) {
+              try {
+                this.chargeUnreportedAttempt(tier, model, options);
+              } catch {
+                // recordStats can trip the budget and throw. The flag it sets
+                // is what matters — the next call fails fast on it — and
+                // letting the throw escape a finally would replace whatever
+                // the fallback itself was reporting.
+              }
+            }
             releaseRetry?.();
           }
         }
@@ -1574,11 +1586,19 @@ export class CascadeRouter extends EventEmitter {
    * may still be running and billing; either way its usage never reaches
    * recordStats, and leaving it uncounted lets the run spend it twice.
    */
-  private chargeUnreportedAttempt(model: ModelInfo, options: GenerateOptions): void {
+  private chargeUnreportedAttempt(tier: TierRole, model: ModelInfo, options: GenerateOptions): void {
     const inputTokens = this.estimateInputTokens(options);
-    const { input: inputPer1k, unknown } = resolveModelPricing(model, { inputTokens });
-    this.runTokens += inputTokens;
-    if (!unknown && inputPer1k > 0) this.runCostUsd += (inputTokens / 1000) * inputPer1k;
+    // Booked through recordStats rather than by hand. A hand-rolled version
+    // updated the two per-RUN totals and none of the rest — not sessionCostUsd,
+    // not stats.totalCostUsd, not the session budget state — so the attempt
+    // vanished from reported spend the moment beginRun() cleared the run
+    // fields, and repeated stream fallbacks could walk past sessionBudgetUsd
+    // while the router still believed it was under. Going through the one
+    // function that owns this bookkeeping is what stops the two drifting again.
+    //
+    // Input only: the response was abandoned, so its output is not merely
+    // unknown but never arrived.
+    this.recordStats(tier, model, buildTokenUsage(inputTokens, 0, model), options.featureTag);
   }
 
   /** Trips the same run-level flag a post-hoc overrun does, and reports it the same way. */
