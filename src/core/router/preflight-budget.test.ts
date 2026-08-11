@@ -264,7 +264,7 @@ describe('preflight budget', () => {
 
     expect(size('速'.repeat(10_000))).toBeGreaterThanOrEqual(10_000);
     // ASCII is left exactly where it was — no inflation of ordinary prompts.
-    expect(size('a'.repeat(10_000))).toBe(2_500);
+    expect(size('a'.repeat(10_000))).toBe(2_504); // + one message's framing
   });
 
   it('counts an assistant turn\'s tool calls, which ride into the next request', async () => {
@@ -338,7 +338,7 @@ describe('preflight budget', () => {
       runBudgetExceeded: boolean;
       runBudgetExceededReason: string;
       reservedCostUsd: number;
-      tpmLimiter: { acquire: (p: string, n: number) => Promise<void> } | undefined;
+      tpmLimiter: { acquire: (p: string, n: number) => Promise<void>; refund: (p: string, n: number) => void } | undefined;
     };
     r.tierModels.set('T3', PRICED);
     let submitted = 0;
@@ -346,11 +346,13 @@ describe('preflight budget', () => {
       generate: async () => { submitted++; return { content: 'x', usage: { inputTokens: 1, outputTokens: 1 } }; },
     });
     // Stand in for a long wait: the sibling trips the ceiling while parked.
+    let refunded = 0;
     r.tpmLimiter = {
       acquire: async () => {
         r.runBudgetExceeded = true;
         r.runBudgetExceededReason = 'Per-task cost cap reached';
       },
+      refund: (_p: string, n: number) => { refunded += n; },
     };
 
     await expect(router.generate('T3', { messages: [{ role: 'user', content: 'hi' }] }))
@@ -358,6 +360,10 @@ describe('preflight budget', () => {
     expect(submitted).toBe(0);
     // …and it did not walk off with the allowance it had reserved.
     expect(r.reservedCostUsd).toBeCloseTo(0, 10);
+    // The rate-limit capacity goes back too: the bucket outlives beginRun(),
+    // so tokens deducted for a call that never submitted would throttle the
+    // next run for up to a refill interval.
+    expect(refunded).toBeGreaterThan(0);
   });
 
   it('bounds emoji by UTF-8 bytes, which a token can never span fewer of', async () => {
@@ -381,7 +387,7 @@ describe('preflight budget', () => {
     const family = '\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}';
     expect(size(family.repeat(1_000))).toBeGreaterThan(20_000);
     // ASCII is untouched: still four characters to the token.
-    expect(size('a'.repeat(10_000))).toBe(2_500);
+    expect(size('a'.repeat(10_000))).toBe(2_504); // + one message's framing
   });
 
   it('does not charge Anthropic for system history it never submits', async () => {
@@ -529,6 +535,81 @@ describe('preflight budget', () => {
       images: urls.map((u) => ({ ...u, type: 'base64', data: 'A'.repeat(100) })),
       maxTokens: 40,
     })).toThrow(/per-task cap/);
+  });
+
+  it('charges per-message framing, so a long history of short turns is not free', async () => {
+    // Every provider wraps each turn in role markers and template scaffolding.
+    // Without it a hundred one-character messages reserved about a token each.
+    const router = await makeRouter({ maxTokensPerRun: 1_000_000 });
+    const r = router as unknown as {
+      enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined;
+      reservedTokens: number;
+    };
+    const release = r.enforcePreflightBudget(PRICED, {
+      messages: Array.from({ length: 100 }, () => ({ role: 'user' as const, content: 'x' })),
+      maxTokens: 40,
+    });
+    const n = r.reservedTokens;
+    release!();
+    expect(n).toBeGreaterThanOrEqual(400);
+  });
+
+  it('counts a Gemini top-level image twice when it is attached twice', async () => {
+    // buildContents() attaches extraImages to the first content entry AND to
+    // the last user message, so with more than one user turn the provider
+    // submits — and bills — two copies of each.
+    const router = await makeRouter({ maxTokensPerRun: 1_000_000 });
+    const r = router as unknown as {
+      enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined;
+      reservedTokens: number;
+    };
+    const gemini = { ...PRICED, provider: 'gemini' } as ModelInfo;
+    const images = [{ type: 'base64', data: 'A'.repeat(100), mimeType: 'image/png' }];
+    const size = (turns: number) => {
+      const release = r.enforcePreflightBudget(gemini, {
+        messages: Array.from({ length: turns }, () => ({ role: 'user' as const, content: 'hi' })),
+        images,
+        maxTokens: 40,
+      });
+      const n = r.reservedTokens;
+      release!();
+      return n;
+    };
+    // Two user turns pay for two copies; one turn pays for one.
+    expect(size(2) - size(1)).toBeGreaterThanOrEqual(1_900);
+  });
+
+  it('sizes a Gemini tool schema as the provider will send it', async () => {
+    // Gemini strips $defs, $schema, additionalProperties and MCP vendor
+    // extensions before submitting. A large MCP schema is mostly that
+    // metadata, so charging the raw JSON refuses budgets over bytes the
+    // provider never sees.
+    const router = await makeRouter({ maxTokensPerRun: 1_000_000 });
+    const r = router as unknown as {
+      enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined;
+      reservedTokens: number;
+    };
+    const tools = [{
+      name: 'search',
+      description: 'find things',
+      inputSchema: {
+        type: 'object',
+        properties: { q: { type: 'string' } },
+        $schema: 'https://json-schema.org/draft/2020-12/schema',
+        additionalProperties: false,
+        $defs: { junk: { description: 'j'.repeat(40_000) } },
+      },
+    }];
+    const size = (model: ModelInfo) => {
+      const release = r.enforcePreflightBudget(model, {
+        messages: [{ role: 'user', content: 'go' }], tools, maxTokens: 40,
+      });
+      const n = r.reservedTokens;
+      release!();
+      return n;
+    };
+    const gemini = { ...PRICED, provider: 'gemini' } as ModelInfo;
+    expect(size(gemini)).toBeLessThan(size(PRICED) / 2);
   });
 
   it('reports a preflight refusal the same way a post-hoc overrun is reported', async () => {

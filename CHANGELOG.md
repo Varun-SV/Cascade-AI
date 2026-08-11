@@ -101,7 +101,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   top-level `images` option; and dense scripts —
   CJK and emoji cost about a token per character, where the
   four-characters-per-token rule used elsewhere underestimates them fourfold,
-  and an underestimate in an enforcement path is a cap that does not hold.
+  and an underestimate in an enforcement path is a cap that does not hold; and
+  the per-turn framing every provider wraps around a message, without which a
+  long history of short turns reserved about a token each.
+
+  Token-dense ASCII — base64, hashes, minified data — is knowingly left at the
+  prose rate. It tokenizes more densely than that, but the only cheap way to
+  spot it is whitespace ratio, which cannot tell a payload from a long URL, a
+  pasted code block, or a repeated character that compresses to almost
+  nothing. Raising the rate for all of them refuses runs that would have
+  completed. The residual under-count is caught by the post-call ceiling, as
+  it always was.
 
   Images are charged a flat rate rather than sized from their bytes. Providers
   bill from decoded dimensions, so byte length misleads in both directions: a

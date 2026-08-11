@@ -34,6 +34,7 @@ import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
 import { buildTokenUsage, resolveModelPricing } from '../../utils/cost.js';
 import { estimateTokens, contentToText } from '../context/compaction.js';
 import { withTimeout, withTimeoutAbort, CascadeCancelledError } from '../../utils/retry.js';
+import { toGeminiParameters } from '../../providers/gemini-schema.js';
 import { ModelProfiler } from './model-profiler.js';
 import type { MemoryStore } from '../../memory/store.js';
 import { computeDelegationSavings, type DelegationSavings } from './savings.js';
@@ -157,8 +158,32 @@ function safeJson(value: unknown): string {
  * in an enforcement path is a cap that silently does not hold. Taking the
  * larger of the two counts leaves ASCII exactly as it was.
  */
+/**
+ * Framing every provider adds around each turn — role markers, message
+ * delimiters, chat-template scaffolding. Four tokens a message is the figure
+ * OpenAI documents for its own format and the others are the same order.
+ * Without it a long history of short turns reserved about a token each while
+ * the provider billed several times that.
+ */
+const TOKENS_PER_MESSAGE_FRAMING = 4;
+
+/**
+ * ASCII is left at four characters per token, deliberately.
+ *
+ * Review raised that token-dense ASCII — base64, hashes, minified data —
+ * tokenizes closer to two or three characters per token, so this can
+ * under-count it. That is true, and it is not worth what correcting it costs:
+ * the only cheap discriminator is whitespace ratio, and it cannot tell a
+ * base64 blob from a long URL, a pasted code block, or a run of one repeated
+ * character (which compresses to almost nothing). Raising the rate for all of
+ * them inflates every large paste by more than half and refuses runs that
+ * would have completed — the failure this whole check is meant to avoid.
+ *
+ * The honest fix is a real tokenizer, not a better guess. Until then the
+ * residual is a bounded under-count on machine data, caught by the post-call
+ * ceiling as it always was.
+ */
 function guardTokens(text: string): number {
-  if (!text) return 0;
   // The bound for the non-ASCII part is its UTF-8 BYTE count, not its
   // character count. Production tokenizers are byte-level BPE, so a token can
   // never span fewer than one byte — bytes are a true ceiling, where "one
@@ -774,6 +799,11 @@ export class CascadeRouter extends EventEmitter {
       // wave, and most of the cap. Throwing inside the try releases both the
       // reservation and the queue slot on the way out.
       if (this.runBudgetExceeded) {
+        // Hand the rate-limit capacity back. acquire() already deducted it,
+        // and the bucket outlives beginRun() — keeping tokens that were never
+        // spent would throttle the NEXT run for up to a refill interval over a
+        // request that was never submitted.
+        this.tpmLimiter?.refund(model.provider, estimatedTokens);
         throw new CascadeRouter.BudgetExceededError(
           this.runBudgetExceededReason ?? 'Per-task budget exceeded.',
         );
@@ -1600,6 +1630,7 @@ export class CascadeRouter extends EventEmitter {
 
     for (const message of options.messages) {
       if (dropsSystemHistory && message.role === 'system') continue;
+      tokens += TOKENS_PER_MESSAGE_FRAMING;
       if (typeof message.content === 'string') {
         tokens += guardTokens(message.content);
       } else {
@@ -1620,7 +1651,18 @@ export class CascadeRouter extends EventEmitter {
 
     // Tool DEFINITIONS ride on every native-tool call — Anthropic and the rest
     // send each name, description and input schema in full.
-    if (options.tools?.length) tokens += guardTokens(safeJson(options.tools));
+    if (options.tools?.length) {
+      // Sized as the provider will actually send them. Gemini strips $defs,
+      // $schema, additionalProperties and MCP vendor extensions from every
+      // input schema before submitting, and a large MCP schema is mostly that
+      // metadata — charging the raw JSON refused budgets over bytes the
+      // provider never sees. Uses the provider's own sanitiser rather than a
+      // second implementation of it, so the two cannot drift.
+      const sized = model.provider === 'gemini'
+        ? options.tools.map((t) => ({ name: t.name, description: t.description, parameters: toGeminiParameters(t.inputSchema) }))
+        : options.tools;
+      tokens += guardTokens(safeJson(sized));
+    }
 
     // The top-level `images` field is read by GeminiProvider alone — every
     // other provider builds its request from `messages` and never looks at it.
@@ -1628,7 +1670,12 @@ export class CascadeRouter extends EventEmitter {
     // are not submitted, which refuses runs over input the provider never
     // sees; not counting it at all left Gemini's vision path unreserved.
     if (model.provider === 'gemini') {
-      images += (options.images ?? []).filter(countsImage).length;
+      const topLevel = (options.images ?? []).filter(countsImage).length;
+      // buildContents() attaches them to the FIRST content entry and again to
+      // the LAST user message, so with more than one user turn the provider
+      // submits — and bills — two copies of every one.
+      const userTurns = options.messages.filter((m) => m.role === 'user').length;
+      images += topLevel * (userTurns > 1 ? 2 : 1);
     }
     tokens += images * IMAGE_TOKENS_EACH;
 
