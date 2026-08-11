@@ -124,6 +124,101 @@ describe('preflight budget', () => {
     expect(() => preflight(router, PRICED, HUGE)).toThrow(/per-task cap of 1,000/);
   });
 
+  it('reserves an admitted call, so a parallel wave cannot all pass the same budget', async () => {
+    // The common case walks straight into this: T2 launches a T3 wave through
+    // Promise.allSettled, so every call reaches the check before any response
+    // has updated runCostUsd. Measuring against spent-so-far alone admitted all
+    // of them against the same untouched allowance.
+    const router = await makeRouter({ maxCostPerRunUsd: 0.10 });
+    const r = router as unknown as {
+      enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined;
+    };
+    const call = () => r.enforcePreflightBudget(PRICED, {
+      // ~$0.09 of input: fits a $0.10 cap once, not twice.
+      messages: [{ role: 'user', content: 'y'.repeat(120_000) }],
+      maxTokens: 40,
+    });
+
+    const first = call();          // admitted, and now holding its estimate
+    expect(first).toBeTypeOf('function');
+    expect(() => call()).toThrow(/remains/); // second sees the reservation
+
+    first!();                      // first call settles
+    expect(() => call()).not.toThrow(); // allowance is free again
+  });
+
+  it('releases a reservation exactly once, however many times it is called', async () => {
+    const router = await makeRouter({ maxCostPerRunUsd: 1.00 });
+    const r = router as unknown as {
+      enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined;
+      reservedCostUsd: number;
+    };
+    const release = r.enforcePreflightBudget(PRICED, {
+      messages: [{ role: 'user', content: 'z'.repeat(40_000) }], maxTokens: 40,
+    });
+    expect(r.reservedCostUsd).toBeGreaterThan(0);
+    release!();
+    release!();
+    release!();
+    expect(r.reservedCostUsd).toBeCloseTo(0, 10);
+  });
+
+  it('beginRun() clears a reservation left behind by a run that did not settle', async () => {
+    const router = await makeRouter({ maxCostPerRunUsd: 0.10 });
+    const r = router as unknown as {
+      enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined;
+      reservedCostUsd: number;
+    };
+    r.enforcePreflightBudget(PRICED, {
+      messages: [{ role: 'user', content: 'y'.repeat(120_000) }], maxTokens: 40,
+    });
+    router.beginRun();
+    expect(r.reservedCostUsd).toBe(0);
+  });
+
+  it('counts tool definitions, which the provider bills on every native-tool call', async () => {
+    const router = await makeRouter({ maxCostPerRunUsd: 0.0005 });
+    const r = router as unknown as { enforcePreflightBudget: (m: ModelInfo, o: unknown) => unknown };
+    const bigTool = {
+      name: 'search', description: 'd'.repeat(50_000),
+      inputSchema: { type: 'object', properties: {} },
+    };
+    // A two-word prompt, but a schema the provider serializes and charges for.
+    expect(() => r.enforcePreflightBudget(PRICED, {
+      messages: [{ role: 'user', content: 'find it' }],
+      tools: [bigTool],
+      maxTokens: 40,
+    })).toThrow(/would cost about/);
+  });
+
+  it('sizes an image by its bytes, not by the "[image]" placeholder', async () => {
+    const router = await makeRouter({ maxCostPerRunUsd: 0.0005 });
+    const r = router as unknown as { enforcePreflightBudget: (m: ModelInfo, o: unknown) => unknown };
+    expect(() => r.enforcePreflightBudget(PRICED, {
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'what is this?' },
+          { type: 'image', data: 'A'.repeat(4_000_000), mimeType: 'image/png' },
+        ],
+      }],
+      maxTokens: 40,
+    })).toThrow(/would cost about/);
+  });
+
+  it('still charges an image with no inline bytes something, not nothing', async () => {
+    const router = await makeRouter({ maxCostPerRunUsd: 1.0 });
+    const r = router as unknown as {
+      enforcePreflightBudget: (m: ModelInfo, o: unknown) => (() => void) | undefined;
+      reservedTokens: number;
+    };
+    r.enforcePreflightBudget(PRICED, {
+      messages: [{ role: 'user', content: [{ type: 'image', mimeType: 'image/png' }] }],
+      maxTokens: 40,
+    });
+    expect(r.reservedTokens).toBeGreaterThan(100);
+  });
+
   it('reports a preflight refusal the same way a post-hoc overrun is reported', async () => {
     // A worker that catches BudgetExceededError turns it into a FAILED result,
     // so the run-level flag is what tells the surfaces why.

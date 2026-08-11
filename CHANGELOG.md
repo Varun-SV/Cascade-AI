@@ -46,6 +46,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   moment a cap was set — leaving those to the post-hoc stop as before. And it
   does nothing at all when no cap is configured.
 
+  An admitted call HOLDS its estimate against the budget until it settles.
+  Checking against spent-so-far alone is a time-of-check/time-of-use hole that
+  the common case walks straight into: a T2 wave launches its T3 workers
+  concurrently, so every call reaches the check before any response has updated
+  the total. Each would see the same untouched allowance, all would be
+  admitted, and the run could bill several times the cap before the post-hoc
+  stop noticed.
+
+  The estimate also counts what the provider actually bills: serialized tool
+  definitions, which Anthropic and others send in full on every native-tool
+  call, and images by their byte size rather than as the seven-character
+  `[image]` placeholder they used to be flattened to.
+
+- **A long call is no longer priced at the short-call rate.** Several
+  long-context models charge more past a threshold — Gemini 3.1 Pro is $2 per
+  million input tokens up to 200K and $4 above it — and the pricing dataset
+  carries those bands. Nothing was passing the input size in to select one, so
+  the cheapest band was resolved unconditionally. That understated the preflight
+  estimate for exactly the large calls it exists to catch, and, because the same
+  function backs `buildTokenUsage`, it also understated the spend Cascade
+  reported for those calls after the fact.
+
 ## 0.72.0 - 2026-08-10
 
 ### Changed

@@ -106,6 +106,14 @@ export interface RouterStats {
 // key's real models is a one-time cost even though the hosted server creates a
 // fresh router per request. In-memory + TTL-bounded; only a hash of the key is
 // stored, never the key itself.
+/**
+ * Tokens charged for an image whose bytes we cannot see (a URL reference, or a
+ * block shaped differently than expected). Around what a mid-size photo costs
+ * on the common vision models — high enough that a budget check notices the
+ * image, low enough that one picture cannot refuse a run on its own.
+ */
+const IMAGE_TOKENS_FALLBACK = 1_500;
+
 const DISCOVERY_TTL_MS = 15 * 60 * 1000;
 const DISCOVERY_TIMEOUT_MS = 4_000;
 interface DiscoveryEntry { ids: string[]; models: ModelInfo[]; at: number }
@@ -172,6 +180,14 @@ export class CascadeRouter extends EventEmitter {
   // start of every `cascade run`, independent of the session-wide budget.
   private runTokens = 0;
   private runCostUsd = 0;
+  /**
+   * Budget held for calls that are IN FLIGHT — admitted by the preflight check
+   * but not yet counted by recordStats. Without these, concurrent calls all
+   * measure themselves against the same unspent allowance and are all admitted.
+   * Released when each call settles; reset by beginRun() alongside the totals.
+   */
+  private reservedTokens = 0;
+  private reservedCostUsd = 0;
   private runBudgetExceeded = false;
   private runBudgetExceededReason: string | undefined;
   /**
@@ -620,7 +636,11 @@ export class CascadeRouter extends EventEmitter {
     // Refuse a call whose INPUT alone cannot fit the remaining budget, before
     // spending it. Placed ahead of the TPM wait: there is no point queueing for
     // provider capacity on a call we are about to decline.
-    this.enforcePreflightBudget(model, options);
+    //
+    // Returns a release handle: the estimate is RESERVED against the budget
+    // until the call settles, so concurrent calls cannot each be admitted
+    // against the same unspent allowance.
+    let releaseReservation: (() => void) | undefined = this.enforcePreflightBudget(model, options);
 
     // Per-provider TPM guard: pause this call until the token bucket has
     // enough budget to cover the estimated input+output tokens. Prevents
@@ -687,11 +707,29 @@ export class CascadeRouter extends EventEmitter {
           }
           // Stream stalled or errored — fall back to a (also time-boxed)
           // non-streaming call rather than letting a hung stream freeze the run.
-          result = await withTimeout(
-            provider.generate(options),
-            cloudTimeoutMs,
-            `Model ${model.id} inference timed out after ${cloudTimeoutMs}ms`,
-          );
+          //
+          // This is a SECOND physical submission of the same input, and the
+          // provider bills it as one: the preflight above cleared the first
+          // attempt only. Re-checking here refuses a retry the remaining budget
+          // cannot afford instead of quietly doubling the input spend. The
+          // first attempt's reservation is still held, so this is measured
+          // against an allowance that already accounts for it.
+          //
+          // Note this does not make the double-spend disappear — `withTimeout`
+          // races the original promise rather than aborting it, so a timed-out
+          // first request may still be running and billable at the provider.
+          // Aborting it properly means threading an AbortController through
+          // every provider call, which is a wider change than this one.
+          const releaseRetry = this.enforcePreflightBudget(model, options);
+          try {
+            result = await withTimeout(
+              provider.generate(options),
+              cloudTimeoutMs,
+              `Model ${model.id} inference timed out after ${cloudTimeoutMs}ms`,
+            );
+          } finally {
+            releaseRetry?.();
+          }
         }
       } else {
         const cloudTimeoutMs = this.config.cloudInferenceTimeoutMs ?? 120_000;
@@ -756,6 +794,12 @@ export class CascadeRouter extends EventEmitter {
           // model (which may itself be local) can acquire its own slot.
           releaseLocalSlot?.();
           releaseLocalSlot = undefined;
+          // Same reasoning for the budget reservation: the retry re-runs the
+          // preflight and reserves for itself, so holding this one across it
+          // would charge the run twice for one logical call and could refuse a
+          // failover that fits.
+          releaseReservation?.();
+          releaseReservation = undefined;
           // Clear a per-subtask pin (Cascade Auto's explicit `options.model`)
           // that pointed at the now-rate-limited model — otherwise the
           // recursive call's `options.model ?? this.tierModels.get(tier)`
@@ -794,6 +838,12 @@ export class CascadeRouter extends EventEmitter {
           });
           releaseLocalSlot?.();
           releaseLocalSlot = undefined;
+          // Same reasoning for the budget reservation: the retry re-runs the
+          // preflight and reserves for itself, so holding this one across it
+          // would charge the run twice for one logical call and could refuse a
+          // failover that fits.
+          releaseReservation?.();
+          releaseReservation = undefined;
           // Clear a per-subtask override that pointed at the dead model so the
           // recursive call resolves the tier's next-best model, and carry the
           // depth so the chain is bounded.
@@ -807,6 +857,11 @@ export class CascadeRouter extends EventEmitter {
       throw err;
     } finally {
       releaseLocalSlot?.();
+      // Actual usage has been recorded by now (recordStats on the success
+      // path), so the reservation must go or it would double-count against
+      // every later call in the run.
+      releaseReservation?.();
+      releaseReservation = undefined;
     }
   }
 
@@ -1294,6 +1349,11 @@ export class CascadeRouter extends EventEmitter {
   beginRun(): void {
     this.runTokens = 0;
     this.runCostUsd = 0;
+    // A run that ended mid-flight (cancelled, crashed) can leave a reservation
+    // behind; starting the next one with it still held would shrink that run's
+    // allowance for no reason.
+    this.reservedTokens = 0;
+    this.reservedCostUsd = 0;
     this.runBudgetExceeded = false;
     this.runBudgetExceededReason = undefined;
   }
@@ -1327,17 +1387,20 @@ export class CascadeRouter extends EventEmitter {
    * The message names the cap AND the estimate, because "too expensive" with
    * no numbers gives the user nothing to change.
    */
-  private enforcePreflightBudget(model: ModelInfo, options: GenerateOptions): void {
+  private enforcePreflightBudget(
+    model: ModelInfo,
+    options: GenerateOptions,
+  ): (() => void) | undefined {
     const budget = this.config?.budget;
     const maxCost = budget?.maxCostPerRunUsd;
     const maxTokens = budget?.maxTokensPerRun;
-    if (maxCost == null && maxTokens == null) return;
+    if (maxCost == null && maxTokens == null) return undefined;
 
-    const inputTokens =
-      messagesTokens(options.messages) + estimateTokens(options.systemPrompt ?? '');
+    const inputTokens = this.estimateInputTokens(options);
 
     if (maxTokens != null) {
-      const remaining = maxTokens - this.runTokens;
+      // Against spent AND reserved — see the reservation note below.
+      const remaining = maxTokens - this.runTokens - this.reservedTokens;
       if (inputTokens > remaining) {
         this.failPreflight(
           `This request's input is about ${inputTokens.toLocaleString()} tokens, but only `
@@ -1348,21 +1411,87 @@ export class CascadeRouter extends EventEmitter {
       }
     }
 
+    let estimatedUsd = 0;
     if (maxCost != null) {
-      const { input: inputPer1k, unknown } = resolveModelPricing(model);
-      if (unknown || inputPer1k <= 0) return;
-      const estimatedUsd = (inputTokens / 1000) * inputPer1k;
-      const remaining = maxCost - this.runCostUsd;
-      if (estimatedUsd > remaining) {
-        this.failPreflight(
-          `Sending this request to ${model.provider}:${model.id} would cost about `
-          + `$${estimatedUsd.toFixed(4)} in input alone (~${inputTokens.toLocaleString()} tokens), `
-          + `and only $${Math.max(0, remaining).toFixed(4)} of the per-task cap of `
-          + `$${maxCost.toFixed(4)} remains. Shorten the input, choose a cheaper model, `
-          + 'or raise budget.maxCostPerRunUsd.',
-        );
+      // Priced at the CONTEXT BAND this input lands in. Several long-context
+      // models charge more past a threshold, and resolving the cheapest band
+      // unconditionally under-estimated exactly the large calls this check
+      // exists to catch.
+      const { input: inputPer1k, unknown } = resolveModelPricing(model, { inputTokens });
+      if (!unknown && inputPer1k > 0) {
+        estimatedUsd = (inputTokens / 1000) * inputPer1k;
+        const remaining = maxCost - this.runCostUsd - this.reservedCostUsd;
+        if (estimatedUsd > remaining) {
+          this.failPreflight(
+            `Sending this request to ${model.provider}:${model.id} would cost about `
+            + `$${estimatedUsd.toFixed(4)} in input alone (~${inputTokens.toLocaleString()} tokens), `
+            + `and only $${Math.max(0, remaining).toFixed(4)} of the per-task cap of `
+            + `$${maxCost.toFixed(4)} remains. Shorten the input, choose a cheaper model, `
+            + 'or raise budget.maxCostPerRunUsd.',
+          );
+        }
       }
     }
+
+    // ── Reserve until this call settles ──
+    //
+    // Checking against spent-so-far alone is a time-of-check/time-of-use hole
+    // the common case walks straight into: T2 launches a T3 wave through
+    // Promise.allSettled, so every call in it reaches this check before any
+    // response has updated runCostUsd. Each would see the same untouched
+    // allowance, all would be admitted, and the run would bill several times
+    // the cap before the post-hoc stop noticed. Holding the estimate against
+    // the budget for the duration of the call makes the wave queue behind
+    // itself instead.
+    this.reservedTokens += inputTokens;
+    this.reservedCostUsd += estimatedUsd;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.reservedTokens -= inputTokens;
+      this.reservedCostUsd -= estimatedUsd;
+    };
+  }
+
+  /**
+   * What this call will send, in tokens.
+   *
+   * Text is the bulk of it, but not all of it: providers bill the serialized
+   * TOOL DEFINITIONS on every native-tool call (Anthropic sends each name,
+   * description and input schema), and an image is billed by its own size
+   * rather than as the `[image]` placeholder `contentToText` reduces it to. A
+   * tool-heavy or vision request could therefore pass either cap while its real
+   * input already exceeded the allowance.
+   */
+  private estimateInputTokens(options: GenerateOptions): number {
+    let tokens = messagesTokens(options.messages) + estimateTokens(options.systemPrompt ?? '');
+
+    if (options.tools?.length) {
+      try {
+        tokens += estimateTokens(JSON.stringify(options.tools));
+      } catch {
+        // A schema that will not serialize is not one we can size; the text
+        // total still stands.
+      }
+    }
+
+    for (const message of options.messages) {
+      if (typeof message.content === 'string') continue;
+      for (const block of message.content) {
+        if (block.type !== 'image') continue;
+        // Base64 carries ~3 bytes per 4 characters, and vision models bill
+        // roughly a token per 750 image bytes at common resolutions. Rough on
+        // purpose — the alternative was counting an image as the 7 characters
+        // of "[image]", which is wrong by three orders of magnitude.
+        const data = (block as { data?: unknown }).data;
+        tokens += typeof data === 'string' && data.length > 0
+          ? Math.ceil((data.length * 0.75) / 750)
+          : IMAGE_TOKENS_FALLBACK;
+      }
+    }
+
+    return tokens;
   }
 
   /** Trips the same run-level flag a post-hoc overrun does, and reports it the same way. */

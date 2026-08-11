@@ -35,8 +35,18 @@ export interface ResolvedPricing {
  * discovered preview model used to fall through to 0 here and be reported as
  * free; it now reports as untracked so the number on screen is honest and the
  * budget code knows its total is an undercount.
+ *
+ * `opts.inputTokens` selects the CONTEXT BAND where a model has one. Several
+ * long-context models charge more past a threshold — Gemini 3.1 Pro is $2/M up
+ * to 200K input and $4/M above it — and the dataset carries those bands
+ * (pricing.ts `tierFor`). Omitting the size resolved the cheapest band
+ * unconditionally, so a long call was both estimated and BILLED at half rate in
+ * our own accounting.
  */
-export function resolveModelPricing(model: ModelInfo): ResolvedPricing {
+export function resolveModelPricing(
+  model: ModelInfo,
+  opts: { inputTokens?: number } = {},
+): ResolvedPricing {
   if (model.isLocal) return { input: 0, output: 0, unknown: false };
 
   if (model.inputCostPer1kTokens > 0 || model.outputCostPer1kTokens > 0) {
@@ -47,7 +57,7 @@ export function resolveModelPricing(model: ModelInfo): ResolvedPricing {
     };
   }
 
-  const fromDataset = resolvePricing(model);
+  const fromDataset = resolvePricing(model, { inputTokens: opts.inputTokens });
   if (!fromDataset.unknown) {
     return {
       input: fromDataset.input,
@@ -78,7 +88,9 @@ export function calculateCost(
   outputTokens: number,
   model: ModelInfo,
 ): number {
-  const { input, output } = resolveModelPricing(model);
+  // Same band selection as buildTokenUsage — these two must not disagree about
+  // what a call costs.
+  const { input, output } = resolveModelPricing(model, { inputTokens });
   return (inputTokens / 1000) * input + (outputTokens / 1000) * output;
 }
 
@@ -87,7 +99,8 @@ export function buildTokenUsage(
   outputTokens: number,
   model: ModelInfo,
 ): TokenUsage {
-  const { input, output, unknown } = resolveModelPricing(model);
+  // Priced at the band this call's input actually lands in, not the cheapest.
+  const { input, output, unknown } = resolveModelPricing(model, { inputTokens });
   return {
     inputTokens,
     outputTokens,
