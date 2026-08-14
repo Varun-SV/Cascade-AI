@@ -79,6 +79,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   send a request. `CLAUDE_CONFIG_DIR` is honoured when locating Claude Code's
   store.
 
+  Azure is the exception: a key alone cannot configure it — without a deployment
+  name it resolves to no model at all, and without an endpoint the client falls
+  back to a placeholder URL — so it is adopted only when `AZURE_OPENAI_ENDPOINT`
+  and `AZURE_OPENAI_DEPLOYMENT` came with it, and the warning names whichever is
+  missing. The same guard now applies to the environment injection that would
+  otherwise create a routing-less Azure entry, mark the install "configured",
+  skip onboarding, and fail later with "No model available for tier".
+
+  Linking an Azure key also no longer collapses a multi-deployment setup. Azure
+  is configured one entry per deployment, and adoption replaced every entry of a
+  type with a single one — deleting the other deployments' names, endpoints and
+  keys, from the global credential store as well. The key is filled into the
+  deployments that are already there instead.
+
   Those services are linkable by name — `cascade link groq` — and the one you
   name is the one you get. They share a single provider type, so every one of
   them is reported rather than just the first, and matching on type alone would

@@ -137,6 +137,26 @@ async function adoptCredential(cred: DiscoveredCredential, workspace: string): P
   await cm.load();
   const config = cm.getConfig();
 
+  // Azure is configured one entry PER DEPLOYMENT — `init()` maps each to its
+  // own model, and the deployment name IS the model id. Collapsing them to a
+  // single entry, as the replace-by-type path below does, would delete every
+  // other deployment's name, endpoint and key, and the save is authoritative
+  // for the global credential store, so they would not come back. A key is not
+  // a reason to forget a user's topology: fill it into the deployments that
+  // are already there and leave everything else alone.
+  const azureDeployments = cred.provider === 'azure'
+    ? config.providers.filter((p) => p.type === 'azure' && p.deploymentName?.trim())
+    : [];
+  if (azureDeployments.length > 0) {
+    const providers = config.providers.map((p) => (
+      p.type === 'azure' && p.deploymentName?.trim()
+        ? { ...p, apiKey: cred.secret, credentialSource: cred.sourceTool }
+        : p
+    ));
+    await cm.updateConfig({ providers });
+    return;
+  }
+
   // Build ON TOP of whatever is already configured for this provider. The
   // entry is replaced wholesale below, so starting from scratch discarded
   // every non-credential field the user had set — `baseUrl` above all. That
@@ -165,6 +185,10 @@ async function adoptCredential(cred: DiscoveredCredential, workspace: string): P
   // A discovered endpoint wins over a configured one — it is the endpoint this
   // particular key belongs to. Without one, whatever was already there stands.
   if (cred.baseUrl) next.baseUrl = cred.baseUrl;
+  // Azure's routing is as required as its key; discovery only reports the
+  // credential as usable when it carried both.
+  if (cred.deploymentName) next.deploymentName = cred.deploymentName;
+  if (cred.apiVersion) next.apiVersion = cred.apiVersion;
 
   const providers = config.providers.filter((p) => p.type !== cred.provider);
   providers.push(next);

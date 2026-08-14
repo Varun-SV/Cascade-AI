@@ -14,6 +14,7 @@ const ENV_KEYS = [
   'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY',
   'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'AZURE_OPENAI_KEY',
   'OPENROUTER_API_KEY', 'GROQ_API_KEY', 'DEEPSEEK_API_KEY',
+  'AZURE_OPENAI_ENDPOINT', 'AZURE_OPENAI_DEPLOYMENT', 'AZURE_OPENAI_API_VERSION',
   // HOME is redirected per test. linkCommand constructs its own ConfigManager,
   // which reads AND WRITES the machine-global credential store under the real
   // home — so without this the suite both leaked adopted state between tests
@@ -99,6 +100,51 @@ describe('cascade link — adoption', () => {
     const compatible = (await providersAfterLink('deepseek')).find((p) => p['type'] === 'openai-compatible');
     expect(compatible?.['apiKey']).toBe('ds-key');
     expect(compatible?.['baseUrl']).toBe('https://api.deepseek.com/v1');
+  });
+
+  it('fills an Azure key into EVERY deployment without collapsing them', async () => {
+    // Azure is configured one entry per deployment — the deployment name is the
+    // model id. Replacing by provider type deleted every deployment but one,
+    // and the save is authoritative for the global credential store, so they
+    // would not come back.
+    await seedConfig([
+      { type: 'azure', deploymentName: 'gpt-5-prod', baseUrl: 'https://prod.openai.azure.com' },
+      { type: 'azure', deploymentName: 'gpt-5-mini-dev', baseUrl: 'https://dev.openai.azure.com' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'az-key';
+    process.env['AZURE_OPENAI_ENDPOINT'] = 'https://acme.openai.azure.com';
+    process.env['AZURE_OPENAI_DEPLOYMENT'] = 'whatever';
+
+    const azure = (await providersAfterLink('azure')).filter((p) => p['type'] === 'azure');
+    expect(azure).toHaveLength(2);
+    expect(azure.map((p) => p['deploymentName'])).toEqual(['gpt-5-prod', 'gpt-5-mini-dev']);
+    // Each keeps its own endpoint, and each gets the key.
+    expect(azure.map((p) => p['baseUrl']))
+      .toEqual(['https://prod.openai.azure.com', 'https://dev.openai.azure.com']);
+    expect(azure.every((p) => p['apiKey'] === 'az-key')).toBe(true);
+  });
+
+  it('refuses an Azure key with no routing anywhere', async () => {
+    // Neither `cascade link` nor the environment injection may conjure an
+    // Azure provider from a key: it would resolve to no model, while making
+    // hasUsableProvider() true and skipping onboarding.
+    process.env['AZURE_OPENAI_KEY'] = 'az-key';
+    const azure = (await providersAfterLink('azure')).filter((p) => p['type'] === 'azure');
+    expect(azure).toHaveLength(0);
+  });
+
+  it('creates one Azure provider when the environment carries full routing', async () => {
+    process.env['AZURE_OPENAI_KEY'] = 'az-key';
+    process.env['AZURE_OPENAI_ENDPOINT'] = 'https://acme.openai.azure.com';
+    process.env['AZURE_OPENAI_DEPLOYMENT'] = 'gpt-5-prod';
+
+    const azure = (await providersAfterLink('azure')).filter((p) => p['type'] === 'azure');
+    expect(azure).toHaveLength(1);
+    expect(azure[0]).toMatchObject({
+      apiKey: 'az-key',
+      baseUrl: 'https://acme.openai.azure.com',
+      deploymentName: 'gpt-5-prod',
+    });
   });
 
   it('refuses a Claude Code subscription token even with --accept-risk', async () => {

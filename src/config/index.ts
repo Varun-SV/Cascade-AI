@@ -351,6 +351,26 @@ export class ConfigManager {
       const existing = this.config.providers.find((p) => p.type === type);
 
       if (!existing && wasEmpty) {
+        // Azure cannot be configured by a key alone. Without a deployment name
+        // it resolves to no model at all (azureModelForDeployment returns
+        // null), and without an endpoint the client falls back to a literal
+        // `YOUR_RESOURCE` placeholder URL. Creating the entry regardless made
+        // hasUsableProvider() true, so onboarding was skipped and the run
+        // failed later with "No model available for tier" — exactly the
+        // misdirection this area keeps producing. Filling the key into a
+        // deployment the user HAS configured is the branch below, unaffected.
+        if (type === 'azure') {
+          const endpoint = process.env['AZURE_OPENAI_ENDPOINT'];
+          const deploymentName = process.env['AZURE_OPENAI_DEPLOYMENT']
+            ?? process.env['AZURE_OPENAI_DEPLOYMENT_NAME'];
+          if (!endpoint || !deploymentName) continue;
+          const apiVersion = process.env['AZURE_OPENAI_API_VERSION'];
+          this.config.providers.push({
+            type, apiKey: key, baseUrl: endpoint, deploymentName,
+            ...(apiVersion ? { apiVersion } : {}),
+          });
+          continue;
+        }
         this.config.providers.push({ type, apiKey: key });
       } else if (existing && !existing.apiKey) {
         existing.apiKey = key;

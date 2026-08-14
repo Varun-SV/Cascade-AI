@@ -116,6 +116,46 @@ describe('discoverCredentials', () => {
       .toBe('https://api.deepseek.com/v1');
   });
 
+  it('refuses an Azure key that arrives without its routing', async () => {
+    // Without a deployment name azureModelForDeployment() returns null, so the
+    // provider can offer no model; without an endpoint the client falls back to
+    // a literal YOUR_RESOURCE placeholder URL. A key alone configures nothing.
+    const found = await discoverCredentials({ homeDir: home, env: { AZURE_OPENAI_KEY: 'az-key' } });
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ provider: 'azure', directlyUsable: false });
+    expect(found[0]!.warning).toMatch(/AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_DEPLOYMENT/);
+  });
+
+  it('accepts an Azure key that arrives WITH its routing', async () => {
+    const found = await discoverCredentials({
+      homeDir: home,
+      env: {
+        AZURE_OPENAI_KEY: 'az-key',
+        AZURE_OPENAI_ENDPOINT: 'https://acme.openai.azure.com',
+        AZURE_OPENAI_DEPLOYMENT: 'gpt-5-prod',
+        AZURE_OPENAI_API_VERSION: '2025-01-01',
+      },
+    });
+    expect(found[0]).toMatchObject({
+      provider: 'azure',
+      directlyUsable: true,
+      baseUrl: 'https://acme.openai.azure.com',
+      deploymentName: 'gpt-5-prod',
+      apiVersion: '2025-01-01',
+    });
+    expect(found[0]!.warning).toBeUndefined();
+  });
+
+  it('names only the routing that is actually missing', async () => {
+    const found = await discoverCredentials({
+      homeDir: home,
+      env: { AZURE_OPENAI_KEY: 'az-key', AZURE_OPENAI_ENDPOINT: 'https://acme.openai.azure.com' },
+    });
+    expect(found[0]!.directlyUsable).toBe(false);
+    expect(found[0]!.warning).toContain('AZURE_OPENAI_DEPLOYMENT');
+    expect(found[0]!.warning).not.toContain('AZURE_OPENAI_ENDPOINT');
+  });
+
   it('detects a Codex API key as directly usable but a ChatGPT OAuth token as not', async () => {
     await write('.codex/auth.json', { OPENAI_API_KEY: 'sk-proj-abc' });
     const keyFound = await discoverCredentials({ homeDir: home, env: {} });

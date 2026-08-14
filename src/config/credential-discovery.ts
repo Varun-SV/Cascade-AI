@@ -53,6 +53,9 @@ export interface DiscoveredCredential {
    * pick the Groq key rather than whichever one happened to be found first.
    */
   serviceId?: string;
+  /** Azure routing, which is as required as the key itself. */
+  deploymentName?: string;
+  apiVersion?: string;
   /** ToS / gray-area note shown before adoption. */
   warning?: string;
   /** File the credential came from (path only — never the secret). */
@@ -135,7 +138,6 @@ function fromEnv(env: NodeJS.ProcessEnv): DiscoveredCredential[] {
     { env: 'OPENAI_API_KEY', provider: 'openai' },
     { env: 'GEMINI_API_KEY', provider: 'gemini' },
     { env: 'GOOGLE_API_KEY', provider: 'gemini' },
-    { env: 'AZURE_OPENAI_KEY', provider: 'azure' },
   ];
   const out: DiscoveredCredential[] = [];
   const seen = new Set<ProviderType>();
@@ -158,6 +160,36 @@ function fromEnv(env: NodeJS.ProcessEnv): DiscoveredCredential[] {
       kind: 'oauth',
       secret: authToken,
       directlyUsable: true,
+    });
+  }
+
+  // Azure is the one provider a key alone cannot configure. Without a
+  // deployment name azureModelForDeployment() returns null, so the provider can
+  // offer no model at all; without an endpoint the client falls back to a
+  // literal `YOUR_RESOURCE` placeholder URL. Reporting the key as usable would
+  // configure precisely the non-working provider every other branch here
+  // refuses to create — so it is only usable when its routing came with it.
+  const azureKey = str(env['AZURE_OPENAI_KEY']) ?? str(env['AZURE_OPENAI_API_KEY']);
+  if (azureKey) {
+    const endpoint = str(env['AZURE_OPENAI_ENDPOINT']);
+    const deployment = str(env['AZURE_OPENAI_DEPLOYMENT']) ?? str(env['AZURE_OPENAI_DEPLOYMENT_NAME']);
+    const apiVersion = str(env['AZURE_OPENAI_API_VERSION']);
+    const missing = [
+      !endpoint && 'AZURE_OPENAI_ENDPOINT',
+      !deployment && 'AZURE_OPENAI_DEPLOYMENT',
+    ].filter((x): x is string => typeof x === 'string');
+    out.push({
+      provider: 'azure',
+      sourceTool: 'Environment (AZURE_OPENAI_KEY)',
+      kind: 'api-key',
+      secret: azureKey,
+      directlyUsable: missing.length === 0,
+      ...(endpoint ? { baseUrl: endpoint } : {}),
+      ...(deployment ? { deploymentName: deployment } : {}),
+      ...(apiVersion ? { apiVersion } : {}),
+      ...(missing.length
+        ? { warning: `Azure also needs ${missing.join(' and ')} — a key alone cannot address a deployment.` }
+        : {}),
     });
   }
 
