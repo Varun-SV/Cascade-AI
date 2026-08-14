@@ -69,7 +69,7 @@ function mapProvider(id: string): { type: string | null; baseUrl?: string } {
 // ─── Backend ─────────────────────────────────────────────────────────────────
 // Resolve the cascade-ai core package (built CommonJS output). In dev it lives at
 // the repo's ../dist; in a packaged app it's bundled under resources/cascade-core.
-function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined) => boolean; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response> } {
+function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined) => boolean; applyProviderApiKey: (providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>, type: string, apiKey: string, extra?: { baseUrl?: string }) => void; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response> } {
   // Dev: the repo's external-deps build (node_modules resolves the requires).
   // Packaged: the self-contained `desktop-core.cjs` bundle (no node_modules to
   // resolve from — every JS dep is bundled in; only native modules like
@@ -440,8 +440,9 @@ function registerIPC(): void {
       if (type && (cfg.apiKey || keyOptional) && cascadeConfig && configManager) {
         if (!Array.isArray(cascadeConfig.providers)) cascadeConfig.providers = [];
         const existing = cascadeConfig.providers.find((p: { type: string }) => p.type === type);
-        if (existing) {
-          existing.apiKey = cfg.apiKey;
+        if (existing && cfg.apiKey) {
+          loadCore().applyProviderApiKey(cascadeConfig.providers, type, cfg.apiKey, { baseUrl });
+        } else if (existing) {
           if (baseUrl) existing.baseUrl = baseUrl;
         } else {
           cascadeConfig.providers.push({
@@ -624,9 +625,7 @@ function registerIPC(): void {
       if (data.keys) {
         for (const [type, apiKey] of Object.entries(data.keys)) {
           if (!apiKey) continue; // blank means "keep the existing key"
-          const existing = cascadeConfig.providers.find((p: { type: string }) => p.type === type);
-          if (existing) existing.apiKey = apiKey;
-          else cascadeConfig.providers.push({ type, apiKey });
+          loadCore().applyProviderApiKey(cascadeConfig.providers, type, apiKey);
         }
       }
       if (data.endpoints) {

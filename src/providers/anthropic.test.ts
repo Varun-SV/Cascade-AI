@@ -84,3 +84,48 @@ describe('AnthropicProvider — gateway routing', () => {
     expect(baseUrlOf(provider)).toContain('api.anthropic.com');
   });
 });
+
+describe('AnthropicProvider.listModels — follows the configured endpoint', () => {
+  it('asks the gateway, not api.anthropic.com, and does not leak the key there', async () => {
+    // It used to hardcode the public host with x-api-key, so a gateway
+    // deployment sent the GATEWAY'S key to a host that was never meant to see
+    // it, and replaced the gateway's catalogue with the public one.
+    fetchSpy.mockResolvedValue(
+      new Response(JSON.stringify({ data: [{ id: 'gw-model', display_name: 'GW' }] }), { status: 200 }),
+    );
+    const provider = new AnthropicProvider(
+      { type: 'anthropic', apiKey: 'gateway-key', baseUrl: 'https://gateway.internal' },
+      undefined as never,
+    );
+    await provider.listModels();
+
+    const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('https://gateway.internal/v1/models');
+    expect((init.headers as Record<string, string>)['x-api-key']).toBe('gateway-key');
+  });
+
+  it('authenticates discovery the same way generation does', async () => {
+    // With a bearer token it previously sent an empty x-api-key and always
+    // fell through to the bundled catalogue.
+    fetchSpy.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    const provider = new AnthropicProvider(
+      { type: 'anthropic', authToken: 'gw-token', baseUrl: 'https://gateway.internal' },
+      undefined as never,
+    );
+    await provider.listModels();
+
+    const headers = (fetchSpy.mock.calls[0] as unknown as [string, RequestInit])[1]
+      .headers as Record<string, string>;
+    expect(headers['authorization']).toBe('Bearer gw-token');
+    expect(headers['anthropic-beta']).toBe('oauth-2025-04-20');
+    expect(headers['x-api-key']).toBeUndefined();
+  });
+
+  it('still uses the public endpoint when no gateway is configured', async () => {
+    fetchSpy.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    const provider = new AnthropicProvider({ type: 'anthropic', apiKey: 'k' }, undefined as never);
+    await provider.listModels();
+    expect((fetchSpy.mock.calls[0] as unknown as [string])[0])
+      .toBe('https://api.anthropic.com/v1/models');
+  });
+});

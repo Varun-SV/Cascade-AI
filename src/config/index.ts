@@ -48,6 +48,31 @@ export function hasUsableProvider(
   return providers.some((p) => KEY_OPTIONAL_PROVIDER_TYPES.has(p.type) || !!p.apiKey || !!p.authToken);
 }
 
+/**
+ * Write a provider's API key, clearing any bearer token it replaces.
+ *
+ * `AnthropicProvider` reads `authToken` in preference to `apiKey` whenever both
+ * are set, so a settings save that wrote only the key left the key the user had
+ * just typed silently unused — and from the UI that is indistinguishable from
+ * the save having failed. Every place a key is written from user input goes
+ * through here, because this was got wrong independently in three of them.
+ */
+export function applyProviderApiKey(
+  providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>,
+  type: string,
+  apiKey: string,
+  extra: { baseUrl?: string } = {},
+): void {
+  const existing = providers.find((p) => p.type === type);
+  if (existing) {
+    existing.apiKey = apiKey;
+    existing.authToken = undefined;
+    if (extra.baseUrl) existing.baseUrl = extra.baseUrl;
+    return;
+  }
+  providers.push({ type, apiKey, ...(extra.baseUrl ? { baseUrl: extra.baseUrl } : {}) });
+}
+
 export class ConfigManager {
   private config!: CascadeConfig;
   private keystore!: Keystore;

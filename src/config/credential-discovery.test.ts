@@ -75,7 +75,10 @@ describe('discoverCredentials', () => {
     // issued by a gateway the user points Cascade at, and it is supported.
     const found = await discoverCredentials({ homeDir: home, env: { ANTHROPIC_AUTH_TOKEN: 'gw-token' } });
     expect(found).toHaveLength(1);
-    expect(found[0]).toMatchObject({ provider: 'anthropic', kind: 'oauth', directlyUsable: true });
+    // 'bearer', NOT 'oauth'. Classifying it as a subscription token sent the
+    // documented `cascade link anthropic` down the risk-gate path and refused
+    // to persist a credential Anthropic explicitly supports.
+    expect(found[0]).toMatchObject({ provider: 'anthropic', kind: 'bearer', directlyUsable: true });
   });
 
   it('prefers a real API key over the gateway token when both are set', async () => {

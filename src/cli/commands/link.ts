@@ -67,7 +67,18 @@ export async function linkCommand(target: string | undefined, options: LinkOptio
     return;
   }
 
-  if (!chosen.directlyUsable) {
+  // Azure's routing can come from the workspace instead of the environment.
+  // Discovery only sees env vars, so a key exported beside deployments that
+  // are ALREADY fully configured looked unusable — and bailing here made the
+  // fill-into-existing-deployments path below reachable only by re-exporting
+  // routing the config already had.
+  const cm = new ConfigManager(options.workspace ?? process.cwd());
+  await cm.load();
+  const routedByConfig = provider === 'azure'
+    && cm.getConfig().providers.some((p) => p.type === 'azure'
+      && p.deploymentName?.trim() && p.baseUrl?.trim());
+
+  if (!chosen.directlyUsable && !routedByConfig) {
     console.log(chalk.yellow(`\n  Found a ${chosen.sourceTool} credential, but it can't be used against the standard ${provider} API.`));
     if (chosen.warning) console.log(chalk.gray(`  ${chosen.warning}`));
     console.log(chalk.gray('  Cascade won\'t adopt it because it would create a non-working provider.\n'));
@@ -84,10 +95,10 @@ export async function linkCommand(target: string | undefined, options: LinkOptio
     return;
   }
 
-  await adoptCredential(chosen, options.workspace ?? process.cwd());
+  await adoptCredential(chosen, cm);
   console.log(chalk.green(`\n  ✓ Linked ${provider} using your ${chosen.sourceTool} credential (${maskSecret(chosen.secret)}).`));
-  if (chosen.kind === 'oauth') {
-    console.log(chalk.gray('  Adopted as an OAuth bearer token — revoke it in the source tool to disable.'));
+  if (chosen.kind === 'bearer') {
+    console.log(chalk.gray('  Adopted as a bearer token — set `baseUrl` to the gateway that issued it.'));
   }
   console.log(chalk.gray('  Run `cascade doctor` to verify, or `cascade` to start.\n'));
 }
@@ -96,13 +107,15 @@ function printDiscovered(found: DiscoveredCredential[]): void {
   console.log(chalk.magenta('\n  ◈ Detected credentials\n'));
   for (const c of found) {
     const usable = c.directlyUsable ? chalk.green('usable') : chalk.yellow('needs vendor backend');
-    const kind = c.kind === 'oauth' ? chalk.yellow('oauth') : chalk.gray('api-key');
+    const kind = c.kind === 'oauth' ? chalk.yellow('subscription')
+      : c.kind === 'bearer' ? chalk.cyan('bearer')
+      : chalk.gray('api-key');
     console.log(`  ${chalk.white(c.provider.padEnd(18))} ${chalk.gray(maskSecret(c.secret).padEnd(12))} ${kind}  ${usable}`);
     console.log(chalk.gray(`    from ${c.sourceTool}`));
     if (c.warning) console.log(chalk.yellow(`    ⚠ ${c.warning}`));
   }
-  console.log(chalk.gray('\n  Adopt one with:  ') + chalk.cyan('cascade link <provider> [--accept-risk]'));
-  console.log(chalk.gray('  --accept-risk is required for subscription OAuth tokens.\n'));
+  console.log(chalk.gray('\n  Adopt one with:  ') + chalk.cyan('cascade link <provider>'));
+  console.log(chalk.gray('  Subscription tokens are listed for visibility and cannot be adopted.\n'));
 }
 
 /** The env var that would configure this provider the supported way. */
@@ -132,9 +145,7 @@ function normalizeProvider(target: string): { provider: ProviderType; serviceId?
   return null;
 }
 
-async function adoptCredential(cred: DiscoveredCredential, workspace: string): Promise<void> {
-  const cm = new ConfigManager(workspace);
-  await cm.load();
+async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): Promise<void> {
   const config = cm.getConfig();
 
   // Azure is configured one entry PER DEPLOYMENT — `init()` maps each to its
@@ -177,14 +188,23 @@ async function adoptCredential(cred: DiscoveredCredential, workspace: string): P
   // A bearer token goes to authToken; everything else is an API key. The only
   // bearer credential discovery still yields is ANTHROPIC_AUTH_TOKEN, which is
   // the gateway case Anthropic documents.
-  if (cred.kind === 'oauth' && cred.provider === 'anthropic') {
+  if (cred.kind === 'bearer') {
     next.authToken = cred.secret;
   } else {
     next.apiKey = cred.secret;
   }
   // A discovered endpoint wins over a configured one — it is the endpoint this
   // particular key belongs to. Without one, whatever was already there stands.
-  if (cred.baseUrl) next.baseUrl = cred.baseUrl;
+  if (cred.baseUrl) {
+    next.baseUrl = cred.baseUrl;
+    // `local` is a statement about the endpoint that is being REPLACED. Carried
+    // across by the spread above, a self-hosted entry's `local: true` would
+    // survive onto a hosted URL — and isLocalEndpoint() gives an explicit
+    // `local` precedence over the URL, so every model from that paid service
+    // would be priced at zero and slip the budget caps entirely. Dropping it
+    // lets it be recomputed from the new URL, in both directions.
+    delete next.local;
+  }
   // Azure's routing is as required as its key; discovery only reports the
   // credential as usable when it carried both.
   if (cred.deploymentName) next.deploymentName = cred.deploymentName;

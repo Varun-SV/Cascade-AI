@@ -12,6 +12,7 @@ import rateLimit from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
 import type { CascadeConfig } from '../types.js';
 import { MemoryStore } from '../memory/store.js';
+import { applyProviderApiKey } from '../config/index.js';
 import type { RuntimeNode, RuntimeNodeLog, RuntimeSession } from '../types.js';
 import { CASCADE_DB_FILE, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE, CASCADE_CONFIG_FILE, CASCADE_DASHBOARD_SECRET_FILE } from '../constants.js';
 import { DashboardSocket } from './websocket.js';
@@ -175,9 +176,7 @@ export class DashboardServer {
       if (data.keys) {
         for (const [type, apiKey] of Object.entries(data.keys)) {
           if (!apiKey) continue;
-          const provider = this.config.providers.find((p) => p.type === (type as import('../types.js').ProviderType));
-          if (provider) provider.apiKey = apiKey;
-          else this.config.providers.push({ type: type as import('../types.js').ProviderType, apiKey });
+          applyProviderApiKey(this.config.providers, type, apiKey);
         }
       }
       if (data.models) {

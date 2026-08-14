@@ -181,9 +181,22 @@ export class AnthropicProvider extends BaseProvider {
 
   async listModels(): Promise<ModelInfo[]> {
     try {
-      const resp = await fetch('https://api.anthropic.com/v1/models', {
+      // Discovery follows the SAME endpoint and auth mode as generation. It
+      // used to hardcode api.anthropic.com with `x-api-key`, which meant a
+      // gateway deployment sent the GATEWAY'S key to Anthropic's real API — a
+      // credential going to a host that was never meant to see it — and then
+      // replaced the gateway's own catalogue with the public one, so routing
+      // picked models the gateway may not serve. With a bearer token
+      // configured it sent an empty `x-api-key` and always fell through.
+      const base = (this.config.baseUrl ?? 'https://api.anthropic.com').replace(/\/+$/, '');
+      const resp = await fetch(`${base}/v1/models`, {
         headers: {
-          'x-api-key': this.config.apiKey ?? '',
+          ...(this.config.authToken
+            ? {
+              authorization: `Bearer ${this.config.authToken}`,
+              'anthropic-beta': 'oauth-2025-04-20',
+            }
+            : { 'x-api-key': this.config.apiKey ?? '' }),
           'anthropic-version': '2023-06-01',
         },
       });

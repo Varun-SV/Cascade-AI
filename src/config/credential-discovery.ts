@@ -25,7 +25,16 @@ import path from 'node:path';
 import os from 'node:os';
 import type { ProviderType } from '../types.js';
 
-export type CredentialKind = 'api-key' | 'oauth';
+/**
+ * 'oauth'  a SUBSCRIPTION token minted by another tool's login. Vendor-locked,
+ *          never adoptable.
+ * 'bearer' a token that authenticates via `Authorization: Bearer` and is
+ *          legitimately usable — ANTHROPIC_AUTH_TOKEN against a gateway. It is
+ *          stored in `authToken` like an oauth token would be, which is why the
+ *          two were once conflated, but it carries none of the same baggage and
+ *          must not be gated behind a risk prompt.
+ */
+export type CredentialKind = 'api-key' | 'oauth' | 'bearer';
 
 export interface DiscoveredCredential {
   /** Which Cascade provider this maps to. */
@@ -157,7 +166,7 @@ function fromEnv(env: NodeJS.ProcessEnv): DiscoveredCredential[] {
     out.push({
       provider: 'anthropic',
       sourceTool: 'Environment (ANTHROPIC_AUTH_TOKEN)',
-      kind: 'oauth',
+      kind: 'bearer',
       secret: authToken,
       directlyUsable: true,
     });

@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ConfigManager, hasUsableProvider } from './index.js';
+import { applyProviderApiKey, ConfigManager, hasUsableProvider } from './index.js';
 import { CASCADE_CONFIG_FILE } from '../constants.js';
 
 const tempDirs: string[] = [];
@@ -328,5 +328,40 @@ describe('getAuthToken — the companion to getApiKey', () => {
     const cm = new ConfigManager(dir);
     await cm.load();
     expect(cm.getAuthToken('openai')).toBeUndefined();
+  });
+});
+
+describe('applyProviderApiKey — a new key must not be shadowed', () => {
+  // AnthropicProvider reads authToken in preference to apiKey whenever both are
+  // set. Three separate settings-save paths wrote only apiKey, so the key the
+  // user had just typed was silently never used — indistinguishable, from the
+  // UI, from the save having failed.
+  it('clears a stale bearer token when a key replaces it', () => {
+    const providers = [{ type: 'anthropic', authToken: 'stale-token' }];
+    applyProviderApiKey(providers, 'anthropic', 'sk-ant-new');
+    expect(providers[0]!.apiKey).toBe('sk-ant-new');
+    expect(providers[0]!.authToken).toBeUndefined();
+  });
+
+  it('creates the entry when the provider is not configured yet', () => {
+    const providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }> = [];
+    applyProviderApiKey(providers, 'openai', 'sk-new');
+    expect(providers).toEqual([{ type: 'openai', apiKey: 'sk-new' }]);
+  });
+
+  it('carries an endpoint through when one is supplied', () => {
+    const providers = [{ type: 'openai-compatible', apiKey: 'old', baseUrl: 'http://old/v1' }];
+    applyProviderApiKey(providers, 'openai-compatible', 'new', { baseUrl: 'http://new/v1' });
+    expect(providers[0]).toMatchObject({ apiKey: 'new', baseUrl: 'http://new/v1' });
+  });
+
+  it('leaves other providers alone', () => {
+    const providers = [
+      { type: 'anthropic', authToken: 'keep-me' },
+      { type: 'openai', apiKey: 'old' },
+    ];
+    applyProviderApiKey(providers, 'openai', 'new');
+    expect(providers[0]!.authToken).toBe('keep-me');
+    expect(providers[1]!.apiKey).toBe('new');
   });
 });

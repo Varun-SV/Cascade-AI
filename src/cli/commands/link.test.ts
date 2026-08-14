@@ -147,6 +147,58 @@ describe('cascade link — adoption', () => {
     });
   });
 
+  it('does not carry `local: true` onto a hosted endpoint', async () => {
+    // isLocalEndpoint() gives an explicit `local` precedence over the URL, so a
+    // self-hosted entry's flag surviving onto Groq would price every paid model
+    // at zero and slip the budget caps entirely.
+    await seedConfig([
+      { type: 'openai-compatible', baseUrl: 'http://localhost:8000/v1', local: true },
+    ]);
+    process.env['GROQ_API_KEY'] = 'groq-key';
+
+    const compatible = (await providersAfterLink('groq')).find((p) => p['type'] === 'openai-compatible');
+    expect(compatible?.['baseUrl']).toBe('https://api.groq.com/openai/v1');
+    expect(compatible?.['local']).toBeUndefined();
+  });
+
+  it('adopts the gateway bearer token without demanding --accept-risk', async () => {
+    // ANTHROPIC_AUTH_TOKEN is the credential Anthropic documents for gateways.
+    // Classifying it as a subscription token sent the documented command down
+    // the risk-gate path and refused to persist it.
+    process.env['ANTHROPIC_AUTH_TOKEN'] = 'gw-token';
+    await linkCommand('anthropic', { workspace: dir });   // note: no acceptRisk
+
+    const cm = new ConfigManager(dir);
+    await cm.load();
+    const anthropic = cm.getConfig().providers.find((p) => p.type === 'anthropic');
+    // `credentialSource` is set by adoption alone. Asserting on authToken would
+    // pass either way: injectEnvKeys picks ANTHROPIC_AUTH_TOKEN up on load, so
+    // the field is populated whether or not `link` ever ran.
+    expect(anthropic?.credentialSource).toContain('ANTHROPIC_AUTH_TOKEN');
+    expect(anthropic?.authToken).toBe('gw-token');
+  });
+
+  it('links an Azure key when the WORKSPACE supplies the routing', async () => {
+    // Discovery only sees env vars, so a key exported beside already-configured
+    // deployments looked unusable — making the fill-into-deployments path
+    // reachable only by re-exporting routing the config already had.
+    await seedConfig([
+      { type: 'azure', deploymentName: 'gpt-5-prod', baseUrl: 'https://prod.openai.azure.com' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'az-key';
+
+    const azure = (await providersAfterLink('azure')).filter((p) => p['type'] === 'azure');
+    expect(azure).toHaveLength(1);
+    expect(azure[0]).toMatchObject({
+      apiKey: 'az-key',
+      deploymentName: 'gpt-5-prod',
+      baseUrl: 'https://prod.openai.azure.com',
+      // Adoption stamps this; injectEnvKeys also fills the key into an existing
+      // entry, so without it the assertion would hold even if link had bailed.
+      credentialSource: 'Environment (AZURE_OPENAI_KEY)',
+    });
+  });
+
   it('refuses a Claude Code subscription token even with --accept-risk', async () => {
     // The flag used to be the way to adopt exactly this. Anthropic prohibits
     // it and refuses it at the API, so no flag should get it configured.

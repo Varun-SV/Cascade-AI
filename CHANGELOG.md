@@ -66,6 +66,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documented Anthropic credential no environment path picked up, so a user
   following Anthropic's own gateway instructions got "No providers configured".
 
+- **A gateway API key was being sent to `api.anthropic.com`.** Model discovery
+  hardcoded the public host and `x-api-key`, ignoring both the configured
+  endpoint and the configured auth mode — so a gateway deployment sent the
+  *gateway's* credential to a host that was never meant to see it, and then
+  replaced the gateway's own model catalogue with the public one, leaving
+  routing free to pick models the gateway does not serve. With a bearer token
+  configured it sent an empty key and always fell through to the bundled list.
+  Discovery now follows the same endpoint and authentication as generation.
+
+- **A newly entered API key could be silently ignored.** `AnthropicProvider`
+  reads `authToken` in preference to `apiKey` whenever both are set, and three
+  separate settings-save paths wrote the key without clearing the token it was
+  replacing — so the key the user had just typed was never used, which from the
+  UI is indistinguishable from the save having failed. All three now go through
+  one `applyProviderApiKey()`.
+
+- **`ANTHROPIC_AUTH_TOKEN` was treated as a subscription token.** It is the
+  credential Anthropic documents for gateway routing, but sharing the `oauth`
+  classification with the subscription tokens sent the documented `cascade link
+  anthropic` down the risk-gate path and refused to persist it. Bearer
+  credentials are their own kind now.
+
+- **Linking a hosted service could mark it free.** Adopting a credential
+  preserves the provider's other settings, which meant a self-hosted
+  `openai-compatible` entry's `local: true` survived onto the hosted endpoint
+  replacing it — and an explicit `local` outranks the URL, so every model from a
+  paid service would have been priced at zero and slipped the budget caps
+  entirely. The flag is dropped whenever adoption changes the endpoint, so it is
+  recomputed from the new URL.
+
 - **`config.baseUrl` now reaches the Anthropic client.** It was dropped on both
   the key and bearer paths, which made `authToken` close to useless: routing
   through an LLM gateway or corporate proxy is the sanctioned use of a bearer
@@ -78,6 +108,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it belongs to, since a key alone would configure a provider with nowhere to
   send a request. `CLAUDE_CONFIG_DIR` is honoured when locating Claude Code's
   store.
+
+  An Azure key is accepted when the WORKSPACE already carries the routing, not
+  only when the environment repeats it — discovery sees environment variables
+  alone, so a key exported beside already-configured deployments looked
+  unusable.
 
   Azure is the exception: a key alone cannot configure it — without a deployment
   name it resolves to no model at all, and without an endpoint the client falls
