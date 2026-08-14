@@ -117,8 +117,11 @@ describe('AnthropicProvider.listModels — follows the configured endpoint', () 
     const headers = (fetchSpy.mock.calls[0] as unknown as [string, RequestInit])[1]
       .headers as Record<string, string>;
     expect(headers['authorization']).toBe('Bearer gw-token');
-    expect(headers['anthropic-beta']).toBe('oauth-2025-04-20');
     expect(headers['x-api-key']).toBeUndefined();
+    // No oauth beta: that header belongs to the Claude subscription flow this
+    // release makes non-adoptable, and a gateway asked to honour an Anthropic
+    // beta it knows nothing about can reject an otherwise valid credential.
+    expect(headers['anthropic-beta']).toBeUndefined();
   });
 
   it('still uses the public endpoint when no gateway is configured', async () => {

@@ -80,3 +80,55 @@ export function stripRevokedCredentials<T extends CredentialBearingProvider>(pro
   }
   return { kept, removed };
 }
+
+/**
+ * The same pass over a RAW, not-yet-validated config object, so it can clear
+ * tier pins as well as providers.
+ *
+ * A `provider:model` pin is a plain string and survives a `providers[]` filter
+ * untouched. When removing the dead token takes the last Anthropic entry with
+ * it, a config pinned to `anthropic:<model>` reaches the router with no such
+ * provider and THROWS — `Configured model … cannot be used` — instead of
+ * falling back to Auto, even when another provider would have served the run.
+ * The retired-provider migration learned this already; this is the same lesson
+ * arriving for a different reason.
+ */
+export function stripRevokedFromConfig(raw: unknown): { removed: number; clearedPins: string[] } {
+  const result = { removed: 0, clearedPins: [] as string[] };
+  if (typeof raw !== 'object' || raw === null) return result;
+  const cfg = raw as Record<string, unknown>;
+
+  if (Array.isArray(cfg['providers'])) {
+    const pass = stripRevokedCredentials(cfg['providers'] as CredentialBearingProvider[]);
+    result.removed = pass.removed;
+    if (pass.removed > 0) cfg['providers'] = pass.kept;
+  }
+  if (result.removed === 0) return result;
+
+  // Only when no usable Anthropic entry survives. A config that still has one —
+  // an API key, or a gateway endpoint the user set — keeps its pin working.
+  const providers = Array.isArray(cfg['providers']) ? cfg['providers'] as CredentialBearingProvider[] : [];
+  const anthropicRemains = providers.some((p) => p?.type === 'anthropic' && (p.apiKey || p.authToken));
+  if (anthropicRemains) return result;
+
+  result.clearedPins = clearAnthropicPins(cfg['models']);
+  return result;
+}
+
+/** Clears `anthropic:<model>` tier pins, mutating in place; returns the tiers cleared. */
+export function clearAnthropicPins(models: unknown): string[] {
+  const cleared: string[] = [];
+  if (typeof models !== 'object' || models === null) return cleared;
+  const tiers = models as Record<string, unknown>;
+  for (const tier of ['t1', 't2', 't3'] as const) {
+    const pin = tiers[tier];
+    if (typeof pin !== 'string') continue;
+    // Lowercased to match selector.ts's resolveDynamicModel(), which parses the
+    // provider half case-insensitively — so `Anthropic:claude-x` is a valid pin
+    // and has to be caught here too.
+    if (!pin.toLowerCase().startsWith('anthropic:')) continue;
+    delete tiers[tier];
+    cleared.push(tier);
+  }
+  return cleared;
+}

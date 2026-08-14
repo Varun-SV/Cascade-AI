@@ -6,7 +6,7 @@ import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { isRevokedSubscriptionCredential, stripRevokedCredentials } from './revoked-credentials.js';
+import { isRevokedSubscriptionCredential, stripRevokedCredentials, stripRevokedFromConfig } from './revoked-credentials.js';
 import { ConfigManager, hasUsableProvider } from './index.js';
 import { CASCADE_CONFIG_FILE } from '../constants.js';
 
@@ -125,5 +125,92 @@ describe('ConfigManager — removing a dead subscription token on load', () => {
     const anthropic = cm.getConfig().providers.find((p) => p.type === 'anthropic');
     expect(anthropic?.authToken).toBe('gw-token');
     expect(cm.takeRetiredNotice()).toBeUndefined();
+  });
+});
+
+describe('clearing pins the removed credential leaves dangling', () => {
+  it('clears an Anthropic tier pin when the last usable entry goes', async () => {
+    // A `provider:model` pin is a plain string and survives a providers[]
+    // filter. Left behind it reaches the router with no such provider and
+    // THROWS rather than falling back to Auto.
+    const raw = {
+      providers: [{ type: 'anthropic', authToken: 'sk-ant-oat01-x' }],
+      models: { t1: 'anthropic:claude-opus-4', t3: 'openai:gpt-5-mini' },
+    };
+    const { removed, clearedPins } = stripRevokedFromConfig(raw);
+    expect(removed).toBe(1);
+    expect(clearedPins).toEqual(['t1']);
+    expect(raw.models).toEqual({ t3: 'openai:gpt-5-mini' });
+  });
+
+  it('matches a pin case-insensitively, as the selector parses it', () => {
+    const raw = {
+      providers: [{ type: 'anthropic', authToken: 'sk-ant-oat01-x' }],
+      models: { t2: 'Anthropic:claude-sonnet-4' },
+    };
+    expect(stripRevokedFromConfig(raw).clearedPins).toEqual(['t2']);
+  });
+
+  it('keeps the pin when a usable Anthropic entry survives', () => {
+    const raw = {
+      providers: [
+        { type: 'anthropic', authToken: 'sk-ant-oat01-x' },
+        { type: 'anthropic', apiKey: 'sk-ant-real' },
+      ],
+      models: { t1: 'anthropic:claude-opus-4' },
+    };
+    const { removed, clearedPins } = stripRevokedFromConfig(raw);
+    expect(removed).toBe(1);
+    expect(clearedPins).toEqual([]);
+    expect(raw.models).toEqual({ t1: 'anthropic:claude-opus-4' });
+  });
+
+  it('leaves everything alone when there is nothing to remove', () => {
+    const raw = { providers: [{ type: 'openai', apiKey: 'sk' }], models: { t1: 'anthropic:x' } };
+    expect(stripRevokedFromConfig(raw)).toEqual({ removed: 0, clearedPins: [] });
+    expect(raw.models).toEqual({ t1: 'anthropic:x' });
+  });
+});
+
+describe('the notice survives alongside a retirement notice', () => {
+  let dir: string;
+  beforeEach(async () => { dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-notices-')); });
+  afterEach(async () => { await fs.rm(dir, { recursive: true, force: true }); });
+
+  it('explains the removal even when only the GLOBAL store held the token', async () => {
+    // The global-store branch used to fabricate an empty retiredCleanup, and
+    // describeCleanup() of that then overwrote this explanation with the bare
+    // string "Cascade config migration: .".
+    const globalDir = path.join(dir, 'global');
+    await fs.mkdir(globalDir, { recursive: true });
+    await fs.writeFile(
+      path.join(globalDir, 'credentials.json'),
+      JSON.stringify({ version: 1, providers: [{ type: 'anthropic', authToken: 'sk-ant-oat01-x' }] }),
+      'utf-8',
+    );
+    const cm = new ConfigManager(dir, globalDir);
+    await cm.load();
+
+    const notice = cm.takeRetiredNotice();
+    expect(notice).toMatch(/no longer permits/i);
+    expect(notice).not.toMatch(/migration: \.$/);
+  });
+
+  it('names the pin it cleared, so the tier change is not a surprise', async () => {
+    await fs.mkdir(path.join(dir, '.cascade'), { recursive: true });
+    await fs.writeFile(
+      path.join(dir, CASCADE_CONFIG_FILE),
+      JSON.stringify({
+        providers: [{ type: 'anthropic', authToken: 'sk-ant-oat01-x' }],
+        models: { t1: 'anthropic:claude-opus-4' },
+        tools: {},
+      }),
+      'utf-8',
+    );
+    const cm = new ConfigManager(dir, path.join(dir, 'global'));
+    await cm.load();
+
+    expect(cm.takeRetiredNotice()).toMatch(/Cleared the T1 model pin/);
+    expect(cm.getConfig().models.t1).toBeUndefined();
   });
 });

@@ -74,13 +74,18 @@ export class AnthropicProvider extends BaseProvider {
     // endpoint. Without it, a user who configured a gateway had their request
     // sent to api.anthropic.com with a token that gateway had issued.
     const baseURL = config.baseUrl;
-    // A bearer token authenticates via Authorization: Bearer plus the oauth
-    // beta header instead of x-api-key.
+    // A bearer token authenticates via Authorization: Bearer instead of
+    // x-api-key, which the SDK's `authToken` option does on its own.
+    //
+    // NO oauth beta header. `anthropic-beta: oauth-2025-04-20` belongs to the
+    // Claude subscription flow, which this release makes non-adoptable — the
+    // only bearer that can reach here now is a gateway's, and asking a gateway
+    // to honour an Anthropic beta it knows nothing about is a way to have a
+    // perfectly valid credential rejected.
     if (config.authToken) {
       this.client = new Anthropic({
         authToken: config.authToken,
         ...(baseURL ? { baseURL } : {}),
-        defaultHeaders: { 'anthropic-beta': 'oauth-2025-04-20' },
       });
     } else {
       this.client = new Anthropic({
@@ -198,10 +203,7 @@ export class AnthropicProvider extends BaseProvider {
       const resp = await fetch(modelsUrl, {
         headers: {
           ...(this.config.authToken
-            ? {
-              authorization: `Bearer ${this.config.authToken}`,
-              'anthropic-beta': 'oauth-2025-04-20',
-            }
+            ? { authorization: `Bearer ${this.config.authToken}` }
             : { 'x-api-key': this.config.apiKey ?? '' }),
           'anthropic-version': '2023-06-01',
         },

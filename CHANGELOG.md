@@ -91,7 +91,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   set instead, reusing the migration path built for retired providers.
   Identification is narrow — the `sk-ant-oat` prefix, or the `credentialSource`
   `cascade link` stamped on it — so a gateway bearer is untouched, and the entry
-  survives (minus the token) when it still holds a key or an endpoint.
+  survives (minus the token) when it still holds a key or an endpoint. A tier
+  pinned to `anthropic:<model>` is reset to Auto when the removal takes the last
+  usable Anthropic entry with it, since a pin naming a provider that no longer
+  exists fails the run outright rather than falling back. The same filter runs
+  on an incoming key-sync bundle: one written before this release can still
+  carry the token, the incoming entry wins the provider merge, and pulling it
+  would have overwritten a valid API key with a dead one — which the next launch
+  would then strip, leaving the good key gone for good.
+
+- **A gateway bearer no longer asks for the Claude OAuth beta.**
+  `anthropic-beta: oauth-2025-04-20` belongs to the subscription flow this
+  release makes non-adoptable; the SDK maps a bearer to `Authorization: Bearer`
+  without it. Sending it to a gateway that validates beta requests is a way to
+  have a perfectly valid credential rejected.
 
 - **`ANTHROPIC_BASE_URL` now applies to an API key too**, not only a bearer. A
   key exported beside a gateway produced a provider with no endpoint, and model

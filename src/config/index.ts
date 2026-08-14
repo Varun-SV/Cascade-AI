@@ -21,7 +21,7 @@ import {
   stripRetiredProviders,
   type RetiredProviderCleanup,
 } from './retired-providers.js';
-import { stripRevokedCredentials, REVOKED_CREDENTIAL_REASON } from './revoked-credentials.js';
+import { stripRevokedCredentials, stripRevokedFromConfig, REVOKED_CREDENTIAL_REASON } from './revoked-credentials.js';
 import { disambiguateMcpServerNames, type McpServerRename } from '../tools/tool-name.js';
 import {
   CASCADE_CONFIG_FILE,
@@ -99,6 +99,10 @@ export class ConfigManager {
    * must not re-announce a migration that already happened.
    */
   private revokedCredentials = 0;
+  /** Tier pins cleared by the revoked-credential migration this load. */
+  private revokedPins: string[] = [];
+  /** This load's revoked-credential explanation, joined with any retirement one. */
+  private revokedNotice?: string;
   /**
    * Human-readable migration notice held for a UI to display. `console.warn`
    * is not sufficient: the REPL clears the TTY immediately after load(), and
@@ -172,6 +176,7 @@ export class ConfigManager {
     const globalCreds = filterRetiredCredentials(globalRevoked.kept);
     if (globalRevoked.removed > 0) this.revokedCredentials += globalRevoked.removed;
     if (globalCreds.removed.length > 0 || globalRevoked.removed > 0) {
+      const retiredHere = globalCreds.removed.length > 0;
       // Best-effort, like save()'s own global-store sync: an unwritable home
       // must not abort startup when the in-memory list is already clean.
       try {
@@ -179,10 +184,16 @@ export class ConfigManager {
       } catch (err) {
         console.warn(`Could not rewrite the global credential store: ${err instanceof Error ? err.message : String(err)}`);
       }
-      this.retiredCleanup = {
-        removed: [...new Set([...(this.retiredCleanup?.removed ?? []), ...globalCreds.removed])],
-        clearedPins: this.retiredCleanup?.clearedPins ?? [],
-      };
+      // Only for an actual RETIRED-provider removal. Setting it for a
+      // revoked-only pass produced a truthy cleanup describing nothing, and
+      // describeCleanup() of that then overwrote the explanation of why the
+      // credential vanished with the bare string "Cascade config migration: .".
+      if (retiredHere) {
+        this.retiredCleanup = {
+          removed: [...new Set([...(this.retiredCleanup?.removed ?? []), ...globalCreds.removed])],
+          clearedPins: this.retiredCleanup?.clearedPins ?? [],
+        };
+      }
     }
     await this.injectEnvKeys();
     this.config.providers = mergeGlobalCredentials(this.config.providers, globalCreds.kept);
@@ -191,11 +202,11 @@ export class ConfigManager {
     // merge are already clean. Stripping again here would work, but it would
     // hide a failure to persist either one behind a correct in-memory result.
     if (this.revokedCredentials > 0) {
-      const notice = `Cascade config migration: ${REVOKED_CREDENTIAL_REASON}`;
-      this.pendingRetiredNotice = this.pendingRetiredNotice
-        ? `${this.pendingRetiredNotice} ${notice}`
-        : notice;
-      console.warn(notice);
+      const pins = this.revokedPins.length
+        ? ` Cleared the ${[...new Set(this.revokedPins)].map((t) => t.toUpperCase()).join('/')} model pin, since it named Anthropic.`
+        : '';
+      this.revokedNotice = `Cascade config migration: ${REVOKED_CREDENTIAL_REASON}${pins}`;
+      console.warn(this.revokedNotice);
     }
 
     // Purge AFTER both stores have been cleaned, not at store construction:
@@ -226,14 +237,20 @@ export class ConfigManager {
     // config was enriched with env and machine-global credentials. Saving it
     // here would push those secrets into the workspace file (see loadConfig).
     if (mcpNamesChanged) await this.save();
+    // console.warn alone is not enough — startRepl() clears the TTY right
+    // after load() returns, and the desktop main process has no UI at all.
+    // Keep the notice so each surface can show it once it has somewhere to
+    // draw; the log line stays for headless runs. Both migrations can fire in
+    // one load, so the notices are JOINED — assigning either one on its own
+    // dropped the other's explanation.
+    const notices: string[] = [];
     if (this.retiredCleanup) {
-      // console.warn alone is not enough — startRepl() clears the TTY right
-      // after load() returns, and the desktop main process has no UI at all.
-      // Keep the notice so each surface can show it once it has somewhere to
-      // draw; the log line stays for headless runs.
-      console.warn(describeCleanup(this.retiredCleanup));
-      this.pendingRetiredNotice = describeCleanup(this.retiredCleanup);
+      const retired = describeCleanup(this.retiredCleanup);
+      console.warn(retired);
+      notices.push(retired);
     }
+    if (this.revokedNotice) notices.push(this.revokedNotice);
+    if (notices.length > 0) this.pendingRetiredNotice = notices.join(' ');
   }
 
   getConfig(): CascadeConfig {
@@ -328,6 +345,8 @@ export class ConfigManager {
     this.retiredCleanup = undefined;
     // Same per-load contract, same reason.
     this.revokedCredentials = 0;
+    this.revokedPins = [];
+    this.revokedNotice = undefined;
     const configPath = path.join(this.workspacePath, CASCADE_CONFIG_FILE);
     try {
       const raw = await fs.readFile(configPath, 'utf-8');
@@ -342,15 +361,11 @@ export class ConfigManager {
       // Dead subscription tokens go in the same pass, and for the same reason:
       // the file has to be rewritten or the migration repeats — and warns —
       // on every launch forever.
-      const rawProviders = (parsed as { providers?: unknown })?.providers;
-      let revokedHere = 0;
-      if (Array.isArray(rawProviders)) {
-        const pass = stripRevokedCredentials(rawProviders as Array<{ type: string }>);
-        revokedHere = pass.removed;
-        if (revokedHere > 0) {
-          (parsed as { providers?: unknown }).providers = pass.kept;
-          this.revokedCredentials += revokedHere;
-        }
+      const revoked = stripRevokedFromConfig(parsed);
+      const revokedHere = revoked.removed;
+      if (revokedHere > 0) {
+        this.revokedCredentials += revokedHere;
+        this.revokedPins.push(...revoked.clearedPins);
       }
       if (didCleanupChangeAnything(cleanup) || revokedHere > 0) {
         if (didCleanupChangeAnything(cleanup)) this.retiredCleanup = cleanup;

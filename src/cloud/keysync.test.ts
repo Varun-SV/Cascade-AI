@@ -231,3 +231,35 @@ describe('keysync — MCP per-tool selections', () => {
     expect(next.tools.mcpServers![0]!.url).toBe('https://new.example.com/mcp');
   });
 });
+
+describe('keysync — a bundle predating 0.75 must not reinstate a dead token', () => {
+  it('drops a Claude subscription token instead of letting it win the merge', () => {
+    // The incoming entry wins the provider merge, and the result is persisted.
+    // Without this filter, pulling an old bundle overwrote a valid API key with
+    // a token this release cannot use — and the next launch stripped that
+    // token, leaving the good key permanently gone.
+    const local = cfg({ providers: [{ type: 'anthropic', apiKey: 'sk-ant-still-good' }] });
+    const stale = {
+      v: 2,
+      providers: [{ type: 'anthropic', authToken: 'sk-ant-oat01-dead', credentialSource: 'Claude Code' }],
+    } as unknown as Parameters<typeof applySyncBundle>[0];
+
+    const merged = applySyncBundle(stale, local);
+    const anthropic = merged.providers.find((p) => p.type === 'anthropic');
+    expect(anthropic?.apiKey).toBe('sk-ant-still-good');
+    expect(anthropic?.authToken).toBeUndefined();
+  });
+
+  it('still carries a legitimate gateway bearer through the merge', () => {
+    const local = cfg({ providers: [] });
+    const bundle = {
+      v: 2,
+      providers: [{ type: 'anthropic', authToken: 'gw-token', baseUrl: 'https://gateway.internal' }],
+    } as unknown as Parameters<typeof applySyncBundle>[0];
+
+    const merged = applySyncBundle(bundle, local);
+    const anthropic = merged.providers.find((p) => p.type === 'anthropic');
+    expect(anthropic?.authToken).toBe('gw-token');
+    expect(anthropic?.baseUrl).toBe('https://gateway.internal');
+  });
+});
