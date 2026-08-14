@@ -246,13 +246,40 @@ const cloudDiscoveryCache = new Map<string, DiscoveryEntry>();
  * password hash would be worse still, since this sits on the init path and is
  * deliberately slow by design.
  *
- * So the secret is used for one thing only — an equality lookup, the same
- * comparison the config already does by holding the string — and what travels
- * onward is an opaque random id carrying none of its bits. The Map holds a
- * reference to a string the config already keeps alive, so it adds no exposure,
- * and it holds one short entry per distinct credential.
+ * So the secret is used for one thing only — an equality lookup — and what
+ * travels onward is an opaque random id carrying none of its bits.
+ *
+ * The map is pruned to the live configuration on every `init()`. When this was
+ * added its comment claimed it "adds no exposure, since the config already
+ * keeps the string alive". That holds only while the config still references
+ * the secret — and rotating a key is precisely the case where it stops. Without
+ * pruning, a long-running desktop or dashboard accumulated every credential it
+ * had ever seen, outliving both the configuration and the 15-minute cache
+ * entry, and a heap dump would surface all of them.
  */
 const credentialIdentities = new Map<string, string>();
+
+/**
+ * Forget credentials the configuration no longer holds.
+ *
+ * Called where the config is (re)installed, so the map tracks the live
+ * configuration rather than the process's whole history. A credential that is
+ * still configured keeps its id, so pruning costs no cache hits.
+ *
+ * A settings save that mutates the provider list without re-initialising the
+ * router leaves the replaced secret until the next `init()` — bounded and
+ * short-lived, where before it was permanent.
+ */
+function pruneCredentialIdentities(providers: readonly ProviderConfig[] | undefined): void {
+  const live = new Set<string>();
+  for (const p of providers ?? []) {
+    if (p.apiKey) live.add(p.apiKey);
+    if (p.authToken) live.add(p.authToken);
+  }
+  for (const secret of [...credentialIdentities.keys()]) {
+    if (!live.has(secret)) credentialIdentities.delete(secret);
+  }
+}
 function credentialIdentity(secret: string | undefined): string {
   if (!secret) return '-';
   let id = credentialIdentities.get(secret);
@@ -442,6 +469,10 @@ export class CascadeRouter extends EventEmitter {
 
   async init(config: CascadeConfig): Promise<void> {
     this.config = config;
+    // Before anything reads a credential: drop the identities of secrets this
+    // configuration no longer holds, so a rotated key does not outlive it.
+    pruneCredentialIdentities(config.providers);
+
     const availableProviders = await this.detectAvailableProviders(config.providers);
     this.selector = new ModelSelector(availableProviders);
     this.failover = new FailoverManager(this.selector);

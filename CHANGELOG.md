@@ -372,7 +372,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   secret is now used for an equality lookup and an opaque random id travels in
   its place; nothing derived from the credential reaches the key at all.
   (Pre-existing; surfaced because this release extends the same key to cover
-  bearer tokens.)
+  bearer tokens.) The identity map that replaced it is pruned to the live
+  configuration on every router init, so a rotated key is forgotten rather than
+  kept for the life of the process.
 
 - **A bearer-only gateway's model list now reaches routing.** Catalogue
   validation required an `apiKey`, and the availability probe uses `listModels()`

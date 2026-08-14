@@ -609,3 +609,36 @@ describe('discoveryCacheKey', () => {
     expect(none).not.toBe(discoveryCacheKey('anthropic', cfg({ apiKey: 'k', baseUrl: 'https://gw' })));
   });
 });
+
+describe('discoveryCacheKey — a rotated credential is forgotten', () => {
+  it('does not keep the old secret alive once the config drops it', async () => {
+    // The identity map is process-global. Without pruning, rotating a key left
+    // the previous secret in it for the rest of the process — outliving both
+    // the configuration and the 15-minute cache entry — so a long-running
+    // desktop accumulated every credential it had ever seen.
+    //
+    // Observable through the id: a secret that was forgotten gets a NEW random
+    // identity when it reappears, so its cache key changes.
+    const before = discoveryCacheKey('anthropic', { type: 'anthropic', apiKey: 'old-key' } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set());
+    await router.init(makeConfig({ providers: [{ type: 'anthropic', apiKey: 'rotated-key' }] }));
+
+    const after = discoveryCacheKey('anthropic', { type: 'anthropic', apiKey: 'old-key' } as never);
+    expect(after).not.toBe(before);
+  });
+
+  it('keeps the identity of a credential the config still holds, so the cache still hits', async () => {
+    const cfgEntry = { type: 'anthropic', apiKey: 'kept-key' };
+    const before = discoveryCacheKey('anthropic', cfgEntry as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set());
+    await router.init(makeConfig({ providers: [cfgEntry] }));
+
+    expect(discoveryCacheKey('anthropic', cfgEntry as never)).toBe(before);
+  });
+});
