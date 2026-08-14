@@ -420,6 +420,24 @@ describe('cascade link — adoption', () => {
     });
   });
 
+  it('says --accept-risk no longer applies rather than ignoring it', async () => {
+    // The flag used to be the documented way past this refusal. It is inert
+    // now — a subscription token is refused by the provider, so there is no
+    // working configuration to opt into — and silently swallowing it would
+    // leave the user waiting for an effect that is never coming.
+    await fs.mkdir(path.join(fakeHome, '.claude'), { recursive: true });
+    await fs.writeFile(
+      path.join(fakeHome, '.claude', '.credentials.json'),
+      JSON.stringify({ claudeAiOauth: { accessToken: 'sk-ant-oat01-x' } }),
+      'utf-8',
+    );
+
+    await linkCommand('anthropic', { workspace: dir, acceptRisk: true });
+    const printed = (console.log as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      .map((c) => String(c[0] ?? '')).join('\n');
+    expect(printed).toMatch(/--accept-risk no longer applies/);
+  });
+
   it('refuses a Claude Code subscription token even with --accept-risk', async () => {
     // The flag used to be the way to adopt exactly this. Anthropic prohibits
     // it and refuses it at the API, so no flag should get it configured.

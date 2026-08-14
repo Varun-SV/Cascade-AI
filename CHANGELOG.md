@@ -327,6 +327,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   something is adoptable, and otherwise points at `cascade link` for the
   explanation.
 
+- **A gateway written with its version in the URL now works for generation, not
+  just discovery.** The Anthropic SDK owns the version segment — it builds
+  `/v1/messages` onto whatever `baseURL` it is given — so
+  `https://gateway.example/v1`, the form discovery and `cascade link` both
+  accept, produced `/v1/v1/messages` and failed every request. Model discovery
+  issues its request by hand and had already been corrected, so a gateway could
+  list its catalogue and then refuse every message. Both now derive their URL
+  from one function.
+
+- **A bearer-configured provider showed as having no credential in desktop
+  Settings** whenever the backend socket was down and the IPC snapshot was used
+  instead. That was the fourth hand-written copy of "does this provider have a
+  credential", each fixed separately as it was noticed; they now share one
+  exported predicate.
+
+- **An exported API key can replace the subscription token the migration
+  removed.** With any other provider in the config the list was not empty after
+  the removal, so `ANTHROPIC_API_KEY` was not allowed to seed a replacement
+  entry — the merged config ended up with no Anthropic at all, and the pin
+  clearing above then removed the user's Claude pins, with a working key in the
+  environment the whole time.
+
+- **`cascade link --accept-risk` says it no longer applies instead of doing
+  nothing.** Every subscription token is now reported unusable and refused
+  before any adoption path, which left the flag inert while `--help` still
+  advertised it as the way to adopt one. It is still accepted, so an existing
+  script does not start failing on an unknown option, and the refusal explains
+  that there is no longer a risk to accept.
+
 ## 0.74.0 - 2026-08-11
 
 ### Fixed

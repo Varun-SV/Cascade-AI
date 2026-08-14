@@ -150,6 +150,43 @@ describe('ConfigManager — removing a dead subscription token on load', () => {
   });
 });
 
+describe('an environment key can replace what the migration removed', () => {
+  let dir: string;
+  const saved = process.env['ANTHROPIC_API_KEY'];
+  beforeEach(async () => { dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-recreate-')); });
+  afterEach(async () => {
+    if (saved === undefined) delete process.env['ANTHROPIC_API_KEY'];
+    else process.env['ANTHROPIC_API_KEY'] = saved;
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('recreates the Anthropic row and keeps the pin', async () => {
+    // With ANOTHER provider in the file, removing the dead token leaves a
+    // non-empty list — so the "may an env key seed an entry" gate said no, the
+    // merged config had no Anthropic at all, and the pin was cleared. All while
+    // a working key sat in the environment.
+    await fs.mkdir(path.join(dir, '.cascade'), { recursive: true });
+    await fs.writeFile(
+      path.join(dir, CASCADE_CONFIG_FILE),
+      JSON.stringify({
+        providers: [
+          { type: 'openai', apiKey: 'sk-openai' },
+          { type: 'anthropic', authToken: 'sk-ant-oat01-dead', credentialSource: 'Claude Code' },
+        ],
+        models: { t1: 'anthropic:claude-opus-4' },
+        tools: {},
+      }),
+      'utf-8',
+    );
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-live';
+
+    const cm = new ConfigManager(dir, path.join(dir, 'global'));
+    await cm.load();
+    expect(cm.getConfig().providers.find((p) => p.type === 'anthropic')?.apiKey).toBe('sk-ant-live');
+    expect((cm.getConfig().models as Record<string, unknown>)['t1']).toBe('anthropic:claude-opus-4');
+  });
+});
+
 describe('clearing pins the removed credential leaves dangling', () => {
   it('clears an Anthropic pin, matched the way the selector parses it', () => {
     const models = { t1: 'anthropic:claude-opus-4', t2: 'Anthropic:claude-sonnet-4', t3: 'openai:gpt-5-mini' };

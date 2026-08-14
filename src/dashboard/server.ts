@@ -12,7 +12,7 @@ import rateLimit from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
 import type { CascadeConfig } from '../types.js';
 import { MemoryStore } from '../memory/store.js';
-import { applyProviderApiKey } from '../config/index.js';
+import { applyProviderApiKey, hasProviderCredential } from '../config/index.js';
 import type { RuntimeNode, RuntimeNodeLog, RuntimeSession } from '../types.js';
 import { CASCADE_DB_FILE, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE, CASCADE_CONFIG_FILE, CASCADE_DASHBOARD_SECRET_FILE } from '../constants.js';
 import { DashboardSocket } from './websocket.js';
@@ -163,12 +163,11 @@ export class DashboardServer {
           maxCostPerRun: this.config.budget?.maxCostPerRunUsd,
           autoBias: this.config.autoBias,
         },
-        // `authToken` is a credential too — the same reasoning as
-        // hasUsableProvider() in config/index.ts. Counting only apiKey showed a
-        // provider configured with a bearer token as unconfigured in settings.
+        // Through the shared predicate: `authToken` is a credential too, and
+        // counting only apiKey showed a bearer-configured provider as
+        // unconfigured in settings.
         providersWithKey: (this.config.providers ?? [])
-          .filter((p) => (typeof p.apiKey === 'string' && p.apiKey.length > 0)
-            || (typeof p.authToken === 'string' && p.authToken.length > 0))
+          .filter(hasProviderCredential)
           .map((p) => p.type),
       });
     });

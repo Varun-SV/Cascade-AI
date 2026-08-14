@@ -27,6 +27,13 @@ import {
 import type { ProviderConfig, ProviderType } from '../../types.js';
 
 export interface LinkOptions {
+  /**
+   * Deprecated and inert. It gated adoption of a subscription OAuth token,
+   * which Anthropic now prohibits and refuses server-side — so every such
+   * credential is reported unusable and returns before any adoption path. Kept
+   * so `cascade link --accept-risk` in an existing script does not fail on an
+   * unknown option; the refusal says explicitly that it no longer applies.
+   */
   acceptRisk?: boolean;
   workspace?: string;
 }
@@ -104,16 +111,16 @@ export async function linkCommand(target: string | undefined, options: LinkOptio
     console.log(chalk.yellow(`\n  Found a ${chosen.sourceTool} credential, but it can't be used against the standard ${provider} API.`));
     if (chosen.warning) console.log(chalk.gray(`  ${chosen.warning}`));
     console.log(chalk.gray('  Cascade won\'t adopt it because it would create a non-working provider.\n'));
+    // `--accept-risk` used to be the way past this for a subscription token, so
+    // silently ignoring it would leave the user waiting for an effect that is
+    // never coming. There is no risk left to accept: the token is refused at
+    // the API, so adopting it cannot produce a working provider.
+    if (options.acceptRisk && chosen.kind === 'oauth') {
+      console.log(chalk.gray('  --accept-risk no longer applies — a subscription token is refused by the'));
+      console.log(chalk.gray('  provider itself, so there is no working configuration to opt into.\n'));
+    }
     // Say what WOULD work, rather than leaving the user at a dead end.
     console.log(chalk.gray(`  Set ${chalk.white(envKeyFor(provider))} instead, or add a key with `) + chalk.cyan('cascade init') + chalk.gray('.\n'));
-    return;
-  }
-
-  if (chosen.kind === 'oauth' && !options.acceptRisk) {
-    console.log(chalk.yellow(`\n  ${chosen.sourceTool} provides a subscription OAuth token, not an API key.`));
-    if (chosen.warning) console.log(chalk.gray(`  ${chosen.warning}`));
-    console.log(chalk.gray('  Re-run with --accept-risk to adopt it anyway:\n'));
-    console.log(chalk.cyan(`      cascade link ${provider} --accept-risk\n`));
     return;
   }
 

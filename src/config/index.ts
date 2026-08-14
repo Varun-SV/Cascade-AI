@@ -38,16 +38,31 @@ import {
 // points (src/cli/index.ts) so they can't drift out of sync with what the
 // setup wizard actually allows to be saved as a complete config.
 const KEY_OPTIONAL_PROVIDER_TYPES = new Set(['ollama', 'openai-compatible']);
+
+/**
+ * Whether a provider entry carries a credential at all.
+ *
+ * `authToken` counts, not just `apiKey`: `cascade link` stores an adopted
+ * bearer there and `AnthropicProvider` runs on it happily. Every surface that
+ * asks "is this provider set up" goes through this one predicate, because the
+ * answer was written out by hand in four places — `hasUsableProvider`, the
+ * dashboard's `config:current`, `cascade doctor`, and the desktop's IPC
+ * settings snapshot — and each was fixed separately as it was noticed, the last
+ * of them two rounds after the first.
+ */
+export function hasProviderCredential(
+  p: { apiKey?: string; authToken?: string } | undefined | null,
+): boolean {
+  if (!p) return false;
+  return (typeof p.apiKey === 'string' && p.apiKey.length > 0)
+    || (typeof p.authToken === 'string' && p.authToken.length > 0);
+}
+
 export function hasUsableProvider(
   providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined,
 ): boolean {
   if (!providers?.length) return false;
-  // `authToken` counts as a credential, not just `apiKey`. `cascade link`
-  // stores an adopted Anthropic OAuth token there (cli/commands/link.ts) and
-  // AnthropicProvider.isAvailable() runs on it happily — so ignoring it here
-  // declared a working install unconfigured: `cascade run` aborted with "No
-  // providers configured" and the desktop reopened the full-screen wizard.
-  return providers.some((p) => KEY_OPTIONAL_PROVIDER_TYPES.has(p.type) || !!p.apiKey || !!p.authToken);
+  return providers.some((p) => KEY_OPTIONAL_PROVIDER_TYPES.has(p.type) || hasProviderCredential(p));
 }
 
 /**
@@ -491,6 +506,23 @@ export class ConfigManager {
     // said yes, and onboarding stayed shut — which is the exact state the
     // migration exists to break out of.
     const emptiedByRetirement = wasEmpty && (!!this.retiredCleanup || this.revokedCredentials > 0);
+    /**
+     * May an environment key CREATE an entry for this provider?
+     *
+     * An empty list is the fresh-install case the gate was written for. The
+     * other case is a provider this load's migration just removed: with any
+     * other provider in the file the list is not empty, so an exported
+     * ANTHROPIC_API_KEY could not replace the dead subscription token, the
+     * merged config ended up with no Anthropic at all, and the pin-clearing
+     * below then deleted the user's Claude pins — with a perfectly good
+     * replacement credential sitting in the environment the whole time.
+     *
+     * Only the revoked migration qualifies. A RETIRED provider type is gone
+     * from the schema, so recreating one would fail validation on the next
+     * load.
+     */
+    const mayCreate = (type: string): boolean =>
+      wasEmpty || (type === 'anthropic' && this.revokedCredentials > 0);
 
     const envProviders: Array<{ env: string; type: CascadeConfig['providers'][0]['type'] }> = [
       { env: 'ANTHROPIC_API_KEY', type: 'anthropic' },
@@ -519,7 +551,7 @@ export class ConfigManager {
       // endpoint — and model discovery then sent that gateway's key to the
       // public host.
       const anthropicGateway = type === 'anthropic' ? process.env['ANTHROPIC_BASE_URL'] : undefined;
-      if (!existing && wasEmpty) {
+      if (!existing && mayCreate(type)) {
         // Azure cannot be configured by a key alone. Without a deployment name
         // it resolves to no model at all (azureModelForDeployment returns
         // null), and without an endpoint the client falls back to a literal
@@ -600,7 +632,7 @@ export class ConfigManager {
             existing.authToken = authToken;
             existing.baseUrl ??= gateway;
           }
-        } else if (wasEmpty || globalAnthropic) {
+        } else if (mayCreate('anthropic') || globalAnthropic) {
           // `wasEmpty` alone was too narrow for the same reason. With any other
           // provider in the workspace file the row was never created, even
           // though the global store demonstrably holds an Anthropic entry and

@@ -69,7 +69,7 @@ function mapProvider(id: string): { type: string | null; baseUrl?: string } {
 // ─── Backend ─────────────────────────────────────────────────────────────────
 // Resolve the cascade-ai core package (built CommonJS output). In dev it lives at
 // the repo's ../dist; in a packaged app it's bundled under resources/cascade-core.
-function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined) => boolean; applyProviderApiKey: (providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>, type: string, apiKey: string, extra?: { baseUrl?: string }) => void; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response> } {
+function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined) => boolean; hasProviderCredential: (p: { apiKey?: string; authToken?: string } | undefined | null) => boolean; applyProviderApiKey: (providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>, type: string, apiKey: string, extra?: { baseUrl?: string }) => void; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response> } {
   // Dev: the repo's external-deps build (node_modules resolves the requires).
   // Packaged: the self-contained `desktop-core.cjs` bundle (no node_modules to
   // resolve from — every JS dep is bundled in; only native modules like
@@ -514,10 +514,16 @@ function registerIPC(): void {
       warnAtPct: cascadeConfig?.budget?.warnAtPct as number | undefined,
     };
     const providers = (cascadeConfig?.providers ?? []) as Array<{
-      type: string; apiKey?: string; baseUrl?: string; label?: string; deploymentName?: string; apiVersion?: string;
+      type: string; apiKey?: string; authToken?: string; baseUrl?: string; label?: string; deploymentName?: string; apiVersion?: string;
     }>;
+    // Through the SDK's shared predicate, not a fourth hand-written copy.
+    // Settings falls back to this IPC snapshot whenever the backend socket is
+    // unavailable, so counting only `apiKey` showed a bearer-configured
+    // provider as having no credential in exactly the path that does not depend
+    // on the backend being up.
+    const { hasProviderCredential } = loadCore();
     const providersWithKey = providers
-      .filter((p) => typeof p.apiKey === 'string' && p.apiKey.length > 0)
+      .filter((p) => hasProviderCredential(p))
       .map((p) => p.type);
     const endpoints: Record<string, string> = {};
     for (const p of providers) { if (p?.type && p?.baseUrl && p.type !== 'azure') endpoints[p.type] = p.baseUrl; }

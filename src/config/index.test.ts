@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { applyProviderApiKey, ConfigManager, hasUsableProvider } from './index.js';
+import { applyProviderApiKey, ConfigManager, hasProviderCredential, hasUsableProvider } from './index.js';
 import { CASCADE_CONFIG_FILE } from '../constants.js';
 
 const tempDirs: string[] = [];
@@ -343,6 +343,24 @@ describe('getAuthToken — the companion to getApiKey', () => {
     const cm = new ConfigManager(dir);
     await cm.load();
     expect(cm.getAuthToken('openai')).toBeUndefined();
+  });
+});
+
+describe('hasProviderCredential — one answer for every surface', () => {
+  it('counts a bearer token as a credential, not only an API key', () => {
+    // The same "counts only apiKey" mistake was written out by hand in four
+    // places and fixed separately in each as it was noticed — the last of them
+    // two review rounds after the first. This is the single predicate they all
+    // go through now.
+    expect(hasProviderCredential({ apiKey: 'sk' })).toBe(true);
+    expect(hasProviderCredential({ authToken: 'gw-token' })).toBe(true);
+    expect(hasProviderCredential({})).toBe(false);
+  });
+
+  it('treats an empty string as no credential, and tolerates a missing entry', () => {
+    expect(hasProviderCredential({ apiKey: '', authToken: '' })).toBe(false);
+    expect(hasProviderCredential(undefined)).toBe(false);
+    expect(hasProviderCredential(null)).toBe(false);
   });
 });
 

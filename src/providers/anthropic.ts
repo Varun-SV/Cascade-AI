@@ -62,6 +62,27 @@ export function toAnthropicToolUse(toolCalls: readonly ToolCall[]): Anthropic.To
   }));
 }
 
+/**
+ * A configured Anthropic endpoint reduced to the ROOT the SDK expects.
+ *
+ * The SDK owns the version segment: every resource path it builds already
+ * starts `/v1/…`, and `buildURL()` is a plain `baseURL + path` concatenation.
+ * So a gateway written the natural way — `https://gw.example/v1`, the form
+ * discovery and `cascade link` both accept — produced `/v1/v1/messages` and
+ * failed EVERY generation call. Model discovery did not fail with it, because
+ * that request is issued by hand, so a gateway could list its models and then
+ * refuse every message: the two disagreed about what `baseUrl` meant.
+ *
+ * One trailing version segment is stripped, and both callers below derive their
+ * URL from this, so they cannot drift apart again.
+ */
+export function anthropicApiRoot(configured: string | undefined): string | undefined {
+  if (!configured) return undefined;
+  const trimmed = configured.trim().replace(/\/+$/, '');
+  if (!trimmed) return undefined;
+  return trimmed.replace(/\/v\d+$/, '');
+}
+
 export class AnthropicProvider extends BaseProvider {
   private client: Anthropic;
 
@@ -73,7 +94,8 @@ export class AnthropicProvider extends BaseProvider {
     // Anthropic documents ANTHROPIC_AUTH_TOKEN for — and that needs the
     // endpoint. Without it, a user who configured a gateway had their request
     // sent to api.anthropic.com with a token that gateway had issued.
-    const baseURL = config.baseUrl;
+    // Through anthropicApiRoot(), because the SDK appends its own `/v1`.
+    const baseURL = anthropicApiRoot(config.baseUrl);
     // A bearer token authenticates via Authorization: Bearer instead of
     // x-api-key, which the SDK's `authToken` option does on its own.
     //
@@ -193,13 +215,16 @@ export class AnthropicProvider extends BaseProvider {
       // replaced the gateway's own catalogue with the public one, so routing
       // picked models the gateway may not serve. With a bearer token
       // configured it sent an empty `x-api-key` and always fell through.
-      // `/v1` only when it is not already there. A gateway baseUrl is commonly
-      // written with the version in it — the SDK accepts either — and appending
-      // unconditionally produced /v1/v1/models, a 404 that fell silently back
-      // to the bundled catalogue and looked exactly like a gateway with no
-      // models of its own.
-      const base = (this.config.baseUrl ?? 'https://api.anthropic.com').replace(/\/+$/, '');
-      const modelsUrl = /\/v\d+$/.test(base) ? `${base}/models` : `${base}/v1/models`;
+      // The version segment comes from the SAME place the client's does. A
+      // gateway baseUrl is commonly written with the version in it, and
+      // appending unconditionally produced /v1/v1/models — a 404 that fell
+      // silently back to the bundled catalogue and looked exactly like a
+      // gateway with no models of its own. Deriving both from
+      // anthropicApiRoot() is what keeps discovery and generation addressing
+      // one host: an earlier fix corrected this URL alone, leaving the client
+      // still pointed at /v1/v1/messages.
+      const base = anthropicApiRoot(this.config.baseUrl) ?? 'https://api.anthropic.com';
+      const modelsUrl = `${base}/v1/models`;
       const resp = await fetch(modelsUrl, {
         headers: {
           ...(this.config.authToken

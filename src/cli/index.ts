@@ -241,7 +241,10 @@ mcp
 program
   .command('link [provider]')
   .description('Reuse credentials from other AI CLIs (Claude Code, Codex, Gemini CLI, Copilot)')
-  .option('--accept-risk', 'Adopt a subscription OAuth token despite the ToS warning')
+  // Still ACCEPTED so an existing script does not start failing on an unknown
+  // option, but it no longer does anything: subscription tokens are refused by
+  // the provider, so there is no working configuration for it to unlock.
+  .option('--accept-risk', 'Deprecated — subscription tokens can no longer be adopted')
   .action(async (provider: string | undefined, opts: { acceptRisk?: boolean }) => {
     await linkCommand(provider, { acceptRisk: opts.acceptRisk, workspace: process.cwd() });
   });

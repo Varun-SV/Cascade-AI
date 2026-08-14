@@ -54,9 +54,21 @@ describe('AnthropicProvider.listModels', () => {
 });
 
 describe('AnthropicProvider — gateway routing', () => {
-  /** The SDK client's resolved base URL, whichever auth path built it. */
-  function baseUrlOf(provider: AnthropicProvider): string {
-    return (provider as unknown as { client: { baseURL: string } }).client.baseURL;
+  /**
+   * The URL the SDK will actually POST a message to.
+   *
+   * Asserted instead of the client's `baseURL` field, which is what an earlier
+   * version of these tests checked — and which is why they passed while every
+   * generation call was going to `/v1/v1/messages`. The SDK owns the version
+   * segment (`buildURL()` concatenates `baseURL` with `/v1/messages`), so
+   * carrying the configured string through to the client is not the same as
+   * addressing the right endpoint.
+   */
+  function messagesUrlOf(provider: AnthropicProvider): string {
+    const client = (provider as unknown as {
+      client: { buildURL(path: string, query: unknown): string };
+    }).client;
+    return client.buildURL('/v1/messages', null);
   }
 
   it('routes an API key at a configured gateway', () => {
@@ -64,7 +76,7 @@ describe('AnthropicProvider — gateway routing', () => {
       { type: 'anthropic', apiKey: 'k', baseUrl: 'https://gateway.internal/v1' },
       undefined as never,
     );
-    expect(baseUrlOf(provider)).toBe('https://gateway.internal/v1');
+    expect(messagesUrlOf(provider)).toBe('https://gateway.internal/v1/messages');
   });
 
   it('routes a bearer token at a configured gateway', () => {
@@ -76,12 +88,37 @@ describe('AnthropicProvider — gateway routing', () => {
       { type: 'anthropic', authToken: 'gw-token', baseUrl: 'https://gateway.internal/v1' },
       undefined as never,
     );
-    expect(baseUrlOf(provider)).toBe('https://gateway.internal/v1');
+    expect(messagesUrlOf(provider)).toBe('https://gateway.internal/v1/messages');
+  });
+
+  it('addresses the same endpoint whether or not the version was written out', () => {
+    // Both spellings are accepted by discovery and `cascade link`, so both have
+    // to reach the same place.
+    for (const configured of [
+      'https://gateway.internal',
+      'https://gateway.internal/',
+      'https://gateway.internal/v1',
+      'https://gateway.internal/v1/',
+    ]) {
+      const provider = new AnthropicProvider(
+        { type: 'anthropic', apiKey: 'k', baseUrl: configured },
+        undefined as never,
+      );
+      expect(messagesUrlOf(provider)).toBe('https://gateway.internal/v1/messages');
+    }
+  });
+
+  it('keeps a gateway path that is not a version segment', () => {
+    const provider = new AnthropicProvider(
+      { type: 'anthropic', apiKey: 'k', baseUrl: 'https://gateway.internal/anthropic/v1' },
+      undefined as never,
+    );
+    expect(messagesUrlOf(provider)).toBe('https://gateway.internal/anthropic/v1/messages');
   });
 
   it('leaves the default endpoint alone when no gateway is configured', () => {
     const provider = new AnthropicProvider({ type: 'anthropic', apiKey: 'k' }, undefined as never);
-    expect(baseUrlOf(provider)).toContain('api.anthropic.com');
+    expect(messagesUrlOf(provider)).toBe('https://api.anthropic.com/v1/messages');
   });
 });
 
@@ -135,11 +172,11 @@ describe('AnthropicProvider.listModels — follows the configured endpoint', () 
 
 describe('AnthropicProvider.listModels — version path', () => {
   it('does not double /v1 when the gateway URL already carries it', async () => {
-    // A gateway baseUrl is commonly written with the version in it — the SDK
-    // accepts either form, and the constructor tests above use exactly that
-    // shape. Appending unconditionally produced /v1/v1/models: a 404 that fell
-    // silently back to the bundled catalogue and looked like a gateway with no
-    // models of its own.
+    // A gateway baseUrl is commonly written with the version in it. Appending
+    // unconditionally produced /v1/v1/models: a 404 that fell silently back to
+    // the bundled catalogue and looked like a gateway with no models of its
+    // own. Discovery and generation derive this from one function, so a gateway
+    // can no longer list its models and then refuse every message.
     fetchSpy.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
     const provider = new AnthropicProvider(
       { type: 'anthropic', apiKey: 'k', baseUrl: 'https://gateway.internal/v1' },
@@ -159,6 +196,25 @@ describe('AnthropicProvider.listModels — version path', () => {
     await provider.listModels();
     expect((fetchSpy.mock.calls[0] as unknown as [string])[0])
       .toBe('https://gateway.internal/anthropic/v1/models');
+  });
+
+  it('asks the same host the client will send messages to', async () => {
+    // The two used to be computed independently, and disagreed: this URL was
+    // corrected for an already-present /v1 while the client was left pointed at
+    // /v1/v1/messages. A gateway could list its catalogue and then fail every
+    // generation call.
+    fetchSpy.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    const provider = new AnthropicProvider(
+      { type: 'anthropic', apiKey: 'k', baseUrl: 'https://gateway.internal/v1' },
+      undefined as never,
+    );
+    await provider.listModels();
+    const modelsUrl = (fetchSpy.mock.calls[0] as unknown as [string])[0];
+    const messagesUrl = (provider as unknown as {
+      client: { buildURL(path: string, query: unknown): string };
+    }).client.buildURL('/v1/messages', null);
+    expect(new URL(modelsUrl).origin).toBe(new URL(messagesUrl).origin);
+    expect(modelsUrl.replace(/\/models$/, '')).toBe(messagesUrl.replace(/\/messages$/, ''));
   });
 });
 
