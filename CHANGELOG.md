@@ -358,12 +358,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   went around this entire release. Anthropic refuses the token whatever header
   carries it, so it is now surfaced and explained rather than adopted.
 
-- **A redirecting gateway can no longer be handed your API key.** Model
-  discovery sends `x-api-key`, and a custom header — unlike `Authorization` —
-  is *not* stripped when a redirect crosses origins, so a gateway that was
-  misconfigured or compromised received the key configured for it. Redirects
-  are now followed only while they stay on the original origin, which is the
-  policy the local-endpoint fetch already applied.
+- **A redirecting gateway can no longer be handed your API key.** Requests send
+  `x-api-key`, and a custom header — unlike `Authorization` — is *not* stripped
+  when a redirect crosses origins, so a gateway that was misconfigured or
+  compromised received the key configured for it. Redirects are now followed
+  only while they stay on the original origin, which is the policy the
+  local-endpoint fetch already applied. Both paths are covered: model discovery,
+  which issues its request by hand, and **generation**, which goes through the
+  SDK client and therefore needed the guard installed as the client's own
+  `fetch` rather than at a call site.
+
+- **`cascade link azure` applies an exported `AZURE_OPENAI_API_VERSION`** to the
+  deployments it keys, not only to a fully routed new one. Each configured
+  deployment otherwise kept its stale or default version, and one that requires
+  a preview version fails on its first request.
 
 - **The model-discovery cache no longer derives its key from your API key.** It
   was a bare `sha256` of the credential — the exact artifact an offline guess is

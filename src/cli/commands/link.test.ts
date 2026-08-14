@@ -359,6 +359,34 @@ describe('cascade link — adoption', () => {
     expect(azure.find((p) => p['deploymentName'] === 'dev')?.['apiKey']).toBe('key-two');
   });
 
+  it('applies the exported API version to the deployments it keys', async () => {
+    // The fully routed branch carries apiVersion; this one dropped it, leaving
+    // each deployment on its stale or default version while the user had
+    // exported the one they meant — and a deployment that requires a preview
+    // version fails on its first request.
+    await seedConfig([
+      { type: 'azure', deploymentName: 'a', baseUrl: 'https://one.openai.azure.com', apiVersion: '2023-05-15' },
+      { type: 'azure', deploymentName: 'b', baseUrl: 'https://one.openai.azure.com' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'new-key';
+    process.env['AZURE_OPENAI_ENDPOINT'] = 'https://one.openai.azure.com';
+    process.env['AZURE_OPENAI_API_VERSION'] = '2026-01-01-preview';
+
+    const azure = (await providersAfterLink('azure')).filter((p) => p['type'] === 'azure');
+    expect(azure.every((p) => p['apiVersion'] === '2026-01-01-preview')).toBe(true);
+  });
+
+  it('leaves each deployment its own API version when none was exported', async () => {
+    await seedConfig([
+      { type: 'azure', deploymentName: 'a', baseUrl: 'https://one.openai.azure.com', apiVersion: '2023-05-15' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'new-key';
+    process.env['AZURE_OPENAI_ENDPOINT'] = 'https://one.openai.azure.com';
+
+    const azure = (await providersAfterLink('azure')).filter((p) => p['type'] === 'azure');
+    expect(azure[0]?.['apiVersion']).toBe('2023-05-15');
+  });
+
   it('still refuses when several resources are configured and none is named', async () => {
     await seedConfig([
       { type: 'azure', deploymentName: 'prod', baseUrl: 'https://one.openai.azure.com', apiKey: 'key-one' },

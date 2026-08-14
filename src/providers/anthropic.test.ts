@@ -276,6 +276,25 @@ describe('AnthropicProvider.listModels — a gateway that redirects', () => {
     await new Promise<void>((r) => sink.close(() => r()));
   });
 
+  it('does not hand the configured key to the redirect target when GENERATING', async () => {
+    // The sibling of the discovery case below, and the one that carries every
+    // real request. Generation goes through the SDK client, so guarding the
+    // hand-written model-list fetch alone left this path leaking.
+    fetchSpy.mockRestore();
+    sinkKeys.length = 0;
+    const provider = new AnthropicProvider(
+      { type: 'anthropic', apiKey: 'secret-key', baseUrl: gwUrl },
+      { id: 'claude-x', maxOutputTokens: 100 } as never,
+    );
+    // The SDK wraps a transport failure as its own "Connection error", so the
+    // refusal's own message does not survive — what matters is that the request
+    // failed and the other origin never saw the key.
+    await expect(
+      provider.generate({ messages: [{ role: 'user', content: 'hi' }] } as never),
+    ).rejects.toThrow();
+    expect(sinkKeys).toEqual([]);
+  });
+
   it('does not hand the configured key to the redirect target', async () => {
     // Exercised through listModels, not through the helper: the point is that
     // THIS call site uses the same-origin fetch. `x-api-key` is a custom

@@ -366,9 +366,20 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
       console.log('');
       return false;
     }
+    // `apiVersion` travels with the key, as it does on the fully routed branch
+    // above. Dropping it here left each deployment on its stale or default
+    // version while the user had exported the one they meant — and a deployment
+    // that requires a preview version then fails on its first request. Only
+    // when the environment actually supplied one, so a row keeps its own
+    // otherwise.
     const providers = config.providers.map((p) => (
       scoped.includes(p)
-        ? { ...p, apiKey: cred.secret, credentialSource: cred.sourceTool }
+        ? {
+          ...p,
+          apiKey: cred.secret,
+          credentialSource: cred.sourceTool,
+          ...(cred.apiVersion ? { apiVersion: cred.apiVersion } : {}),
+        }
         : p
     ));
     await cm.updateConfig({ providers });

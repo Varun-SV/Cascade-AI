@@ -84,6 +84,27 @@ export function anthropicApiRoot(configured: string | undefined): string | undef
   return trimmed.replace(/\/v\d+$/, '');
 }
 
+/**
+ * The fetch the SDK client uses, refusing to follow a redirect off-origin.
+ *
+ * Generation carries `x-api-key`, and a custom header is not stripped across
+ * origins the way `Authorization` is — the same leak closed for the model-list
+ * request, arriving by the other door. Model discovery issues its request by
+ * hand and was guarded first; generation goes through the SDK, so the guard has
+ * to be installed there rather than at a call site.
+ *
+ * The SDK invokes this as `fetch(url, init)` with a string URL (`client.js`
+ * `this.fetch.call(undefined, url, fetchOptions)`), so unwrapping a `Request`
+ * is not a case that arises; it is handled for the URL only, and would fail
+ * loudly rather than quietly skip the guard.
+ */
+const sameOriginFetch = ((input: string | URL | Request, init?: RequestInit) => {
+  const url = typeof input === 'string' ? input
+    : input instanceof URL ? input.toString()
+    : input.url;
+  return fetchSameOrigin(url, init);
+}) as unknown as typeof fetch;
+
 export class AnthropicProvider extends BaseProvider {
   private client: Anthropic;
 
@@ -108,11 +129,13 @@ export class AnthropicProvider extends BaseProvider {
     if (config.authToken) {
       this.client = new Anthropic({
         authToken: config.authToken,
+        fetch: sameOriginFetch,
         ...(baseURL ? { baseURL } : {}),
       });
     } else {
       this.client = new Anthropic({
         apiKey: config.apiKey,
+        fetch: sameOriginFetch,
         ...(baseURL ? { baseURL } : {}),
       });
     }
