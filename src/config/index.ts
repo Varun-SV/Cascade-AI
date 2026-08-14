@@ -13,6 +13,7 @@ import { loadCascadeMd, type CascadeMdContent } from './cascade-md.js';
 import { MemoryStore } from '../memory/store.js';
 import { validateConfig } from './validate.js';
 import { loadGlobalCredentials, mergeGlobalCredentials, saveGlobalCredentials } from './global-credentials.js';
+import { normalizeAzureEndpoint, sameAzureEndpoint } from './azure-endpoint.js';
 import {
   describeCleanup,
   didCleanupChangeAnything,
@@ -206,7 +207,7 @@ export class ConfigManager {
     // to Auto, so it has to go — but a key from the global store or the
     // environment keeps it valid, and both arrive after the file is read.
     if (this.revokedCredentials > 0 && !hasUsableAnthropic(this.config.providers)) {
-      this.revokedPins = clearAnthropicPins(this.config.models);
+      this.revokedPins = clearAnthropicPins(this.config.models, this.config.providers);
       if (this.revokedPins.length > 0) await this.persistClearedPins(this.revokedPins);
     }
 
@@ -412,20 +413,25 @@ export class ConfigManager {
    * reason, since a read-only config directory must not abort startup.
    */
   /**
-   * The Azure entry `AZURE_OPENAI_KEY` belongs to, or undefined when that
-   * cannot be answered.
+   * The Azure entries `AZURE_OPENAI_KEY` belongs to — possibly several.
    *
    * `AZURE_OPENAI_ENDPOINT` names the resource. Without one, a single
    * configured resource is unambiguous and anything more is a guess — and
    * guessing wrong writes a key to a resource that will reject it.
+   *
+   * ALL the deployments on that resource, not the first. An Azure key is
+   * resource-scoped, so every deployment there shares it, and Azure is
+   * configured one entry per deployment — the router binds each model to its
+   * own row, matching `deploymentName` against the model id, so filling only
+   * the first left the rest issuing requests with no key at all.
    */
-  private azureEntryForEnv(): CascadeConfig['providers'][number] | undefined {
+  private azureEntriesForEnv(): CascadeConfig['providers'] {
     const entries = this.config.providers.filter((p) => p.type === 'azure');
-    if (entries.length === 0) return undefined;
+    if (entries.length === 0) return [];
     const endpoint = process.env['AZURE_OPENAI_ENDPOINT']?.trim();
-    if (endpoint) return entries.find((p) => (p.baseUrl?.trim() ?? '') === endpoint);
-    const resources = new Set(entries.map((p) => p.baseUrl?.trim() ?? ''));
-    return resources.size === 1 ? entries.find((p) => !p.apiKey) ?? entries[0] : undefined;
+    if (endpoint) return entries.filter((p) => sameAzureEndpoint(p.baseUrl, endpoint));
+    const resources = new Set(entries.map((p) => normalizeAzureEndpoint(p.baseUrl)));
+    return resources.size === 1 ? entries : [];
   }
 
   private async persistClearedPins(tiers: readonly string[]): Promise<void> {
@@ -481,14 +487,16 @@ export class ConfigManager {
     for (const { env, type } of envProviders) {
       const key = process.env[env];
       if (!key) continue;
-      // An Azure key belongs to ONE RESOURCE, so the entry it fills has to be
-      // chosen by endpoint rather than by "first of this type". Filling the
+      // An Azure key belongs to ONE RESOURCE, so the entries it fills have to
+      // be chosen by endpoint rather than by "first of this type". Filling the
       // first keyless deployment sent a resource-specific key to an unrelated
       // resource — and `cascade link azure` then persisted that alongside its
-      // own correctly scoped write.
-      const existing = type === 'azure'
-        ? this.azureEntryForEnv()
-        : this.config.providers.find((p) => p.type === type);
+      // own correctly scoped write. Plural, because the key covers every
+      // deployment on the resource it belongs to.
+      const targets = type === 'azure'
+        ? this.azureEntriesForEnv()
+        : [this.config.providers.find((p) => p.type === type)].filter((p) => !!p);
+      const existing = targets[0];
 
       // ANTHROPIC_BASE_URL is the gateway for whichever Anthropic credential
       // is in play, key or bearer. Carrying it only on the bearer path meant an
@@ -521,12 +529,18 @@ export class ConfigManager {
           type, apiKey: key,
           ...(anthropicGateway ? { baseUrl: anthropicGateway } : {}),
         });
-      } else if (existing && !existing.apiKey) {
-        existing.apiKey = key;
-        // A key and a gateway exported together are a PAIR. `??=` kept a stale
-        // configured endpoint, so the newly exported credential was sent to the
-        // host it was not issued by.
-        if (anthropicGateway) existing.baseUrl = anthropicGateway;
+      } else if (existing) {
+        // EVERY keyless target, not just the first: for Azure that is all the
+        // deployments on the resource this key belongs to, and a deployment
+        // left keyless issues its requests with no credential.
+        for (const target of targets) {
+          if (target.apiKey) continue;
+          target.apiKey = key;
+          // A key and a gateway exported together are a PAIR. `??=` kept a
+          // stale configured endpoint, so the newly exported credential was
+          // sent to the host it was not issued by.
+          if (anthropicGateway) target.baseUrl = anthropicGateway;
+        }
       }
     }
 

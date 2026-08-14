@@ -303,6 +303,56 @@ describe('cascade link — adoption', () => {
     });
   });
 
+  it('updates the existing deployment when the endpoint differs by a trailing slash', async () => {
+    // The provider strips trailing slashes before it builds a client, so these
+    // address the same service. Comparing them as typed missed the row and
+    // appended a DUPLICATE — and the router takes the first row matching a
+    // deployment name, so it kept using the old keyless one while link printed
+    // "✓ Linked".
+    await seedConfig([
+      { type: 'azure', deploymentName: 'prod', baseUrl: 'https://one.openai.azure.com' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'new-key';
+    process.env['AZURE_OPENAI_ENDPOINT'] = 'https://one.openai.azure.com/';
+    process.env['AZURE_OPENAI_DEPLOYMENT'] = 'prod';
+
+    const azure = (await providersAfterLink('azure')).filter((p) => p['type'] === 'azure');
+    expect(azure).toHaveLength(1);
+    expect(azure[0]).toMatchObject({ deploymentName: 'prod', apiKey: 'new-key' });
+  });
+
+  it('refuses to guess which compatible service a bare target meant', async () => {
+    // They all share one provider type, so the first directly-usable candidate
+    // won — leaving the choice to the order of a table in
+    // credential-discovery.ts and silently configuring OpenRouter for someone
+    // who meant Groq.
+    process.env['OPENROUTER_API_KEY'] = 'or-key';
+    process.env['GROQ_API_KEY'] = 'groq-key';
+
+    const providers = await providersAfterLink('openai-compatible');
+    expect(providers.find((p) => p['type'] === 'openai-compatible')).toBeUndefined();
+  });
+
+  it('adopts the service the target names, with both keys set', async () => {
+    process.env['OPENROUTER_API_KEY'] = 'or-key';
+    process.env['GROQ_API_KEY'] = 'groq-key';
+
+    const providers = await providersAfterLink('groq');
+    expect(providers.find((p) => p['type'] === 'openai-compatible')).toMatchObject({
+      apiKey: 'groq-key',
+      baseUrl: 'https://api.groq.com/openai/v1',
+    });
+  });
+
+  it('still adopts a bare target when only one compatible key is set', async () => {
+    process.env['OPENROUTER_API_KEY'] = 'or-key';
+
+    const providers = await providersAfterLink('openai-compatible');
+    expect(providers.find((p) => p['type'] === 'openai-compatible')).toMatchObject({
+      apiKey: 'or-key',
+    });
+  });
+
   it('refuses a Claude Code subscription token even with --accept-risk', async () => {
     // The flag used to be the way to adopt exactly this. Anthropic prohibits
     // it and refuses it at the API, so no flag should get it configured.

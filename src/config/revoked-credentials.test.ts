@@ -40,6 +40,25 @@ describe('isRevokedSubscriptionCredential', () => {
     })).toBe(false);
   });
 
+  it('keeps a row that still holds an API key when an endpoint would not count', () => {
+    // `keepForEndpoint: false` is what a sync bundle uses. A row carrying BOTH
+    // a revoked token and a good key is what the settings-save paths fixed in
+    // this release used to produce, and the key is the replacement the user is
+    // syncing — dropping the row would lose it.
+    const { kept, removed } = stripRevokedCredentials(
+      [{ type: 'anthropic', authToken: 'sk-ant-oat01-x', apiKey: 'sk-ant-api-good' }],
+      { keepForEndpoint: false },
+    );
+    expect(removed).toBe(1);
+    expect(kept).toEqual([{ type: 'anthropic', apiKey: 'sk-ant-api-good' }]);
+  });
+
+  it('drops an endpoint-only row for a bundle, keeps it for local config', () => {
+    const row = () => [{ type: 'anthropic', authToken: 'sk-ant-oat01-x', baseUrl: 'https://gw' }];
+    expect(stripRevokedCredentials(row(), { keepForEndpoint: false }).kept).toEqual([]);
+    expect(stripRevokedCredentials(row()).kept).toEqual([{ type: 'anthropic', baseUrl: 'https://gw' }]);
+  });
+
   it('does not reach into other providers', () => {
     expect(isRevokedSubscriptionCredential({ type: 'openai', authToken: 'sk-ant-oat01-abc' })).toBe(false);
   });
@@ -136,7 +155,7 @@ describe('clearing pins the removed credential leaves dangling', () => {
     const models = { t1: 'anthropic:claude-opus-4', t2: 'Anthropic:claude-sonnet-4', t3: 'openai:gpt-5-mini' };
     // Lowercased because selector.ts's resolveDynamicModel() parses the
     // provider half case-insensitively, so `Anthropic:` is a valid pin.
-    expect(clearAnthropicPins(models)).toEqual(['t1', 't2']);
+    expect(clearAnthropicPins(models, [])).toEqual(['t1', 't2']);
     expect(models).toEqual({ t3: 'openai:gpt-5-mini' });
   });
 
@@ -145,7 +164,7 @@ describe('clearing pins the removed credential leaves dangling', () => {
     // writes the same shape. Matching only `anthropic:` left the ordinary pin
     // behind, and the router throws on a pin it cannot resolve.
     const models = { t1: 'claude-opus-4', t2: 'gpt-5-mini', t3: 'llama3.2:3b' };
-    expect(clearAnthropicPins(models)).toEqual(['t1']);
+    expect(clearAnthropicPins(models, [])).toEqual(['t1']);
     expect(models).toEqual({ t2: 'gpt-5-mini', t3: 'llama3.2:3b' });
   });
 
@@ -153,13 +172,49 @@ describe('clearing pins the removed credential leaves dangling', () => {
     // A pin is most likely to name an unknown model precisely when it is newer
     // than the build.
     const models = { t1: 'claude-opus-9-future' };
-    expect(clearAnthropicPins(models)).toEqual(['t1']);
+    expect(clearAnthropicPins(models, [])).toEqual(['t1']);
   });
 
   it('leaves another provider\'s bare pin alone', () => {
     const models = { t1: 'gpt-5', t2: 'gemini-2.5-flash', t3: 'llama3.2:3b' };
-    expect(clearAnthropicPins(models)).toEqual([]);
+    expect(clearAnthropicPins(models, [])).toEqual([]);
     expect(models).toEqual({ t1: 'gpt-5', t2: 'gemini-2.5-flash', t3: 'llama3.2:3b' });
+  });
+
+  it('keeps a bare Claude pin a configured gateway could serve', () => {
+    // resolveDynamicModel() accepts any REGISTERED model by id whatever vendor
+    // its name suggests (selector.ts), so an openai-compatible gateway serving
+    // `claude-sonnet-4` resolves this pin perfectly well. Deleting it because
+    // of the model's name would throw away a working configuration.
+    const models = { t1: 'claude-sonnet-4' };
+    expect(clearAnthropicPins(models, [
+      { type: 'openai-compatible', apiKey: 'k', baseUrl: 'https://gw/v1' },
+    ])).toEqual([]);
+    expect(models).toEqual({ t1: 'claude-sonnet-4' });
+  });
+
+  it('keeps a bare pin naming an Azure deployment', () => {
+    // Azure model ids ARE deployment names, so this one is knowable exactly.
+    const models = { t1: 'claude-proxy' };
+    expect(clearAnthropicPins(models, [
+      { type: 'azure', apiKey: 'k', baseUrl: 'https://r.openai.azure.com', deploymentName: 'claude-proxy' },
+    ])).toEqual([]);
+  });
+
+  it('still clears the PREFIXED form even with a gateway configured', () => {
+    // `anthropic:<model>` names the provider, not just a model, and that
+    // provider is the one that was removed — no other entry can serve it.
+    const models = { t1: 'anthropic:claude-sonnet-4' };
+    expect(clearAnthropicPins(models, [
+      { type: 'openai-compatible', apiKey: 'k', baseUrl: 'https://gw/v1' },
+    ])).toEqual(['t1']);
+  });
+
+  it('clears a bare pin when the only other provider serves a fixed catalogue', () => {
+    // OpenAI cannot be asked for `claude-opus-4`, so nothing configured can
+    // resolve this pin and the router would throw on it.
+    const models = { t1: 'claude-opus-4' };
+    expect(clearAnthropicPins(models, [{ type: 'openai', apiKey: 'sk' }])).toEqual(['t1']);
   });
 
   it('reads a surviving Anthropic provider from whatever list it is given', () => {

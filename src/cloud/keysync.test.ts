@@ -287,4 +287,60 @@ describe('keysync — an endpoint-only revoked row must not win either', () => {
     expect(anthropic?.apiKey).toBe('sk-ant-still-good');
     expect(anthropic?.authToken).toBeUndefined();
   });
+
+  it('keeps a synced row that carries a replacement API key beside the dead token', () => {
+    // Dropping the row wholesale lost the key. This is the state the
+    // settings-save paths fixed in this release used to produce, so a device
+    // still on an older build syncs exactly this shape — and the key is the
+    // thing the user is trying to transfer.
+    const local = cfg({ providers: [{ type: 'anthropic', apiKey: 'sk-ant-old' }] });
+    const bundle = {
+      v: 2,
+      providers: [{
+        type: 'anthropic', authToken: 'sk-ant-oat01-dead',
+        apiKey: 'sk-ant-replacement', credentialSource: 'Claude Code',
+      }],
+    } as unknown as Parameters<typeof applySyncBundle>[0];
+
+    const merged = applySyncBundle(bundle, local);
+    const anthropic = merged.providers.find((p) => p.type === 'anthropic');
+    expect(anthropic?.apiKey).toBe('sk-ant-replacement');
+    expect(anthropic?.authToken).toBeUndefined();
+  });
+});
+
+describe('keysync — a pin the removed credential leaves dangling', () => {
+  it('clears an Anthropic pin the bundle brought with the dead token', () => {
+    // clearRetiredPins() does not cover this: `anthropic` is not a retired
+    // provider type, it is a supported one whose credential died. The models
+    // merge lets the incoming pin win, so without this the pull persisted a pin
+    // naming a provider that is not there — and the router throws on that
+    // rather than falling back to the provider that still works.
+    const local = cfg({ providers: [{ type: 'openai', apiKey: 'sk-openai' }], models: { t1: 'gpt-5' } });
+    const stale = {
+      v: 2,
+      providers: [{ type: 'anthropic', authToken: 'sk-ant-oat01-dead', credentialSource: 'Claude Code' }],
+      models: { t1: 'anthropic:claude-opus-4' },
+    } as unknown as Parameters<typeof applySyncBundle>[0];
+
+    const cleanup = { removed: [] as string[], clearedPins: [] as string[] };
+    const merged = applySyncBundle(stale, local, cleanup as never);
+    expect((merged.models as Record<string, unknown>)['t1']).toBeUndefined();
+    expect(cleanup.clearedPins).toContain('t1');
+  });
+
+  it('leaves the pin alone when the local side still has a usable Anthropic key', () => {
+    // The pin resolves fine — clearing it would be data loss caused by a stale
+    // remote snapshot, which is the same reasoning the retired-pin
+    // reconciliation already applies.
+    const local = cfg({ providers: [{ type: 'anthropic', apiKey: 'sk-ant-good' }] });
+    const stale = {
+      v: 2,
+      providers: [{ type: 'anthropic', authToken: 'sk-ant-oat01-dead', credentialSource: 'Claude Code' }],
+      models: { t1: 'anthropic:claude-opus-4' },
+    } as unknown as Parameters<typeof applySyncBundle>[0];
+
+    const merged = applySyncBundle(stale, local);
+    expect((merged.models as Record<string, unknown>)['t1']).toBe('anthropic:claude-opus-4');
+  });
 });

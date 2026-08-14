@@ -17,6 +17,7 @@
 
 import chalk from 'chalk';
 import { ConfigManager } from '../../config/index.js';
+import { normalizeAzureEndpoint, sameAzureEndpoint } from '../../config/azure-endpoint.js';
 import {
   discoverCredentials,
   maskSecret,
@@ -61,6 +62,21 @@ export async function linkCommand(target: string | undefined, options: LinkOptio
   // would configure whichever key happened to be discovered first.
   const candidates = found.filter((c) => c.provider === provider
     && (!serviceId || c.serviceId === serviceId));
+
+  // The bare `openai-compatible` target names a TYPE, and several services
+  // share it. With keys for more than one exported, picking the first left the
+  // choice to the order of a table in credential-discovery.ts and silently
+  // overwrote the single compatible provider entry with whichever service that
+  // happened to be. The user knows which one they meant; ask for it by name.
+  const services = [...new Set(candidates.map((c) => c.serviceId).filter((id): id is string => !!id))];
+  if (!serviceId && services.length > 1) {
+    console.log(chalk.yellow(`\n  Keys for several OpenAI-compatible services are set, and "${target}" does not say which.`));
+    console.log(chalk.gray('  Name the one you mean:\n'));
+    for (const id of services) console.log(chalk.cyan(`      cascade link ${id}`));
+    console.log('');
+    return;
+  }
+
   const chosen = candidates.find((c) => c.directlyUsable) ?? candidates[0];
   if (!chosen) {
     console.log(chalk.yellow(`\n  No detected credential maps to "${provider}".\n`));
@@ -178,8 +194,15 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
     const target = cred.baseUrl?.trim();
     const deployment = cred.deploymentName?.trim();
     if (target && deployment) {
+      // Endpoints compared through the shared normalizer, not as typed. The
+      // provider strips trailing slashes before it builds a client, so
+      // `https://acme.openai.azure.com` and the same URL with one address the
+      // same resource — but an exact comparison called them different, missed
+      // the existing row, and appended a DUPLICATE deployment. The router takes
+      // the first row matching a deployment name, so it kept using the old
+      // keyless one while this printed "✓ Linked".
       const existing = config.providers.find((p) => p.type === 'azure'
-        && (p.baseUrl?.trim() ?? '') === target
+        && sameAzureEndpoint(p.baseUrl, target)
         && (p.deploymentName?.trim() ?? '') === deployment);
       const providers = existing
         ? config.providers.map((p) => (p === existing
@@ -201,7 +224,7 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
     // RESOURCE, so writing it across every deployment would break the ones on
     // other resources and overwrite keys they already had — permanently, since
     // the save is authoritative for the global credential store.
-    const resources = [...new Set(azureDeployments.map((p) => p.baseUrl?.trim() ?? ''))];
+    const resources = [...new Set(azureDeployments.map((p) => normalizeAzureEndpoint(p.baseUrl)))];
     if (resources.length !== 1) {
       console.log(chalk.yellow('\n  Several Azure resources are configured, and an Azure key belongs to one of them.'));
       console.log(chalk.gray('  Set AZURE_OPENAI_ENDPOINT to the resource this key is for, then run again:\n'));
@@ -211,7 +234,7 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
     }
     const only = resources[0];
     const providers = config.providers.map((p) => (
-      p.type === 'azure' && p.deploymentName?.trim() && (p.baseUrl?.trim() ?? '') === only
+      p.type === 'azure' && p.deploymentName?.trim() && normalizeAzureEndpoint(p.baseUrl) === only
         ? { ...p, apiKey: cred.secret, credentialSource: cred.sourceTool }
         : p
     ));

@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { ProviderConfig } from '../types.js';
 import { GLOBAL_CREDENTIALS_FILE } from '../constants.js';
+import { normalizeAzureEndpoint } from './azure-endpoint.js';
 
 interface CredentialsFile {
   version: 1;
@@ -34,7 +35,13 @@ export function credentialsPath(globalDir: string): string {
  */
 function providerKey(p: ProviderConfig): string {
   if (p.type === 'azure') {
-    return `azure:${p.deploymentName ?? p.baseUrl ?? p.label ?? ''}`;
+    // The endpoint goes through the shared normalizer, so a row whose URL
+    // differs only by a trailing slash is the same row here as it is to
+    // `cascade link` and to the environment injection.
+    // `?? p.label` still has to be reachable, so an absent baseUrl must stay
+    // nullish rather than normalizing to the empty string.
+    const endpoint = p.baseUrl === undefined ? undefined : normalizeAzureEndpoint(p.baseUrl);
+    return `azure:${p.deploymentName ?? endpoint ?? p.label ?? ''}`;
   }
   return p.type;
 }

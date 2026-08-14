@@ -488,4 +488,65 @@ describe('an environment key and gateway are a pair', () => {
     expect(cm.getConfig().providers.filter((p) => p.type === 'azure')
       .every((p) => p.apiKey === undefined)).toBe(true);
   });
+
+  it('fills EVERY deployment on the named resource, not just the first', async () => {
+    // An Azure key is resource-scoped, and Azure is configured one entry per
+    // deployment — the router binds each model to its own row. Keying only the
+    // first left the rest issuing requests with no credential at all.
+    await seed([
+      { type: 'azure', deploymentName: 'a', baseUrl: 'https://one.openai.azure.com' },
+      { type: 'azure', deploymentName: 'b', baseUrl: 'https://one.openai.azure.com' },
+      { type: 'azure', deploymentName: 'c', baseUrl: 'https://two.openai.azure.com' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'az-key';
+    process.env['AZURE_OPENAI_ENDPOINT'] = 'https://one.openai.azure.com';
+
+    const cm = new ConfigManager(dir, path.join(dir, 'global'));
+    await cm.load();
+    const azure = cm.getConfig().providers.filter((p) => p.type === 'azure');
+    expect(azure.find((p) => p.deploymentName === 'a')?.apiKey).toBe('az-key');
+    expect(azure.find((p) => p.deploymentName === 'b')?.apiKey).toBe('az-key');
+    expect(azure.find((p) => p.deploymentName === 'c')?.apiKey).toBeUndefined();
+  });
+
+  it('fills every deployment when there is only one resource and no endpoint named', async () => {
+    await seed([
+      { type: 'azure', deploymentName: 'a', baseUrl: 'https://one.openai.azure.com' },
+      { type: 'azure', deploymentName: 'b', baseUrl: 'https://one.openai.azure.com' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'az-key';
+
+    const cm = new ConfigManager(dir, path.join(dir, 'global'));
+    await cm.load();
+    expect(cm.getConfig().providers.filter((p) => p.type === 'azure')
+      .every((p) => p.apiKey === 'az-key')).toBe(true);
+  });
+
+  it('matches the resource across a trailing slash', async () => {
+    // AzureOpenAIProvider strips trailing slashes before it builds a client, so
+    // these are the same service. Comparing the strings as typed matched
+    // nothing and the key went nowhere.
+    await seed([{ type: 'azure', deploymentName: 'a', baseUrl: 'https://one.openai.azure.com' }]);
+    process.env['AZURE_OPENAI_KEY'] = 'az-key';
+    process.env['AZURE_OPENAI_ENDPOINT'] = 'https://one.openai.azure.com/';
+
+    const cm = new ConfigManager(dir, path.join(dir, 'global'));
+    await cm.load();
+    expect(cm.getConfig().providers.find((p) => p.type === 'azure')?.apiKey).toBe('az-key');
+  });
+
+  it('leaves a deployment that already has its own key', async () => {
+    await seed([
+      { type: 'azure', deploymentName: 'a', baseUrl: 'https://one.openai.azure.com', apiKey: 'own-key' },
+      { type: 'azure', deploymentName: 'b', baseUrl: 'https://one.openai.azure.com' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'az-key';
+    process.env['AZURE_OPENAI_ENDPOINT'] = 'https://one.openai.azure.com';
+
+    const cm = new ConfigManager(dir, path.join(dir, 'global'));
+    await cm.load();
+    const azure = cm.getConfig().providers.filter((p) => p.type === 'azure');
+    expect(azure.find((p) => p.deploymentName === 'a')?.apiKey).toBe('own-key');
+    expect(azure.find((p) => p.deploymentName === 'b')?.apiKey).toBe('az-key');
+  });
 });

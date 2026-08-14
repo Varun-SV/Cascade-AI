@@ -37,6 +37,7 @@ interface CredentialBearingProvider {
   authToken?: string;
   credentialSource?: string;
   baseUrl?: string;
+  deploymentName?: string;
 }
 
 /**
@@ -57,12 +58,28 @@ export function isRevokedSubscriptionCredential(p: CredentialBearingProvider): b
  * Strips dead subscription tokens from a provider list, in place of the entry
  * where possible.
  *
- * The ENTRY is kept when it still carries something usable — an API key, or an
- * endpoint the user configured — because deleting a provider row takes more
- * than the dead secret with it. Only when the token was the entry's sole
- * reason to exist is the row removed.
+ * The ENTRY is kept when it still carries something usable, because deleting a
+ * provider row takes more than the dead secret with it. Only when the token was
+ * the entry's sole reason to exist is the row removed.
+ *
+ * What counts as "usable" differs by where the list came from, which is what
+ * `keepForEndpoint` selects:
+ *
+ * - **Local config** (default): an endpoint alone is worth keeping. The user
+ *   configured that gateway, and the row is the only record of it.
+ * - **An incoming sync bundle**: it is not. The provider merge lets a matching
+ *   incoming row win outright, so a row holding nothing but an endpoint would
+ *   replace a valid local API key and persist with no credential at all.
+ *
+ * An API key is worth keeping either way — and a row carrying BOTH a revoked
+ * token and a good key is exactly what the settings-save paths fixed in this
+ * release used to produce, so dropping it wholesale would lose the key the user
+ * added to replace the token.
  */
-export function stripRevokedCredentials<T extends CredentialBearingProvider>(providers: T[]): {
+export function stripRevokedCredentials<T extends CredentialBearingProvider>(
+  providers: T[],
+  { keepForEndpoint = true }: { keepForEndpoint?: boolean } = {},
+): {
   kept: T[];
   removed: number;
 } {
@@ -74,7 +91,7 @@ export function stripRevokedCredentials<T extends CredentialBearingProvider>(pro
       continue;
     }
     removed++;
-    const worthKeeping = Boolean(p.apiKey || p.baseUrl);
+    const worthKeeping = Boolean(p.apiKey || (keepForEndpoint && p.baseUrl));
     if (worthKeeping) {
       const { authToken: _dropped, credentialSource: _source, ...rest } = p;
       kept.push(rest as T);
@@ -121,40 +138,77 @@ export function hasUsableAnthropic(providers: readonly CredentialBearingProvider
 }
 
 /**
- * Clears tier pins that name an Anthropic model, mutating in place; returns the
- * tiers cleared.
+ * Clears tier pins that named the Anthropic provider that was just removed,
+ * mutating in place; returns the tiers cleared.
  *
  * BOTH pin forms. `anthropic:<model>` is the explicit one, but the documented
  * config shape and the setup wizard both write a BARE model id — README's
  * example is `"t1": "claude-opus-4"` — and those are the common case. Matching
  * only the prefixed form left the ordinary pin behind, and the router throws on
  * a pin it cannot resolve rather than falling back to a provider that works.
+ *
+ * `providers` is the FINAL merged list, and it is what keeps the bare form from
+ * over-reaching — see canBeServedElsewhere().
  */
-export function clearAnthropicPins(models: unknown): string[] {
+export function clearAnthropicPins(
+  models: unknown,
+  // Required, not defaulted: a caller that omits it would silently get the
+  // over-reaching behaviour this argument exists to prevent, and the compiler
+  // is the right place to catch that.
+  providers: readonly CredentialBearingProvider[],
+): string[] {
   const cleared: string[] = [];
   if (typeof models !== 'object' || models === null) return cleared;
   const tiers = models as Record<string, unknown>;
   for (const tier of ['t1', 't2', 't3'] as const) {
     const pin = tiers[tier];
-    if (typeof pin !== 'string' || !namesAnthropicModel(pin)) continue;
+    if (typeof pin !== 'string' || !namesAnthropicModel(pin, providers)) continue;
     delete tiers[tier];
     cleared.push(tier);
   }
   return cleared;
 }
 
-/** Whether a tier pin, in either form, resolves to an Anthropic model. */
-function namesAnthropicModel(pin: string): boolean {
+/**
+ * Whether a tier pin named the provider that was removed — so clearing it
+ * repairs the config rather than discarding a working choice.
+ */
+function namesAnthropicModel(pin: string, providers: readonly CredentialBearingProvider[]): boolean {
   const value = pin.trim().toLowerCase();
   if (!value) return false;
   // Lowercased to match selector.ts's resolveDynamicModel(), which parses the
   // provider half case-insensitively — `Anthropic:claude-x` is a valid pin.
+  // The prefixed form is unambiguous: it names the provider, and that provider
+  // is gone.
   if (value.includes(':')) return value.startsWith('anthropic:');
-  // A bare id. The bundled catalogue is the authority; the `claude-` prefix
-  // catches a model newer than this build's catalogue, which is exactly when a
-  // pin is most likely to be one the catalogue has never heard of.
+  // A bare id names a MODEL, not a provider, and resolveDynamicModel() accepts
+  // any registered model by id whatever vendor its name suggests — so a gateway
+  // serving `claude-sonnet-4` resolves this pin perfectly well, and deleting it
+  // would be throwing away a working configuration on the strength of the
+  // model's name. Only clear it when nothing else configured could serve it.
   const known = Object.values(MODELS).some(
     (m) => m.provider === 'anthropic' && m.id.toLowerCase() === value,
   );
-  return known || value.startsWith('claude-');
+  // The `claude-` prefix catches a model newer than this build's catalogue,
+  // which is exactly when a pin is most likely to be one it has never heard of.
+  if (!known && !value.startsWith('claude-')) return false;
+  return !canBeServedElsewhere(value, providers);
+}
+
+/**
+ * Whether some provider still configured could resolve a bare model id.
+ *
+ * `openai-compatible` and `ollama` serve whatever their endpoint offers, so
+ * their catalogues are discovered at runtime and unknowable here — any id might
+ * be theirs. Azure is knowable: its model ids ARE its deployment names.
+ */
+function canBeServedElsewhere(
+  modelId: string,
+  providers: readonly CredentialBearingProvider[],
+): boolean {
+  return providers.some((p) => {
+    if (!p) return false;
+    if (p.type === 'openai-compatible' || p.type === 'ollama') return true;
+    return p.type === 'azure' && (p.deploymentName ?? '').trim().toLowerCase() === modelId;
+  });
 }

@@ -238,6 +238,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolve rather than falling back, so the migration meant to get an install
   working again left that tier dead.
 
+  A bare pin is only cleared when nothing else configured could serve it. The
+  prefixed form names the provider, so it is unambiguous; a bare id names a
+  MODEL, and the router accepts any registered model by id whatever vendor its
+  name suggests — so a gateway serving `claude-sonnet-4` resolves that pin
+  perfectly well, and deleting it on the strength of the model's name would
+  throw away a working configuration.
+
+- **The same dangling pin could arrive by sync.** `applySyncBundle` dropped the
+  revoked provider and then reconciled pins with `clearRetiredPins()` alone —
+  which does not cover this, because `anthropic` is not a retired provider type
+  but a supported one whose credential died. The models merge lets the incoming
+  pin win, so a pull from a pre-0.75 device persisted a pin naming a provider
+  that was no longer there. Cleared now under the same two conditions the config
+  loader applies: this pull actually removed one, and no usable Anthropic
+  survives the merge.
+
+- **A synced row holding a replacement key beside the dead token kept the key.**
+  Dropping the row whole — right when it carries nothing but an endpoint — lost
+  an API key stored alongside the revoked token, which is exactly the shape the
+  settings-save paths fixed in this release used to produce, and exactly the
+  credential the user was trying to transfer.
+
+- **An environment Azure key now reaches every deployment on its resource.**
+  Azure keys are resource-scoped and Azure is configured one entry per
+  deployment, so filling only the first left the rest issuing requests with no
+  credential at all — the router binds each model to its own row.
+
+- **Azure endpoints are compared through one normalizer.** The provider strips
+  trailing slashes before it builds a client, so `https://acme.openai.azure.com`
+  and the same URL with one address the same service — but every comparison was
+  done on the strings as typed. `cascade link` missed the existing row and
+  appended a duplicate deployment while reporting success, and the router, which
+  takes the first row matching a deployment name, went on using the old keyless
+  one.
+
+- **`cascade link openai-compatible` no longer guesses which service you meant.**
+  They share one provider type, so with keys for several exported it adopted
+  whichever came first in the discovery table and overwrote the single
+  compatible entry with it. It now lists the candidates and asks for one by
+  name; naming a service directly (`cascade link groq`) is unchanged.
+
 ## 0.74.0 - 2026-08-11
 
 ### Fixed
