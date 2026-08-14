@@ -69,6 +69,11 @@ export async function fetchSameOrigin(
     if (![301, 302, 303, 307, 308].includes(res.status)) return res;
     const location = res.headers.get('location');
     if (!location) return res;
+    // The redirect's own body is drained before the next request goes out.
+    // Undici cannot reuse a connection whose body is still unread, so a chain
+    // of redirects would tie up a socket each, and a redirect that streams
+    // indefinitely would hold one open for as long as it kept writing.
+    await res.body?.cancel().catch(() => { /* already consumed or closed */ });
     const next = new URL(location, current);
     if (next.origin !== origin) {
       throw new Error(

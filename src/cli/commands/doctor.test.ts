@@ -135,6 +135,30 @@ describe('what doctor says about discovered credentials', () => {
     expect(detail).toBe('1 found (1 usable) — run `cascade link` to adopt');
   });
 
+  it('does not count an Azure key when every configured row lacks an endpoint', () => {
+    // Normalising an absent endpoint to '' made a config of nothing but
+    // endpointless rows look like ONE unambiguous resource. linkCommand
+    // refuses these at its own gate, and the rows could not route a request
+    // anyway.
+    const detail = linkableCredentialsDetail(
+      [cred({ provider: 'azure' })],
+      [{ type: 'azure', deploymentName: 'prod' }, { type: 'azure', deploymentName: 'mini' }],
+    );
+    expect(detail).toBe('1 found, none usable — run `cascade link` to see why');
+  });
+
+  it('counts an Azure key that names its deployment but not its endpoint', () => {
+    // The deployment name pins the resource just as well as the endpoint does.
+    const detail = linkableCredentialsDetail(
+      [cred({ provider: 'azure', deploymentName: 'mini' })],
+      [
+        { type: 'azure', deploymentName: 'prod', baseUrl: 'https://one.openai.azure.com' },
+        { type: 'azure', deploymentName: 'mini', baseUrl: 'https://two.openai.azure.com' },
+      ],
+    );
+    expect(detail).toBe('1 found (1 usable) — run `cascade link` to adopt');
+  });
+
   it('does not count a subscription token just because a gateway is configured', () => {
     // Routing is not the obstacle for this one — the provider refuses it.
     const detail = linkableCredentialsDetail(

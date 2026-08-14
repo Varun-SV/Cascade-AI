@@ -238,15 +238,35 @@ export function azureRoutedTarget(
  * names the resource even when no deployment name came with it.
  */
 export function azureDeploymentsForCredential(
-  cred: Pick<DiscoveredCredential, 'baseUrl'>,
+  cred: Pick<DiscoveredCredential, 'baseUrl' | 'deploymentName'>,
   configured: readonly ProviderConfig[],
 ): ProviderConfig[] {
-  const deployments = configured.filter((p) => p.type === 'azure' && p.deploymentName?.trim());
+  // A row needs an ENDPOINT to be routable at all: without one the Azure client
+  // falls back to a placeholder URL, so a key written there configures a
+  // provider that cannot reach anything. Endpointless rows were counted as a
+  // resource of their own — the empty string — which made a config of nothing
+  // but them look like one unambiguous resource, and `doctor` reported a
+  // credential usable that `linkCommand` refuses at its own gate.
+  const deployments = configured.filter((p) => p.type === 'azure'
+    && p.deploymentName?.trim() && p.baseUrl?.trim());
   if (deployments.length === 0) return [];
+
   const target = cred.baseUrl?.trim();
-  const scoped = target
-    ? deployments.filter((p) => sameAzureEndpoint(p.baseUrl, target))
-    : deployments;
+  const named = cred.deploymentName?.trim();
+  // Three ways to identify the resource, most specific first. The DEPLOYMENT
+  // name is one of them: a configured row carrying that name pins its resource
+  // just as well as the endpoint would, so a key exported with
+  // AZURE_OPENAI_DEPLOYMENT and no AZURE_OPENAI_ENDPOINT is not ambiguous — it
+  // was being refused as though it were.
+  let scoped: ProviderConfig[] | undefined;
+  if (target) {
+    scoped = deployments.filter((p) => sameAzureEndpoint(p.baseUrl, target));
+  } else if (named) {
+    const match = deployments.find((p) => (p.deploymentName?.trim() ?? '') === named);
+    if (match) scoped = deployments.filter((p) => sameAzureEndpoint(p.baseUrl, match.baseUrl));
+  }
+  scoped ??= deployments;
+
   const resources = new Set(scoped.map((p) => normalizeAzureEndpoint(p.baseUrl)));
   return resources.size === 1 ? scoped : [];
 }
@@ -385,6 +405,14 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
       const onTarget = target
         ? azureDeployments.some((p) => sameAzureEndpoint(p.baseUrl, target))
         : true;
+      const anyRouted = azureDeployments.some((p) => p.baseUrl?.trim());
+      if (!anyRouted) {
+        console.log(chalk.yellow('\n  The configured Azure deployments have no endpoint.'));
+        console.log(chalk.gray('  A deployment needs its resource URL before a key can reach it —'));
+        console.log(chalk.gray('  set AZURE_OPENAI_ENDPOINT, or add `baseUrl` to the entries in'));
+        console.log(chalk.gray('  .cascade/config.json, then run this again.\n'));
+        return false;
+      }
       if (target && !onTarget) {
         console.log(chalk.yellow(`\n  No configured Azure deployment is on ${target}.`));
         console.log(chalk.gray('  Set AZURE_OPENAI_DEPLOYMENT as well to add one, or point'));

@@ -447,10 +447,24 @@ export class ConfigManager {
    * the first left the rest issuing requests with no key at all.
    */
   private azureEntriesForEnv(): CascadeConfig['providers'] {
-    const entries = this.config.providers.filter((p) => p.type === 'azure');
+    // An entry with no ENDPOINT cannot route a request — the Azure client falls
+    // back to a placeholder URL — so filling a key into one produces a provider
+    // that resolves to nothing while making hasUsableProvider() true, skipping
+    // onboarding and failing later with "No model available for tier". Counting
+    // those rows also made a config of nothing but them normalise to a single
+    // empty "resource" and look unambiguous. Same correction as
+    // `azureDeploymentsForCredential`, whose copy of this rule was fixed first.
+    const entries = this.config.providers.filter((p) => p.type === 'azure' && p.baseUrl?.trim());
     if (entries.length === 0) return [];
     const endpoint = process.env['AZURE_OPENAI_ENDPOINT']?.trim();
     if (endpoint) return entries.filter((p) => sameAzureEndpoint(p.baseUrl, endpoint));
+    const deployment = process.env['AZURE_OPENAI_DEPLOYMENT']?.trim()
+      ?? process.env['AZURE_OPENAI_DEPLOYMENT_NAME']?.trim();
+    // The deployment name pins the resource just as well as the endpoint does.
+    if (deployment) {
+      const match = entries.find((p) => (p.deploymentName?.trim() ?? '') === deployment);
+      if (match) return entries.filter((p) => sameAzureEndpoint(p.baseUrl, match.baseUrl));
+    }
     const resources = new Set(entries.map((p) => normalizeAzureEndpoint(p.baseUrl)));
     return resources.size === 1 ? entries : [];
   }

@@ -439,6 +439,38 @@ describe('cascade link — adoption', () => {
     expect(azure[0]?.['apiVersion']).toBe('2023-05-15');
   });
 
+  it('scopes by the exported deployment name when no endpoint came with it', async () => {
+    // AZURE_OPENAI_DEPLOYMENT alone identifies the resource, via the row that
+    // already carries that name — so the key is not ambiguous and was being
+    // refused as though it were.
+    await seedConfig([
+      { type: 'azure', deploymentName: 'prod', baseUrl: 'https://one.openai.azure.com' },
+      { type: 'azure', deploymentName: 'mini', baseUrl: 'https://two.openai.azure.com' },
+      { type: 'azure', deploymentName: 'mini-b', baseUrl: 'https://two.openai.azure.com' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'new-key';
+    process.env['AZURE_OPENAI_DEPLOYMENT'] = 'mini';
+
+    const azure = (await providersAfterLink('azure')).filter((p) => p['type'] === 'azure');
+    // Its whole resource is keyed — an Azure key is resource-scoped.
+    expect(azure.find((p) => p['deploymentName'] === 'mini')?.['apiKey']).toBe('new-key');
+    expect(azure.find((p) => p['deploymentName'] === 'mini-b')?.['apiKey']).toBe('new-key');
+    expect(azure.find((p) => p['deploymentName'] === 'prod')?.['apiKey']).toBeUndefined();
+    // `credentialSource` is stamped by ADOPTION only — injectEnvKeys fills the
+    // same key into the same rows, so without this the assertions above would
+    // hold even if `cascade link` had bailed out entirely.
+    expect(azure.find((p) => p['deploymentName'] === 'mini')?.['credentialSource'])
+      .toBe('Environment (AZURE_OPENAI_KEY)');
+  });
+
+  it('refuses when the configured deployments have no endpoint at all', async () => {
+    await seedConfig([{ type: 'azure', deploymentName: 'prod' }]);
+    process.env['AZURE_OPENAI_KEY'] = 'new-key';
+
+    const azure = (await providersAfterLink('azure')).filter((p) => p['type'] === 'azure');
+    expect(azure[0]?.['apiKey']).toBeUndefined();
+  });
+
   it('still refuses when several resources are configured and none is named', async () => {
     await seedConfig([
       { type: 'azure', deploymentName: 'prod', baseUrl: 'https://one.openai.azure.com', apiKey: 'key-one' },

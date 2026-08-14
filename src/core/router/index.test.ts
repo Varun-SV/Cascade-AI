@@ -563,6 +563,21 @@ describe('discoveryCacheKey', () => {
     expect(discoveryCacheKey('anthropic', entryA)).toBe(a);
   });
 
+  it('expires an identity once its TTL is up, however small the map is', async () => {
+    // The sweep used to run only when the map grew past a threshold, so in the
+    // ordinary case — a handful of credentials — nothing ever expired and a
+    // rotated key stayed a raw Map key for the life of the process. That is
+    // exactly the retention the expiry exists to end.
+    vi.useFakeTimers();
+    try {
+      const before = discoveryCacheKey('anthropic', cfg({ apiKey: 'sk-ttl' }));
+      vi.advanceTimersByTime(16 * 60 * 1000); // past the 15-minute TTL
+      expect(discoveryCacheKey('anthropic', cfg({ apiKey: 'sk-ttl' }))).not.toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('is stable for an EQUIVALENT config rebuilt from scratch', () => {
     // The hosted server rebuilds its config for every chat run
     // (cloud/server/src/runs.ts → buildCloudConfig), so identity keyed on the

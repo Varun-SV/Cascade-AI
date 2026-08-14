@@ -267,8 +267,10 @@ const cloudDiscoveryCache = new Map<string, DiscoveryEntry>();
  * so a secret is held exactly as long as it is being used and no longer, and
  * the map cannot outgrow the number of credentials active in one TTL window.
  */
-const IDENTITY_SWEEP_THRESHOLD = 64;
+/** How often the sweep runs at most — cheap, and unrelated to how full the map is. */
+const IDENTITY_SWEEP_INTERVAL_MS = 60 * 1000;
 const credentialIdentities = new Map<string, { id: string; at: number }>();
+let lastIdentitySweep = 0;
 
 /** Drop identities, and the discovery entries naming them, once their TTL is up. */
 function sweepExpired(now: number): void {
@@ -285,13 +287,20 @@ function sweepExpired(now: number): void {
 function credentialIdentity(secret: string | undefined): string {
   if (!secret) return '-';
   const now = Date.now();
-  // Swept on a size trigger rather than every call: the map holds one short
-  // entry per credential active in the window, so this is a handful of items
-  // in every deployment except a busy multi-tenant one, and there it stays
-  // proportional to live credentials rather than to requests served.
-  if (credentialIdentities.size > IDENTITY_SWEEP_THRESHOLD) sweepExpired(now);
+  // Swept on a TIME trigger, not a size one. Gating the sweep on map size meant
+  // that below the threshold — the ordinary case, a handful of credentials —
+  // nothing ever expired, so a rotated key stayed a raw Map key for the life of
+  // the process. That is precisely the retention this expiry exists to end, and
+  // the threshold quietly exempted almost every deployment from it.
+  if (now - lastIdentitySweep > IDENTITY_SWEEP_INTERVAL_MS) {
+    lastIdentitySweep = now;
+    sweepExpired(now);
+  }
   const held = credentialIdentities.get(secret);
-  if (held) {
+  // An entry past its TTL is not reused: refreshing it on lookup would let a
+  // credential still in occasional use keep its identity for ever, which is the
+  // same unbounded retention by a slower route.
+  if (held && now - held.at <= DISCOVERY_TTL_MS) {
     held.at = now;
     return held.id;
   }
