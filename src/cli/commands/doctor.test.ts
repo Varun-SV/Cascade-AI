@@ -97,6 +97,21 @@ describe('what doctor says about discovered credentials', () => {
     expect(detail).toBe('1 found, none usable — run `cascade link` to see why');
   });
 
+  it('counts a fully routed Azure key against a row that has no endpoint yet', () => {
+    // Adoption recognises that row as the same deployment and fills in its
+    // endpoint, so treating the absent endpoint as "a different resource" made
+    // doctor report unusable a credential `cascade link azure` accepts
+    // immediately afterwards. Both now ask one function.
+    const detail = linkableCredentialsDetail(
+      [cred({
+        provider: 'azure', directlyUsable: true,
+        baseUrl: 'https://one.openai.azure.com', deploymentName: 'prod',
+      })],
+      [{ type: 'azure', deploymentName: 'prod' }],
+    );
+    expect(detail).toBe('1 found (1 usable) — run `cascade link` to adopt');
+  });
+
   it('counts a fully routed Azure key whose deployment name is free', () => {
     const detail = linkableCredentialsDetail(
       [cred({

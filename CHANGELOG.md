@@ -391,7 +391,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   environment injection skips rows that already have one — so once the old key
   was revoked, every other deployment on that resource failed. It also fills a
   configured deployment that has no endpoint yet, rather than mistaking it for
-  another resource's and refusing.
+  another resource's and refusing — and `cascade doctor` answers that question
+  from the same function, so it no longer reports "none usable" a moment before
+  `cascade link` accepts the credential.
 
 - **A bearer-only gateway's model list now reaches routing.** Catalogue
   validation required an `apiKey`, and the availability probe uses `listModels()`

@@ -186,14 +186,44 @@ export function willAdoptFromConfig(
     // resource already claims, because the name is the model id and the router
     // would never select the second row. Checked here too, or doctor promises a
     // link that refuses.
-    if (target && deployment) {
-      return !configured.some((p) => p.type === 'azure'
-        && (p.deploymentName?.trim() ?? '') === deployment
-        && !sameAzureEndpoint(p.baseUrl, target));
-    }
+    if (target && deployment) return !azureRoutedTarget(deployment, target, configured).collision;
     return azureDeploymentsForCredential(cred, configured).length > 0;
   }
   return cred.directlyUsable || isRoutedByConfig(cred, configured);
+}
+
+/**
+ * Where a FULLY ROUTED Azure credential lands among the configured rows.
+ *
+ * One function because two callers need the identical answer and had drifted
+ * apart twice: `adoptCredential()` decides what to write, and
+ * `willAdoptFromConfig()` tells `cascade doctor` whether that write would
+ * succeed. Doctor reported "none usable" for a credential adoption accepts a
+ * moment later, because only one of them had learned the endpointless case.
+ *
+ * - A row with this deployment name and NO endpoint is THIS deployment waiting
+ *   for one, and the credential supplies exactly what it lacks — so it is the
+ *   row to update, not a conflict.
+ * - A row with this deployment name and a DIFFERENT, non-empty endpoint is a
+ *   real collision: the name is the model id, the router binds the first row
+ *   that matches without consulting the endpoint, so the second could never be
+ *   selected.
+ */
+export function azureRoutedTarget(
+  deployment: string,
+  target: string,
+  configured: readonly ProviderConfig[],
+): { existing?: ProviderConfig; collision: boolean } {
+  const named = (p: ProviderConfig): boolean =>
+    p.type === 'azure' && (p.deploymentName?.trim() ?? '') === deployment;
+  const existing = configured.find((p) => named(p)
+    && (sameAzureEndpoint(p.baseUrl, target) || !p.baseUrl?.trim()));
+  if (existing) return { existing, collision: false };
+  return {
+    collision: configured.some((p) => named(p)
+      && !!p.baseUrl?.trim()
+      && !sameAzureEndpoint(p.baseUrl, target)),
+  };
 }
 
 /**
@@ -292,28 +322,10 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
       // the existing row, and appended a DUPLICATE deployment. The router takes
       // the first row matching a deployment name, so it kept using the old
       // keyless one while this printed "✓ Linked".
-      // A row carrying this deployment name and NO endpoint is THIS deployment
-      // waiting for one, not another resource's — and the credential supplies
-      // exactly what it is missing. Treating it as a collision refused a link
-      // that had everything it needed.
-      const existing = config.providers.find((p) => p.type === 'azure'
-        && (p.deploymentName?.trim() ?? '') === deployment
-        && (sameAzureEndpoint(p.baseUrl, target) || !p.baseUrl?.trim()));
-
-      // A deployment name is the MODEL ID everywhere downstream, and the router
-      // binds an Azure model with `deploymentName === model.id` — the first row
-      // that matches, endpoint not consulted. So two resources each with a
-      // `prod` deployment are indistinguishable once configured: appending the
-      // second would create a row that can never be selected, while this
-      // printed "✓ Linked" and requests carried on to the other resource.
-      // Refusing is the honest answer — the same answer this function already
-      // gives when several resources leave a key with nothing to choose
-      // between them. A DIFFERENT, non-empty endpoint is what makes it a
-      // collision; an absent one is handled above.
-      const claimedElsewhere = !existing && config.providers.some((p) => p.type === 'azure'
-        && (p.deploymentName?.trim() ?? '') === deployment
-        && !!p.baseUrl?.trim()
-        && !sameAzureEndpoint(p.baseUrl, target));
+      // Both halves of this decision — which row to update, and whether the
+      // name is claimed by another resource — come from the one function
+      // `cascade doctor` also asks, so the two cannot answer differently.
+      const { existing, collision: claimedElsewhere } = azureRoutedTarget(deployment, target, config.providers);
       if (claimedElsewhere) {
         console.log(chalk.yellow(`\n  A different Azure resource already has a deployment named "${deployment}".`));
         console.log(chalk.gray('  Deployment names are model ids in Cascade, so two resources cannot share one —'));
