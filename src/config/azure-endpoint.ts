@@ -19,6 +19,8 @@
 //  One normalizer, used everywhere an Azure endpoint is compared for identity,
 //  so the answer cannot differ between call sites.
 
+import { stripTrailingSlashes } from '../utils/net.js';
+
 /**
  * An Azure endpoint reduced to what identifies the resource.
  *
@@ -29,7 +31,7 @@
  * to nothing else.
  */
 export function normalizeAzureEndpoint(url: string | undefined | null): string {
-  return (url ?? '').trim().replace(/\/+$/, '').toLowerCase();
+  return stripTrailingSlashes((url ?? '').trim()).toLowerCase();
 }
 
 /** Whether two Azure endpoints name the same resource. */

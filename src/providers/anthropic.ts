@@ -18,6 +18,7 @@ import { MODELS } from '../constants.js';
 import { BaseProvider } from './base.js';
 import { withResolvedPricing } from '../core/router/pricing.js';
 import { isChatModel } from './model-filter.js';
+import { stripTrailingSlashes } from '../utils/net.js';
 
 // Anthropic extended thinking — only the 4.x reasoning models (Opus 4 / Sonnet 4)
 // support it. budget_tokens must be >= 1024 and < max_tokens; we cap well under
@@ -78,7 +79,7 @@ export function toAnthropicToolUse(toolCalls: readonly ToolCall[]): Anthropic.To
  */
 export function anthropicApiRoot(configured: string | undefined): string | undefined {
   if (!configured) return undefined;
-  const trimmed = configured.trim().replace(/\/+$/, '');
+  const trimmed = stripTrailingSlashes(configured.trim());
   if (!trimmed) return undefined;
   return trimmed.replace(/\/v\d+$/, '');
 }

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
 import zlib from 'node:zlib';
 import type { AddressInfo } from 'node:net';
-import { nodeHttpFetch, preferIpv4Host } from './net.js';
+import { nodeHttpFetch, preferIpv4Host, stripTrailingSlashes } from './net.js';
 
 const MODELS = JSON.stringify({
   object: 'list',
@@ -152,5 +152,28 @@ describe('preferIpv4Host', () => {
 
   it('leaves other hosts untouched', () => {
     expect(preferIpv4Host('https://api.example.com/v1')).toBe('https://api.example.com/v1');
+  });
+});
+
+describe('stripTrailingSlashes', () => {
+  it('drops trailing slashes and leaves everything else alone', () => {
+    expect(stripTrailingSlashes('https://gw.example/v1/')).toBe('https://gw.example/v1');
+    expect(stripTrailingSlashes('https://gw.example/v1///')).toBe('https://gw.example/v1');
+    expect(stripTrailingSlashes('https://gw.example/v1')).toBe('https://gw.example/v1');
+    expect(stripTrailingSlashes('')).toBe('');
+    expect(stripTrailingSlashes('///')).toBe('');
+    // Interior slashes are untouched — only the tail is stripped.
+    expect(stripTrailingSlashes('https://gw.example//a//b//')).toBe('https://gw.example//a//b');
+  });
+
+  it('stays linear on a long run of slashes', () => {
+    // The regex it replaces (`/\/+$/`) retries the anchored repetition from
+    // every start position, which is O(n²) — the ReDoS CodeQL flagged. This is
+    // a bound on the shape of the algorithm, not a benchmark: a quadratic
+    // implementation takes seconds on this input.
+    const input = `${'/'.repeat(200_000)}x${'/'.repeat(200_000)}`;
+    const started = Date.now();
+    expect(stripTrailingSlashes(input)).toBe(`${'/'.repeat(200_000)}x`);
+    expect(Date.now() - started).toBeLessThan(1_000);
   });
 });

@@ -19,6 +19,21 @@ export function preferIpv4Host(url: string | undefined): string | undefined {
   return url;
 }
 
+/**
+ * Drop trailing `/` characters from a URL, in linear time.
+ *
+ * Written as a scan rather than `replace(/\/+$/, '')` because that regex is
+ * polynomial: the engine retries the anchored repetition from every start
+ * position, so a string of many slashes costs O(n²). CodeQL flags it as a
+ * ReDoS risk on any function reachable with caller-supplied input, which the
+ * endpoint normalizers are. The behaviour is identical for every input.
+ */
+export function stripTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47 /* '/' */) end--;
+  return end === value.length ? value : value.slice(0, end);
+}
+
 /** Max redirect hops before nodeHttpFetch gives up (matches browser/curl-ish defaults). */
 const MAX_REDIRECTS = 5;
 
