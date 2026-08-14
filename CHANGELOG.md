@@ -383,7 +383,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bearer tokens.) The identity that replaced it expires on the same clock as the
   discovery entry it exists to name, so a secret is held while it is in use and
   no longer, and the cache — which was never evicted at all — no longer grows
-  for the life of a hosted process.
+  for the life of a hosted process. The expiry runs on a timer rather than
+  when the map grows past a threshold, so it applies to the ordinary case of a
+  handful of credentials instead of exempting it.
 
 - **`cascade link azure` rotates a key across the whole resource.** An Azure key
   is resource-scoped, but a fully routed credential updated only the deployment
@@ -393,7 +395,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configured deployment that has no endpoint yet, rather than mistaking it for
   another resource's and refusing — and `cascade doctor` answers that question
   from the same function, so it no longer reports "none usable" a moment before
-  `cascade link` accepts the credential.
+  `cascade link` accepts the credential. An Azure key is also scoped by an
+  exported `AZURE_OPENAI_DEPLOYMENT` alone — a configured row carrying that name
+  pins its resource as well as the endpoint would — and a row with no endpoint
+  at all is never counted as a resource, since it cannot route a request.
 
 - **A bearer-only gateway's model list now reaches routing.** Catalogue
   validation required an `apiKey`, and the availability probe uses `listModels()`
@@ -430,7 +435,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   3xx carrying `Location` as a redirect and replayed the original request
   unchanged — so a `303` after a generation POST re-submitted the prompt body
   instead of becoming a bodiless GET, and a `304` was followed as though it were
-  a redirect at all.
+  a redirect at all. A redirect's own body is drained before the next
+  hop, so a chain of them cannot tie up a connection each.
 
 - **A malformed provider entry reaches the validator again.** The
   revoked-credential migration runs before schema validation by design, and a
