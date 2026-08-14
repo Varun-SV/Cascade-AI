@@ -380,9 +380,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   secret is now used for an equality lookup and an opaque random id travels in
   its place; nothing derived from the credential reaches the key at all.
   (Pre-existing; surfaced because this release extends the same key to cover
-  bearer tokens.) The identity map that replaced it is pruned to the live
-  configuration on every router init, so a rotated key is forgotten rather than
-  kept for the life of the process.
+  bearer tokens.) The identity that replaced it is held weakly, against the
+  provider entry and only for that entry's *current* secret, so a rotated key is
+  released the moment it stops being current — including on the ordinary
+  settings-save path, which replaces a credential without ever re-initialising
+  the router.
+
+- **`cascade link azure` rotates a key across the whole resource.** An Azure key
+  is resource-scoped, but a fully routed credential updated only the deployment
+  `AZURE_OPENAI_DEPLOYMENT` named. Its siblings kept the previous key — and the
+  environment injection skips rows that already have one — so once the old key
+  was revoked, every other deployment on that resource failed. It also fills a
+  configured deployment that has no endpoint yet, rather than mistaking it for
+  another resource's and refusing.
 
 - **A bearer-only gateway's model list now reaches routing.** Catalogue
   validation required an `apiKey`, and the availability probe uses `listModels()`

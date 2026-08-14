@@ -551,11 +551,29 @@ describe('CascadeRouter — a bearer-only Anthropic gateway is validated too', (
 describe('discoveryCacheKey', () => {
   const cfg = (over: Record<string, unknown>) => ({ type: 'anthropic', ...over }) as never;
 
-  it('separates credentials, and matches the same one', () => {
-    const a = discoveryCacheKey('anthropic', cfg({ apiKey: 'sk-a' }));
-    const b = discoveryCacheKey('anthropic', cfg({ apiKey: 'sk-b' }));
-    expect(a).not.toBe(b);
-    expect(discoveryCacheKey('anthropic', cfg({ apiKey: 'sk-a' }))).toBe(a);
+  it('separates credentials, and is stable for the same configured entry', () => {
+    // Identity is per CONFIG ENTRY: the router passes the same object from
+    // `config.providers.find(...)` on every call, and the desktop mutates that
+    // object in place across settings saves, so this is the shape that decides
+    // whether the cache hits.
+    const entryA = cfg({ apiKey: 'sk-a' });
+    const entryB = cfg({ apiKey: 'sk-b' });
+    const a = discoveryCacheKey('anthropic', entryA);
+    expect(a).not.toBe(discoveryCacheKey('anthropic', entryB));
+    expect(discoveryCacheKey('anthropic', entryA)).toBe(a);
+  });
+
+  it('changes the moment the entry\'s credential is rotated in place', () => {
+    // The security property, and the one an init-time prune could not deliver:
+    // a settings save mutates the provider object and never re-initialises the
+    // router, so the replacement has to be noticed here, on the next call.
+    const entry = cfg({ apiKey: 'sk-old' }) as { apiKey: string };
+    const before = discoveryCacheKey('anthropic', entry as never);
+    entry.apiKey = 'sk-new';
+    const after = discoveryCacheKey('anthropic', entry as never);
+    expect(after).not.toBe(before);
+    // …and it does not flap: the new secret keeps its own identity.
+    expect(discoveryCacheKey('anthropic', entry as never)).toBe(after);
   });
 
   it('separates two bearers at the same endpoint', () => {
@@ -563,9 +581,10 @@ describe('discoveryCacheKey', () => {
     // alone collapsed every bearer-only config onto one entry, so switching
     // credentials was answered from the previous one's cache.
     const url = 'https://gw.internal';
-    const a = discoveryCacheKey('anthropic', cfg({ authToken: 'tok-a', baseUrl: url }));
-    const b = discoveryCacheKey('anthropic', cfg({ authToken: 'tok-b', baseUrl: url }));
-    expect(a).not.toBe(b);
+    const entry = cfg({ authToken: 'tok-a', baseUrl: url }) as { authToken: string };
+    const a = discoveryCacheKey('anthropic', entry as never);
+    entry.authToken = 'tok-b';
+    expect(discoveryCacheKey('anthropic', entry as never)).not.toBe(a);
   });
 
   it('carries nothing derived from the credential', () => {
@@ -598,47 +617,45 @@ describe('discoveryCacheKey', () => {
   });
 
   it('tells an apiKey and an authToken of the same value apart', () => {
-    const a = discoveryCacheKey('anthropic', cfg({ apiKey: 'same' }));
-    const b = discoveryCacheKey('anthropic', cfg({ authToken: 'same' }));
-    expect(a).not.toBe(b);
+    // Separate slots, so one field's identity is never reused for the other.
+    const entry = cfg({ apiKey: 'same', authToken: 'same' });
+    const key = discoveryCacheKey('anthropic', entry);
+    const [, keyId, tokenId] = key.split('|');
+    expect(keyId).not.toBe(tokenId);
   });
 
   it('treats an absent credential as its own case, not as a collision', () => {
-    const none = discoveryCacheKey('anthropic', cfg({ baseUrl: 'https://gw' }));
-    expect(none).toBe(discoveryCacheKey('anthropic', cfg({ baseUrl: 'https://gw' })));
+    const bare = cfg({ baseUrl: 'https://gw' });
+    const none = discoveryCacheKey('anthropic', bare);
+    expect(none).toBe(discoveryCacheKey('anthropic', bare));
     expect(none).not.toBe(discoveryCacheKey('anthropic', cfg({ apiKey: 'k', baseUrl: 'https://gw' })));
   });
 });
 
-describe('discoveryCacheKey — a rotated credential is forgotten', () => {
-  it('does not keep the old secret alive once the config drops it', async () => {
-    // The identity map is process-global. Without pruning, rotating a key left
-    // the previous secret in it for the rest of the process — outliving both
-    // the configuration and the 15-minute cache entry — so a long-running
-    // desktop accumulated every credential it had ever seen.
-    //
-    // Observable through the id: a secret that was forgotten gets a NEW random
-    // identity when it reappears, so its cache key changes.
-    const before = discoveryCacheKey('anthropic', { type: 'anthropic', apiKey: 'old-key' } as never);
+describe('discoveryCacheKey — a rotated credential is not retained', () => {
+  it('survives a settings save that never re-initialises the router', async () => {
+    // The path an init-time prune could not reach, and the ordinary way a
+    // credential is replaced: DashboardServer's config:update mutates the
+    // provider entry and persists it without calling init(). The replacement
+    // has to be noticed on the next call, not at some later lifecycle event.
+    const entry = { type: 'anthropic', apiKey: 'old-key' };
+    const before = discoveryCacheKey('anthropic', entry as never);
 
-    const router = new CascadeRouter();
-    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
-      vi.fn().mockResolvedValue(new Set());
-    await router.init(makeConfig({ providers: [{ type: 'anthropic', apiKey: 'rotated-key' }] }));
+    const { applyProviderApiKey } = await import('../../config/index.js');
+    applyProviderApiKey([entry], 'anthropic', 'rotated-key');
 
-    const after = discoveryCacheKey('anthropic', { type: 'anthropic', apiKey: 'old-key' } as never);
-    expect(after).not.toBe(before);
+    expect(discoveryCacheKey('anthropic', entry as never)).not.toBe(before);
   });
 
-  it('keeps the identity of a credential the config still holds, so the cache still hits', async () => {
-    const cfgEntry = { type: 'anthropic', apiKey: 'kept-key' };
-    const before = discoveryCacheKey('anthropic', cfgEntry as never);
+  it('keeps the identity of a credential that did not change, so the cache still hits', async () => {
+    const entry = { type: 'anthropic', apiKey: 'kept-key' };
+    const before = discoveryCacheKey('anthropic', entry as never);
 
     const router = new CascadeRouter();
     (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
       vi.fn().mockResolvedValue(new Set());
-    await router.init(makeConfig({ providers: [cfgEntry] }));
+    await router.init(makeConfig({ providers: [entry] }));
 
-    expect(discoveryCacheKey('anthropic', cfgEntry as never)).toBe(before);
+    expect(discoveryCacheKey('anthropic', entry as never)).toBe(before);
   });
 });

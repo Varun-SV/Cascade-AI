@@ -246,48 +246,43 @@ const cloudDiscoveryCache = new Map<string, DiscoveryEntry>();
  * password hash would be worse still, since this sits on the init path and is
  * deliberately slow by design.
  *
- * So the secret is used for one thing only — an equality lookup — and what
+ * So the secret is used for one thing only — an equality comparison — and what
  * travels onward is an opaque random id carrying none of its bits.
  *
- * The map is pruned to the live configuration on every `init()`. When this was
- * added its comment claimed it "adds no exposure, since the config already
- * keeps the string alive". That holds only while the config still references
- * the secret — and rotating a key is precisely the case where it stops. Without
- * pruning, a long-running desktop or dashboard accumulated every credential it
- * had ever seen, outliving both the configuration and the 15-minute cache
- * entry, and a heap dump would surface all of them.
+ * Keyed on the CONFIG OBJECT, weakly, and holding only that object's CURRENT
+ * secret. Two earlier shapes were wrong in the same direction:
+ *
+ * - A `Map` keyed by the secret retained every credential the process had ever
+ *   seen, outliving both the configuration and the 15-minute cache entry.
+ * - Pruning that map at `init()` fixed only the paths that re-initialise the
+ *   router. The ordinary way a credential is replaced is a settings save —
+ *   `DashboardServer`'s config:update mutates and persists without any init —
+ *   so the old secret survived there for the rest of the process. The comment
+ *   calling that residue "short-lived" was wrong; nothing was scheduled to end
+ *   it.
+ *
+ * A WeakMap needs no lifecycle hook at all. The entry dies with the config
+ * object, and a rotation is noticed on the very next call, because the stored
+ * secret no longer matches the one being asked about — so the replaced string
+ * is dropped at the moment it stops being current, whichever path replaced it.
  */
-const credentialIdentities = new Map<string, string>();
+interface CredentialSlot { secret: string; id: string }
+const credentialIdentities = new WeakMap<object, { apiKey?: CredentialSlot; authToken?: CredentialSlot }>();
 
-/**
- * Forget credentials the configuration no longer holds.
- *
- * Called where the config is (re)installed, so the map tracks the live
- * configuration rather than the process's whole history. A credential that is
- * still configured keeps its id, so pruning costs no cache hits.
- *
- * A settings save that mutates the provider list without re-initialising the
- * router leaves the replaced secret until the next `init()` — bounded and
- * short-lived, where before it was permanent.
- */
-function pruneCredentialIdentities(providers: readonly ProviderConfig[] | undefined): void {
-  const live = new Set<string>();
-  for (const p of providers ?? []) {
-    if (p.apiKey) live.add(p.apiKey);
-    if (p.authToken) live.add(p.authToken);
-  }
-  for (const secret of [...credentialIdentities.keys()]) {
-    if (!live.has(secret)) credentialIdentities.delete(secret);
-  }
-}
-function credentialIdentity(secret: string | undefined): string {
+function credentialIdentity(
+  cfg: object,
+  field: 'apiKey' | 'authToken',
+  secret: string | undefined,
+): string {
   if (!secret) return '-';
-  let id = credentialIdentities.get(secret);
-  if (!id) {
-    id = crypto.randomUUID();
-    credentialIdentities.set(secret, id);
-  }
-  return id;
+  const slots = credentialIdentities.get(cfg) ?? {};
+  const held = slots[field];
+  // Same object, same secret — the cache should hit. Anything else is a new
+  // credential, and the previous one is released here rather than accumulated.
+  if (held && held.secret === secret) return held.id;
+  const slot: CredentialSlot = { secret, id: crypto.randomUUID() };
+  credentialIdentities.set(cfg, { ...slots, [field]: slot });
+  return slot.id;
 }
 
 /**
@@ -305,8 +300,8 @@ export function discoveryCacheKey(type: ProviderType, cfg: ProviderConfig): stri
   // authToken with the same value are still two different configurations.
   return [
     type,
-    credentialIdentity(cfg.apiKey),
-    credentialIdentity(cfg.authToken),
+    credentialIdentity(cfg, 'apiKey', cfg.apiKey),
+    credentialIdentity(cfg, 'authToken', cfg.authToken),
     cfg.baseUrl ?? '',
   ].join('|');
 }
@@ -469,9 +464,6 @@ export class CascadeRouter extends EventEmitter {
 
   async init(config: CascadeConfig): Promise<void> {
     this.config = config;
-    // Before anything reads a credential: drop the identities of secrets this
-    // configuration no longer holds, so a rotated key does not outlive it.
-    pruneCredentialIdentities(config.providers);
 
     const availableProviders = await this.detectAvailableProviders(config.providers);
     this.selector = new ModelSelector(availableProviders);

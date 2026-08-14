@@ -359,6 +359,58 @@ describe('cascade link — adoption', () => {
     expect(azure.find((p) => p['deploymentName'] === 'dev')?.['apiKey']).toBe('key-two');
   });
 
+  it('rotates the key across EVERY deployment on the named resource', async () => {
+    // An Azure key is resource-scoped. Keying only the deployment that
+    // AZURE_OPENAI_DEPLOYMENT names left its siblings holding the previous key
+    // — and injectEnvKeys skips rows that already have one — so once the old
+    // key was revoked every other deployment on that resource failed.
+    await seedConfig([
+      { type: 'azure', deploymentName: 'prod', baseUrl: 'https://one.openai.azure.com', apiKey: 'old-key' },
+      { type: 'azure', deploymentName: 'mini', baseUrl: 'https://one.openai.azure.com', apiKey: 'old-key' },
+      { type: 'azure', deploymentName: 'dev', baseUrl: 'https://two.openai.azure.com', apiKey: 'other-resource' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'new-key';
+    process.env['AZURE_OPENAI_ENDPOINT'] = 'https://one.openai.azure.com';
+    process.env['AZURE_OPENAI_DEPLOYMENT'] = 'prod';
+
+    const azure = (await providersAfterLink('azure')).filter((p) => p['type'] === 'azure');
+    expect(azure.find((p) => p['deploymentName'] === 'prod')?.['apiKey']).toBe('new-key');
+    expect(azure.find((p) => p['deploymentName'] === 'mini')?.['apiKey']).toBe('new-key');
+    // The other resource is untouched — the key does not belong to it.
+    expect(azure.find((p) => p['deploymentName'] === 'dev')?.['apiKey']).toBe('other-resource');
+  });
+
+  it('fills an endpointless row rather than calling it another resource\'s', async () => {
+    // A row with this deployment name and NO endpoint is this deployment
+    // waiting for one — and the credential supplies exactly what it lacks.
+    // Treating it as a collision refused a link that had everything it needed.
+    await seedConfig([{ type: 'azure', deploymentName: 'prod' }]);
+    process.env['AZURE_OPENAI_KEY'] = 'new-key';
+    process.env['AZURE_OPENAI_ENDPOINT'] = 'https://one.openai.azure.com';
+    process.env['AZURE_OPENAI_DEPLOYMENT'] = 'prod';
+
+    const azure = (await providersAfterLink('azure')).filter((p) => p['type'] === 'azure');
+    expect(azure).toHaveLength(1);
+    expect(azure[0]).toMatchObject({
+      deploymentName: 'prod',
+      baseUrl: 'https://one.openai.azure.com',
+      apiKey: 'new-key',
+    });
+  });
+
+  it('still refuses when the name belongs to a DIFFERENT configured resource', async () => {
+    await seedConfig([
+      { type: 'azure', deploymentName: 'prod', baseUrl: 'https://one.openai.azure.com', apiKey: 'key-one' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'new-key';
+    process.env['AZURE_OPENAI_ENDPOINT'] = 'https://two.openai.azure.com';
+    process.env['AZURE_OPENAI_DEPLOYMENT'] = 'prod';
+
+    const azure = (await providersAfterLink('azure')).filter((p) => p['type'] === 'azure');
+    expect(azure).toHaveLength(1);
+    expect(azure[0]).toMatchObject({ baseUrl: 'https://one.openai.azure.com', apiKey: 'key-one' });
+  });
+
   it('applies the exported API version to the deployments it keys', async () => {
     // The fully routed branch carries apiVersion; this one dropped it, leaving
     // each deployment on its stale or default version while the user had

@@ -292,9 +292,13 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
       // the existing row, and appended a DUPLICATE deployment. The router takes
       // the first row matching a deployment name, so it kept using the old
       // keyless one while this printed "✓ Linked".
+      // A row carrying this deployment name and NO endpoint is THIS deployment
+      // waiting for one, not another resource's — and the credential supplies
+      // exactly what it is missing. Treating it as a collision refused a link
+      // that had everything it needed.
       const existing = config.providers.find((p) => p.type === 'azure'
-        && sameAzureEndpoint(p.baseUrl, target)
-        && (p.deploymentName?.trim() ?? '') === deployment);
+        && (p.deploymentName?.trim() ?? '') === deployment
+        && (sameAzureEndpoint(p.baseUrl, target) || !p.baseUrl?.trim()));
 
       // A deployment name is the MODEL ID everywhere downstream, and the router
       // binds an Azure model with `deploymentName === model.id` — the first row
@@ -304,9 +308,11 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
       // printed "✓ Linked" and requests carried on to the other resource.
       // Refusing is the honest answer — the same answer this function already
       // gives when several resources leave a key with nothing to choose
-      // between them.
+      // between them. A DIFFERENT, non-empty endpoint is what makes it a
+      // collision; an absent one is handled above.
       const claimedElsewhere = !existing && config.providers.some((p) => p.type === 'azure'
         && (p.deploymentName?.trim() ?? '') === deployment
+        && !!p.baseUrl?.trim()
         && !sameAzureEndpoint(p.baseUrl, target));
       if (claimedElsewhere) {
         console.log(chalk.yellow(`\n  A different Azure resource already has a deployment named "${deployment}".`));
@@ -316,17 +322,30 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
         return false;
       }
 
+      // The key is RESOURCE-scoped, so it lands on every deployment of that
+      // resource — not only the one `AZURE_OPENAI_DEPLOYMENT` happens to name.
+      // Keying just that row left its siblings holding the previous key, and
+      // injectEnvKeys skips rows that already have one, so after the old key
+      // was revoked every other deployment on the resource failed. This is the
+      // same resource-scoping the workspace-routed branch below applies.
+      const patch = {
+        apiKey: cred.secret,
+        credentialSource: cred.sourceTool,
+        ...(cred.apiVersion ? { apiVersion: cred.apiVersion } : {}),
+      };
+      const updated = config.providers.map((p) => {
+        if (p === existing) return { ...p, baseUrl: target, ...patch };
+        const sibling = p.type === 'azure' && p.deploymentName?.trim()
+          && sameAzureEndpoint(p.baseUrl, target);
+        return sibling ? { ...p, ...patch } : p;
+      });
       const providers = existing
-        ? config.providers.map((p) => (p === existing
-          ? { ...p, apiKey: cred.secret, credentialSource: cred.sourceTool, ...(cred.apiVersion ? { apiVersion: cred.apiVersion } : {}) }
-          : p))
-        : [...config.providers, {
+        ? updated
+        : [...updated, {
           type: 'azure' as const,
-          apiKey: cred.secret,
           baseUrl: target,
           deploymentName: deployment,
-          ...(cred.apiVersion ? { apiVersion: cred.apiVersion } : {}),
-          credentialSource: cred.sourceTool,
+          ...patch,
         }];
       await cm.updateConfig({ providers });
       return true;
