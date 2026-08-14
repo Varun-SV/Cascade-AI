@@ -14,6 +14,26 @@ interface CheckResult {
   detail?: string;
 }
 
+/**
+ * What `doctor` says about credentials it found on the machine.
+ *
+ * Exported so the wording can be tested on its own rather than by running the
+ * whole diagnostic. `cascade link` is only offered as a remedy when something
+ * would actually be adopted: a machine whose one discovered credential is a
+ * Claude subscription token — which link is required to refuse — was told to
+ * run a command that cannot succeed, and a diagnostic prescribing an impossible
+ * step reads as a mistake the user made rather than a credential Cascade is not
+ * permitted to use.
+ */
+export function linkableCredentialsDetail(
+  discovered: ReadonlyArray<{ directlyUsable: boolean }>,
+): string {
+  const usable = discovered.filter((d) => d.directlyUsable).length;
+  return usable > 0
+    ? `${discovered.length} found (${usable} usable) — run \`cascade link\` to adopt`
+    : `${discovered.length} found, none usable — run \`cascade link\` to see why`;
+}
+
 export async function doctorCommand(): Promise<void> {
   console.log(chalk.magenta('\n  ◈ Cascade Doctor — System Diagnostics\n'));
 
@@ -131,11 +151,10 @@ export async function doctorCommand(): Promise<void> {
   try {
     const discovered = await discoverCredentials();
     if (discovered.length > 0) {
-      const usable = discovered.filter((d) => d.directlyUsable).length;
       checks.push({
         label: 'Linkable credentials',
         ok: true,
-        detail: `${discovered.length} found (${usable} usable) — run \`cascade link\` to adopt`,
+        detail: linkableCredentialsDetail(discovered),
       });
     }
   } catch { /* discovery is best-effort */ }

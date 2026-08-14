@@ -245,11 +245,29 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
     // RESOURCE, so writing it across every deployment would break the ones on
     // other resources and overwrite keys they already had — permanently, since
     // the save is authoritative for the global credential store.
-    const resources = [...new Set(azureDeployments.map((p) => normalizeAzureEndpoint(p.baseUrl)))];
+    //
+    // An exported AZURE_OPENAI_ENDPOINT names that resource even when no
+    // deployment name came with it, so it narrows the candidates before the
+    // ambiguity check rather than after. Counting every configured resource
+    // first refused a key whose resource was never in doubt — and because the
+    // refusal returns before updateConfig(), the key injectEnvKeys had already
+    // put into those deployments in memory was never persisted, so the command
+    // failed with the routing sitting right there.
+    const scoped = target
+      ? azureDeployments.filter((p) => sameAzureEndpoint(p.baseUrl, target))
+      : azureDeployments;
+    const resources = [...new Set(scoped.map((p) => normalizeAzureEndpoint(p.baseUrl)))];
     if (resources.length !== 1) {
-      console.log(chalk.yellow('\n  Several Azure resources are configured, and an Azure key belongs to one of them.'));
-      console.log(chalk.gray('  Set AZURE_OPENAI_ENDPOINT to the resource this key is for, then run again:\n'));
-      for (const r of resources) console.log(chalk.gray(`      ${r || '(no endpoint set)'}`));
+      const all = [...new Set(azureDeployments.map((p) => normalizeAzureEndpoint(p.baseUrl)))];
+      if (target && scoped.length === 0) {
+        console.log(chalk.yellow(`\n  No configured Azure deployment is on ${target}.`));
+        console.log(chalk.gray('  Set AZURE_OPENAI_DEPLOYMENT as well to add one, or point'));
+        console.log(chalk.gray('  AZURE_OPENAI_ENDPOINT at a resource you have configured:\n'));
+      } else {
+        console.log(chalk.yellow('\n  Several Azure resources are configured, and an Azure key belongs to one of them.'));
+        console.log(chalk.gray('  Set AZURE_OPENAI_ENDPOINT to the resource this key is for, then run again:\n'));
+      }
+      for (const r of all) console.log(chalk.gray(`      ${r || '(no endpoint set)'}`));
       console.log('');
       return false;
     }

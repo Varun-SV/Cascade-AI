@@ -22,7 +22,7 @@ import {
   stripRetiredProviders,
   type RetiredProviderCleanup,
 } from './retired-providers.js';
-import { stripRevokedCredentials, stripRevokedFromConfig, clearAnthropicPins, hasUsableAnthropic, REVOKED_CREDENTIAL_REASON } from './revoked-credentials.js';
+import { stripRevokedCredentials, stripRevokedFromConfig, clearAnthropicPins, hasUsableAnthropic, REVOKED_CREDENTIAL_REASON, type ClearedPin } from './revoked-credentials.js';
 import { disambiguateMcpServerNames, type McpServerRename } from '../tools/tool-name.js';
 import {
   CASCADE_CONFIG_FILE,
@@ -101,7 +101,7 @@ export class ConfigManager {
    */
   private revokedCredentials = 0;
   /** Tier pins cleared by the revoked-credential migration this load. */
-  private revokedPins: string[] = [];
+  private revokedPins: ClearedPin[] = [];
   /** This load's revoked-credential explanation, joined with any retirement one. */
   private revokedNotice?: string;
   /**
@@ -208,12 +208,18 @@ export class ConfigManager {
     // environment keeps it valid, and both arrive after the file is read.
     if (this.revokedCredentials > 0 && !hasUsableAnthropic(this.config.providers)) {
       this.revokedPins = clearAnthropicPins(this.config.models, this.config.providers);
-      if (this.revokedPins.length > 0) await this.persistClearedPins(this.revokedPins);
+      if (this.revokedPins.length > 0) {
+        await this.persistClearedPins(this.revokedPins.map((p) => p.tier));
+      }
     }
 
     if (this.revokedCredentials > 0) {
+      // The MODEL is named, not just the tier. Whether a bare `claude-…` pin
+      // was really Anthropic's is not knowable at config load — a gateway may
+      // serve that id — so this migration errs toward clearing, and saying
+      // exactly what it removed is what makes that recoverable in one line.
       const pins = this.revokedPins.length
-        ? ` Cleared the ${[...new Set(this.revokedPins)].map((t) => t.toUpperCase()).join('/')} model pin, since it named Anthropic.`
+        ? ` Cleared the ${this.revokedPins.map((p) => `${p.tier.toUpperCase()} pin (${p.model})`).join(' and ')}, since it named Anthropic.`
         : '';
       this.revokedNotice = `Cascade config migration: ${REVOKED_CREDENTIAL_REASON}${pins}`;
       console.warn(this.revokedNotice);

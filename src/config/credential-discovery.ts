@@ -154,7 +154,21 @@ function fromEnv(env: NodeJS.ProcessEnv): DiscoveredCredential[] {
     const secret = str(env[name]);
     if (!secret || seen.has(provider)) continue;
     seen.add(provider);
-    out.push({ provider, sourceTool: `Environment (${name})`, kind: 'api-key', secret, directlyUsable: true });
+    // ANTHROPIC_BASE_URL travels with the KEY as well as with the bearer below.
+    // Adoption replaces the provider entry but keeps fields the credential says
+    // nothing about, so omitting the endpoint here meant `cascade link
+    // anthropic` left a stale `baseUrl` in place and sent the newly exported
+    // key to the host it was not issued by — the same pairing the environment
+    // injection already applies, missing from the path a user is told to use.
+    const gateway = provider === 'anthropic' ? str(env['ANTHROPIC_BASE_URL']) : undefined;
+    out.push({
+      provider,
+      sourceTool: `Environment (${name})`,
+      kind: 'api-key',
+      secret,
+      directlyUsable: true,
+      ...(gateway ? { baseUrl: gateway } : {}),
+    });
   }
 
   // An Anthropic bearer token pointed at a gateway. This is the sanctioned use

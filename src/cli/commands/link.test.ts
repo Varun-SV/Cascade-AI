@@ -321,6 +321,55 @@ describe('cascade link — adoption', () => {
     expect(azure[0]).toMatchObject({ deploymentName: 'prod', apiKey: 'new-key' });
   });
 
+  it('sends a newly linked key to the gateway exported with it', async () => {
+    // Adoption keeps fields the credential says nothing about, and discovery
+    // attached ANTHROPIC_BASE_URL only to the bearer — so linking an exported
+    // API key left the stale endpoint in place and sent the new key to the host
+    // that did not issue it. injectEnvKeys cannot cover this one: the entry is
+    // already credentialed, so it skips it.
+    await seedConfig([{ type: 'anthropic', apiKey: 'old-key', baseUrl: 'https://old-gateway.internal' }]);
+    process.env['ANTHROPIC_API_KEY'] = 'new-key';
+    process.env['ANTHROPIC_BASE_URL'] = 'https://new-gateway.internal';
+
+    const providers = await providersAfterLink('anthropic');
+    expect(providers.find((p) => p['type'] === 'anthropic')).toMatchObject({
+      apiKey: 'new-key',
+      baseUrl: 'https://new-gateway.internal',
+    });
+  });
+
+  it('links an Azure key when the endpoint names the resource but no deployment came with it', async () => {
+    // The configured deployments already supply the routing, and the exported
+    // endpoint says which resource — nothing is ambiguous. Counting every
+    // configured resource before narrowing refused the key, and because the
+    // refusal returns before the write, nothing was persisted.
+    await seedConfig([
+      { type: 'azure', deploymentName: 'prod', baseUrl: 'https://one.openai.azure.com' },
+      { type: 'azure', deploymentName: 'dev', baseUrl: 'https://two.openai.azure.com', apiKey: 'key-two' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'new-key';
+    process.env['AZURE_OPENAI_ENDPOINT'] = 'https://one.openai.azure.com';
+
+    const azure = (await providersAfterLink('azure')).filter((p) => p['type'] === 'azure');
+    expect(azure.find((p) => p['deploymentName'] === 'prod')).toMatchObject({
+      apiKey: 'new-key',
+      credentialSource: 'Environment (AZURE_OPENAI_KEY)',
+    });
+    // The other resource is untouched — an Azure key belongs to one of them.
+    expect(azure.find((p) => p['deploymentName'] === 'dev')?.['apiKey']).toBe('key-two');
+  });
+
+  it('still refuses when several resources are configured and none is named', async () => {
+    await seedConfig([
+      { type: 'azure', deploymentName: 'prod', baseUrl: 'https://one.openai.azure.com', apiKey: 'key-one' },
+      { type: 'azure', deploymentName: 'dev', baseUrl: 'https://two.openai.azure.com', apiKey: 'key-two' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'new-key';
+
+    const azure = (await providersAfterLink('azure')).filter((p) => p['type'] === 'azure');
+    expect(azure.map((p) => p['apiKey'])).toEqual(['key-one', 'key-two']);
+  });
+
   it('refuses a deployment name another resource already claims', async () => {
     // A deployment name IS the model id, and the router binds an Azure model to
     // the first row whose deploymentName matches — endpoint not consulted. So

@@ -238,12 +238,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolve rather than falling back, so the migration meant to get an install
   working again left that tier dead.
 
-  A bare pin is only cleared when nothing else configured could serve it. The
-  prefixed form names the provider, so it is unambiguous; a bare id names a
-  MODEL, and the router accepts any registered model by id whatever vendor its
-  name suggests — so a gateway serving `claude-sonnet-4` resolves that pin
-  perfectly well, and deleting it on the strength of the model's name would
-  throw away a working configuration.
+  A bare pin is kept only when a configured provider is KNOWN to serve it —
+  which, at config load, means an Azure deployment of that exact name. A gateway
+  might serve `claude-sonnet-4`, since the router accepts any registered id
+  whatever vendor its name suggests, but its catalogue is discovered at runtime
+  and its mere presence proves nothing. Guessing wrong in that direction is the
+  costlier mistake: an unresolvable pin makes the router throw on every run,
+  where a cleared one costs a tier its pin and is announced. The notice names
+  the model as well as the tier, so putting it back is one line.
 
 - **The same dangling pin could arrive by sync.** `applySyncBundle` dropped the
   revoked provider and then reconciled pins with `clearRetiredPins()` alone —
@@ -303,6 +305,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consulting the endpoint. Adding a second `prod` on a different resource
   created a row that could never be selected, while the command reported
   success and requests carried on to the other resource.
+
+- **`ANTHROPIC_BASE_URL` travels with an exported API key through `cascade
+  link`, not only through startup.** Adoption keeps whatever the credential says
+  nothing about, and discovery attached the endpoint only to the bearer — so
+  linking an exported key left the old gateway in place and sent the new key to
+  the host that had not issued it. The environment injection cannot cover this
+  case: the entry already holds a credential, so it is skipped by design.
+
+- **`cascade link azure` accepts a key whose resource is named but whose
+  deployment is not.** The configured deployments already supply that routing,
+  and `AZURE_OPENAI_ENDPOINT` says which resource — but every configured
+  resource was counted before narrowing, so the key was refused as ambiguous
+  when nothing was in doubt. The refusal returns before the write, so nothing
+  was persisted either.
+
+- **`cascade doctor` stopped prescribing a step that cannot work.** With a
+  Claude subscription token as the only credential on the machine it reported
+  "1 found (0 usable) — run `cascade link` to adopt", about a credential
+  `cascade link` is required to refuse. It now offers adoption only when
+  something is adoptable, and otherwise points at `cascade link` for the
+  explanation.
 
 ## 0.74.0 - 2026-08-11
 

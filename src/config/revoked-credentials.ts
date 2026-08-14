@@ -156,17 +156,26 @@ export function clearAnthropicPins(
   // over-reaching behaviour this argument exists to prevent, and the compiler
   // is the right place to catch that.
   providers: readonly CredentialBearingProvider[],
-): string[] {
-  const cleared: string[] = [];
+): ClearedPin[] {
+  const cleared: ClearedPin[] = [];
   if (typeof models !== 'object' || models === null) return cleared;
   const tiers = models as Record<string, unknown>;
   for (const tier of ['t1', 't2', 't3'] as const) {
     const pin = tiers[tier];
     if (typeof pin !== 'string' || !namesAnthropicModel(pin, providers)) continue;
     delete tiers[tier];
-    cleared.push(tier);
+    // The model id travels with the tier so the notice can NAME what it
+    // removed. A pin cleared in error is then one line to restore, which is
+    // what makes erring toward clearing the safer of the two mistakes below.
+    cleared.push({ tier, model: pin });
   }
   return cleared;
+}
+
+/** A pin the migration removed, and the model it named. */
+export interface ClearedPin {
+  tier: string;
+  model: string;
 }
 
 /**
@@ -182,10 +191,8 @@ function namesAnthropicModel(pin: string, providers: readonly CredentialBearingP
   // is gone.
   if (value.includes(':')) return value.startsWith('anthropic:');
   // A bare id names a MODEL, not a provider, and resolveDynamicModel() accepts
-  // any registered model by id whatever vendor its name suggests — so a gateway
-  // serving `claude-sonnet-4` resolves this pin perfectly well, and deleting it
-  // would be throwing away a working configuration on the strength of the
-  // model's name. Only clear it when nothing else configured could serve it.
+  // any registered model by id whatever vendor its name suggests — so a pin can
+  // in principle belong to something other than the provider just removed.
   const known = Object.values(MODELS).some(
     (m) => m.provider === 'anthropic' && m.id.toLowerCase() === value,
   );
@@ -196,19 +203,31 @@ function namesAnthropicModel(pin: string, providers: readonly CredentialBearingP
 }
 
 /**
- * Whether some provider still configured could resolve a bare model id.
+ * Whether some provider still configured is KNOWN to resolve a bare model id.
  *
- * `openai-compatible` and `ollama` serve whatever their endpoint offers, so
- * their catalogues are discovered at runtime and unknowable here — any id might
- * be theirs. Azure is knowable: its model ids ARE its deployment names.
+ * Known, not "might". Azure is the only case answerable here, because its model
+ * ids are its deployment names and those are in the config. `openai-compatible`
+ * and `ollama` serve whatever their endpoint offers, discovered at runtime — so
+ * their presence says nothing about this id, and an earlier revision treating
+ * it as proof got the trade the wrong way round:
+ *
+ * - Keep a pin the gateway does NOT serve: `resolveDynamicModel()` misses the
+ *   registry, infers `anthropic` from the name, finds no such provider, and the
+ *   router THROWS on every run. Total failure, repaired only by hand-editing
+ *   the config.
+ * - Clear a pin the gateway DOES serve: that tier falls back to Auto, and the
+ *   migration notice names the tier and the model it removed, so putting it
+ *   back is one line.
+ *
+ * The second is the mistake worth making. Deciding properly needs the
+ * gateway's discovered catalogue, which exists only after the router has
+ * initialised — long after config load, where this runs.
  */
 function canBeServedElsewhere(
   modelId: string,
   providers: readonly CredentialBearingProvider[],
 ): boolean {
-  return providers.some((p) => {
-    if (!p) return false;
-    if (p.type === 'openai-compatible' || p.type === 'ollama') return true;
-    return p.type === 'azure' && (p.deploymentName ?? '').trim().toLowerCase() === modelId;
-  });
+  return providers.some((p) => p
+    && p.type === 'azure'
+    && (p.deploymentName ?? '').trim().toLowerCase() === modelId);
 }

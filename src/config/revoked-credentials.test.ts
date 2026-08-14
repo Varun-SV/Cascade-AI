@@ -155,7 +155,7 @@ describe('clearing pins the removed credential leaves dangling', () => {
     const models = { t1: 'anthropic:claude-opus-4', t2: 'Anthropic:claude-sonnet-4', t3: 'openai:gpt-5-mini' };
     // Lowercased because selector.ts's resolveDynamicModel() parses the
     // provider half case-insensitively, so `Anthropic:` is a valid pin.
-    expect(clearAnthropicPins(models, [])).toEqual(['t1', 't2']);
+    expect(clearAnthropicPins(models, []).map((c) => c.tier)).toEqual(['t1', 't2']);
     expect(models).toEqual({ t3: 'openai:gpt-5-mini' });
   });
 
@@ -164,7 +164,9 @@ describe('clearing pins the removed credential leaves dangling', () => {
     // writes the same shape. Matching only `anthropic:` left the ordinary pin
     // behind, and the router throws on a pin it cannot resolve.
     const models = { t1: 'claude-opus-4', t2: 'gpt-5-mini', t3: 'llama3.2:3b' };
-    expect(clearAnthropicPins(models, [])).toEqual(['t1']);
+    // The MODEL travels with the tier, so the migration notice can name what
+    // it removed — which is what makes clearing recoverable in one line.
+    expect(clearAnthropicPins(models, [])).toEqual([{ tier: 't1', model: 'claude-opus-4' }]);
     expect(models).toEqual({ t2: 'gpt-5-mini', t3: 'llama3.2:3b' });
   });
 
@@ -172,7 +174,7 @@ describe('clearing pins the removed credential leaves dangling', () => {
     // A pin is most likely to name an unknown model precisely when it is newer
     // than the build.
     const models = { t1: 'claude-opus-9-future' };
-    expect(clearAnthropicPins(models, [])).toEqual(['t1']);
+    expect(clearAnthropicPins(models, []).map((c) => c.tier)).toEqual(['t1']);
   });
 
   it('leaves another provider\'s bare pin alone', () => {
@@ -181,16 +183,18 @@ describe('clearing pins the removed credential leaves dangling', () => {
     expect(models).toEqual({ t1: 'gpt-5', t2: 'gemini-2.5-flash', t3: 'llama3.2:3b' });
   });
 
-  it('keeps a bare Claude pin a configured gateway could serve', () => {
-    // resolveDynamicModel() accepts any REGISTERED model by id whatever vendor
-    // its name suggests (selector.ts), so an openai-compatible gateway serving
-    // `claude-sonnet-4` resolves this pin perfectly well. Deleting it because
-    // of the model's name would throw away a working configuration.
+  it('clears a bare Claude pin even with a gateway configured', () => {
+    // A gateway MIGHT serve `claude-sonnet-4` — resolveDynamicModel() accepts
+    // any registered id whatever vendor its name suggests — but its catalogue
+    // is discovered at runtime and unknowable here, so its presence proves
+    // nothing about this id. Keeping the pin on that basis is the worse of the
+    // two mistakes: when the gateway does NOT serve it, the id is inferred as
+    // Anthropic, no such provider exists, and the router throws on every run.
+    // Clearing costs one tier its pin, and the notice names the model.
     const models = { t1: 'claude-sonnet-4' };
     expect(clearAnthropicPins(models, [
       { type: 'openai-compatible', apiKey: 'k', baseUrl: 'https://gw/v1' },
-    ])).toEqual([]);
-    expect(models).toEqual({ t1: 'claude-sonnet-4' });
+    ])).toEqual([{ tier: 't1', model: 'claude-sonnet-4' }]);
   });
 
   it('keeps a bare pin naming an Azure deployment', () => {
@@ -199,6 +203,7 @@ describe('clearing pins the removed credential leaves dangling', () => {
     expect(clearAnthropicPins(models, [
       { type: 'azure', apiKey: 'k', baseUrl: 'https://r.openai.azure.com', deploymentName: 'claude-proxy' },
     ])).toEqual([]);
+    expect(models).toEqual({ t1: 'claude-proxy' });
   });
 
   it('still clears the PREFIXED form even with a gateway configured', () => {
@@ -207,14 +212,14 @@ describe('clearing pins the removed credential leaves dangling', () => {
     const models = { t1: 'anthropic:claude-sonnet-4' };
     expect(clearAnthropicPins(models, [
       { type: 'openai-compatible', apiKey: 'k', baseUrl: 'https://gw/v1' },
-    ])).toEqual(['t1']);
+    ]).map((c) => c.tier)).toEqual(['t1']);
   });
 
   it('clears a bare pin when the only other provider serves a fixed catalogue', () => {
     // OpenAI cannot be asked for `claude-opus-4`, so nothing configured can
     // resolve this pin and the router would throw on it.
     const models = { t1: 'claude-opus-4' };
-    expect(clearAnthropicPins(models, [{ type: 'openai', apiKey: 'sk' }])).toEqual(['t1']);
+    expect(clearAnthropicPins(models, [{ type: 'openai', apiKey: 'sk' }]).map((c) => c.tier)).toEqual(['t1']);
   });
 
   it('reads a surviving Anthropic provider from whatever list it is given', () => {
@@ -325,7 +330,11 @@ describe('the notice survives alongside a retirement notice', () => {
     const cm = new ConfigManager(dir, path.join(dir, 'global'));
     await cm.load();
 
-    expect(cm.takeRetiredNotice()).toMatch(/Cleared the T1 model pin/);
+    // The MODEL is named as well as the tier. Whether a bare Claude pin really
+    // belonged to Anthropic is not knowable at config load, so the migration
+    // errs toward clearing — and naming what it removed is what keeps that
+    // recoverable.
+    expect(cm.takeRetiredNotice()).toMatch(/Cleared the T1 pin \(anthropic:claude-opus-4\)/);
     expect(cm.getConfig().models.t1).toBeUndefined();
   });
 });
