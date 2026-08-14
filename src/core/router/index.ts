@@ -234,14 +234,33 @@ const DISCOVERY_TIMEOUT_MS = 4_000;
 interface DiscoveryEntry { ids: string[]; models: ModelInfo[]; at: number }
 const cloudDiscoveryCache = new Map<string, DiscoveryEntry>();
 
-function discoveryCacheKey(type: ProviderType, cfg: ProviderConfig): string {
+/**
+ * A random, process-local MAC key for the discovery cache.
+ *
+ * The cache needs to tell credentials APART; it never needs a digest OF one.
+ * A bare `sha256(apiKey)` is exactly the artifact an offline guess can be
+ * tested against, so anywhere it surfaced — a heap dump, a crash report, a
+ * future debug log of cache keys — it would confirm a guessed key. Keying the
+ * digest with bytes that exist only in this process removes that property at no
+ * cost: the cache is a module-level Map that dies with the process, so a key
+ * that is not stable across runs is not a key anything depends on.
+ */
+const DISCOVERY_CACHE_MAC_KEY = crypto.randomBytes(32);
+
+/**
+ * Identity of a provider's credential + endpoint, for the discovery cache.
+ *
+ * Exported for its test: the security property — that the result is NOT
+ * derivable from the credential — is invisible from the outside otherwise.
+ */
+export function discoveryCacheKey(type: ProviderType, cfg: ProviderConfig): string {
   // `authToken` is part of the identity, not just `apiKey`. Two gateways
   // reachable at the same URL with different bearers serve different
   // catalogues, and omitting it also collapsed every bearer-only config for a
   // provider onto one key — so switching credentials would have been answered
   // from the previous one's cache.
   const raw = `${type}|${cfg.apiKey ?? ''}|${cfg.authToken ?? ''}|${cfg.baseUrl ?? ''}`;
-  return crypto.createHash('sha256').update(raw).digest('hex').slice(0, 24);
+  return crypto.createHmac('sha256', DISCOVERY_CACHE_MAC_KEY).update(raw).digest('hex').slice(0, 24);
 }
 
 /**

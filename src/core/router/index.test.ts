@@ -5,7 +5,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { CascadeRouter } from './index.js';
+import { CascadeRouter, discoveryCacheKey } from './index.js';
+import crypto from 'node:crypto';
 import type { CascadeConfig } from '../../types.js';
 import { CascadeConfigSchema } from '../../config/schema.js';
 import { DEFAULT_PROVIDER_TPM, TpmLimiter } from './tpm-limiter.js';
@@ -544,5 +545,38 @@ describe('CascadeRouter — a bearer-only Anthropic gateway is validated too', (
     expect(router.getAvailableModels().some((m) => m.id === 'gw-claude-a')).toBe(true);
     // And it authenticated as a bearer, not with an empty x-api-key.
     expect(authSeen.some((a) => a === 'Bearer gw-token')).toBe(true);
+  });
+});
+
+describe('discoveryCacheKey', () => {
+  const cfg = (over: Record<string, unknown>) => ({ type: 'anthropic', ...over }) as never;
+
+  it('separates credentials, and matches the same one', () => {
+    const a = discoveryCacheKey('anthropic', cfg({ apiKey: 'sk-a' }));
+    const b = discoveryCacheKey('anthropic', cfg({ apiKey: 'sk-b' }));
+    expect(a).not.toBe(b);
+    expect(discoveryCacheKey('anthropic', cfg({ apiKey: 'sk-a' }))).toBe(a);
+  });
+
+  it('separates two bearers at the same endpoint', () => {
+    // Two gateways on one URL serve different catalogues. Keying on apiKey
+    // alone collapsed every bearer-only config onto one entry, so switching
+    // credentials was answered from the previous one's cache.
+    const url = 'https://gw.internal';
+    const a = discoveryCacheKey('anthropic', cfg({ authToken: 'tok-a', baseUrl: url }));
+    const b = discoveryCacheKey('anthropic', cfg({ authToken: 'tok-b', baseUrl: url }));
+    expect(a).not.toBe(b);
+  });
+
+  it('is not a digest OF the credential', () => {
+    // The security property. A bare sha256(apiKey) is the artifact an offline
+    // guess is tested against — anywhere it surfaced (heap dump, crash report,
+    // a future log of cache keys) it would confirm a guessed key. Keyed with
+    // process-local random bytes, the digest cannot be reproduced from the
+    // credential alone.
+    const key = discoveryCacheKey('anthropic', cfg({ apiKey: 'sk-a' }));
+    const naive = crypto.createHash('sha256')
+      .update('anthropic|sk-a||').digest('hex').slice(0, 24);
+    expect(key).not.toBe(naive);
   });
 });
