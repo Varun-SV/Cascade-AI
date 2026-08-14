@@ -240,6 +240,37 @@ describe('cascade link — adoption', () => {
     expect(azure.find((p) => p['deploymentName'] === 'dev')?.['apiKey']).toBe('key-two');
   });
 
+  it('adds a fully routed deployment rather than refusing it', async () => {
+    // The credential names its own endpoint AND deployment, so there is nothing
+    // to infer. Requiring the endpoint to already exist refused a key that
+    // carried everything needed to configure it.
+    await seedConfig([
+      { type: 'azure', deploymentName: 'prod', baseUrl: 'https://one.openai.azure.com', apiKey: 'key-one' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'new-key';
+    process.env['AZURE_OPENAI_ENDPOINT'] = 'https://two.openai.azure.com';
+    process.env['AZURE_OPENAI_DEPLOYMENT'] = 'staging';
+
+    const azure = (await providersAfterLink('azure')).filter((p) => p['type'] === 'azure');
+    expect(azure).toHaveLength(2);
+    const added = azure.find((p) => p['deploymentName'] === 'staging');
+    expect(added).toMatchObject({ apiKey: 'new-key', baseUrl: 'https://two.openai.azure.com' });
+    // The existing resource keeps its own key.
+    expect(azure.find((p) => p['deploymentName'] === 'prod')?.['apiKey']).toBe('key-one');
+  });
+
+  it('adds a new deployment on a resource that already has one', async () => {
+    await seedConfig([
+      { type: 'azure', deploymentName: 'prod', baseUrl: 'https://one.openai.azure.com', apiKey: 'key-one' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'new-key';
+    process.env['AZURE_OPENAI_ENDPOINT'] = 'https://one.openai.azure.com';
+    process.env['AZURE_OPENAI_DEPLOYMENT'] = 'mini';
+
+    const azure = (await providersAfterLink('azure')).filter((p) => p['type'] === 'azure');
+    expect(azure.map((p) => p['deploymentName']).sort()).toEqual(['mini', 'prod']);
+  });
+
   it('refuses to guess when several Azure resources are configured', async () => {
     await seedConfig([
       { type: 'azure', deploymentName: 'prod', baseUrl: 'https://one.openai.azure.com', apiKey: 'key-one' },

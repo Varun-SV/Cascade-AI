@@ -94,7 +94,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   survives (minus the token) when it still holds a key or an endpoint. A tier
   pinned to `anthropic:<model>` is reset to Auto when the removal takes the last
   usable Anthropic entry with it, since a pin naming a provider that no longer
-  exists fails the run outright rather than falling back. The same filter runs
+  exists fails the run outright rather than falling back — decided from the
+  final merged provider list, because a key arriving from the machine-global
+  store or the environment keeps that pin perfectly valid. The same filter runs
   on an incoming key-sync bundle: one written before this release can still
   carry the token, the incoming entry wins the provider merge, and pulling it
   would have overwritten a valid API key with a dead one — which the next launch
@@ -180,6 +182,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only when the environment repeats it — discovery sees environment variables
   alone, so a key exported beside already-configured deployments looked
   unusable.
+
+  A fully routed Azure credential — one naming both its endpoint and its
+  deployment — is added rather than refused. Requiring the endpoint to already
+  exist turned away a key that carried everything needed to configure it, and a
+  new deployment on a known resource silently updated the old rows instead of
+  being created.
 
   Azure is the exception: a key alone cannot configure it — without a deployment
   name it resolves to no model at all, and without an endpoint the client falls

@@ -170,29 +170,48 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
     ? config.providers.filter((p) => p.type === 'azure' && p.deploymentName?.trim())
     : [];
   if (azureDeployments.length > 0) {
-    // An Azure key belongs to ONE RESOURCE. Writing it across every deployment
-    // would break the ones on other resources and overwrite keys they already
-    // had — permanently, since the save is authoritative for the global
-    // credential store. So the update is scoped to a single resource: the one
-    // the credential names, or the only one configured.
+    // A FULLY ROUTED credential names the deployment it belongs to, so there is
+    // nothing to infer: upsert that exact row. Requiring its endpoint to already
+    // exist meant a key exported with a brand-new resource — everything needed
+    // to add it — was refused, and a new deployment on a known resource silently
+    // updated the old rows without ever being created.
+    const target = cred.baseUrl?.trim();
+    const deployment = cred.deploymentName?.trim();
+    if (target && deployment) {
+      const existing = config.providers.find((p) => p.type === 'azure'
+        && (p.baseUrl?.trim() ?? '') === target
+        && (p.deploymentName?.trim() ?? '') === deployment);
+      const providers = existing
+        ? config.providers.map((p) => (p === existing
+          ? { ...p, apiKey: cred.secret, credentialSource: cred.sourceTool, ...(cred.apiVersion ? { apiVersion: cred.apiVersion } : {}) }
+          : p))
+        : [...config.providers, {
+          type: 'azure' as const,
+          apiKey: cred.secret,
+          baseUrl: target,
+          deploymentName: deployment,
+          ...(cred.apiVersion ? { apiVersion: cred.apiVersion } : {}),
+          credentialSource: cred.sourceTool,
+        }];
+      await cm.updateConfig({ providers });
+      return true;
+    }
+
+    // Routing came from the workspace instead. An Azure key belongs to ONE
+    // RESOURCE, so writing it across every deployment would break the ones on
+    // other resources and overwrite keys they already had — permanently, since
+    // the save is authoritative for the global credential store.
     const resources = [...new Set(azureDeployments.map((p) => p.baseUrl?.trim() ?? ''))];
-    const target = cred.baseUrl?.trim()
-      ?? (resources.length === 1 ? resources[0] : undefined);
-    if (target === undefined) {
+    if (resources.length !== 1) {
       console.log(chalk.yellow('\n  Several Azure resources are configured, and an Azure key belongs to one of them.'));
       console.log(chalk.gray('  Set AZURE_OPENAI_ENDPOINT to the resource this key is for, then run again:\n'));
       for (const r of resources) console.log(chalk.gray(`      ${r || '(no endpoint set)'}`));
       console.log('');
       return false;
     }
-    const matches = azureDeployments.filter((p) => (p.baseUrl?.trim() ?? '') === target);
-    if (matches.length === 0) {
-      console.log(chalk.yellow(`\n  No configured Azure deployment uses ${target}.`));
-      console.log(chalk.gray('  Nothing was changed.\n'));
-      return false;
-    }
+    const only = resources[0];
     const providers = config.providers.map((p) => (
-      matches.includes(p)
+      p.type === 'azure' && p.deploymentName?.trim() && (p.baseUrl?.trim() ?? '') === only
         ? { ...p, apiKey: cred.secret, credentialSource: cred.sourceTool }
         : p
     ));

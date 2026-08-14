@@ -21,7 +21,7 @@ import {
   stripRetiredProviders,
   type RetiredProviderCleanup,
 } from './retired-providers.js';
-import { stripRevokedCredentials, stripRevokedFromConfig, REVOKED_CREDENTIAL_REASON } from './revoked-credentials.js';
+import { stripRevokedCredentials, stripRevokedFromConfig, clearAnthropicPins, hasUsableAnthropic, REVOKED_CREDENTIAL_REASON } from './revoked-credentials.js';
 import { disambiguateMcpServerNames, type McpServerRename } from '../tools/tool-name.js';
 import {
   CASCADE_CONFIG_FILE,
@@ -201,6 +201,15 @@ export class ConfigManager {
     // loadConfig() and the global store just above, so both inputs to this
     // merge are already clean. Stripping again here would work, but it would
     // hide a failure to persist either one behind a correct in-memory result.
+    // Pins LAST, and only when nothing usable survived the merge. A dangling
+    // `anthropic:<model>` pin fails every run outright rather than falling back
+    // to Auto, so it has to go — but a key from the global store or the
+    // environment keeps it valid, and both arrive after the file is read.
+    if (this.revokedCredentials > 0 && !hasUsableAnthropic(this.config.providers)) {
+      this.revokedPins = clearAnthropicPins(this.config.models);
+      if (this.revokedPins.length > 0) await this.persistClearedPins(this.revokedPins);
+    }
+
     if (this.revokedCredentials > 0) {
       const pins = this.revokedPins.length
         ? ` Cleared the ${[...new Set(this.revokedPins)].map((t) => t.toUpperCase()).join('/')} model pin, since it named Anthropic.`
@@ -361,12 +370,8 @@ export class ConfigManager {
       // Dead subscription tokens go in the same pass, and for the same reason:
       // the file has to be rewritten or the migration repeats — and warns —
       // on every launch forever.
-      const revoked = stripRevokedFromConfig(parsed);
-      const revokedHere = revoked.removed;
-      if (revokedHere > 0) {
-        this.revokedCredentials += revokedHere;
-        this.revokedPins.push(...revoked.clearedPins);
-      }
+      const revokedHere = stripRevokedFromConfig(parsed).removed;
+      if (revokedHere > 0) this.revokedCredentials += revokedHere;
       if (didCleanupChangeAnything(cleanup) || revokedHere > 0) {
         if (didCleanupChangeAnything(cleanup)) this.retiredCleanup = cleanup;
         // Persist HERE, from the raw parsed file, not via save() at the end of
@@ -393,6 +398,30 @@ export class ConfigManager {
         return validateConfig({});
       }
       throw err;
+    }
+  }
+
+  /**
+   * Rewrite the workspace file with those tier pins removed.
+   *
+   * A targeted edit of the RAW file, not save(). By this point `this.config`
+   * carries environment keys and machine-global credentials, and save()
+   * serializes the whole object — so persisting through it would copy secrets
+   * kept 0600 in ~/.cascade-ai into a workspace file that may be 0644. Same
+   * reasoning as the migration write in loadConfig(); best-effort for the same
+   * reason, since a read-only config directory must not abort startup.
+   */
+  private async persistClearedPins(tiers: readonly string[]): Promise<void> {
+    const configPath = path.join(this.workspacePath, CASCADE_CONFIG_FILE);
+    try {
+      const raw = JSON.parse(await fs.readFile(configPath, 'utf-8')) as Record<string, unknown>;
+      const models = raw['models'];
+      if (typeof models !== 'object' || models === null) return;
+      for (const tier of tiers) delete (models as Record<string, unknown>)[tier];
+      await fs.writeFile(configPath, JSON.stringify(raw, null, 2), 'utf-8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+      console.warn(`Could not persist the cleared model pin: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 

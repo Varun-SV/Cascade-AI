@@ -93,26 +93,29 @@ export function stripRevokedCredentials<T extends CredentialBearingProvider>(pro
  * The retired-provider migration learned this already; this is the same lesson
  * arriving for a different reason.
  */
-export function stripRevokedFromConfig(raw: unknown): { removed: number; clearedPins: string[] } {
-  const result = { removed: 0, clearedPins: [] as string[] };
+export function stripRevokedFromConfig(raw: unknown): { removed: number } {
+  const result = { removed: 0 };
   if (typeof raw !== 'object' || raw === null) return result;
   const cfg = raw as Record<string, unknown>;
-
   if (Array.isArray(cfg['providers'])) {
     const pass = stripRevokedCredentials(cfg['providers'] as CredentialBearingProvider[]);
     result.removed = pass.removed;
     if (pass.removed > 0) cfg['providers'] = pass.kept;
   }
-  if (result.removed === 0) return result;
-
-  // Only when no usable Anthropic entry survives. A config that still has one —
-  // an API key, or a gateway endpoint the user set — keeps its pin working.
-  const providers = Array.isArray(cfg['providers']) ? cfg['providers'] as CredentialBearingProvider[] : [];
-  const anthropicRemains = providers.some((p) => p?.type === 'anthropic' && (p.apiKey || p.authToken));
-  if (anthropicRemains) return result;
-
-  result.clearedPins = clearAnthropicPins(cfg['models']);
   return result;
+}
+
+/**
+ * Whether any usable Anthropic provider remains.
+ *
+ * Asked of the FINAL merged provider list, never the raw workspace file. The
+ * key that keeps a pin valid can arrive from the machine-global store or the
+ * environment, both of which are merged in after the file is read — deciding
+ * from the raw file deleted the user's explicit model selection while the
+ * loaded config still had a perfectly good Anthropic provider.
+ */
+export function hasUsableAnthropic(providers: readonly CredentialBearingProvider[]): boolean {
+  return providers.some((p) => p?.type === 'anthropic' && Boolean(p.apiKey || p.authToken));
 }
 
 /** Clears `anthropic:<model>` tier pins, mutating in place; returns the tiers cleared. */

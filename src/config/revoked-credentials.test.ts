@@ -6,7 +6,10 @@ import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { isRevokedSubscriptionCredential, stripRevokedCredentials, stripRevokedFromConfig } from './revoked-credentials.js';
+import {
+  isRevokedSubscriptionCredential, stripRevokedCredentials, stripRevokedFromConfig,
+  clearAnthropicPins, hasUsableAnthropic,
+} from './revoked-credentials.js';
 import { ConfigManager, hasUsableProvider } from './index.js';
 import { CASCADE_CONFIG_FILE } from '../constants.js';
 
@@ -129,46 +132,81 @@ describe('ConfigManager — removing a dead subscription token on load', () => {
 });
 
 describe('clearing pins the removed credential leaves dangling', () => {
-  it('clears an Anthropic tier pin when the last usable entry goes', async () => {
-    // A `provider:model` pin is a plain string and survives a providers[]
-    // filter. Left behind it reaches the router with no such provider and
-    // THROWS rather than falling back to Auto.
-    const raw = {
-      providers: [{ type: 'anthropic', authToken: 'sk-ant-oat01-x' }],
-      models: { t1: 'anthropic:claude-opus-4', t3: 'openai:gpt-5-mini' },
-    };
-    const { removed, clearedPins } = stripRevokedFromConfig(raw);
-    expect(removed).toBe(1);
-    expect(clearedPins).toEqual(['t1']);
-    expect(raw.models).toEqual({ t3: 'openai:gpt-5-mini' });
+  it('clears an Anthropic pin, matched the way the selector parses it', () => {
+    const models = { t1: 'anthropic:claude-opus-4', t2: 'Anthropic:claude-sonnet-4', t3: 'openai:gpt-5-mini' };
+    // Lowercased because selector.ts's resolveDynamicModel() parses the
+    // provider half case-insensitively, so `Anthropic:` is a valid pin.
+    expect(clearAnthropicPins(models)).toEqual(['t1', 't2']);
+    expect(models).toEqual({ t3: 'openai:gpt-5-mini' });
   });
 
-  it('matches a pin case-insensitively, as the selector parses it', () => {
-    const raw = {
-      providers: [{ type: 'anthropic', authToken: 'sk-ant-oat01-x' }],
-      models: { t2: 'Anthropic:claude-sonnet-4' },
-    };
-    expect(stripRevokedFromConfig(raw).clearedPins).toEqual(['t2']);
+  it('reads a surviving Anthropic provider from whatever list it is given', () => {
+    expect(hasUsableAnthropic([{ type: 'anthropic', apiKey: 'sk' }])).toBe(true);
+    expect(hasUsableAnthropic([{ type: 'anthropic', baseUrl: 'https://gw' }])).toBe(false);
+    expect(hasUsableAnthropic([{ type: 'openai', apiKey: 'sk' }])).toBe(false);
   });
 
-  it('keeps the pin when a usable Anthropic entry survives', () => {
+  it('strips providers without touching pins — that decision comes later', () => {
+    // stripRevokedFromConfig runs on the RAW workspace file, before the global
+    // store and the environment are merged in. It cannot know yet whether a
+    // usable Anthropic provider survives, so it must not decide.
     const raw = {
-      providers: [
-        { type: 'anthropic', authToken: 'sk-ant-oat01-x' },
-        { type: 'anthropic', apiKey: 'sk-ant-real' },
-      ],
+      providers: [{ type: 'anthropic', authToken: 'sk-ant-oat01-x' }],
       models: { t1: 'anthropic:claude-opus-4' },
     };
-    const { removed, clearedPins } = stripRevokedFromConfig(raw);
-    expect(removed).toBe(1);
-    expect(clearedPins).toEqual([]);
+    expect(stripRevokedFromConfig(raw).removed).toBe(1);
     expect(raw.models).toEqual({ t1: 'anthropic:claude-opus-4' });
   });
+});
 
-  it('leaves everything alone when there is nothing to remove', () => {
-    const raw = { providers: [{ type: 'openai', apiKey: 'sk' }], models: { t1: 'anthropic:x' } };
-    expect(stripRevokedFromConfig(raw)).toEqual({ removed: 0, clearedPins: [] });
-    expect(raw.models).toEqual({ t1: 'anthropic:x' });
+describe('ConfigManager — a pin survives if any source still supplies Anthropic', () => {
+  let dir: string;
+  beforeEach(async () => { dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-pins-')); });
+  afterEach(async () => { await fs.rm(dir, { recursive: true, force: true }); });
+
+  async function seedWorkspace(providers: unknown[], models: unknown): Promise<void> {
+    await fs.mkdir(path.join(dir, '.cascade'), { recursive: true });
+    await fs.writeFile(
+      path.join(dir, CASCADE_CONFIG_FILE),
+      JSON.stringify({ providers, models, tools: {} }),
+      'utf-8',
+    );
+  }
+
+  it('KEEPS the pin when the global store still supplies a key', async () => {
+    // Deciding from the raw workspace file deleted the user's explicit model
+    // selection while the loaded config still had a working Anthropic provider.
+    const globalDir = path.join(dir, 'global');
+    await fs.mkdir(globalDir, { recursive: true });
+    await fs.writeFile(
+      path.join(globalDir, 'credentials.json'),
+      JSON.stringify({ version: 1, providers: [{ type: 'anthropic', apiKey: 'sk-ant-real' }] }),
+      'utf-8',
+    );
+    await seedWorkspace(
+      [{ type: 'anthropic', authToken: 'sk-ant-oat01-x' }],
+      { t1: 'anthropic:claude-opus-4' },
+    );
+
+    const cm = new ConfigManager(dir, globalDir);
+    await cm.load();
+    expect(cm.getConfig().models.t1).toBe('anthropic:claude-opus-4');
+    expect(hasUsableProvider(cm.getConfig().providers)).toBe(true);
+  });
+
+  it('clears it when nothing else supplies one, and persists that', async () => {
+    await seedWorkspace(
+      [{ type: 'anthropic', authToken: 'sk-ant-oat01-x' }],
+      { t1: 'anthropic:claude-opus-4' },
+    );
+    const cm = new ConfigManager(dir, path.join(dir, 'global'));
+    await cm.load();
+    expect(cm.getConfig().models.t1).toBeUndefined();
+
+    // Persisted, so the next launch does not repeat the migration or re-warn.
+    const onDisk = JSON.parse(await fs.readFile(path.join(dir, CASCADE_CONFIG_FILE), 'utf-8')) as
+      { models?: Record<string, unknown> };
+    expect(onDisk.models?.['t1']).toBeUndefined();
   });
 });
 
