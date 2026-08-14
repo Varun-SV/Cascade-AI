@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { CascadeConfig } from '../types.js';
 import { gatherSyncBundle, applySyncBundle } from './keysync.js';
+import { didCleanupChangeAnything, describeCleanup } from '../config/retired-providers.js';
 import { mcpServerPrefix } from '../tools/tool-name.js';
 
 // A minimal config stub — only the fields key-sync touches matter here.
@@ -342,5 +343,37 @@ describe('keysync — a pin the removed credential leaves dangling', () => {
 
     const merged = applySyncBundle(stale, local);
     expect((merged.models as Record<string, unknown>)['t1']).toBe('anthropic:claude-opus-4');
+  });
+});
+
+describe('keysync — reporting a credential the sync discarded', () => {
+  it('reports the removal even when no pin was cleared', () => {
+    // A bundle whose only content was the dead token produced an empty
+    // cleanup, so `cascade cloud pull` printed "Your keys are ready here" and
+    // the desktop returned no `skipped` — over the one key it had carried.
+    const local = cfg({ providers: [] });
+    const stale = {
+      v: 2,
+      providers: [{ type: 'anthropic', authToken: 'sk-ant-oat01-dead', credentialSource: 'Claude Code' }],
+    } as unknown as Parameters<typeof applySyncBundle>[0];
+
+    const cleanup = { removed: [] as string[], clearedPins: [] as string[], revokedCredentials: 0 };
+    applySyncBundle(stale, local, cleanup as never);
+    expect(cleanup.revokedCredentials).toBe(1);
+    expect(didCleanupChangeAnything(cleanup)).toBe(true);
+    expect(describeCleanup(cleanup)).toMatch(/Claude subscription token/);
+  });
+
+  it('reports nothing when the bundle carried nothing dead', () => {
+    const local = cfg({ providers: [] });
+    const bundle = {
+      v: 2,
+      providers: [{ type: 'anthropic', apiKey: 'sk-ant-good' }],
+    } as unknown as Parameters<typeof applySyncBundle>[0];
+
+    const cleanup = { removed: [] as string[], clearedPins: [] as string[], revokedCredentials: 0 };
+    applySyncBundle(bundle, local, cleanup as never);
+    expect(cleanup.revokedCredentials).toBe(0);
+    expect(didCleanupChangeAnything(cleanup)).toBe(false);
   });
 });

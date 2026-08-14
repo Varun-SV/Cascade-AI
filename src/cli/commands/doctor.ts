@@ -31,12 +31,14 @@ export function linkableCredentialsDetail(
   discovered: ReadonlyArray<DiscoveredCredential>,
   configured: readonly ProviderConfig[] = [],
 ): string {
-  // `directlyUsable` is the ENVIRONMENT's view. `cascade link` also adopts a
-  // credential whose routing is already in the config — an Azure key beside
-  // configured deployments, a bearer beside a configured gateway — so counting
-  // the flag alone reported "none usable" immediately before link succeeded
-  // with one. Same question, same answer, one function.
-  const usable = discovered.filter((d) => d.directlyUsable || willAdoptFromConfig(d, configured)).length;
+  // `willAdoptFromConfig` is asked about EVERY credential, not just the ones
+  // the environment could not route on its own. `directlyUsable` is only the
+  // environment's view, and it cuts both ways: it misses a credential the
+  // config can route (a bearer beside a configured gateway, an Azure key beside
+  // configured deployments), and it over-reports a fully routed Azure key whose
+  // deployment name another resource has already claimed — which adoption
+  // refuses. Short-circuiting on the flag skipped exactly that check.
+  const usable = discovered.filter((d) => willAdoptFromConfig(d, configured)).length;
   return usable > 0
     ? `${discovered.length} found (${usable} usable) — run \`cascade link\` to adopt`
     : `${discovered.length} found, none usable — run \`cascade link\` to see why`;

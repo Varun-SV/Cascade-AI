@@ -174,13 +174,26 @@ export function isRoutedByConfig(
  * the exported endpoint matched no configured deployment at all.
  */
 export function willAdoptFromConfig(
-  cred: Pick<DiscoveredCredential, 'provider' | 'kind' | 'baseUrl'>,
+  cred: Pick<DiscoveredCredential, 'provider' | 'kind' | 'baseUrl' | 'deploymentName' | 'directlyUsable'>,
   configured: readonly ProviderConfig[],
 ): boolean {
   if (cred.provider === 'azure') {
+    const target = cred.baseUrl?.trim();
+    const deployment = cred.deploymentName?.trim();
+    // A FULLY ROUTED credential does not need the config to supply anything,
+    // so `directlyUsable` is true and an earlier version of this let it through
+    // unexamined. Adoption still refuses one case: a deployment name another
+    // resource already claims, because the name is the model id and the router
+    // would never select the second row. Checked here too, or doctor promises a
+    // link that refuses.
+    if (target && deployment) {
+      return !configured.some((p) => p.type === 'azure'
+        && (p.deploymentName?.trim() ?? '') === deployment
+        && !sameAzureEndpoint(p.baseUrl, target));
+    }
     return azureDeploymentsForCredential(cred, configured).length > 0;
   }
-  return isRoutedByConfig(cred, configured);
+  return cred.directlyUsable || isRoutedByConfig(cred, configured);
 }
 
 /**

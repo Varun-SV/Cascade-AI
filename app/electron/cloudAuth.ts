@@ -87,7 +87,7 @@ interface CoreExports {
   CloudClient: CloudClientCtor;
   DEFAULT_CLOUD_URL: string;
   gatherSyncBundle: (config: Cfg) => unknown;
-  applySyncBundle: (bundle: unknown, config: Cfg, cleanup?: { removed: string[]; clearedPins: string[] }) => Cfg;
+  applySyncBundle: (bundle: unknown, config: Cfg, cleanup?: { removed: string[]; clearedPins: string[]; revokedCredentials?: number }) => Cfg;
   encryptSyncBlob: (data: unknown, passphrase: string) => Promise<EncBlob>;
   decryptSyncBlob: (blob: EncBlob, passphrase: string) => Promise<unknown>;
   connectMcpWithLoopbackOAuth: (opts: { serverUrl: string; store: McpFileStore; openUrl: (u: string) => void; clientName?: string }) => Promise<unknown>;
@@ -302,7 +302,7 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
       // A blob pushed by an older build can carry a provider this version no
       // longer supports. applySyncBundle strips it; collect what went so the
       // renderer can say so rather than a key appearing to vanish.
-      const cleanup = { removed: [] as string[], clearedPins: [] as string[] };
+      const cleanup = { removed: [] as string[], clearedPins: [] as string[], revokedCredentials: 0 };
       const merged = applySyncBundle(bundle, cfg, cleanup);
       // Apply onto the live config object in place so the running backend picks
       // it up without a restart (mirrors cascade:updateSettings), then persist.
@@ -328,8 +328,18 @@ export function registerCloudAuthIpc(loadCore: () => unknown, hooks: ConfigHooks
       return {
         ok: true,
         applied: true,
-        ...(cleanup.removed.length || cleanup.clearedPins.length
-          ? { skipped: { removed: cleanup.removed, clearedPins: cleanup.clearedPins } }
+        // A dropped subscription credential counts as something to report:
+        // without it a bundle whose only content was that dead token produced
+        // an empty cleanup and the renderer said "Applied" over a key that had
+        // just been discarded.
+        ...(cleanup.removed.length || cleanup.clearedPins.length || cleanup.revokedCredentials
+          ? {
+            skipped: {
+              removed: cleanup.removed,
+              clearedPins: cleanup.clearedPins,
+              revokedCredentials: cleanup.revokedCredentials,
+            },
+          }
           : {}),
       };
     } catch {

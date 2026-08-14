@@ -82,6 +82,44 @@ describe('what doctor says about discovered credentials', () => {
     expect(detail).toBe('1 found, none usable — run `cascade link` to see why');
   });
 
+  it('does not count a fully routed Azure key whose deployment name is taken', () => {
+    // `directlyUsable` is true here — the environment carried endpoint AND
+    // deployment — so an `||` short-circuit skipped the check entirely. But
+    // adoption refuses this: a deployment name is the model id, and the router
+    // would never select the second row.
+    const detail = linkableCredentialsDetail(
+      [cred({
+        provider: 'azure', directlyUsable: true,
+        baseUrl: 'https://two.openai.azure.com', deploymentName: 'prod',
+      })],
+      [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://one.openai.azure.com' }],
+    );
+    expect(detail).toBe('1 found, none usable — run `cascade link` to see why');
+  });
+
+  it('counts a fully routed Azure key whose deployment name is free', () => {
+    const detail = linkableCredentialsDetail(
+      [cred({
+        provider: 'azure', directlyUsable: true,
+        baseUrl: 'https://two.openai.azure.com', deploymentName: 'mini',
+      })],
+      [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://one.openai.azure.com' }],
+    );
+    expect(detail).toBe('1 found (1 usable) — run `cascade link` to adopt');
+  });
+
+  it('counts an updated deployment on the resource that already owns the name', () => {
+    // Same name, SAME resource, is an update — not a collision.
+    const detail = linkableCredentialsDetail(
+      [cred({
+        provider: 'azure', directlyUsable: true,
+        baseUrl: 'https://one.openai.azure.com/', deploymentName: 'prod',
+      })],
+      [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://one.openai.azure.com' }],
+    );
+    expect(detail).toBe('1 found (1 usable) — run `cascade link` to adopt');
+  });
+
   it('does not count a subscription token just because a gateway is configured', () => {
     // Routing is not the obstacle for this one — the provider refuses it.
     const detail = linkableCredentialsDetail(

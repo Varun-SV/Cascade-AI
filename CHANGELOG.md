@@ -398,6 +398,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   newly exported `ANTHROPIC_AUTH_TOKEN` against the endpoint already in the
   config, sending it to the host that had not issued it.
 
+- **A sync that discards a dead credential now says so.** `cascade cloud pull`
+  printed "Your keys are ready here" — and the desktop reported nothing — when
+  the bundle's only content was a Claude subscription token the pull had just
+  thrown away. The cleanup report covered retired provider *types* and cleared
+  pins, and `anthropic` is neither: the provider is still supported, its
+  credential is not. Both surfaces name it now.
+
+- **`cascade doctor` checks the Azure deployment-name collision too.** A fully
+  routed Azure credential is "directly usable" as far as the environment is
+  concerned, which short-circuited the check — but adoption refuses a
+  deployment name another resource already claims, so doctor promised a link
+  that then refused.
+
 - **`cascade link --accept-risk` says it no longer applies instead of doing
   nothing.** Every subscription token is now reported unusable and refused
   before any adoption path, which left the flag inert while `--help` still

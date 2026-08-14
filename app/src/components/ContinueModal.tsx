@@ -259,6 +259,10 @@ function SyncBlock() {
         const skipped = 'skipped' in r ? r.skipped : undefined;
         const parts: string[] = [];
         if (skipped?.removed.length) parts.push(`skipped ${skipped.removed.join(', ')} (no longer supported)`);
+        // Named explicitly rather than lumped in with "no longer supported":
+        // the provider is still supported, the CREDENTIAL is not, and the two
+        // need different things from the user.
+        if (skipped?.revokedCredentials) parts.push('discarded a linked Claude subscription token (Anthropic no longer permits third-party use)');
         if (skipped?.clearedPins.length) parts.push(`reset ${skipped.clearedPins.map((t) => t.toUpperCase()).join('/')} to Auto`);
         setStatus(parts.length ? `Applied your synced settings here — ${parts.join('; ')}.` : 'Applied your synced settings here.');
       }
