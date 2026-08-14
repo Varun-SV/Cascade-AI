@@ -311,7 +311,7 @@ export function SettingsView({ socket }: Props) {
     }
 
     // Keys are now stored; clear the inputs so placeholders show "key set".
-    setAnthropicKey(''); setOpenaiKey(''); setGeminiKey(''); setGithubModelsKey(''); setOcKey('');
+    setAnthropicKey(''); setOpenaiKey(''); setGeminiKey(''); setOcKey('');
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };

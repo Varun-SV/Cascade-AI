@@ -7,12 +7,13 @@
 //
 //    cascade link                 List detected credentials
 //    cascade link <provider>      Adopt the best credential for a provider
-//        --accept-risk            Required to adopt a subscription OAuth token
+//        --accept-risk            Required for any bearer-token credential
 //
-//  ⚠ Adopting a subscription OAuth token (e.g. Claude Code) reuses it
-//  outside its own CLI, which may violate the vendor's terms of service.
-//  Cascade only reads YOUR local files and never adopts an OAuth token
-//  without --accept-risk.
+//  ⚠ Subscription OAuth tokens are NOT adoptable. Each is locked to its own
+//  vendor's backend, and Anthropic prohibits third-party use of Claude
+//  subscription credentials outright. `cascade link` surfaces them so the
+//  user knows what is on the machine, and refuses to configure a provider
+//  that cannot work. Cascade only reads YOUR local files.
 
 import chalk from 'chalk';
 import { ConfigManager } from '../../config/index.js';
@@ -61,6 +62,8 @@ export async function linkCommand(target: string | undefined, options: LinkOptio
     console.log(chalk.yellow(`\n  Found a ${chosen.sourceTool} credential, but it can't be used against the standard ${provider} API.`));
     if (chosen.warning) console.log(chalk.gray(`  ${chosen.warning}`));
     console.log(chalk.gray('  Cascade won\'t adopt it because it would create a non-working provider.\n'));
+    // Say what WOULD work, rather than leaving the user at a dead end.
+    console.log(chalk.gray(`  Set ${chalk.white(envKeyFor(provider))} instead, or add a key with `) + chalk.cyan('cascade init') + chalk.gray('.\n'));
     return;
   }
 
@@ -93,6 +96,14 @@ function printDiscovered(found: DiscoveredCredential[]): void {
   console.log(chalk.gray('  --accept-risk is required for subscription OAuth tokens.\n'));
 }
 
+/** The env var that would configure this provider the supported way. */
+function envKeyFor(provider: ProviderType): string {
+  if (provider === 'openai') return 'OPENAI_API_KEY';
+  if (provider === 'gemini') return 'GEMINI_API_KEY';
+  if (provider === 'anthropic') return 'ANTHROPIC_API_KEY';
+  return 'the provider\'s API key';
+}
+
 function normalizeProvider(target: string): ProviderType | null {
   const t = target.toLowerCase();
   if (t === 'anthropic' || t === 'claude' || t === 'claude-code') return 'anthropic';
@@ -110,11 +121,18 @@ async function adoptCredential(cred: DiscoveredCredential, workspace: string): P
     type: cred.provider,
     credentialSource: cred.sourceTool,
   };
+  // A bearer token goes to authToken; everything else is an API key. The only
+  // bearer credential discovery still yields is ANTHROPIC_AUTH_TOKEN, which is
+  // the gateway case Anthropic documents.
   if (cred.kind === 'oauth' && cred.provider === 'anthropic') {
     next.authToken = cred.secret;
   } else {
     next.apiKey = cred.secret;
   }
+  // An OpenAI-compatible key is meaningless without the endpoint it belongs
+  // to — adopting one alone would configure a provider with nowhere to send a
+  // request.
+  if (cred.baseUrl) next.baseUrl = cred.baseUrl;
 
   const providers = config.providers.filter((p) => p.type !== cred.provider);
   providers.push(next);

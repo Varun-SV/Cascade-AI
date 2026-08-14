@@ -18,6 +18,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+## 0.75.0 - 2026-08-14
+
+### Fixed
+- **A bearer token was served in plaintext by `/api/config`.** The handler
+  masked `apiKey` and nothing else, under a comment saying "Strip sensitive
+  fields before sending". A provider configured with `authToken` — which both
+  `cascade link` and `ANTHROPIC_AUTH_TOKEN` produce — had that credential
+  returned in full to anyone who could reach the route. The redaction is now a
+  single exported function covering every secret field, and is tested on its own
+  rather than only through a running server, which is how the gap survived.
+
+- **Claude subscription tokens are no longer offered as usable.** Discovery
+  marked the Claude Code OAuth token `directlyUsable: true` and `cascade link
+  anthropic --accept-risk` would adopt it. Anthropic's terms now state plainly
+  that it "does not permit third-party developers to offer Claude.ai login or to
+  route requests through Free, Pro, or Max plan credentials on behalf of their
+  users", and it is refused server-side as well — so adopting one produced a
+  provider that failed on its first call. The token is still *surfaced*, because
+  knowing it is there and why it cannot be used beats silence, but it is no
+  longer adoptable, and the warning names the policy and the alternatives
+  instead of hedging with "may violate".
+
+- **A desktop settings save threw after persisting.** `setGithubModelsKey` was
+  still called when clearing the key inputs, having been removed with the rest
+  of the GitHub Models provider in 0.71.0. Keys were written and then the
+  handler died on an undefined function, so the UI never confirmed the save.
+  This also left `app` failing to typecheck on main.
+
+- **A provider configured with a bearer token showed as unconfigured.** The
+  dashboard counted only `apiKey` when reporting which providers hold a
+  credential — the same reasoning `hasUsableProvider` already applies.
+
+### Added
+- **`ANTHROPIC_AUTH_TOKEN` is read from the environment.** It was the one
+  documented Anthropic credential no environment path picked up, so a user
+  following Anthropic's own gateway instructions got "No providers configured".
+
+- **`config.baseUrl` now reaches the Anthropic client.** It was dropped on both
+  the key and bearer paths, which made `authToken` close to useless: routing
+  through an LLM gateway or corporate proxy is the sanctioned use of a bearer
+  credential, and the request was going to `api.anthropic.com` regardless,
+  carrying a token only the gateway had issued.
+
+- **Credential discovery covers more of what is already in your shell.**
+  `AZURE_OPENAI_KEY`, and OpenAI-compatible keys for OpenRouter, Groq, DeepSeek,
+  xAI, Mistral, Together and Fireworks — each adopted together with the endpoint
+  it belongs to, since a key alone would configure a provider with nowhere to
+  send a request. `CLAUDE_CONFIG_DIR` is honoured when locating Claude Code's
+  store.
+
 ## 0.74.0 - 2026-08-11
 
 ### Fixed

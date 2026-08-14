@@ -7,12 +7,15 @@
 //  the standard provider env vars, so `cascade link` / `cascade init` can
 //  reuse them instead of asking the user to paste keys again.
 //
-//  ⚠ Reusing another tool's stored credential — especially a subscription
-//  OAuth token (Claude Code, ChatGPT, Copilot) — outside that tool may
-//  violate the vendor's terms of service and can get an account flagged.
-//  We only ever read the CURRENT user's own local files, classify each
-//  credential, and surface a warning; nothing is adopted without an
-//  explicit, risk-acknowledged action.
+//  ⚠ A subscription OAuth token (Claude Code, ChatGPT, Copilot, Gemini CLI)
+//  belongs to the tool that minted it, and none of them are adopted. Each
+//  targets its own vendor's backend rather than the public API, and
+//  Anthropic's — the one that would otherwise have worked — is explicitly
+//  prohibited for third-party clients and refused server-side. They are still
+//  SURFACED, because "you have this, Cascade can't use it, here is why" is
+//  more useful than silence.
+//
+//  We only ever read the CURRENT user's own local files.
 //
 //  All reads go through an injectable home dir so this is unit-testable
 //  without touching the real filesystem.
@@ -34,11 +37,16 @@ export interface DiscoveredCredential {
   secret: string;
   /**
    * True when the secret can be used directly against the standard provider
-   * API (a real API key). OAuth subscription tokens are mostly vendor-locked,
-   * so this is false for them except Anthropic, whose SDK accepts a bearer
-   * token via the oauth beta.
+   * API. Subscription OAuth tokens are vendor-locked — each targets its own
+   * tool's backend, not the public API — so this is false for all of them.
    */
   directlyUsable: boolean;
+  /**
+   * Endpoint the secret belongs to, for OpenAI-compatible services that are
+   * only identifiable by which env var carried the key. Adopting one without
+   * this would configure a provider with nowhere to send a request.
+   */
+  baseUrl?: string;
   /** ToS / gray-area note shown before adoption. */
   warning?: string;
   /** File the credential came from (path only — never the secret). */
@@ -54,6 +62,48 @@ export interface DiscoveryOptions {
 
 const TOS_WARNING =
   'Reusing this subscription token outside its own CLI may violate the vendor’s terms of service.';
+
+/**
+ * Anthropic's position is no longer a gray area, so this does not hedge.
+ *
+ * code.claude.com/docs/en/legal-and-compliance states that OAuth authentication
+ * is "intended exclusively" for ordinary use of Claude Code and other native
+ * Anthropic applications, and that Anthropic "does not permit third-party
+ * developers to offer Claude.ai login or to route requests through Free, Pro,
+ * or Max plan credentials on behalf of their users" — directing developers to
+ * API keys instead. It is enforced server-side as well as contractually: a
+ * subscription token presented by another client is refused with "This
+ * credential is only authorized for use with Claude Code and cannot be used for
+ * other API requests."
+ *
+ * So this token is surfaced (it is worth telling the user what is on their
+ * machine) and never adopted. The old text said "may violate", which
+ * understated it, and the old `directlyUsable: true` would today produce a
+ * provider that fails on its first call.
+ */
+const ANTHROPIC_OAUTH_WARNING =
+  'Anthropic does not permit third-party tools to route requests through Claude '
+  + 'subscription credentials, and blocks them server-side. Use an API key from '
+  + 'the Claude Console, or ANTHROPIC_AUTH_TOKEN with a gateway. '
+  + 'See code.claude.com/docs/en/legal-and-compliance.';
+
+/**
+ * OpenAI-compatible services identifiable only by which variable carries the
+ * key. Each needs its endpoint adopted alongside the secret, or the result is a
+ * provider configured with nowhere to send a request.
+ *
+ * Only one openai-compatible provider can be configured at a time, so the first
+ * match in this order wins.
+ */
+const OPENAI_COMPATIBLE_ENV: Array<{ env: string; label: string; baseUrl: string }> = [
+  { env: 'OPENROUTER_API_KEY', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1' },
+  { env: 'GROQ_API_KEY', label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1' },
+  { env: 'DEEPSEEK_API_KEY', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1' },
+  { env: 'XAI_API_KEY', label: 'xAI', baseUrl: 'https://api.x.ai/v1' },
+  { env: 'MISTRAL_API_KEY', label: 'Mistral', baseUrl: 'https://api.mistral.ai/v1' },
+  { env: 'TOGETHER_API_KEY', label: 'Together AI', baseUrl: 'https://api.together.xyz/v1' },
+  { env: 'FIREWORKS_API_KEY', label: 'Fireworks AI', baseUrl: 'https://api.fireworks.ai/inference/v1' },
+];
 
 async function readJson(file: string): Promise<Record<string, unknown> | null> {
   try {
@@ -75,6 +125,7 @@ function fromEnv(env: NodeJS.ProcessEnv): DiscoveredCredential[] {
     { env: 'OPENAI_API_KEY', provider: 'openai' },
     { env: 'GEMINI_API_KEY', provider: 'gemini' },
     { env: 'GOOGLE_API_KEY', provider: 'gemini' },
+    { env: 'AZURE_OPENAI_KEY', provider: 'azure' },
   ];
   const out: DiscoveredCredential[] = [];
   const seen = new Set<ProviderType>();
@@ -84,17 +135,63 @@ function fromEnv(env: NodeJS.ProcessEnv): DiscoveredCredential[] {
     seen.add(provider);
     out.push({ provider, sourceTool: `Environment (${name})`, kind: 'api-key', secret, directlyUsable: true });
   }
+
+  // An Anthropic bearer token pointed at a gateway. This is the sanctioned use
+  // of a bearer credential — Anthropic documents ANTHROPIC_AUTH_TOKEN for
+  // exactly it — and it is unrelated to the subscription tokens above.
+  const authToken = str(env['ANTHROPIC_AUTH_TOKEN']);
+  if (authToken && !seen.has('anthropic')) {
+    seen.add('anthropic');
+    out.push({
+      provider: 'anthropic',
+      sourceTool: 'Environment (ANTHROPIC_AUTH_TOKEN)',
+      kind: 'oauth',
+      secret: authToken,
+      directlyUsable: true,
+    });
+  }
+
+  // Everything that speaks the OpenAI wire format at its own endpoint. Keys for
+  // these are already sitting in most developers' shells, and asking for one
+  // again is the friction `cascade link` exists to remove.
+  for (const { env: name, label, baseUrl } of OPENAI_COMPATIBLE_ENV) {
+    const secret = str(env[name]);
+    if (!secret) continue;
+    out.push({
+      provider: 'openai-compatible',
+      sourceTool: `Environment (${name}) — ${label}`,
+      kind: 'api-key',
+      secret,
+      directlyUsable: true,
+      baseUrl,
+    });
+    break; // only one openai-compatible provider can be configured at a time
+  }
   return out;
 }
 
-/** Claude Code: ~/.claude/.credentials.json → { claudeAiOauth: { accessToken } }, or an API key. */
-async function fromClaudeCode(home: string): Promise<DiscoveredCredential[]> {
-  const file = path.join(home, '.claude', '.credentials.json');
+/**
+ * Claude Code: ~/.claude/.credentials.json → { claudeAiOauth: { accessToken } },
+ * or an API key.
+ *
+ * `CLAUDE_CONFIG_DIR` relocates this file, so it is honoured here.
+ *
+ * NOT read on macOS, where Claude Code has moved credentials into the Keychain
+ * and deletes this file — so discovery finds nothing there. Reading the
+ * Keychain would mean shelling out to `security`, which prompts the user by
+ * name, and the only credential it would surface is the subscription token
+ * below, which Cascade now declines to adopt. Left undone deliberately rather
+ * than shipped unverified.
+ */
+async function fromClaudeCode(home: string, env: NodeJS.ProcessEnv): Promise<DiscoveredCredential[]> {
+  const dir = str(env['CLAUDE_CONFIG_DIR']) ?? path.join(home, '.claude');
+  const file = path.join(dir, '.credentials.json');
   const data = await readJson(file);
   if (!data) return [];
 
-  // OAuth subscription login (sk-ant-oat...). Usable as an Anthropic bearer
-  // token, but gray-area outside Claude Code.
+  // Subscription login (sk-ant-oat...). Surfaced so the user knows it is here,
+  // never adopted: Anthropic prohibits third-party use of it and refuses it at
+  // the API. See ANTHROPIC_OAUTH_WARNING.
   const oauth = data['claudeAiOauth'] as Record<string, unknown> | undefined;
   const oauthToken = str(oauth?.['accessToken']);
   if (oauthToken) {
@@ -103,8 +200,8 @@ async function fromClaudeCode(home: string): Promise<DiscoveredCredential[]> {
       sourceTool: 'Claude Code',
       kind: 'oauth',
       secret: oauthToken,
-      directlyUsable: true,
-      warning: TOS_WARNING,
+      directlyUsable: false,
+      warning: ANTHROPIC_OAUTH_WARNING,
       sourcePath: file,
     }];
   }
@@ -198,7 +295,7 @@ export async function discoverCredentials(opts: DiscoveryOptions = {}): Promise<
 
   const groups = await Promise.all([
     Promise.resolve(fromEnv(env)),
-    fromClaudeCode(home),
+    fromClaudeCode(home, env),
     fromCodex(home),
     fromGemini(home),
     fromCopilot(home),

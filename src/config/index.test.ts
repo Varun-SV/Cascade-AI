@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ConfigManager, hasUsableProvider } from './index.js';
 import { CASCADE_CONFIG_FILE } from '../constants.js';
 
@@ -257,5 +257,46 @@ describe('hasUsableProvider (CLI re-init bug fix)', () => {
 
   it('still returns false for a provider with neither key nor token', () => {
     expect(hasUsableProvider([{ type: 'anthropic', apiKey: '', authToken: '' }])).toBe(false);
+  });
+});
+
+describe('ANTHROPIC_AUTH_TOKEN — the gateway credential Anthropic documents', () => {
+  const saved = process.env['ANTHROPIC_AUTH_TOKEN'];
+  const savedKey = process.env['ANTHROPIC_API_KEY'];
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-authtoken-'));
+    delete process.env['ANTHROPIC_API_KEY'];
+  });
+
+  afterEach(async () => {
+    if (saved === undefined) delete process.env['ANTHROPIC_AUTH_TOKEN'];
+    else process.env['ANTHROPIC_AUTH_TOKEN'] = saved;
+    if (savedKey === undefined) delete process.env['ANTHROPIC_API_KEY'];
+    else process.env['ANTHROPIC_API_KEY'] = savedKey;
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('configures an Anthropic provider from the environment', async () => {
+    // Every other documented Anthropic credential was picked up from the
+    // environment except this one, so a user following Anthropic's own gateway
+    // instructions got "No providers configured".
+    process.env['ANTHROPIC_AUTH_TOKEN'] = 'gw-token';
+    const cm = new ConfigManager(dir);
+    await cm.load();
+    const anthropic = cm.getConfig().providers.find((p) => p.type === 'anthropic');
+    expect(anthropic?.authToken).toBe('gw-token');
+    expect(hasUsableProvider(cm.getConfig().providers)).toBe(true);
+  });
+
+  it('does not overwrite a key the user already configured', async () => {
+    process.env['ANTHROPIC_AUTH_TOKEN'] = 'gw-token';
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-real';
+    const cm = new ConfigManager(dir);
+    await cm.load();
+    const anthropic = cm.getConfig().providers.find((p) => p.type === 'anthropic');
+    expect(anthropic?.apiKey).toBe('sk-ant-real');
+    expect(anthropic?.authToken).toBeUndefined();
   });
 });

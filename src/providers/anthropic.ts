@@ -67,16 +67,25 @@ export class AnthropicProvider extends BaseProvider {
 
   constructor(config: ProviderConfig, model: ModelInfo) {
     super(config, model);
-    // OAuth bearer (e.g. a Claude Code subscription token) authenticates via
-    // Authorization: Bearer + the oauth beta header instead of x-api-key.
+    // `baseUrl` is honoured on BOTH paths. Dropping it was what made
+    // `authToken` close to useless: the sanctioned use of a bearer credential
+    // is routing through an LLM gateway or corporate proxy — which is what
+    // Anthropic documents ANTHROPIC_AUTH_TOKEN for — and that needs the
+    // endpoint. Without it, a user who configured a gateway had their request
+    // sent to api.anthropic.com with a token that gateway had issued.
+    const baseURL = config.baseUrl;
+    // A bearer token authenticates via Authorization: Bearer plus the oauth
+    // beta header instead of x-api-key.
     if (config.authToken) {
       this.client = new Anthropic({
         authToken: config.authToken,
+        ...(baseURL ? { baseURL } : {}),
         defaultHeaders: { 'anthropic-beta': 'oauth-2025-04-20' },
       });
     } else {
       this.client = new Anthropic({
         apiKey: config.apiKey,
+        ...(baseURL ? { baseURL } : {}),
       });
     }
   }

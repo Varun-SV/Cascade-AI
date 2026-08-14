@@ -334,11 +334,26 @@ export class ConfigManager {
       const key = process.env[env];
       if (!key) continue;
       const existing = this.config.providers.find((p) => p.type === type);
-      
+
       if (!existing && wasEmpty) {
         this.config.providers.push({ type, apiKey: key });
       } else if (existing && !existing.apiKey) {
         existing.apiKey = key;
+      }
+    }
+
+    // ANTHROPIC_AUTH_TOKEN is a bearer credential, not an API key — Anthropic
+    // documents it for routing through an LLM gateway or proxy, where the
+    // gateway issues the token and `baseUrl` points at it. It was the one
+    // documented Anthropic credential no environment path picked up, so a user
+    // following Anthropic's own instructions got "no providers configured".
+    const authToken = process.env['ANTHROPIC_AUTH_TOKEN'];
+    if (authToken) {
+      const existing = this.config.providers.find((p) => p.type === 'anthropic');
+      if (!existing && wasEmpty) {
+        this.config.providers.push({ type: 'anthropic', authToken });
+      } else if (existing && !existing.apiKey && !existing.authToken) {
+        existing.authToken = authToken;
       }
     }
 

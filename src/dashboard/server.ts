@@ -51,6 +51,29 @@ interface PendingEscalationEntry {
   graceTimer?: NodeJS.Timeout;
 }
 
+/**
+ * A copy of the config with every provider secret masked.
+ *
+ * Every credential field, not a list of the ones someone remembered. This was
+ * previously inline in the /api/config handler and masked `apiKey` only, so a
+ * provider configured with a bearer token — which `cascade link` and
+ * ANTHROPIC_AUTH_TOKEN both produce — had that token served in plaintext to
+ * anyone who could reach the route, under a comment claiming sensitive fields
+ * were stripped.
+ *
+ * Exported so the redaction is testable on its own rather than only through a
+ * running HTTP server, which is why the gap survived as long as it did.
+ */
+export function redactProviderSecrets(config: CascadeConfig): CascadeConfig {
+  const safe = { ...config };
+  safe.providers = (safe.providers ?? []).map((p) => ({
+    ...p,
+    ...(p.apiKey ? { apiKey: '***' } : { apiKey: undefined }),
+    ...(p.authToken ? { authToken: '***' } : { authToken: undefined }),
+  }));
+  return safe;
+}
+
 export class DashboardServer {
   private app: express.Application;
   private httpServer: ReturnType<typeof createServer>;
@@ -139,8 +162,12 @@ export class DashboardServer {
           maxCostPerRun: this.config.budget?.maxCostPerRunUsd,
           autoBias: this.config.autoBias,
         },
+        // `authToken` is a credential too — the same reasoning as
+        // hasUsableProvider() in config/index.ts. Counting only apiKey showed a
+        // provider configured with a bearer token as unconfigured in settings.
         providersWithKey: (this.config.providers ?? [])
-          .filter((p) => typeof p.apiKey === 'string' && p.apiKey.length > 0)
+          .filter((p) => (typeof p.apiKey === 'string' && p.apiKey.length > 0)
+            || (typeof p.authToken === 'string' && p.authToken.length > 0))
           .map((p) => p.type),
       });
     });
@@ -1240,9 +1267,7 @@ export class DashboardServer {
     });
 
     this.app.get('/api/config', auth, (_req, res) => {
-      // Strip sensitive fields before sending
-      const safe = { ...this.config };
-      safe.providers = safe.providers.map((p) => ({ ...p, apiKey: p.apiKey ? '***' : undefined }));
+      const safe = redactProviderSecrets(this.config);
       res.json(safe);
     });
 
