@@ -246,43 +246,58 @@ const cloudDiscoveryCache = new Map<string, DiscoveryEntry>();
  * password hash would be worse still, since this sits on the init path and is
  * deliberately slow by design.
  *
- * So the secret is used for one thing only — an equality comparison — and what
+ * So the secret is used for one thing only — an equality lookup — and what
  * travels onward is an opaque random id carrying none of its bits.
  *
- * Keyed on the CONFIG OBJECT, weakly, and holding only that object's CURRENT
- * secret. Two earlier shapes were wrong in the same direction:
+ * RETENTION IS TIED TO THE CACHE ENTRY, which is the part two earlier attempts
+ * got wrong in opposite directions:
  *
- * - A `Map` keyed by the secret retained every credential the process had ever
- *   seen, outliving both the configuration and the 15-minute cache entry.
- * - Pruning that map at `init()` fixed only the paths that re-initialise the
- *   router. The ordinary way a credential is replaced is a settings save —
- *   `DashboardServer`'s config:update mutates and persists without any init —
- *   so the old secret survived there for the rest of the process. The comment
- *   calling that residue "short-lived" was wrong; nothing was scheduled to end
- *   it.
+ * - Keyed by the secret with no expiry, this retained every credential the
+ *   process had ever seen. Pruning at `init()` fixed only the paths that
+ *   re-initialise the router — not a settings save, which is the ordinary way a
+ *   credential is replaced.
+ * - Keyed WEAKLY by the provider object, it retained nothing but lost value
+ *   stability: the hosted server rebuilds its config for EVERY chat run
+ *   (`cloud/server/src/runs.ts` → `buildCloudConfig`), so an equivalent
+ *   credential got a fresh identity per request. That missed the cache on every
+ *   run, re-listed each provider's models, and grew the cache with request
+ *   volume — trading a bounded retention problem for an unbounded one.
  *
- * A WeakMap needs no lifecycle hook at all. The entry dies with the config
- * object, and a rotation is noticed on the very next call, because the stored
- * secret no longer matches the one being asked about — so the replaced string
- * is dropped at the moment it stops being current, whichever path replaced it.
+ * Entries expire on the same clock as the discovery entries they exist to name,
+ * so a secret is held exactly as long as it is being used and no longer, and
+ * the map cannot outgrow the number of credentials active in one TTL window.
  */
-interface CredentialSlot { secret: string; id: string }
-const credentialIdentities = new WeakMap<object, { apiKey?: CredentialSlot; authToken?: CredentialSlot }>();
+const IDENTITY_SWEEP_THRESHOLD = 64;
+const credentialIdentities = new Map<string, { id: string; at: number }>();
 
-function credentialIdentity(
-  cfg: object,
-  field: 'apiKey' | 'authToken',
-  secret: string | undefined,
-): string {
+/** Drop identities, and the discovery entries naming them, once their TTL is up. */
+function sweepExpired(now: number): void {
+  for (const [secret, held] of credentialIdentities) {
+    if (now - held.at > DISCOVERY_TTL_MS) credentialIdentities.delete(secret);
+  }
+  // The discovery cache is swept here too. It was never evicted at all, so on a
+  // hosted server it grew for the life of the process.
+  for (const [key, entry] of cloudDiscoveryCache) {
+    if (now - entry.at > DISCOVERY_TTL_MS) cloudDiscoveryCache.delete(key);
+  }
+}
+
+function credentialIdentity(secret: string | undefined): string {
   if (!secret) return '-';
-  const slots = credentialIdentities.get(cfg) ?? {};
-  const held = slots[field];
-  // Same object, same secret — the cache should hit. Anything else is a new
-  // credential, and the previous one is released here rather than accumulated.
-  if (held && held.secret === secret) return held.id;
-  const slot: CredentialSlot = { secret, id: crypto.randomUUID() };
-  credentialIdentities.set(cfg, { ...slots, [field]: slot });
-  return slot.id;
+  const now = Date.now();
+  // Swept on a size trigger rather than every call: the map holds one short
+  // entry per credential active in the window, so this is a handful of items
+  // in every deployment except a busy multi-tenant one, and there it stays
+  // proportional to live credentials rather than to requests served.
+  if (credentialIdentities.size > IDENTITY_SWEEP_THRESHOLD) sweepExpired(now);
+  const held = credentialIdentities.get(secret);
+  if (held) {
+    held.at = now;
+    return held.id;
+  }
+  const id = crypto.randomUUID();
+  credentialIdentities.set(secret, { id, at: now });
+  return id;
 }
 
 /**
@@ -300,8 +315,8 @@ export function discoveryCacheKey(type: ProviderType, cfg: ProviderConfig): stri
   // authToken with the same value are still two different configurations.
   return [
     type,
-    credentialIdentity(cfg, 'apiKey', cfg.apiKey),
-    credentialIdentity(cfg, 'authToken', cfg.authToken),
+    credentialIdentity(cfg.apiKey),
+    credentialIdentity(cfg.authToken),
     cfg.baseUrl ?? '',
   ].join('|');
 }

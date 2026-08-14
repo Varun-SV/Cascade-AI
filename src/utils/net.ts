@@ -60,9 +60,13 @@ export async function fetchSameOrigin(
 ): Promise<Response> {
   const origin = new URL(url).origin;
   let current = url;
+  let options: RequestInit = { ...init };
   for (let hop = 0; hop <= maxRedirects; hop++) {
-    const res = await fetch(current, { ...init, redirect: 'manual' });
-    if (res.status < 300 || res.status >= 400) return res;
+    const res = await fetch(current, { ...options, redirect: 'manual' });
+    // Only the statuses Fetch itself treats as redirects. 300, 304 and 305 can
+    // carry a `Location` without being one, and following a 304 in particular
+    // would turn a cache revalidation into a second request.
+    if (![301, 302, 303, 307, 308].includes(res.status)) return res;
     const location = res.headers.get('location');
     if (!location) return res;
     const next = new URL(location, current);
@@ -70,6 +74,23 @@ export async function fetchSameOrigin(
       throw new Error(
         `Refusing cross-origin redirect to ${next.origin}: the request carries a credential for ${origin}.`,
       );
+    }
+    // Fetch's own method/body transitions, which following blindly would skip:
+    // 303 always becomes GET, and 301/302 do for POST. Replaying the original
+    // POST body at the redirect target would re-submit a generation request —
+    // duplicating it, or failing a gateway's result/poll redirect outright.
+    // 307/308 exist precisely to preserve the method, and are left alone.
+    const method = (options.method ?? 'GET').toUpperCase();
+    const downgrades = res.status === 303
+      ? method !== 'GET' && method !== 'HEAD'
+      : (res.status === 301 || res.status === 302) && method === 'POST';
+    if (downgrades) {
+      const headers = new Headers(options.headers as Record<string, string> | undefined);
+      // The body is gone, so its framing headers must go with it.
+      for (const h of ['content-type', 'content-length', 'content-encoding', 'content-language', 'content-location']) {
+        headers.delete(h);
+      }
+      options = { ...options, method: 'GET', body: undefined, headers };
     }
     current = next.toString();
   }

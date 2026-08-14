@@ -59,6 +59,15 @@ describe('isRevokedSubscriptionCredential', () => {
     expect(stripRevokedCredentials(row()).kept).toEqual([{ type: 'anthropic', baseUrl: 'https://gw' }]);
   });
 
+  it('leaves a malformed entry for the validator instead of throwing', () => {
+    // This migration runs BEFORE validateConfig() by design, so a bare
+    // TypeError here replaced the actionable "providers[0] is invalid" the
+    // schema would have produced for a hand-edited file.
+    expect(() => stripRevokedFromConfig({ providers: [null, 'nonsense', 42] })).not.toThrow();
+    expect(isRevokedSubscriptionCredential(null as never)).toBe(false);
+    expect(isRevokedSubscriptionCredential(undefined as never)).toBe(false);
+  });
+
   it('does not reach into other providers', () => {
     expect(isRevokedSubscriptionCredential({ type: 'openai', authToken: 'sk-ant-oat01-abc' })).toBe(false);
   });

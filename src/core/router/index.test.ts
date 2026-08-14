@@ -563,6 +563,17 @@ describe('discoveryCacheKey', () => {
     expect(discoveryCacheKey('anthropic', entryA)).toBe(a);
   });
 
+  it('is stable for an EQUIVALENT config rebuilt from scratch', () => {
+    // The hosted server rebuilds its config for every chat run
+    // (cloud/server/src/runs.ts → buildCloudConfig), so identity keyed on the
+    // object missed the cache on every request: each run re-listed every
+    // provider's models and appended another entry to a cache that was never
+    // evicted.
+    const a = discoveryCacheKey('anthropic', cfg({ apiKey: 'sk-a', baseUrl: 'https://gw' }));
+    const b = discoveryCacheKey('anthropic', cfg({ apiKey: 'sk-a', baseUrl: 'https://gw' }));
+    expect(b).toBe(a);
+  });
+
   it('changes the moment the entry\'s credential is rotated in place', () => {
     // The security property, and the one an init-time prune could not deliver:
     // a settings save mutates the provider object and never re-initialises the
@@ -617,11 +628,13 @@ describe('discoveryCacheKey', () => {
   });
 
   it('tells an apiKey and an authToken of the same value apart', () => {
-    // Separate slots, so one field's identity is never reused for the other.
-    const entry = cfg({ apiKey: 'same', authToken: 'same' });
-    const key = discoveryCacheKey('anthropic', entry);
-    const [, keyId, tokenId] = key.split('|');
-    expect(keyId).not.toBe(tokenId);
+    // The identity of a secret is the same whichever field holds it — the map
+    // is keyed by the secret — but the two occupy different SLOTS in the key,
+    // so a value used as an API key never collides with the same value used as
+    // a bearer.
+    const asKey = discoveryCacheKey('anthropic', cfg({ apiKey: 'same' }));
+    const asToken = discoveryCacheKey('anthropic', cfg({ authToken: 'same' }));
+    expect(asKey).not.toBe(asToken);
   });
 
   it('treats an absent credential as its own case, not as a collision', () => {

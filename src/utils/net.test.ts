@@ -183,7 +183,7 @@ describe('fetchSameOrigin', () => {
   let base: string;
   let other: http.Server;
   let otherBase: string;
-  const seen: Array<{ url: string; key: string | undefined }> = [];
+  const seen: Array<{ url: string; key: string | undefined; method?: string; body?: string; contentType?: string }> = [];
 
   beforeAll(async () => {
     other = http.createServer((req, res) => {
@@ -195,11 +195,24 @@ describe('fetchSameOrigin', () => {
     otherBase = `http://127.0.0.1:${(other.address() as AddressInfo).port}`;
 
     server = http.createServer((req, res) => {
-      seen.push({ url: req.url ?? '', key: req.headers['x-api-key'] as string | undefined });
-      if (req.url === '/away') { res.writeHead(302, { location: `${otherBase}/stolen` }); res.end(); return; }
-      if (req.url === '/local') { res.writeHead(302, { location: '/models' }); res.end(); return; }
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end('{"data":[]}');
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        seen.push({
+          url: req.url ?? '',
+          key: req.headers['x-api-key'] as string | undefined,
+          method: req.method,
+          body,
+          contentType: req.headers['content-type'] as string | undefined,
+        });
+        if (req.url === '/away') { res.writeHead(302, { location: `${otherBase}/stolen` }); res.end(); return; }
+        if (req.url === '/local') { res.writeHead(302, { location: '/models' }); res.end(); return; }
+        if (req.url === '/seeother') { res.writeHead(303, { location: '/models' }); res.end(); return; }
+        if (req.url === '/keepmethod') { res.writeHead(307, { location: '/models' }); res.end(); return; }
+        if (req.url === '/notmodified') { res.writeHead(304, { location: '/models' }); res.end(); return; }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{"data":[]}');
+      });
     });
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -220,6 +233,47 @@ describe('fetchSameOrigin', () => {
     ).rejects.toThrow(/cross-origin redirect/i);
     expect(seen.some((r) => r.url.startsWith('other'))).toBe(false);
     expect(seen.some((r) => r.url.startsWith('other') && r.key === 'secret-key')).toBe(false);
+  });
+
+  it('turns a 303 POST into a GET without the body, as Fetch does', async () => {
+    // Replaying the original POST body at the redirect target would re-submit a
+    // generation request — duplicating it, or failing a gateway's result/poll
+    // redirect outright.
+    seen.length = 0;
+    const res = await fetchSameOrigin(`${base}/seeother`, {
+      method: 'POST',
+      body: '{"prompt":"hi"}',
+      headers: { 'content-type': 'application/json', 'x-api-key': 'secret-key' },
+    });
+    expect(res.status).toBe(200);
+    const hop = seen[seen.length - 1]!;
+    expect(hop.method).toBe('GET');
+    expect(hop.body).toBe('');
+    expect(hop.contentType).toBeUndefined();
+    // The credential still travels — it is same-origin.
+    expect(hop.key).toBe('secret-key');
+  });
+
+  it('preserves the method and body across a 307, which exists to do that', async () => {
+    seen.length = 0;
+    const res = await fetchSameOrigin(`${base}/keepmethod`, {
+      method: 'POST',
+      body: '{"prompt":"hi"}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(200);
+    const hop = seen[seen.length - 1]!;
+    expect(hop.method).toBe('POST');
+    expect(hop.body).toBe('{"prompt":"hi"}');
+  });
+
+  it('does not treat a 304 as a redirect', async () => {
+    // A 304 can carry Location without being a redirect; following it would
+    // turn a cache revalidation into a second request.
+    seen.length = 0;
+    const res = await fetchSameOrigin(`${base}/notmodified`);
+    expect(res.status).toBe(304);
+    expect(seen).toHaveLength(1);
   });
 
   it('still follows a same-origin redirect, which endpoints use to canonicalise paths', async () => {

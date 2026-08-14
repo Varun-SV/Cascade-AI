@@ -380,11 +380,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   secret is now used for an equality lookup and an opaque random id travels in
   its place; nothing derived from the credential reaches the key at all.
   (Pre-existing; surfaced because this release extends the same key to cover
-  bearer tokens.) The identity that replaced it is held weakly, against the
-  provider entry and only for that entry's *current* secret, so a rotated key is
-  released the moment it stops being current — including on the ordinary
-  settings-save path, which replaces a credential without ever re-initialising
-  the router.
+  bearer tokens.) The identity that replaced it expires on the same clock as the
+  discovery entry it exists to name, so a secret is held while it is in use and
+  no longer, and the cache — which was never evicted at all — no longer grows
+  for the life of a hosted process.
 
 - **`cascade link azure` rotates a key across the whole resource.** An Azure key
   is resource-scoped, but a fully routed credential updated only the deployment
@@ -417,6 +416,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was fixed for this; the bearer branch beside it kept `??=` and so installed a
   newly exported `ANTHROPIC_AUTH_TOKEN` against the endpoint already in the
   config, sending it to the host that had not issued it.
+
+- **A synced gateway bearer no longer costs the browser its API key.** A
+  legitimate `authToken` is not revoked, so it survives the filter and won the
+  merge — but the web can only use `apiKey`, and the restored value is
+  persisted, so the browser's own key was gone for good and the next chat had no
+  credential. The incoming row still wins for everything else, so the gateway's
+  fields survive to be pushed back.
+
+- **A redirect follows Fetch's own rules.** The same-origin guard treated any
+  3xx carrying `Location` as a redirect and replayed the original request
+  unchanged — so a `303` after a generation POST re-submitted the prompt body
+  instead of becoming a bodiless GET, and a `304` was followed as though it were
+  a redirect at all.
+
+- **A malformed provider entry reaches the validator again.** The
+  revoked-credential migration runs before schema validation by design, and a
+  `null` in a hand-edited `providers` array made it throw a bare `TypeError` —
+  replacing the actionable "providers[0] is invalid" the schema would have
+  produced.
 
 - **The browser's sync path drops the dead credential too.** The web app runs
   its own merge and never reaches the SDK's, so a pre-0.75 bundle pulled there

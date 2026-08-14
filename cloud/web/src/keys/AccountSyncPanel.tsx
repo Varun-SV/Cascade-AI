@@ -51,7 +51,18 @@ export function mergeProviders(
   for (const l of local) map.set(providerSig(l), l);
   const { kept: live, removed } = stripRetiredProviders(incoming);
   const { kept, removed: revoked } = stripRevokedCredentials(live);
-  for (const i of kept) map.set(providerSig(i), i);
+  for (const i of kept) {
+    // The browser can only USE `apiKey` — its ProviderConfig has no bearer
+    // field and neither does the hosted run schema — so an incoming row
+    // carrying only a gateway `authToken` is a valid credential elsewhere and
+    // no credential here. Letting it win outright replaced a working browser
+    // key with something unusable and persisted that to localStorage, leaving
+    // the next chat with nothing. The incoming row still wins for everything
+    // else, so the gateway's own fields survive to be pushed back.
+    const prior = map.get(providerSig(i));
+    const merged = !i.apiKey && prior?.apiKey ? { ...i, apiKey: prior.apiKey } : i;
+    map.set(providerSig(merged), merged);
+  }
   // `removed` is returned rather than dropped so the restore can SAY a synced
   // key was skipped. The CLI and desktop pull paths both explain it; the
   // browser staying silent would be the one surface where a key disappears

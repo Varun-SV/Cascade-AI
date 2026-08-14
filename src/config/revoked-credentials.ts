@@ -49,6 +49,12 @@ interface CredentialBearingProvider {
  * neither, and must survive this untouched.
  */
 export function isRevokedSubscriptionCredential(p: CredentialBearingProvider): boolean {
+  // Non-object entries are left for the validator. This migration runs BEFORE
+  // validateConfig() by design, so dereferencing a `null` in a hand-edited
+  // providers array threw a bare TypeError and replaced the actionable
+  // "providers[0] is invalid" the schema would have produced. Same defensive
+  // shape as stripRetiredProviders().
+  if (typeof p !== 'object' || p === null) return false;
   if (p.type !== 'anthropic' || !p.authToken) return false;
   return isSubscriptionToken(p.authToken)
     || /claude\s*code/i.test(p.credentialSource ?? '');
