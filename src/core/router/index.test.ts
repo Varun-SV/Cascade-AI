@@ -568,15 +568,44 @@ describe('discoveryCacheKey', () => {
     expect(a).not.toBe(b);
   });
 
-  it('is not a digest OF the credential', () => {
-    // The security property. A bare sha256(apiKey) is the artifact an offline
-    // guess is tested against — anywhere it surfaced (heap dump, crash report,
-    // a future log of cache keys) it would confirm a guessed key. Keyed with
-    // process-local random bytes, the digest cannot be reproduced from the
-    // credential alone.
-    const key = discoveryCacheKey('anthropic', cfg({ apiKey: 'sk-a' }));
-    const naive = crypto.createHash('sha256')
-      .update('anthropic|sk-a||').digest('hex').slice(0, 24);
-    expect(key).not.toBe(naive);
+  it('carries nothing derived from the credential', () => {
+    // The security property. The key used to be sha256(apiKey) — the artifact
+    // an offline guess is tested against, anywhere it surfaced (heap dump,
+    // crash report, a future log of cache keys). The credential is now used
+    // only for an equality lookup, so the key can neither contain it nor be
+    // reproduced from it.
+    const secret = 'sk-a-very-secret';
+    const baseUrl = 'https://gw.internal';
+    const key = discoveryCacheKey('anthropic', cfg({ apiKey: secret, baseUrl }));
+    expect(key).not.toContain(secret);
+
+    // The exact construction this used to have. Reproducing it here is what
+    // makes the assertion bite: an earlier version of this test hashed the
+    // secret ALONE, which never matched the tuple the code actually digested,
+    // so it passed against the very implementation it was meant to reject.
+    const previous = crypto.createHash('sha256')
+      .update(`anthropic|${secret}||${baseUrl}`).digest('hex');
+    expect(key).not.toBe(previous.slice(0, 24));
+    expect(key).not.toContain(previous.slice(0, 16));
+
+    // …and nothing else obvious either.
+    for (const algo of ['sha256', 'sha1', 'md5']) {
+      for (const input of [secret, `anthropic|${secret}`, `${secret}|${baseUrl}`]) {
+        const digest = crypto.createHash(algo).update(input).digest('hex');
+        expect(key).not.toContain(digest.slice(0, 16));
+      }
+    }
+  });
+
+  it('tells an apiKey and an authToken of the same value apart', () => {
+    const a = discoveryCacheKey('anthropic', cfg({ apiKey: 'same' }));
+    const b = discoveryCacheKey('anthropic', cfg({ authToken: 'same' }));
+    expect(a).not.toBe(b);
+  });
+
+  it('treats an absent credential as its own case, not as a collision', () => {
+    const none = discoveryCacheKey('anthropic', cfg({ baseUrl: 'https://gw' }));
+    expect(none).toBe(discoveryCacheKey('anthropic', cfg({ baseUrl: 'https://gw' })));
+    expect(none).not.toBe(discoveryCacheKey('anthropic', cfg({ apiKey: 'k', baseUrl: 'https://gw' })));
   });
 });

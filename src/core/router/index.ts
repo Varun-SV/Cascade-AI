@@ -235,32 +235,53 @@ interface DiscoveryEntry { ids: string[]; models: ModelInfo[]; at: number }
 const cloudDiscoveryCache = new Map<string, DiscoveryEntry>();
 
 /**
- * A random, process-local MAC key for the discovery cache.
+ * Random stand-ins for credentials seen this process, so the discovery cache
+ * key can be built without a credential reaching a digest at all.
  *
- * The cache needs to tell credentials APART; it never needs a digest OF one.
- * A bare `sha256(apiKey)` is exactly the artifact an offline guess can be
- * tested against, so anywhere it surfaced — a heap dump, a crash report, a
- * future debug log of cache keys — it would confirm a guessed key. Keying the
- * digest with bytes that exist only in this process removes that property at no
- * cost: the cache is a module-level Map that dies with the process, so a key
- * that is not stable across runs is not a key anything depends on.
+ * The cache needs to tell credentials APART; it never needs to represent one.
+ * It used to hash the key with sha256 — precisely the artifact an offline guess
+ * is tested against, had it ever reached a heap dump, a crash report or a debug
+ * log of cache keys. Strengthening that into a MAC would have kept a credential
+ * flowing into a hash for no reason; a KDF stiff enough to be a *correct*
+ * password hash would be worse still, since this sits on the init path and is
+ * deliberately slow by design.
+ *
+ * So the secret is used for one thing only — an equality lookup, the same
+ * comparison the config already does by holding the string — and what travels
+ * onward is an opaque random id carrying none of its bits. The Map holds a
+ * reference to a string the config already keeps alive, so it adds no exposure,
+ * and it holds one short entry per distinct credential.
  */
-const DISCOVERY_CACHE_MAC_KEY = crypto.randomBytes(32);
+const credentialIdentities = new Map<string, string>();
+function credentialIdentity(secret: string | undefined): string {
+  if (!secret) return '-';
+  let id = credentialIdentities.get(secret);
+  if (!id) {
+    id = crypto.randomUUID();
+    credentialIdentities.set(secret, id);
+  }
+  return id;
+}
 
 /**
  * Identity of a provider's credential + endpoint, for the discovery cache.
  *
- * Exported for its test: the security property — that the result is NOT
- * derivable from the credential — is invisible from the outside otherwise.
+ * Exported for its test: that the result carries nothing derived from the
+ * credential is invisible from the outside otherwise.
  */
 export function discoveryCacheKey(type: ProviderType, cfg: ProviderConfig): string {
   // `authToken` is part of the identity, not just `apiKey`. Two gateways
   // reachable at the same URL with different bearers serve different
   // catalogues, and omitting it also collapsed every bearer-only config for a
   // provider onto one key — so switching credentials would have been answered
-  // from the previous one's cache.
-  const raw = `${type}|${cfg.apiKey ?? ''}|${cfg.authToken ?? ''}|${cfg.baseUrl ?? ''}`;
-  return crypto.createHmac('sha256', DISCOVERY_CACHE_MAC_KEY).update(raw).digest('hex').slice(0, 24);
+  // from the previous one's cache. Kept in separate slots so an apiKey and an
+  // authToken with the same value are still two different configurations.
+  return [
+    type,
+    credentialIdentity(cfg.apiKey),
+    credentialIdentity(cfg.authToken),
+    cfg.baseUrl ?? '',
+  ].join('|');
 }
 
 /**

@@ -365,12 +365,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are now followed only while they stay on the original origin, which is the
   policy the local-endpoint fetch already applied.
 
-- **The model-discovery cache no longer holds a hash of your API key.** It was
-  a bare `sha256` of the credential — the exact artifact an offline guess is
+- **The model-discovery cache no longer derives its key from your API key.** It
+  was a bare `sha256` of the credential — the exact artifact an offline guess is
   tested against, had it ever reached a heap dump, a crash report, or a log of
-  cache keys. The cache only needs to tell credentials apart, never to digest
-  one, so the key is a MAC under process-local random bytes. (Pre-existing;
-  surfaced because this release extends the same key to cover bearer tokens.)
+  cache keys. The cache only ever needed to tell credentials apart, so the
+  secret is now used for an equality lookup and an opaque random id travels in
+  its place; nothing derived from the credential reaches the key at all.
+  (Pre-existing; surfaced because this release extends the same key to cover
+  bearer tokens.)
 
 - **A bearer-only gateway's model list now reaches routing.** Catalogue
   validation required an `apiKey`, and the availability probe uses `listModels()`
