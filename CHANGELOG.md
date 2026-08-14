@@ -400,6 +400,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   newly exported `ANTHROPIC_AUTH_TOKEN` against the endpoint already in the
   config, sending it to the host that had not issued it.
 
+- **The browser's sync path drops the dead credential too.** The web app runs
+  its own merge and never reaches the SDK's, so a pre-0.75 bundle pulled there
+  kept an Anthropic row holding only a subscription token — `authToken` is not
+  even a field the browser sends — and let it overwrite a working local API key,
+  ready to be pushed back on the next sync. It is filtered and explained now, in
+  terms of the credential rather than the provider.
+
 - **A sync that discards a dead credential now says so.** `cascade cloud pull`
   printed "Your keys are ready here" — and the desktop reported nothing — when
   the bundle's only content was a Claude subscription token the pull had just

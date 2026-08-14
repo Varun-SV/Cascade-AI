@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Cloud, Loader2, UploadCloud, DownloadCloud } from 'lucide-react';
 import type { ProviderConfig, WebSearchSettings } from '../lib/types.js';
 import { stripRetiredProviders } from '../lib/retired-providers.js';
+import { describeRevokedRemoval, stripRevokedCredentials } from '../lib/revoked-credentials.js';
 import { decryptJSON, encryptJSON, type EncryptedBlob } from './crypto.js';
 import { pullKeySync, pushKeySync } from '../lib/api.js';
 
@@ -34,20 +35,28 @@ function providerSig(p: ProviderConfig): string {
  * from before a provider was retired would otherwise reintroduce the dead
  * entry into a vault that had already been migrated — and keep doing it on
  * every restore, which reads as the cleanup not working.
+ *
+ * …and for dead Claude subscription credentials, for the same reason and with
+ * more at stake. The CLI and desktop filter those in the SDK's applySyncBundle;
+ * this merge is the browser's own and goes nowhere near it, so a pre-0.75
+ * bundle pulled here kept a row the web cannot use — `authToken` is not even a
+ * field it sends — and let that row overwrite a perfectly good local API key,
+ * ready to be pushed back on the next sync.
  */
-function mergeProviders(
+export function mergeProviders(
   local: ProviderConfig[],
   incoming: ProviderConfig[],
-): { merged: ProviderConfig[]; removed: string[] } {
+): { merged: ProviderConfig[]; removed: string[]; revoked: number } {
   const map = new Map<string, ProviderConfig>();
   for (const l of local) map.set(providerSig(l), l);
-  const { kept, removed } = stripRetiredProviders(incoming);
+  const { kept: live, removed } = stripRetiredProviders(incoming);
+  const { kept, removed: revoked } = stripRevokedCredentials(live);
   for (const i of kept) map.set(providerSig(i), i);
   // `removed` is returned rather than dropped so the restore can SAY a synced
   // key was skipped. The CLI and desktop pull paths both explain it; the
   // browser staying silent would be the one surface where a key disappears
   // with no reason given.
-  return { merged: [...map.values()], removed };
+  return { merged: [...map.values()], removed, revoked };
 }
 
 /** Rebuild the web's `backend` discriminator from whichever key is present. */
@@ -96,16 +105,21 @@ export default function AccountSyncPanel({ keys, webSearch, onRestoreKeys, onRes
       if (!blob) { setStatus('Nothing synced to your account yet.'); return; }
       const bundle = await decryptJSON<WebSyncBundle>(blob as EncryptedBlob, passphrase);
       let skippedProviders: string[] = [];
+      let revokedCount = 0;
       if (bundle.providers) {
-        const { merged, removed } = mergeProviders(keys, bundle.providers);
+        const { merged, removed, revoked } = mergeProviders(keys, bundle.providers);
         skippedProviders = removed;
+        revokedCount = revoked;
         onRestoreKeys(merged);
       }
       if (bundle.webSearch) onRestoreWebSearch(toWebSearch(bundle.webSearch));
       const skippedNote = skippedProviders.length
         ? ` Skipped ${skippedProviders.join(', ')} — no longer supported.`
         : '';
-      setStatus(`Restored from your account${updatedAt ? ` (synced ${relativeTime(updatedAt)})` : ''}.${skippedNote}`);
+      // Named separately from "no longer supported": the PROVIDER is fine, the
+      // credential is the problem, and the two ask different things of the user.
+      const revokedNote = revokedCount ? ` ${describeRevokedRemoval()}` : '';
+      setStatus(`Restored from your account${updatedAt ? ` (synced ${relativeTime(updatedAt)})` : ''}.${skippedNote}${revokedNote}`);
     } catch {
       // AES-GCM's auth-tag check is what fails on a wrong passphrase — say so
       // plainly rather than surfacing a raw WebCrypto "OperationError".
