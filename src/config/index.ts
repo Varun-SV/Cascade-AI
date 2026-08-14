@@ -196,7 +196,7 @@ export class ConfigManager {
         };
       }
     }
-    await this.injectEnvKeys();
+    await this.injectEnvKeys(globalCreds.kept);
     this.config.providers = mergeGlobalCredentials(this.config.providers, globalCreds.kept);
     // No post-merge pass: the workspace file was cleaned from its raw form in
     // loadConfig() and the global store just above, so both inputs to this
@@ -448,7 +448,16 @@ export class ConfigManager {
     }
   }
 
-  private async injectEnvKeys(): Promise<void> {
+  /**
+   * `globalProviders` is the machine-global credential store, passed in
+   * READ-ONLY. This runs before mergeGlobalCredentials() on purpose — an
+   * exported key should outrank a stored one, which only holds while the
+   * injection goes first — but a few of the questions asked here are about the
+   * user's whole configuration rather than this workspace's file, and answering
+   * those from the workspace alone is what produced the gateway bug this
+   * argument fixes.
+   */
+  private async injectEnvKeys(globalProviders: readonly CascadeConfig['providers'][number][] = []): Promise<void> {
     // Two different questions, previously conflated into one `isFirstRun`.
     //
     // "Is the list empty?" governs whether an environment key may seed a new
@@ -534,7 +543,17 @@ export class ConfigManager {
         // deployments on the resource this key belongs to, and a deployment
         // left keyless issues its requests with no credential.
         for (const target of targets) {
-          if (target.apiKey) continue;
+          // `authToken` counts as already-credentialed, exactly as the bearer
+          // branch below reads it. Filling a key into an entry that holds a
+          // gateway bearer, and moving its endpoint with it, sent that
+          // gateway's token to a different host — AnthropicProvider prefers
+          // `authToken` when both are set, so the exported key was ignored and
+          // the bearer travelled. Env injection fills EMPTY slots; replacing a
+          // credential is what `applyProviderApiKey` is for, and it clears the
+          // bearer when it does. Skipping here is also the non-destructive
+          // reading: `save()` syncs providers to the machine-global store, so
+          // clearing a bearer in memory would delete it for every workspace.
+          if (target.apiKey || target.authToken) continue;
           target.apiKey = key;
           // A key and a gateway exported together are a PAIR. `??=` kept a
           // stale configured endpoint, so the newly exported credential was
@@ -552,19 +571,36 @@ export class ConfigManager {
     const authToken = process.env['ANTHROPIC_AUTH_TOKEN'];
     if (authToken) {
       const existing = this.config.providers.find((p) => p.type === 'anthropic');
+      // The gateway is looked for in the GLOBAL store too, not just the
+      // workspace list. This runs before mergeGlobalCredentials() — deliberately,
+      // so an exported key still outranks a stored one — but that left the
+      // lookup reading a view of the config that was missing an endpoint the
+      // user had configured. A gateway entered once in another workspace lives
+      // only in ~/.cascade-ai/credentials.json, so `ANTHROPIC_AUTH_TOKEN`
+      // exported on its own was refused for want of a gateway, and the merge
+      // then added that very endpoint a few lines later. Read-only: the global
+      // list is consulted, never written through.
+      const globalAnthropic = globalProviders.find((p) => p.type === 'anthropic');
       // A bearer is valid only at the gateway that issued it, so it is never
       // configured without one — otherwise the client defaults to
       // api.anthropic.com and sends the token to a host that should not see it,
       // while hasUsableProvider() accepts the entry and skips onboarding. Same
       // requirement credential discovery applies; it was missing here, which is
       // the same gap Azure had one layer down.
-      const gateway = process.env['ANTHROPIC_BASE_URL'] ?? existing?.baseUrl;
+      const gateway = process.env['ANTHROPIC_BASE_URL'] ?? existing?.baseUrl ?? globalAnthropic?.baseUrl;
       if (gateway) {
-        if (!existing && wasEmpty) {
+        if (existing) {
+          if (!existing.apiKey && !existing.authToken) {
+            existing.authToken = authToken;
+            existing.baseUrl ??= gateway;
+          }
+        } else if (wasEmpty || globalAnthropic) {
+          // `wasEmpty` alone was too narrow for the same reason. With any other
+          // provider in the workspace file the row was never created, even
+          // though the global store demonstrably holds an Anthropic entry and
+          // the merge is about to bring it in — so this is not inventing a
+          // provider the user never configured.
           this.config.providers.push({ type: 'anthropic', authToken, baseUrl: gateway });
-        } else if (existing && !existing.apiKey && !existing.authToken) {
-          existing.authToken = authToken;
-          existing.baseUrl ??= gateway;
         }
       }
     }

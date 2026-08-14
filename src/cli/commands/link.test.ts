@@ -321,6 +321,24 @@ describe('cascade link — adoption', () => {
     expect(azure[0]).toMatchObject({ deploymentName: 'prod', apiKey: 'new-key' });
   });
 
+  it('refuses a deployment name another resource already claims', async () => {
+    // A deployment name IS the model id, and the router binds an Azure model to
+    // the first row whose deploymentName matches — endpoint not consulted. So
+    // appending the second `prod` created a row that can never be selected,
+    // while link printed "✓ Linked" and requests carried on to the other
+    // resource.
+    await seedConfig([
+      { type: 'azure', deploymentName: 'prod', baseUrl: 'https://one.openai.azure.com', apiKey: 'key-one' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'new-key';
+    process.env['AZURE_OPENAI_ENDPOINT'] = 'https://two.openai.azure.com';
+    process.env['AZURE_OPENAI_DEPLOYMENT'] = 'prod';
+
+    const azure = (await providersAfterLink('azure')).filter((p) => p['type'] === 'azure');
+    expect(azure).toHaveLength(1);
+    expect(azure[0]).toMatchObject({ baseUrl: 'https://one.openai.azure.com', apiKey: 'key-one' });
+  });
+
   it('refuses to guess which compatible service a bare target meant', async () => {
     // They all share one provider type, so the first directly-usable candidate
     // won — leaving the choice to the order of a table in

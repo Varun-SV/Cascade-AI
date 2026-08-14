@@ -436,6 +436,17 @@ describe('an environment key and gateway are a pair', () => {
     );
   }
 
+  async function seedGlobal(providers: unknown[]): Promise<string> {
+    const globalDir = path.join(dir, 'global');
+    await fs.mkdir(globalDir, { recursive: true });
+    await fs.writeFile(
+      path.join(globalDir, 'credentials.json'),
+      JSON.stringify({ version: 1, providers }),
+      'utf-8',
+    );
+    return globalDir;
+  }
+
   it('replaces a stale endpoint rather than sending the new key to the old host', async () => {
     // `??=` kept the configured URL, so a key exported alongside a different
     // gateway went to the host that did not issue it.
@@ -457,6 +468,68 @@ describe('an environment key and gateway are a pair', () => {
     await cm.load();
     expect(cm.getConfig().providers.find((p) => p.type === 'anthropic')?.baseUrl)
       .toBe('https://configured.internal');
+  });
+
+  it('finds the bearer\'s gateway in the machine-global store', async () => {
+    // injectEnvKeys runs BEFORE mergeGlobalCredentials — deliberately, so an
+    // exported key outranks a stored one — which left this lookup reading a
+    // config that was missing an endpoint the user had configured. A gateway
+    // entered once in another workspace lives only in the global store, so
+    // ANTHROPIC_AUTH_TOKEN on its own was refused for want of a gateway, and
+    // the merge added that very endpoint a few lines later.
+    await seed([]);
+    const globalDir = await seedGlobal([{ type: 'anthropic', baseUrl: 'https://gw.internal' }]);
+    process.env['ANTHROPIC_AUTH_TOKEN'] = 'gw-token';
+
+    const cm = new ConfigManager(dir, globalDir);
+    await cm.load();
+    expect(cm.getConfig().providers.find((p) => p.type === 'anthropic')).toMatchObject({
+      authToken: 'gw-token',
+      baseUrl: 'https://gw.internal',
+    });
+  });
+
+  it('adopts the bearer even when the workspace already lists other providers', async () => {
+    // `wasEmpty` was too narrow for the same reason: with any other provider in
+    // the workspace file the Anthropic row was never created, though the global
+    // store demonstrably holds one and the merge is about to bring it in.
+    await seed([{ type: 'openai', apiKey: 'sk-openai' }]);
+    const globalDir = await seedGlobal([{ type: 'anthropic', baseUrl: 'https://gw.internal' }]);
+    process.env['ANTHROPIC_AUTH_TOKEN'] = 'gw-token';
+
+    const cm = new ConfigManager(dir, globalDir);
+    await cm.load();
+    expect(cm.getConfig().providers.find((p) => p.type === 'anthropic')?.authToken).toBe('gw-token');
+  });
+
+  it('still refuses a bearer with no gateway anywhere', async () => {
+    // The requirement itself stands: a bearer sent to api.anthropic.com goes to
+    // a host that should not see it, while hasUsableProvider() calls the
+    // install configured and skips onboarding.
+    await seed([{ type: 'openai', apiKey: 'sk-openai' }]);
+    const globalDir = await seedGlobal([]);
+    process.env['ANTHROPIC_AUTH_TOKEN'] = 'gw-token';
+
+    const cm = new ConfigManager(dir, globalDir);
+    await cm.load();
+    expect(cm.getConfig().providers.find((p) => p.type === 'anthropic')).toBeUndefined();
+  });
+
+  it('leaves an entry that already holds a gateway bearer', async () => {
+    // AnthropicProvider prefers `authToken` when both are set, so filling the
+    // key in and moving the endpoint with it sent the OLD gateway's bearer to
+    // the NEW host while the exported key sat unused. `authToken` is a
+    // credential — the bearer branch below already reads it that way — so the
+    // entry is already configured and env injection leaves it alone.
+    await seed([{ type: 'anthropic', authToken: 'gw-token', baseUrl: 'https://old-gateway.internal' }]);
+    process.env['ANTHROPIC_API_KEY'] = 'new-key';
+    process.env['ANTHROPIC_BASE_URL'] = 'https://new-gateway.internal';
+
+    const cm = new ConfigManager(dir, path.join(dir, 'global'));
+    await cm.load();
+    const anthropic = cm.getConfig().providers.find((p) => p.type === 'anthropic');
+    expect(anthropic).toMatchObject({ authToken: 'gw-token', baseUrl: 'https://old-gateway.internal' });
+    expect(anthropic?.apiKey).toBeUndefined();
   });
 
   it('gives an environment Azure key to the resource its endpoint names', async () => {

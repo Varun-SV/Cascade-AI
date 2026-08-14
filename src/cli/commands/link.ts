@@ -204,6 +204,27 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
       const existing = config.providers.find((p) => p.type === 'azure'
         && sameAzureEndpoint(p.baseUrl, target)
         && (p.deploymentName?.trim() ?? '') === deployment);
+
+      // A deployment name is the MODEL ID everywhere downstream, and the router
+      // binds an Azure model with `deploymentName === model.id` — the first row
+      // that matches, endpoint not consulted. So two resources each with a
+      // `prod` deployment are indistinguishable once configured: appending the
+      // second would create a row that can never be selected, while this
+      // printed "✓ Linked" and requests carried on to the other resource.
+      // Refusing is the honest answer — the same answer this function already
+      // gives when several resources leave a key with nothing to choose
+      // between them.
+      const claimedElsewhere = !existing && config.providers.some((p) => p.type === 'azure'
+        && (p.deploymentName?.trim() ?? '') === deployment
+        && !sameAzureEndpoint(p.baseUrl, target));
+      if (claimedElsewhere) {
+        console.log(chalk.yellow(`\n  A different Azure resource already has a deployment named "${deployment}".`));
+        console.log(chalk.gray('  Deployment names are model ids in Cascade, so two resources cannot share one —'));
+        console.log(chalk.gray('  the second would never be selected. Rename one deployment, or remove the entry'));
+        console.log(chalk.gray('  you no longer use, then run this again.\n'));
+        return false;
+      }
+
       const providers = existing
         ? config.providers.map((p) => (p === existing
           ? { ...p, apiKey: cred.secret, credentialSource: cred.sourceTool, ...(cred.apiVersion ? { apiVersion: cred.apiVersion } : {}) }

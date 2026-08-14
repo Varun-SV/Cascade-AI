@@ -279,6 +279,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compatible entry with it. It now lists the candidates and asks for one by
   name; naming a service directly (`cascade link groq`) is unchanged.
 
+- **An exported API key no longer moves someone else's bearer to a new host.**
+  Environment injection filled a key into any entry without one — including an
+  entry holding a gateway `authToken` — and moved `baseUrl` with it. The
+  provider prefers `authToken` when both are set, so the exported key was
+  ignored and the old gateway's token was sent to the new host. A bearer counts
+  as a credential here, exactly as the bearer branch beside it already read it;
+  replacing one is what the settings paths do, and they clear it when they do.
+
+- **`ANTHROPIC_AUTH_TOKEN` finds a gateway configured in another workspace.**
+  The endpoint check ran before the machine-global credential store was merged
+  in, so a gateway entered once and stored globally was invisible: the bearer
+  was refused for want of a gateway, and the merge then added that very
+  endpoint a few lines later. The lookup reads the global store too, and the
+  bearer is adopted whenever that store holds an Anthropic entry rather than
+  only on a completely empty config. Refusing a bearer with no gateway anywhere
+  is unchanged — sending it to `api.anthropic.com` is the case that rule exists
+  for.
+
+- **`cascade link` refuses a deployment name another Azure resource already
+  uses.** A deployment name is the model id everywhere downstream, and the
+  router binds an Azure model to the first row whose name matches without
+  consulting the endpoint. Adding a second `prod` on a different resource
+  created a row that could never be selected, while the command reported
+  success and requests carried on to the other resource.
+
 ## 0.74.0 - 2026-08-11
 
 ### Fixed
