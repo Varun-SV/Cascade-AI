@@ -208,6 +208,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them is reported rather than just the first, and matching on type alone would
   have configured whichever key sorted earliest.
 
+- **A synced bundle could replace a working key with nothing.** The revoked
+  subscription token was stripped from an incoming bundle's providers, but the
+  entry itself was kept — the right call for local config, where the row still
+  carries a gateway the user configured, and the wrong one here: the merge
+  treats a matching incoming row as authoritative, so a row left holding only an
+  endpoint overwrote a valid local API key and persisted with no credential at
+  all. A row with nothing usable in it is now dropped whole.
+
+- **An exported key and gateway are adopted as a pair.** `ANTHROPIC_API_KEY`
+  filled an existing keyless entry, but `ANTHROPIC_BASE_URL` was applied with
+  `??=` — so a stale configured endpoint survived and the newly exported
+  credential went to a host that had not issued it.
+
+- **An Azure key from the environment could land on the wrong resource.** Azure
+  keys are resource-scoped, and `AZURE_OPENAI_KEY` was filled into the first
+  keyless entry of that type regardless of which resource it was for. The entry
+  is now chosen by `AZURE_OPENAI_ENDPOINT`, or by there being exactly one
+  resource configured; with several and nothing to disambiguate them, no key is
+  written. That mirrors what `cascade link azure` already does, which was
+  otherwise scoping its own write correctly and then persisting the environment
+  injection's mistake alongside it.
+
+- **Removing a Claude subscription credential now clears the ordinary tier pin
+  too.** Only `anthropic:<model>` was cleared, but the documented config shape
+  and the setup wizard both write a bare model id — README's own example is
+  `"t1": "claude-opus-4"` — so the common pin was left behind, pointing at a
+  provider that had just been removed. The router throws on a pin it cannot
+  resolve rather than falling back, so the migration meant to get an install
+  working again left that tier dead.
+
 ## 0.74.0 - 2026-08-11
 
 ### Fixed

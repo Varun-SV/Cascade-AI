@@ -411,6 +411,23 @@ export class ConfigManager {
    * reasoning as the migration write in loadConfig(); best-effort for the same
    * reason, since a read-only config directory must not abort startup.
    */
+  /**
+   * The Azure entry `AZURE_OPENAI_KEY` belongs to, or undefined when that
+   * cannot be answered.
+   *
+   * `AZURE_OPENAI_ENDPOINT` names the resource. Without one, a single
+   * configured resource is unambiguous and anything more is a guess — and
+   * guessing wrong writes a key to a resource that will reject it.
+   */
+  private azureEntryForEnv(): CascadeConfig['providers'][number] | undefined {
+    const entries = this.config.providers.filter((p) => p.type === 'azure');
+    if (entries.length === 0) return undefined;
+    const endpoint = process.env['AZURE_OPENAI_ENDPOINT']?.trim();
+    if (endpoint) return entries.find((p) => (p.baseUrl?.trim() ?? '') === endpoint);
+    const resources = new Set(entries.map((p) => p.baseUrl?.trim() ?? ''));
+    return resources.size === 1 ? entries.find((p) => !p.apiKey) ?? entries[0] : undefined;
+  }
+
   private async persistClearedPins(tiers: readonly string[]): Promise<void> {
     const configPath = path.join(this.workspacePath, CASCADE_CONFIG_FILE);
     try {
@@ -464,7 +481,14 @@ export class ConfigManager {
     for (const { env, type } of envProviders) {
       const key = process.env[env];
       if (!key) continue;
-      const existing = this.config.providers.find((p) => p.type === type);
+      // An Azure key belongs to ONE RESOURCE, so the entry it fills has to be
+      // chosen by endpoint rather than by "first of this type". Filling the
+      // first keyless deployment sent a resource-specific key to an unrelated
+      // resource — and `cascade link azure` then persisted that alongside its
+      // own correctly scoped write.
+      const existing = type === 'azure'
+        ? this.azureEntryForEnv()
+        : this.config.providers.find((p) => p.type === type);
 
       // ANTHROPIC_BASE_URL is the gateway for whichever Anthropic credential
       // is in play, key or bearer. Carrying it only on the bearer path meant an
@@ -499,7 +523,10 @@ export class ConfigManager {
         });
       } else if (existing && !existing.apiKey) {
         existing.apiKey = key;
-        if (anthropicGateway) existing.baseUrl ??= anthropicGateway;
+        // A key and a gateway exported together are a PAIR. `??=` kept a stale
+        // configured endpoint, so the newly exported credential was sent to the
+        // host it was not issued by.
+        if (anthropicGateway) existing.baseUrl = anthropicGateway;
       }
     }
 

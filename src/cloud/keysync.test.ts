@@ -263,3 +263,28 @@ describe('keysync — a bundle predating 0.75 must not reinstate a dead token', 
     expect(anthropic?.baseUrl).toBe('https://gateway.internal');
   });
 });
+
+describe('keysync — an endpoint-only revoked row must not win either', () => {
+  it('drops the whole row, so a valid local key survives the merge', () => {
+    // Keeping the entry minus its token is right for local config, where the
+    // row holds a gateway the user configured. It is wrong for an incoming
+    // bundle: mergeByKey treats a matching incoming row as authoritative, so an
+    // endpoint-only row replaced a valid local key and persisted with no
+    // credential at all — the exact loss the filter was added to prevent.
+    const local = cfg({
+      providers: [{ type: 'anthropic', apiKey: 'sk-ant-still-good', baseUrl: 'https://gw.internal' }],
+    });
+    const stale = {
+      v: 2,
+      providers: [{
+        type: 'anthropic', authToken: 'sk-ant-oat01-dead',
+        baseUrl: 'https://gw.internal', credentialSource: 'Claude Code',
+      }],
+    } as unknown as Parameters<typeof applySyncBundle>[0];
+
+    const merged = applySyncBundle(stale, local);
+    const anthropic = merged.providers.find((p) => p.type === 'anthropic');
+    expect(anthropic?.apiKey).toBe('sk-ant-still-good');
+    expect(anthropic?.authToken).toBeUndefined();
+  });
+});

@@ -23,6 +23,8 @@
 //  prefix Anthropic mints them with, and the `credentialSource` that
 //  `cascade link` stamped on the entry it created.
 
+import { MODELS } from '../constants.js';
+
 /** Why a credential was dropped, shown to the user. */
 export const REVOKED_CREDENTIAL_REASON =
   'Anthropic no longer permits third-party tools to use Claude subscription credentials '
@@ -118,20 +120,41 @@ export function hasUsableAnthropic(providers: readonly CredentialBearingProvider
   return providers.some((p) => p?.type === 'anthropic' && Boolean(p.apiKey || p.authToken));
 }
 
-/** Clears `anthropic:<model>` tier pins, mutating in place; returns the tiers cleared. */
+/**
+ * Clears tier pins that name an Anthropic model, mutating in place; returns the
+ * tiers cleared.
+ *
+ * BOTH pin forms. `anthropic:<model>` is the explicit one, but the documented
+ * config shape and the setup wizard both write a BARE model id — README's
+ * example is `"t1": "claude-opus-4"` — and those are the common case. Matching
+ * only the prefixed form left the ordinary pin behind, and the router throws on
+ * a pin it cannot resolve rather than falling back to a provider that works.
+ */
 export function clearAnthropicPins(models: unknown): string[] {
   const cleared: string[] = [];
   if (typeof models !== 'object' || models === null) return cleared;
   const tiers = models as Record<string, unknown>;
   for (const tier of ['t1', 't2', 't3'] as const) {
     const pin = tiers[tier];
-    if (typeof pin !== 'string') continue;
-    // Lowercased to match selector.ts's resolveDynamicModel(), which parses the
-    // provider half case-insensitively — so `Anthropic:claude-x` is a valid pin
-    // and has to be caught here too.
-    if (!pin.toLowerCase().startsWith('anthropic:')) continue;
+    if (typeof pin !== 'string' || !namesAnthropicModel(pin)) continue;
     delete tiers[tier];
     cleared.push(tier);
   }
   return cleared;
+}
+
+/** Whether a tier pin, in either form, resolves to an Anthropic model. */
+function namesAnthropicModel(pin: string): boolean {
+  const value = pin.trim().toLowerCase();
+  if (!value) return false;
+  // Lowercased to match selector.ts's resolveDynamicModel(), which parses the
+  // provider half case-insensitively — `Anthropic:claude-x` is a valid pin.
+  if (value.includes(':')) return value.startsWith('anthropic:');
+  // A bare id. The bundled catalogue is the authority; the `claude-` prefix
+  // catches a model newer than this build's catalogue, which is exactly when a
+  // pin is most likely to be one the catalogue has never heard of.
+  const known = Object.values(MODELS).some(
+    (m) => m.provider === 'anthropic' && m.id.toLowerCase() === value,
+  );
+  return known || value.startsWith('claude-');
 }

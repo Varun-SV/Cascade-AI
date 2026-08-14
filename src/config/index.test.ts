@@ -421,3 +421,71 @@ describe('ANTHROPIC_AUTH_TOKEN needs the gateway that issued it', () => {
     expect(anthropic).toMatchObject({ authToken: 'gw-token', baseUrl: 'https://gateway.internal' });
   });
 });
+
+describe('an environment key and gateway are a pair', () => {
+  let dir: string;
+  beforeEach(async () => { dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-pair-')); });
+  afterEach(async () => { await fs.rm(dir, { recursive: true, force: true }); });
+
+  async function seed(providers: unknown[]): Promise<void> {
+    await fs.mkdir(path.join(dir, '.cascade'), { recursive: true });
+    await fs.writeFile(
+      path.join(dir, CASCADE_CONFIG_FILE),
+      JSON.stringify({ providers, models: {}, tools: {} }),
+      'utf-8',
+    );
+  }
+
+  it('replaces a stale endpoint rather than sending the new key to the old host', async () => {
+    // `??=` kept the configured URL, so a key exported alongside a different
+    // gateway went to the host that did not issue it.
+    await seed([{ type: 'anthropic', baseUrl: 'https://old-gateway.internal' }]);
+    process.env['ANTHROPIC_API_KEY'] = 'new-key';
+    process.env['ANTHROPIC_BASE_URL'] = 'https://new-gateway.internal';
+
+    const cm = new ConfigManager(dir, path.join(dir, 'global'));
+    await cm.load();
+    const anthropic = cm.getConfig().providers.find((p) => p.type === 'anthropic');
+    expect(anthropic).toMatchObject({ apiKey: 'new-key', baseUrl: 'https://new-gateway.internal' });
+  });
+
+  it('leaves a configured endpoint alone when the environment names none', async () => {
+    await seed([{ type: 'anthropic', baseUrl: 'https://configured.internal' }]);
+    process.env['ANTHROPIC_API_KEY'] = 'new-key';
+
+    const cm = new ConfigManager(dir, path.join(dir, 'global'));
+    await cm.load();
+    expect(cm.getConfig().providers.find((p) => p.type === 'anthropic')?.baseUrl)
+      .toBe('https://configured.internal');
+  });
+
+  it('gives an environment Azure key to the resource its endpoint names', async () => {
+    // Filling the first keyless entry sent a resource-specific key to an
+    // unrelated resource, which `cascade link azure` then persisted.
+    await seed([
+      { type: 'azure', deploymentName: 'a', baseUrl: 'https://one.openai.azure.com' },
+      { type: 'azure', deploymentName: 'b', baseUrl: 'https://two.openai.azure.com' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'az-key';
+    process.env['AZURE_OPENAI_ENDPOINT'] = 'https://two.openai.azure.com';
+
+    const cm = new ConfigManager(dir, path.join(dir, 'global'));
+    await cm.load();
+    const azure = cm.getConfig().providers.filter((p) => p.type === 'azure');
+    expect(azure.find((p) => p.deploymentName === 'b')?.apiKey).toBe('az-key');
+    expect(azure.find((p) => p.deploymentName === 'a')?.apiKey).toBeUndefined();
+  });
+
+  it('fills none when several Azure resources are configured and none is named', async () => {
+    await seed([
+      { type: 'azure', deploymentName: 'a', baseUrl: 'https://one.openai.azure.com' },
+      { type: 'azure', deploymentName: 'b', baseUrl: 'https://two.openai.azure.com' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'az-key';
+
+    const cm = new ConfigManager(dir, path.join(dir, 'global'));
+    await cm.load();
+    expect(cm.getConfig().providers.filter((p) => p.type === 'azure')
+      .every((p) => p.apiKey === undefined)).toBe(true);
+  });
+});

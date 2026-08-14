@@ -140,6 +140,28 @@ describe('clearing pins the removed credential leaves dangling', () => {
     expect(models).toEqual({ t3: 'openai:gpt-5-mini' });
   });
 
+  it('clears a BARE model id, which is the documented and commoner form', () => {
+    // README's own example is `"t1": "claude-opus-4"`, and the setup wizard
+    // writes the same shape. Matching only `anthropic:` left the ordinary pin
+    // behind, and the router throws on a pin it cannot resolve.
+    const models = { t1: 'claude-opus-4', t2: 'gpt-5-mini', t3: 'llama3.2:3b' };
+    expect(clearAnthropicPins(models)).toEqual(['t1']);
+    expect(models).toEqual({ t2: 'gpt-5-mini', t3: 'llama3.2:3b' });
+  });
+
+  it('clears a bare Claude id the bundled catalogue has never heard of', () => {
+    // A pin is most likely to name an unknown model precisely when it is newer
+    // than the build.
+    const models = { t1: 'claude-opus-9-future' };
+    expect(clearAnthropicPins(models)).toEqual(['t1']);
+  });
+
+  it('leaves another provider\'s bare pin alone', () => {
+    const models = { t1: 'gpt-5', t2: 'gemini-2.5-flash', t3: 'llama3.2:3b' };
+    expect(clearAnthropicPins(models)).toEqual([]);
+    expect(models).toEqual({ t1: 'gpt-5', t2: 'gemini-2.5-flash', t3: 'llama3.2:3b' });
+  });
+
   it('reads a surviving Anthropic provider from whatever list it is given', () => {
     expect(hasUsableAnthropic([{ type: 'anthropic', apiKey: 'sk' }])).toBe(true);
     expect(hasUsableAnthropic([{ type: 'anthropic', baseUrl: 'https://gw' }])).toBe(false);
