@@ -73,12 +73,27 @@ describe('discoverCredentials', () => {
   it('picks up ANTHROPIC_AUTH_TOKEN, the gateway credential Anthropic documents', async () => {
     // Unrelated to the subscription tokens above: this is a bearer credential
     // issued by a gateway the user points Cascade at, and it is supported.
-    const found = await discoverCredentials({ homeDir: home, env: { ANTHROPIC_AUTH_TOKEN: 'gw-token' } });
+    const found = await discoverCredentials({
+      homeDir: home,
+      env: { ANTHROPIC_AUTH_TOKEN: 'gw-token', ANTHROPIC_BASE_URL: 'https://gateway.internal' },
+    });
     expect(found).toHaveLength(1);
     // 'bearer', NOT 'oauth'. Classifying it as a subscription token sent the
     // documented `cascade link anthropic` down the risk-gate path and refused
     // to persist a credential Anthropic explicitly supports.
-    expect(found[0]).toMatchObject({ provider: 'anthropic', kind: 'bearer', directlyUsable: true });
+    expect(found[0]).toMatchObject({
+      provider: 'anthropic', kind: 'bearer', directlyUsable: true,
+      baseUrl: 'https://gateway.internal',
+    });
+  });
+
+  it('refuses a bearer token with no gateway to send it to', async () => {
+    // A bearer is issued BY a gateway and valid only AT it. Adopting one with
+    // no endpoint points the client at api.anthropic.com — the same credential
+    // leak just closed in model discovery, arriving by a different door.
+    const found = await discoverCredentials({ homeDir: home, env: { ANTHROPIC_AUTH_TOKEN: 'gw-token' } });
+    expect(found[0]).toMatchObject({ provider: 'anthropic', kind: 'bearer', directlyUsable: false });
+    expect(found[0]!.warning).toMatch(/ANTHROPIC_BASE_URL/);
   });
 
   it('prefers a real API key over the gateway token when both are set', async () => {

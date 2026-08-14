@@ -82,6 +82,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   UI is indistinguishable from the save having failed. All three now go through
   one `applyProviderApiKey()`.
 
+- **A bearer token could be adopted with no gateway to send it to.** It is
+  issued BY a gateway and valid only AT it, so configuring one without an
+  endpoint pointed the client at `api.anthropic.com` — the same credential leak
+  closed above in model discovery, arriving by a different door. It is adopted
+  only alongside `ANTHROPIC_BASE_URL`, or a `baseUrl` the workspace already has.
+
+- **An Azure key was written across every configured deployment.** Azure keys
+  are resource-scoped, so a key linked while deployments on other resources were
+  configured would break them and overwrite the keys they already had —
+  permanently, the global credential store included. The update is now confined
+  to one resource: the one the credential names, or the only one present. With
+  several configured and nothing to disambiguate them, `cascade link` lists them
+  and changes nothing.
+
+- **Model discovery could ask a gateway for `/v1/v1/models`.** A gateway
+  `baseUrl` is commonly written with the version already in it, and the path was
+  appended unconditionally — a 404 that fell silently back to the bundled
+  catalogue and looked like a gateway with no models of its own.
+
 - **`ANTHROPIC_AUTH_TOKEN` was treated as a subscription token.** It is the
   credential Anthropic documents for gateway routing, but sharing the `oauth`
   classification with the subscription tokens sent the documented `cascade link

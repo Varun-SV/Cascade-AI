@@ -188,8 +188,14 @@ export class AnthropicProvider extends BaseProvider {
       // replaced the gateway's own catalogue with the public one, so routing
       // picked models the gateway may not serve. With a bearer token
       // configured it sent an empty `x-api-key` and always fell through.
+      // `/v1` only when it is not already there. A gateway baseUrl is commonly
+      // written with the version in it — the SDK accepts either — and appending
+      // unconditionally produced /v1/v1/models, a 404 that fell silently back
+      // to the bundled catalogue and looked exactly like a gateway with no
+      // models of its own.
       const base = (this.config.baseUrl ?? 'https://api.anthropic.com').replace(/\/+$/, '');
-      const resp = await fetch(`${base}/v1/models`, {
+      const modelsUrl = /\/v\d+$/.test(base) ? `${base}/models` : `${base}/v1/models`;
+      const resp = await fetch(modelsUrl, {
         headers: {
           ...(this.config.authToken
             ? {

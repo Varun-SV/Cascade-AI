@@ -129,3 +129,32 @@ describe('AnthropicProvider.listModels — follows the configured endpoint', () 
       .toBe('https://api.anthropic.com/v1/models');
   });
 });
+
+describe('AnthropicProvider.listModels — version path', () => {
+  it('does not double /v1 when the gateway URL already carries it', async () => {
+    // A gateway baseUrl is commonly written with the version in it — the SDK
+    // accepts either form, and the constructor tests above use exactly that
+    // shape. Appending unconditionally produced /v1/v1/models: a 404 that fell
+    // silently back to the bundled catalogue and looked like a gateway with no
+    // models of its own.
+    fetchSpy.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    const provider = new AnthropicProvider(
+      { type: 'anthropic', apiKey: 'k', baseUrl: 'https://gateway.internal/v1' },
+      undefined as never,
+    );
+    await provider.listModels();
+    expect((fetchSpy.mock.calls[0] as unknown as [string])[0])
+      .toBe('https://gateway.internal/v1/models');
+  });
+
+  it('adds /v1 when the gateway URL omits it', async () => {
+    fetchSpy.mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    const provider = new AnthropicProvider(
+      { type: 'anthropic', apiKey: 'k', baseUrl: 'https://gateway.internal/anthropic' },
+      undefined as never,
+    );
+    await provider.listModels();
+    expect((fetchSpy.mock.calls[0] as unknown as [string])[0])
+      .toBe('https://gateway.internal/anthropic/v1/models');
+  });
+});

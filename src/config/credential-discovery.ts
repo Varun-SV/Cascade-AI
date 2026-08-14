@@ -163,12 +163,25 @@ function fromEnv(env: NodeJS.ProcessEnv): DiscoveredCredential[] {
   const authToken = str(env['ANTHROPIC_AUTH_TOKEN']);
   if (authToken && !seen.has('anthropic')) {
     seen.add('anthropic');
+    // A bearer token is issued BY a gateway and is only valid AT that gateway.
+    // Adopting one without an endpoint configures the client to send it to
+    // api.anthropic.com — a credential going to a host that was never meant to
+    // receive it, which is the same leak just fixed in model discovery, arriving
+    // by a different door. `link` also accepts an endpoint already present in
+    // the workspace; this covers the environment-only case.
+    const gateway = str(env['ANTHROPIC_BASE_URL']);
     out.push({
       provider: 'anthropic',
       sourceTool: 'Environment (ANTHROPIC_AUTH_TOKEN)',
       kind: 'bearer',
       secret: authToken,
-      directlyUsable: true,
+      directlyUsable: Boolean(gateway),
+      ...(gateway ? { baseUrl: gateway } : {}),
+      ...(gateway ? {} : {
+        warning: 'A bearer token is only valid at the gateway that issued it. '
+          + 'Set ANTHROPIC_BASE_URL to that gateway, or configure `baseUrl` for '
+          + 'the anthropic provider, before linking it.',
+      }),
     });
   }
 

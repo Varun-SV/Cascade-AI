@@ -159,8 +159,29 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
     ? config.providers.filter((p) => p.type === 'azure' && p.deploymentName?.trim())
     : [];
   if (azureDeployments.length > 0) {
+    // An Azure key belongs to ONE RESOURCE. Writing it across every deployment
+    // would break the ones on other resources and overwrite keys they already
+    // had — permanently, since the save is authoritative for the global
+    // credential store. So the update is scoped to a single resource: the one
+    // the credential names, or the only one configured.
+    const resources = [...new Set(azureDeployments.map((p) => p.baseUrl?.trim() ?? ''))];
+    const target = cred.baseUrl?.trim()
+      ?? (resources.length === 1 ? resources[0] : undefined);
+    if (target === undefined) {
+      console.log(chalk.yellow('\n  Several Azure resources are configured, and an Azure key belongs to one of them.'));
+      console.log(chalk.gray('  Set AZURE_OPENAI_ENDPOINT to the resource this key is for, then run again:\n'));
+      for (const r of resources) console.log(chalk.gray(`      ${r || '(no endpoint set)'}`));
+      console.log('');
+      return;
+    }
+    const matches = azureDeployments.filter((p) => (p.baseUrl?.trim() ?? '') === target);
+    if (matches.length === 0) {
+      console.log(chalk.yellow(`\n  No configured Azure deployment uses ${target}.`));
+      console.log(chalk.gray('  Nothing was changed.\n'));
+      return;
+    }
     const providers = config.providers.map((p) => (
-      p.type === 'azure' && p.deploymentName?.trim()
+      matches.includes(p)
         ? { ...p, apiKey: cred.secret, credentialSource: cred.sourceTool }
         : p
     ));

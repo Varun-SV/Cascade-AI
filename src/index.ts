@@ -12,7 +12,7 @@ export * from './core/verification/index.js';
 
 export { runCascade, createCascade, streamCascade } from './sdk/index.js';
 
-export { ConfigManager, hasUsableProvider } from './config/index.js';
+export { ConfigManager, hasUsableProvider, applyProviderApiKey } from './config/index.js';
 export { Keystore } from './config/keystore.js';
 export { CascadeIgnore } from './config/ignore.js';
 export { MemoryStore } from './memory/store.js';

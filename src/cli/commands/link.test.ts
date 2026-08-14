@@ -15,6 +15,7 @@ const ENV_KEYS = [
   'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'AZURE_OPENAI_KEY',
   'OPENROUTER_API_KEY', 'GROQ_API_KEY', 'DEEPSEEK_API_KEY',
   'AZURE_OPENAI_ENDPOINT', 'AZURE_OPENAI_DEPLOYMENT', 'AZURE_OPENAI_API_VERSION',
+  'ANTHROPIC_BASE_URL',
   // HOME is redirected per test. linkCommand constructs its own ConfigManager,
   // which reads AND WRITES the machine-global credential store under the real
   // home — so without this the suite both leaked adopted state between tests
@@ -78,6 +79,7 @@ describe('cascade link — adoption', () => {
   it('replaces the previous credential rather than leaving both', async () => {
     await seedConfig([{ type: 'anthropic', apiKey: 'sk-ant-old' }]);
     process.env['ANTHROPIC_AUTH_TOKEN'] = 'gw-token';
+    process.env['ANTHROPIC_BASE_URL'] = 'https://gateway.internal';
 
     const anthropic = (await providersAfterLink('anthropic')).find((p) => p['type'] === 'anthropic');
     expect(anthropic?.['authToken']).toBe('gw-token');
@@ -107,20 +109,17 @@ describe('cascade link — adoption', () => {
     // model id. Replacing by provider type deleted every deployment but one,
     // and the save is authoritative for the global credential store, so they
     // would not come back.
+    // Several deployments on ONE resource — the normal Azure setup, and the
+    // case where a single key legitimately applies to all of them.
     await seedConfig([
-      { type: 'azure', deploymentName: 'gpt-5-prod', baseUrl: 'https://prod.openai.azure.com' },
-      { type: 'azure', deploymentName: 'gpt-5-mini-dev', baseUrl: 'https://dev.openai.azure.com' },
+      { type: 'azure', deploymentName: 'gpt-5-prod', baseUrl: 'https://acme.openai.azure.com' },
+      { type: 'azure', deploymentName: 'gpt-5-mini-dev', baseUrl: 'https://acme.openai.azure.com' },
     ]);
     process.env['AZURE_OPENAI_KEY'] = 'az-key';
-    process.env['AZURE_OPENAI_ENDPOINT'] = 'https://acme.openai.azure.com';
-    process.env['AZURE_OPENAI_DEPLOYMENT'] = 'whatever';
 
     const azure = (await providersAfterLink('azure')).filter((p) => p['type'] === 'azure');
     expect(azure).toHaveLength(2);
     expect(azure.map((p) => p['deploymentName'])).toEqual(['gpt-5-prod', 'gpt-5-mini-dev']);
-    // Each keeps its own endpoint, and each gets the key.
-    expect(azure.map((p) => p['baseUrl']))
-      .toEqual(['https://prod.openai.azure.com', 'https://dev.openai.azure.com']);
     expect(azure.every((p) => p['apiKey'] === 'az-key')).toBe(true);
   });
 
@@ -166,6 +165,7 @@ describe('cascade link — adoption', () => {
     // Classifying it as a subscription token sent the documented command down
     // the risk-gate path and refused to persist it.
     process.env['ANTHROPIC_AUTH_TOKEN'] = 'gw-token';
+    process.env['ANTHROPIC_BASE_URL'] = 'https://gateway.internal';
     await linkCommand('anthropic', { workspace: dir });   // note: no acceptRisk
 
     const cm = new ConfigManager(dir);
@@ -176,6 +176,48 @@ describe('cascade link — adoption', () => {
     // the field is populated whether or not `link` ever ran.
     expect(anthropic?.credentialSource).toContain('ANTHROPIC_AUTH_TOKEN');
     expect(anthropic?.authToken).toBe('gw-token');
+    // The gateway comes with it — a bearer sent anywhere else is a leak.
+    expect(anthropic?.baseUrl).toBe('https://gateway.internal');
+  });
+
+  it('refuses a bearer token when no gateway is known', async () => {
+    process.env['ANTHROPIC_AUTH_TOKEN'] = 'gw-token';
+    await linkCommand('anthropic', { workspace: dir, acceptRisk: true });
+
+    const cm = new ConfigManager(dir);
+    await cm.load();
+    const anthropic = cm.getConfig().providers.find((p) => p.type === 'anthropic');
+    expect(anthropic?.credentialSource).toBeUndefined();
+  });
+
+  it('gives an Azure key only to the resource it belongs to', async () => {
+    // Azure keys are resource-scoped. Writing one across every deployment
+    // breaks the ones on other resources and overwrites keys they already had
+    // — permanently, since the save is authoritative for the global store.
+    await seedConfig([
+      { type: 'azure', deploymentName: 'prod', baseUrl: 'https://one.openai.azure.com', apiKey: 'key-one' },
+      { type: 'azure', deploymentName: 'dev', baseUrl: 'https://two.openai.azure.com', apiKey: 'key-two' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'new-key';
+    process.env['AZURE_OPENAI_ENDPOINT'] = 'https://one.openai.azure.com';
+    process.env['AZURE_OPENAI_DEPLOYMENT'] = 'prod';
+
+    const azure = (await providersAfterLink('azure')).filter((p) => p['type'] === 'azure');
+    expect(azure).toHaveLength(2);
+    expect(azure.find((p) => p['deploymentName'] === 'prod')?.['apiKey']).toBe('new-key');
+    // The other resource is untouched.
+    expect(azure.find((p) => p['deploymentName'] === 'dev')?.['apiKey']).toBe('key-two');
+  });
+
+  it('refuses to guess when several Azure resources are configured', async () => {
+    await seedConfig([
+      { type: 'azure', deploymentName: 'prod', baseUrl: 'https://one.openai.azure.com', apiKey: 'key-one' },
+      { type: 'azure', deploymentName: 'dev', baseUrl: 'https://two.openai.azure.com', apiKey: 'key-two' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'new-key';
+
+    const azure = (await providersAfterLink('azure')).filter((p) => p['type'] === 'azure');
+    expect(azure.map((p) => p['apiKey'])).toEqual(['key-one', 'key-two']);
   });
 
   it('links an Azure key when the WORKSPACE supplies the routing', async () => {

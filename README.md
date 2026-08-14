@@ -351,9 +351,10 @@ cascade link groq                 # adopt a compatible service, with its endpoin
 
 | Source | Stored as | Reusable? |
 |--------|-----------|-----------|
-| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` / `AZURE_OPENAI_KEY` env | API key | ✅ directly |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` env | API key | ✅ directly |
+| `AZURE_OPENAI_KEY` env | API key | ⚠️ needs routing — `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT`, or deployments already configured |
 | `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `MISTRAL_API_KEY`, `TOGETHER_API_KEY`, `FIREWORKS_API_KEY` | API key | ✅ directly — adopted together with the service's endpoint |
-| `ANTHROPIC_AUTH_TOKEN` env | bearer token | ✅ directly — for an LLM gateway or proxy (set `baseUrl` too) |
+| `ANTHROPIC_AUTH_TOKEN` env | bearer token | ⚠️ needs the gateway that issued it — `ANTHROPIC_BASE_URL`, or `baseUrl` already configured |
 | Codex `~/.codex/auth.json` (API-key mode) | API key | ✅ directly |
 | Claude Code `~/.claude/.credentials.json` | subscription OAuth | ❌ detected only — Anthropic prohibits third-party use |
 | Codex ChatGPT login · Gemini CLI · Copilot CLI | vendor OAuth | ❌ detected only — locked to that vendor's backend |
