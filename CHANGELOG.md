@@ -46,9 +46,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handler died on an undefined function, so the UI never confirmed the save.
   This also left `app` failing to typecheck on main.
 
-- **A provider configured with a bearer token showed as unconfigured.** The
-  dashboard counted only `apiKey` when reporting which providers hold a
-  credential — the same reasoning `hasUsableProvider` already applies.
+- **A provider configured with a bearer token showed as unconfigured** in every
+  status surface, not just one. The dashboard route, `cascade doctor` (which
+  reported "Anthropic API key — Missing" as a critical failure, and is exactly
+  where `cascade link` sends you to verify), and the desktop onboarding gate all
+  counted `apiKey` alone. `ConfigManager.getAuthToken()` is the companion to
+  `getApiKey()`, and all three consult both now.
+
+- **Linking a credential wiped the rest of the provider's configuration.**
+  `cascade link` replaced the whole entry, so a configured `baseUrl` was lost —
+  harmless while the Anthropic client ignored it, and not harmless now that it
+  honours it: adopting a gateway token would have discarded the gateway and sent
+  that token to `api.anthropic.com`, the one endpoint where it is not valid.
+  Non-credential fields are preserved, and adopting a credential now clears the
+  other kind rather than leaving a stale key beside a new token.
 
 ### Added
 - **`ANTHROPIC_AUTH_TOKEN` is read from the environment.** It was the one
@@ -67,6 +78,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it belongs to, since a key alone would configure a provider with nowhere to
   send a request. `CLAUDE_CONFIG_DIR` is honoured when locating Claude Code's
   store.
+
+  Those services are linkable by name — `cascade link groq` — and the one you
+  name is the one you get. They share a single provider type, so every one of
+  them is reported rather than just the first, and matching on type alone would
+  have configured whichever key sorted earliest.
 
 ## 0.74.0 - 2026-08-11
 

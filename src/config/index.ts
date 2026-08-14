@@ -252,6 +252,21 @@ export class ConfigManager {
     return configProvider?.apiKey;
   }
 
+  /**
+   * The bearer token configured for a provider, if any.
+   *
+   * Companion to getApiKey(). A provider can be fully configured with only
+   * this — `cascade link` and ANTHROPIC_AUTH_TOKEN both produce it — so any
+   * surface that asks "is this provider set up" has to consult both, or it
+   * reports a working install as unconfigured.
+   */
+  getAuthToken(provider: string): string | undefined {
+    if (provider === 'anthropic' && process.env['ANTHROPIC_AUTH_TOKEN']) {
+      return process.env['ANTHROPIC_AUTH_TOKEN'];
+    }
+    return this.config.providers.find((p) => p.type === provider)?.authToken;
+  }
+
   private async loadConfig(): Promise<CascadeConfig> {
     // Reset on entry, not after the notice is built at the end of load(), so
     // the flag cannot outlive the load that set it even if that load throws

@@ -101,13 +101,19 @@ describe('discoverCredentials', () => {
     expect(found[0]!.sourceTool).toContain('OpenRouter');
   });
 
-  it('adopts only one OpenAI-compatible endpoint, since only one can be configured', async () => {
+  it('reports EVERY OpenAI-compatible key, tagged by service', async () => {
+    // Only one can be configured at a time, but that is a choice to make at
+    // adoption. Reporting one and hiding the rest meant `cascade link groq`
+    // silently configured OpenRouter because its variable sorted earlier.
     const found = await discoverCredentials({
       homeDir: home,
       env: { GROQ_API_KEY: 'g-1', DEEPSEEK_API_KEY: 'd-1' },
     });
-    expect(found.filter((c) => c.provider === 'openai-compatible')).toHaveLength(1);
-    expect(found[0]!.baseUrl).toBe('https://api.groq.com/openai/v1');
+    const compatible = found.filter((c) => c.provider === 'openai-compatible');
+    expect(compatible).toHaveLength(2);
+    expect(compatible.map((c) => c.serviceId)).toEqual(['groq', 'deepseek']);
+    expect(compatible.find((c) => c.serviceId === 'deepseek')!.baseUrl)
+      .toBe('https://api.deepseek.com/v1');
   });
 
   it('detects a Codex API key as directly usable but a ChatGPT OAuth token as not', async () => {

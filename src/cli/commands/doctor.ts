@@ -47,11 +47,16 @@ export async function doctorCommand(): Promise<void> {
   ];
 
   for (const { type, name } of providers) {
+    // A bearer token configures a provider just as completely as a key does.
+    // Checking only getApiKey() reported "Missing" for a provider that runs
+    // fine — and `cascade link` sends the user straight here to verify, so the
+    // first thing they saw after a successful link was a failure.
     const key = cm.getApiKey(type);
+    const token = key ? undefined : cm.getAuthToken(type);
     checks.push({
-      label: `${name} API key`,
-      ok: Boolean(key),
-      detail: key ? 'Set' : 'Missing',
+      label: `${name} credential`,
+      ok: Boolean(key || token),
+      detail: key ? 'API key set' : token ? 'Bearer token set' : 'Missing',
     });
   }
 
@@ -149,7 +154,7 @@ export async function doctorCommand(): Promise<void> {
   if (failures.length === 0) {
     console.log(chalk.green('  All checks passed!\n'));
   } else {
-    const critical = failures.filter((c) => c.label.includes('Node') || c.label.includes('API key'));
+    const critical = failures.filter((c) => c.label.includes('Node') || c.label.includes('credential'));
     if (critical.length) {
       console.log(chalk.yellow(`  ${critical.length} issue(s) need attention.\n`));
     } else {

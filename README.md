@@ -344,19 +344,21 @@ If you already use **Claude Code**, **OpenAI Codex**, **Gemini CLI**, or **GitHu
 ```bash
 cascade link                      # list detected credentials
 cascade link anthropic            # adopt an API key for a provider
-cascade link anthropic --accept-risk   # adopt a Claude Code subscription token
+cascade link groq                 # adopt a compatible service, with its endpoint
 ```
 
 `cascade doctor` also reports what's linkable. How each credential is treated:
 
 | Source | Stored as | Reusable? |
 |--------|-----------|-----------|
-| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` env | API key | ✅ directly |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` / `AZURE_OPENAI_KEY` env | API key | ✅ directly |
+| `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `MISTRAL_API_KEY`, `TOGETHER_API_KEY`, `FIREWORKS_API_KEY` | API key | ✅ directly — adopted together with the service's endpoint |
+| `ANTHROPIC_AUTH_TOKEN` env | bearer token | ✅ directly — for an LLM gateway or proxy (set `baseUrl` too) |
 | Codex `~/.codex/auth.json` (API-key mode) | API key | ✅ directly |
-| Claude Code `~/.claude/.credentials.json` | OAuth token | ⚠️ as an Anthropic bearer token (needs `--accept-risk`) |
+| Claude Code `~/.claude/.credentials.json` | subscription OAuth | ❌ detected only — Anthropic prohibits third-party use |
 | Codex ChatGPT login · Gemini CLI · Copilot CLI | vendor OAuth | ❌ detected only — locked to that vendor's backend |
 
-> ⚠️ **Terms of service:** reusing a *subscription* OAuth token (Claude Code, ChatGPT, Copilot) outside its own CLI may violate the vendor's terms and can get your account flagged. Cascade only ever reads **your own** local files, never adopts an OAuth token without `--accept-risk`, and never transmits a credential anywhere except to that credential's own provider. Use API keys where you can.
+> ⚠️ **Subscription tokens are not adoptable.** Anthropic [does not permit](https://code.claude.com/docs/en/legal-and-compliance) third-party developers to route requests through Claude Free, Pro or Max credentials, and refuses them server-side; the Codex, Gemini CLI and Copilot tokens each target their own vendor's backend rather than the public API. Cascade detects them so you know what is on the machine and why it cannot use them, and declines to configure a provider that would fail on its first call. It only ever reads **your own** local files, and never transmits a credential anywhere except to that credential's own provider.
 
 ### CASCADE.md
 

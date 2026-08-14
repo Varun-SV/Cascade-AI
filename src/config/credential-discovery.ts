@@ -47,6 +47,12 @@ export interface DiscoveredCredential {
    * this would configure a provider with nowhere to send a request.
    */
   baseUrl?: string;
+  /**
+   * Which OpenAI-compatible service this is ("openrouter", "groq", …). They
+   * all map to the same provider type, so this is what lets `cascade link groq`
+   * pick the Groq key rather than whichever one happened to be found first.
+   */
+  serviceId?: string;
   /** ToS / gray-area note shown before adoption. */
   warning?: string;
   /** File the credential came from (path only — never the secret). */
@@ -92,17 +98,21 @@ const ANTHROPIC_OAUTH_WARNING =
  * key. Each needs its endpoint adopted alongside the secret, or the result is a
  * provider configured with nowhere to send a request.
  *
- * Only one openai-compatible provider can be configured at a time, so the first
- * match in this order wins.
+ * ALL matches are reported, not just the first. Only one openai-compatible
+ * provider can be configured at a time, but that is a choice to make at
+ * adoption — reporting one key and hiding the others meant `cascade link groq`
+ * would silently configure OpenRouter because its variable sorted earlier.
  */
-const OPENAI_COMPATIBLE_ENV: Array<{ env: string; label: string; baseUrl: string }> = [
-  { env: 'OPENROUTER_API_KEY', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1' },
-  { env: 'GROQ_API_KEY', label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1' },
-  { env: 'DEEPSEEK_API_KEY', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1' },
-  { env: 'XAI_API_KEY', label: 'xAI', baseUrl: 'https://api.x.ai/v1' },
-  { env: 'MISTRAL_API_KEY', label: 'Mistral', baseUrl: 'https://api.mistral.ai/v1' },
-  { env: 'TOGETHER_API_KEY', label: 'Together AI', baseUrl: 'https://api.together.xyz/v1' },
-  { env: 'FIREWORKS_API_KEY', label: 'Fireworks AI', baseUrl: 'https://api.fireworks.ai/inference/v1' },
+export const OPENAI_COMPATIBLE_ENV: Array<{
+  id: string; env: string; label: string; baseUrl: string;
+}> = [
+  { id: 'openrouter', env: 'OPENROUTER_API_KEY', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1' },
+  { id: 'groq', env: 'GROQ_API_KEY', label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1' },
+  { id: 'deepseek', env: 'DEEPSEEK_API_KEY', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1' },
+  { id: 'xai', env: 'XAI_API_KEY', label: 'xAI', baseUrl: 'https://api.x.ai/v1' },
+  { id: 'mistral', env: 'MISTRAL_API_KEY', label: 'Mistral', baseUrl: 'https://api.mistral.ai/v1' },
+  { id: 'together', env: 'TOGETHER_API_KEY', label: 'Together AI', baseUrl: 'https://api.together.xyz/v1' },
+  { id: 'fireworks', env: 'FIREWORKS_API_KEY', label: 'Fireworks AI', baseUrl: 'https://api.fireworks.ai/inference/v1' },
 ];
 
 async function readJson(file: string): Promise<Record<string, unknown> | null> {
@@ -154,7 +164,7 @@ function fromEnv(env: NodeJS.ProcessEnv): DiscoveredCredential[] {
   // Everything that speaks the OpenAI wire format at its own endpoint. Keys for
   // these are already sitting in most developers' shells, and asking for one
   // again is the friction `cascade link` exists to remove.
-  for (const { env: name, label, baseUrl } of OPENAI_COMPATIBLE_ENV) {
+  for (const { id, env: name, label, baseUrl } of OPENAI_COMPATIBLE_ENV) {
     const secret = str(env[name]);
     if (!secret) continue;
     out.push({
@@ -164,8 +174,8 @@ function fromEnv(env: NodeJS.ProcessEnv): DiscoveredCredential[] {
       secret,
       directlyUsable: true,
       baseUrl,
+      serviceId: id,
     });
-    break; // only one openai-compatible provider can be configured at a time
   }
   return out;
 }

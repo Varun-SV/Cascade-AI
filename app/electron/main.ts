@@ -402,7 +402,13 @@ function registerIPC(): void {
       let apiKey = '';
       const { type } = mapProvider(provider);
       if (type && cascadeConfig?.providers) {
-        apiKey = cascadeConfig.providers.find((p: { type: string; apiKey?: string }) => p.type === type)?.apiKey ?? '';
+        // `authToken` counts: a provider linked with a bearer token is
+        // configured, and reporting an empty key here reopened the setup
+        // wizard over a working install.
+        const entry = cascadeConfig.providers.find(
+          (p: { type: string; apiKey?: string; authToken?: string }) => p.type === type,
+        );
+        apiKey = entry?.apiKey ?? entry?.authToken ?? '';
       }
       return { provider, apiKey, workspace, onboardingDone, migrationNotice };
     } catch {

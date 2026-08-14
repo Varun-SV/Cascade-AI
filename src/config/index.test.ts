@@ -300,3 +300,33 @@ describe('ANTHROPIC_AUTH_TOKEN — the gateway credential Anthropic documents', 
     expect(anthropic?.authToken).toBeUndefined();
   });
 });
+
+describe('getAuthToken — the companion to getApiKey', () => {
+  const saved = process.env['ANTHROPIC_AUTH_TOKEN'];
+  let dir: string;
+
+  beforeEach(async () => { dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-gettoken-')); });
+  afterEach(async () => {
+    if (saved === undefined) delete process.env['ANTHROPIC_AUTH_TOKEN'];
+    else process.env['ANTHROPIC_AUTH_TOKEN'] = saved;
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('returns a bearer token configured in the environment', async () => {
+    // Every status surface — `cascade doctor`, the dashboard, the desktop
+    // onboarding gate — asks "is this provider set up". Answering from
+    // getApiKey() alone called a bearer-only install unconfigured, and
+    // `cascade link` sends the user straight to doctor to verify.
+    process.env['ANTHROPIC_AUTH_TOKEN'] = 'gw-token';
+    const cm = new ConfigManager(dir);
+    await cm.load();
+    expect(cm.getAuthToken('anthropic')).toBe('gw-token');
+  });
+
+  it('returns nothing for a provider that has neither', async () => {
+    delete process.env['ANTHROPIC_AUTH_TOKEN'];
+    const cm = new ConfigManager(dir);
+    await cm.load();
+    expect(cm.getAuthToken('openai')).toBeUndefined();
+  });
+});
