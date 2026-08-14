@@ -82,6 +82,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   UI is indistinguishable from the save having failed. All three now go through
   one `applyProviderApiKey()`.
 
+- **The desktop no longer hands a credential to the renderer.** `getConfig`
+  returned the provider's API key across the IPC bridge, where any renderer
+  script or DevTools session could read it, and the renderer used only
+  `onboardingDone`, `migrationNotice` and `workspace`. It returns
+  `hasCredential` now — the fact, not the secret.
+
+- **`cascade link` no longer reports success when it changed nothing.** Azure
+  adoption can decline, explaining why, and "✓ Linked" was printed over the
+  explanation along with an invitation to verify it.
+
+- **A configured gateway satisfies the bearer's routing requirement.** The
+  warning tells the user to set `baseUrl` on the anthropic provider; the gate
+  then checked the workspace for Azure only and refused to honour its own
+  advice.
+
 - **A bearer token could be adopted with no gateway to send it to.** It is
   issued BY a gateway and valid only AT it, so configuring one without an
   endpoint pointed the client at `api.anthropic.com` — the same credential leak

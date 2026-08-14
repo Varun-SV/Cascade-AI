@@ -180,6 +180,37 @@ describe('cascade link — adoption', () => {
     expect(anthropic?.baseUrl).toBe('https://gateway.internal');
   });
 
+  it('accepts a bearer token when the WORKSPACE names the gateway', async () => {
+    // Discovery sees env vars only, so it marks an endpoint-less bearer
+    // unusable — but its own warning tells the user to configure `baseUrl`,
+    // which this path has to then honour.
+    await seedConfig([{ type: 'anthropic', baseUrl: 'https://gateway.internal' }]);
+    process.env['ANTHROPIC_AUTH_TOKEN'] = 'gw-token';
+
+    const anthropic = (await providersAfterLink('anthropic')).find((p) => p['type'] === 'anthropic');
+    expect(anthropic?.['authToken']).toBe('gw-token');
+    expect(anthropic?.['baseUrl']).toBe('https://gateway.internal');
+    expect(anthropic?.['credentialSource']).toContain('ANTHROPIC_AUTH_TOKEN');
+  });
+
+  it('does not claim success when Azure adoption declines', async () => {
+    // Two resources, nothing to choose between them: adoption explains and
+    // changes nothing, so the caller must not print "✓ Linked" over that.
+    await seedConfig([
+      { type: 'azure', deploymentName: 'prod', baseUrl: 'https://one.openai.azure.com', apiKey: 'key-one' },
+      { type: 'azure', deploymentName: 'dev', baseUrl: 'https://two.openai.azure.com', apiKey: 'key-two' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'new-key';
+
+    const said: string[] = [];
+    (console.log as unknown as { mockImplementation: (f: (m?: unknown) => void) => void })
+      .mockImplementation((m?: unknown) => { said.push(String(m ?? '')); });
+    await linkCommand('azure', { workspace: dir, acceptRisk: true });
+
+    expect(said.join('\n')).not.toMatch(/✓ Linked/);
+    expect(said.join('\n')).toMatch(/Several Azure resources/);
+  });
+
   it('refuses a bearer token when no gateway is known', async () => {
     process.env['ANTHROPIC_AUTH_TOKEN'] = 'gw-token';
     await linkCommand('anthropic', { workspace: dir, acceptRisk: true });

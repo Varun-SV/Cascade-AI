@@ -399,20 +399,22 @@ function registerIPC(): void {
       // ConfigManager only logs the migration to a console nobody reads, so
       // the renderer has to be told why the provider vanished.
       const migrationNotice = configManager?.takeRetiredNotice?.() ?? undefined;
-      let apiKey = '';
+      // Whether a credential exists — never the credential. The renderer reads
+      // only onboardingDone, migrationNotice and workspace from this; the secret
+      // was passed across the bridge for nothing, where any renderer script or
+      // DevTools session could read it. Widening it to cover `authToken` would
+      // have put a bearer token on that same wire, in a change whose whole
+      // subject is not leaking them.
       const { type } = mapProvider(provider);
-      if (type && cascadeConfig?.providers) {
-        // `authToken` counts: a provider linked with a bearer token is
-        // configured, and reporting an empty key here reopened the setup
-        // wizard over a working install.
-        const entry = cascadeConfig.providers.find(
+      const entry = type && cascadeConfig?.providers
+        ? cascadeConfig.providers.find(
           (p: { type: string; apiKey?: string; authToken?: string }) => p.type === type,
-        );
-        apiKey = entry?.apiKey ?? entry?.authToken ?? '';
-      }
-      return { provider, apiKey, workspace, onboardingDone, migrationNotice };
+        )
+        : undefined;
+      const hasCredential = Boolean(entry?.apiKey || entry?.authToken);
+      return { provider, hasCredential, workspace, onboardingDone, migrationNotice };
     } catch {
-      return { provider: '', apiKey: '', workspace: '', onboardingDone: false };
+      return { provider: '', hasCredential: false, workspace: '', onboardingDone: false };
     }
   });
 

@@ -63,7 +63,8 @@ contextBridge.exposeInMainWorld('cascade', {
   // Config: read/write provider key + workspace for onboarding
   getConfig: () => ipcRenderer.invoke('cascade:getConfig') as Promise<{
     provider: string;
-    apiKey: string;
+    /** Whether a credential is configured — deliberately not the credential. */
+    hasCredential: boolean;
     workspace: string;
     onboardingDone: boolean;
   }>,

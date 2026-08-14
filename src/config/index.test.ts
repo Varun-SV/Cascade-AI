@@ -365,3 +365,44 @@ describe('applyProviderApiKey — a new key must not be shadowed', () => {
     expect(providers[1]!.apiKey).toBe('new');
   });
 });
+
+describe('ANTHROPIC_AUTH_TOKEN needs the gateway that issued it', () => {
+  const savedToken = process.env['ANTHROPIC_AUTH_TOKEN'];
+  const savedBase = process.env['ANTHROPIC_BASE_URL'];
+  const savedKey = process.env['ANTHROPIC_API_KEY'];
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-bearer-'));
+    delete process.env['ANTHROPIC_API_KEY'];
+    delete process.env['ANTHROPIC_BASE_URL'];
+  });
+  afterEach(async () => {
+    for (const [k, v] of [
+      ['ANTHROPIC_AUTH_TOKEN', savedToken], ['ANTHROPIC_BASE_URL', savedBase],
+      ['ANTHROPIC_API_KEY', savedKey],
+    ] as const) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('does not configure a bearer-only provider with nowhere to send it', async () => {
+    // Without a gateway the client defaults to api.anthropic.com — sending the
+    // token to a host that should never see it — while hasUsableProvider()
+    // accepts the entry and skips onboarding.
+    process.env['ANTHROPIC_AUTH_TOKEN'] = 'gw-token';
+    const cm = new ConfigManager(dir);
+    await cm.load();
+    expect(cm.getConfig().providers.find((p) => p.type === 'anthropic')).toBeUndefined();
+  });
+
+  it('configures it, with the gateway, when ANTHROPIC_BASE_URL is set', async () => {
+    process.env['ANTHROPIC_AUTH_TOKEN'] = 'gw-token';
+    process.env['ANTHROPIC_BASE_URL'] = 'https://gateway.internal';
+    const cm = new ConfigManager(dir);
+    await cm.load();
+    const anthropic = cm.getConfig().providers.find((p) => p.type === 'anthropic');
+    expect(anthropic).toMatchObject({ authToken: 'gw-token', baseUrl: 'https://gateway.internal' });
+  });
+});

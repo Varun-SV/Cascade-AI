@@ -410,10 +410,20 @@ export class ConfigManager {
     const authToken = process.env['ANTHROPIC_AUTH_TOKEN'];
     if (authToken) {
       const existing = this.config.providers.find((p) => p.type === 'anthropic');
-      if (!existing && wasEmpty) {
-        this.config.providers.push({ type: 'anthropic', authToken });
-      } else if (existing && !existing.apiKey && !existing.authToken) {
-        existing.authToken = authToken;
+      // A bearer is valid only at the gateway that issued it, so it is never
+      // configured without one — otherwise the client defaults to
+      // api.anthropic.com and sends the token to a host that should not see it,
+      // while hasUsableProvider() accepts the entry and skips onboarding. Same
+      // requirement credential discovery applies; it was missing here, which is
+      // the same gap Azure had one layer down.
+      const gateway = process.env['ANTHROPIC_BASE_URL'] ?? existing?.baseUrl;
+      if (gateway) {
+        if (!existing && wasEmpty) {
+          this.config.providers.push({ type: 'anthropic', authToken, baseUrl: gateway });
+        } else if (existing && !existing.apiKey && !existing.authToken) {
+          existing.authToken = authToken;
+          existing.baseUrl ??= gateway;
+        }
       }
     }
 

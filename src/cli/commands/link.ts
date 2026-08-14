@@ -74,9 +74,15 @@ export async function linkCommand(target: string | undefined, options: LinkOptio
   // routing the config already had.
   const cm = new ConfigManager(options.workspace ?? process.cwd());
   await cm.load();
+  // Routing can live in the workspace rather than the environment. Discovery
+  // sees env vars only, so it cannot know that — and the bearer warning it
+  // writes says "or configure `baseUrl` for the anthropic provider", advice
+  // this gate then refused to honour.
+  const configured = cm.getConfig().providers;
   const routedByConfig = provider === 'azure'
-    && cm.getConfig().providers.some((p) => p.type === 'azure'
-      && p.deploymentName?.trim() && p.baseUrl?.trim());
+    ? configured.some((p) => p.type === 'azure' && p.deploymentName?.trim() && p.baseUrl?.trim())
+    : chosen.kind === 'bearer'
+      && configured.some((p) => p.type === provider && p.baseUrl?.trim());
 
   if (!chosen.directlyUsable && !routedByConfig) {
     console.log(chalk.yellow(`\n  Found a ${chosen.sourceTool} credential, but it can't be used against the standard ${provider} API.`));
@@ -95,7 +101,12 @@ export async function linkCommand(target: string | undefined, options: LinkOptio
     return;
   }
 
-  await adoptCredential(chosen, cm);
+  // Adoption can decline — several Azure resources with nothing to choose
+  // between them, for one — and it explains why when it does. Printing
+  // "✓ Linked" and "run cascade doctor to verify" over that told the user the
+  // opposite of what had just happened.
+  const adopted = await adoptCredential(chosen, cm);
+  if (!adopted) return;
   console.log(chalk.green(`\n  ✓ Linked ${provider} using your ${chosen.sourceTool} credential (${maskSecret(chosen.secret)}).`));
   if (chosen.kind === 'bearer') {
     console.log(chalk.gray('  Adopted as a bearer token — set `baseUrl` to the gateway that issued it.'));
@@ -145,7 +156,7 @@ function normalizeProvider(target: string): { provider: ProviderType; serviceId?
   return null;
 }
 
-async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): Promise<void> {
+async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): Promise<boolean> {
   const config = cm.getConfig();
 
   // Azure is configured one entry PER DEPLOYMENT — `init()` maps each to its
@@ -172,13 +183,13 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
       console.log(chalk.gray('  Set AZURE_OPENAI_ENDPOINT to the resource this key is for, then run again:\n'));
       for (const r of resources) console.log(chalk.gray(`      ${r || '(no endpoint set)'}`));
       console.log('');
-      return;
+      return false;
     }
     const matches = azureDeployments.filter((p) => (p.baseUrl?.trim() ?? '') === target);
     if (matches.length === 0) {
       console.log(chalk.yellow(`\n  No configured Azure deployment uses ${target}.`));
       console.log(chalk.gray('  Nothing was changed.\n'));
-      return;
+      return false;
     }
     const providers = config.providers.map((p) => (
       matches.includes(p)
@@ -186,7 +197,7 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
         : p
     ));
     await cm.updateConfig({ providers });
-    return;
+    return true;
   }
 
   // Build ON TOP of whatever is already configured for this provider. The
@@ -234,4 +245,5 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
   const providers = config.providers.filter((p) => p.type !== cred.provider);
   providers.push(next);
   await cm.updateConfig({ providers });
+  return true;
 }
