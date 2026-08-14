@@ -158,3 +158,30 @@ describe('AnthropicProvider.listModels — version path', () => {
       .toBe('https://gateway.internal/anthropic/v1/models');
   });
 });
+
+describe('AnthropicProvider — an environment gateway reaches the API-key path', () => {
+  it('is carried into the provider config, not just the bearer path', async () => {
+    // ANTHROPIC_BASE_URL is the gateway for whichever Anthropic credential is
+    // in play. Applying it only to bearers meant an API key exported beside a
+    // gateway produced an entry with no endpoint — and discovery then sent that
+    // gateway's key to the public host.
+    const { ConfigManager } = await import('../config/index.js');
+    const fs = await import('node:fs/promises');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-anthropic-gw-'));
+    try {
+      process.env['ANTHROPIC_API_KEY'] = 'gateway-key';
+      process.env['ANTHROPIC_BASE_URL'] = 'https://gateway.internal';
+      const cm = new ConfigManager(dir, path.join(dir, 'global'));
+      await cm.load();
+      const anthropic = cm.getConfig().providers.find((p) => p.type === 'anthropic');
+      expect(anthropic).toMatchObject({
+        apiKey: 'gateway-key',
+        baseUrl: 'https://gateway.internal',
+      });
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});

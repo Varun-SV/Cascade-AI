@@ -282,11 +282,18 @@ describe('ANTHROPIC_AUTH_TOKEN — the gateway credential Anthropic documents', 
     // Every other documented Anthropic credential was picked up from the
     // environment except this one, so a user following Anthropic's own gateway
     // instructions got "No providers configured".
+    //
+    // The gateway is set EXPLICITLY. It is required now, and this test passed
+    // for a while only because ANTHROPIC_BASE_URL happened to be exported in
+    // the development container — reading a value it never set, and failing the
+    // moment CI ran it without one.
     process.env['ANTHROPIC_AUTH_TOKEN'] = 'gw-token';
+    process.env['ANTHROPIC_BASE_URL'] = 'https://gateway.internal';
     const cm = new ConfigManager(dir);
     await cm.load();
     const anthropic = cm.getConfig().providers.find((p) => p.type === 'anthropic');
     expect(anthropic?.authToken).toBe('gw-token');
+    expect(anthropic?.baseUrl).toBe('https://gateway.internal');
     expect(hasUsableProvider(cm.getConfig().providers)).toBe(true);
   });
 
@@ -302,15 +309,11 @@ describe('ANTHROPIC_AUTH_TOKEN — the gateway credential Anthropic documents', 
 });
 
 describe('getAuthToken — the companion to getApiKey', () => {
-  const saved = process.env['ANTHROPIC_AUTH_TOKEN'];
   let dir: string;
-
+  // Provider variables are cleared before every test by vitest.setup.ts, so
+  // each case sets exactly what it means to exercise.
   beforeEach(async () => { dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-gettoken-')); });
-  afterEach(async () => {
-    if (saved === undefined) delete process.env['ANTHROPIC_AUTH_TOKEN'];
-    else process.env['ANTHROPIC_AUTH_TOKEN'] = saved;
-    await fs.rm(dir, { recursive: true, force: true });
-  });
+  afterEach(async () => { await fs.rm(dir, { recursive: true, force: true }); });
 
   it('returns a bearer token configured in the environment', async () => {
     // Every status surface — `cascade doctor`, the dashboard, the desktop
@@ -318,9 +321,21 @@ describe('getAuthToken — the companion to getApiKey', () => {
     // getApiKey() alone called a bearer-only install unconfigured, and
     // `cascade link` sends the user straight to doctor to verify.
     process.env['ANTHROPIC_AUTH_TOKEN'] = 'gw-token';
+    process.env['ANTHROPIC_BASE_URL'] = 'https://gateway.internal';
     const cm = new ConfigManager(dir);
     await cm.load();
     expect(cm.getAuthToken('anthropic')).toBe('gw-token');
+  });
+
+  it('reports nothing for a bearer the config refused to configure', async () => {
+    // injectEnvKeys() will not build a provider from a gateway-less bearer, so
+    // reading the variable directly told `cascade doctor` a credential was set
+    // that the loaded config does not hold and could not use.
+    process.env['ANTHROPIC_AUTH_TOKEN'] = 'gw-token';
+    delete process.env['ANTHROPIC_BASE_URL'];
+    const cm = new ConfigManager(dir);
+    await cm.load();
+    expect(cm.getAuthToken('anthropic')).toBeUndefined();
   });
 
   it('returns nothing for a provider that has neither', async () => {

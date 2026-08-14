@@ -206,3 +206,21 @@ describe('maskSecret', () => {
     expect(maskSecret('short')).toBe('••••');
   });
 });
+
+describe('Claude Code file holding BOTH credentials', () => {
+  it('offers the usable API key, not just the token that cannot be adopted', async () => {
+    // Switching authentication modes leaves the old value behind. Returning
+    // only the subscription token meant `cascade link anthropic` refused —
+    // with a perfectly good key sitting in the file it had just read.
+    await write('.claude/.credentials.json', {
+      claudeAiOauth: { accessToken: 'sk-ant-oat01-dead' },
+      apiKey: 'sk-ant-real',
+    });
+    const found = await discoverCredentials({ homeDir: home, env: {} });
+    const usable = found.filter((c) => c.directlyUsable);
+    expect(usable).toHaveLength(1);
+    expect(usable[0]).toMatchObject({ kind: 'api-key', secret: 'sk-ant-real' });
+    // The token is still reported, so the user knows it is there.
+    expect(found.some((c) => c.kind === 'oauth' && c.secret === 'sk-ant-oat01-dead')).toBe(true);
+  });
+});

@@ -253,13 +253,24 @@ async function fromClaudeCode(home: string, env: NodeJS.ProcessEnv): Promise<Dis
   const data = await readJson(file);
   if (!data) return [];
 
+  const found: DiscoveredCredential[] = [];
+
+  // The API key FIRST. A file can hold both — switching authentication modes
+  // leaves the old one behind — and returning the subscription token alone
+  // meant `cascade link anthropic` refused, with a perfectly good key sitting
+  // in the same file it had just read.
+  const apiKey = str(data['apiKey']) ?? str(data['anthropicApiKey']);
+  if (apiKey) {
+    found.push({ provider: 'anthropic', sourceTool: 'Claude Code', kind: 'api-key', secret: apiKey, directlyUsable: true, sourcePath: file });
+  }
+
   // Subscription login (sk-ant-oat...). Surfaced so the user knows it is here,
   // never adopted: Anthropic prohibits third-party use of it and refuses it at
   // the API. See ANTHROPIC_OAUTH_WARNING.
   const oauth = data['claudeAiOauth'] as Record<string, unknown> | undefined;
   const oauthToken = str(oauth?.['accessToken']);
   if (oauthToken) {
-    return [{
+    found.push({
       provider: 'anthropic',
       sourceTool: 'Claude Code',
       kind: 'oauth',
@@ -267,15 +278,9 @@ async function fromClaudeCode(home: string, env: NodeJS.ProcessEnv): Promise<Dis
       directlyUsable: false,
       warning: ANTHROPIC_OAUTH_WARNING,
       sourcePath: file,
-    }];
+    });
   }
-
-  // Some setups store a raw API key.
-  const apiKey = str(data['apiKey']) ?? str(data['anthropicApiKey']);
-  if (apiKey) {
-    return [{ provider: 'anthropic', sourceTool: 'Claude Code', kind: 'api-key', secret: apiKey, directlyUsable: true, sourcePath: file }];
-  }
-  return [];
+  return found;
 }
 
 /** OpenAI Codex CLI: ~/.codex/auth.json → { OPENAI_API_KEY } (usable) or ChatGPT { tokens } (locked). */

@@ -82,6 +82,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   UI is indistinguishable from the save having failed. All three now go through
   one `applyProviderApiKey()`.
 
+- **A Claude subscription token adopted by an earlier release is now removed on
+  load.** `cascade link anthropic --accept-risk` used to configure one, and this
+  release cannot use it — but nothing was taking it out, so those installs kept
+  a dead credential, kept skipping onboarding because something counted as
+  configured, and had every request refused. It is stripped from the workspace
+  config and the machine-global store, with a notice explaining why and what to
+  set instead, reusing the migration path built for retired providers.
+  Identification is narrow — the `sk-ant-oat` prefix, or the `credentialSource`
+  `cascade link` stamped on it — so a gateway bearer is untouched, and the entry
+  survives (minus the token) when it still holds a key or an endpoint.
+
+- **`ANTHROPIC_BASE_URL` now applies to an API key too**, not only a bearer. A
+  key exported beside a gateway produced a provider with no endpoint, and model
+  discovery then sent that gateway's key to the public host.
+
+- **A Claude Code file holding both a token and an API key offers the key.**
+  Switching authentication modes leaves the old value behind, and returning only
+  the non-adoptable token made `cascade link anthropic` refuse with a usable key
+  in the same file it had just read.
+
 - **The desktop no longer hands a credential to the renderer.** `getConfig`
   returned the provider's API key across the IPC bridge, where any renderer
   script or DevTools session could read it, and the renderer used only

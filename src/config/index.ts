@@ -21,6 +21,7 @@ import {
   stripRetiredProviders,
   type RetiredProviderCleanup,
 } from './retired-providers.js';
+import { stripRevokedCredentials, REVOKED_CREDENTIAL_REASON } from './revoked-credentials.js';
 import { disambiguateMcpServerNames, type McpServerRename } from '../tools/tool-name.js';
 import {
   CASCADE_CONFIG_FILE,
@@ -93,6 +94,12 @@ export class ConfigManager {
    */
   private retiredCleanup?: RetiredProviderCleanup;
   /**
+   * How many dead subscription credentials THIS load removed. Per-load like
+   * `retiredCleanup`, for the same reason: a second load() on the same instance
+   * must not re-announce a migration that already happened.
+   */
+  private revokedCredentials = 0;
+  /**
    * Human-readable migration notice held for a UI to display. `console.warn`
    * is not sufficient: the REPL clears the TTY immediately after load(), and
    * the desktop emits from the main process where nothing is rendered.
@@ -156,8 +163,15 @@ export class ConfigManager {
     // in ~/.cascade-ai/credentials.json would otherwise be reinstated in
     // memory moments after being cleaned off disk — and would come back on
     // every load, in every workspace.
-    const globalCreds = filterRetiredCredentials(loadGlobalCredentials(this.globalDir));
-    if (globalCreds.removed.length > 0) {
+    // Both stores get the revoked-credential pass as well: a Claude Code
+    // subscription token adopted by an earlier release is dead — Anthropic
+    // refuses it — but the provider TYPE is still supported, so the retirement
+    // filter above does not see it. Left in place it counts as a credential,
+    // which keeps onboarding closed over an install that cannot make a request.
+    const globalRevoked = stripRevokedCredentials(loadGlobalCredentials(this.globalDir));
+    const globalCreds = filterRetiredCredentials(globalRevoked.kept);
+    if (globalRevoked.removed > 0) this.revokedCredentials += globalRevoked.removed;
+    if (globalCreds.removed.length > 0 || globalRevoked.removed > 0) {
       // Best-effort, like save()'s own global-store sync: an unwritable home
       // must not abort startup when the in-memory list is already clean.
       try {
@@ -172,6 +186,17 @@ export class ConfigManager {
     }
     await this.injectEnvKeys();
     this.config.providers = mergeGlobalCredentials(this.config.providers, globalCreds.kept);
+    // No post-merge pass: the workspace file was cleaned from its raw form in
+    // loadConfig() and the global store just above, so both inputs to this
+    // merge are already clean. Stripping again here would work, but it would
+    // hide a failure to persist either one behind a correct in-memory result.
+    if (this.revokedCredentials > 0) {
+      const notice = `Cascade config migration: ${REVOKED_CREDENTIAL_REASON}`;
+      this.pendingRetiredNotice = this.pendingRetiredNotice
+        ? `${this.pendingRetiredNotice} ${notice}`
+        : notice;
+      console.warn(notice);
+    }
 
     // Purge AFTER both stores have been cleaned, not at store construction:
     // a retired provider that existed ONLY in ~/.cascade-ai/credentials.json
@@ -286,9 +311,11 @@ export class ConfigManager {
    * reports a working install as unconfigured.
    */
   getAuthToken(provider: string): string | undefined {
-    if (provider === 'anthropic' && process.env['ANTHROPIC_AUTH_TOKEN']) {
-      return process.env['ANTHROPIC_AUTH_TOKEN'];
-    }
+    // The CONFIGURED entry, not the raw environment. injectEnvKeys() refuses to
+    // build an Anthropic provider from a bearer with no gateway, so reading the
+    // variable directly reported "Bearer token set" for a credential the loaded
+    // config does not hold and cannot use — with `cascade doctor`, which sends
+    // people here to verify a link, as the consumer.
     return this.config.providers.find((p) => p.type === provider)?.authToken;
   }
 
@@ -299,6 +326,8 @@ export class ConfigManager {
     // its only other writer — and because assigning `undefined` in load()
     // narrows the property to `never` for the reads further down it.
     this.retiredCleanup = undefined;
+    // Same per-load contract, same reason.
+    this.revokedCredentials = 0;
     const configPath = path.join(this.workspacePath, CASCADE_CONFIG_FILE);
     try {
       const raw = await fs.readFile(configPath, 'utf-8');
@@ -310,8 +339,21 @@ export class ConfigManager {
       // `retiredCleanup` tells load() to persist the cleaned version so the
       // next process does not repeat the work.
       const cleanup = stripRetiredProviders(parsed);
-      if (didCleanupChangeAnything(cleanup)) {
-        this.retiredCleanup = cleanup;
+      // Dead subscription tokens go in the same pass, and for the same reason:
+      // the file has to be rewritten or the migration repeats — and warns —
+      // on every launch forever.
+      const rawProviders = (parsed as { providers?: unknown })?.providers;
+      let revokedHere = 0;
+      if (Array.isArray(rawProviders)) {
+        const pass = stripRevokedCredentials(rawProviders as Array<{ type: string }>);
+        revokedHere = pass.removed;
+        if (revokedHere > 0) {
+          (parsed as { providers?: unknown }).providers = pass.kept;
+          this.revokedCredentials += revokedHere;
+        }
+      }
+      if (didCleanupChangeAnything(cleanup) || revokedHere > 0) {
+        if (didCleanupChangeAnything(cleanup)) this.retiredCleanup = cleanup;
         // Persist HERE, from the raw parsed file, not via save() at the end of
         // load(). By then `this.config` has been enriched by injectEnvKeys()
         // and mergeGlobalCredentials(), and save() serializes the whole object
@@ -327,7 +369,7 @@ export class ConfigManager {
         try {
           await fs.writeFile(configPath, JSON.stringify(parsed, null, 2), 'utf-8');
         } catch (err) {
-          console.warn(`Could not persist the retired-provider migration: ${err instanceof Error ? err.message : String(err)}`);
+          console.warn(`Could not persist the config migration: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
       return validateConfig(parsed);
@@ -361,7 +403,12 @@ export class ConfigManager {
     // any earlier saw an unset flag, called it a fresh install, and appended
     // the keyless Ollama entry this branch exists to prevent.
     const wasEmpty = this.config.providers.length === 0;
-    const emptiedByRetirement = wasEmpty && !!this.retiredCleanup;
+    // A list emptied by EITHER migration is not a fresh install. Without the
+    // revoked-credential half, removing a dead subscription token left an empty
+    // list, the keyless Ollama fallback below filled it, hasUsableProvider()
+    // said yes, and onboarding stayed shut — which is the exact state the
+    // migration exists to break out of.
+    const emptiedByRetirement = wasEmpty && (!!this.retiredCleanup || this.revokedCredentials > 0);
 
     const envProviders: Array<{ env: string; type: CascadeConfig['providers'][0]['type'] }> = [
       { env: 'ANTHROPIC_API_KEY', type: 'anthropic' },
@@ -375,6 +422,12 @@ export class ConfigManager {
       if (!key) continue;
       const existing = this.config.providers.find((p) => p.type === type);
 
+      // ANTHROPIC_BASE_URL is the gateway for whichever Anthropic credential
+      // is in play, key or bearer. Carrying it only on the bearer path meant an
+      // API key exported alongside a gateway produced an entry with no
+      // endpoint — and model discovery then sent that gateway's key to the
+      // public host.
+      const anthropicGateway = type === 'anthropic' ? process.env['ANTHROPIC_BASE_URL'] : undefined;
       if (!existing && wasEmpty) {
         // Azure cannot be configured by a key alone. Without a deployment name
         // it resolves to no model at all (azureModelForDeployment returns
@@ -396,9 +449,13 @@ export class ConfigManager {
           });
           continue;
         }
-        this.config.providers.push({ type, apiKey: key });
+        this.config.providers.push({
+          type, apiKey: key,
+          ...(anthropicGateway ? { baseUrl: anthropicGateway } : {}),
+        });
       } else if (existing && !existing.apiKey) {
         existing.apiKey = key;
+        if (anthropicGateway) existing.baseUrl ??= anthropicGateway;
       }
     }
 

@@ -4,6 +4,11 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    // Strips provider credentials from the environment before each test — see
+    // vitest.setup.ts. Without it the suite can read keys and endpoints the
+    // developer happens to have exported, and pass for reasons CI will not
+    // reproduce.
+    setupFiles: ['./vitest.setup.ts'],
     // app/electron holds a little pure logic (address-bar parsing) that is
     // worth testing; the rest of that directory imports electron and is not.
     include: [
