@@ -2,9 +2,10 @@
 //  Cascade AI — test environment isolation
 // ─────────────────────────────────────────────
 //
-//  Clears every provider credential and endpoint variable before each test
-//  file, so a test asserts what it sets up rather than what happens to be
-//  exported in the shell that ran it.
+//  Clears every provider credential and endpoint variable before each TEST —
+//  `beforeEach` in a setup file runs per test, not per file — so a test asserts
+//  what it sets up rather than what happens to be exported in the shell that
+//  ran it, or what a previous test in the same file left behind.
 //
 //  This exists because of a real miss: `ANTHROPIC_BASE_URL` is set in some
 //  development containers, and a test asserting that a bearer token is adopted

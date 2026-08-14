@@ -7,7 +7,7 @@ import path from 'node:path';
 import { CASCADE_CONFIG_FILE, LM_STUDIO_BASE_URL, OLLAMA_BASE_URL } from '../../constants.js';
 import { ConfigManager } from '../../config/index.js';
 import { discoverCredentials, type DiscoveredCredential } from '../../config/credential-discovery.js';
-import { isRoutedByConfig } from './link.js';
+import { willAdoptFromConfig } from './link.js';
 import type { ProviderConfig } from '../../types.js';
 
 interface CheckResult {
@@ -36,7 +36,7 @@ export function linkableCredentialsDetail(
   // configured deployments, a bearer beside a configured gateway — so counting
   // the flag alone reported "none usable" immediately before link succeeded
   // with one. Same question, same answer, one function.
-  const usable = discovered.filter((d) => d.directlyUsable || isRoutedByConfig(d, configured)).length;
+  const usable = discovered.filter((d) => d.directlyUsable || willAdoptFromConfig(d, configured)).length;
   return usable > 0
     ? `${discovered.length} found (${usable} usable) — run \`cascade link\` to adopt`
     : `${discovered.length} found, none usable — run \`cascade link\` to see why`;

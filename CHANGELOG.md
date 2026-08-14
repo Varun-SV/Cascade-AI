@@ -385,8 +385,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`cascade doctor` and `cascade link` agree on what is usable.** Doctor
   counted only the environment's own view, so it reported "none usable" about
   credentials `cascade link` adopts successfully — a bearer beside a configured
-  gateway, an Azure key beside configured deployments. Both ask one shared
-  function now.
+  gateway, an Azure key beside configured deployments. It also has to be
+  *exact*: an Azure key is scoped to one resource at adoption, so "some
+  deployment is configured" would have gone the other way and promised a link
+  that then refuses as ambiguous. Doctor asks whether adoption would actually
+  succeed; `cascade link` keeps a laxer gate on purpose, so that a credential
+  reaching it gets the specific reason ("set `AZURE_OPENAI_ENDPOINT`") rather
+  than a generic refusal.
+
+- **An exported bearer and gateway are adopted as a pair.** The API-key path
+  was fixed for this; the bearer branch beside it kept `??=` and so installed a
+  newly exported `ANTHROPIC_AUTH_TOKEN` against the endpoint already in the
+  config, sending it to the host that had not issued it.
 
 - **`cascade link --accept-risk` says it no longer applies instead of doing
   nothing.** Every subscription token is now reported unusable and refused

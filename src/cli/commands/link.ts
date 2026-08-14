@@ -159,6 +159,55 @@ export function isRoutedByConfig(
     && configured.some((p) => p.type === cred.provider && p.baseUrl?.trim());
 }
 
+/**
+ * Whether adoption would actually SUCCEED using routing already in the config.
+ *
+ * Deliberately stricter than `isRoutedByConfig`, and a different question. That
+ * one is a gate: it lets a credential reach `adoptCredential()` so the refusal
+ * can name the real obstacle ("several Azure resources are configured — set
+ * AZURE_OPENAI_ENDPOINT"), which is far more useful than the generic "can't be
+ * used against the standard API" this command prints when it stops earlier.
+ *
+ * This one is the verdict `cascade doctor` needs. Doctor makes no attempt and
+ * prints no follow-up, so an optimistic answer there is just wrong: it reported
+ * an Azure key as usable when adoption would refuse it as ambiguous, or when
+ * the exported endpoint matched no configured deployment at all.
+ */
+export function willAdoptFromConfig(
+  cred: Pick<DiscoveredCredential, 'provider' | 'kind' | 'baseUrl'>,
+  configured: readonly ProviderConfig[],
+): boolean {
+  if (cred.provider === 'azure') {
+    return azureDeploymentsForCredential(cred, configured).length > 0;
+  }
+  return isRoutedByConfig(cred, configured);
+}
+
+/**
+ * The configured Azure deployments an adopted key would actually be written to.
+ *
+ * Empty when the resource cannot be determined: an Azure key belongs to ONE
+ * resource, so with several configured and nothing to choose between them
+ * there is no safe write — filling them all would break the deployments on the
+ * other resources and overwrite the keys they already had.
+ *
+ * `cred.baseUrl` narrows first when the environment supplied one, because that
+ * names the resource even when no deployment name came with it.
+ */
+export function azureDeploymentsForCredential(
+  cred: Pick<DiscoveredCredential, 'baseUrl'>,
+  configured: readonly ProviderConfig[],
+): ProviderConfig[] {
+  const deployments = configured.filter((p) => p.type === 'azure' && p.deploymentName?.trim());
+  if (deployments.length === 0) return [];
+  const target = cred.baseUrl?.trim();
+  const scoped = target
+    ? deployments.filter((p) => sameAzureEndpoint(p.baseUrl, target))
+    : deployments;
+  const resources = new Set(scoped.map((p) => normalizeAzureEndpoint(p.baseUrl)));
+  return resources.size === 1 ? scoped : [];
+}
+
 function printDiscovered(found: DiscoveredCredential[]): void {
   console.log(chalk.magenta('\n  ◈ Detected credentials\n'));
   for (const c of found) {
@@ -282,13 +331,17 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
     // refusal returns before updateConfig(), the key injectEnvKeys had already
     // put into those deployments in memory was never persisted, so the command
     // failed with the routing sitting right there.
-    const scoped = target
-      ? azureDeployments.filter((p) => sameAzureEndpoint(p.baseUrl, target))
-      : azureDeployments;
-    const resources = [...new Set(scoped.map((p) => normalizeAzureEndpoint(p.baseUrl)))];
-    if (resources.length !== 1) {
+    //
+    // Which rows those are is answered by azureDeploymentsForCredential(), the
+    // same function `cascade doctor` asks whether this key is usable at all —
+    // it was reporting "usable" for a key this branch then refused.
+    const scoped = azureDeploymentsForCredential(cred, config.providers);
+    if (scoped.length === 0) {
       const all = [...new Set(azureDeployments.map((p) => normalizeAzureEndpoint(p.baseUrl)))];
-      if (target && scoped.length === 0) {
+      const onTarget = target
+        ? azureDeployments.some((p) => sameAzureEndpoint(p.baseUrl, target))
+        : true;
+      if (target && !onTarget) {
         console.log(chalk.yellow(`\n  No configured Azure deployment is on ${target}.`));
         console.log(chalk.gray('  Set AZURE_OPENAI_DEPLOYMENT as well to add one, or point'));
         console.log(chalk.gray('  AZURE_OPENAI_ENDPOINT at a resource you have configured:\n'));
@@ -300,9 +353,8 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
       console.log('');
       return false;
     }
-    const only = resources[0];
     const providers = config.providers.map((p) => (
-      p.type === 'azure' && p.deploymentName?.trim() && normalizeAzureEndpoint(p.baseUrl) === only
+      scoped.includes(p)
         ? { ...p, apiKey: cred.secret, credentialSource: cred.sourceTool }
         : p
     ));

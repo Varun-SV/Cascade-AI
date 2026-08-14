@@ -488,6 +488,22 @@ describe('an environment key and gateway are a pair', () => {
       .toBe('https://configured.internal');
   });
 
+  it('replaces a stale endpoint when the bearer and gateway are exported together', async () => {
+    // The API-key path was fixed for this; the bearer branch beside it kept
+    // `??=` and so installed the new token against the old host — the exact
+    // pairing rule, missed in the sibling case.
+    await seed([{ type: 'anthropic', baseUrl: 'https://old-gateway.internal' }]);
+    process.env['ANTHROPIC_AUTH_TOKEN'] = 'gw-token';
+    process.env['ANTHROPIC_BASE_URL'] = 'https://new-gateway.internal';
+
+    const cm = new ConfigManager(dir, path.join(dir, 'global'));
+    await cm.load();
+    expect(cm.getConfig().providers.find((p) => p.type === 'anthropic')).toMatchObject({
+      authToken: 'gw-token',
+      baseUrl: 'https://new-gateway.internal',
+    });
+  });
+
   it('finds the bearer\'s gateway in the machine-global store', async () => {
     // injectEnvKeys runs BEFORE mergeGlobalCredentials — deliberately, so an
     // exported key outranks a stored one — which left this lookup reading a

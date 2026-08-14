@@ -636,7 +636,13 @@ export class ConfigManager {
         if (existing) {
           if (!existing.apiKey && !existing.authToken) {
             existing.authToken = authToken;
-            existing.baseUrl ??= gateway;
+            // `=`, not `??=` — the same pairing the API-key path above applies,
+            // which this branch was missed by. A bearer and the gateway
+            // exported beside it belong together, so keeping a stale configured
+            // endpoint sent the newly exported token to the host that did not
+            // issue it. When ANTHROPIC_BASE_URL is unset this is a no-op:
+            // `gateway` has already fallen back to this very value.
+            existing.baseUrl = gateway;
           }
         } else if (mayCreate('anthropic') || globalAnthropic) {
           // `wasEmpty` alone was too narrow for the same reason. With any other

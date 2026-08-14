@@ -47,6 +47,41 @@ describe('what doctor says about discovered credentials', () => {
     expect(detail).toBe('1 found (1 usable) — run `cascade link` to adopt');
   });
 
+  it('does not count an Azure key whose resource is ambiguous', () => {
+    // Adoption scopes an Azure key to ONE resource and refuses when several
+    // remain, so counting "some deployment is configured" reported a key as
+    // usable that `cascade link` rejects a moment later. Doctor makes no
+    // attempt and prints no follow-up, so an optimistic answer here is simply
+    // wrong.
+    const detail = linkableCredentialsDetail(
+      [cred({ provider: 'azure' })],
+      [
+        { type: 'azure', deploymentName: 'a', baseUrl: 'https://one.openai.azure.com' },
+        { type: 'azure', deploymentName: 'b', baseUrl: 'https://two.openai.azure.com' },
+      ],
+    );
+    expect(detail).toBe('1 found, none usable — run `cascade link` to see why');
+  });
+
+  it('counts it again once the exported endpoint names the resource', () => {
+    const detail = linkableCredentialsDetail(
+      [cred({ provider: 'azure', baseUrl: 'https://two.openai.azure.com' })],
+      [
+        { type: 'azure', deploymentName: 'a', baseUrl: 'https://one.openai.azure.com' },
+        { type: 'azure', deploymentName: 'b', baseUrl: 'https://two.openai.azure.com' },
+      ],
+    );
+    expect(detail).toBe('1 found (1 usable) — run `cascade link` to adopt');
+  });
+
+  it('does not count an Azure key whose endpoint matches no configured deployment', () => {
+    const detail = linkableCredentialsDetail(
+      [cred({ provider: 'azure', baseUrl: 'https://elsewhere.openai.azure.com' })],
+      [{ type: 'azure', deploymentName: 'a', baseUrl: 'https://one.openai.azure.com' }],
+    );
+    expect(detail).toBe('1 found, none usable — run `cascade link` to see why');
+  });
+
   it('does not count a subscription token just because a gateway is configured', () => {
     // Routing is not the obstacle for this one — the provider refuses it.
     const detail = linkableCredentialsDetail(
