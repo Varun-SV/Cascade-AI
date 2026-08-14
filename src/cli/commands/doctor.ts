@@ -6,7 +6,9 @@ import chalk from 'chalk';
 import path from 'node:path';
 import { CASCADE_CONFIG_FILE, LM_STUDIO_BASE_URL, OLLAMA_BASE_URL } from '../../constants.js';
 import { ConfigManager } from '../../config/index.js';
-import { discoverCredentials } from '../../config/credential-discovery.js';
+import { discoverCredentials, type DiscoveredCredential } from '../../config/credential-discovery.js';
+import { isRoutedByConfig } from './link.js';
+import type { ProviderConfig } from '../../types.js';
 
 interface CheckResult {
   label: string;
@@ -26,9 +28,15 @@ interface CheckResult {
  * permitted to use.
  */
 export function linkableCredentialsDetail(
-  discovered: ReadonlyArray<{ directlyUsable: boolean }>,
+  discovered: ReadonlyArray<DiscoveredCredential>,
+  configured: readonly ProviderConfig[] = [],
 ): string {
-  const usable = discovered.filter((d) => d.directlyUsable).length;
+  // `directlyUsable` is the ENVIRONMENT's view. `cascade link` also adopts a
+  // credential whose routing is already in the config — an Azure key beside
+  // configured deployments, a bearer beside a configured gateway — so counting
+  // the flag alone reported "none usable" immediately before link succeeded
+  // with one. Same question, same answer, one function.
+  const usable = discovered.filter((d) => d.directlyUsable || isRoutedByConfig(d, configured)).length;
   return usable > 0
     ? `${discovered.length} found (${usable} usable) — run \`cascade link\` to adopt`
     : `${discovered.length} found, none usable — run \`cascade link\` to see why`;
@@ -154,7 +162,7 @@ export async function doctorCommand(): Promise<void> {
       checks.push({
         label: 'Linkable credentials',
         ok: true,
-        detail: linkableCredentialsDetail(discovered),
+        detail: linkableCredentialsDetail(discovered, config.providers ?? []),
       });
     }
   } catch { /* discovery is best-effort */ }

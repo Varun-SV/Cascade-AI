@@ -18,7 +18,7 @@ import { MODELS } from '../constants.js';
 import { BaseProvider } from './base.js';
 import { withResolvedPricing } from '../core/router/pricing.js';
 import { isChatModel } from './model-filter.js';
-import { stripTrailingSlashes } from '../utils/net.js';
+import { fetchSameOrigin, stripTrailingSlashes } from '../utils/net.js';
 
 // Anthropic extended thinking — only the 4.x reasoning models (Opus 4 / Sonnet 4)
 // support it. budget_tokens must be >= 1024 and < max_tokens; we cap well under
@@ -226,7 +226,11 @@ export class AnthropicProvider extends BaseProvider {
       // still pointed at /v1/v1/messages.
       const base = anthropicApiRoot(this.config.baseUrl) ?? 'https://api.anthropic.com';
       const modelsUrl = `${base}/v1/models`;
-      const resp = await fetch(modelsUrl, {
+      // Same-origin redirects only: `x-api-key` is a custom header, so the
+      // platform does NOT strip it across origins the way it strips
+      // Authorization. A gateway that redirected elsewhere would be handed the
+      // key configured for it.
+      const resp = await fetchSameOrigin(modelsUrl, {
         headers: {
           ...(this.config.authToken
             ? { authorization: `Bearer ${this.config.authToken}` }

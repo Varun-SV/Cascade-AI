@@ -349,6 +349,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clearing above then removed the user's Claude pins, with a working key in the
   environment the whole time.
 
+- **A Claude subscription token exported as `ANTHROPIC_AUTH_TOKEN` is refused
+  like any other.** The variable is the documented way to configure a *gateway*
+  bearer, and neither discovery nor the environment injection checked what the
+  token actually was — so exporting a subscription token made it a "usable
+  gateway bearer", adoptable by `cascade link` and written back into config on
+  every load, immediately after the migration had stripped the stored copy. It
+  went around this entire release. Anthropic refuses the token whatever header
+  carries it, so it is now surfaced and explained rather than adopted.
+
+- **A redirecting gateway can no longer be handed your API key.** Model
+  discovery sends `x-api-key`, and a custom header — unlike `Authorization` —
+  is *not* stripped when a redirect crosses origins, so a gateway that was
+  misconfigured or compromised received the key configured for it. Redirects
+  are now followed only while they stay on the original origin, which is the
+  policy the local-endpoint fetch already applied.
+
+- **A bearer-only gateway's model list now reaches routing.** Catalogue
+  validation required an `apiKey`, and the availability probe uses `listModels()`
+  only as a yes/no — so a gateway configured with `authToken` alone had its
+  catalogue fetched, discarded, and replaced by the bundled public Anthropic
+  list, leaving Auto free to pick a model the gateway does not serve. The
+  discovery cache is keyed on the bearer as well, so switching credentials is
+  not answered from the previous one's cache.
+
+- **`cascade doctor` and `cascade link` agree on what is usable.** Doctor
+  counted only the environment's own view, so it reported "none usable" about
+  credentials `cascade link` adopts successfully — a bearer beside a configured
+  gateway, an Azure key beside configured deployments. Both ask one shared
+  function now.
+
 - **`cascade link --accept-risk` says it no longer applies instead of doing
   nothing.** Every subscription token is now reported unusable and refused
   before any adoption path, which left the flag inert while `--help` still

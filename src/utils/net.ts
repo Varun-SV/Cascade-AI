@@ -37,6 +37,45 @@ export function stripTrailingSlashes(value: string): string {
 /** Max redirect hops before nodeHttpFetch gives up (matches browser/curl-ish defaults). */
 const MAX_REDIRECTS = 5;
 
+/**
+ * `fetch`, following redirects only while they stay on the ORIGINAL origin.
+ *
+ * The platform's own rule is not enough here. On a cross-origin redirect the
+ * fetch spec strips `Authorization`, `Cookie` and friends — but a custom header
+ * is not on that list, so `x-api-key` is replayed verbatim to wherever the
+ * `Location` points. A provider's model-list request carries exactly that
+ * header, so a gateway that is misconfigured or compromised could hand a user's
+ * key to a third host, which is the same class of leak as sending a gateway's
+ * key to `api.anthropic.com`.
+ *
+ * Same-origin hops are still followed, because endpoints legitimately
+ * canonicalise paths (a trailing slash, `/models` → `/models/`). This is the
+ * policy `nodeHttpFetch`'s `allowedRedirectOrigin` already applies, expressed
+ * for callers that use the global fetch.
+ */
+export async function fetchSameOrigin(
+  url: string,
+  init: RequestInit = {},
+  maxRedirects = MAX_REDIRECTS,
+): Promise<Response> {
+  const origin = new URL(url).origin;
+  let current = url;
+  for (let hop = 0; hop <= maxRedirects; hop++) {
+    const res = await fetch(current, { ...init, redirect: 'manual' });
+    if (res.status < 300 || res.status >= 400) return res;
+    const location = res.headers.get('location');
+    if (!location) return res;
+    const next = new URL(location, current);
+    if (next.origin !== origin) {
+      throw new Error(
+        `Refusing cross-origin redirect to ${next.origin}: the request carries a credential for ${origin}.`,
+      );
+    }
+    current = next.toString();
+  }
+  throw new Error(`Too many redirects from ${url}`);
+}
+
 // A fetch() implemented on Node's http/https modules. In the Electron MAIN
 // process the global fetch (undici) — and Chromium's net.fetch — can fail to
 // reach loopback model servers even when a child Node process and the renderer

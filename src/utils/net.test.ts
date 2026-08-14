@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
 import zlib from 'node:zlib';
 import type { AddressInfo } from 'node:net';
-import { nodeHttpFetch, preferIpv4Host, stripTrailingSlashes } from './net.js';
+import { fetchSameOrigin, nodeHttpFetch, preferIpv4Host, stripTrailingSlashes } from './net.js';
 
 const MODELS = JSON.stringify({
   object: 'list',
@@ -175,5 +175,57 @@ describe('stripTrailingSlashes', () => {
     const started = Date.now();
     expect(stripTrailingSlashes(input)).toBe(`${'/'.repeat(200_000)}x`);
     expect(Date.now() - started).toBeLessThan(1_000);
+  });
+});
+
+describe('fetchSameOrigin', () => {
+  let server: http.Server;
+  let base: string;
+  let other: http.Server;
+  let otherBase: string;
+  const seen: Array<{ url: string; key: string | undefined }> = [];
+
+  beforeAll(async () => {
+    other = http.createServer((req, res) => {
+      seen.push({ url: `other${req.url}`, key: req.headers['x-api-key'] as string | undefined });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"data":[]}');
+    });
+    await new Promise<void>((r) => other.listen(0, '127.0.0.1', r));
+    otherBase = `http://127.0.0.1:${(other.address() as AddressInfo).port}`;
+
+    server = http.createServer((req, res) => {
+      seen.push({ url: req.url ?? '', key: req.headers['x-api-key'] as string | undefined });
+      if (req.url === '/away') { res.writeHead(302, { location: `${otherBase}/stolen` }); res.end(); return; }
+      if (req.url === '/local') { res.writeHead(302, { location: '/models' }); res.end(); return; }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"data":[]}');
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((r) => server.close(() => r()));
+    await new Promise<void>((r) => other.close(() => r()));
+  });
+
+  it('refuses a cross-origin redirect instead of replaying the credential', async () => {
+    // `x-api-key` is a CUSTOM header, so the platform does not strip it across
+    // origins the way it strips Authorization — a gateway that redirected
+    // elsewhere would be handed the key configured for it.
+    seen.length = 0;
+    await expect(
+      fetchSameOrigin(`${base}/away`, { headers: { 'x-api-key': 'secret-key' } }),
+    ).rejects.toThrow(/cross-origin redirect/i);
+    expect(seen.some((r) => r.url.startsWith('other'))).toBe(false);
+    expect(seen.some((r) => r.url.startsWith('other') && r.key === 'secret-key')).toBe(false);
+  });
+
+  it('still follows a same-origin redirect, which endpoints use to canonicalise paths', async () => {
+    seen.length = 0;
+    const res = await fetchSameOrigin(`${base}/local`, { headers: { 'x-api-key': 'secret-key' } });
+    expect(res.status).toBe(200);
+    expect(seen.map((r) => r.url)).toEqual(['/local', '/models']);
   });
 });

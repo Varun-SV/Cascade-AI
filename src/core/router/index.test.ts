@@ -505,3 +505,44 @@ describe('CascadeRouter — a transient probe failure does not erase a provider'
     expect(router.providerProbeFailures()[0]?.reason).toContain('API key not valid');
   });
 });
+
+describe('CascadeRouter — a bearer-only Anthropic gateway is validated too', () => {
+  let gw: http.Server;
+  let gwUrl: string;
+  const authSeen: string[] = [];
+
+  beforeAll(async () => {
+    gw = http.createServer((req, res) => {
+      authSeen.push(String(req.headers['authorization'] ?? ''));
+      if (req.url === '/v1/models') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ data: [{ id: 'gw-claude-a', display_name: 'GW A' }] }));
+      }
+      res.writeHead(404);
+      res.end('nope');
+    });
+    await new Promise<void>((r) => gw.listen(0, '127.0.0.1', r));
+    gwUrl = `http://127.0.0.1:${(gw.address() as AddressInfo).port}`;
+  });
+  afterAll(() => new Promise<void>((r) => gw.close(() => r())));
+
+  it('registers the gateway catalogue for a provider configured with only authToken', async () => {
+    // validateCloudProviderModels() required `cfg.apiKey`, so a bearer-only
+    // gateway never had its catalogue validated: the availability probe uses
+    // listModels() as a boolean and discards the models, leaving AUTO routing
+    // pinned to the BUNDLED public Anthropic catalogue — free to pick a model
+    // the gateway does not serve and fail the first real request.
+    authSeen.length = 0;
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['anthropic']));
+
+    await router.init(makeConfig({
+      providers: [{ type: 'anthropic', authToken: 'gw-token', baseUrl: gwUrl }],
+    }));
+
+    expect(router.getAvailableModels().some((m) => m.id === 'gw-claude-a')).toBe(true);
+    // And it authenticated as a bearer, not with an empty x-api-key.
+    expect(authSeen.some((a) => a === 'Bearer gw-token')).toBe(true);
+  });
+});

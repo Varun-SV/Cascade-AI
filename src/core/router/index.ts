@@ -34,6 +34,7 @@ import type { FeedbackSource } from './feedback-prior.js';
 import { DeadModelStore } from './dead-models.js';
 import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
 import { buildTokenUsage, resolveModelPricing } from '../../utils/cost.js';
+import { hasProviderCredential } from '../../config/index.js';
 import { estimateTokens, contentToText, CHARS_PER_TOKEN } from '../context/compaction.js';
 import { withTimeout, withTimeoutAbort, anySignal, CascadeCancelledError } from '../../utils/retry.js';
 import { wireProfile, geminiImageCopies } from './wire-profile.js';
@@ -234,7 +235,12 @@ interface DiscoveryEntry { ids: string[]; models: ModelInfo[]; at: number }
 const cloudDiscoveryCache = new Map<string, DiscoveryEntry>();
 
 function discoveryCacheKey(type: ProviderType, cfg: ProviderConfig): string {
-  const raw = `${type}|${cfg.apiKey ?? ''}|${cfg.baseUrl ?? ''}`;
+  // `authToken` is part of the identity, not just `apiKey`. Two gateways
+  // reachable at the same URL with different bearers serve different
+  // catalogues, and omitting it also collapsed every bearer-only config for a
+  // provider onto one key — so switching credentials would have been answered
+  // from the previous one's cache.
+  const raw = `${type}|${cfg.apiKey ?? ''}|${cfg.authToken ?? ''}|${cfg.baseUrl ?? ''}`;
   return crypto.createHash('sha256').update(raw).digest('hex').slice(0, 24);
 }
 
@@ -631,7 +637,13 @@ export class CascadeRouter extends EventEmitter {
     await Promise.all(providers.map(async (type) => {
       if (!this.selector.isProviderAvailable(type)) return;
       const cfg = config.providers.find((p) => p.type === type);
-      if (!cfg?.apiKey) return;
+      // `authToken` qualifies too. Requiring an apiKey meant a bearer-only
+      // gateway never had its catalogue validated: the availability probe uses
+      // listModels() as a boolean and throws the models away, so AUTO routing
+      // stayed pinned to the BUNDLED public Anthropic catalogue and could pick
+      // a model the gateway does not serve — failing the first real request
+      // from a gateway that had advertised its models correctly.
+      if (!cfg || !hasProviderCredential(cfg)) return;
       const cacheKey = discoveryCacheKey(type, cfg);
       let entry = cloudDiscoveryCache.get(cacheKey);
       if (!entry || Date.now() - entry.at > DISCOVERY_TTL_MS) {

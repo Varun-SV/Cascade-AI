@@ -22,7 +22,7 @@ import {
   stripRetiredProviders,
   type RetiredProviderCleanup,
 } from './retired-providers.js';
-import { stripRevokedCredentials, stripRevokedFromConfig, clearAnthropicPins, hasUsableAnthropic, REVOKED_CREDENTIAL_REASON, type ClearedPin } from './revoked-credentials.js';
+import { stripRevokedCredentials, stripRevokedFromConfig, clearAnthropicPins, hasUsableAnthropic, isSubscriptionToken, REVOKED_CREDENTIAL_REASON, type ClearedPin } from './revoked-credentials.js';
 import { disambiguateMcpServerNames, type McpServerRename } from '../tools/tool-name.js';
 import {
   CASCADE_CONFIG_FILE,
@@ -607,7 +607,13 @@ export class ConfigManager {
     // documented Anthropic credential no environment path picked up, so a user
     // following Anthropic's own instructions got "no providers configured".
     const authToken = process.env['ANTHROPIC_AUTH_TOKEN'];
-    if (authToken) {
+    // …but NOT when it is a subscription token. This injection runs after the
+    // migration has stripped the stored copy, so without this check the same
+    // dead token, exported as a variable, was put straight back into the config
+    // it had just been removed from — every load, with the removal notice
+    // printed alongside it. Anthropic refuses the token whatever header carries
+    // it, so calling it a gateway bearer does not make it one.
+    if (authToken && !isSubscriptionToken(authToken)) {
       const existing = this.config.providers.find((p) => p.type === 'anthropic');
       // The gateway is looked for in the GLOBAL store too, not just the
       // workspace list. This runs before mergeGlobalCredentials() — deliberately,

@@ -102,10 +102,7 @@ export async function linkCommand(target: string | undefined, options: LinkOptio
   // writes says "or configure `baseUrl` for the anthropic provider", advice
   // this gate then refused to honour.
   const configured = cm.getConfig().providers;
-  const routedByConfig = provider === 'azure'
-    ? configured.some((p) => p.type === 'azure' && p.deploymentName?.trim() && p.baseUrl?.trim())
-    : chosen.kind === 'bearer'
-      && configured.some((p) => p.type === provider && p.baseUrl?.trim());
+  const routedByConfig = isRoutedByConfig(chosen, configured);
 
   if (!chosen.directlyUsable && !routedByConfig) {
     console.log(chalk.yellow(`\n  Found a ${chosen.sourceTool} credential, but it can't be used against the standard ${provider} API.`));
@@ -135,6 +132,31 @@ export async function linkCommand(target: string | undefined, options: LinkOptio
     console.log(chalk.gray('  Adopted as a bearer token — set `baseUrl` to the gateway that issued it.'));
   }
   console.log(chalk.gray('  Run `cascade doctor` to verify, or `cascade` to start.\n'));
+}
+
+/**
+ * Whether the LOADED configuration already supplies the routing a credential
+ * needs but the environment did not carry.
+ *
+ * Discovery sees environment variables only, so it cannot know that an Azure
+ * deployment or an Anthropic gateway is already configured — it reports such a
+ * credential `directlyUsable: false`. This command accepts it anyway, which
+ * means `directlyUsable` alone is not the same question as "will linking work".
+ *
+ * Exported because `cascade doctor` has to ask the identical question: it was
+ * reporting "none usable" about credentials this command adopts successfully a
+ * moment later, and answering that from a second hand-written copy of the rule
+ * is how these two drift.
+ */
+export function isRoutedByConfig(
+  cred: Pick<DiscoveredCredential, 'provider' | 'kind'>,
+  configured: readonly ProviderConfig[],
+): boolean {
+  if (cred.provider === 'azure') {
+    return configured.some((p) => p.type === 'azure' && p.deploymentName?.trim() && p.baseUrl?.trim());
+  }
+  return cred.kind === 'bearer'
+    && configured.some((p) => p.type === cred.provider && p.baseUrl?.trim());
 }
 
 function printDiscovered(found: DiscoveredCredential[]): void {

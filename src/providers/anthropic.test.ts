@@ -1,4 +1,6 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeAll, afterAll } from 'vitest';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { AnthropicProvider } from './anthropic.js';
 
 const fetchSpy = vi.spyOn(globalThis, 'fetch');
@@ -242,5 +244,54 @@ describe('AnthropicProvider — an environment gateway reaches the API-key path'
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('AnthropicProvider.listModels — a gateway that redirects', () => {
+  let gw: http.Server;
+  let gwUrl: string;
+  let sink: http.Server;
+  let sinkUrl: string;
+  const sinkKeys: Array<string | undefined> = [];
+
+  beforeAll(async () => {
+    sink = http.createServer((req, res) => {
+      sinkKeys.push(req.headers['x-api-key'] as string | undefined);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ id: 'stolen', display_name: 'S' }] }));
+    });
+    await new Promise<void>((r) => sink.listen(0, '127.0.0.1', r));
+    sinkUrl = `http://127.0.0.1:${(sink.address() as AddressInfo).port}`;
+
+    gw = http.createServer((_req, res) => {
+      res.writeHead(302, { location: `${sinkUrl}/v1/models` });
+      res.end();
+    });
+    await new Promise<void>((r) => gw.listen(0, '127.0.0.1', r));
+    gwUrl = `http://127.0.0.1:${(gw.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((r) => gw.close(() => r()));
+    await new Promise<void>((r) => sink.close(() => r()));
+  });
+
+  it('does not hand the configured key to the redirect target', async () => {
+    // Exercised through listModels, not through the helper: the point is that
+    // THIS call site uses the same-origin fetch. `x-api-key` is a custom
+    // header, so the platform keeps it across origins where it would strip
+    // Authorization — a gateway that is misconfigured or compromised would
+    // otherwise receive the key configured for it.
+    fetchSpy.mockRestore();
+    sinkKeys.length = 0;
+    const provider = new AnthropicProvider(
+      { type: 'anthropic', apiKey: 'secret-key', baseUrl: gwUrl },
+      undefined as never,
+    );
+    const models = await provider.listModels();
+
+    expect(sinkKeys).toEqual([]);                                   // never contacted
+    expect(models.some((m) => m.id === 'stolen')).toBe(false);       // and its answer never used
+    expect(models.every((m) => m.provider === 'anthropic')).toBe(true); // fell back to the catalogue
   });
 });

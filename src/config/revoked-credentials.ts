@@ -50,8 +50,23 @@ interface CredentialBearingProvider {
  */
 export function isRevokedSubscriptionCredential(p: CredentialBearingProvider): boolean {
   if (p.type !== 'anthropic' || !p.authToken) return false;
-  return p.authToken.startsWith('sk-ant-oat')
+  return isSubscriptionToken(p.authToken)
     || /claude\s*code/i.test(p.credentialSource ?? '');
+}
+
+/**
+ * Whether a raw secret is a Claude subscription token, by its mint prefix.
+ *
+ * Separate from the entry-shaped check above because the secret can arrive
+ * without an entry around it: `ANTHROPIC_AUTH_TOKEN` is read straight from the
+ * environment by BOTH credential discovery and `injectEnvKeys`, neither of
+ * which had any subscription check at all. That was a way around this whole
+ * migration — the stored token is stripped on load, and then the same token,
+ * exported as a variable, was classified as a usable gateway bearer and put
+ * straight back into the config it had just been removed from.
+ */
+export function isSubscriptionToken(secret: string | undefined): boolean {
+  return !!secret && secret.trim().startsWith('sk-ant-oat');
 }
 
 /**

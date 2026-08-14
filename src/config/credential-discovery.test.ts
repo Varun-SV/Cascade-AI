@@ -96,6 +96,30 @@ describe('discoverCredentials', () => {
     expect(found[0]!.warning).toMatch(/ANTHROPIC_BASE_URL/);
   });
 
+  it('refuses a SUBSCRIPTION token exported through the gateway variable', async () => {
+    // The variable does not change what the credential is. Anthropic refuses a
+    // subscription token whatever header carries it, so classifying this as a
+    // usable gateway bearer would hand `cascade link` the exact credential this
+    // release exists to stop configuring — and would do it right after the
+    // migration removed the stored copy.
+    const found = await discoverCredentials({
+      homeDir: home,
+      env: { ANTHROPIC_AUTH_TOKEN: 'sk-ant-oat01-subscription', ANTHROPIC_BASE_URL: 'https://gateway.internal' },
+    });
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ provider: 'anthropic', kind: 'oauth', directlyUsable: false });
+    expect(found[0]!.warning).toMatch(/does not permit third-party/i);
+  });
+
+  it('still reports the other environment services alongside a refused token', async () => {
+    // The refusal must not short-circuit the rest of discovery.
+    const found = await discoverCredentials({
+      homeDir: home,
+      env: { ANTHROPIC_AUTH_TOKEN: 'sk-ant-oat01-x', GROQ_API_KEY: 'gsk-real' },
+    });
+    expect(found.some((c) => c.serviceId === 'groq' && c.directlyUsable)).toBe(true);
+  });
+
   it('prefers a real API key over the gateway token when both are set', async () => {
     const found = await discoverCredentials({
       homeDir: home,

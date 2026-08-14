@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   isRevokedSubscriptionCredential, stripRevokedCredentials, stripRevokedFromConfig,
-  clearAnthropicPins, hasUsableAnthropic,
+  clearAnthropicPins, hasUsableAnthropic, isSubscriptionToken,
 } from './revoked-credentials.js';
 import { ConfigManager, hasUsableProvider } from './index.js';
 import { CASCADE_CONFIG_FILE } from '../constants.js';
@@ -147,6 +147,53 @@ describe('ConfigManager — removing a dead subscription token on load', () => {
     const anthropic = cm.getConfig().providers.find((p) => p.type === 'anthropic');
     expect(anthropic?.authToken).toBe('gw-token');
     expect(cm.takeRetiredNotice()).toBeUndefined();
+  });
+});
+
+describe('a subscription token exported as ANTHROPIC_AUTH_TOKEN', () => {
+  let dir: string;
+  const saved: Record<string, string | undefined> = {};
+  const KEYS = ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL'];
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-envoat-'));
+    for (const k of KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
+  });
+  afterEach(async () => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k]!;
+    }
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('is not injected into the config, gateway or no gateway', async () => {
+    // Straight through the migration otherwise: the stored copy is stripped on
+    // load, and then the same dead token — exported as a variable — was put
+    // back into the config it had just been removed from, on every load.
+    // Anthropic refuses it whatever header carries it.
+    await fs.mkdir(path.join(dir, '.cascade'), { recursive: true });
+    await fs.writeFile(
+      path.join(dir, CASCADE_CONFIG_FILE),
+      JSON.stringify({ providers: [], models: {}, tools: {} }),
+      'utf-8',
+    );
+    process.env['ANTHROPIC_AUTH_TOKEN'] = 'sk-ant-oat01-subscription';
+    process.env['ANTHROPIC_BASE_URL'] = 'https://gateway.internal';
+
+    const cm = new ConfigManager(dir, path.join(dir, 'global'));
+    await cm.load();
+    const anthropic = cm.getConfig().providers.find((p) => p.type === 'anthropic');
+    expect(anthropic?.authToken).toBeUndefined();
+  });
+
+  it('still injects a genuine gateway bearer', () => {
+    // The narrowness matters as much as the check: a gateway's bearer is a good
+    // credential and this release exists partly to make it work.
+    expect(isSubscriptionToken('sk-ant-oat01-x')).toBe(true);
+    expect(isSubscriptionToken('gw-issued-token')).toBe(false);
+    expect(isSubscriptionToken('sk-ant-api03-real-key')).toBe(false);
+    expect(isSubscriptionToken(undefined)).toBe(false);
   });
 });
 

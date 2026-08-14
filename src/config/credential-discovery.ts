@@ -24,6 +24,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import type { ProviderType } from '../types.js';
+import { isSubscriptionToken } from './revoked-credentials.js';
 
 /**
  * 'oauth'  a SUBSCRIPTION token minted by another tool's login. Vendor-locked,
@@ -177,26 +178,43 @@ function fromEnv(env: NodeJS.ProcessEnv): DiscoveredCredential[] {
   const authToken = str(env['ANTHROPIC_AUTH_TOKEN']);
   if (authToken && !seen.has('anthropic')) {
     seen.add('anthropic');
-    // A bearer token is issued BY a gateway and is only valid AT that gateway.
-    // Adopting one without an endpoint configures the client to send it to
-    // api.anthropic.com — a credential going to a host that was never meant to
-    // receive it, which is the same leak just fixed in model discovery, arriving
-    // by a different door. `link` also accepts an endpoint already present in
-    // the workspace; this covers the environment-only case.
-    const gateway = str(env['ANTHROPIC_BASE_URL']);
-    out.push({
-      provider: 'anthropic',
-      sourceTool: 'Environment (ANTHROPIC_AUTH_TOKEN)',
-      kind: 'bearer',
-      secret: authToken,
-      directlyUsable: Boolean(gateway),
-      ...(gateway ? { baseUrl: gateway } : {}),
-      ...(gateway ? {} : {
-        warning: 'A bearer token is only valid at the gateway that issued it. '
-          + 'Set ANTHROPIC_BASE_URL to that gateway, or configure `baseUrl` for '
-          + 'the anthropic provider, before linking it.',
-      }),
-    });
+    // A SUBSCRIPTION token exported through this variable is still a
+    // subscription token. Anthropic refuses it whatever header carries it, so
+    // classifying it as a gateway bearer would hand `cascade link` the one
+    // credential this release exists to stop configuring — and would do it
+    // right after the migration removed the stored copy. Reported like any
+    // other subscription token instead: visible, explained, not adoptable.
+    if (isSubscriptionToken(authToken)) {
+      out.push({
+        provider: 'anthropic',
+        sourceTool: 'Environment (ANTHROPIC_AUTH_TOKEN)',
+        kind: 'oauth',
+        secret: authToken,
+        directlyUsable: false,
+        warning: ANTHROPIC_OAUTH_WARNING,
+      });
+    } else {
+      // A bearer token is issued BY a gateway and is only valid AT that gateway.
+      // Adopting one without an endpoint configures the client to send it to
+      // api.anthropic.com — a credential going to a host that was never meant to
+      // receive it, which is the same leak just fixed in model discovery, arriving
+      // by a different door. `link` also accepts an endpoint already present in
+      // the workspace; this covers the environment-only case.
+      const gateway = str(env['ANTHROPIC_BASE_URL']);
+      out.push({
+        provider: 'anthropic',
+        sourceTool: 'Environment (ANTHROPIC_AUTH_TOKEN)',
+        kind: 'bearer',
+        secret: authToken,
+        directlyUsable: Boolean(gateway),
+        ...(gateway ? { baseUrl: gateway } : {}),
+        ...(gateway ? {} : {
+          warning: 'A bearer token is only valid at the gateway that issued it. '
+            + 'Set ANTHROPIC_BASE_URL to that gateway, or configure `baseUrl` for '
+            + 'the anthropic provider, before linking it.',
+        }),
+      });
+    }
   }
 
   // Azure is the one provider a key alone cannot configure. Without a
