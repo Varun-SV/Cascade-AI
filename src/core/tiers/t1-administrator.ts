@@ -30,6 +30,8 @@ import type { PermissionEscalator } from '../permissions/escalator.js';
 import type { ToolCreator } from '../../tools/tool-creator.js';
 import { parseFirstJsonObject } from '../../utils/json-extract.js';
 import { describeGenerationForPlanner } from '../multimodal/registry.js';
+import { canProduceFiles } from './t3-worker.js';
+import { planSpecShape, quotedFieldRules } from './plan-spec.js';
 
 /** Case-insensitive shared keywords between two keyword lists. */
 export function sharedKeywords(a: string[] = [], b: string[] = []): string[] {
@@ -525,14 +527,20 @@ In 3-5 terse bullets, flag the most important RISKS, GAPS, or over-/under-decomp
       }
     }
     const contextSection = systemContext ? `\nProject context:\n${systemContext}` : '';
-    const decompositionPrompt = `Analyze this task and create an execution plan.${contextSection}${worldStateContext}
+    // Read BEFORE the prompt is built, not after: the plan's shape depends on
+    // it. A run with no file tools must not be shown a worked example that
+    // scaffolds a project (see plan-spec.ts).
+    const available = new Set(this.toolRegistry.getToolDefinitions().map((t) => t.name));
+    const spec = planSpecShape(canProduceFiles([...available]));
+    const decompositionPrompt = `Analyze this task and create an execution plan.${spec.preamble ? `\n\n${spec.preamble}` : ''}${contextSection}${worldStateContext}
 
     Task: ${prompt}
 
+${spec.exampleFiles === '[]' ? '' : `
     IMPORTANT: If the task specifies a directory (e.g. "inside X", "in X folder"), 
     ALL file paths in ALL subtasks must include that full directory prefix.
     Example: if asked to create files "inside python_exclusive", every subtask that 
-    creates a file must use "python_exclusive/filename.ext" as the path.
+    creates a file must use "python_exclusive/filename.ext" as the path.`}
 
 Return JSON where SECTIONS can declare dependencies on other SECTIONS:
 {
@@ -545,14 +553,14 @@ Return JSON where SECTIONS can declare dependencies on other SECTIONS:
     "dependsOn": [],           // ← empty = runs immediately
     "t3Subtasks": [{
       "subtaskId": "t1",
-      "subtaskTitle": "Init NPM",
-      "description": "Run npm init",
-      "expectedOutput": "package.json created",
+      "subtaskTitle": "${spec.exampleSubtaskTitle}",
+      "description": "${spec.exampleDescription}",
+      "expectedOutput": "${spec.exampleExpectedOutput}",
       "constraints": [],
       "dependsOn": [],
-      "files": ["package.json"],                       // ← exact paths this subtask owns
-      "acceptance": ["package.json exists and parses as JSON"],  // ← objectively checkable
-      "contextBrief": "Fresh Node 20 project; npm available."    // ← ALL the background the worker gets
+      "files": ${spec.exampleFiles},
+      "acceptance": ${spec.exampleAcceptance},
+      "contextBrief": "${spec.exampleContextBrief}"    // ← ALL the background the worker gets
     }]
   }, {
     "sectionId": "s2",
@@ -568,12 +576,10 @@ Use dependsOn at the SECTION level when a whole T2 Manager needs the output of a
 Leave dependsOn empty for sections that can run immediately in parallel.
 
 SPEC RULES — each subtask is a self-contained spec slice (workers execute from their slice ALONE):
-- "files": the exact relative paths the subtask creates or edits. Never vague ("some files"); always concrete.
-- "acceptance": 1-3 checks a reviewer could verify mechanically (file exists / contains X / command exits 0). These define done.
+${quotedFieldRules(spec)}
 - "contextBrief": 1-3 short sentences with the ONLY background the worker needs. It sees nothing else about the task, so make the brief self-sufficient — but never pad it.
 - RIGHT-SIZE the plan: use the FEWEST sections and workers that fully cover the task. One section with 1-2 subtasks is the CORRECT plan for a small task; padding a plan with filler sections wastes the user's money.`;
 
-    const available = new Set(this.toolRegistry.getToolDefinitions().map((t) => t.name));
     const messages: ConversationMessage[] = [{ role: 'user', content: decompositionPrompt }];
     const result = await this.router.generate('T1', {
       messages,

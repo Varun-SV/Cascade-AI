@@ -183,6 +183,38 @@ ${rules.filter((r): r is string => r !== false).join('\n')}`;
 const ARTIFACT_TOOLS = new Set(['file_write', 'file_edit', 'shell', 'generate_document']);
 
 /**
+ * Every tool through which a file can end up on disk.
+ *
+ * Deliberately WIDER than ARTIFACT_TOOLS, and the two are not interchangeable
+ * because the rungs ask different questions. ARTIFACT_TOOLS answers "should a
+ * file be DEMANDED of this worker?" — only a tool whose purpose is producing
+ * the deliverable counts, or every run with a code interpreter starts owing an
+ * artifact nobody asked for. This set answers "could a file plausibly be there
+ * to look at?", and `run_code` writes files as readily as `file_write` does.
+ *
+ * Keep them separate. Collapsing them in either direction is a regression:
+ * narrowing this one makes the acceptance rung stat a filesystem a run_code
+ * worker legitimately wrote to, and widening ARTIFACT_TOOLS makes every
+ * run_code subtask require an artifact.
+ */
+const FILE_WRITING_TOOLS = new Set([...ARTIFACT_TOOLS, 'run_code']);
+
+/**
+ * Whether anything in this run could have put a file on disk.
+ *
+ * Exported because two rungs of the verification ladder need the same answer
+ * and previously only one of them asked. `shouldRequireArtifact()` has gated
+ * on tool presence since #151; `checkAcceptance()` was added afterwards and
+ * stat'd the filesystem unconditionally, so a hosted run — `web_search` and
+ * `web_fetch`, nothing else — failed its own planner's "report.md exists"
+ * criterion, corrected, failed again, and ESCALATED with a finished answer
+ * attached. Same bug, sibling code path.
+ */
+export function canProduceFiles(toolNames: readonly string[]): boolean {
+  return toolNames.some((n) => FILE_WRITING_TOOLS.has(n));
+}
+
+/**
  * Filenames worth treating as a promised artifact. Office extensions are here
  * because there is now a tool that can genuinely produce them — before
  * generate_document, a subtask naming `deck.pptx` could only ever have been
@@ -957,12 +989,25 @@ export class T3Worker extends BaseTier {
       }
     }
 
-    // Emit tool:use before execution so the TUI can display the active tool
-    this.sendStatusUpdate({
-      progressPct: 50,
-      currentAction: `Using tool: ${tc.name}`,
-      status: 'IN_PROGRESS',
-    });
+    // Emit tool:use before execution so the TUI can display the active tool.
+    //
+    // Only for a tool that EXISTS. A model can call a name it was never given —
+    // and does, once a correction round tells it to fix something its tool set
+    // cannot fix — but nothing checked before announcing it: validateToolInput
+    // returns null for an unknown name (no schema to validate against), so the
+    // UI showed "Using tool: run_code" on a hosted run where run_code is not
+    // registered at all. That reads as a tool failing, when what happened is a
+    // tool being imagined; it sent this bug's diagnosis in the wrong direction
+    // for a while. The call itself is unchanged and still falls through to
+    // registry.execute → adaptiveFallback, which is the path that recovers a
+    // hallucinated name by substituting or synthesizing a real tool.
+    if (this.toolRegistry.hasTool?.(tc.name) !== false) {
+      this.sendStatusUpdate({
+        progressPct: 50,
+        currentAction: `Using tool: ${tc.name}`,
+        status: 'IN_PROGRESS',
+      });
+    }
 
     this.emit('tool:call', { id: tc.id, tierId: this.id, toolName: tc.name, input: tc.input });
     const toolStartMs = Date.now();
@@ -1413,6 +1458,12 @@ ${current}`,
     const criteria = assignment.acceptance ?? [];
     if (!criteria.length) return [];
     const resolve = (target: string) => path.resolve(this.artifactRoot(), target);
+    // The planner writes "file exists" criteria whether or not this run has a
+    // tool that could create one (t1-administrator.ts / t2-manager.ts spell out
+    // that shape in their prompts). Without this the deterministic rung graded
+    // a hosted worker on a filesystem it had no way to touch — see
+    // canProduceFiles() above for why that ends as a failed node.
+    const workerCanWriteFiles = canProduceFiles(this.tools.map((t) => t.name));
     return evaluateAcceptance(criteria, assignment.files ?? [], {
       stat: async (target) => {
         try {
@@ -1430,7 +1481,7 @@ ${current}`,
           return content.includes('\uFFFD') ? null : content;
         } catch { return null; }
       },
-    });
+    }, { workerCanWriteFiles });
   }
 
   private async selfTest(

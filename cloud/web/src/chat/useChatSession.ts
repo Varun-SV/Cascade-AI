@@ -415,6 +415,22 @@ export function useChatSession(
     } catch { /* keep the optimistic transcript on a transient fetch error */ }
   }, []);
 
+  // A reconnect re-reads the transcript from the server.
+  //
+  // The server now holds a run whose socket dropped rather than aborting it
+  // (see cloud/server/src/socket.ts RECONNECT_GRACE_MS), so a run can FINISH
+  // during the gap. Its events went to the dead socket and are gone, but the
+  // assistant message was persisted before any of them were emitted — so the
+  // answer is sitting on the conversation, and this is what surfaces it.
+  // Without it the run survives and the user still sees nothing, which is the
+  // same symptom for them.
+  useEffect(() => {
+    if (!socket) return;
+    const onConnect = () => { if (conversationId) void reloadActivePath(conversationId); };
+    socket.on('connect', onConnect);
+    return () => { socket.off('connect', onConnect); };
+  }, [socket, conversationId, reloadActivePath]);
+
   // Shared run path for a fresh send, an edit (new branch), and a regenerate.
   // `appendUser` is false when regenerating (no new user turn is created). The
   // `branch` params tell the server where to attach the new turn in the tree.

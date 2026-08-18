@@ -529,3 +529,62 @@ describe('T2 wave signal — listener headroom', () => {
     for (const signal of seen) expect(getMaxListeners(signal)).toBeGreaterThan(10);
   });
 });
+
+describe('T2 decomposition prompt — file capability awareness', () => {
+  // T2 is the tier that writes the `files` and `acceptance` a worker is
+  // actually held to, so a file-shaped criterion here fails the subtask on its
+  // own — regardless of what T1 planned. Its field listing hard-coded
+  // "(1-3 mechanically checkable done-criteria: file exists / contains X /
+  // command exits 0)" for every run.
+  function makeManager(captured: { prompt?: string }, toolNames: string[]) {
+    const router = {
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }> }) => {
+        const latest = options.messages[options.messages.length - 1];
+        const text = typeof latest?.content === 'string' ? latest.content : '';
+        if (text.startsWith('Decompose this section')) captured.prompt = text;
+        return makeResult('[]');
+      }),
+      getModelForTier: () => undefined,
+    } as unknown as CascadeRouter;
+    const toolRegistry = {
+      getToolDefinitions: () => toolNames.map((name) => ({ name, description: '', inputSchema: {} })),
+      requiresApproval: () => false,
+      isDangerous: () => false,
+      hasTool: (name: string) => toolNames.includes(name),
+      execute: vi.fn(),
+    } as unknown as ToolRegistry;
+    return new T2Manager(router, toolRegistry, 't1-root');
+  }
+
+  type Decompose = (assignment: T1ToT2Assignment) => Promise<unknown>;
+
+  const section: T1ToT2Assignment = {
+    sectionId: 's1',
+    sectionTitle: 'Data Preprocessing',
+    description: 'Prepare the raw data',
+    expectedOutput: 'Cleaned data',
+    constraints: [],
+    t3Subtasks: [],
+  } as unknown as T1ToT2Assignment;
+
+  it('asks for answer-shaped criteria when nothing can write a file', async () => {
+    const captured: { prompt?: string } = {};
+    const manager = makeManager(captured, ['web_search', 'web_fetch']);
+
+    await (manager as unknown as { decomposeSection: Decompose }).decomposeSection(section);
+
+    expect(captured.prompt).toMatch(/READING THE WRITTEN ANSWER/);
+    expect(captured.prompt).toMatch(/leave EMPTY/i);
+    expect(captured.prompt).not.toMatch(/file exists \/ contains X \/ command exits 0/);
+  });
+
+  it('keeps the mechanical criteria when the run can write files', async () => {
+    const captured: { prompt?: string } = {};
+    const manager = makeManager(captured, ['file_write']);
+
+    await (manager as unknown as { decomposeSection: Decompose }).decomposeSection(section);
+
+    expect(captured.prompt).toMatch(/file exists \/ contains X \/ command exits 0/);
+    expect(captured.prompt).not.toMatch(/READING THE WRITTEN ANSWER/);
+  });
+});

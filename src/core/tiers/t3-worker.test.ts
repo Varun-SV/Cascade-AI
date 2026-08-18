@@ -11,7 +11,7 @@ import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import { PeerBus } from '../peer/bus.js';
 import { PermissionEscalator } from '../permissions/escalator.js';
-import { T3Worker, buildWorkerRules, missingVisualEvidence, shouldRequireArtifact } from './t3-worker.js';
+import { T3Worker, buildWorkerRules, canProduceFiles, missingVisualEvidence, shouldRequireArtifact } from './t3-worker.js';
 
 function makeResult(
   content: string,
@@ -594,5 +594,156 @@ describe('artifact verification resolves against the run workspace', () => {
     // has a real workspace, keeps both the tool and the check.
     expect(shouldRequireArtifact({ files: ['deck.pptx'] }, ['generate_document'])).toBe(true);
     expect(shouldRequireArtifact({ files: ['deck.pptx'] }, ['web_search'])).toBe(false);
+  });
+});
+
+describe('canProduceFiles', () => {
+  it('is false for the hosted tool set', () => {
+    // cloud/server/src/runs.ts: enabledTools is web_search/web_fetch or nothing.
+    expect(canProduceFiles(['web_search', 'web_fetch'])).toBe(false);
+    expect(canProduceFiles([])).toBe(false);
+  });
+
+  it('is true for anything that can put a file on disk', () => {
+    for (const tool of ['file_write', 'file_edit', 'shell', 'generate_document', 'run_code']) {
+      expect(canProduceFiles([tool, 'web_search'])).toBe(true);
+    }
+  });
+
+  it('counts run_code, which shouldRequireArtifact deliberately does not', () => {
+    // The two predicates answer different questions and must not be merged:
+    // run_code CAN write a file (so the acceptance rung may look at the disk),
+    // but a run_code subtask is not thereby owed an artifact.
+    expect(canProduceFiles(['run_code'])).toBe(true);
+    expect(shouldRequireArtifact({ files: ['out.csv'] }, ['run_code'])).toBe(false);
+  });
+});
+
+describe('acceptance checking on a worker with no file tools', () => {
+  /** A hosted-shaped worker: web_search only, exactly as cloud/server configures it. */
+  function makeHostedWorker(): T3Worker {
+    const router = makeRouter(vi.fn(async (_tier, options) => {
+      const latest = options.messages[options.messages.length - 1];
+      const content = typeof latest?.content === 'string' ? latest.content : '';
+      if (content.startsWith('Self-test this output')) {
+        return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+      }
+      return makeResult('Here is the full analysis you asked for.');
+    }));
+    const registry = makeToolRegistry({
+      getToolDefinitions: () => [{ name: 'web_search', description: 'Search', inputSchema: {} }],
+    });
+    return new T3Worker(router, registry, 't2-parent');
+  }
+
+  it('does not fail a subtask for a file no tool on the run could write', async () => {
+    // The production failure: T1/T2 planned "Create Project Directory
+    // Structure" with acceptance "report.md exists", the worker had
+    // web_search only, the deterministic rung stat'd a file that could never
+    // appear, correctOutput re-ran, the recheck failed again, and the subtask
+    // ESCALATED — turning a finished answer into a red node, and every
+    // dependent worker into "Blocked by failed dependency".
+    const result = await makeHostedWorker().execute(
+      makeAssignment({
+        files: ['report.md'],
+        acceptance: ['report.md exists', 'report.md contains "Findings"'],
+      }),
+      'task-hosted',
+    );
+
+    expect(result.status).not.toBe('ESCALATED');
+    expect(result.output).toContain('full analysis');
+    expect(result.issues ?? []).not.toContainEqual(
+      expect.stringContaining('report.md does not exist'),
+    );
+  });
+
+  it('still fails a real missing file when the worker could have written one', async () => {
+    // The guard must not blunt the rung on a desktop run. makeToolRegistry's
+    // default tool set is file_write, so the disk is a fair thing to check —
+    // and nothing wrote the file, so this must escalate.
+    const router = makeRouter(vi.fn(async (_tier, options) => {
+      const latest = options.messages[options.messages.length - 1];
+      const content = typeof latest?.content === 'string' ? latest.content : '';
+      if (content.startsWith('Self-test this output')) {
+        return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+      }
+      return makeResult('I have written the report.');
+    }));
+    const worker = new T3Worker(router, makeToolRegistry(), 't2-parent');
+    const result = await worker.execute(
+      makeAssignment({
+        description: 'Write the findings',
+        expectedOutput: 'A report',
+        files: ['definitely-absent-report.md'],
+        acceptance: ['definitely-absent-report.md exists'],
+      }),
+      'task-desktop',
+    );
+    expect(result.status).toBe('ESCALATED');
+  });
+});
+
+describe('tool status display', () => {
+  it('does not announce a tool the registry does not have', async () => {
+    // The screenshot that started this investigation showed "Using tool:
+    // run_code" on a hosted run, where run_code is not registered at all
+    // (cloud/server enables web_search/web_fetch only). The model had imagined
+    // the call — validateToolInput cannot catch that, since an unknown name has
+    // no schema to check — and the status went out before anything asked the
+    // registry. It reads as a real tool failing.
+    const statuses: string[] = [];
+    const router = makeRouter(vi.fn(async (_tier, options) => {
+      const latest = options.messages[options.messages.length - 1];
+      const content = typeof latest?.content === 'string' ? latest.content : '';
+      if (content.startsWith('Self-test this output')) {
+        return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+      }
+      if (statuses.every((s) => !s.startsWith('Using tool'))) {
+        return makeResult('', [{ id: 'tc-1', name: 'run_code', input: { code: 'print(1)' } }], 'tool_use');
+      }
+      return makeResult('Answered in prose.');
+    }));
+    const registry = makeToolRegistry({
+      getToolDefinitions: () => [{ name: 'web_search', description: 'Search', inputSchema: {} }],
+      hasTool: (name: string) => name === 'web_search',
+      execute: vi.fn().mockRejectedValue(new Error('Tool not found: run_code')),
+    } as unknown as Partial<ToolRegistry>);
+
+    const worker = new T3Worker(router, registry, 't2-parent');
+    worker.on('tier:status', (e: { currentAction?: string }) => {
+      if (e.currentAction) statuses.push(e.currentAction);
+    });
+
+    await worker.execute(makeAssignment(), 'task-ghost-tool');
+
+    expect(statuses).not.toContain('Using tool: run_code');
+  });
+
+  it('still announces a tool that is genuinely registered', async () => {
+    const statuses: string[] = [];
+    let calledTool = false;
+    const router = makeRouter(vi.fn(async (_tier, options) => {
+      const latest = options.messages[options.messages.length - 1];
+      const content = typeof latest?.content === 'string' ? latest.content : '';
+      if (content.startsWith('Self-test this output')) {
+        return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+      }
+      if (!calledTool) {
+        calledTool = true;
+        return makeResult('', [{ id: 'tc-1', name: 'file_write', input: { path: 'a.md', content: 'x' } }], 'tool_use');
+      }
+      return makeResult('Done.');
+    }));
+    const registry = makeToolRegistry({ hasTool: (name: string) => name === 'file_write' } as unknown as Partial<ToolRegistry>);
+
+    const worker = new T3Worker(router, registry, 't2-parent');
+    worker.on('tier:status', (e: { currentAction?: string }) => {
+      if (e.currentAction) statuses.push(e.currentAction);
+    });
+
+    await worker.execute(makeAssignment(), 'task-real-tool');
+
+    expect(statuses).toContain('Using tool: file_write');
   });
 });

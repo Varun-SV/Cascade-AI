@@ -12,7 +12,18 @@ export interface StubOpenAIServer {
   close: () => Promise<void>;
 }
 
-export function startStubOpenAIServer(): Promise<StubOpenAIServer> {
+export interface StubOpenAIOptions {
+  /**
+   * Hold the completion open this long before writing any chunk. Lets a test
+   * act while a run is genuinely in flight (disconnect, abort, stop) instead
+   * of racing an instant response. Default 0 — every existing caller is
+   * unchanged.
+   */
+  delayMs?: number;
+}
+
+export function startStubOpenAIServer(options: StubOpenAIOptions = {}): Promise<StubOpenAIServer> {
+  const delayMs = options.delayMs ?? 0;
   const requestLog: string[] = [];
   const server = http.createServer((req, res) => {
     requestLog.push(`${req.method} ${req.url}`);
@@ -37,15 +48,26 @@ export function startStubOpenAIServer(): Promise<StubOpenAIServer> {
           choices: [{ index: 0, delta, finish_reason: finishReason }],
         })}\n\n`;
 
-      res.write(chunk({ role: 'assistant', content: 'Hello ' }));
-      res.write(chunk({ content: 'from the stub model.' }));
-      res.write(chunk({}, 'stop'));
-      res.write(`data: ${JSON.stringify({
-        id, object: 'chat.completion.chunk', created, model: 'stub-model',
-        choices: [], usage: { prompt_tokens: 5, completion_tokens: 4, total_tokens: 9 },
-      })}\n\n`);
-      res.write('data: [DONE]\n\n');
-      res.end();
+      const finish = () => {
+        // The client may already be gone (an aborted run destroys the socket);
+        // writing to a closed response would throw out of a timer callback.
+        if (res.writableEnded || res.destroyed) return;
+        res.write(chunk({ role: 'assistant', content: 'Hello ' }));
+        res.write(chunk({ content: 'from the stub model.' }));
+        res.write(chunk({}, 'stop'));
+        res.write(`data: ${JSON.stringify({
+          id, object: 'chat.completion.chunk', created, model: 'stub-model',
+          choices: [], usage: { prompt_tokens: 5, completion_tokens: 4, total_tokens: 9 },
+        })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
+      };
+      if (delayMs > 0) {
+        const timer = setTimeout(finish, delayMs);
+        res.on('close', () => clearTimeout(timer));
+      } else {
+        finish();
+      }
       return;
     }
 

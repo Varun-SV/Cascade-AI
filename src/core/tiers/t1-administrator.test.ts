@@ -291,3 +291,69 @@ describe('T1 planner prompt — media generation capability awareness', () => {
     expect(captured.systemPrompt).not.toContain('generate_video');
   });
 });
+
+describe('T1 planner prompt — file capability awareness', () => {
+  // The system prompt has been capability-aware since the media work above.
+  // The USER prompt — which carries the JSON schema, the SPEC RULES, and a
+  // fully worked example subtask — was not, and an example outweighs a rule.
+  // On a hosted run (web_search/web_fetch only) it still showed `npm init`,
+  // `"files": ["package.json"]` and `"acceptance": ["package.json exists and
+  // parses as JSON"]`, so the plan came back full of scaffolding subtasks no
+  // tool on the run could perform.
+  type Decompose = (prompt: string, systemContext?: string) => Promise<TaskPlan>;
+
+  function makePlanner(captured: { prompt?: string }, toolNames: string[]) {
+    const router = {
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }> }) => {
+        const latest = options.messages[options.messages.length - 1];
+        captured.prompt = typeof latest?.content === 'string' ? latest.content : '';
+        return {
+          content: '{"complexity":"Simple","reasoning":"r","sections":[]}',
+          finishReason: 'stop',
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimatedCostUsd: 0 },
+        };
+      }),
+    } as unknown as CascadeRouter;
+    const toolRegistry = {
+      getToolDefinitions: () => toolNames.map((name) => ({ name, description: '', inputSchema: {} })),
+    } as unknown as ToolRegistry;
+    return new T1Administrator(router, toolRegistry, {} as CascadeConfig);
+  }
+
+  it('stops showing a scaffolding example to a run that cannot write files', async () => {
+    const captured: { prompt?: string } = {};
+    const admin = makePlanner(captured, ['web_search', 'web_fetch']);
+
+    await (admin as unknown as { decomposeTask: Decompose })
+      .decomposeTask('build a digital twin simulation with fault detection');
+
+    expect(captured.prompt).not.toContain('npm init');
+    expect(captured.prompt).not.toContain('package.json exists and parses as JSON');
+    expect(captured.prompt).not.toMatch(/npm available/);
+    expect(captured.prompt).toContain('"files": []');
+    // The directory-prefix instruction is about paths, and there are none.
+    expect(captured.prompt).not.toMatch(/python_exclusive\/filename\.ext/);
+  });
+
+  it('warns the planner up front that nothing can touch the disk', async () => {
+    const captured: { prompt?: string } = {};
+    const admin = makePlanner(captured, ['web_search']);
+
+    await (admin as unknown as { decomposeTask: Decompose }).decomposeTask('analyse this dataset');
+
+    expect(captured.prompt).toMatch(/NO file, shell, or code-execution tools/i);
+    expect(captured.prompt).toMatch(/NEVER phrase one as a file existing/i);
+  });
+
+  it('leaves a run that CAN write files planning exactly as before', async () => {
+    const captured: { prompt?: string } = {};
+    const admin = makePlanner(captured, ['file_write', 'shell']);
+
+    await (admin as unknown as { decomposeTask: Decompose }).decomposeTask('scaffold a node project');
+
+    expect(captured.prompt).toContain('npm init');
+    expect(captured.prompt).toContain('package.json exists and parses as JSON');
+    expect(captured.prompt).toContain('python_exclusive/filename.ext');
+    expect(captured.prompt).not.toMatch(/NO file, shell, or code-execution tools/i);
+  });
+});
