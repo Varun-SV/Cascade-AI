@@ -269,6 +269,22 @@ describe('a configured Gemini endpoint is actually used', () => {
       .toBe('https://gemini-proxy.internal/v1beta/models');
   });
 
+  it('strips any version segment, not just the current one', async () => {
+    // The client owns the version — that is why `CLIENT_OWNS_VERSION` lists
+    // Gemini — so whatever the user wrote is replaced rather than appended to.
+    // Trusting a `/v2` here would produce `/v2/v1beta` on the wire, and would
+    // also make endpoint identity and the provider disagree about which
+    // spellings name one host.
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(listOk());
+    await new GeminiProvider(
+      { type: 'gemini', apiKey: 'k', baseUrl: 'https://gemini-proxy.internal/v2/' },
+      MODEL,
+    ).listModels();
+
+    expect(String(spy.mock.calls[0]?.[0]))
+      .toBe('https://gemini-proxy.internal/v1beta/models');
+  });
+
   it('hands the same root to the SDK client that discovery uses', async () => {
     // Generation goes through the SDK rather than `fetch`, so the two could
     // disagree without either test noticing — which is exactly what happened.

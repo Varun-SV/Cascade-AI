@@ -26,6 +26,7 @@ import { BaseProvider, ProviderUnreachableError } from './base.js';
 import { withResolvedPricing } from '../core/router/pricing.js';
 import { isChatModel } from './model-filter.js';
 import { toGeminiParameters } from './gemini-schema.js';
+import { stripVersionSuffix } from '../utils/net.js';
 
 /**
  * The version segment the Gemini client owns.
@@ -44,15 +45,18 @@ const GEMINI_PUBLIC_ROOT = 'https://generativelanguage.googleapis.com';
  *
  * A trailing version segment is stripped rather than trusted: the SDK adds its
  * own, so a user who writes the URL the way it appears in Google's docs would
- * otherwise generate against `/v1beta/v1beta`. Same shape as
- * `anthropicApiRoot()`, and for the same reason — the client, not the config,
- * owns the version.
+ * otherwise generate against `/v1beta/v1beta`.
+ *
+ * Delegates, exactly as `anthropicApiRoot()` does and for the same two
+ * reasons. Credential-scope comparison in `config/` has to agree with this
+ * about which spellings name one root — `CLIENT_OWNS_VERSION` lists Gemini
+ * precisely because of the concatenation above — and a hand-rolled copy also
+ * reintroduced the polynomial `replace(/\/+$/, '')` that
+ * `stripTrailingSlashes()` exists to keep out of the codebase.
  */
 export function geminiApiRoot(baseUrl?: string): string {
-  const configured = baseUrl?.trim().replace(/\/+$/, '');
-  if (!configured) return GEMINI_PUBLIC_ROOT;
-  const suffix = `/${GEMINI_API_VERSION}`;
-  return configured.endsWith(suffix) ? configured.slice(0, -suffix.length) : configured;
+  const configured = baseUrl?.trim();
+  return configured ? stripVersionSuffix(configured) || GEMINI_PUBLIC_ROOT : GEMINI_PUBLIC_ROOT;
 }
 
 /**
