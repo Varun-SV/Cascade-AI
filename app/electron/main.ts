@@ -11,6 +11,7 @@ import {
   net as electronNet,
 } from 'electron';
 import { join } from 'node:path';
+import { keepsCredentialAcrossEdit, priorAzureRow } from './settings-merge.js';
 import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
 import { registerCloudAuthIpc } from './cloudAuth';
@@ -69,7 +70,7 @@ function mapProvider(id: string): { type: string | null; baseUrl?: string } {
 // ─── Backend ─────────────────────────────────────────────────────────────────
 // Resolve the cascade-ai core package (built CommonJS output). In dev it lives at
 // the repo's ../dist; in a packaged app it's bundled under resources/cascade-core.
-function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined) => boolean; hasProviderCredential: (p: { apiKey?: string; authToken?: string } | undefined | null) => boolean; applyProviderApiKey: (providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>, type: string, apiKey: string, extra?: { baseUrl?: string }) => void; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response> } {
+function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined) => boolean; hasProviderCredential: (p: { apiKey?: string; authToken?: string } | undefined | null) => boolean; applyProviderApiKey: (providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>, type: string, apiKey: string, extra?: { baseUrl?: string }) => void; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response>; sameEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean; sameAzureEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean } {
   // Dev: the repo's external-deps build (node_modules resolves the requires).
   // Packaged: the self-contained `desktop-core.cjs` bundle (no node_modules to
   // resolve from — every JS dep is bundled in; only native modules like
@@ -637,11 +638,28 @@ function registerIPC(): void {
         }
       }
       if (data.endpoints) {
+        const { sameEndpoint } = loadCore();
         for (const [type, baseUrl] of Object.entries(data.endpoints)) {
           if (baseUrl === undefined || type === 'azure') continue; // azure goes through azureDeployments below
-          const existing = cascadeConfig.providers.find((pr: { type: string }) => pr.type === type);
-          if (existing) existing.baseUrl = baseUrl || undefined;
-          else if (baseUrl) cascadeConfig.providers.push({ type, baseUrl });
+          const existing = cascadeConfig.providers.find(
+            (pr: { type: string }) => pr.type === type,
+          ) as { baseUrl?: string; apiKey?: string; authToken?: string } | undefined;
+          if (existing) {
+            // A key belongs to the host that issued it. The two fields were
+            // handled independently, and a blank key field means "keep the
+            // existing key" — so pointing an OpenAI-compatible provider at a
+            // different host without typing a new key moved the old host's key
+            // onto the new one. Changing the endpoint retires the credential
+            // that was paired with it; a key typed in the same save is applied
+            // above and survives, because that IS the replacement.
+            if (!keepsCredentialAcrossEdit(existing, baseUrl, data.keys?.[type], sameEndpoint)) {
+              existing.apiKey = undefined;
+              existing.authToken = undefined;
+            }
+            existing.baseUrl = baseUrl || undefined;
+          } else if (baseUrl) {
+            cascadeConfig.providers.push({ type, baseUrl });
+          }
         }
       }
       // Azure supports multiple deployments — unlike every other provider type,
@@ -650,12 +668,19 @@ function registerIPC(): void {
       // Blank/omitted apiKey on an incoming row keeps that deployment's
       // existing key (matched by deploymentName, its natural stable identity).
       if (Array.isArray(data.azureDeployments)) {
+        const { sameAzureEndpoint } = loadCore();
         const priorAzure = cascadeConfig.providers.filter((p: { type: string }) => p.type === 'azure') as
-          Array<{ deploymentName?: string; apiKey?: string }>;
+          Array<{ deploymentName?: string; apiKey?: string; baseUrl?: string }>;
         const nonAzure = cascadeConfig.providers.filter((p: { type: string }) => p.type !== 'azure');
         const nextAzure = data.azureDeployments
           .map((d) => {
-            const prior = d.deploymentName ? priorAzure.find((p) => p.deploymentName === d.deploymentName) : undefined;
+            // Matched on deployment name AND resource, not the name alone. An
+            // Azure key is resource-scoped, so moving deployment "prod" from
+            // resource A to resource B with a blank key field was copying A's
+            // key onto B — a credential sent to a resource that never issued
+            // it. A row whose resource changed inherits nothing and needs a key
+            // typed in the same save.
+            const prior = priorAzureRow(priorAzure, d, sameAzureEndpoint);
             const apiKey = d.apiKey ? d.apiKey : prior?.apiKey;
             return {
               type: 'azure' as const,

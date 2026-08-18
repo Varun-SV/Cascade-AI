@@ -154,6 +154,29 @@ function fromEnv(env: NodeJS.ProcessEnv): DiscoveredCredential[] {
   for (const { env: name, provider } of map) {
     const secret = str(env[name]);
     if (!secret || seen.has(provider)) continue;
+
+    // A subscription token exported through an API-KEY variable is still a
+    // subscription token — the field it arrives in says nothing about what it
+    // is, and `anthropicAuth()` refuses it at the wire whichever one carries
+    // it. Reported like the bearer case below (visible, explained, not
+    // adoptable) rather than as a usable key.
+    //
+    // Deliberately does NOT take the `seen` slot: claiming it here would
+    // suppress a perfectly good ANTHROPIC_AUTH_TOKEN further down, so a user
+    // with a stale key and a working gateway bearer would be shown only the
+    // dead one.
+    if (isSubscriptionToken(secret)) {
+      out.push({
+        provider,
+        sourceTool: `Environment (${name})`,
+        kind: 'oauth',
+        secret,
+        directlyUsable: false,
+        warning: ANTHROPIC_OAUTH_WARNING,
+      });
+      continue;
+    }
+
     seen.add(provider);
     // ANTHROPIC_BASE_URL travels with the KEY as well as with the bearer below.
     // Adoption replaces the provider entry but keeps fields the credential says

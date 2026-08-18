@@ -226,7 +226,17 @@ export class OpenAIProvider extends BaseProvider {
     return Math.ceil(text.length / 4);
   }
 
-  async listModels(): Promise<ModelInfo[]> {
+  async listModels(options: { staticFallback?: boolean } = {}): Promise<ModelInfo[]> {
+  // Same contract Anthropic honours (see BaseProvider.listModels). The bundled
+  // catalogue is right for a settings list and wrong for router validation,
+  // which reads a non-empty result as "the endpoint confirmed these ids",
+  // caches it and pins Auto to them — so a 401 or an outage was being recorded
+  // as confirmation of the PUBLIC catalogue. The parameter existed and this
+  // provider ignored it, which is worse than not having it: the router asked
+  // for confirmed models and was answered with a guess.
+    const staticCatalog = () => (options.staticFallback === false
+      ? []
+      : Object.values(MODELS).filter((m) => m.provider === 'openai'));
     try {
       const response = await this.client.models.list();
       return response.data.filter((m) => isChatModel(m.id)).map((m) => {
@@ -248,7 +258,7 @@ export class OpenAIProvider extends BaseProvider {
         });
       });
     } catch {
-      return Object.values(MODELS).filter((m) => m.provider === 'openai');
+      return staticCatalog();
     }
   }
 

@@ -319,4 +319,64 @@ describe('ConfigManager + global credentials (the "AppImage forgets my keys" bug
     );
     expect(merged.find((p) => p.type === 'openai')?.apiKey).toBe('sk-o');
   });
+
+  it('does not graft a global endpoint onto a row that has its own credential', () => {
+    // The refusal was one-sided: a secret could not be imported into a row
+    // naming a different host, but the endpoint fill ran unconditionally. So a
+    // workspace row holding a project key and no endpoint silently acquired the
+    // global row's corporate gateway — sending that key to a host it was never
+    // paired with.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'anthropic', apiKey: 'project-key' }],
+      [{ type: 'anthropic', apiKey: 'old-gateway-key', baseUrl: 'https://corp-gw.example' }],
+    );
+
+    const anthropic = merged.find((p) => p.type === 'anthropic')!;
+    expect(anthropic.apiKey).toBe('project-key');
+    expect(anthropic.baseUrl).toBeUndefined();
+  });
+
+  it('still gives an endpoint to a row that brought no credential', () => {
+    const merged = mergeGlobalCredentials(
+      [{ type: 'anthropic' }],
+      [{ type: 'anthropic', apiKey: 'gw-key', baseUrl: 'https://corp-gw.example' }],
+    );
+    expect(merged.find((p) => p.type === 'anthropic')).toMatchObject({
+      apiKey: 'gw-key', baseUrl: 'https://corp-gw.example',
+    });
+  });
+
+  it('spreads a resource-scoped Azure key across every deployment on it', () => {
+    // Azure keys are resource-scoped. A global row naming the RESOURCE and no
+    // deployment matched through `find`, so only the first workspace deployment
+    // got the key and its siblings stayed keyless — failing every request while
+    // the first worked.
+    const merged = mergeGlobalCredentials(
+      [
+        { type: 'azure', deploymentName: 'gpt-4o', baseUrl: 'https://r1.openai.azure.com' },
+        { type: 'azure', deploymentName: 'gpt-4o-mini', baseUrl: 'https://r1.openai.azure.com' },
+        { type: 'azure', deploymentName: 'other', baseUrl: 'https://r2.openai.azure.com' },
+      ],
+      [{ type: 'azure', baseUrl: 'https://r1.openai.azure.com', apiKey: 'key-r1' }],
+    );
+
+    const on = (name: string) => merged.find((p) => p.deploymentName === name);
+    expect(on('gpt-4o')?.apiKey).toBe('key-r1');
+    expect(on('gpt-4o-mini')?.apiKey).toBe('key-r1');
+    // …and nothing on the other resource.
+    expect(on('other')?.apiKey).toBeUndefined();
+  });
+
+  it('keeps an Azure deployment endpoint fill, which its deployment name pins', () => {
+    // The non-Azure graft rule must not break this: a matching deployment name
+    // identifies its resource, so the global row is the only record of where
+    // that deployment lives, not a guess.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'azure', deploymentName: 'gpt-4o', apiKey: 'ws-key' }],
+      [{ type: 'azure', deploymentName: 'gpt-4o', apiKey: 'global-key', baseUrl: 'https://r1.openai.azure.com' }],
+    );
+    const row = merged.find((p) => p.deploymentName === 'gpt-4o')!;
+    expect(row.apiKey).toBe('ws-key');
+    expect(row.baseUrl).toBe('https://r1.openai.azure.com');
+  });
 });

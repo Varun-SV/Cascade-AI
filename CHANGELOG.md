@@ -21,6 +21,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## 0.75.0 - 2026-08-14
 
 ### Fixed
+- **Desktop Settings could move a key to a host that never issued it.** The key
+  and endpoint fields were handled independently, and a blank key means "keep
+  the existing key" — so repointing an OpenAI-compatible provider at another
+  host carried the old host's key with it. The Azure editor matched a prior key
+  by deployment name alone, so moving a deployment between resources copied the
+  first resource's key onto the second. Keeping a credential across an edit is
+  now conditional on the endpoint being the same one.
+
+- **A stored endpoint could be grafted onto a credential it was never paired
+  with.** The global merge refused to import a secret into a row naming a
+  different host, but not the reverse: a workspace row holding its own key and
+  no endpoint silently adopted the stored gateway. Atomic in both directions
+  now. An Azure row is the exception and stays one — a matching deployment name
+  pins its resource, so the stored endpoint is the only record of where that
+  deployment lives, not a guess.
+
+- **A resource-scoped Azure key reached only one deployment.** A global row
+  naming a resource and no deployment matched the first workspace row on it and
+  stopped; its siblings stayed keyless and failed every request. Azure keys are
+  resource-scoped, so it now applies to every deployment on that resource.
+
+- **OpenAI-compatible keys were replayed across cross-origin redirects.** The
+  provider installed the raw Node fetch helper as the SDK's transport and used
+  it directly for model discovery, both carrying `Authorization: Bearer`, with
+  no redirect origin policy — so an endpoint that redirected elsewhere handed
+  the key to the second host. Same protection the Anthropic paths already had.
+
+- **A Claude subscription token was only refused when it sat in `authToken`.**
+  Discovery reported `ANTHROPIC_API_KEY=sk-ant-oat…` as usable, the environment
+  injection wrote it into `apiKey` on every load, and both the native and
+  browser migrations looked at the wrong field — so the provider boundary threw
+  on a credential everything upstream had called healthy. All of them classify
+  the secret by value now, and the migration removes whichever field holds it
+  rather than a fixed one.
+
+- **A failed model discovery could still be cached as endpoint-confirmed.** The
+  OpenAI and Gemini providers accepted the "no static fallback" flag and ignored
+  it, so a 401 or a network failure returned the bundled catalogue and router
+  validation recorded it as confirmation. Both honour it now.
+
+- **The automatic Azure environment path disagreed with `cascade link azure`.**
+  It never created a deployment the environment named, and could not see
+  deployments held only in the machine-global store — so an exported replacement
+  key was dropped and the stale stored rows restored. Both paths now resolve the
+  resource over the same workspace-plus-global view and upsert the named
+  deployment, keeping the refusal when several resources are configured.
+
+- **A discarded sync credential was counted but never named.** The CLI could
+  print `Cascade config migration: .` when an orphan bearer was the only
+  removal, and the desktop knew nothing about that count at all — reporting a
+  clean sync over a credential it had just dropped.
+
+- **The desktop reported every sync failure as a bad passphrase.** Decrypt,
+  apply and persist shared one `catch`, so a read-only config or a failed write
+  sent the user to retry a passphrase that was already correct.
+
+- **Two security fixes were narrower than they looked.** The browser's
+  local-endpoint filter missed bracketed IPv6 (`[::1]`), unique-local and
+  link-local IPv6, IPv4-mapped addresses in their re-serialized hex form, and a
+  trailing DNS dot. And the discovery credential-identity TTL was refreshed on
+  every lookup — directly contradicting the comment above it — so a credential
+  used once per window stayed a raw map key indefinitely; retention is measured
+  from first use and no longer slides.
+
 - **A credential could be paired with the wrong endpoint on adoption.** The
   machine-global merge copied an `apiKey` before considering the endpoint it
   came with, so a workspace row naming gateway B with no credential took the

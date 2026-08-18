@@ -488,4 +488,5 @@ describe('AnthropicProvider.listModels — a failed gateway is not a validated c
       spy.mockRestore();
     }
   });
+
 });

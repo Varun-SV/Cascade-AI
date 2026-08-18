@@ -263,6 +263,11 @@ function SyncBlock() {
         // the provider is still supported, the CREDENTIAL is not, and the two
         // need different things from the user.
         if (skipped?.revokedCredentials) parts.push('discarded a linked Claude subscription token (Anthropic no longer permits third-party use)');
+        // A different removal with a different cause: the token is live,
+        // it just named no gateway, and a bearer is only valid at the one
+        // that issued it. Reported separately or the sync says it applied
+        // cleanly over a credential it discarded.
+        if (skipped?.unusableCredentials) parts.push('discarded a synced gateway token that named no gateway URL');
         if (skipped?.clearedPins.length) parts.push(`reset ${skipped.clearedPins.map((t) => t.toUpperCase()).join('/')} to Auto`);
         setStatus(parts.length ? `Applied your synced settings here — ${parts.join('; ')}.` : 'Applied your synced settings here.');
       }

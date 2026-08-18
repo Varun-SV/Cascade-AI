@@ -201,4 +201,41 @@ describe('browser sync merge', () => {
     expect(merged[0]?.apiKey).toBe('sk-ant-real');
     expect((merged[0] as { authToken?: string }).authToken).toBeUndefined();
   });
+
+  it('recognises private endpoint forms the first filter missed', () => {
+    // WHATWG URL.hostname serialises an IPv6 literal WITH brackets, so
+    // `http://[::1]:8080` yields `[::1]` and matched nothing. Unique-local
+    // (fc00::/7), link-local (fe80::/10) and a trailing DNS dot were all
+    // unhandled too, so these could still be restored into a hosted vault.
+    const forms = [
+      'http://[::1]:8080/v1',
+      'http://[fd00::1]:8080/v1',
+      'http://[fe80::1]:8080/v1',
+      'http://localhost./v1',
+      'http://[::ffff:127.0.0.1]:8080/v1',
+    ];
+    for (const baseUrl of forms) {
+      const { merged, unusable } = mergeProviders([], [{ type: 'openai-compatible', baseUrl, apiKey: 'k' }]);
+      expect(merged, baseUrl).toHaveLength(0);
+      expect(unusable.map((u) => u.reason), baseUrl).toEqual(['local-endpoint']);
+    }
+  });
+
+  it('does not mistake a public IPv6 host for a private one', () => {
+    const { merged, unusable } = mergeProviders([], [
+      { type: 'openai-compatible', baseUrl: 'https://[2606:4700::1111]/v1', apiKey: 'k' },
+    ]);
+    expect(merged).toHaveLength(1);
+    expect(unusable).toEqual([]);
+  });
+
+  it('drops a subscription token that arrives in apiKey', () => {
+    // The browser classifier checked `authToken` only, so a row with the token
+    // in the wrong field was stored and sent.
+    const { merged, revoked } = mergeProviders([], [
+      { type: 'anthropic', apiKey: 'sk-ant-oat01-dead' } as ProviderConfig,
+    ]);
+    expect(merged).toHaveLength(0);
+    expect(revoked).toBe(1);
+  });
 });

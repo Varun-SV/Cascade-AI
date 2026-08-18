@@ -23,10 +23,18 @@ export function isSubscriptionToken(secret: unknown): boolean {
 
 /** Whether an incoming row is an Anthropic entry whose bearer is a dead subscription token. */
 export function isRevokedSubscriptionCredential(p: unknown): boolean {
-  const row = p as { type?: unknown; authToken?: unknown; credentialSource?: unknown } | null;
-  if (!row || row.type !== 'anthropic' || !row.authToken) return false;
+  const row = p as {
+    type?: unknown; apiKey?: unknown; authToken?: unknown; credentialSource?: unknown;
+  } | null;
+  if (!row || row.type !== 'anthropic') return false;
+  // EITHER field, mirroring src/config/revoked-credentials.ts. A bundle is raw
+  // JSON with no validation, so a row can arrive with the token in `apiKey` —
+  // where a check on `authToken` alone stored it and let the browser send it.
+  if (!row.authToken && !row.apiKey) return false;
   return isSubscriptionToken(row.authToken)
-    || (typeof row.credentialSource === 'string' && /claude\s*code/i.test(row.credentialSource));
+    || isSubscriptionToken(row.apiKey)
+    || (Boolean(row.authToken)
+      && typeof row.credentialSource === 'string' && /claude\s*code/i.test(row.credentialSource));
 }
 
 /**
@@ -54,11 +62,22 @@ export function stripRevokedCredentials(providers: unknown[]): {
       continue;
     }
     removed++;
-    const row = p as ProviderConfig & { authToken?: unknown; credentialSource?: unknown };
-    if (row.apiKey) {
-      const { authToken: _t, credentialSource: _s, ...rest } = row;
-      kept.push(rest as ProviderConfig);
+    // Remove the field that actually holds the dead secret, not a fixed one.
+    // Dropping `authToken` unconditionally left a subscription token sitting in
+    // `apiKey`, and `row.apiKey` then read as "still has a key" so the row was
+    // kept and sent.
+    const row = { ...(p as ProviderConfig & { authToken?: unknown; credentialSource?: unknown }) };
+    if (isSubscriptionToken(row.apiKey)) delete row.apiKey;
+    const bearerIsDead = isSubscriptionToken(row.authToken)
+      || (Boolean(row.authToken)
+        && typeof row.credentialSource === 'string' && /claude\s*code/i.test(row.credentialSource));
+    if (bearerIsDead) {
+      delete row.authToken;
+      delete row.credentialSource;
     }
+    // Only an API key keeps the row here: the browser cannot send a bearer at
+    // all, so a surviving one is no reason to keep an otherwise-empty entry.
+    if (row.apiKey) kept.push(row as ProviderConfig);
   }
   return { kept, removed };
 }
@@ -87,14 +106,51 @@ function isUnreachableFromServer(baseUrl: unknown): boolean {
   } catch {
     return false; // not a URL we can judge — leave it to the server to reject
   }
-  if (host === 'localhost' || host.endsWith('.localhost') || host === '::1') return true;
-  if (host === '0.0.0.0' || host.startsWith('127.')) return true;
-  // RFC1918 and link-local.
-  if (/^10\./.test(host) || /^192\.168\./.test(host) || /^169\.254\./.test(host)) return true;
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true;
+
+  // WHATWG `URL.hostname` serializes an IPv6 literal WITH its brackets, so
+  // `http://[::1]:8080` yields `[::1]` — which matched none of the checks that
+  // followed. Unwrapped first, before anything else looks at the string.
+  const ipv6 = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : null;
+  if (ipv6) {
+    if (ipv6 === '::1' || ipv6 === '::') return true;
+    // Unique-local (fc00::/7) and link-local (fe80::/10).
+    if (/^f[cd]/.test(ipv6)) return true;
+    if (/^fe[89ab]/.test(ipv6)) return true;
+    // An IPv4-mapped literal carries the v4 rules with it. WHATWG re-serialises
+    // `::ffff:127.0.0.1` to the HEX form `::ffff:7f00:1`, so matching only the
+    // dotted spelling let loopback through in mapped form.
+    const mapped = /^::ffff:(.+)$/.exec(ipv6);
+    if (mapped) {
+      const rest = mapped[1]!;
+      if (rest.includes('.')) return isPrivateIpv4(rest);
+      const groups = rest.split(':');
+      if (groups.length === 2) {
+        const [hi, lo] = groups.map((g) => Number.parseInt(g, 16));
+        if (Number.isFinite(hi) && Number.isFinite(lo)) {
+          return isPrivateIpv4(
+            `${(hi! >> 8) & 0xff}.${hi! & 0xff}.${(lo! >> 8) & 0xff}.${lo! & 0xff}`,
+          );
+        }
+      }
+    }
+    return false;
+  }
+
+  // A trailing dot is the DNS root and addresses the same name, so `localhost.`
+  // must not slip past an exact comparison.
+  const name = host.endsWith('.') ? host.slice(0, -1) : host;
+
+  if (name === 'localhost' || name.endsWith('.localhost')) return true;
   // `.local` mDNS names resolve on the user's LAN only.
-  if (host.endsWith('.local')) return true;
-  return false;
+  if (name.endsWith('.local')) return true;
+  return isPrivateIpv4(name);
+}
+
+/** Loopback, RFC1918 and link-local IPv4, by literal address. */
+function isPrivateIpv4(host: string): boolean {
+  if (host === '0.0.0.0' || host.startsWith('127.')) return true;
+  if (/^10\./.test(host) || /^192\.168\./.test(host) || /^169\.254\./.test(host)) return true;
+  return /^172\.(1[6-9]|2\d|3[01])\./.test(host);
 }
 
 /** Why a synced provider row cannot be used from the hosted web client. */

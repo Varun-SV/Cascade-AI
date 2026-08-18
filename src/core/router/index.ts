@@ -297,13 +297,18 @@ function credentialIdentity(secret: string | undefined): string {
     sweepExpired(now);
   }
   const held = credentialIdentities.get(secret);
-  // An entry past its TTL is not reused: refreshing it on lookup would let a
-  // credential still in occasional use keep its identity for ever, which is the
-  // same unbounded retention by a slower route.
-  if (held && now - held.at <= DISCOVERY_TTL_MS) {
-    held.at = now;
-    return held.id;
-  }
+  // `at` is the moment this secret was FIRST held, and it is never moved. The
+  // comment here used to say that refreshing on lookup would let a credential
+  // in occasional use keep its identity for ever — and the line below it did
+  // exactly that, so any secret used at least once per TTL window stayed a raw
+  // Map key for the life of the process. That is the retention this expiry
+  // exists to end.
+  //
+  // Retention is therefore capped at DISCOVERY_TTL_MS from first use, whatever
+  // the traffic. A credential still in use past that simply gets a new opaque
+  // id, which invalidates a discovery entry that was expiring on the same clock
+  // anyway — a re-probe every fifteen minutes, not a correctness change.
+  if (held && now - held.at <= DISCOVERY_TTL_MS) return held.id;
   const id = crypto.randomUUID();
   credentialIdentities.set(secret, { id, at: now });
   return id;

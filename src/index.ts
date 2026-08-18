@@ -13,6 +13,12 @@ export * from './core/verification/index.js';
 export { runCascade, createCascade, streamCascade } from './sdk/index.js';
 
 export { ConfigManager, hasUsableProvider, hasProviderCredential, applyProviderApiKey } from './config/index.js';
+// The desktop settings save has to ask "is this the same endpoint?" to decide
+// whether a stored key may be kept across an edit. Exported rather than
+// reimplemented in app/: a second copy of this rule is how the answer starts
+// differing between the surfaces that share the config.
+export { sameEndpoint, normalizeEndpoint } from './utils/net.js';
+export { sameAzureEndpoint } from './config/azure-endpoint.js';
 export { Keystore } from './config/keystore.js';
 export { CascadeIgnore } from './config/ignore.js';
 export { MemoryStore } from './memory/store.js';

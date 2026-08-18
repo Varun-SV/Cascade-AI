@@ -455,7 +455,9 @@ export class ConfigManager {
    * own row, matching `deploymentName` against the model id, so filling only
    * the first left the rest issuing requests with no key at all.
    */
-  private azureEntriesForEnv(): CascadeConfig['providers'] {
+  private azureEntriesForEnv(
+    globalProviders: readonly CascadeConfig['providers'][number][] = [],
+  ): CascadeConfig['providers'] {
     // An entry with no ENDPOINT cannot route a request — the Azure client falls
     // back to a placeholder URL — so filling a key into one produces a provider
     // that resolves to nothing while making hasUsableProvider() true, skipping
@@ -463,19 +465,65 @@ export class ConfigManager {
     // those rows also made a config of nothing but them normalise to a single
     // empty "resource" and look unambiguous. Same correction as
     // `azureDeploymentsForCredential`, whose copy of this rule was fixed first.
-    const entries = this.config.providers.filter((p) => p.type === 'azure' && p.baseUrl?.trim());
-    if (entries.length === 0) return [];
+    const routable = (list: readonly CascadeConfig['providers'][number][]) =>
+      list.filter((p) => p.type === 'azure' && p.baseUrl?.trim());
+    const workspace = routable(this.config.providers);
+    // The machine-global store is part of the VIEW used to resolve the resource,
+    // even though only workspace rows are written. A deployment configured once
+    // in another workspace lives only in ~/.cascade-ai/credentials.json, and
+    // reading the workspace alone made an unambiguous single-resource setup look
+    // like no setup at all — so an exported replacement key was dropped and the
+    // merge then restored the stale global rows a few lines later.
+    const global = routable(globalProviders);
+    const view = [...workspace, ...global];
+    if (view.length === 0) return [];
+
     const endpoint = process.env['AZURE_OPENAI_ENDPOINT']?.trim();
-    if (endpoint) return entries.filter((p) => sameAzureEndpoint(p.baseUrl, endpoint));
     const deployment = process.env['AZURE_OPENAI_DEPLOYMENT']?.trim()
       ?? process.env['AZURE_OPENAI_DEPLOYMENT_NAME']?.trim();
-    // The deployment name pins the resource just as well as the endpoint does.
-    if (deployment) {
-      const match = entries.find((p) => (p.deploymentName?.trim() ?? '') === deployment);
-      if (match) return entries.filter((p) => sameAzureEndpoint(p.baseUrl, match.baseUrl));
+
+    // Which resource this key belongs to, by the same three routes
+    // `azureDeploymentsForCredential` uses — the deployment name pins the
+    // resource just as well as the endpoint does, and a sole configured
+    // resource is unambiguous on its own.
+    let anchor = endpoint
+      ? view.find((p) => sameAzureEndpoint(p.baseUrl, endpoint))
+      : undefined;
+    if (!anchor && endpoint) return [];                 // exported an endpoint nothing is on
+    if (!anchor && deployment) {
+      anchor = view.find((p) => (p.deploymentName?.trim() ?? '') === deployment);
     }
-    const resources = new Set(entries.map((p) => normalizeAzureEndpoint(p.baseUrl)));
-    return resources.size === 1 ? entries : [];
+    if (!anchor) {
+      const resources = new Set(view.map((p) => normalizeAzureEndpoint(p.baseUrl)));
+      if (resources.size !== 1) return [];              // ambiguous — refuse, as before
+      anchor = view[0];
+    }
+    const resource = anchor!.baseUrl!;
+    const onResource = workspace.filter((p) => sameAzureEndpoint(p.baseUrl, resource));
+
+    // A deployment that exists only in the global store still needs a workspace
+    // row to receive the exported key: without one the merge appends the global
+    // row whole, stale credential included.
+    for (const g of global) {
+      if (!sameAzureEndpoint(g.baseUrl, resource)) continue;
+      const name = g.deploymentName?.trim() ?? '';
+      if (onResource.some((p) => (p.deploymentName?.trim() ?? '') === name)) continue;
+      const row = { ...g, apiKey: undefined, authToken: undefined };
+      this.config.providers.push(row);
+      onResource.push(row);
+    }
+
+    // A deployment the environment NAMED that nothing has yet. `cascade link
+    // azure` creates it; this path silently rotated the existing rows instead
+    // and never made the one the user asked for — the same divergence, on the
+    // automatic path rather than the explicit one.
+    if (deployment && !view.some((p) => (p.deploymentName?.trim() ?? '') === deployment)) {
+      const row = { type: 'azure' as const, deploymentName: deployment, baseUrl: resource };
+      this.config.providers.push(row);
+      onResource.push(row);
+    }
+
+    return onResource;
   }
 
   private async persistClearedPins(tiers: readonly string[]): Promise<void> {
@@ -557,6 +605,14 @@ export class ConfigManager {
     for (const { env, type } of envProviders) {
       const key = process.env[env];
       if (!key) continue;
+      // The same value check the bearer branch below applies, on the API-key
+      // path it was missing from. `ANTHROPIC_API_KEY=sk-ant-oat…` was written
+      // straight into `apiKey` on every load — surviving the migration that had
+      // just stripped the stored copy, counted as a credential by
+      // `hasProviderCredential`, and reported healthy until the provider
+      // constructor threw. The slot a secret arrives in says nothing about what
+      // it is.
+      if (isSubscriptionToken(key)) continue;
       // An Azure key belongs to ONE RESOURCE, so the entries it fills have to
       // be chosen by endpoint rather than by "first of this type". Filling the
       // first keyless deployment sent a resource-specific key to an unrelated
@@ -564,7 +620,7 @@ export class ConfigManager {
       // own correctly scoped write. Plural, because the key covers every
       // deployment on the resource it belongs to.
       const targets = type === 'azure'
-        ? this.azureEntriesForEnv()
+        ? this.azureEntriesForEnv(globalProviders)
         : [this.config.providers.find((p) => p.type === type)].filter((p) => !!p);
       const existing = targets[0];
 

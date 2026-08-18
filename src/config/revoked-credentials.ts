@@ -55,9 +55,17 @@ export function isRevokedSubscriptionCredential(p: CredentialBearingProvider): b
   // "providers[0] is invalid" the schema would have produced. Same defensive
   // shape as stripRetiredProviders().
   if (typeof p !== 'object' || p === null) return false;
-  if (p.type !== 'anthropic' || !p.authToken) return false;
+  if (p.type !== 'anthropic') return false;
+  // EITHER field. The secret's value decides what it is, not the slot it was
+  // written into — a hand-edited config, `ANTHROPIC_API_KEY=sk-ant-oat…`, or a
+  // synced row with the token in the wrong field all put it in `apiKey`, where
+  // a check on `authToken` alone left it stored, counted as a credential by
+  // `hasProviderCredential`, and reported healthy right up until the provider
+  // constructor threw.
+  if (!p.authToken && !p.apiKey) return false;
   return isSubscriptionToken(p.authToken)
-    || /claude\s*code/i.test(p.credentialSource ?? '');
+    || isSubscriptionToken(p.apiKey)
+    || (Boolean(p.authToken) && /claude\s*code/i.test(p.credentialSource ?? ''));
 }
 
 /**
@@ -112,11 +120,24 @@ export function stripRevokedCredentials<T extends CredentialBearingProvider>(
       continue;
     }
     removed++;
-    const worthKeeping = Boolean(p.apiKey || (keepForEndpoint && p.baseUrl));
-    if (worthKeeping) {
-      const { authToken: _dropped, credentialSource: _source, ...rest } = p;
-      kept.push(rest as T);
+    // Remove exactly the field that holds the dead secret. Dropping `authToken`
+    // unconditionally left a subscription token sitting in `apiKey` untouched —
+    // the row survived as "still has a key", `hasProviderCredential` counted
+    // it, and nothing upstream of the provider constructor knew otherwise.
+    const cleaned = { ...p } as T;
+    if (isSubscriptionToken(cleaned.apiKey)) delete cleaned.apiKey;
+    const bearerIsDead = isSubscriptionToken(cleaned.authToken)
+      || (Boolean(cleaned.authToken) && /claude\s*code/i.test(cleaned.credentialSource ?? ''));
+    if (bearerIsDead) {
+      delete cleaned.authToken;
+      delete cleaned.credentialSource;
     }
+    // A legitimate gateway bearer that survived counts as a reason to keep the
+    // row, as an API key does — the entry still carries a usable credential.
+    const worthKeeping = Boolean(
+      cleaned.apiKey || cleaned.authToken || (keepForEndpoint && cleaned.baseUrl),
+    );
+    if (worthKeeping) kept.push(cleaned);
   }
   return { kept, removed };
 }

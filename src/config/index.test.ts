@@ -487,6 +487,46 @@ describe('an environment key and gateway are a pair', () => {
     return globalDir;
   }
 
+  it('refuses a subscription token exported through ANTHROPIC_API_KEY', async () => {
+    // The bearer branch classified the value; the API-key branch did not, so
+    // this was written into `apiKey` on every load — surviving the migration
+    // that had just stripped the stored copy, counted as a credential by
+    // hasProviderCredential, and reported healthy until the provider threw.
+    // An EMPTY workspace, so the creation gate is open and injectEnvKeys would
+    // genuinely write this row. Seeding another provider closes that gate and
+    // the assertion would hold for the wrong reason.
+    await seed([]);
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-oat01-dead';
+
+    const cm = new ConfigManager(dir, path.join(dir, 'global'));
+    await cm.load();
+    const anthropic = cm.getConfig().providers.find((p) => p.type === 'anthropic');
+    expect(anthropic?.apiKey).toBeUndefined();
+  });
+
+  it('does create the row for a legitimate exported key, so the gate is real', async () => {
+    // Proves the test above is measuring the classifier and not an empty
+    // workspace that would have produced no row either way.
+    await seed([]);
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-genuine';
+
+    const cm = new ConfigManager(dir, path.join(dir, 'global'));
+    await cm.load();
+    expect(cm.getConfig().providers.find((p) => p.type === 'anthropic')?.apiKey)
+      .toBe('sk-ant-genuine');
+  });
+
+  it('strips a stored subscription token that sits in apiKey', async () => {
+    // The migration matched on `authToken` only, so the same dead secret in the
+    // other field was left in the config entirely.
+    await seed([{ type: 'anthropic', apiKey: 'sk-ant-oat01-dead' }]);
+
+    const cm = new ConfigManager(dir, path.join(dir, 'global'));
+    await cm.load();
+    const anthropic = cm.getConfig().providers.find((p) => p.type === 'anthropic');
+    expect(anthropic?.apiKey).toBeUndefined();
+  });
+
   it('lets an exported API key outrank a provider that exists only globally', async () => {
     // `mayCreate` is false whenever the workspace file holds any other
     // provider, and the API-key path searched only the workspace list — so an
@@ -742,5 +782,95 @@ describe('an environment key and gateway are a pair', () => {
     const azure = cm.getConfig().providers.filter((p) => p.type === 'azure');
     expect(azure.find((p) => p.deploymentName === 'a')?.apiKey).toBe('own-key');
     expect(azure.find((p) => p.deploymentName === 'b')?.apiKey).toBe('az-key');
+  });
+
+});
+
+describe('automatic Azure env routing agrees with `cascade link azure`', () => {
+  let dir: string;
+  const saved: Record<string, string | undefined> = {};
+  const KEYS = ['AZURE_OPENAI_KEY', 'AZURE_OPENAI_ENDPOINT', 'AZURE_OPENAI_DEPLOYMENT'];
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-azure-env-'));
+    for (const k of KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
+  });
+  afterEach(async () => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k]!;
+    }
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  async function seedWorkspace(providers: unknown[]): Promise<void> {
+    await fs.mkdir(path.join(dir, '.cascade'), { recursive: true });
+    await fs.writeFile(
+      path.join(dir, CASCADE_CONFIG_FILE),
+      JSON.stringify({ providers, models: {}, tools: {} }),
+      'utf-8',
+    );
+  }
+
+  async function seedGlobal(providers: unknown[]): Promise<string> {
+    const globalDir = path.join(dir, 'global');
+    await fs.mkdir(globalDir, { recursive: true });
+    await fs.writeFile(
+      path.join(globalDir, 'credentials.json'),
+      JSON.stringify({ version: 1, providers }),
+      'utf-8',
+    );
+    return globalDir;
+  }
+
+  it('creates a deployment the environment names, as the link command does', async () => {
+    // The automatic path rotated the existing rows and never made the named
+    // deployment — the explicit `cascade link azure` path was fixed for this
+    // and the two then disagreed.
+    await seedWorkspace([
+      { type: 'azure', deploymentName: 'gpt-4o', baseUrl: 'https://acme.openai.azure.com' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'env-key';
+    process.env['AZURE_OPENAI_DEPLOYMENT'] = 'gpt-4o-mini';
+
+    const cm = new ConfigManager(dir, path.join(dir, 'global'));
+    await cm.load();
+    const azure = cm.getConfig().providers.filter((p) => p.type === 'azure');
+
+    expect(azure.find((p) => p.deploymentName === 'gpt-4o-mini')).toMatchObject({
+      baseUrl: 'https://acme.openai.azure.com', apiKey: 'env-key',
+    });
+    expect(azure.find((p) => p.deploymentName === 'gpt-4o')?.apiKey).toBe('env-key');
+  });
+
+  it('sees Azure deployments held only in the machine-global store', async () => {
+    // Reading the workspace alone made an unambiguous single-resource setup
+    // look like no setup at all, so the exported key was dropped and the merge
+    // restored the stale global row a few lines later.
+    await seedWorkspace([{ type: 'openai', apiKey: 'sk-o' }]);
+    const globalDir = await seedGlobal([
+      { type: 'azure', deploymentName: 'gpt-4o', baseUrl: 'https://acme.openai.azure.com', apiKey: 'stale' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'env-key';
+
+    const cm = new ConfigManager(dir, globalDir);
+    await cm.load();
+    const azure = cm.getConfig().providers.filter((p) => p.type === 'azure');
+    expect(azure).toHaveLength(1);
+    expect(azure[0]).toMatchObject({ deploymentName: 'gpt-4o', apiKey: 'env-key' });
+  });
+
+  it('still refuses when several resources are configured and none is named', async () => {
+    await seedWorkspace([
+      { type: 'azure', deploymentName: 'a', baseUrl: 'https://r1.openai.azure.com' },
+      { type: 'azure', deploymentName: 'b', baseUrl: 'https://r2.openai.azure.com' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'env-key';
+
+    const cm = new ConfigManager(dir, path.join(dir, 'global'));
+    await cm.load();
+    for (const p of cm.getConfig().providers.filter((p) => p.type === 'azure')) {
+      expect(p.apiKey).toBeUndefined();
+    }
   });
 });

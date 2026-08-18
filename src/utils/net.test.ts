@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
 import zlib from 'node:zlib';
 import type { AddressInfo } from 'node:net';
-import { fetchSameOrigin, nodeHttpFetch, preferIpv4Host, stripTrailingSlashes } from './net.js';
+import { fetchSameOrigin, nodeHttpFetch, preferIpv4Host, sameEndpoint, stripTrailingSlashes } from './net.js';
 
 const MODELS = JSON.stringify({
   object: 'list',
@@ -281,5 +281,28 @@ describe('fetchSameOrigin', () => {
     const res = await fetchSameOrigin(`${base}/local`, { headers: { 'x-api-key': 'secret-key' } });
     expect(res.status).toBe(200);
     expect(seen.map((r) => r.url)).toEqual(['/local', '/models']);
+  });
+});
+
+describe('normalizeEndpoint — host case, path case', () => {
+  it('ignores host case and a trailing slash', () => {
+    expect(sameEndpoint('https://GW.Example.com/', 'https://gw.example.com')).toBe(true);
+  });
+
+  it('preserves path case, which is significant', () => {
+    // Lowercasing the whole URL made two distinct tenant routes on one gateway
+    // the same endpoint — and this decides whether a stored credential may be
+    // adopted into a row, so it would authorize moving a key between them.
+    expect(sameEndpoint('https://gw.example/TenantA', 'https://gw.example/tenanta')).toBe(false);
+    expect(sameEndpoint('https://gw.example/TenantA', 'https://gw.example/TenantA/')).toBe(true);
+  });
+
+  it('still compares two identical non-URL strings equal', () => {
+    expect(sameEndpoint('not a url', 'NOT A URL')).toBe(true);
+  });
+
+  it('treats a missing endpoint as equal only to another missing one', () => {
+    expect(sameEndpoint(undefined, '')).toBe(true);
+    expect(sameEndpoint(undefined, 'https://gw.example')).toBe(false);
   });
 });

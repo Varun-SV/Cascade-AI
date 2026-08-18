@@ -686,4 +686,46 @@ describe('discoveryCacheKey — a rotated credential is not retained', () => {
 
     expect(discoveryCacheKey('anthropic', entry as never)).toBe(before);
   });
+
+});
+
+describe('credential identity retention is capped, not slid', () => {
+  // The comment above this code said that refreshing an entry on lookup would
+  // let a credential in occasional use keep its identity for ever — and the
+  // line below it did exactly that (`held.at = now`). Any secret used at least
+  // once per TTL window therefore stayed a raw Map key for the life of the
+  // process, which is precisely the retention the expiry exists to end.
+  const TTL_MS = 15 * 60 * 1000;
+
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('does not let repeated use extend how long a raw secret is held', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+
+    const cfg = { type: 'anthropic' as const, apiKey: 'secret-value' };
+    const first = discoveryCacheKey('anthropic', cfg);
+
+    // Used steadily, well inside the window each time — the traffic pattern
+    // that used to pin the entry open indefinitely.
+    for (let i = 0; i < 4; i++) {
+      vi.advanceTimersByTime(TTL_MS / 3);
+      discoveryCacheKey('anthropic', cfg);
+    }
+
+    // Past the TTL measured from FIRST use, the identity must have rotated:
+    // the original entry was not kept alive by the lookups.
+    vi.advanceTimersByTime(TTL_MS);
+    expect(discoveryCacheKey('anthropic', cfg)).not.toBe(first);
+  });
+
+  it('is stable within one window, so the discovery cache still hits', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-02-01T00:00:00Z'));
+
+    const cfg = { type: 'anthropic' as const, apiKey: 'another-secret' };
+    const first = discoveryCacheKey('anthropic', cfg);
+    vi.advanceTimersByTime(TTL_MS / 2);
+    expect(discoveryCacheKey('anthropic', cfg)).toBe(first);
+  });
 });

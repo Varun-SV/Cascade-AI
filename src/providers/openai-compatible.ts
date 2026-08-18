@@ -6,7 +6,7 @@ import OpenAI from 'openai';
 import type { ModelInfo, ProviderConfig } from '../types.js';
 import { OpenAIProvider } from './openai.js';
 import { isChatModel } from './model-filter.js';
-import { preferIpv4Host, nodeHttpFetch } from '../utils/net.js';
+import { preferIpv4Host, nodeHttpFetch, type NodeHttpFetchOptions } from '../utils/net.js';
 import { isLocalEndpoint, withResolvedPricing } from '../core/router/pricing.js';
 
 export class OpenAICompatibleProvider extends OpenAIProvider {
@@ -25,8 +25,32 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
     this.client = new OpenAI({
       apiKey: config.apiKey ?? 'not-required',
       baseURL: preferIpv4Host(config.baseUrl),
-      fetch: nodeHttpFetch as unknown as NonNullable<ConstructorParameters<typeof OpenAI>[0]>['fetch'],
+      // Bound to the configured origin, NOT bare `nodeHttpFetch`. That helper
+      // follows a 3xx by reusing `init` verbatim — headers included — so an
+      // endpoint that redirected to another host was handed
+      // `Authorization: Bearer <apiKey>` on the second one. This is the same
+      // leak the Anthropic paths were fixed for; `allowedRedirectOrigin` exists
+      // precisely for callers that attach a credential, and this one attaches
+      // it on every request.
+      fetch: ((input: string | URL | Request, init?: RequestInit) =>
+        nodeHttpFetch(input, init ?? {}, 0, this.redirectPolicy())
+      ) as unknown as NonNullable<ConstructorParameters<typeof OpenAI>[0]>['fetch'],
     });
+  }
+
+  /**
+   * Redirects may only stay on the host the credential was configured for.
+   *
+   * An unparseable `baseUrl` yields no policy, which is the pre-existing
+   * behaviour — but such a config cannot address anything anyway, so the
+   * request fails before a redirect is possible.
+   */
+  private redirectPolicy(): NodeHttpFetchOptions {
+    try {
+      return { allowedRedirectOrigin: new URL(preferIpv4Host(this.config.baseUrl) ?? '').origin };
+    } catch {
+      return {};
+    }
   }
 
   private modelsUrl(): string {
@@ -41,7 +65,7 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
   }
 
   async listModels(): Promise<ModelInfo[]> {
-    const res = await nodeHttpFetch(this.modelsUrl(), { headers: this.authHeaders() });
+    const res = await nodeHttpFetch(this.modelsUrl(), { headers: this.authHeaders() }, 0, this.redirectPolicy());
     if (!res.ok) throw new Error(`models endpoint ${this.modelsUrl()} returned HTTP ${res.status}`);
     const body = (await res.json()) as { data?: unknown[]; models?: unknown[] };
     const raw = Array.isArray(body?.data) ? body.data
@@ -84,7 +108,7 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
 
   async isAvailable(): Promise<boolean> {
     try {
-      const res = await nodeHttpFetch(this.modelsUrl(), { headers: this.authHeaders() });
+      const res = await nodeHttpFetch(this.modelsUrl(), { headers: this.authHeaders() }, 0, this.redirectPolicy());
       return res.ok;
     } catch {
       return false;

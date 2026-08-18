@@ -49,7 +49,23 @@ export function stripTrailingSlashes(value: string): string {
  * means.
  */
 export function normalizeEndpoint(url: string | undefined | null): string {
-  return stripTrailingSlashes((url ?? '').trim()).toLowerCase();
+  const raw = stripTrailingSlashes((url ?? '').trim());
+  if (!raw) return '';
+  try {
+    const u = new URL(raw);
+    // Scheme and host are case-insensitive by spec. THE PATH IS NOT, and
+    // lowercasing it made `https://gw.example/TenantA` and `/tenanta` the same
+    // endpoint — which, since this decides whether a stored credential may be
+    // adopted into a row, would authorize moving a key between two distinct
+    // tenant routes on one gateway.
+    const path = stripTrailingSlashes(`${u.pathname}${u.search}`);
+    return `${u.protocol}//${u.host.toLowerCase()}${path}`;
+  } catch {
+    // Not a parseable URL — nothing to reason about structurally, so fall back
+    // to the old whole-string rule. Two identical strings still compare equal,
+    // which is all a non-URL can support.
+    return raw.toLowerCase();
+  }
 }
 
 /** Whether two endpoint URLs address the same host. */
