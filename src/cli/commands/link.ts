@@ -19,6 +19,7 @@ import chalk from 'chalk';
 import { ConfigManager } from '../../config/index.js';
 import { normalizeAzureEndpoint, sameAzureEndpoint } from '../../config/azure-endpoint.js';
 import { resolveAzureRouting } from '../../config/azure-routing.js';
+import { hasDefaultEndpoint } from '../../config/endpoint-identity.js';
 import {
   discoverCredentials,
   maskSecret,
@@ -498,7 +499,27 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
     next.apiKey = cred.secret;
   }
   // A discovered endpoint wins over a configured one — it is the endpoint this
-  // particular key belongs to. Without one, whatever was already there stands.
+  // particular key belongs to.
+  //
+  // Without one, "whatever was already there stands" was wrong for a provider
+  // with a public host. `fromEnv()` attaches ANTHROPIC_BASE_URL only when it is
+  // exported, so a bare ANTHROPIC_API_KEY deliberately arrives with no
+  // `baseUrl` — it belongs to api.anthropic.com. The spread above has already
+  // copied the existing row's URL, so linking that key against a preconfigured
+  // gateway saved a public-host key addressed to the gateway. The endpoint is
+  // dropped instead, letting the client fall back to the public host it was
+  // issued for. A type with no canonical host keeps its URL: there the key
+  // would otherwise address nothing.
+  //
+  // API KEYS only. A bearer is the opposite case: it is valid ONLY at a
+  // gateway, has no public host to fall back to, and adopting one against an
+  // endpoint already configured in the workspace is a supported path in this
+  // release. Dropping the URL there would leave a credential that can be sent
+  // nowhere.
+  if (cred.kind !== 'bearer' && !cred.baseUrl && hasDefaultEndpoint(cred.provider) && next.baseUrl) {
+    delete next.baseUrl;
+    delete next.local;
+  }
   if (cred.baseUrl) {
     next.baseUrl = cred.baseUrl;
     // `local` is a statement about the endpoint that is being REPLACED. Carried

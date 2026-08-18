@@ -11,7 +11,7 @@ import {
   net as electronNet,
 } from 'electron';
 import { join } from 'node:path';
-import { applyEndpointEdit, applySettingsCredentials, priorAzureRow } from './settings-merge.js';
+import { applyEndpointEdit, applyReplacementKey, applySettingsCredentials, priorAzureRow } from './settings-merge.js';
 import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
 import { registerCloudAuthIpc } from './cloudAuth';
@@ -70,7 +70,7 @@ function mapProvider(id: string): { type: string | null; baseUrl?: string } {
 // ─── Backend ─────────────────────────────────────────────────────────────────
 // Resolve the cascade-ai core package (built CommonJS output). In dev it lives at
 // the repo's ../dist; in a packaged app it's bundled under resources/cascade-core.
-function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined) => boolean; hasProviderCredential: (p: { apiKey?: string; authToken?: string } | undefined | null) => boolean; applyProviderApiKey: (providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>, type: string, apiKey: string, extra?: { baseUrl?: string }) => void; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response>; sameEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean; sameCredentialEndpoint: (type: string, a?: string, b?: string) => boolean; sameAzureEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean } {
+function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined) => boolean; hasProviderCredential: (p: { apiKey?: string; authToken?: string } | undefined | null) => boolean; applyProviderApiKey: (providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>, type: string, apiKey: string, extra?: { baseUrl?: string }) => void; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response>; sameEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean; sameCredentialEndpoint: (type: string, a?: string, b?: string) => boolean; hasDefaultEndpoint: (type: string) => boolean; sameAzureEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean } {
   // Dev: the repo's external-deps build (node_modules resolves the requires).
   // Packaged: the self-contained `desktop-core.cjs` bundle (no node_modules to
   // resolve from — every JS dep is bundled in; only native modules like
@@ -444,7 +444,14 @@ function registerIPC(): void {
         if (!Array.isArray(cascadeConfig.providers)) cascadeConfig.providers = [];
         const existing = cascadeConfig.providers.find((p: { type: string }) => p.type === type);
         if (existing && cfg.apiKey) {
-          loadCore().applyProviderApiKey(cascadeConfig.providers, type, cfg.apiKey, { baseUrl });
+          // A replacement key with no endpoint belongs to the provider's public
+          // host. `applyProviderApiKey` only rewrites `baseUrl` when given one,
+          // so this path replaced the secret and left a configured gateway
+          // attached — the onboarding UI has no base-URL field for Anthropic.
+          const { applyProviderApiKey, hasDefaultEndpoint, sameCredentialEndpoint } = loadCore();
+          applyReplacementKey(cascadeConfig.providers, type, cfg.apiKey, baseUrl, {
+            applyProviderApiKey, hasDefaultEndpoint, sameCredentialEndpoint,
+          });
         } else if (existing) {
           // The SAME rule the Settings save uses. This path bypassed it, so a
           // key-optional provider could have its endpoint changed here with a

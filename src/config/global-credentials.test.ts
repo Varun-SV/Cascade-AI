@@ -404,4 +404,35 @@ describe('ConfigManager + global credentials (the "AppImage forgets my keys" bug
       apiKey: 'key-a', baseUrl: 'https://resource-a.openai.azure.com',
     });
   });
+
+  it('refuses a bare global key for a workspace row pointing at a gateway', () => {
+    // The endpoint check only ran when BOTH rows had a `baseUrl`, so a missing
+    // one on the global side was read as "compatible with anything". It is not:
+    // `{ anthropic, apiKey }` with no endpoint is a PUBLIC-host key, and this
+    // merged it into a row addressed to a corporate gateway.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'anthropic', baseUrl: 'https://corp-gateway.example' }],
+      [{ type: 'anthropic', apiKey: 'public-key' }],
+    );
+
+    const row = merged.find((p) => p.type === 'anthropic' && p.baseUrl === 'https://corp-gateway.example')!;
+    expect(row.apiKey).toBeUndefined();
+  });
+
+  it('still adopts a bare global key for a row that names no host', () => {
+    const merged = mergeGlobalCredentials(
+      [{ type: 'anthropic' }],
+      [{ type: 'anthropic', apiKey: 'public-key' }],
+    );
+    expect(merged.find((p) => p.type === 'anthropic')?.apiKey).toBe('public-key');
+  });
+
+  it('adopts a gateway key into a row already naming that same gateway', () => {
+    const merged = mergeGlobalCredentials(
+      [{ type: 'anthropic', baseUrl: 'https://gw.example' }],
+      [{ type: 'anthropic', apiKey: 'gw-key', baseUrl: 'https://gw.example/v1' }],
+    );
+    // …and the two Anthropic spellings are the same host, so this must match.
+    expect(merged.find((p) => p.type === 'anthropic')?.apiKey).toBe('gw-key');
+  });
 });

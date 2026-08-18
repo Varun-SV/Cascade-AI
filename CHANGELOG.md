@@ -21,6 +21,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## 0.75.0 - 2026-08-14
 
 ### Fixed
+- **Three more ways a public-host key could end up addressed to a gateway.**
+  The rule that a missing `baseUrl` means the provider's own public host reached
+  the desktop Settings save first; three sibling ingress paths still read the
+  absence as "compatible with anything". The machine-global merge compared
+  endpoints only when *both* rows had one, so a stored bare API key filled a
+  workspace row pointing at a corporate gateway. The environment injection
+  stopped inheriting a stored endpoint when it CREATED a row, but the branch
+  that fills an existing one still left that row's gateway attached. And
+  `cascade link` spread the configured row first, so a bare exported key was
+  saved against whatever endpoint was already there. All three resolve the
+  omission to the provider's canonical host before deciding, and detach an
+  endpoint the key does not belong to. A bearer is exempt — it has no public
+  host to fall back on, and adopting one against a configured gateway is
+  supported.
+
+- **A replacement key in desktop onboarding kept the old gateway.** The
+  blank-key path was fixed; the keyed one still wrote through a helper that
+  only rewrites the endpoint when given one. The Anthropic onboarding form has
+  no base-URL field, so entering a normal API key against a row pointing at a
+  corporate gateway replaced the secret and left the gateway in place.
+
+- **Anthropic's `/v1` equivalence was being applied to every provider.**
+  Anthropic's client appends its own version segment, so both spellings name one
+  API root — but `OpenAICompatibleProvider` passes the URL through and builds
+  discovery as `base + '/models'`, making `…/openai/v1` and `…/openai` different
+  routes. Collapsing them let a key survive an edit that moved generation
+  elsewhere. The normalization is now scoped to providers whose client owns the
+  segment.
+
+- **An Azure deployment could end up configured twice on one resource.** A
+  workspace row naming only its deployment is excluded from the routable set, so
+  the environment injection did not see it and added a second row for the same
+  deployment on the same resource. The global merge then matched the *original*
+  row by deployment name and filled it with the stored key — and the router,
+  which takes the first deployment-name match, used that stale key, discarding
+  the exported one. The endpointless row is completed in place instead.
+
 - **A public-host key could be repointed at a gateway.** A provider row with no
   `baseUrl` is not unscoped — for Anthropic, OpenAI and Gemini it means the
   provider's own public host, which is where the client sends. Three paths read

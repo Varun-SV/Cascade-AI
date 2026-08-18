@@ -603,4 +603,33 @@ describe('cascade link — adoption', () => {
     expect(azure).toHaveLength(1);
     expect(azure[0]).toMatchObject({ apiKey: 'new-key' });
   });
+
+  it('does not save a bare exported key against a preconfigured gateway', async () => {
+    // `fromEnv()` attaches ANTHROPIC_BASE_URL only when it is exported, so a
+    // bare ANTHROPIC_API_KEY deliberately arrives with no `baseUrl` — it
+    // belongs to api.anthropic.com. Adoption spreads the existing row first, so
+    // the old gateway rode along and the public key was saved addressed to it.
+    //
+    // The seeded row already HOLDS a key, so `injectEnvKeys` skips it — env
+    // injection only fills empty slots. That isolates the link path: without
+    // it, this assertion is satisfied by the environment fix instead and holds
+    // with the adoption change reverted.
+    await seedConfig([
+      { type: 'anthropic', apiKey: 'old-gateway-key', baseUrl: 'https://corp-gateway.example' },
+    ]);
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-public';
+
+    const anthropic = (await providersAfterLink('anthropic')).find((p) => p['type'] === 'anthropic')!;
+    expect(anthropic['apiKey']).toBe('sk-ant-public');
+    expect(anthropic['baseUrl']).toBeUndefined();
+  });
+
+  it('still saves an exported key against an exported gateway', async () => {
+    await seedConfig([{ type: 'anthropic', baseUrl: 'https://old-gateway.example' }]);
+    process.env['ANTHROPIC_API_KEY'] = 'gw-key';
+    process.env['ANTHROPIC_BASE_URL'] = 'https://new-gateway.example';
+
+    const anthropic = (await providersAfterLink('anthropic')).find((p) => p['type'] === 'anthropic')!;
+    expect(anthropic).toMatchObject({ apiKey: 'gw-key', baseUrl: 'https://new-gateway.example' });
+  });
 });

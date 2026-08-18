@@ -40,6 +40,21 @@ const DEFAULT_ENDPOINT: Readonly<Record<string, string>> = {
   gemini: 'https://generativelanguage.googleapis.com',
 };
 
+/**
+ * Providers whose CLIENT owns the version segment, so the URL may be written
+ * with or without it and mean the same route.
+ *
+ * Anthropic only, and deliberately so. Its SDK concatenates `/v1/messages` onto
+ * whatever `baseURL` it is given, which is why `anthropicApiRoot()` strips a
+ * trailing `/vN` — the two spellings reach an identical wire path.
+ * `OpenAICompatibleProvider` does the opposite: it passes `baseUrl` through as
+ * the SDK's `baseURL` and builds discovery as `base + '/models'`, so
+ * `https://api.groq.com/openai/v1` and `https://api.groq.com/openai` are
+ * different routes. Stripping for every type collapsed those into one and let a
+ * key survive an edit that moved generation somewhere else.
+ */
+const CLIENT_OWNS_VERSION = new Set(['anthropic']);
+
 /** Whether absence of `baseUrl` resolves to a known public host for this type. */
 export function hasDefaultEndpoint(type: string): boolean {
   return Object.hasOwn(DEFAULT_ENDPOINT, type);
@@ -56,10 +71,13 @@ export function credentialEndpointIdentity(type: string, baseUrl?: string): stri
   const configured = baseUrl?.trim();
   const effective = configured || DEFAULT_ENDPOINT[type];
   if (!effective) return null;
-  // The version segment is dropped for every type, not only Anthropic: it is
-  // the provider client that owns it, and no provider distinguishes two hosts
-  // by it. Doing it here keeps this answer identical to `anthropicApiRoot()`.
-  return normalizeEndpoint(stripVersionSuffix(effective));
+  // Only where the client appends its own version — see CLIENT_OWNS_VERSION.
+  // Everywhere else the path is part of the route and must be preserved, for
+  // the same reason `normalizeEndpoint()` preserves path case: a gateway path
+  // can be scope-bearing.
+  return normalizeEndpoint(
+    CLIENT_OWNS_VERSION.has(type) ? stripVersionSuffix(effective) : effective,
+  );
 }
 
 /**
@@ -80,4 +98,37 @@ export function sameCredentialEndpoint(
   if (left === null && right === null) return true;
   if (left === null || right === null) return false;
   return left === right;
+}
+
+/**
+ * Whether an incoming credential belongs somewhere other than where a
+ * credentialless row points.
+ *
+ * ASYMMETRIC, and that is the point. The two sides are answering different
+ * things:
+ *
+ * - The **credential** always has a scope. Its own `baseUrl` if it names one;
+ *   otherwise the provider's public host, because that is where a key with no
+ *   endpoint is used. This is the round-31 rule.
+ * - The **row** being filled has no credential of its own — that is the only
+ *   time this is asked — so it is scoped to nothing. It contributes a host only
+ *   if it explicitly names one. Resolving ITS absence to the default would be
+ *   wrong: an empty `{ type: 'anthropic' }` is a placeholder, not a claim to
+ *   the public host, and treating it as one stopped it adopting a gateway
+ *   entry from the store at all.
+ *
+ * So: a conflict needs the row to name a host AND the credential to belong to a
+ * different one. A row naming nothing accepts anything — which is what the
+ * machine-global store is for — while a row pointing at a corporate gateway
+ * refuses a bare public-host key, which is the leak this closes.
+ */
+export function credentialEndpointsConflict(
+  type: string,
+  rowEndpoint: string | undefined,
+  credentialEndpoint: string | undefined,
+): boolean {
+  const row = rowEndpoint?.trim() ? credentialEndpointIdentity(type, rowEndpoint) : null;
+  const credential = credentialEndpointIdentity(type, credentialEndpoint);
+  if (row === null || credential === null) return false;
+  return row !== credential;
 }

@@ -623,14 +623,34 @@ describe('an environment key and gateway are a pair', () => {
     expect(anthropic).toMatchObject({ apiKey: 'new-key', baseUrl: 'https://new-gateway.internal' });
   });
 
-  it('leaves a configured endpoint alone when the environment names none', async () => {
+  it('detaches a configured gateway from a key exported without one', async () => {
+    // Previously asserted that the configured endpoint is left alone. Under the
+    // rule the rest of this release now holds, that is a leak: a bare
+    // ANTHROPIC_API_KEY is a public-host key, and pairing it with a stored
+    // corporate gateway sends it to a host that never issued it. The creation
+    // branch stopped inheriting a stored endpoint; this is the sibling that
+    // fills an EXISTING row.
     await seed([{ type: 'anthropic', baseUrl: 'https://configured.internal' }]);
     process.env['ANTHROPIC_API_KEY'] = 'new-key';
 
     const cm = new ConfigManager(dir, path.join(dir, 'global'));
     await cm.load();
-    expect(cm.getConfig().providers.find((p) => p.type === 'anthropic')?.baseUrl)
-      .toBe('https://configured.internal');
+    const anthropic = cm.getConfig().providers.find((p) => p.type === 'anthropic')!;
+    expect(anthropic.apiKey).toBe('new-key');
+    expect(anthropic.baseUrl).toBeUndefined();
+  });
+
+  it('keeps an OpenAI-compatible endpoint, which has no public host to fall back to', async () => {
+    // The detachment is scoped to providers with a canonical public host. An
+    // openai-compatible row's URL IS the service; removing it would leave the
+    // key addressing nothing.
+    await seed([{ type: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1' }]);
+    process.env['OPENAI_API_KEY'] = 'sk-o';
+
+    const cm = new ConfigManager(dir, path.join(dir, 'global'));
+    await cm.load();
+    expect(cm.getConfig().providers.find((p) => p.type === 'openai-compatible')?.baseUrl)
+      .toBe('https://api.groq.com/openai/v1');
   });
 
   it('replaces a stale endpoint when the bearer and gateway are exported together', async () => {
@@ -890,5 +910,32 @@ describe('automatic Azure env routing agrees with `cascade link azure`', () => {
     for (const p of cm.getConfig().providers.filter((p) => p.type === 'azure')) {
       expect(p.apiKey).toBeUndefined();
     }
+  });
+
+  it('completes an endpointless workspace deployment instead of duplicating it', async () => {
+    // The full load order matters here. Env injection ran first and pushed a
+    // SECOND `prod@resourceA` for the fresh key, because the endpointless
+    // workspace `prod` is excluded from the routable set. mergeGlobalCredentials
+    // then matched that original endpointless row to the global one by
+    // deployment name and filled it with the stale key — leaving two `prod`
+    // rows on one resource, with the router's first-match lookup taking the
+    // stale one. The environment override was silently lost.
+    await seedWorkspace([{ type: 'azure', deploymentName: 'prod' }]);
+    const globalDir = await seedGlobal([
+      { type: 'azure', deploymentName: 'prod', baseUrl: 'https://resource-a.openai.azure.com', apiKey: 'old-key' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'fresh';
+    process.env['AZURE_OPENAI_DEPLOYMENT'] = 'prod';
+
+    const cm = new ConfigManager(dir, globalDir);
+    await cm.load();
+    const azure = cm.getConfig().providers.filter((p) => p.type === 'azure');
+
+    expect(azure).toHaveLength(1);
+    expect(azure[0]).toMatchObject({
+      deploymentName: 'prod',
+      baseUrl: 'https://resource-a.openai.azure.com',
+      apiKey: 'fresh',
+    });
   });
 });

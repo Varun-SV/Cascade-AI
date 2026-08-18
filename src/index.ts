@@ -21,7 +21,7 @@ export { sameEndpoint, normalizeEndpoint } from './utils/net.js';
 // Provider-aware: absence of a baseUrl means the provider's own public host,
 // not "any host". The desktop decides credential scope with this, not with the
 // generic string compare above.
-export { sameCredentialEndpoint, credentialEndpointIdentity } from './config/endpoint-identity.js';
+export { sameCredentialEndpoint, credentialEndpointIdentity, hasDefaultEndpoint } from './config/endpoint-identity.js';
 export { sameAzureEndpoint } from './config/azure-endpoint.js';
 export { Keystore } from './config/keystore.js';
 export { CascadeIgnore } from './config/ignore.js';

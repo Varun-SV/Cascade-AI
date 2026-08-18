@@ -15,6 +15,7 @@ import { validateConfig } from './validate.js';
 import { loadGlobalCredentials, mergeGlobalCredentials, saveGlobalCredentials } from './global-credentials.js';
 import { normalizeAzureEndpoint, sameAzureEndpoint } from './azure-endpoint.js';
 import { resolveAzureRouting } from './azure-routing.js';
+import { credentialEndpointsConflict, hasDefaultEndpoint } from './endpoint-identity.js';
 import {
   describeCleanup,
   didCleanupChangeAnything,
@@ -483,6 +484,27 @@ export class ConfigManager {
 
     const onResource = [...routing.rows];
 
+    // Complete an endpointless workspace row rather than adding a second one.
+    //
+    // `onResource` comes from `routing.rows`, which excludes rows with no
+    // endpoint — so a workspace `{ azure, deploymentName: 'prod' }` was
+    // invisible here and a duplicate `prod` on the same resource was pushed
+    // beside it. `mergeGlobalCredentials()` runs after this and matches by
+    // deployment name, so it then filled the ORIGINAL endpointless row with the
+    // stale stored key. Two `prod` rows on one resource, and the router — which
+    // takes the first deployment-name match — used the stale one, losing the
+    // environment override entirely. Not the cross-resource collision fixed
+    // earlier: the resource is the same.
+    const claimEndpointlessRow = (name: string): CascadeConfig['providers'][number] | undefined => {
+      const row = this.config.providers.find((p) => p.type === 'azure'
+        && !p.baseUrl?.trim()
+        && (p.deploymentName?.trim() ?? '') === name);
+      if (!row) return undefined;
+      row.baseUrl = routing.resource;
+      onResource.push(row);
+      return row;
+    };
+
     // A deployment held only in the global store still needs a workspace row to
     // receive the exported key: without one the merge appends the global row
     // whole, stale credential included.
@@ -491,12 +513,13 @@ export class ConfigManager {
       if (!sameAzureEndpoint(g.baseUrl, routing.resource)) continue;
       const name = g.deploymentName?.trim() ?? '';
       if (onResource.some((p) => (p.deploymentName?.trim() ?? '') === name)) continue;
+      if (claimEndpointlessRow(name)) continue;
       const row = { ...g, apiKey: undefined, authToken: undefined };
       this.config.providers.push(row);
       onResource.push(row);
     }
 
-    if (routing.createDeployment) {
+    if (routing.createDeployment && !claimEndpointlessRow(routing.createDeployment)) {
       const row = {
         type: 'azure' as const,
         deploymentName: routing.createDeployment,
@@ -678,11 +701,24 @@ export class ConfigManager {
           // reading: `save()` syncs providers to the machine-global store, so
           // clearing a bearer in memory would delete it for every workspace.
           if (target.apiKey || target.authToken) continue;
-          target.apiKey = key;
           // A key and a gateway exported together are a PAIR. `??=` kept a
           // stale configured endpoint, so the newly exported credential was
           // sent to the host it was not issued by.
-          if (anthropicGateway) target.baseUrl = anthropicGateway;
+          if (anthropicGateway) {
+            target.apiKey = key;
+            target.baseUrl = anthropicGateway;
+            continue;
+          }
+          // Exported WITHOUT a gateway, so this key belongs to the provider's
+          // public host. The row's own `baseUrl` was left in place — the
+          // creation branch above stopped inheriting a stored endpoint, but
+          // this sibling still filled a public key into a row addressed to a
+          // configured gateway and sent it there. Detached for a provider that
+          // has a public host to fall back to; a type with no default (an
+          // OpenAI-compatible endpoint) has nowhere else to go and keeps its
+          // URL, since the key would otherwise address nothing.
+          if (hasDefaultEndpoint(type) && target.baseUrl) target.baseUrl = undefined;
+          target.apiKey = key;
         }
       }
     }

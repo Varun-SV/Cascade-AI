@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { applyEndpointEdit, applySettingsCredentials, credentialDispositionForEdit, priorAzureRow, type SettingsMergeDeps } from './settings-merge.js';
-import { sameCredentialEndpoint, sameAzureEndpoint } from '../../src/index.js';
+import { applyEndpointEdit, applyReplacementKey, applySettingsCredentials, credentialDispositionForEdit, priorAzureRow, type SettingsMergeDeps } from './settings-merge.js';
+import { sameCredentialEndpoint, sameAzureEndpoint, hasDefaultEndpoint } from '../../src/index.js';
 
 describe('credentialDispositionForEdit', () => {
   it('keeps the key when the endpoint has not moved', () => {
@@ -228,6 +228,48 @@ describe('both desktop save paths are actually wired to the shared rule', () => 
     expect(source).not.toMatch(/if \(baseUrl\) existing\.baseUrl = baseUrl;/);
     // Both save paths reach the shared rule.
     expect(source).toMatch(/applyEndpointEdit\(existing, baseUrl, cfg\.apiKey/);
+    // …and the KEYED branch reaches the replacement rule, not applyProviderApiKey direct.
+    expect(source).not.toMatch(/applyProviderApiKey\(cascadeConfig\.providers, type, cfg\.apiKey/);
+    expect(source).toMatch(/applyReplacementKey\(cascadeConfig\.providers, type, cfg\.apiKey/);
     expect(source).toMatch(/applySettingsCredentials\(cascadeConfig\.providers, data/);
+  });
+
+});
+
+describe('applyReplacementKey — a new key with no endpoint is a public-host key', () => {
+  const applyProviderApiKey: SettingsMergeDeps['applyProviderApiKey'] = (providers, type, apiKey, extra) => {
+    const existing = providers.find((p) => p.type === type);
+    if (existing) {
+      existing.apiKey = apiKey;
+      existing.authToken = undefined;
+      if (extra?.baseUrl) existing.baseUrl = extra.baseUrl;
+      return;
+    }
+    providers.push({ type, apiKey, ...(extra?.baseUrl ? { baseUrl: extra.baseUrl } : {}) });
+  };
+  const deps = { applyProviderApiKey, sameCredentialEndpoint, hasDefaultEndpoint };
+
+  it('retires a stored gateway when onboarding supplies a plain Anthropic key', () => {
+    // The Anthropic onboarding UI exposes no base-URL field, so `baseUrl` is
+    // undefined here. `applyProviderApiKey` only rewrites the endpoint when
+    // given one, so the key was replaced and the corporate gateway left
+    // attached — and the next request sent a console.anthropic.com key there.
+    const providers = [{ type: 'anthropic', apiKey: 'old', baseUrl: 'https://corp-gateway.example' }];
+    applyReplacementKey(providers, 'anthropic', 'sk-ant-public', undefined, deps);
+
+    expect(providers[0]?.apiKey).toBe('sk-ant-public');
+    expect(providers[0]?.baseUrl).toBeUndefined();
+  });
+
+  it('keeps an endpoint supplied alongside the key', () => {
+    const providers = [{ type: 'anthropic', apiKey: 'old', baseUrl: 'https://old-gw.example' }];
+    applyReplacementKey(providers, 'anthropic', 'gw-key', 'https://new-gw.example', deps);
+    expect(providers[0]).toMatchObject({ apiKey: 'gw-key', baseUrl: 'https://new-gw.example' });
+  });
+
+  it('keeps an OpenAI-compatible endpoint, which has no public host to fall back to', () => {
+    const providers = [{ type: 'openai-compatible', apiKey: 'old', baseUrl: 'https://api.groq.com/openai/v1' }];
+    applyReplacementKey(providers, 'openai-compatible', 'new-key', undefined, deps);
+    expect(providers[0]).toMatchObject({ apiKey: 'new-key', baseUrl: 'https://api.groq.com/openai/v1' });
   });
 });

@@ -18,7 +18,7 @@ import path from 'node:path';
 import type { ProviderConfig } from '../types.js';
 import { GLOBAL_CREDENTIALS_FILE } from '../constants.js';
 import { normalizeAzureEndpoint } from './azure-endpoint.js';
-import { sameEndpoint } from '../utils/net.js';
+import { credentialEndpointsConflict } from './endpoint-identity.js';
 
 interface CredentialsFile {
   version: 1;
@@ -233,9 +233,15 @@ export function mergeGlobalCredentials(
  */
 function fillFrom(existing: ProviderConfig, g: ProviderConfig): void {
   const credentialled = Boolean(existing.apiKey || existing.authToken);
-  const endpointsDiffer = Boolean(
-    existing.baseUrl && g.baseUrl && !sameEndpoint(existing.baseUrl, g.baseUrl),
-  );
+  // Provider-aware, and evaluated even when one side omits the URL. Comparing
+  // only when BOTH rows had a `baseUrl` treated a missing one as compatible
+  // with anything — so a global `{ anthropic, apiKey }`, which is a PUBLIC-host
+  // key, merged into a workspace row pointing at a corporate gateway and was
+  // sent there. `credentialEndpointsConflict` resolves that omission to the
+  // provider's default before comparing, while still reporting no conflict for
+  // a type that genuinely has no default (an Azure row naming only its
+  // deployment must still adopt endpoint and key together).
+  const endpointsDiffer = credentialEndpointsConflict(existing.type, existing.baseUrl, g.baseUrl);
 
   if (!credentialled && !endpointsDiffer && g.apiKey) {
     existing.apiKey = g.apiKey;

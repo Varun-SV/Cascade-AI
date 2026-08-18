@@ -101,6 +101,35 @@ export interface SettingsMergeDeps {
  * its endpoint changed with a blank key and keep the old host's key attached.
  * Two save paths, one rule.
  */
+/**
+ * Write a replacement key, retiring an endpoint the new key does not belong to.
+ *
+ * The blank-key path went through `applyEndpointEdit()`, but the KEYED path
+ * called `applyProviderApiKey()` with an optional `baseUrl` — and that helper
+ * only touches `existing.baseUrl` when the argument is truthy. The Anthropic
+ * onboarding UI exposes no base-URL field, so entering a normal API key against
+ * a row already pointing at a corporate gateway replaced the secret and left
+ * the gateway attached, sending a public-host key there.
+ *
+ * A replacement key with no endpoint is scoped to the provider's public host,
+ * so a stored endpoint that is not that host is retired with the key it
+ * belonged to.
+ */
+export function applyReplacementKey(
+  providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>,
+  type: string,
+  apiKey: string,
+  baseUrl: string | undefined,
+  deps: SettingsMergeDeps & { hasDefaultEndpoint: (type: string) => boolean },
+): void {
+  if (!baseUrl && deps.hasDefaultEndpoint(type)) {
+    const existing = providers.find((p) => p.type === type);
+    // Cleared BEFORE the write, so `applyProviderApiKey` cannot re-attach it.
+    if (existing?.baseUrl) existing.baseUrl = undefined;
+  }
+  deps.applyProviderApiKey(providers, type, apiKey, ...(baseUrl ? [{ baseUrl }] as const : [] as const));
+}
+
 export function applyEndpointEdit(
   existing: { type: string; apiKey?: string; authToken?: string; baseUrl?: string },
   nextBaseUrl: string | undefined,
