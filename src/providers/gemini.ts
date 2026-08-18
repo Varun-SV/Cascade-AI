@@ -26,7 +26,7 @@ import { BaseProvider, ProviderUnreachableError } from './base.js';
 import { withResolvedPricing } from '../core/router/pricing.js';
 import { isChatModel } from './model-filter.js';
 import { toGeminiParameters } from './gemini-schema.js';
-import { stripVersionSuffix } from '../utils/net.js';
+import { clientApiRoot, fetchSameOrigin } from '../utils/net.js';
 
 /**
  * The version segment the Gemini client owns.
@@ -56,7 +56,8 @@ const GEMINI_PUBLIC_ROOT = 'https://generativelanguage.googleapis.com';
  */
 export function geminiApiRoot(baseUrl?: string): string {
   const configured = baseUrl?.trim();
-  return configured ? stripVersionSuffix(configured) || GEMINI_PUBLIC_ROOT : GEMINI_PUBLIC_ROOT;
+  if (!configured) return GEMINI_PUBLIC_ROOT;
+  return clientApiRoot('gemini', configured) || GEMINI_PUBLIC_ROOT;
 }
 
 /**
@@ -371,7 +372,14 @@ export class GeminiProvider extends BaseProvider {
     // moment a proxy was configured: the proxy's restricted catalogue was
     // replaced by Google's public one, and routing then picked models the
     // proxy does not serve — with the key going to the wrong host on the way.
-    return fetch(`${geminiApiRoot(this.config.baseUrl)}/${GEMINI_API_VERSION}/models`, {
+    //
+    // Same-origin redirects only, now that the root can be a proxy the user
+    // configured. `x-goog-api-key` is a CUSTOM header, so the fetch spec does
+    // not strip it across origins the way it strips `Authorization` — a
+    // gateway answering with a 302 elsewhere would be handing that host the
+    // key it was never issued by. Identical guard to the Anthropic model-list
+    // request, and the reason it exists there.
+    return fetchSameOrigin(`${geminiApiRoot(this.config.baseUrl)}/${GEMINI_API_VERSION}/models`, {
       headers: { 'x-goog-api-key': this.config.apiKey ?? '' },
     });
   }

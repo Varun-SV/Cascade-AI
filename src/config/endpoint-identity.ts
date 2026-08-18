@@ -25,7 +25,7 @@
 //  spellings look like a host change and retire a key that was still perfectly
 //  valid.
 
-import { normalizeEndpoint, stripVersionSuffix } from '../utils/net.js';
+import { clientApiRoot, normalizeEndpoint } from '../utils/net.js';
 
 /**
  * Where a provider sends when no `baseUrl` is configured.
@@ -39,23 +39,6 @@ const DEFAULT_ENDPOINT: Readonly<Record<string, string>> = {
   openai: 'https://api.openai.com/v1',
   gemini: 'https://generativelanguage.googleapis.com',
 };
-
-/**
- * Providers whose CLIENT owns the version segment, so the URL may be written
- * with or without it and mean the same route.
- *
- * Anthropic and Gemini, and deliberately just those two. Anthropic's SDK
- * concatenates `/v1/messages` onto whatever `baseURL` it is given, and Gemini's
- * appends `/v1beta` to `httpOptions.baseUrl` — which is why `anthropicApiRoot()`
- * and `geminiApiRoot()` both strip a trailing version segment. The two
- * spellings reach an identical wire path.
- * `OpenAICompatibleProvider` does the opposite: it passes `baseUrl` through as
- * the SDK's `baseURL` and builds discovery as `base + '/models'`, so
- * `https://api.groq.com/openai/v1` and `https://api.groq.com/openai` are
- * different routes. Stripping for every type collapsed those into one and let a
- * key survive an edit that moved generation somewhere else.
- */
-const CLIENT_OWNS_VERSION = new Set(['anthropic', 'gemini']);
 
 /** Whether absence of `baseUrl` resolves to a known public host for this type. */
 export function hasDefaultEndpoint(type: string): boolean {
@@ -73,13 +56,11 @@ export function credentialEndpointIdentity(type: string, baseUrl?: string): stri
   const configured = baseUrl?.trim();
   const effective = configured || DEFAULT_ENDPOINT[type];
   if (!effective) return null;
-  // Only where the client appends its own version — see CLIENT_OWNS_VERSION.
-  // Everywhere else the path is part of the route and must be preserved, for
-  // the same reason `normalizeEndpoint()` preserves path case: a gateway path
-  // can be scope-bearing.
-  return normalizeEndpoint(
-    CLIENT_OWNS_VERSION.has(type) ? stripVersionSuffix(effective) : effective,
-  );
+  // `clientApiRoot` removes only the ONE segment this provider's client
+  // appends for itself. Everywhere else the path is part of the route and must
+  // be preserved, for the same reason `normalizeEndpoint()` preserves path
+  // case: a gateway path can be scope-bearing.
+  return normalizeEndpoint(clientApiRoot(type, effective));
 }
 
 /**

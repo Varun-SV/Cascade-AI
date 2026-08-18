@@ -69,20 +69,51 @@ export function normalizeEndpoint(url: string | undefined | null): string {
 }
 
 /**
- * An endpoint with a trailing API version segment removed.
+ * Drop one EXACT trailing path segment, in linear time.
  *
- * `https://gw.example/v1` and `https://gw.example` address the same API root —
- * the Anthropic SDK appends its own `/v1`, so both spellings generate against
- * the identical host and path. Lives here rather than in the provider so
- * `config/` can reach it without importing `providers/`, which imports back
- * into `config/`.
+ * No regex, deliberately. The obvious `replace(/\/v\d+[a-z]*$/, '')` is both a
+ * polynomial-ReDoS shape on caller-supplied input and too greedy for the job
+ * below — it removes any version-looking segment, not the one segment a client
+ * actually appends.
  */
-export function stripVersionSuffix(url: string): string {
-  // The channel suffix counts: Gemini's version segment is `v1beta`, so
-  // matching only `/vN` left `https://proxy` and `https://proxy/v1beta`
-  // looking like different hosts even though the SDK reduces both to the same
-  // root before sending. Anchored, with two disjoint classes — no backtracking.
-  return stripTrailingSlashes(url.trim()).replace(/\/v\d+[a-z]*$/, '');
+export function stripPathSegment(url: string, segment: string): string {
+  const trimmed = stripTrailingSlashes(url.trim());
+  const suffix = `/${segment}`;
+  return trimmed.endsWith(suffix) ? trimmed.slice(0, -suffix.length) : trimmed;
+}
+
+/**
+ * The exact version segment each provider's CLIENT appends for itself.
+ *
+ * Per-provider, because the segment differs and the difference matters: the
+ * Anthropic SDK concatenates `/v1`, the Gemini SDK `/v1beta`. Anything ELSE
+ * that looks like a version in a configured URL is a path the user chose, and
+ * this release treats proxy paths as scope-bearing — `/openai/v1` and
+ * `/openai` are different routes on the same host.
+ *
+ * A generic "strip any trailing /vN" got this wrong in both directions at once:
+ * `https://proxy/v2` compared equal to `https://proxy` for credential scope,
+ * while the Gemini client would have sent one to `/v2/v1beta/...` and the other
+ * to `/v1beta/...` — identity saying "same host" about two different routes is
+ * exactly how a key survives an edit that moved generation elsewhere.
+ */
+const CLIENT_VERSION_SEGMENT: Readonly<Record<string, string>> = {
+  anthropic: 'v1',
+  gemini: 'v1beta',
+};
+
+/**
+ * A configured endpoint reduced to the root its client will build on.
+ *
+ * The one place that answers "which spellings name the same API root?", so
+ * credential-scope comparison in `config/` and the providers' own request
+ * construction cannot drift apart on it. Lives here rather than in either so
+ * both can reach it: `providers/` imports `config/`, so the reverse would
+ * cycle.
+ */
+export function clientApiRoot(type: string, url: string): string {
+  const segment = CLIENT_VERSION_SEGMENT[type];
+  return segment ? stripPathSegment(url, segment) : stripTrailingSlashes(url.trim());
 }
 
 /** Whether two endpoint URLs address the same host. */

@@ -120,6 +120,14 @@ export function SettingsView({ socket }: Props) {
   // OpenAI-compatible (vLLM / llama.cpp / LM Studio …) key + endpoint, and Ollama endpoint.
   const [ocKey, setOcKey] = useState('');
   const [ocUrl, setOcUrl] = useState('');
+  // Gateway endpoints for the providers that have a public host of their own.
+  // Blank means "the provider's own API" — an explicit statement, which is the
+  // point: without these fields a key typed here carried no information about
+  // which host issued it, and Cascade had to either guess (it guessed wrong in
+  // both directions across two releases) or refuse the save.
+  const [anthropicUrl, setAnthropicUrl] = useState('');
+  const [openaiUrl, setOpenaiUrl] = useState('');
+  const [geminiUrl, setGeminiUrl] = useState('');
   const [ollamaUrl, setOllamaUrl] = useState('');
   // Web-search backends (tools.webSearch) — without one configured, the
   // web_search tool depends entirely on scraping DuckDuckGo.
@@ -193,6 +201,9 @@ export function SettingsView({ socket }: Props) {
     if (typeof cfg.budget?.warnAtPct === 'number') setWarnAt(String(cfg.budget.warnAtPct));
     if (cfg.providersWithKey) setProvidersWithKey(cfg.providersWithKey);
     if (cfg.endpoints?.['openai-compatible']) setOcUrl(cfg.endpoints['openai-compatible']);
+    setAnthropicUrl(cfg.endpoints?.['anthropic'] ?? '');
+    setOpenaiUrl(cfg.endpoints?.['openai'] ?? '');
+    setGeminiUrl(cfg.endpoints?.['gemini'] ?? '');
     if (cfg.endpoints?.['ollama']) setOllamaUrl(cfg.endpoints['ollama']);
     if (cfg.webSearch) {
       if (cfg.webSearch.searxngUrl) setSearxngUrl(cfg.webSearch.searxngUrl);
@@ -272,7 +283,13 @@ export function SettingsView({ socket }: Props) {
         maxTokensPerRun: maxTokens ? parseInt(maxTokens, 10) : undefined,
         warnAtPct: warnAt ? parseFloat(warnAt) : undefined,
       },
-      endpoints: { 'openai-compatible': ocUrl.trim() || undefined, ollama: ollamaUrl.trim() || undefined },
+      endpoints: {
+        anthropic: anthropicUrl.trim() || undefined,
+        openai: openaiUrl.trim() || undefined,
+        gemini: geminiUrl.trim() || undefined,
+        'openai-compatible': ocUrl.trim() || undefined,
+        ollama: ollamaUrl.trim() || undefined,
+      },
       webSearch: { searxngUrl: searxngUrl.trim(), braveApiKey: braveKey || undefined, tavilyApiKey: tavilyKey || undefined },
       azureDeployments: azureDeployments
         .filter((d) => d.label.trim() || d.baseUrl.trim() || d.apiKey.trim() || d.deploymentName.trim())
@@ -293,8 +310,14 @@ export function SettingsView({ socket }: Props) {
     try {
       if (window.cascade?.updateSettings) {
         const res = await window.cascade.updateSettings(payload);
-        if (res?.ok) { persisted = true; applyConfig(res); }
-        else if (res?.error && res.error !== 'backend-unavailable') setSaveError(res.error);
+        if (res?.ok) {
+          persisted = true;
+          applyConfig(res);
+          // A save can succeed for models and budget while DECLINING to store a
+          // key whose host it could not determine. That must not read as "✓
+          // Saved" — it is the one case where the user has to act.
+          if (res.error) { setSaveError(res.error); return; }
+        } else if (res?.error && res.error !== 'backend-unavailable') setSaveError(res.error);
       }
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : String(err));
@@ -367,10 +390,10 @@ export function SettingsView({ socket }: Props) {
                 Keys are stored in your local Cascade config and never sent to any server other than the model provider.
               </p>
               {[
-                { id: 'anthropic', label: 'Anthropic', val: anthropicKey, set: setAnthropicKey, placeholder: 'sk-ant-…' },
-                { id: 'openai', label: 'OpenAI', val: openaiKey, set: setOpenaiKey, placeholder: 'sk-…' },
-                { id: 'gemini', label: 'Google', val: geminiKey, set: setGeminiKey, placeholder: 'AIza…' },
-              ].map(({ id, label, val, set, placeholder }) => (
+                { id: 'anthropic', label: 'Anthropic', val: anthropicKey, set: setAnthropicKey, placeholder: 'sk-ant-…', url: anthropicUrl, setUrl: setAnthropicUrl },
+                { id: 'openai', label: 'OpenAI', val: openaiKey, set: setOpenaiKey, placeholder: 'sk-…', url: openaiUrl, setUrl: setOpenaiUrl },
+                { id: 'gemini', label: 'Google', val: geminiKey, set: setGeminiKey, placeholder: 'AIza…', url: geminiUrl, setUrl: setGeminiUrl },
+              ].map(({ id, label, val, set, placeholder, url, setUrl }) => (
                 <div key={label}>
                   <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>
                     {label}
@@ -381,6 +404,9 @@ export function SettingsView({ socket }: Props) {
                   <input type="password" value={val} onChange={(e) => set(e.target.value)}
                     placeholder={providersWithKey.includes(id) ? '•••••••• (leave blank to keep)' : placeholder}
                     style={{ width: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
+                  <input type="text" value={url} onChange={(e) => setUrl(e.target.value)}
+                    placeholder={`Gateway URL — blank for ${label}'s own API`}
+                    style={{ width: '100%', marginTop: 4, background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-muted)', padding: '6px 10px', fontSize: 11, fontFamily: 'var(--font-mono)', outline: 'none', boxSizing: 'border-box' }} />
                 </div>
               ))}
               <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>

@@ -15,8 +15,9 @@ export { runCascade, createCascade, streamCascade } from './sdk/index.js';
 export { ConfigManager, hasUsableProvider, hasProviderCredential, applyProviderApiKey } from './config/index.js';
 export {
   applyProviderCredential, applyEndpointEdit, applySettingsCredentials,
-  credentialDispositionForEdit, endpointFromSettingsPayload,
+  credentialDispositionForEdit, endpointFromSettingsPayload, explainRefusal,
   type CredentialEndpoint, type CredentialDisposition,
+  type CredentialWriteOutcome, type SettingsCredentialResult,
 } from './config/credential-write.js';
 // The desktop settings save has to ask "is this the same endpoint?" to decide
 // whether a stored key may be kept across an edit. Exported rather than

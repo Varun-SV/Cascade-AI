@@ -136,23 +136,33 @@ describe('applySettingsCredentials — the real save sequence', () => {
     expect(providers).toEqual([{ type: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1' }]);
   });
 
-  it('keeps a stored gateway when the payload has no endpoint field for that provider', () => {
-    // The exact Settings payload: `SettingsView.save()` sends endpoint entries
-    // only for `openai-compatible` and `ollama`. There is no `anthropic` key in
-    // `endpoints` AT ALL, so the panel cannot express a host for it — and a
-    // user rotating their gateway's API key has no way to re-state the gateway.
-    //
-    // An earlier revision read that absence as "the public host" and cleared
-    // the URL, which sent the freshly rotated, gateway-ISSUED key straight to
-    // api.anthropic.com. Absence is a limit of the surface, not evidence about
-    // the key. Fixing the leak in the other direction needs an endpoint field
-    // in the panel, not a guess here.
+  it('refuses a key the payload gives no way to scope, and says so', () => {
+    // The payload a panel WITHOUT gateway fields sends: no `anthropic` entry in
+    // `endpoints` at all. Cascade cannot tell whether the new key belongs to
+    // the stored gateway or to Anthropic, so it stores neither answer — and the
+    // refusal is returned rather than swallowed, because a key that was typed
+    // and not saved must not look like one that was.
     const providers = [{ type: 'anthropic', apiKey: 'old-gateway-key', baseUrl: 'https://corp-gateway.example' }];
-    applySettingsCredentials(providers, {
-      keys: { anthropic: 'rotated-gateway-key', openai: undefined, gemini: undefined, 'openai-compatible': undefined },
+    const result = applySettingsCredentials(providers, {
+      keys: { anthropic: 'unknown-scope-key', openai: undefined, gemini: undefined, 'openai-compatible': undefined },
       endpoints: { 'openai-compatible': undefined, ollama: undefined },
     });
 
+    expect(result.refused).toEqual([{ type: 'anthropic', reason: 'ambiguous-scope' }]);
+    expect(providers[0]).toMatchObject({ apiKey: 'old-gateway-key', baseUrl: 'https://corp-gateway.example' });
+  });
+
+  it('saves the rotated gateway key once the payload can name the gateway', () => {
+    // The same rotation through a panel that HAS the field — which is why the
+    // field was added. The ambiguity is gone, so nothing has to be guessed or
+    // refused.
+    const providers = [{ type: 'anthropic', apiKey: 'old-gateway-key', baseUrl: 'https://corp-gateway.example' }];
+    const result = applySettingsCredentials(providers, {
+      keys: { anthropic: 'rotated-gateway-key' },
+      endpoints: { anthropic: 'https://corp-gateway.example', 'openai-compatible': undefined, ollama: undefined },
+    });
+
+    expect(result.refused).toEqual([]);
     expect(providers[0]).toMatchObject({
       apiKey: 'rotated-gateway-key',
       baseUrl: 'https://corp-gateway.example',
@@ -179,7 +189,7 @@ describe('applySettingsCredentials — the real save sequence', () => {
     ];
     applySettingsCredentials(providers, {
       keys: { anthropic: 'rotated' },
-      endpoints: { 'openai-compatible': 'https://api.groq.com/openai/v1', ollama: undefined },
+      endpoints: { anthropic: 'https://corp-gateway.example', 'openai-compatible': 'https://api.groq.com/openai/v1', ollama: undefined },
     });
 
     expect(providers[0]).toMatchObject({ apiKey: 'rotated', baseUrl: 'https://corp-gateway.example' });
@@ -286,9 +296,9 @@ describe('endpointFromSettingsPayload — presence of the KEY is the signal', ()
 
   it('reads a present-but-empty entry as "the field was shown and left blank"', () => {
     expect(endpointFromSettingsPayload({ anthropic: undefined }, 'anthropic'))
-      .toEqual({ kind: 'provider-default' });
+      .toEqual({ kind: 'cleared' });
     expect(endpointFromSettingsPayload({ anthropic: '   ' }, 'anthropic'))
-      .toEqual({ kind: 'provider-default' });
+      .toEqual({ kind: 'cleared' });
   });
 
   it('reads a filled entry as the host itself', () => {
@@ -298,24 +308,46 @@ describe('endpointFromSettingsPayload — presence of the KEY is the signal', ()
 });
 
 describe('applyProviderCredential — intent decides, absence never does', () => {
-  it('preserves a gateway a caller with no endpoint field cannot re-state', () => {
+  it('REFUSES a replacement key it cannot scope, rather than guessing', () => {
+    // The row names a custom host; the surface has no way to say whether the
+    // new key came from that host or from Anthropic directly. Keeping the host
+    // sends a public key to the gateway; dropping it sends a gateway key to the
+    // public API. Both shipped as leaks, so neither is guessed: nothing is
+    // written and the old credential is left exactly as it was.
     const providers = [{ type: 'anthropic', apiKey: 'old-gw', baseUrl: 'https://corp-gateway.example' }];
-    applyProviderCredential(providers, 'anthropic', 'rotated-gw', { kind: 'preserve' });
-    expect(providers[0]).toMatchObject({ apiKey: 'rotated-gw', baseUrl: 'https://corp-gateway.example' });
+    const outcome = applyProviderCredential(providers, 'anthropic', 'unknown-scope-key', { kind: 'preserve' });
+
+    expect(outcome).toEqual({ written: false, reason: 'ambiguous-scope' });
+    expect(providers[0]).toMatchObject({ apiKey: 'old-gw', baseUrl: 'https://corp-gateway.example' });
+  });
+
+  it('writes on preserve when the row names no custom host to be ambiguous about', () => {
+    const providers = [{ type: 'anthropic', apiKey: 'old' }];
+    expect(applyProviderCredential(providers, 'anthropic', 'sk-ant-new', { kind: 'preserve' }))
+      .toEqual({ written: true });
+    expect(providers[0]).toMatchObject({ apiKey: 'sk-ant-new' });
+    expect(providers[0]?.baseUrl).toBeUndefined();
   });
 
   it('retires it when the caller HAS the field and it was empty', () => {
     const providers = [{ type: 'anthropic', apiKey: 'old-gw', baseUrl: 'https://corp-gateway.example' }];
-    applyProviderCredential(providers, 'anthropic', 'sk-ant-public', { kind: 'provider-default' });
+    applyProviderCredential(providers, 'anthropic', 'sk-ant-public', { kind: 'cleared' });
     expect(providers[0]?.apiKey).toBe('sk-ant-public');
     expect(providers[0]?.baseUrl).toBeUndefined();
   });
 
-  it('keeps an OpenAI-compatible endpoint even on provider-default, having no public host', () => {
-    // Clearing here would leave the key addressing nothing at all.
-    const providers = [{ type: 'openai-compatible', apiKey: 'old', baseUrl: 'https://api.groq.com/openai/v1' }];
-    applyProviderCredential(providers, 'openai-compatible', 'new-key', { kind: 'provider-default' });
-    expect(providers[0]).toMatchObject({ apiKey: 'new-key', baseUrl: 'https://api.groq.com/openai/v1' });
+  it('retires the whole pairing when a no-default provider has its endpoint cleared', () => {
+    // The user emptied a field they were shown, and `openai-compatible` has no
+    // public host — the row addresses nothing now. Writing the key anyway is
+    // not a harmless no-op: an endpointless compatible row hands `baseURL:
+    // undefined` to the OpenAI SDK, which defaults to api.openai.com, so a Groq
+    // key would be sent to OpenAI.
+    const providers = [{ type: 'openai-compatible', apiKey: 'groq-key', baseUrl: 'https://api.groq.com/openai/v1' }];
+    const outcome = applyProviderCredential(providers, 'openai-compatible', 'new-key', { kind: 'cleared' });
+
+    expect(outcome).toEqual({ written: false, reason: 'unroutable' });
+    expect(providers[0]?.apiKey).toBeUndefined();
+    expect(providers[0]?.baseUrl).toBeUndefined();
   });
 
   it('writes the host it was given', () => {
@@ -328,7 +360,7 @@ describe('applyProviderCredential — intent decides, absence never does', () =>
     // AnthropicProvider prefers authToken when both are set, so a surviving
     // bearer would make the key the user just typed silently unused.
     const providers = [{ type: 'anthropic', authToken: 'stale', baseUrl: 'https://corp-gateway.example' }];
-    applyProviderCredential(providers, 'anthropic', 'sk-ant-public', { kind: 'provider-default' });
+    applyProviderCredential(providers, 'anthropic', 'sk-ant-public', { kind: 'cleared' });
     expect(providers[0]?.authToken).toBeUndefined();
     expect(providers[0]?.baseUrl).toBeUndefined();
   });

@@ -70,7 +70,7 @@ function mapProvider(id: string): { type: string | null; baseUrl?: string } {
 // ─── Backend ─────────────────────────────────────────────────────────────────
 // Resolve the cascade-ai core package (built CommonJS output). In dev it lives at
 // the repo's ../dist; in a packaged app it's bundled under resources/cascade-core.
-function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined) => boolean; hasProviderCredential: (p: { apiKey?: string; authToken?: string } | undefined | null) => boolean; applyProviderApiKey: (providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>, type: string, apiKey: string, extra?: { baseUrl?: string }) => void; applyProviderCredential: (providers: Array<Record<string, unknown>>, type: string, apiKey: string, endpoint: { kind: 'at'; baseUrl: string } | { kind: 'provider-default' } | { kind: 'preserve' }) => void; applyEndpointEdit: (existing: Record<string, unknown>, nextBaseUrl: string | undefined, replacementKey: string | undefined) => void; applySettingsCredentials: (providers: Array<Record<string, unknown>>, data: { keys?: Record<string, string | undefined>; endpoints?: Record<string, string | undefined> }) => void; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response>; sameEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean; sameCredentialEndpoint: (type: string, a?: string, b?: string) => boolean; hasDefaultEndpoint: (type: string) => boolean; sameAzureEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean } {
+function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined) => boolean; hasProviderCredential: (p: { apiKey?: string; authToken?: string } | undefined | null) => boolean; applyProviderApiKey: (providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>, type: string, apiKey: string, extra?: { baseUrl?: string }) => void; applyProviderCredential: (providers: Array<Record<string, unknown>>, type: string, apiKey: string, endpoint: { kind: 'at'; baseUrl: string } | { kind: 'cleared' } | { kind: 'preserve' }) => { written: boolean; reason: 'ambiguous-scope' | 'unroutable' }; applyEndpointEdit: (existing: Record<string, unknown>, nextBaseUrl: string | undefined, replacementKey: string | undefined) => void; applySettingsCredentials: (providers: Array<Record<string, unknown>>, data: { keys?: Record<string, string | undefined>; endpoints?: Record<string, string | undefined> }) => { refused: Array<{ type: string; reason: 'ambiguous-scope' | 'unroutable' }> }; explainRefusal: (type: string, reason: 'ambiguous-scope' | 'unroutable') => string; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response>; sameEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean; sameCredentialEndpoint: (type: string, a?: string, b?: string) => boolean; hasDefaultEndpoint: (type: string) => boolean; sameAzureEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean } {
   // Dev: the repo's external-deps build (node_modules resolves the requires).
   // Packaged: the self-contained `desktop-core.cjs` bundle (no node_modules to
   // resolve from — every JS dep is bundled in; only native modules like
@@ -452,9 +452,23 @@ function registerIPC(): void {
           // limit of this screen and must not be read as "the public host" —
           // that reading moved a rotated gateway key onto the provider's own
           // API.
-          const { applyProviderCredential } = loadCore();
-          applyProviderCredential(cascadeConfig.providers, type, cfg.apiKey,
-            baseUrl ? { kind: 'at', baseUrl } : { kind: 'preserve' });
+          const { applyProviderCredential, explainRefusal } = loadCore();
+          // Which providers the wizard renders a base-URL input for — mirrors
+          // `needsBaseUrl` in OnboardingView. A blank field the user was SHOWN
+          // is a statement; a field that was never rendered is not, and reading
+          // the second as the first moved a rotated gateway key onto the
+          // provider's public API.
+          const endpoint = baseUrl
+            ? { kind: 'at' as const, baseUrl }
+            : type === 'openai-compatible' ? { kind: 'cleared' as const } : { kind: 'preserve' as const };
+          const outcome = applyProviderCredential(cascadeConfig.providers, type, cfg.apiKey, endpoint);
+          if (!outcome.written) {
+            // Nothing was stored, so the wizard must not advance as though it
+            // had been. Onboarding has no endpoint control for these providers;
+            // Settings does, which is where the user can say what this key is
+            // for.
+            return { ok: false, error: explainRefusal(type, outcome.reason) };
+          }
         } else if (existing) {
           // The SAME rule the Settings save uses. This path bypassed it, so a
           // key-optional provider could have its endpoint changed here with a
@@ -648,7 +662,12 @@ function registerIPC(): void {
       // Both halves in one call, because the ORDER matters: keys are written
       // first, so the endpoint step has to know a key it might retire could be
       // the one just installed. Split across two loops here, it deleted it.
-      loadCore().applySettingsCredentials(cascadeConfig.providers, data);
+      const { applySettingsCredentials, explainRefusal } = loadCore();
+      const credentials = applySettingsCredentials(cascadeConfig.providers, data);
+      // Reported through the response the panel already renders as an error. A
+      // key that was typed and not stored has to say so; the alternative is a
+      // save that looks identical to one that worked.
+      const refusals = credentials.refused.map((r) => explainRefusal(r.type, r.reason));
 
       // Azure supports multiple deployments — unlike every other provider type,
       // it can't be addressed by a bare `type` string, so it gets its own
@@ -741,7 +760,10 @@ function registerIPC(): void {
         if (typeof a['telemetryEnabled'] === 'boolean') cascadeConfig.telemetry = { ...(cascadeConfig.telemetry ?? {}), enabled: a['telemetryEnabled'] };
       }
       await configManager.save();
-      return { ok: true, ...settingsSnapshot() };
+      // `ok` stays true — models, budget and every other key DID save. The
+      // refusal rides alongside so the panel can name what it declined and
+      // why, rather than reporting a clean success over a key it dropped.
+      return { ok: true, ...settingsSnapshot(), ...(refusals.length ? { error: refusals.join(' ') } : {}) };
     } catch (err) {
       console.warn('[main] updateSettings failed:', err);
       return { ok: false, error: err instanceof Error ? err.message : String(err) };

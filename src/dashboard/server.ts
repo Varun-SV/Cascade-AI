@@ -13,7 +13,7 @@ import bcrypt from 'bcryptjs';
 import type { CascadeConfig } from '../types.js';
 import { MemoryStore } from '../memory/store.js';
 import { hasProviderCredential } from '../config/index.js';
-import { applySettingsCredentials } from '../config/credential-write.js';
+import { applySettingsCredentials, explainRefusal } from '../config/credential-write.js';
 import type { RuntimeNode, RuntimeNodeLog, RuntimeSession } from '../types.js';
 import { CASCADE_DB_FILE, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE, CASCADE_CONFIG_FILE, CASCADE_DASHBOARD_SECRET_FILE } from '../constants.js';
 import { DashboardSocket } from './websocket.js';
@@ -237,7 +237,9 @@ export class DashboardServer {
       // an endpoint change it had persisted nothing for, and never retired the
       // old host's key on a move. One implementation, so there is no third
       // copy to drift.
-      applySettingsCredentials(this.config.providers, data);
+      const credentials = applySettingsCredentials(this.config.providers, data);
+      // A key Cascade declined to store must not look like one it saved.
+      for (const r of credentials.refused) console.warn(explainRefusal(r.type, r.reason));
       if (data.models) {
         // A tier value may be a bare model id, a `provider:model` binding, or
         // 'auto' / '' meaning "no override — let routing pick". Store explicit

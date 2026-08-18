@@ -18,7 +18,7 @@ import { MODELS } from '../constants.js';
 import { BaseProvider } from './base.js';
 import { withResolvedPricing } from '../core/router/pricing.js';
 import { isChatModel } from './model-filter.js';
-import { fetchSameOrigin, stripTrailingSlashes , stripVersionSuffix } from '../utils/net.js';
+import { clientApiRoot, fetchSameOrigin, stripTrailingSlashes } from '../utils/net.js';
 import { isSubscriptionToken } from '../config/revoked-credentials.js';
 
 // Anthropic extended thinking — only the 4.x reasoning models (Opus 4 / Sonnet 4)
@@ -83,7 +83,7 @@ export function anthropicApiRoot(configured: string | undefined): string | undef
   // Delegates: credential-scope comparison in `config/` has to agree with this
   // about which spellings are the same API root, and a second copy of the rule
   // is how the two start disagreeing.
-  const root = stripVersionSuffix(configured);
+  const root = clientApiRoot('anthropic', configured);
   return root || undefined;
 }
 

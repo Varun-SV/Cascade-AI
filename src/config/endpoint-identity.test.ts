@@ -94,6 +94,26 @@ describe('credentialEndpointsConflict — the merge question, not the edit quest
     expect(credentialEndpointsConflict('anthropic', 'https://gw.example', 'https://gw.example/v1')).toBe(false);
   });
 
+  it('collapses only the segment each client appends for itself', () => {
+    // Anthropic's SDK adds `/v1`, Gemini's adds `/v1beta`. Those spellings are
+    // one root apiece.
+    expect(credentialEndpointsConflict('gemini', 'https://proxy.example', 'https://proxy.example/v1beta'))
+      .toBe(false);
+    // Anything else that merely LOOKS like a version is a path the user chose.
+    // A generic "strip any trailing /vN" made these compare equal, so a key
+    // survived an edit between two genuinely different proxy routes —
+    // `/v2/v1beta/...` and `/v1beta/...`.
+    expect(credentialEndpointsConflict('gemini', 'https://proxy.example/v2', 'https://proxy.example'))
+      .toBe(true);
+    expect(credentialEndpointsConflict('gemini', 'https://proxy.example/v1alpha', 'https://proxy.example'))
+      .toBe(true);
+    expect(credentialEndpointsConflict('anthropic', 'https://gw.example/v2', 'https://gw.example'))
+      .toBe(true);
+    // …and one client's segment is not another's.
+    expect(credentialEndpointsConflict('anthropic', 'https://gw.example/v1beta', 'https://gw.example'))
+      .toBe(true);
+  });
+
   it('refuses a credential whose host cannot be named at all', () => {
     // The other `null`, and NOT the same state as an unnamed row. An
     // `openai-compatible` key saved with the URL field blank — which the
