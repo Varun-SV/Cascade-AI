@@ -19,6 +19,7 @@ import { BaseProvider } from './base.js';
 import { withResolvedPricing } from '../core/router/pricing.js';
 import { isChatModel } from './model-filter.js';
 import { fetchSameOrigin, stripTrailingSlashes } from '../utils/net.js';
+import { isSubscriptionToken } from '../config/revoked-credentials.js';
 
 // Anthropic extended thinking — only the 4.x reasoning models (Opus 4 / Sonnet 4)
 // support it. budget_tokens must be >= 1024 and < max_tokens; we cap well under
@@ -124,6 +125,21 @@ export function anthropicAuth(
   config: { apiKey?: string; authToken?: string; baseUrl?: string },
 ): { mode: 'bearer'; token: string } | { mode: 'apiKey'; key: string } | { mode: 'none' } {
   const gateway = anthropicApiRoot(config.baseUrl);
+  // A Claude subscription token is refused wherever it appears, gateway or not.
+  // The environment, `cascade link` and config-load paths all classify it, but
+  // the public SDK runs none of them — `createCascade()` schema-validates and
+  // nothing else — so `{ authToken: 'sk-ant-oat…', baseUrl: 'https://gw' }`
+  // walked straight past the gateway check and onto the wire, carrying exactly
+  // the credential this release exists to stop using. Anthropic refuses it
+  // whatever header holds it; pointing it at a gateway does not make it a
+  // gateway's bearer.
+  if (config.authToken && isSubscriptionToken(config.authToken)) {
+    if (config.apiKey) return { mode: 'apiKey', key: config.apiKey };
+    throw new Error(
+      'This Anthropic credential is a Claude subscription token, which Anthropic does not permit '
+      + 'third-party clients to use. Configure an API key from console.anthropic.com instead.',
+    );
+  }
   if (config.authToken && gateway) return { mode: 'bearer', token: config.authToken };
   if (config.apiKey) return { mode: 'apiKey', key: config.apiKey };
   if (config.authToken) {

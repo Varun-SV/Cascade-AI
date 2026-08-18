@@ -58,6 +58,15 @@ export function mergeProviders(
     // carrying only a gateway `authToken` is a valid credential elsewhere and
     // no credential here.
     const prior = map.get(providerSig(i));
+    // Keyless is NOT the same as unusable. `openai-compatible` is explicitly
+    // key-optional — the provider substitutes `not-required` when no key is set
+    // and the vault accepts a row with just a `baseUrl` — so a synced
+    // self-hosted endpoint has no key and is perfectly valid here. Only a row
+    // whose sole credential is a bearer cannot be used, and `authToken` is not
+    // on the web's ProviderConfig at all, so it is read off the runtime object
+    // the bundle actually carries.
+    const bearer = (i as { authToken?: unknown }).authToken;
+    const bearerOnly = !i.apiKey && typeof bearer === 'string' && bearer.length > 0;
     if (!i.apiKey) {
       if (prior?.apiKey) {
         // Keep the local key rather than letting the bearer row displace it.
@@ -79,8 +88,11 @@ export function mergeProviders(
       // in localStorage where nothing can ever use it is storage risk with no
       // benefit, and the notice tells the user to keep managing it from the
       // desktop or CLI, which do support bearers.
-      unusable.push(i.type);
-      continue;
+      if (bearerOnly) {
+        unusable.push(i.type);
+        continue;
+      }
+      // Keyless and no bearer: a legitimate key-optional endpoint. Kept.
     }
     map.set(providerSig(i), i);
   }

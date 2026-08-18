@@ -21,6 +21,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## 0.75.0 - 2026-08-14
 
 ### Fixed
+- **A stored bearer could be paired with the wrong gateway.** Non-Azure rows
+  merge on provider type alone, so a workspace row naming gateway B with no
+  credential adopted the machine-global row's token from gateway A — and the
+  endpoint fill, which only ran when the row had none, left B in place. The
+  result passed every usability check on the way to the wire. A bearer and its
+  gateway are one credential now: adopted together, or not at all, and never
+  when the two rows name different hosts.
+
+- **A Claude subscription token could still reach the wire programmatically.**
+  The provider accepted any bearer once a gateway was named, but the public SDK
+  runs no credential classification — `createCascade()` schema-validates and
+  nothing else — so a config carrying `sk-ant-oat…` with a `baseUrl` walked past
+  the gateway check that had just been added. Pointing such a token at a gateway
+  does not make it a gateway's bearer; it is refused wherever it appears, with a
+  configured API key used instead when there is one.
+
+- **The browser vault dropped keyless providers it can actually use.**
+  Quarantining bearer-only rows keyed off "has no API key", but
+  `openai-compatible` is deliberately key-optional — the provider substitutes
+  `not-required` and the vault accepts a row with just a `baseUrl` — so a synced
+  self-hosted endpoint was discarded and reported as unusable in the one place
+  it works. Only a row whose sole credential is a bearer is quarantined.
+
 - **A gateway bearer could still reach the public Anthropic host.** Every
   config path refuses to configure `authToken` without the `baseUrl` of the
   gateway that issued it, but the provider itself enforced nothing — and the

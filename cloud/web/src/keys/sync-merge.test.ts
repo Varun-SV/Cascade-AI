@@ -104,4 +104,39 @@ describe('browser sync merge', () => {
     expect(merged[0]?.type).toBe('openai');
     expect(unusable).toEqual(['anthropic']);
   });
+
+  it('keeps a keyless openai-compatible endpoint, which is key-optional', () => {
+    // The bearer quarantine keyed off "no apiKey", but keyless is not the same
+    // as unusable: OpenAICompatibleProvider substitutes `not-required` when no
+    // key is set, and the vault accepts a row with just a baseUrl. A synced
+    // self-hosted endpoint was being dropped and reported as unusable in the
+    // browser, which is exactly where it does work.
+    const local: ProviderConfig[] = [];
+    const incoming: ProviderConfig[] = [
+      { type: 'openai-compatible', baseUrl: 'http://localhost:8000/v1' },
+    ];
+
+    const { merged, unusable } = mergeProviders(local, incoming);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.baseUrl).toBe('http://localhost:8000/v1');
+    expect(unusable).toEqual([]);
+  });
+
+  it('keeps a keyless ollama row too', () => {
+    const { merged, unusable } = mergeProviders([], [{ type: 'ollama' }]);
+    expect(merged).toHaveLength(1);
+    expect(unusable).toEqual([]);
+  });
+
+  it('still quarantines a bearer-only row alongside a kept keyless one', () => {
+    const incoming: ProviderConfig[] = [
+      { type: 'openai-compatible', baseUrl: 'http://localhost:8000/v1' },
+      { type: 'anthropic', authToken: 'gw-token', baseUrl: 'https://gateway.internal' } as ProviderConfig,
+    ];
+
+    const { merged, unusable } = mergeProviders([], incoming);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.type).toBe('openai-compatible');
+    expect(unusable).toEqual(['anthropic']);
+  });
 });

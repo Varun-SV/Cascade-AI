@@ -18,6 +18,7 @@ import path from 'node:path';
 import type { ProviderConfig } from '../types.js';
 import { GLOBAL_CREDENTIALS_FILE } from '../constants.js';
 import { normalizeAzureEndpoint } from './azure-endpoint.js';
+import { sameEndpoint } from '../utils/net.js';
 
 interface CredentialsFile {
   version: 1;
@@ -167,7 +168,20 @@ export function mergeGlobalCredentials(
     // no rival; only a row with neither adopts one.
     const credentialled = Boolean(existing.apiKey || existing.authToken);
     if (!credentialled && g.apiKey) existing.apiKey = g.apiKey;
-    if (!credentialled && !existing.apiKey && g.authToken) existing.authToken = g.authToken;
+    // A bearer and the gateway that issued it are ONE credential, and travel
+    // together or not at all. Filling the token while leaving the row's own
+    // endpoint in place — which the `!existing.baseUrl` guard below does — sent
+    // gateway A's token to gateway B: a workspace row naming gateway B with no
+    // credential adopted the global row's token from gateway A, and the result
+    // passes every usability check on the way to the wire.
+    //
+    // Non-Azure rows still match on provider type alone, so this pairing is the
+    // only thing standing between two different gateways for one provider.
+    if (!credentialled && !existing.apiKey && g.authToken && g.baseUrl
+        && (!existing.baseUrl || sameEndpoint(existing.baseUrl, g.baseUrl))) {
+      existing.authToken = g.authToken;
+      existing.baseUrl = g.baseUrl;
+    }
     if (!existing.baseUrl && g.baseUrl) existing.baseUrl = g.baseUrl;
     if (!existing.apiVersion && g.apiVersion) existing.apiVersion = g.apiVersion;
     if (!existing.label && g.label) existing.label = g.label;

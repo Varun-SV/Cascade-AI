@@ -221,4 +221,50 @@ describe('ConfigManager + global credentials (the "AppImage forgets my keys" bug
 
     expect(loadGlobalCredentials(globalDir).find((p) => p.type === 'openai')).toBeUndefined();
   });
+
+  it('never pairs a global bearer with a different gateway', () => {
+    // Non-Azure rows match on provider type alone, so a credentialless
+    // workspace row naming gateway B accepted the global row's token from
+    // gateway A — and the `!existing.baseUrl` guard left B's endpoint in place.
+    // The result passes every usability check on the way to the wire, and
+    // AnthropicProvider sends A's bearer to B.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'anthropic', baseUrl: 'https://gw-b.example' }],
+      [{ type: 'anthropic', authToken: 'token-a', baseUrl: 'https://gw-a.example' }],
+    );
+
+    const anthropic = merged.find((p) => p.type === 'anthropic')!;
+    expect(anthropic.authToken).toBeUndefined();
+    expect(anthropic.baseUrl).toBe('https://gw-b.example');
+  });
+
+  it('adopts a bearer together with the gateway that issued it', () => {
+    // A workspace row with no endpoint of its own takes both.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'anthropic' }],
+      [{ type: 'anthropic', authToken: 'token-a', baseUrl: 'https://gw-a.example' }],
+    );
+
+    const anthropic = merged.find((p) => p.type === 'anthropic')!;
+    expect(anthropic.authToken).toBe('token-a');
+    expect(anthropic.baseUrl).toBe('https://gw-a.example');
+  });
+
+  it('adopts a bearer when both name the same gateway, trailing slash aside', () => {
+    const merged = mergeGlobalCredentials(
+      [{ type: 'anthropic', baseUrl: 'https://gw-a.example/' }],
+      [{ type: 'anthropic', authToken: 'token-a', baseUrl: 'https://gw-a.example' }],
+    );
+    expect(merged.find((p) => p.type === 'anthropic')?.authToken).toBe('token-a');
+  });
+
+  it('will not adopt a stored bearer that names no gateway at all', () => {
+    // Nowhere to send it, so it is not a credential — the rule the rest of the
+    // release holds. Adopting it would make the row look configured.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'anthropic' }],
+      [{ type: 'anthropic', authToken: 'token-a' }],
+    );
+    expect(merged.find((p) => p.type === 'anthropic')?.authToken).toBeUndefined();
+  });
 });

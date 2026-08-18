@@ -61,9 +61,19 @@ export interface ProviderConfig {
   apiVersion?: string;            // Azure
   model?: string;
   /**
-   * OAuth bearer token (e.g. a Claude Code subscription token) used instead
-   * of an API key. When set on an Anthropic provider, the request uses
-   * `Authorization: Bearer` + the oauth beta header rather than `x-api-key`.
+   * Bearer token for an LLM **gateway or proxy** — what Anthropic documents
+   * `ANTHROPIC_AUTH_TOKEN` for — used instead of an API key. The request goes
+   * out as `Authorization: Bearer` rather than `x-api-key`.
+   *
+   * Requires `baseUrl`: a bearer is only valid at the gateway that issued it,
+   * so without one there is nowhere it can be sent, and the provider refuses
+   * rather than falling back to the public host.
+   *
+   * NOT a Claude subscription token. Those were accepted here once, with an
+   * `anthropic-beta: oauth-…` header; Anthropic does not permit third-party
+   * clients to route requests through Free/Pro/Max credentials, and such a
+   * token is now refused wherever it appears — including on a config passed
+   * straight to `createCascade()`.
    */
   authToken?: string;
   /** Where an adopted credential came from, e.g. "Claude Code". Informational. */

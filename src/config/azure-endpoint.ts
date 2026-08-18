@@ -19,7 +19,7 @@
 //  One normalizer, used everywhere an Azure endpoint is compared for identity,
 //  so the answer cannot differ between call sites.
 
-import { stripTrailingSlashes } from '../utils/net.js';
+import { normalizeEndpoint } from '../utils/net.js';
 
 /**
  * An Azure endpoint reduced to what identifies the resource.
@@ -31,7 +31,9 @@ import { stripTrailingSlashes } from '../utils/net.js';
  * to nothing else.
  */
 export function normalizeAzureEndpoint(url: string | undefined | null): string {
-  return stripTrailingSlashes((url ?? '').trim()).toLowerCase();
+  // Delegates: the normalization is not Azure-specific, and a bearer's gateway
+  // is compared with exactly the same rule (see utils/net normalizeEndpoint).
+  return normalizeEndpoint(url);
 }
 
 /** Whether two Azure endpoints name the same resource. */

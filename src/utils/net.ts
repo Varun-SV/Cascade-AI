@@ -34,6 +34,29 @@ export function stripTrailingSlashes(value: string): string {
   return end === value.length ? value : value.slice(0, end);
 }
 
+/**
+ * An endpoint URL reduced to what identifies the host it addresses.
+ *
+ * Trailing slashes go because every provider client drops them anyway; case
+ * goes because the meaningful part is a hostname, which is case-insensitive.
+ * A missing or blank endpoint normalizes to the empty string, so rows with no
+ * endpoint compare equal to each other and to nothing else.
+ *
+ * Lives here rather than in `azure-endpoint.ts` because the question is not
+ * Azure's: "is this bearer's gateway the same host as the one already
+ * configured?" needs the identical normalization, and writing it out a second
+ * time is how two call sites start disagreeing about what "same endpoint"
+ * means.
+ */
+export function normalizeEndpoint(url: string | undefined | null): string {
+  return stripTrailingSlashes((url ?? '').trim()).toLowerCase();
+}
+
+/** Whether two endpoint URLs address the same host. */
+export function sameEndpoint(a: string | undefined | null, b: string | undefined | null): boolean {
+  return normalizeEndpoint(a) === normalizeEndpoint(b);
+}
+
 /** Max redirect hops before nodeHttpFetch gives up (matches browser/curl-ish defaults). */
 const MAX_REDIRECTS = 5;
 

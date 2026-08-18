@@ -364,16 +364,53 @@ describe('AnthropicProvider — a bearer is never sent to the public host', () =
   });
 
   it('rejects the same shape through the programmatic config path', async () => {
-    // The route the finding names: a config the schema accepts, straight into
-    // createCascade(), with nothing in between to catch it.
-    const { createCascade } = await import('../sdk/index.js');
-    const build = async () => {
-      const cascade = await createCascade({
-        providers: [{ type: 'anthropic', authToken: 'gw-token' }],
-      } as never);
-      // Construction is lazy in some paths; force a provider to be built.
-      await cascade.getRouter().generate('T3', { messages: [{ role: 'user', content: 'hi' }] });
-    };
-    await expect(build()).rejects.toThrow();
+    // The route the finding names, asserted as the two facts that make it a
+    // hole: the schema ACCEPTS the config — so nothing upstream of the provider
+    // catches it, which is the whole reason the boundary has to — and building
+    // the provider from that parsed config refuses.
+    //
+    // Not written as a createCascade() run: that path fails first for an
+    // unrelated reason ("Cannot read properties of undefined (reading
+    // 'selectForTier')"), so a bare rejects.toThrow() passed identically with
+    // the guard removed. A test that cannot fail is worse than no test.
+    const { CascadeConfigSchema } = await import('../config/schema.js');
+    const parsed = CascadeConfigSchema.parse({
+      providers: [{ type: 'anthropic', authToken: 'gw-token' }],
+    });
+    expect(parsed.providers[0]).toMatchObject({ type: 'anthropic', authToken: 'gw-token' });
+
+    expect(() => new AnthropicProvider(parsed.providers[0]!))
+      .toThrow(/without a gateway URL/i);
+  });
+
+  it('refuses a Claude subscription token even when a gateway is named', () => {
+    // Pointing a subscription token at a gateway does not make it a gateway's
+    // bearer — Anthropic refuses it whatever header carries it. The
+    // environment, link and config-load paths all classify it, but the public
+    // SDK runs none of them, so this shape walked past the gateway check.
+    expect(() => new AnthropicProvider({
+      type: 'anthropic', authToken: 'sk-ant-oat01-abc', baseUrl: 'https://gateway.internal/v1',
+    })).toThrow(/subscription token/i);
+  });
+
+  it('falls back to a configured API key rather than the subscription token', () => {
+    expect(() => new AnthropicProvider({
+      type: 'anthropic', authToken: 'sk-ant-oat01-abc', apiKey: 'sk-ant-real',
+      baseUrl: 'https://gateway.internal/v1',
+    })).not.toThrow();
+  });
+
+  it('rejects a subscription token through the programmatic config path', async () => {
+    // Same two facts: schema validation is all the public path runs, and it
+    // does not classify the token — so the provider boundary is the only thing
+    // between this config and the wire.
+    const { CascadeConfigSchema } = await import('../config/schema.js');
+    const parsed = CascadeConfigSchema.parse({
+      providers: [{ type: 'anthropic', authToken: 'sk-ant-oat01-abc', baseUrl: 'https://gateway.example' }],
+    });
+    expect(parsed.providers[0]?.authToken).toBe('sk-ant-oat01-abc');
+
+    expect(() => new AnthropicProvider(parsed.providers[0]!))
+      .toThrow(/subscription token/i);
   });
 });
