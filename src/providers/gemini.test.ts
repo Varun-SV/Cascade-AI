@@ -326,10 +326,13 @@ describe('GeminiProvider — the key never follows a cross-origin redirect', () 
     await new Promise<void>((r) => sink.listen(0, '127.0.0.1', r));
     sinkUrl = `http://127.0.0.1:${(sink.address() as AddressInfo).port}`;
 
-    redirector = http.createServer((req, res) => {
+    redirector = http.createServer((_req, res) => {
       // Same path, different origin — the shape a compromised or misconfigured
-      // gateway produces.
-      res.writeHead(302, { Location: `${sinkUrl}${req.url}` });
+      // gateway produces. The target is a CONSTANT rather than an echo of
+      // `req.url`: reflecting a request path into `Location` is an open
+      // redirect, which CodeQL flags whether or not the server is a fixture,
+      // and the path here is known anyway.
+      res.writeHead(302, { Location: `${sinkUrl}/v1beta/models` });
       res.end();
     });
     await new Promise<void>((r) => redirector.listen(0, '127.0.0.1', r));
@@ -362,7 +365,8 @@ describe('GeminiProvider — the key never follows a cross-origin redirect', () 
     const server = http.createServer((req, res) => {
       hops.push(req.url ?? '');
       if (hops.length === 1) {
-        res.writeHead(308, { Location: `${req.url}/` });
+        // Constant target, for the same reason as above.
+        res.writeHead(308, { Location: '/v1beta/models/' });
         res.end();
         return;
       }
