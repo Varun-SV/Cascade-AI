@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { applyProviderApiKey, applyProviderCredential, ConfigManager, hasProviderCredential, hasUsableProvider } from './index.js';
+import { applyProviderApiKey, ConfigManager, hasProviderCredential, hasUsableProvider } from './index.js';
 import { CASCADE_CONFIG_FILE } from '../constants.js';
 
 const tempDirs: string[] = [];
@@ -421,79 +421,6 @@ describe('applyProviderApiKey — a new key must not be shadowed', () => {
   });
 });
 
-describe('applyProviderCredential — a key and the host it was issued by', () => {
-  // `applyProviderApiKey` only rewrites `baseUrl` when it is handed one, which
-  // is right for the field and wrong for the pairing. Every settings surface
-  // that wrote a key through it therefore kept whatever host was already on the
-  // row, and a public-host key was then sent to a corporate gateway.
-  it('retires a stored gateway when a key arrives with no endpoint', () => {
-    const providers = [{ type: 'anthropic', apiKey: 'old-gateway-key', baseUrl: 'https://corp-gateway.example' }];
-    applyProviderCredential(providers, 'anthropic', 'sk-ant-public');
-
-    expect(providers[0]!.apiKey).toBe('sk-ant-public');
-    expect(providers[0]!.baseUrl).toBeUndefined();
-  });
-
-  it('keeps an endpoint supplied alongside the key', () => {
-    const providers = [{ type: 'anthropic', apiKey: 'old', baseUrl: 'https://old-gw.example' }];
-    applyProviderCredential(providers, 'anthropic', 'gw-key', 'https://new-gw.example');
-    expect(providers[0]).toMatchObject({ apiKey: 'gw-key', baseUrl: 'https://new-gw.example' });
-  });
-
-  it('keeps an OpenAI-compatible endpoint, which has no public host to fall back to', () => {
-    // Clearing here would leave the key addressing nothing at all.
-    const providers = [{ type: 'openai-compatible', apiKey: 'old', baseUrl: 'https://api.groq.com/openai/v1' }];
-    applyProviderCredential(providers, 'openai-compatible', 'new-key');
-    expect(providers[0]).toMatchObject({ apiKey: 'new-key', baseUrl: 'https://api.groq.com/openai/v1' });
-  });
-
-  it('still clears a bearer the key replaces', () => {
-    // Inherited from applyProviderApiKey and worth pinning: AnthropicProvider
-    // prefers authToken when both are set, so a surviving bearer would make the
-    // key the user just typed silently unused.
-    const providers = [{ type: 'anthropic', authToken: 'stale', baseUrl: 'https://corp-gateway.example' }];
-    applyProviderCredential(providers, 'anthropic', 'sk-ant-public');
-    expect(providers[0]!.authToken).toBeUndefined();
-    expect(providers[0]!.baseUrl).toBeUndefined();
-  });
-
-  it('creates the entry when the provider is not configured yet', () => {
-    const providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }> = [];
-    applyProviderCredential(providers, 'openai', 'sk-new');
-    expect(providers).toEqual([{ type: 'openai', apiKey: 'sk-new' }]);
-  });
-});
-
-describe('every user-input key write is wired to applyProviderCredential', () => {
-  // A source-level check, deliberately. The unit tests above prove the helper
-  // is correct; they say nothing about whether the save handlers call it, and
-  // that is the defect that kept recurring — three handlers wrote a key with
-  // `applyProviderApiKey` and left a stored gateway attached, and reverting any
-  // one of those call sites leaves every other test in the suite green.
-  //
-  // Comments are stripped first so the prose in these files, which necessarily
-  // names the function it stopped calling, cannot fail the check.
-  const stripComments = (src: string): string => src
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/^[ \t]*\/\/.*$/gm, '');
-
-  const handlers = [
-    ['dashboard config:update (the live backend)', '../dashboard/server.ts'],
-    ['desktop Settings save', '../../app/electron/settings-merge.ts'],
-  ] as const;
-
-  it.each(handlers)('%s writes keys through the provider-aware helper', async (_name, rel) => {
-    const fs = await import('node:fs/promises');
-    const url = await import('node:url');
-    const nodePath = await import('node:path');
-    const here = nodePath.dirname(url.fileURLToPath(import.meta.url));
-    const code = stripComments(await fs.readFile(nodePath.join(here, rel), 'utf-8'));
-
-    expect(code).not.toMatch(/applyProviderApiKey/);
-    expect(code).toMatch(/applyProviderCredential/);
-  });
-});
-
 describe('an env key does not delete an endpoint the environment cannot name', () => {
   // `ANTHROPIC_API_KEY` exported with no `ANTHROPIC_BASE_URL` is evidence: the
   // pair is modeled, so the user COULD have named a gateway and did not. There
@@ -554,6 +481,56 @@ describe('an env key does not delete an endpoint the environment cannot name', (
       apiKey: 'proxy-key',
       baseUrl: 'https://gemini-proxy.internal',
     });
+  });
+
+  it('inherits the global store endpoint when that is the only routing there is', async () => {
+    // The sibling of the case above. When OpenAI exists only in
+    // ~/.cascade-ai/credentials.json, the created row used to copy the key and
+    // drop the stored gateway — and the merge that follows will not put it back,
+    // because the row it finds is already credentialled. The workspace-resident
+    // case preserved the gateway and this one did not, for no reason a user
+    // could see.
+    const workspace = await makeTempWorkspace();
+    const globalDir = await makeTempWorkspace();
+    await fs.writeFile(
+      path.join(globalDir, 'credentials.json'),
+      JSON.stringify({
+        providers: [{ type: 'openai', baseUrl: 'https://corp-openai-gateway.example/v1', apiKey: 'old' }],
+      }),
+      'utf-8',
+    );
+    process.env['OPENAI_API_KEY'] = 'fresh-gateway-key';
+
+    const cm = new ConfigManager(workspace, globalDir);
+    await cm.load();
+
+    expect(cm.getConfig().providers.find((p) => p.type === 'openai')).toMatchObject({
+      apiKey: 'fresh-gateway-key',
+      baseUrl: 'https://corp-openai-gateway.example/v1',
+    });
+  });
+
+  it('does NOT inherit a stored Anthropic gateway for a bare key', async () => {
+    // Anthropic keeps the opposite behaviour, and for the reason that makes the
+    // two consistent: the environment could have said `ANTHROPIC_BASE_URL` and
+    // did not, so the key belongs to the public host.
+    const workspace = await makeTempWorkspace();
+    const globalDir = await makeTempWorkspace();
+    await fs.writeFile(
+      path.join(globalDir, 'credentials.json'),
+      JSON.stringify({
+        providers: [{ type: 'anthropic', baseUrl: 'https://corp-gateway.example', apiKey: 'old' }],
+      }),
+      'utf-8',
+    );
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-public';
+
+    const cm = new ConfigManager(workspace, globalDir);
+    await cm.load();
+
+    const anthropic = cm.getConfig().providers.find((p) => p.type === 'anthropic');
+    expect(anthropic?.apiKey).toBe('sk-ant-public');
+    expect(anthropic?.baseUrl).toBeUndefined();
   });
 
   it('still detaches an Anthropic gateway, where the environment HAS a channel for it', async () => {

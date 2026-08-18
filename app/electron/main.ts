@@ -11,7 +11,7 @@ import {
   net as electronNet,
 } from 'electron';
 import { join } from 'node:path';
-import { applyEndpointEdit, applySettingsCredentials, priorAzureRow } from './settings-merge.js';
+import { priorAzureRow } from './settings-merge.js';
 import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
 import { registerCloudAuthIpc } from './cloudAuth';
@@ -70,7 +70,7 @@ function mapProvider(id: string): { type: string | null; baseUrl?: string } {
 // ─── Backend ─────────────────────────────────────────────────────────────────
 // Resolve the cascade-ai core package (built CommonJS output). In dev it lives at
 // the repo's ../dist; in a packaged app it's bundled under resources/cascade-core.
-function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined) => boolean; hasProviderCredential: (p: { apiKey?: string; authToken?: string } | undefined | null) => boolean; applyProviderApiKey: (providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>, type: string, apiKey: string, extra?: { baseUrl?: string }) => void; applyProviderCredential: (providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>, type: string, apiKey: string, baseUrl?: string) => void; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response>; sameEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean; sameCredentialEndpoint: (type: string, a?: string, b?: string) => boolean; hasDefaultEndpoint: (type: string) => boolean; sameAzureEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean } {
+function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined) => boolean; hasProviderCredential: (p: { apiKey?: string; authToken?: string } | undefined | null) => boolean; applyProviderApiKey: (providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>, type: string, apiKey: string, extra?: { baseUrl?: string }) => void; applyProviderCredential: (providers: Array<Record<string, unknown>>, type: string, apiKey: string, endpoint: { kind: 'at'; baseUrl: string } | { kind: 'provider-default' } | { kind: 'preserve' }) => void; applyEndpointEdit: (existing: Record<string, unknown>, nextBaseUrl: string | undefined, replacementKey: string | undefined) => void; applySettingsCredentials: (providers: Array<Record<string, unknown>>, data: { keys?: Record<string, string | undefined>; endpoints?: Record<string, string | undefined> }) => void; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response>; sameEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean; sameCredentialEndpoint: (type: string, a?: string, b?: string) => boolean; hasDefaultEndpoint: (type: string) => boolean; sameAzureEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean } {
   // Dev: the repo's external-deps build (node_modules resolves the requires).
   // Packaged: the self-contained `desktop-core.cjs` bundle (no node_modules to
   // resolve from — every JS dep is bundled in; only native modules like
@@ -444,22 +444,23 @@ function registerIPC(): void {
         if (!Array.isArray(cascadeConfig.providers)) cascadeConfig.providers = [];
         const existing = cascadeConfig.providers.find((p: { type: string }) => p.type === type);
         if (existing && cfg.apiKey) {
-          // A replacement key with no endpoint belongs to the provider's public
-          // host. `applyProviderApiKey` only rewrites `baseUrl` when given one,
-          // so this path replaced the secret and left a configured gateway
-          // attached — the onboarding UI has no base-URL field for Anthropic.
-          // `applyProviderCredential` is the SDK's own write and holds that
-          // rule for every caller, so the desktop no longer restates it.
+          // The wizard renders a base-URL field for `openai-compatible` ONLY
+          // (`needsBaseUrl` in OnboardingView), so a blank `baseUrl` here means
+          // two different things depending on the provider, and the write is
+          // told which. Where the field exists and was left empty there is
+          // nothing to preserve anyway; where it was never shown, absence is a
+          // limit of this screen and must not be read as "the public host" —
+          // that reading moved a rotated gateway key onto the provider's own
+          // API.
           const { applyProviderCredential } = loadCore();
-          applyProviderCredential(cascadeConfig.providers, type, cfg.apiKey, baseUrl);
+          applyProviderCredential(cascadeConfig.providers, type, cfg.apiKey,
+            baseUrl ? { kind: 'at', baseUrl } : { kind: 'preserve' });
         } else if (existing) {
           // The SAME rule the Settings save uses. This path bypassed it, so a
           // key-optional provider could have its endpoint changed here with a
           // blank key field and keep the previous host's key attached — the
           // provider then sent that key to the new host.
-          applyEndpointEdit(existing, baseUrl, cfg.apiKey, {
-            sameCredentialEndpoint: loadCore().sameCredentialEndpoint,
-          });
+          loadCore().applyEndpointEdit(existing, baseUrl, cfg.apiKey);
         } else {
           cascadeConfig.providers.push({
             type,
@@ -647,8 +648,7 @@ function registerIPC(): void {
       // Both halves in one call, because the ORDER matters: keys are written
       // first, so the endpoint step has to know a key it might retire could be
       // the one just installed. Split across two loops here, it deleted it.
-      const { applyProviderCredential, sameCredentialEndpoint } = loadCore();
-      applySettingsCredentials(cascadeConfig.providers, data, { applyProviderCredential, sameCredentialEndpoint });
+      loadCore().applySettingsCredentials(cascadeConfig.providers, data);
 
       // Azure supports multiple deployments — unlike every other provider type,
       // it can't be addressed by a bare `type` string, so it gets its own

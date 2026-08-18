@@ -78,7 +78,11 @@ export function normalizeEndpoint(url: string | undefined | null): string {
  * into `config/`.
  */
 export function stripVersionSuffix(url: string): string {
-  return stripTrailingSlashes(url.trim()).replace(/\/v\d+$/, '');
+  // The channel suffix counts: Gemini's version segment is `v1beta`, so
+  // matching only `/vN` left `https://proxy` and `https://proxy/v1beta`
+  // looking like different hosts even though the SDK reduces both to the same
+  // root before sending. Anchored, with two disjoint classes — no backtracking.
+  return stripTrailingSlashes(url.trim()).replace(/\/v\d+[a-z]*$/, '');
 }
 
 /** Whether two endpoint URLs address the same host. */

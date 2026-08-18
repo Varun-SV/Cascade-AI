@@ -1,0 +1,393 @@
+import { describe, expect, it } from 'vitest';
+import {
+  applyEndpointEdit, applyProviderCredential, applySettingsCredentials,
+  credentialDispositionForEdit, endpointFromSettingsPayload,
+} from './credential-write.js';
+
+describe('credentialDispositionForEdit', () => {
+  it('keeps the key when the endpoint has not moved', () => {
+    expect(credentialDispositionForEdit(
+      { type: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1' },
+      'https://api.groq.com/openai/v1/',
+      undefined,
+    )).toBe('keep');
+  });
+
+  it('drops the key when the host changes and no replacement was typed', () => {
+    // The reported shape: `{ baseUrl: Groq, apiKey: groqKey }` edited to another
+    // host became `{ baseUrl: otherHost, apiKey: groqKey }`, because a blank key
+    // field means "keep the existing key" and the two fields were handled
+    // independently.
+    expect(credentialDispositionForEdit(
+      { type: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1' },
+      'https://api.deepseek.com/v1',
+      undefined,
+    )).toBe('clear');
+  });
+
+  it('drops the key when the endpoint is cleared', () => {
+    expect(credentialDispositionForEdit(
+      { type: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1' }, '', undefined,
+    )).toBe('clear');
+  });
+
+  it('reports a typed key as a REPLACEMENT, never as a clear', () => {
+    // This returned `false` — the same value as "clear" — and the caller
+    // deleted the credential on `false`. So a save carrying a new key and a new
+    // endpoint installed the key and immediately removed it.
+    expect(credentialDispositionForEdit(
+      { type: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1' },
+      'https://api.deepseek.com/v1',
+      'new-key',
+    )).toBe('replaced');
+    // …and likewise when the endpoint did not move at all.
+    expect(credentialDispositionForEdit(
+      { type: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1' },
+      'https://api.groq.com/openai/v1',
+      'new-key',
+    )).toBe('replaced');
+  });
+
+  it('retires a public-host key when a gateway is typed in beside it', () => {
+    // This previously asserted 'keep', on the reasoning that a row with no
+    // baseUrl "is not endpoint-scoped". It is: for anthropic/openai/gemini a
+    // missing baseUrl means the provider's own PUBLIC host, which is where the
+    // client sends. Keeping the key while writing in a corporate gateway sent a
+    // console.anthropic.com key to that gateway on the next request.
+    expect(credentialDispositionForEdit(
+      { type: 'anthropic' }, 'https://corp-gateway.example', undefined,
+    )).toBe('clear');
+  });
+
+  it('keeps a key when the edit does not change where requests go', () => {
+    // Anthropic's optional /v1 suffix names the same API root — anthropicApiRoot()
+    // says so and its tests assert it — so this edit must not retire anything.
+    expect(credentialDispositionForEdit(
+      { type: 'anthropic', baseUrl: 'https://gw.example' },
+      'https://gw.example/v1',
+      undefined,
+    )).toBe('keep');
+    // …and writing the public host explicitly over an implicit one is a no-op.
+    expect(credentialDispositionForEdit(
+      { type: 'anthropic' }, 'https://api.anthropic.com', undefined,
+    )).toBe('keep');
+  });
+
+  it('retires a key when an endpoint appears on a type with no default', () => {
+    // openai-compatible has no canonical host, so "none → some" is still a host
+    // being introduced where the credential was not scoped to one.
+    expect(credentialDispositionForEdit(
+      { type: 'openai-compatible' }, 'https://openrouter.ai/api/v1', undefined,
+    )).toBe('clear');
+  });
+});
+
+describe('applySettingsCredentials — the real save sequence', () => {
+  // The unit above is not enough on its own: the defect was in how the two
+  // halves compose, and the composition lived inside `ipcMain.handle` where no
+  // test could reach it.
+
+  it('keeps a key and endpoint saved together', () => {
+    // The reported P1: typing a new key alongside a new endpoint wrote the key
+    // and then deleted it, so Settings appeared to discard what the user typed.
+    const providers = [{ type: 'openai-compatible', apiKey: 'groq-key', baseUrl: 'https://api.groq.com/openai/v1' }];
+    applySettingsCredentials(providers, {
+      keys: { 'openai-compatible': 'new-key' },
+      endpoints: { 'openai-compatible': 'https://api.deepseek.com/v1' },
+    });
+
+    expect(providers[0]).toMatchObject({ apiKey: 'new-key', baseUrl: 'https://api.deepseek.com/v1' });
+  });
+
+  it('keeps a key saved with no endpoint change at all', () => {
+    const providers = [{ type: 'openai-compatible', apiKey: 'old', baseUrl: 'https://api.groq.com/openai/v1' }];
+    applySettingsCredentials(providers, {
+      keys: { 'openai-compatible': 'new-key' },
+      endpoints: { 'openai-compatible': 'https://api.groq.com/openai/v1' },
+    });
+
+    expect(providers[0]?.apiKey).toBe('new-key');
+  });
+
+  it('still retires a key when the host moves and nothing was typed', () => {
+    // The behaviour the disposition exists to preserve.
+    const providers = [{ type: 'openai-compatible', apiKey: 'groq-key', baseUrl: 'https://api.groq.com/openai/v1' }];
+    applySettingsCredentials(providers, {
+      endpoints: { 'openai-compatible': 'https://api.deepseek.com/v1' },
+    });
+
+    expect(providers[0]?.apiKey).toBeUndefined();
+    expect(providers[0]?.baseUrl).toBe('https://api.deepseek.com/v1');
+  });
+
+  it('leaves a blank key field meaning "keep it" when the host is unchanged', () => {
+    const providers = [{ type: 'openai-compatible', apiKey: 'groq-key', baseUrl: 'https://api.groq.com/openai/v1' }];
+    applySettingsCredentials(providers, {
+      keys: { 'openai-compatible': '' },
+      endpoints: { 'openai-compatible': 'https://api.groq.com/openai/v1/' },
+    });
+
+    expect(providers[0]?.apiKey).toBe('groq-key');
+  });
+
+  it('creates a row for an endpoint typed against a provider with none', () => {
+    const providers: Array<{ type: string; apiKey?: string; baseUrl?: string }> = [];
+    applySettingsCredentials(providers, { endpoints: { 'openai-compatible': 'https://api.groq.com/openai/v1' } });
+    expect(providers).toEqual([{ type: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1' }]);
+  });
+
+  it('keeps a stored gateway when the payload has no endpoint field for that provider', () => {
+    // The exact Settings payload: `SettingsView.save()` sends endpoint entries
+    // only for `openai-compatible` and `ollama`. There is no `anthropic` key in
+    // `endpoints` AT ALL, so the panel cannot express a host for it — and a
+    // user rotating their gateway's API key has no way to re-state the gateway.
+    //
+    // An earlier revision read that absence as "the public host" and cleared
+    // the URL, which sent the freshly rotated, gateway-ISSUED key straight to
+    // api.anthropic.com. Absence is a limit of the surface, not evidence about
+    // the key. Fixing the leak in the other direction needs an endpoint field
+    // in the panel, not a guess here.
+    const providers = [{ type: 'anthropic', apiKey: 'old-gateway-key', baseUrl: 'https://corp-gateway.example' }];
+    applySettingsCredentials(providers, {
+      keys: { anthropic: 'rotated-gateway-key', openai: undefined, gemini: undefined, 'openai-compatible': undefined },
+      endpoints: { 'openai-compatible': undefined, ollama: undefined },
+    });
+
+    expect(providers[0]).toMatchObject({
+      apiKey: 'rotated-gateway-key',
+      baseUrl: 'https://corp-gateway.example',
+    });
+  });
+
+  it('DOES retire the gateway when the surface has the field and it was left blank', () => {
+    // The other half of the same rule, and the reason intent is declared rather
+    // than inferred: an empty field the user was actually shown IS a claim.
+    const providers = [{ type: 'anthropic', apiKey: 'old-gateway-key', baseUrl: 'https://corp-gateway.example' }];
+    applySettingsCredentials(providers, {
+      keys: { anthropic: 'sk-ant-public' },
+      endpoints: { anthropic: undefined },
+    });
+
+    expect(providers[0]?.apiKey).toBe('sk-ant-public');
+    expect(providers[0]?.baseUrl).toBeUndefined();
+  });
+
+  it('leaves an untouched provider alone when another provider is re-keyed', () => {
+    const providers = [
+      { type: 'anthropic', apiKey: 'old', baseUrl: 'https://corp-gateway.example' },
+      { type: 'openai-compatible', apiKey: 'groq-key', baseUrl: 'https://api.groq.com/openai/v1' },
+    ];
+    applySettingsCredentials(providers, {
+      keys: { anthropic: 'rotated' },
+      endpoints: { 'openai-compatible': 'https://api.groq.com/openai/v1', ollama: undefined },
+    });
+
+    expect(providers[0]).toMatchObject({ apiKey: 'rotated', baseUrl: 'https://corp-gateway.example' });
+    expect(providers[1]).toMatchObject({ apiKey: 'groq-key', baseUrl: 'https://api.groq.com/openai/v1' });
+  });
+
+  it('applies an endpoint-only edit, which the dashboard used to drop on the floor', () => {
+    // Key field blank, URL changed. The live backend ran a key-only loop, so it
+    // persisted a config in which nothing had moved while telling the user the
+    // save succeeded — and never retired the old host's key.
+    const providers = [{ type: 'openai-compatible', apiKey: 'groq-key', baseUrl: 'https://api.groq.com/openai/v1' }];
+    applySettingsCredentials(providers, {
+      keys: { 'openai-compatible': undefined },
+      endpoints: { 'openai-compatible': 'https://api.deepseek.com/v1', ollama: undefined },
+    });
+
+    expect(providers[0]?.baseUrl).toBe('https://api.deepseek.com/v1');
+    expect(providers[0]?.apiKey).toBeUndefined();
+  });
+
+  it('drops `local` when the Settings payload moves a self-hosted endpoint', () => {
+    // Through the real save, not just the helper: this is the shape the panel
+    // sends when someone points an OpenAI-compatible row at a hosted service.
+    const providers = [{
+      type: 'openai-compatible', apiKey: 'k', baseUrl: 'http://localhost:8000/v1', local: true,
+    }];
+    applySettingsCredentials(providers, {
+      keys: { 'openai-compatible': 'groq-key' },
+      endpoints: { 'openai-compatible': 'https://api.groq.com/openai/v1', ollama: undefined },
+    });
+
+    expect(providers[0]?.local).toBeUndefined();
+    expect(providers[0]).toMatchObject({ apiKey: 'groq-key', baseUrl: 'https://api.groq.com/openai/v1' });
+  });
+
+  it('never touches azure, which has its own field', () => {
+    const providers = [{ type: 'azure', apiKey: 'az', baseUrl: 'https://r1.openai.azure.com' }];
+    applySettingsCredentials(providers, { endpoints: { azure: 'https://r2.openai.azure.com' } });
+    expect(providers[0]).toMatchObject({ apiKey: 'az', baseUrl: 'https://r1.openai.azure.com' });
+  });
+
+});
+
+describe('applyEndpointEdit — shared by both desktop save paths', () => {
+  // `cascade:setConfig`, the key-optional onboarding save, wrote an endpoint
+  // through its own branch and bypassed applySettingsCredentials entirely — so
+  // an OpenAI-compatible row could have its endpoint changed with a blank key
+  // and keep the previous host's key attached.
+  it('clears the key when onboarding repoints a compatible provider', () => {
+    const row = {
+      type: 'openai-compatible',
+      apiKey: 'openrouter-key',
+      baseUrl: 'https://openrouter.ai/api/v1',
+    };
+    applyEndpointEdit(row, 'https://api.groq.com/openai/v1', undefined);
+
+    expect(row.apiKey).toBeUndefined();
+    expect(row.baseUrl).toBe('https://api.groq.com/openai/v1');
+  });
+
+  it('keeps the key when onboarding supplies one with the endpoint', () => {
+    const row = { type: 'openai-compatible', apiKey: 'old', baseUrl: 'https://openrouter.ai/api/v1' };
+    applyEndpointEdit(row, 'https://api.groq.com/openai/v1', 'groq-key');
+    // The caller writes the replacement; this must not delete it.
+    expect(row.apiKey).toBe('old');
+    expect(row.baseUrl).toBe('https://api.groq.com/openai/v1');
+  });
+
+  it('drops `local` when a self-hosted endpoint becomes a paid one', () => {
+    // `local` is a statement about the endpoint being replaced, and
+    // `isLocalEndpoint()` gives it precedence over the URL — so carrying it
+    // across priced every model discovered at the new host at zero and slipped
+    // the budget caps entirely. `cascade link` has dropped it since the same
+    // defect was found there; this helper's parameter type did not even
+    // include the field.
+    const row = { type: 'openai-compatible', apiKey: 'k', baseUrl: 'http://localhost:8000/v1', local: true };
+    applyEndpointEdit(row, 'https://api.groq.com/openai/v1', 'groq-key');
+
+    expect(row.local).toBeUndefined();
+    expect(row.baseUrl).toBe('https://api.groq.com/openai/v1');
+  });
+
+  it('keeps `local` when the endpoint has not actually moved', () => {
+    // An explicit `local` is a user statement about THIS host — a self-hosted
+    // box on a public-looking domain, say. Re-saving the same URL must not
+    // silently discard it.
+    const row = { type: 'openai-compatible', apiKey: 'k', baseUrl: 'https://llm.internal.example/v1', local: true };
+    applyEndpointEdit(row, 'https://llm.internal.example/v1/', undefined);
+
+    expect(row.local).toBe(true);
+  });
+});
+
+describe('endpointFromSettingsPayload — presence of the KEY is the signal', () => {
+  // The two absences this whole module exists to tell apart. Both send no URL;
+  // one is a claim and the other is silence, and only the payload's shape says
+  // which — a surface that can address a provider's endpoint sends an entry for
+  // it even when the field is blank.
+  it('reads a missing entry as "this surface has no field"', () => {
+    expect(endpointFromSettingsPayload({ 'openai-compatible': 'https://x' }, 'anthropic'))
+      .toEqual({ kind: 'preserve' });
+    expect(endpointFromSettingsPayload(undefined, 'anthropic')).toEqual({ kind: 'preserve' });
+  });
+
+  it('reads a present-but-empty entry as "the field was shown and left blank"', () => {
+    expect(endpointFromSettingsPayload({ anthropic: undefined }, 'anthropic'))
+      .toEqual({ kind: 'provider-default' });
+    expect(endpointFromSettingsPayload({ anthropic: '   ' }, 'anthropic'))
+      .toEqual({ kind: 'provider-default' });
+  });
+
+  it('reads a filled entry as the host itself', () => {
+    expect(endpointFromSettingsPayload({ anthropic: ' https://gw.example ' }, 'anthropic'))
+      .toEqual({ kind: 'at', baseUrl: 'https://gw.example' });
+  });
+});
+
+describe('applyProviderCredential — intent decides, absence never does', () => {
+  it('preserves a gateway a caller with no endpoint field cannot re-state', () => {
+    const providers = [{ type: 'anthropic', apiKey: 'old-gw', baseUrl: 'https://corp-gateway.example' }];
+    applyProviderCredential(providers, 'anthropic', 'rotated-gw', { kind: 'preserve' });
+    expect(providers[0]).toMatchObject({ apiKey: 'rotated-gw', baseUrl: 'https://corp-gateway.example' });
+  });
+
+  it('retires it when the caller HAS the field and it was empty', () => {
+    const providers = [{ type: 'anthropic', apiKey: 'old-gw', baseUrl: 'https://corp-gateway.example' }];
+    applyProviderCredential(providers, 'anthropic', 'sk-ant-public', { kind: 'provider-default' });
+    expect(providers[0]?.apiKey).toBe('sk-ant-public');
+    expect(providers[0]?.baseUrl).toBeUndefined();
+  });
+
+  it('keeps an OpenAI-compatible endpoint even on provider-default, having no public host', () => {
+    // Clearing here would leave the key addressing nothing at all.
+    const providers = [{ type: 'openai-compatible', apiKey: 'old', baseUrl: 'https://api.groq.com/openai/v1' }];
+    applyProviderCredential(providers, 'openai-compatible', 'new-key', { kind: 'provider-default' });
+    expect(providers[0]).toMatchObject({ apiKey: 'new-key', baseUrl: 'https://api.groq.com/openai/v1' });
+  });
+
+  it('writes the host it was given', () => {
+    const providers = [{ type: 'anthropic', apiKey: 'old', baseUrl: 'https://old-gw.example' }];
+    applyProviderCredential(providers, 'anthropic', 'gw-key', { kind: 'at', baseUrl: 'https://new-gw.example' });
+    expect(providers[0]).toMatchObject({ apiKey: 'gw-key', baseUrl: 'https://new-gw.example' });
+  });
+
+  it('still clears a bearer the key replaces', () => {
+    // AnthropicProvider prefers authToken when both are set, so a surviving
+    // bearer would make the key the user just typed silently unused.
+    const providers = [{ type: 'anthropic', authToken: 'stale', baseUrl: 'https://corp-gateway.example' }];
+    applyProviderCredential(providers, 'anthropic', 'sk-ant-public', { kind: 'provider-default' });
+    expect(providers[0]?.authToken).toBeUndefined();
+    expect(providers[0]?.baseUrl).toBeUndefined();
+  });
+
+  it('creates the entry when the provider is not configured yet', () => {
+    const providers: Array<{ type: string; apiKey?: string; baseUrl?: string }> = [];
+    applyProviderCredential(providers, 'openai', 'sk-new', { kind: 'preserve' });
+    expect(providers).toEqual([{ type: 'openai', apiKey: 'sk-new' }]);
+  });
+
+  it('drops `local` when the host changes, and keeps it when it does not', () => {
+    const moved = [{ type: 'openai-compatible', apiKey: 'k', baseUrl: 'http://localhost:8000/v1', local: true }];
+    applyProviderCredential(moved, 'openai-compatible', 'groq-key', { kind: 'at', baseUrl: 'https://api.groq.com/openai/v1' });
+    expect(moved[0]?.local).toBeUndefined();
+
+    const stayed = [{ type: 'openai-compatible', apiKey: 'k', baseUrl: 'http://localhost:8000/v1', local: true }];
+    applyProviderCredential(stayed, 'openai-compatible', 'k2', { kind: 'preserve' });
+    expect(stayed[0]?.local).toBe(true);
+  });
+});
+
+describe('every settings surface is actually wired to the shared rules', () => {
+  // Source-level, deliberately. The tests above prove these helpers are
+  // correct; they say nothing about whether the save handlers call them, and
+  // that is the defect that kept recurring — a surface would grow its own copy
+  // and diverge, leaving every other test in the suite green.
+  //
+  // Comments are stripped first so the prose in these files, which necessarily
+  // names the function it stopped calling, cannot fail the check.
+  const stripComments = (src: string): string => src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^[ \t]*\/\/.*$/gm, '');
+
+  const read = async (rel: string): Promise<string> => {
+    const fs = await import('node:fs/promises');
+    const url = await import('node:url');
+    const nodePath = await import('node:path');
+    const here = nodePath.dirname(url.fileURLToPath(import.meta.url));
+    return stripComments(await fs.readFile(nodePath.join(here, rel), 'utf-8'));
+  };
+
+  it('the desktop onboarding save states its endpoint intent', async () => {
+    const source = await read('../../app/electron/main.ts');
+    // The shape the original finding described: an endpoint written straight
+    // onto an existing row, leaving whatever credential was there attached.
+    expect(source).not.toMatch(/if \(baseUrl\) existing\.baseUrl = baseUrl;/);
+    expect(source).toMatch(/applyEndpointEdit\(existing, baseUrl, cfg\.apiKey\)/);
+    // Intent is DECLARED, never inferred from an absent field.
+    expect(source).toMatch(/kind: 'preserve'/);
+    expect(source).not.toMatch(/applyProviderApiKey\(/);
+  });
+
+  it('both live save handlers run the one shared implementation', async () => {
+    for (const rel of ['../../app/electron/main.ts', '../dashboard/server.ts']) {
+      const source = await read(rel);
+      expect(source, rel).toMatch(/applySettingsCredentials\(/);
+      // No hand-rolled key loop beside it — that is how the dashboard drifted
+      // into writing keys without endpoints and ignoring `endpoints` entirely.
+      expect(source, rel).not.toMatch(/applyProviderApiKey\(/);
+    }
+  });
+});

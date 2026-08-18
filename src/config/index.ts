@@ -102,55 +102,6 @@ export function applyProviderApiKey(
 }
 
 /**
- * Write a user-supplied key TOGETHER with the endpoint it belongs to, retiring
- * a stored endpoint the new key was never issued by.
- *
- * `applyProviderApiKey()` only touches `baseUrl` when it is given one. That is
- * right for the field and wrong for the pairing: a key typed with no endpoint
- * is scoped to the provider's PUBLIC host, so leaving a previously stored
- * gateway attached replaces the secret and then sends the new public-host key
- * to the gateway on the very next request.
- *
- * Every place a key arrives from user input goes through here rather than
- * calling `applyProviderApiKey()` directly, because three of them got this
- * wrong independently — desktop onboarding, the desktop Settings save, and the
- * live dashboard `config:update`. The last two never sent an endpoint at all
- * for anthropic/openai/gemini, so no amount of care in the endpoint-editing
- * code could have caught them; the rule has to live on the key write.
- *
- * Only types with a canonical public host are detached. `openai-compatible`
- * and `azure` have none, so absence there means genuinely unconfigured rather
- * than "the public one", and clearing the URL would leave the key addressing
- * nothing.
- */
-export function applyProviderCredential(
-  providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string; local?: boolean }>,
-  type: string,
-  apiKey: string,
-  baseUrl?: string,
-): void {
-  const existing = providers.find((p) => p.type === type);
-  // A stored endpoint is retired only when the provider has a public host to
-  // fall back to. A type with no default keeps whatever the row already named,
-  // since the key would otherwise address nothing at all.
-  const retiresStoredEndpoint = !baseUrl && hasDefaultEndpoint(type);
-  // Where this key will actually be used once the write lands.
-  const nextBaseUrl = retiresStoredEndpoint ? undefined : (baseUrl ?? existing?.baseUrl);
-  if (existing && !sameCredentialEndpoint(type, existing.baseUrl, nextBaseUrl)) {
-    // `local` is a statement about the endpoint being replaced, not about the
-    // provider. `isLocalEndpoint()` gives an explicit `local` precedence over
-    // inference from the URL, so carrying it across a host change prices every
-    // model at the new endpoint as free and slips the budget caps. Deleted
-    // rather than recomputed: absence is what makes `isLocalEndpoint()` read
-    // the new URL.
-    delete existing.local;
-  }
-  // Cleared BEFORE the write, so `applyProviderApiKey` cannot re-attach it.
-  if (existing && retiresStoredEndpoint) existing.baseUrl = undefined;
-  applyProviderApiKey(providers, type, apiKey, baseUrl ? { baseUrl } : {});
-}
-
-/**
  * Providers whose ENDPOINT the environment can name, not just their key.
  *
  * Anthropic alone: `ANTHROPIC_BASE_URL` is read beside `ANTHROPIC_API_KEY` and
@@ -761,18 +712,29 @@ export class ConfigManager {
           });
           continue;
         }
-        // ONLY the exported gateway. A previous revision inherited
-        // `globalMatch?.baseUrl` as well, reasoning that a key created with no
-        // endpoint would otherwise go to the public host — but for a bare
-        // `ANTHROPIC_API_KEY` the public host is exactly right, and that is
-        // where a console.anthropic.com key belongs. Inheriting a stored
-        // corporate gateway paired a brand-new public key with a host that
-        // never issued it. A stored endpoint is adopted only when the
-        // credential arrived with evidence it belongs there — which, for the
-        // environment, means `ANTHROPIC_BASE_URL` exported alongside it.
+        // Which endpoint a row created from the environment gets, and it
+        // turns on the same question as the fill branch below: could the
+        // environment have named one?
+        //
+        // For Anthropic it could. A bare `ANTHROPIC_API_KEY` is a public-host
+        // key and belongs at the public host, so a stored corporate gateway is
+        // NOT inherited — doing that paired a brand-new public key with a host
+        // that never issued it. Only `ANTHROPIC_BASE_URL` puts a gateway here.
+        //
+        // For OpenAI and Gemini it could not, and the global store is then the
+        // only routing context there is. Dropping its endpoint created
+        // `{ type, apiKey }` with no host — and the merge that follows will not
+        // graft `g.baseUrl` back, because the row it now finds is already
+        // credentialled. A key exported for a corporate gateway went to the
+        // public API, while the otherwise identical workspace-resident case
+        // preserved the gateway. Same reasoning, opposite outcome, for no
+        // reason the user could see.
+        const inherited = ENV_ENDPOINT_CHANNEL.has(type)
+          ? anthropicGateway
+          : anthropicGateway ?? globalMatch?.baseUrl;
         this.config.providers.push({
           type, apiKey: key,
-          ...(anthropicGateway ? { baseUrl: anthropicGateway } : {}),
+          ...(inherited ? { baseUrl: inherited } : {}),
         });
       } else if (existing) {
         // EVERY keyless target, not just the first: for Azure that is all the

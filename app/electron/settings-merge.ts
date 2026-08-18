@@ -2,63 +2,17 @@
 //  Cascade AI — desktop Settings save decisions
 // ─────────────────────────────────────────────
 //
-//  The two questions the settings save has to answer about a credential when
-//  the user edits an endpoint. Both were previously answered inline, and both
-//  answered wrongly, because the key field and the endpoint field were treated
-//  as independent when they are not: a provider key is issued BY a host and
-//  valid only AT that host.
+//  What is left here after the rest moved into the SDK.
 //
-//  Pure and exported so they can be tested at all — the originals lived inside
-//  an `ipcMain.handle` body in a 900-line file, which is why neither had a test.
-
-/**
- * Comparison injected so the desktop uses the SDK's rule, not a second copy.
- *
- * Provider-AWARE: a missing `baseUrl` means the provider's own public host for
- * anthropic/openai/gemini, not "compatible with anything", and Anthropic's
- * optional `/v1` suffix names the same root. Taking a generic string compare
- * here is what let a public-host key survive a gateway being typed in beside
- * it.
- */
-type SameCredentialEndpoint = (type: string, a?: string, b?: string) => boolean;
-
-/** What happens to the credential already on a row when its endpoint is edited. */
-export type CredentialDisposition =
-  /** Nothing typed, and the endpoint still identifies the same host — it stays. */
-  | 'keep'
-  /** The endpoint moved or was cleared with nothing typed — the pairing is gone. */
-  | 'clear'
-  /** A key was typed in this save; it is the credential now, and must not be touched. */
-  | 'replaced';
-
-/**
- * What becomes of a stored credential when the endpoint field is edited.
- *
- * Three outcomes, not two. This started life as a boolean "does the credential
- * survive?", and the caller read `false` as "delete the credential" — so a save
- * carrying BOTH a new key and a new endpoint wrote the key and then deleted it,
- * because `false` also meant "a replacement was supplied". A user typing a key
- * into Settings watched it vanish. `'replaced'` exists so that case cannot be
- * confused with `'clear'` again.
- *
- * The underlying rule is unchanged: a provider key is issued BY a host and valid
- * only AT that host, so an endpoint edit with nothing typed retires the
- * credential that was paired with it.
- */
-export function credentialDispositionForEdit(
-  existing: { type: string; baseUrl?: string },
-  nextBaseUrl: string | undefined,
-  replacementKey: string | undefined,
-  sameCredentialEndpoint: SameCredentialEndpoint,
-): CredentialDisposition {
-  if (replacementKey) return 'replaced';
-  // No `!existing.baseUrl → keep` shortcut. That read absence as "this key was
-  // never scoped to anywhere", but for a default-host provider it means the key
-  // IS scoped — to the public host. Typing a gateway with the key field left
-  // blank therefore kept a console.anthropic.com key and pointed it at the
-  // gateway.
-  return sameCredentialEndpoint(existing.type, existing.baseUrl, nextBaseUrl) ? 'keep' : 'clear';
-}
+//  The key/endpoint rules used to live in this file so the desktop could test
+//  them without loading the core bundle. That turned out to be the wrong trade:
+//  the live dashboard needed exactly the same rules, could not import from
+//  `app/electron`, and grew its own copy — which then diverged, twice. They now
+//  live in `src/config/credential-write.ts` and reach `main.ts` through
+//  `loadCore()`, the same route as every other core helper.
+//
+//  Azure stays. It is addressed per deployment rather than by provider type, so
+//  it has no `keys`/`endpoints` entry to share and its own identity predicate.
 
 /**
  * The prior Azure row a saved deployment may inherit its key from.
@@ -78,106 +32,4 @@ export function priorAzureRow<T extends { deploymentName?: string; baseUrl?: str
   if (!incoming.deploymentName) return undefined;
   return prior.find((p) => p.deploymentName === incoming.deploymentName
     && sameAzureEndpoint(p.baseUrl, incoming.baseUrl));
-}
-
-/** The two mutable surfaces the settings save needs from the SDK. */
-export interface SettingsMergeDeps {
-  /**
-   * The SDK's provider-aware key write, NOT `applyProviderApiKey`.
-   *
-   * The difference is the fourth argument. `applyProviderApiKey` leaves a
-   * stored `baseUrl` alone when given none, so writing a key through it kept
-   * whatever host was already on the row — which is precisely the pairing this
-   * file exists to get right. The desktop injects the SDK's own
-   * `applyProviderCredential` so there is one implementation of the rule, not a
-   * second copy that can drift.
-   */
-  applyProviderCredential: (
-    providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>,
-    type: string,
-    apiKey: string,
-    baseUrl?: string,
-  ) => void;
-  sameCredentialEndpoint: SameCredentialEndpoint;
-}
-
-/**
- * Apply ONE provider's endpoint edit, retiring the credential when the host
- * changes and nothing was typed to replace it.
- *
- * Exported because `cascade:setConfig` — the key-optional onboarding save —
- * writes an endpoint through a different path and bypassed
- * `applySettingsCredentials()` entirely, so an OpenAI-compatible row could have
- * its endpoint changed with a blank key and keep the old host's key attached.
- * Two save paths, one rule.
- */
-export function applyEndpointEdit(
-  existing: { type: string; apiKey?: string; authToken?: string; baseUrl?: string; local?: boolean },
-  nextBaseUrl: string | undefined,
-  replacementKey: string | undefined,
-  deps: Pick<SettingsMergeDeps, 'sameCredentialEndpoint'>,
-): void {
-  if (credentialDispositionForEdit(existing, nextBaseUrl, replacementKey, deps.sameCredentialEndpoint) === 'clear') {
-    existing.apiKey = undefined;
-    existing.authToken = undefined;
-  }
-  // `local` is a statement about the endpoint being REPLACED, not about the
-  // provider — and it was not even in this function's parameter type, so
-  // nothing here could see it. `isLocalEndpoint()` gives an explicit `local`
-  // precedence over inference from the URL, so a self-hosted row edited from
-  // `http://localhost:8000/v1` to a paid host kept `local: true` and every
-  // model discovered there was priced at zero, slipping the budget caps
-  // entirely. Deleted rather than recomputed: absence is what makes
-  // `isLocalEndpoint()` read the new URL. `cascade link` has done this since
-  // the same defect was found on its side; the desktop is the sibling that
-  // still had it.
-  if (!deps.sameCredentialEndpoint(existing.type, existing.baseUrl, nextBaseUrl)) {
-    delete existing.local;
-  }
-  existing.baseUrl = nextBaseUrl || undefined;
-}
-
-/**
- * Apply the non-Azure `keys` and `endpoints` halves of a settings save, in order.
- *
- * The ORDER is the whole point, and it is why this is one function rather than
- * two loops in the IPC handler. Keys are written first and endpoints second, so
- * the endpoint step has to know that a key it is about to consider retiring may
- * be the one just written. Expressed as two loops with a boolean between them,
- * that knowledge went missing and the save deleted the key it had installed a
- * few lines earlier — with no test able to see it, because the loops lived
- * inside `ipcMain.handle`.
- */
-export function applySettingsCredentials(
-  providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string; local?: boolean }>,
-  data: {
-    keys?: Record<string, string | undefined>;
-    endpoints?: Record<string, string | undefined>;
-  },
-  deps: SettingsMergeDeps,
-): void {
-  if (data.keys) {
-    for (const [type, apiKey] of Object.entries(data.keys)) {
-      if (!apiKey) continue; // blank means "keep the existing key"
-      // Written WITH the endpoint saved beside it, through the provider-aware
-      // helper. A plain `applyProviderApiKey()` here left the endpoint loop
-      // below as the only thing that could retire a stale host — and that loop
-      // never sees anthropic/openai/gemini, because the Settings panel sends
-      // endpoint fields only for `openai-compatible` and `ollama`. A public
-      // Anthropic key typed over a row holding a corporate gateway therefore
-      // replaced the secret and kept the gateway, with no path able to notice.
-      deps.applyProviderCredential(providers, type, apiKey, data.endpoints?.[type]);
-    }
-  }
-  if (!data.endpoints) return;
-  for (const [type, baseUrl] of Object.entries(data.endpoints)) {
-    // Azure is addressed per deployment and goes through its own field.
-    if (baseUrl === undefined || type === 'azure') continue;
-    const existing = providers.find((p) => p.type === type);
-    if (!existing) {
-      if (baseUrl) providers.push({ type, baseUrl });
-      continue;
-    }
-    applyEndpointEdit(existing, baseUrl, data.keys?.[type], deps);
-  }
 }

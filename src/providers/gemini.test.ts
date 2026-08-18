@@ -222,3 +222,63 @@ describe('GeminiProvider — availability is about the KEY, not one model', () =
     await expect(provider.isAvailable()).rejects.toThrow(/no Gemini API key/);
   });
 });
+
+describe('a configured Gemini endpoint is actually used', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  // `baseUrl` was accepted by the schema, preserved across settings edits and
+  // compared by `credentialEndpointIdentity` — while this provider ignored it,
+  // so a proxy-issued key was sent to Google's public backend and the proxy's
+  // catalogue was silently replaced by the public one. Asserting the REQUEST,
+  // not the stored config, is the whole point: the config assertion passed
+  // throughout.
+  const listOk = () => new Response(JSON.stringify({ models: [] }), { status: 200 });
+
+  it('sends model discovery to the configured host', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(listOk());
+    const provider = new GeminiProvider(
+      { type: 'gemini', apiKey: 'proxy-key', baseUrl: 'https://gemini-proxy.internal' },
+      MODEL,
+    );
+    await provider.listModels();
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(String(spy.mock.calls[0]?.[0]))
+      .toBe('https://gemini-proxy.internal/v1beta/models');
+  });
+
+  it('still reaches the public host when nothing is configured', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(listOk());
+    await new GeminiProvider({ type: 'gemini', apiKey: 'k' }, MODEL).listModels();
+
+    expect(String(spy.mock.calls[0]?.[0]))
+      .toBe('https://generativelanguage.googleapis.com/v1beta/models');
+  });
+
+  it('does not double the version segment the client appends itself', async () => {
+    // A user copying the URL out of Google's docs writes the versioned form.
+    // The SDK adds `/v1beta` to whatever root it is given, so trusting the
+    // configured string verbatim would generate against `/v1beta/v1beta`.
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(listOk());
+    await new GeminiProvider(
+      { type: 'gemini', apiKey: 'k', baseUrl: 'https://gemini-proxy.internal/v1beta' },
+      MODEL,
+    ).listModels();
+
+    expect(String(spy.mock.calls[0]?.[0]))
+      .toBe('https://gemini-proxy.internal/v1beta/models');
+  });
+
+  it('hands the same root to the SDK client that discovery uses', async () => {
+    // Generation goes through the SDK rather than `fetch`, so the two could
+    // disagree without either test noticing — which is exactly what happened.
+    const provider = new GeminiProvider(
+      { type: 'gemini', apiKey: 'proxy-key', baseUrl: 'https://gemini-proxy.internal/v1beta' },
+      MODEL,
+    );
+    const client = (provider as unknown as { client: { apiClient?: unknown } }).client;
+    const options = (client as unknown as Record<string, unknown>);
+    expect(JSON.stringify(options)).toContain('https://gemini-proxy.internal');
+    expect(JSON.stringify(options)).not.toContain('v1beta/v1beta');
+  });
+});

@@ -12,7 +12,8 @@ import rateLimit from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
 import type { CascadeConfig } from '../types.js';
 import { MemoryStore } from '../memory/store.js';
-import { applyProviderCredential, hasProviderCredential } from '../config/index.js';
+import { hasProviderCredential } from '../config/index.js';
+import { applySettingsCredentials } from '../config/credential-write.js';
 import type { RuntimeNode, RuntimeNodeLog, RuntimeSession } from '../types.js';
 import { CASCADE_DB_FILE, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE, CASCADE_CONFIG_FILE, CASCADE_DASHBOARD_SECRET_FILE } from '../constants.js';
 import { DashboardSocket } from './websocket.js';
@@ -228,22 +229,15 @@ export class DashboardServer {
       });
     });
     this.socket.onConfigUpdate((data) => {
-      if (data.keys) {
-        for (const [type, apiKey] of Object.entries(data.keys)) {
-          if (!apiKey) continue;
-          // The key travels with whatever endpoint was typed beside it in the
-          // same save, and a key saved with NO endpoint is a public-host key.
-          // This loop used to call `applyProviderApiKey()`, which leaves a
-          // stored `baseUrl` untouched — and the Settings panel sends endpoint
-          // fields only for `openai-compatible` and `ollama`, so an Anthropic
-          // key typed over a row pointing at a corporate gateway replaced the
-          // secret and kept the gateway, sending the new public-host key there.
-          // The desktop IPC save fixed this on its own path; this one is
-          // reached whenever that path is unavailable and by the standalone
-          // `cascade dashboard`, so it has to hold the rule itself.
-          applyProviderCredential(this.config.providers, type, apiKey, data.endpoints?.[type]);
-        }
-      }
+      // The SAME function the desktop IPC save runs, over the same payload.
+      // This handler used to hold its own key-only loop, so it diverged twice:
+      // it wrote keys without deciding what endpoint they belonged to, and it
+      // ignored `endpoints` entirely — a standalone `cascade dashboard` (and
+      // the socket fallback when the Electron bridge is unavailable) reported
+      // an endpoint change it had persisted nothing for, and never retired the
+      // old host's key on a move. One implementation, so there is no third
+      // copy to drift.
+      applySettingsCredentials(this.config.providers, data);
       if (data.models) {
         // A tier value may be a bare model id, a `provider:model` binding, or
         // 'auto' / '' meaning "no override — let routing pick". Store explicit

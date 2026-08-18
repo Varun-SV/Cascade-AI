@@ -12,7 +12,12 @@ export * from './core/verification/index.js';
 
 export { runCascade, createCascade, streamCascade } from './sdk/index.js';
 
-export { ConfigManager, hasUsableProvider, hasProviderCredential, applyProviderApiKey, applyProviderCredential } from './config/index.js';
+export { ConfigManager, hasUsableProvider, hasProviderCredential, applyProviderApiKey } from './config/index.js';
+export {
+  applyProviderCredential, applyEndpointEdit, applySettingsCredentials,
+  credentialDispositionForEdit, endpointFromSettingsPayload,
+  type CredentialEndpoint, type CredentialDisposition,
+} from './config/credential-write.js';
 // The desktop settings save has to ask "is this the same endpoint?" to decide
 // whether a stored key may be kept across an edit. Exported rather than
 // reimplemented in app/: a second copy of this rule is how the answer starts

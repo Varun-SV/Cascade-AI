@@ -28,6 +28,34 @@ import { isChatModel } from './model-filter.js';
 import { toGeminiParameters } from './gemini-schema.js';
 
 /**
+ * The version segment the Gemini client owns.
+ *
+ * The SDK appends it to whatever `httpOptions.baseUrl` it is given, so a
+ * configured endpoint is an API ROOT, not a versioned path — and discovery has
+ * to append the same thing to reach the same service.
+ */
+const GEMINI_API_VERSION = 'v1beta';
+
+/** Where Gemini sends when nothing is configured. */
+const GEMINI_PUBLIC_ROOT = 'https://generativelanguage.googleapis.com';
+
+/**
+ * The API root for a configured Gemini endpoint.
+ *
+ * A trailing version segment is stripped rather than trusted: the SDK adds its
+ * own, so a user who writes the URL the way it appears in Google's docs would
+ * otherwise generate against `/v1beta/v1beta`. Same shape as
+ * `anthropicApiRoot()`, and for the same reason — the client, not the config,
+ * owns the version.
+ */
+export function geminiApiRoot(baseUrl?: string): string {
+  const configured = baseUrl?.trim().replace(/\/+$/, '');
+  if (!configured) return GEMINI_PUBLIC_ROOT;
+  const suffix = `/${GEMINI_API_VERSION}`;
+  return configured.endsWith(suffix) ? configured.slice(0, -suffix.length) : configured;
+}
+
+/**
  * Tool definitions in the shape this provider actually submits.
  *
  * Exported so the router's budget preflight sizes what goes on the wire rather
@@ -101,7 +129,15 @@ export class GeminiProvider extends BaseProvider {
 
   constructor(config: ProviderConfig, model: ModelInfo) {
     super(config, model);
-    this.client = new GoogleGenAI({ apiKey: config.apiKey ?? '' });
+    // `baseUrl` was accepted by the config schema, preserved across edits and
+    // compared by `credentialEndpointIdentity` — and then ignored here, so a
+    // key configured for a proxy was sent to Google's public backend anyway.
+    // A configured endpoint that silently does nothing is worse than one that
+    // is refused: everything upstream reports the routing as honoured.
+    this.client = new GoogleGenAI({
+      apiKey: config.apiKey ?? '',
+      ...(config.baseUrl ? { httpOptions: { baseUrl: geminiApiRoot(config.baseUrl) } } : {}),
+    });
   }
 
   async generate(options: GenerateOptions): Promise<GenerateResult> {
@@ -326,7 +362,12 @@ export class GeminiProvider extends BaseProvider {
    * with it.
    */
   private fetchModelList(): Promise<Response> {
-    return fetch('https://generativelanguage.googleapis.com/v1beta/models', {
+    // Built from the SAME root the SDK client was given. Hardcoding the public
+    // host here meant discovery and generation asked different endpoints the
+    // moment a proxy was configured: the proxy's restricted catalogue was
+    // replaced by Google's public one, and routing then picked models the
+    // proxy does not serve — with the key going to the wrong host on the way.
+    return fetch(`${geminiApiRoot(this.config.baseUrl)}/${GEMINI_API_VERSION}/models`, {
       headers: { 'x-goog-api-key': this.config.apiKey ?? '' },
     });
   }

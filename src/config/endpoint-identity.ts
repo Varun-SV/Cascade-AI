@@ -44,16 +44,18 @@ const DEFAULT_ENDPOINT: Readonly<Record<string, string>> = {
  * Providers whose CLIENT owns the version segment, so the URL may be written
  * with or without it and mean the same route.
  *
- * Anthropic only, and deliberately so. Its SDK concatenates `/v1/messages` onto
- * whatever `baseURL` it is given, which is why `anthropicApiRoot()` strips a
- * trailing `/vN` — the two spellings reach an identical wire path.
+ * Anthropic and Gemini, and deliberately just those two. Anthropic's SDK
+ * concatenates `/v1/messages` onto whatever `baseURL` it is given, and Gemini's
+ * appends `/v1beta` to `httpOptions.baseUrl` — which is why `anthropicApiRoot()`
+ * and `geminiApiRoot()` both strip a trailing version segment. The two
+ * spellings reach an identical wire path.
  * `OpenAICompatibleProvider` does the opposite: it passes `baseUrl` through as
  * the SDK's `baseURL` and builds discovery as `base + '/models'`, so
  * `https://api.groq.com/openai/v1` and `https://api.groq.com/openai` are
  * different routes. Stripping for every type collapsed those into one and let a
  * key survive an edit that moved generation somewhere else.
  */
-const CLIENT_OWNS_VERSION = new Set(['anthropic']);
+const CLIENT_OWNS_VERSION = new Set(['anthropic', 'gemini']);
 
 /** Whether absence of `baseUrl` resolves to a known public host for this type. */
 export function hasDefaultEndpoint(type: string): boolean {
