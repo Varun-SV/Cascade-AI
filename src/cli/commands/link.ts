@@ -18,6 +18,7 @@
 import chalk from 'chalk';
 import { ConfigManager } from '../../config/index.js';
 import { normalizeAzureEndpoint, sameAzureEndpoint } from '../../config/azure-endpoint.js';
+import { resolveAzureRouting } from '../../config/azure-routing.js';
 import {
   discoverCredentials,
   maskSecret,
@@ -241,34 +242,31 @@ export function azureDeploymentsForCredential(
   cred: Pick<DiscoveredCredential, 'baseUrl' | 'deploymentName'>,
   configured: readonly ProviderConfig[],
 ): ProviderConfig[] {
-  // A row needs an ENDPOINT to be routable at all: without one the Azure client
-  // falls back to a placeholder URL, so a key written there configures a
-  // provider that cannot reach anything. Endpointless rows were counted as a
-  // resource of their own — the empty string — which made a config of nothing
-  // but them look like one unambiguous resource, and `doctor` reported a
-  // credential usable that `linkCommand` refuses at its own gate.
-  const deployments = configured.filter((p) => p.type === 'azure'
-    && p.deploymentName?.trim() && p.baseUrl?.trim());
-  if (deployments.length === 0) return [];
+  // Delegates to the one shared rule (config/azure-routing.ts). This function
+  // and `ConfigManager.azureEntriesForEnv()` were two hand-written copies of
+  // the same reasoning, and every round of review found them disagreeing —
+  // last on a deployment name occurring on two resources, which both resolved
+  // with `find()` and therefore settled arbitrarily.
+  const routing = resolveAzureRouting(configured, configured, {
+    endpoint: cred.baseUrl,
+    deployment: cred.deploymentName,
+  });
+  return routing.ok ? routing.rows : [];
+}
 
-  const target = cred.baseUrl?.trim();
-  const named = cred.deploymentName?.trim();
-  // Three ways to identify the resource, most specific first. The DEPLOYMENT
-  // name is one of them: a configured row carrying that name pins its resource
-  // just as well as the endpoint would, so a key exported with
-  // AZURE_OPENAI_DEPLOYMENT and no AZURE_OPENAI_ENDPOINT is not ambiguous — it
-  // was being refused as though it were.
-  let scoped: ProviderConfig[] | undefined;
-  if (target) {
-    scoped = deployments.filter((p) => sameAzureEndpoint(p.baseUrl, target));
-  } else if (named) {
-    const match = deployments.find((p) => (p.deploymentName?.trim() ?? '') === named);
-    if (match) scoped = deployments.filter((p) => sameAzureEndpoint(p.baseUrl, match.baseUrl));
-  }
-  scoped ??= deployments;
-
-  const resources = new Set(scoped.map((p) => normalizeAzureEndpoint(p.baseUrl)));
-  return resources.size === 1 ? scoped : [];
+/**
+ * The resource a credential resolves to, and whether a named deployment still
+ * has to be created on it. Exported so `linkCommand` can act on the same answer
+ * `azureDeploymentsForCredential` returns rows for, rather than re-deriving it.
+ */
+export function azureRoutingForCredential(
+  cred: Pick<DiscoveredCredential, 'baseUrl' | 'deploymentName'>,
+  configured: readonly ProviderConfig[],
+): ReturnType<typeof resolveAzureRouting<ProviderConfig>> {
+  return resolveAzureRouting(configured, configured, {
+    endpoint: cred.baseUrl,
+    deployment: cred.deploymentName,
+  });
 }
 
 function printDiscovered(found: DiscoveredCredential[]): void {
@@ -452,16 +450,22 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
     // belongs to. A name already claimed by a DIFFERENT resource cannot reach
     // here — azureDeploymentsForCredential would have scoped to that resource
     // instead, and the row would already exist.
-    const named = cred.deploymentName?.trim();
-    const alreadyConfigured = !named || config.providers.some(
-      (p) => p.type === 'azure' && (p.deploymentName?.trim() ?? '') === named,
-    );
-    if (named && !alreadyConfigured) {
-      const resource = scoped[0]?.baseUrl;
-      if (resource) {
-        providers.push({ type: 'azure', deploymentName: named, baseUrl: resource, ...patch });
-        console.log(chalk.gray(`  Added deployment "${named}" on ${normalizeAzureEndpoint(resource)}.`));
-      }
+    // Asked of the shared rule, not re-derived. The local check looked for the
+    // name across EVERY resource, so a name already used on another one
+    // suppressed creating it here — the key rotated this resource's siblings
+    // and the deployment the user named was silently discarded. The rule now
+    // raises that as a collision before this point is reached.
+    const routing = azureRoutingForCredential(cred, config.providers);
+    if (routing.ok && routing.createDeployment) {
+      providers.push({
+        type: 'azure',
+        deploymentName: routing.createDeployment,
+        baseUrl: routing.resource,
+        ...patch,
+      });
+      console.log(chalk.gray(
+        `  Added deployment "${routing.createDeployment}" on ${normalizeAzureEndpoint(routing.resource)}.`,
+      ));
     }
 
     await cm.updateConfig({ providers });

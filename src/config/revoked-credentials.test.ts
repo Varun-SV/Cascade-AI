@@ -430,4 +430,16 @@ describe('the notice survives alongside a retirement notice', () => {
     expect(cm.takeRetiredNotice()).toMatch(/Cleared the T1 pin \(anthropic:claude-opus-4\)/);
     expect(cm.getConfig().models.t1).toBeUndefined();
   });
+
+  it('does not count a bearer with no gateway as a usable Anthropic provider', () => {
+    // The shared rule everywhere else: a bearer is only valid at the gateway
+    // that issued it. Counting a bare one here left a dead `anthropic:` tier
+    // pin in place after the migration, and the router throws on a pin it
+    // cannot resolve rather than falling back.
+    expect(hasUsableAnthropic([{ type: 'anthropic', authToken: 'gw-token' }])).toBe(false);
+    expect(hasUsableAnthropic([
+      { type: 'anthropic', authToken: 'gw-token', baseUrl: 'https://gateway.internal' },
+    ])).toBe(true);
+    expect(hasUsableAnthropic([{ type: 'anthropic', apiKey: 'sk-ant' }])).toBe(true);
+  });
 });

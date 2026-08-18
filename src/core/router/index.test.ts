@@ -5,7 +5,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { CascadeRouter, discoveryCacheKey } from './index.js';
+import { CascadeRouter, credentialIdentityKeys, discoveryCacheKey } from './index.js';
 import crypto from 'node:crypto';
 import type { CascadeConfig } from '../../types.js';
 import { CascadeConfigSchema } from '../../config/schema.js';
@@ -717,6 +717,28 @@ describe('credential identity retention is capped, not slid', () => {
     // the original entry was not kept alive by the lookups.
     vi.advanceTimersByTime(TTL_MS);
     expect(discoveryCacheKey('anthropic', cfg)).not.toBe(first);
+  });
+
+  it('never holds the raw secret, even with no later lookup to sweep it', () => {
+    // Dropping the sliding refresh capped retention only in the sense that a
+    // FUTURE lookup would evict the entry — `sweepExpired()` runs from nowhere
+    // else. An idle process that inserted a credential and then made no further
+    // identity lookup kept the raw string as a Map key for its whole lifetime.
+    // Not storing the raw value at all removes the question instead of bounding
+    // it, and no amount of advancing the clock can reintroduce it.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-01T00:00:00Z'));
+
+    const secret = 'sk-raw-secret-value-should-never-be-retained';
+    discoveryCacheKey('anthropic', { type: 'anthropic', apiKey: secret });
+
+    // No further call — exactly the idle case the finding describes.
+    vi.advanceTimersByTime(TTL_MS * 4);
+
+    expect(credentialIdentityKeys().join('|')).not.toContain(secret);
+    // …and the entry IS still there, so this is not passing because the map
+    // happened to be empty.
+    expect(credentialIdentityKeys().length).toBeGreaterThan(0);
   });
 
   it('is stable within one window, so the discovery cache still hits', () => {

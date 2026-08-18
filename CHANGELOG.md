@@ -21,6 +21,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## 0.75.0 - 2026-08-14
 
 ### Fixed
+- **Saving a new API key in desktop Settings deleted it.** The endpoint step
+  asked "does the stored credential survive this edit?" and got back `false`
+  both when the endpoint had moved and when a replacement key had been typed —
+  and the caller cleared the credential on `false`. So a save carrying a key and
+  an endpoint wrote the key and immediately removed it, and a key typed with no
+  endpoint change went the same way. The answer is now three-valued, and the
+  whole save sequence is one tested function rather than two loops with a
+  boolean between them.
+
+- **A workspace Azure key could be addressed to another resource.** The global
+  merge let a row that already owned a key adopt a stored endpoint when the
+  deployment names matched. A deployment name is unique only *within* a
+  resource — which is why linking refuses to reuse one across resources — so a
+  row holding resource B's key took resource A's endpoint. A row with no
+  credential still adopts endpoint and key together; only one bringing its own
+  is refused.
+
+- **A deployment name on two resources picked one arbitrarily.** Both Azure
+  routing paths resolved a named deployment with `find`, taking whichever row
+  came first, and the automatic path checked "already configured" across every
+  resource — so a name in use elsewhere silently suppressed creating the one the
+  environment asked for while the key rotated another resource's deployments.
+  The rule is now one function both paths call: without an endpoint a name must
+  resolve to exactly one resource, with an endpoint a name claimed elsewhere is
+  a reported collision, and the upsert check is scoped to the chosen resource.
+
+- **A dead Anthropic tier pin could survive migration.** The check for "is there
+  still a usable Anthropic provider" counted a bearer with no gateway, unlike
+  every other usability check in the release — so a stale row kept the pin
+  clearing from running and the router later threw on a pin it could not
+  resolve instead of falling back.
+
+- **Raw credentials could stay in memory for the life of the process.** The
+  identity map was keyed by the secret itself and only swept during a later
+  lookup, so an idle process kept a rotated secret indefinitely. Keys are an
+  HMAC under a process-random key now: the question is removed rather than
+  bounded.
+
+- **`nodeHttpFetch` followed redirects unlike Fetch does.** It treated any
+  3xx carrying a `Location` as a redirect (including 304, turning a cache
+  revalidation into a second request), downgraded `HEAD` to GET on a 303, and
+  kept `Content-Type`/`Content-Length` describing a body it had just dropped.
+  It now runs the same state machine as `fetchSameOrigin` — which matters
+  because OpenAI-compatible generation and discovery were routed through it for
+  the cross-origin credential fix. Found alongside: any null-body status
+  (204/205/304) made it **hang forever**, because constructing a `Response` with
+  a body for those throws inside a callback and the promise never settled.
+
+- **Electron tests were typechecked by nothing.** Excluding them from the
+  desktop build was right — the build's root is `app/electron`, so a test
+  importing the SDK broke it — but the root `tsc` covers only `src/**/*` and
+  excludes tests, and the app config excludes `electron` entirely. A dedicated
+  no-emit config now typechecks them, wired into `npm run lint`.
+
 - **Desktop Settings could move a key to a host that never issued it.** The key
   and endpoint fields were handled independently, and a blank key means "keep
   the existing key" — so repointing an OpenAI-compatible provider at another

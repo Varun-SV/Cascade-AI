@@ -306,3 +306,80 @@ describe('normalizeEndpoint — host case, path case', () => {
     expect(sameEndpoint(undefined, 'https://gw.example')).toBe(false);
   });
 });
+
+describe('nodeHttpFetch redirect semantics match Fetch', () => {
+  // `fetchSameOrigin` was given this state machine; its sibling kept the older
+  // "any 3xx with a Location" behaviour. That matters now: the OpenAI-compatible
+  // provider routes both generation and discovery through this helper for the
+  // cross-origin credential fix, so the two have to agree.
+  let server: http.Server;
+  let base = '';
+  const seen: Array<{ url: string; method: string; headers: http.IncomingHttpHeaders }> = [];
+
+  beforeAll(async () => {
+    server = http.createServer((req, res) => {
+      seen.push({ url: req.url ?? '', method: req.method ?? '', headers: req.headers });
+      const url = req.url ?? '';
+      if (url.startsWith('/r/')) {
+        const code = Number(url.slice(3).split('/')[0]);
+        res.writeHead(code, { Location: '/landed' });
+        res.end();
+        return;
+      }
+      if (url === '/not-a-redirect') {
+        // 304 carries a Location here deliberately: following it would turn a
+        // cache revalidation into a second request.
+        res.writeHead(304, { Location: '/landed' });
+        res.end();
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => { await new Promise((r) => server.close(r)); });
+
+  it('does not follow a 304 that carries a Location', async () => {
+    seen.length = 0;
+    const res = await nodeHttpFetch(`${base}/not-a-redirect`);
+    expect(res.status).toBe(304);
+    expect(seen.map((s) => s.url)).toEqual(['/not-a-redirect']);
+  });
+
+  it('preserves HEAD across a 303 instead of downgrading it to GET', async () => {
+    seen.length = 0;
+    await nodeHttpFetch(`${base}/r/303`, { method: 'HEAD' });
+    expect(seen.map((s) => s.method)).toEqual(['HEAD', 'HEAD']);
+  });
+
+  it('drops body framing headers when a POST downgrades to GET', async () => {
+    seen.length = 0;
+    await nodeHttpFetch(`${base}/r/302`, {
+      method: 'POST',
+      body: '{"a":1}',
+      headers: { 'content-type': 'application/json', 'x-keep-me': 'yes' },
+    });
+    const landed = seen[1]!;
+    expect(landed.method).toBe('GET');
+    // The body is gone, so headers describing one must be too — otherwise
+    // Content-Length announces a body that never arrives.
+    expect(landed.headers['content-type']).toBeUndefined();
+    expect(landed.headers['content-length']).toBeUndefined();
+    // …while a header that has nothing to do with the body survives.
+    expect(landed.headers['x-keep-me']).toBe('yes');
+  });
+
+  it('preserves method and body across a 307', async () => {
+    seen.length = 0;
+    await nodeHttpFetch(`${base}/r/307`, {
+      method: 'POST',
+      body: '{"a":1}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(seen[1]?.method).toBe('POST');
+    expect(seen[1]?.headers['content-type']).toBe('application/json');
+  });
+});

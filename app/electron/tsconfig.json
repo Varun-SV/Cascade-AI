@@ -16,7 +16,10 @@
   // which is what happened, and it broke CI while `tsc -p app/tsconfig.json`,
   // a different config with a different root, stayed clean locally.
   //
-  // They are still typechecked: the root `tsc --noEmit` covers `app/electron/**`,
-  // and vitest runs them. They simply have no business in the built bundle.
+  // They are typechecked by `tsconfig.test.json` beside this file, which `npm
+  // run lint` runs — NOT by the root `tsc --noEmit`, which includes only
+  // `src/**/*` and excludes `**/*.test.ts`. An earlier version of this comment
+  // claimed the root check covered them; it did not, and excluding them here
+  // had quietly left them typechecked by nothing.
   "exclude": ["node_modules", "**/*.test.ts"]
 }

@@ -11,7 +11,7 @@ import {
   net as electronNet,
 } from 'electron';
 import { join } from 'node:path';
-import { keepsCredentialAcrossEdit, priorAzureRow } from './settings-merge.js';
+import { applySettingsCredentials, priorAzureRow } from './settings-merge.js';
 import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
 import { registerCloudAuthIpc } from './cloudAuth';
@@ -631,37 +631,12 @@ function registerIPC(): void {
     try {
       if (!cascadeConfig || !configManager) return { ok: false, error: 'backend-unavailable' };
       if (!Array.isArray(cascadeConfig.providers)) cascadeConfig.providers = [];
-      if (data.keys) {
-        for (const [type, apiKey] of Object.entries(data.keys)) {
-          if (!apiKey) continue; // blank means "keep the existing key"
-          loadCore().applyProviderApiKey(cascadeConfig.providers, type, apiKey);
-        }
-      }
-      if (data.endpoints) {
-        const { sameEndpoint } = loadCore();
-        for (const [type, baseUrl] of Object.entries(data.endpoints)) {
-          if (baseUrl === undefined || type === 'azure') continue; // azure goes through azureDeployments below
-          const existing = cascadeConfig.providers.find(
-            (pr: { type: string }) => pr.type === type,
-          ) as { baseUrl?: string; apiKey?: string; authToken?: string } | undefined;
-          if (existing) {
-            // A key belongs to the host that issued it. The two fields were
-            // handled independently, and a blank key field means "keep the
-            // existing key" — so pointing an OpenAI-compatible provider at a
-            // different host without typing a new key moved the old host's key
-            // onto the new one. Changing the endpoint retires the credential
-            // that was paired with it; a key typed in the same save is applied
-            // above and survives, because that IS the replacement.
-            if (!keepsCredentialAcrossEdit(existing, baseUrl, data.keys?.[type], sameEndpoint)) {
-              existing.apiKey = undefined;
-              existing.authToken = undefined;
-            }
-            existing.baseUrl = baseUrl || undefined;
-          } else if (baseUrl) {
-            cascadeConfig.providers.push({ type, baseUrl });
-          }
-        }
-      }
+      // Both halves in one call, because the ORDER matters: keys are written
+      // first, so the endpoint step has to know a key it might retire could be
+      // the one just installed. Split across two loops here, it deleted it.
+      const { applyProviderApiKey, sameEndpoint } = loadCore();
+      applySettingsCredentials(cascadeConfig.providers, data, { applyProviderApiKey, sameEndpoint });
+
       // Azure supports multiple deployments — unlike every other provider type,
       // it can't be addressed by a bare `type` string, so it gets its own
       // replace-the-whole-list field instead of the keys/endpoints maps above.

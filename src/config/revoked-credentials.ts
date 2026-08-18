@@ -176,7 +176,15 @@ export function stripRevokedFromConfig(raw: unknown): { removed: number } {
  * loaded config still had a perfectly good Anthropic provider.
  */
 export function hasUsableAnthropic(providers: readonly CredentialBearingProvider[]): boolean {
-  return providers.some((p) => p?.type === 'anthropic' && Boolean(p.apiKey || p.authToken));
+  // A bearer counts only WITH its gateway — the same rule
+  // `hasProviderCredential()` and `anthropicAuth()` hold, and the one this
+  // function was left out of. Counting a bare `authToken` meant a stale row
+  // carrying one kept `clearAnthropicPins()` from running, so an
+  // `anthropic:`/`claude-…` tier pin survived the migration pointing at a
+  // provider that cannot serve it — and the router throws on a pin it cannot
+  // resolve rather than falling back.
+  return providers.some((p) => p?.type === 'anthropic'
+    && Boolean(p.apiKey || (p.authToken && p.baseUrl)));
 }
 
 /**

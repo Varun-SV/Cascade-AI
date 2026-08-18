@@ -211,15 +211,19 @@ export function mergeGlobalCredentials(
  *   acquired the global row's corporate gateway, sending a key to a host it was
  *   never paired with.
  *
- *   `strongMatch` is what separates the two cases, and it is not a hedge. A
- *   non-Azure row matches on provider TYPE alone — "some anthropic row" — which
- *   says nothing about which host either means, so an endpoint from it is a
- *   guess. An Azure row matches through `sameAzureEntry`, on an agreeing
- *   deployment name or resource; a deployment name pins its resource, so the
- *   global row is not guessing where that deployment lives, it is the only
- *   record of it. An Azure deployment with no endpoint cannot route a request
- *   at all, so refusing the fill there would break the case the store exists
- *   for.
+ *   There is NO exception for Azure. An earlier version made one, reasoning
+ *   that a matching deployment name pins its resource — but it does not: a
+ *   deployment name is unique only WITHIN a resource, which is why `cascade
+ *   link` refuses to reuse one across resources in the first place. So a
+ *   workspace row `{ deploymentName: 'prod', apiKey: 'resource-B-key' }` took
+ *   the endpoint off a stale global `prod` on resource A, and a resource-B key
+ *   was addressed to resource A.
+ *
+ *   The safe case survives untouched, because it is the credentialless one: a
+ *   row with no key and no endpoint still adopts BOTH atomically from the
+ *   global row, which is what the store exists for. Only a row that already
+ *   owns a resource-scoped credential is refused an endpoint inferred from a
+ *   name.
  *
  * The rule covers `apiKey` exactly as it does `authToken`: the environment path
  * already treats `ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL` as a pair, and an
@@ -228,7 +232,6 @@ export function mergeGlobalCredentials(
  * hosts for one provider type.
  */
 function fillFrom(existing: ProviderConfig, g: ProviderConfig): void {
-  const strongMatch = g.type === 'azure';
   const credentialled = Boolean(existing.apiKey || existing.authToken);
   const endpointsDiffer = Boolean(
     existing.baseUrl && g.baseUrl && !sameEndpoint(existing.baseUrl, g.baseUrl),
@@ -244,7 +247,7 @@ function fillFrom(existing: ProviderConfig, g: ProviderConfig): void {
     existing.authToken = g.authToken;
     existing.baseUrl = g.baseUrl;
   }
-  if ((!credentialled || strongMatch) && !existing.baseUrl && g.baseUrl) existing.baseUrl = g.baseUrl;
+  if (!credentialled && !existing.baseUrl && g.baseUrl) existing.baseUrl = g.baseUrl;
   if (!existing.apiVersion && g.apiVersion) existing.apiVersion = g.apiVersion;
   if (!existing.label && g.label) existing.label = g.label;
 }

@@ -14,6 +14,7 @@ import { MemoryStore } from '../memory/store.js';
 import { validateConfig } from './validate.js';
 import { loadGlobalCredentials, mergeGlobalCredentials, saveGlobalCredentials } from './global-credentials.js';
 import { normalizeAzureEndpoint, sameAzureEndpoint } from './azure-endpoint.js';
+import { resolveAzureRouting } from './azure-routing.js';
 import {
   describeCleanup,
   didCleanupChangeAnything,
@@ -465,47 +466,29 @@ export class ConfigManager {
     // those rows also made a config of nothing but them normalise to a single
     // empty "resource" and look unambiguous. Same correction as
     // `azureDeploymentsForCredential`, whose copy of this rule was fixed first.
-    const routable = (list: readonly CascadeConfig['providers'][number][]) =>
-      list.filter((p) => p.type === 'azure' && p.baseUrl?.trim());
-    const workspace = routable(this.config.providers);
-    // The machine-global store is part of the VIEW used to resolve the resource,
-    // even though only workspace rows are written. A deployment configured once
-    // in another workspace lives only in ~/.cascade-ai/credentials.json, and
-    // reading the workspace alone made an unambiguous single-resource setup look
-    // like no setup at all — so an exported replacement key was dropped and the
-    // merge then restored the stale global rows a few lines later.
-    const global = routable(globalProviders);
-    const view = [...workspace, ...global];
-    if (view.length === 0) return [];
+    const workspace = this.config.providers;
+    // Decided by the one function `cascade link azure` also asks. Three copies
+    // of this rule existed and every review round found them disagreeing — most
+    // recently on a deployment name that occurs on two resources, which both
+    // copies resolved with `find()` and therefore settled arbitrarily.
+    const routing = resolveAzureRouting(
+      [...workspace, ...globalProviders],
+      workspace,
+      {
+        endpoint: process.env['AZURE_OPENAI_ENDPOINT'],
+        deployment: process.env['AZURE_OPENAI_DEPLOYMENT'] ?? process.env['AZURE_OPENAI_DEPLOYMENT_NAME'],
+      },
+    );
+    if (!routing.ok) return [];
 
-    const endpoint = process.env['AZURE_OPENAI_ENDPOINT']?.trim();
-    const deployment = process.env['AZURE_OPENAI_DEPLOYMENT']?.trim()
-      ?? process.env['AZURE_OPENAI_DEPLOYMENT_NAME']?.trim();
+    const onResource = [...routing.rows];
 
-    // Which resource this key belongs to, by the same three routes
-    // `azureDeploymentsForCredential` uses — the deployment name pins the
-    // resource just as well as the endpoint does, and a sole configured
-    // resource is unambiguous on its own.
-    let anchor = endpoint
-      ? view.find((p) => sameAzureEndpoint(p.baseUrl, endpoint))
-      : undefined;
-    if (!anchor && endpoint) return [];                 // exported an endpoint nothing is on
-    if (!anchor && deployment) {
-      anchor = view.find((p) => (p.deploymentName?.trim() ?? '') === deployment);
-    }
-    if (!anchor) {
-      const resources = new Set(view.map((p) => normalizeAzureEndpoint(p.baseUrl)));
-      if (resources.size !== 1) return [];              // ambiguous — refuse, as before
-      anchor = view[0];
-    }
-    const resource = anchor!.baseUrl!;
-    const onResource = workspace.filter((p) => sameAzureEndpoint(p.baseUrl, resource));
-
-    // A deployment that exists only in the global store still needs a workspace
-    // row to receive the exported key: without one the merge appends the global
-    // row whole, stale credential included.
-    for (const g of global) {
-      if (!sameAzureEndpoint(g.baseUrl, resource)) continue;
+    // A deployment held only in the global store still needs a workspace row to
+    // receive the exported key: without one the merge appends the global row
+    // whole, stale credential included.
+    for (const g of globalProviders) {
+      if (g.type !== 'azure' || !g.baseUrl?.trim()) continue;
+      if (!sameAzureEndpoint(g.baseUrl, routing.resource)) continue;
       const name = g.deploymentName?.trim() ?? '';
       if (onResource.some((p) => (p.deploymentName?.trim() ?? '') === name)) continue;
       const row = { ...g, apiKey: undefined, authToken: undefined };
@@ -513,12 +496,12 @@ export class ConfigManager {
       onResource.push(row);
     }
 
-    // A deployment the environment NAMED that nothing has yet. `cascade link
-    // azure` creates it; this path silently rotated the existing rows instead
-    // and never made the one the user asked for — the same divergence, on the
-    // automatic path rather than the explicit one.
-    if (deployment && !view.some((p) => (p.deploymentName?.trim() ?? '') === deployment)) {
-      const row = { type: 'azure' as const, deploymentName: deployment, baseUrl: resource };
+    if (routing.createDeployment) {
+      const row = {
+        type: 'azure' as const,
+        deploymentName: routing.createDeployment,
+        baseUrl: routing.resource,
+      };
       this.config.providers.push(row);
       onResource.push(row);
     }

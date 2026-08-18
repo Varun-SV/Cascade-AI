@@ -14,25 +14,39 @@
 /** Comparison injected so the desktop uses the SDK's rule, not a second copy. */
 type SameEndpoint = (a: string | undefined | null, b: string | undefined | null) => boolean;
 
+/** What happens to the credential already on a row when its endpoint is edited. */
+export type CredentialDisposition =
+  /** Nothing typed, and the endpoint still identifies the same host — it stays. */
+  | 'keep'
+  /** The endpoint moved or was cleared with nothing typed — the pairing is gone. */
+  | 'clear'
+  /** A key was typed in this save; it is the credential now, and must not be touched. */
+  | 'replaced';
+
 /**
- * Whether a stored credential survives an endpoint edit.
+ * What becomes of a stored credential when the endpoint field is edited.
  *
- * A blank key field means "keep the existing key", which is right when the
- * endpoint has not moved and wrong when it has: pointing an OpenAI-compatible
- * provider at a different host without typing a new key moved the old host's
- * key onto the new one. A key typed in the SAME save is the replacement, so it
- * wins and the old credential goes either way.
+ * Three outcomes, not two. This started life as a boolean "does the credential
+ * survive?", and the caller read `false` as "delete the credential" — so a save
+ * carrying BOTH a new key and a new endpoint wrote the key and then deleted it,
+ * because `false` also meant "a replacement was supplied". A user typing a key
+ * into Settings watched it vanish. `'replaced'` exists so that case cannot be
+ * confused with `'clear'` again.
+ *
+ * The underlying rule is unchanged: a provider key is issued BY a host and valid
+ * only AT that host, so an endpoint edit with nothing typed retires the
+ * credential that was paired with it.
  */
-export function keepsCredentialAcrossEdit(
+export function credentialDispositionForEdit(
   existing: { baseUrl?: string },
   nextBaseUrl: string | undefined,
   replacementKey: string | undefined,
   sameEndpoint: SameEndpoint,
-): boolean {
-  if (replacementKey) return false;          // replaced outright — nothing to keep
-  if (!existing.baseUrl) return true;        // had no endpoint to be scoped to
-  if (!nextBaseUrl) return false;            // endpoint cleared — the pairing is gone
-  return sameEndpoint(existing.baseUrl, nextBaseUrl);
+): CredentialDisposition {
+  if (replacementKey) return 'replaced';
+  if (!existing.baseUrl) return 'keep';      // never was endpoint-scoped
+  if (!nextBaseUrl) return 'clear';          // endpoint cleared — pairing gone
+  return sameEndpoint(existing.baseUrl, nextBaseUrl) ? 'keep' : 'clear';
 }
 
 /**
@@ -51,4 +65,57 @@ export function priorAzureRow<T extends { deploymentName?: string; baseUrl?: str
   if (!incoming.deploymentName) return undefined;
   return prior.find((p) => p.deploymentName === incoming.deploymentName
     && sameAzureEndpoint(p.baseUrl, incoming.baseUrl));
+}
+
+/** The two mutable surfaces the settings save needs from the SDK. */
+export interface SettingsMergeDeps {
+  applyProviderApiKey: (
+    providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>,
+    type: string,
+    apiKey: string,
+    extra?: { baseUrl?: string },
+  ) => void;
+  sameEndpoint: SameEndpoint;
+}
+
+/**
+ * Apply the non-Azure `keys` and `endpoints` halves of a settings save, in order.
+ *
+ * The ORDER is the whole point, and it is why this is one function rather than
+ * two loops in the IPC handler. Keys are written first and endpoints second, so
+ * the endpoint step has to know that a key it is about to consider retiring may
+ * be the one just written. Expressed as two loops with a boolean between them,
+ * that knowledge went missing and the save deleted the key it had installed a
+ * few lines earlier — with no test able to see it, because the loops lived
+ * inside `ipcMain.handle`.
+ */
+export function applySettingsCredentials(
+  providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>,
+  data: {
+    keys?: Record<string, string | undefined>;
+    endpoints?: Record<string, string | undefined>;
+  },
+  deps: SettingsMergeDeps,
+): void {
+  if (data.keys) {
+    for (const [type, apiKey] of Object.entries(data.keys)) {
+      if (!apiKey) continue; // blank means "keep the existing key"
+      deps.applyProviderApiKey(providers, type, apiKey);
+    }
+  }
+  if (!data.endpoints) return;
+  for (const [type, baseUrl] of Object.entries(data.endpoints)) {
+    // Azure is addressed per deployment and goes through its own field.
+    if (baseUrl === undefined || type === 'azure') continue;
+    const existing = providers.find((p) => p.type === type);
+    if (!existing) {
+      if (baseUrl) providers.push({ type, baseUrl });
+      continue;
+    }
+    if (credentialDispositionForEdit(existing, baseUrl, data.keys?.[type], deps.sameEndpoint) === 'clear') {
+      existing.apiKey = undefined;
+      existing.authToken = undefined;
+    }
+    existing.baseUrl = baseUrl || undefined;
+  }
 }

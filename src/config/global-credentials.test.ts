@@ -186,7 +186,12 @@ describe('global credentials store', () => {
     expect(azure).toHaveLength(2);
     const gpt4o = azure.find((p) => p.deploymentName === 'gpt-4o')!;
     expect(gpt4o.apiKey).toBe('ws-key');                        // workspace key wins
-    expect(gpt4o.baseUrl).toBe('https://r1.openai.azure.com');  // missing endpoint filled
+    // The endpoint is NOT filled. This asserted that it was — "missing endpoint
+    // filled" — but a deployment name is unique only WITHIN a resource, so the
+    // stale global `gpt-4o` may name a different one. Filling it addressed the
+    // workspace row's own key to that other resource. A row with no credential
+    // still adopts endpoint and key together; this row brought its own.
+    expect(gpt4o.baseUrl).toBeUndefined();
     expect(azure.find((p) => p.deploymentName === 'gpt-35')?.apiKey).toBe('global-35');
   });
 });
@@ -367,16 +372,36 @@ describe('ConfigManager + global credentials (the "AppImage forgets my keys" bug
     expect(on('other')?.apiKey).toBeUndefined();
   });
 
-  it('keeps an Azure deployment endpoint fill, which its deployment name pins', () => {
-    // The non-Azure graft rule must not break this: a matching deployment name
-    // identifies its resource, so the global row is the only record of where
-    // that deployment lives, not a guess.
+  it('never addresses a workspace Azure key to a resource inferred from a name', () => {
+    // Previously asserted the opposite, on the reasoning that a matching
+    // deployment name pins its resource. It does not — the name is unique only
+    // within a resource, which is exactly why `cascade link` refuses to reuse
+    // one across resources. So a workspace row holding resource B's key took
+    // the endpoint off a stale global `prod` on resource A, and B's key was
+    // sent to A.
     const merged = mergeGlobalCredentials(
-      [{ type: 'azure', deploymentName: 'gpt-4o', apiKey: 'ws-key' }],
-      [{ type: 'azure', deploymentName: 'gpt-4o', apiKey: 'global-key', baseUrl: 'https://r1.openai.azure.com' }],
+      [{ type: 'azure', deploymentName: 'prod', apiKey: 'resource-B-key' }],
+      [{
+        type: 'azure', deploymentName: 'prod', apiKey: 'resource-A-key',
+        baseUrl: 'https://resource-a.openai.azure.com',
+      }],
     );
-    const row = merged.find((p) => p.deploymentName === 'gpt-4o')!;
-    expect(row.apiKey).toBe('ws-key');
-    expect(row.baseUrl).toBe('https://r1.openai.azure.com');
+    const row = merged.find((p) => p.deploymentName === 'prod')!;
+    expect(row.apiKey).toBe('resource-B-key');
+    expect(row.baseUrl).toBeUndefined();
+  });
+
+  it('still adopts endpoint AND key together for a credentialless Azure row', () => {
+    // The case the store exists for, unaffected: nothing of its own to protect.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'azure', deploymentName: 'prod' }],
+      [{
+        type: 'azure', deploymentName: 'prod', apiKey: 'key-a',
+        baseUrl: 'https://resource-a.openai.azure.com',
+      }],
+    );
+    expect(merged.find((p) => p.deploymentName === 'prod')).toMatchObject({
+      apiKey: 'key-a', baseUrl: 'https://resource-a.openai.azure.com',
+    });
   });
 });

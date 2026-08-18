@@ -73,6 +73,27 @@ export function sameEndpoint(a: string | undefined | null, b: string | undefined
   return normalizeEndpoint(a) === normalizeEndpoint(b);
 }
 
+/** The statuses Fetch treats as redirects. 300/304/305 are deliberately absent. */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/** Statuses the Response constructor refuses to attach a body to. */
+const NULL_BODY_STATUSES = new Set([204, 205, 304]);
+
+/**
+ * Response headers, minus the ones describing a wire encoding this helper has
+ * already undone — otherwise a consumer decompresses twice or trusts a length
+ * that no longer matches.
+ */
+function headersFrom(raw: http.IncomingHttpHeaders): Headers {
+  const out = new Headers();
+  for (const [k, v] of Object.entries(raw)) {
+    if (k === 'content-encoding' || k === 'content-length') continue;
+    if (Array.isArray(v)) out.set(k, v.join(', '));
+    else if (typeof v === 'string') out.set(k, v);
+  }
+  return out;
+}
+
 /** Max redirect hops before nodeHttpFetch gives up (matches browser/curl-ish defaults). */
 const MAX_REDIRECTS = 5;
 
@@ -209,19 +230,37 @@ export async function nodeHttpFetch(
         // Follow redirects so endpoints that canonicalise paths (trailing slash,
         // http→https, reverse-proxy rewrites) still resolve to the real response.
         const location = res.headers.location;
-        if (status >= 300 && status < 400 && location && redirectCount < MAX_REDIRECTS) {
+        // Only the statuses Fetch itself treats as redirects — the same list
+        // `fetchSameOrigin` uses. `>= 300 && < 400` also swept in 300, 304 and
+        // 305: following a 304 turns a cache revalidation into a second
+        // request, and neither 300 nor 305 is a redirect to follow.
+        if (REDIRECT_STATUSES.has(status) && location && redirectCount < MAX_REDIRECTS) {
           res.resume(); // drain the redirect body so the socket can be reused
           const nextUrl = new URL(location, u).href;
           if (opts.allowedRedirectOrigin && new URL(nextUrl).origin !== opts.allowedRedirectOrigin) {
             reject(new Error(`Refusing cross-origin redirect to ${new URL(nextUrl).origin}`));
             return;
           }
-          // 303 (and legacy 301/302 on non-GET) downgrade to GET without a body;
-          // 307/308 preserve method + body.
-          const downgrade = status === 303 || ((status === 301 || status === 302) && method !== 'GET' && method !== 'HEAD');
-          const nextInit: RequestInit = downgrade
-            ? { ...init, method: 'GET', body: undefined }
-            : init;
+          // Fetch's own transitions, matching fetchSameOrigin: 303 becomes GET
+          // for anything except HEAD — HEAD is preserved, and downgrading it
+          // turned a metadata probe into a full body fetch — and 301/302 do so
+          // only for POST.
+          const downgrade = status === 303
+            ? method !== 'GET' && method !== 'HEAD'
+            : (status === 301 || status === 302) && method === 'POST';
+          let nextInit: RequestInit = init;
+          if (downgrade) {
+            // The body is gone, so its framing headers must go with it. Reusing
+            // them left `Content-Length`/`Content-Type` describing a body that
+            // no longer existed, which a target can legitimately hang on or
+            // reject — and this helper now carries the OpenAI-compatible
+            // security fix, so its behaviour has to match the sibling.
+            const headers = new Headers(init.headers as Record<string, string> | undefined);
+            for (const h of ['content-type', 'content-length', 'content-encoding', 'content-language', 'content-location']) {
+              headers.delete(h);
+            }
+            nextInit = { ...init, method: 'GET', body: undefined, headers };
+          }
           resolve(nodeHttpFetch(nextUrl, nextInit, redirectCount + 1, opts));
           return;
         }
@@ -234,19 +273,26 @@ export async function nodeHttpFetch(
         else if (encoding === 'deflate') bodyStream = res.pipe(zlib.createInflate());
         else if (encoding === 'br') bodyStream = res.pipe(zlib.createBrotliDecompress());
 
-        const stream = Readable.toWeb(bodyStream) as unknown as ReadableStream<Uint8Array>;
-        const respHeaders = new Headers();
-        for (const [k, v] of Object.entries(res.headers)) {
-          // The body is now decoded — drop headers that describe the wire encoding
-          // so consumers don't try to decompress again or trust a stale length.
-          if (k === 'content-encoding' || k === 'content-length') continue;
-          if (Array.isArray(v)) respHeaders.set(k, v.join(', '));
-          else if (typeof v === 'string') respHeaders.set(k, v);
+        // 204/205/304 are null-body statuses: `new Response(body, { status })`
+        // THROWS for them. That throw happened inside this http callback, so the
+        // promise never settled and the caller hung until its own timeout — a
+        // 304 from any endpoint was an indefinite stall, not an error. The
+        // response body is drained so the socket can be reused.
+        if (NULL_BODY_STATUSES.has(status)) {
+          bodyStream.resume();
+          resolve(new Response(null, {
+            status,
+            statusText: res.statusMessage ?? '',
+            headers: headersFrom(res.headers),
+          }));
+          return;
         }
+
+        const stream = Readable.toWeb(bodyStream) as unknown as ReadableStream<Uint8Array>;
         resolve(new Response(stream, {
           status,
           statusText: res.statusMessage ?? '',
-          headers: respHeaders,
+          headers: headersFrom(res.headers),
         }));
       },
     );

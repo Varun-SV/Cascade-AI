@@ -269,19 +269,45 @@ const cloudDiscoveryCache = new Map<string, DiscoveryEntry>();
  */
 /** How often the sweep runs at most — cheap, and unrelated to how full the map is. */
 const IDENTITY_SWEEP_INTERVAL_MS = 60 * 1000;
+/**
+ * Keyed by an HMAC of the secret under a process-random key, never by the secret
+ * itself. Removing the sliding refresh capped how long a raw value COULD be
+ * held, but only in the sense that a later lookup would evict it — an idle
+ * process that inserted a credential and made no further lookup kept that raw
+ * string as a Map key for its whole lifetime, because `sweepExpired()` only
+ * runs from `credentialIdentity()`. Not storing the raw value removes the
+ * question rather than bounding it: the digest is unusable as a credential and
+ * meaningless outside this process.
+ */
 const credentialIdentities = new Map<string, { id: string; at: number }>();
+const IDENTITY_HMAC_KEY = crypto.randomBytes(32);
+const identityDigest = (secret: string): string =>
+  crypto.createHmac('sha256', IDENTITY_HMAC_KEY).update(secret).digest('hex');
 let lastIdentitySweep = 0;
 
 /** Drop identities, and the discovery entries naming them, once their TTL is up. */
 function sweepExpired(now: number): void {
-  for (const [secret, held] of credentialIdentities) {
-    if (now - held.at > DISCOVERY_TTL_MS) credentialIdentities.delete(secret);
+  for (const [key, held] of credentialIdentities) {
+    if (now - held.at > DISCOVERY_TTL_MS) credentialIdentities.delete(key);
   }
   // The discovery cache is swept here too. It was never evicted at all, so on a
   // hosted server it grew for the life of the process.
   for (const [key, entry] of cloudDiscoveryCache) {
     if (now - entry.at > DISCOVERY_TTL_MS) cloudDiscoveryCache.delete(key);
   }
+}
+
+/**
+ * The keys currently held in the identity map.
+ *
+ * Exported for its test, and safe to export precisely because of what this
+ * fixes: every key is an HMAC digest under a process-random key, so the list
+ * carries no credential. A test asserting "the raw secret is not retained"
+ * cannot be written against a private Map, and the earlier version of that
+ * claim went unverified for two rounds.
+ */
+export function credentialIdentityKeys(): string[] {
+  return [...credentialIdentities.keys()];
 }
 
 function credentialIdentity(secret: string | undefined): string {
@@ -296,7 +322,8 @@ function credentialIdentity(secret: string | undefined): string {
     lastIdentitySweep = now;
     sweepExpired(now);
   }
-  const held = credentialIdentities.get(secret);
+  const digest = identityDigest(secret);
+  const held = credentialIdentities.get(digest);
   // `at` is the moment this secret was FIRST held, and it is never moved. The
   // comment here used to say that refreshing on lookup would let a credential
   // in occasional use keep its identity for ever — and the line below it did
@@ -310,7 +337,7 @@ function credentialIdentity(secret: string | undefined): string {
   // anyway — a re-probe every fifteen minutes, not a correctness change.
   if (held && now - held.at <= DISCOVERY_TTL_MS) return held.id;
   const id = crypto.randomUUID();
-  credentialIdentities.set(secret, { id, at: now });
+  credentialIdentities.set(digest, { id, at: now });
   return id;
 }
 
