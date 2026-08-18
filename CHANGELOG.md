@@ -54,10 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolve instead of falling back.
 
 - **Raw credentials could stay in memory for the life of the process.** The
-  identity map was keyed by the secret itself and only swept during a later
-  lookup, so an idle process kept a rotated secret indefinitely. Keys are an
-  HMAC under a process-random key now: the question is removed rather than
-  bounded.
+  identity map was swept only during a later lookup, so a process that inserted
+  a credential, had it rotated, and then went idle held the old value until it
+  exited — the documented fifteen-minute retention was really "until someone
+  asks again". Expiry now runs on its own timer, which stops once nothing is
+  held.
 
 - **`nodeHttpFetch` followed redirects unlike Fetch does.** It treated any
   3xx carrying a `Location` as a redirect (including 304, turning a cache

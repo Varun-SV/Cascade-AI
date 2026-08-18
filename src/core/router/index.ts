@@ -269,21 +269,41 @@ const cloudDiscoveryCache = new Map<string, DiscoveryEntry>();
  */
 /** How often the sweep runs at most — cheap, and unrelated to how full the map is. */
 const IDENTITY_SWEEP_INTERVAL_MS = 60 * 1000;
-/**
- * Keyed by an HMAC of the secret under a process-random key, never by the secret
- * itself. Removing the sliding refresh capped how long a raw value COULD be
- * held, but only in the sense that a later lookup would evict it — an idle
- * process that inserted a credential and made no further lookup kept that raw
- * string as a Map key for its whole lifetime, because `sweepExpired()` only
- * runs from `credentialIdentity()`. Not storing the raw value removes the
- * question rather than bounding it: the digest is unusable as a credential and
- * meaningless outside this process.
- */
 const credentialIdentities = new Map<string, { id: string; at: number }>();
-const IDENTITY_HMAC_KEY = crypto.randomBytes(32);
-const identityDigest = (secret: string): string =>
-  crypto.createHmac('sha256', IDENTITY_HMAC_KEY).update(secret).digest('hex');
 let lastIdentitySweep = 0;
+/**
+ * Expiry runs on a REAL timer, not only when someone next asks for an identity.
+ *
+ * Sweeping from `credentialIdentity()` alone meant retention was bounded only
+ * for a process that kept making lookups: one that inserted a credential, had
+ * it rotated, and then went idle held the old value until it exited. The
+ * documented fifteen-minute retention was in practice "until the next lookup,
+ * whenever that is".
+ *
+ * An HMAC of the secret under a process-random key was tried instead — not
+ * storing the raw value at all — and reverted: CodeQL's
+ * `js/insufficient-password-hash` flags any fast hash of a credential, and it
+ * is not wrong to, since the rule cannot see that the security here comes from
+ * the random key rather than a work factor. Arguing with it in a suppression
+ * comment on a high-severity credential alert is worse than making retention
+ * actually bounded, which is what this does.
+ *
+ * `unref()` so it never holds the process open, and it stops entirely once the
+ * map is empty — an idle process ends up with no timer and nothing retained.
+ */
+let identitySweepTimer: NodeJS.Timeout | undefined;
+
+function ensureIdentitySweeper(): void {
+  if (identitySweepTimer) return;
+  identitySweepTimer = setInterval(() => {
+    sweepExpired(Date.now());
+    if (credentialIdentities.size === 0 && identitySweepTimer) {
+      clearInterval(identitySweepTimer);
+      identitySweepTimer = undefined;
+    }
+  }, IDENTITY_SWEEP_INTERVAL_MS);
+  identitySweepTimer.unref?.();
+}
 
 /** Drop identities, and the discovery entries naming them, once their TTL is up. */
 function sweepExpired(now: number): void {
@@ -310,6 +330,23 @@ export function credentialIdentityKeys(): string[] {
   return [...credentialIdentities.keys()];
 }
 
+/**
+ * Clears the identity map and its sweep timer.
+ *
+ * For tests only. The sweeper is created lazily on first insert, so a test that
+ * switches to fake timers AFTER some earlier test has already armed it cannot
+ * drive it — the interval belongs to the real clock. Resetting first makes the
+ * timer be created under whatever clock the test installed.
+ */
+export function resetCredentialIdentitiesForTest(): void {
+  credentialIdentities.clear();
+  if (identitySweepTimer) {
+    clearInterval(identitySweepTimer);
+    identitySweepTimer = undefined;
+  }
+  lastIdentitySweep = 0;
+}
+
 function credentialIdentity(secret: string | undefined): string {
   if (!secret) return '-';
   const now = Date.now();
@@ -322,8 +359,7 @@ function credentialIdentity(secret: string | undefined): string {
     lastIdentitySweep = now;
     sweepExpired(now);
   }
-  const digest = identityDigest(secret);
-  const held = credentialIdentities.get(digest);
+  const held = credentialIdentities.get(secret);
   // `at` is the moment this secret was FIRST held, and it is never moved. The
   // comment here used to say that refreshing on lookup would let a credential
   // in occasional use keep its identity for ever — and the line below it did
@@ -337,7 +373,8 @@ function credentialIdentity(secret: string | undefined): string {
   // anyway — a re-probe every fifteen minutes, not a correctness change.
   if (held && now - held.at <= DISCOVERY_TTL_MS) return held.id;
   const id = crypto.randomUUID();
-  credentialIdentities.set(digest, { id, at: now });
+  credentialIdentities.set(secret, { id, at: now });
+  ensureIdentitySweeper();
   return id;
 }
 
