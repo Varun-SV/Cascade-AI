@@ -9,5 +9,14 @@
     "rootDir": "."
   },
   "include": ["."],
-  "exclude": ["node_modules"]
+  // Tests are excluded because this config BUILDS the shipped Electron main
+  // process: `rootDir` is `app/electron`, so anything compiled here must live
+  // under it. A test importing the SDK (`../../src/index.js`) therefore fails
+  // the whole desktop build with a wall of TS6059 "not under rootDir" errors —
+  // which is what happened, and it broke CI while `tsc -p app/tsconfig.json`,
+  // a different config with a different root, stayed clean locally.
+  //
+  // They are still typechecked: the root `tsc --noEmit` covers `app/electron/**`,
+  // and vitest runs them. They simply have no business in the built bundle.
+  "exclude": ["node_modules", "**/*.test.ts"]
 }
