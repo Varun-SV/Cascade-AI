@@ -82,11 +82,21 @@ export function priorAzureRow<T extends { deploymentName?: string; baseUrl?: str
 
 /** The two mutable surfaces the settings save needs from the SDK. */
 export interface SettingsMergeDeps {
-  applyProviderApiKey: (
+  /**
+   * The SDK's provider-aware key write, NOT `applyProviderApiKey`.
+   *
+   * The difference is the fourth argument. `applyProviderApiKey` leaves a
+   * stored `baseUrl` alone when given none, so writing a key through it kept
+   * whatever host was already on the row — which is precisely the pairing this
+   * file exists to get right. The desktop injects the SDK's own
+   * `applyProviderCredential` so there is one implementation of the rule, not a
+   * second copy that can drift.
+   */
+  applyProviderCredential: (
     providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>,
     type: string,
     apiKey: string,
-    extra?: { baseUrl?: string },
+    baseUrl?: string,
   ) => void;
   sameCredentialEndpoint: SameCredentialEndpoint;
 }
@@ -101,37 +111,8 @@ export interface SettingsMergeDeps {
  * its endpoint changed with a blank key and keep the old host's key attached.
  * Two save paths, one rule.
  */
-/**
- * Write a replacement key, retiring an endpoint the new key does not belong to.
- *
- * The blank-key path went through `applyEndpointEdit()`, but the KEYED path
- * called `applyProviderApiKey()` with an optional `baseUrl` — and that helper
- * only touches `existing.baseUrl` when the argument is truthy. The Anthropic
- * onboarding UI exposes no base-URL field, so entering a normal API key against
- * a row already pointing at a corporate gateway replaced the secret and left
- * the gateway attached, sending a public-host key there.
- *
- * A replacement key with no endpoint is scoped to the provider's public host,
- * so a stored endpoint that is not that host is retired with the key it
- * belonged to.
- */
-export function applyReplacementKey(
-  providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>,
-  type: string,
-  apiKey: string,
-  baseUrl: string | undefined,
-  deps: SettingsMergeDeps & { hasDefaultEndpoint: (type: string) => boolean },
-): void {
-  if (!baseUrl && deps.hasDefaultEndpoint(type)) {
-    const existing = providers.find((p) => p.type === type);
-    // Cleared BEFORE the write, so `applyProviderApiKey` cannot re-attach it.
-    if (existing?.baseUrl) existing.baseUrl = undefined;
-  }
-  deps.applyProviderApiKey(providers, type, apiKey, ...(baseUrl ? [{ baseUrl }] as const : [] as const));
-}
-
 export function applyEndpointEdit(
-  existing: { type: string; apiKey?: string; authToken?: string; baseUrl?: string },
+  existing: { type: string; apiKey?: string; authToken?: string; baseUrl?: string; local?: boolean },
   nextBaseUrl: string | undefined,
   replacementKey: string | undefined,
   deps: Pick<SettingsMergeDeps, 'sameCredentialEndpoint'>,
@@ -139,6 +120,19 @@ export function applyEndpointEdit(
   if (credentialDispositionForEdit(existing, nextBaseUrl, replacementKey, deps.sameCredentialEndpoint) === 'clear') {
     existing.apiKey = undefined;
     existing.authToken = undefined;
+  }
+  // `local` is a statement about the endpoint being REPLACED, not about the
+  // provider — and it was not even in this function's parameter type, so
+  // nothing here could see it. `isLocalEndpoint()` gives an explicit `local`
+  // precedence over inference from the URL, so a self-hosted row edited from
+  // `http://localhost:8000/v1` to a paid host kept `local: true` and every
+  // model discovered there was priced at zero, slipping the budget caps
+  // entirely. Deleted rather than recomputed: absence is what makes
+  // `isLocalEndpoint()` read the new URL. `cascade link` has done this since
+  // the same defect was found on its side; the desktop is the sibling that
+  // still had it.
+  if (!deps.sameCredentialEndpoint(existing.type, existing.baseUrl, nextBaseUrl)) {
+    delete existing.local;
   }
   existing.baseUrl = nextBaseUrl || undefined;
 }
@@ -155,7 +149,7 @@ export function applyEndpointEdit(
  * inside `ipcMain.handle`.
  */
 export function applySettingsCredentials(
-  providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>,
+  providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string; local?: boolean }>,
   data: {
     keys?: Record<string, string | undefined>;
     endpoints?: Record<string, string | undefined>;
@@ -165,7 +159,14 @@ export function applySettingsCredentials(
   if (data.keys) {
     for (const [type, apiKey] of Object.entries(data.keys)) {
       if (!apiKey) continue; // blank means "keep the existing key"
-      deps.applyProviderApiKey(providers, type, apiKey);
+      // Written WITH the endpoint saved beside it, through the provider-aware
+      // helper. A plain `applyProviderApiKey()` here left the endpoint loop
+      // below as the only thing that could retire a stale host — and that loop
+      // never sees anthropic/openai/gemini, because the Settings panel sends
+      // endpoint fields only for `openai-compatible` and `ollama`. A public
+      // Anthropic key typed over a row holding a corporate gateway therefore
+      // replaced the secret and kept the gateway, with no path able to notice.
+      deps.applyProviderCredential(providers, type, apiKey, data.endpoints?.[type]);
     }
   }
   if (!data.endpoints) return;

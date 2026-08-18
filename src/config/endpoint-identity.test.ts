@@ -93,4 +93,24 @@ describe('credentialEndpointsConflict — the merge question, not the edit quest
   it('agrees with itself across Anthropic’s two spellings', () => {
     expect(credentialEndpointsConflict('anthropic', 'https://gw.example', 'https://gw.example/v1')).toBe(false);
   });
+
+  it('refuses a credential whose host cannot be named at all', () => {
+    // The other `null`, and NOT the same state as an unnamed row. An
+    // `openai-compatible` key saved with the URL field blank — which the
+    // desktop permits — names no host and has no public one to fall back to,
+    // so its scope is unknown rather than universal. Read as "no conflict", a
+    // bare Groq key filled a workspace row addressed to DeepSeek.
+    expect(credentialEndpointsConflict('openai-compatible', 'https://api.deepseek.com/v1', undefined))
+      .toBe(true);
+    // Azure has no public host either: a stored key naming only a deployment
+    // is unscoped, and a row that already names its resource must not take it.
+    expect(credentialEndpointsConflict('azure', 'https://r1.openai.azure.com', undefined)).toBe(true);
+  });
+
+  it('keeps the placeholder row accepting an unscoped credential', () => {
+    // Both sides unnamed: nothing has been contradicted, and this is how a
+    // bare row still adopts a bare stored key.
+    expect(credentialEndpointsConflict('openai-compatible', undefined, undefined)).toBe(false);
+    expect(credentialEndpointsConflict('azure', undefined, undefined)).toBe(false);
+  });
 });

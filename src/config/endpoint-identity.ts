@@ -104,23 +104,27 @@ export function sameCredentialEndpoint(
  * Whether an incoming credential belongs somewhere other than where a
  * credentialless row points.
  *
- * ASYMMETRIC, and that is the point. The two sides are answering different
- * things:
+ * ASYMMETRIC, and that is the point — but the two `null`s are NOT the same
+ * state, and reading them as one was a leak of its own:
  *
- * - The **credential** always has a scope. Its own `baseUrl` if it names one;
- *   otherwise the provider's public host, because that is where a key with no
- *   endpoint is used. This is the round-31 rule.
- * - The **row** being filled has no credential of its own — that is the only
- *   time this is asked — so it is scoped to nothing. It contributes a host only
- *   if it explicitly names one. Resolving ITS absence to the default would be
- *   wrong: an empty `{ type: 'anthropic' }` is a placeholder, not a claim to
- *   the public host, and treating it as one stopped it adopting a gateway
- *   entry from the store at all.
+ * - `row === null` means the row names no host. It has no credential of its
+ *   own either — that is the only time this is asked — so it is scoped to
+ *   nothing and accepts anything, which is what the machine-global store is
+ *   for. Resolving ITS absence to the default would be wrong: an empty
+ *   `{ type: 'anthropic' }` is a placeholder, not a claim to the public host,
+ *   and treating it as one stopped it adopting a gateway entry from the store
+ *   at all.
+ * - `credential === null` means the incoming credential names no host AND its
+ *   provider has no public one to fall back to — an `openai-compatible` key
+ *   saved with the URL field left blank, which the desktop permits. Its scope
+ *   is UNKNOWN, not universal. Read as "no conflict", a bare Groq key filled a
+ *   workspace row addressed to DeepSeek and was sent there.
  *
- * So: a conflict needs the row to name a host AND the credential to belong to a
- * different one. A row naming nothing accepts anything — which is what the
- * machine-global store is for — while a row pointing at a corporate gateway
- * refuses a bare public-host key, which is the leak this closes.
+ * So: a row naming nothing accepts anything; a row naming a host accepts only a
+ * credential known to belong to that host. Unknown scope is refused rather than
+ * assumed compatible, because the cost of being wrong is a secret delivered to
+ * a service that did not issue it — and a credential whose host cannot be named
+ * is exactly the one that should never be guessed at.
  */
 export function credentialEndpointsConflict(
   type: string,
@@ -129,6 +133,14 @@ export function credentialEndpointsConflict(
 ): boolean {
   const row = rowEndpoint?.trim() ? credentialEndpointIdentity(type, rowEndpoint) : null;
   const credential = credentialEndpointIdentity(type, credentialEndpoint);
-  if (row === null || credential === null) return false;
+  // The placeholder row, which the store exists to complete. Checked FIRST so
+  // it still adopts endpoint and credential together even when the credential
+  // names no host of its own — an Azure row carrying only a deployment name is
+  // the ordinary case.
+  if (row === null) return false;
+  // A named row against a credential of unknown scope. Nothing here says they
+  // belong together, and only `openai-compatible`-shaped types can reach it,
+  // since every type with a public default resolves to one.
+  if (credential === null) return true;
   return row !== credential;
 }

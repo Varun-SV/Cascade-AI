@@ -12,7 +12,7 @@ import rateLimit from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
 import type { CascadeConfig } from '../types.js';
 import { MemoryStore } from '../memory/store.js';
-import { applyProviderApiKey, hasProviderCredential } from '../config/index.js';
+import { applyProviderCredential, hasProviderCredential } from '../config/index.js';
 import type { RuntimeNode, RuntimeNodeLog, RuntimeSession } from '../types.js';
 import { CASCADE_DB_FILE, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE, CASCADE_CONFIG_FILE, CASCADE_DASHBOARD_SECRET_FILE } from '../constants.js';
 import { DashboardSocket } from './websocket.js';
@@ -231,7 +231,17 @@ export class DashboardServer {
       if (data.keys) {
         for (const [type, apiKey] of Object.entries(data.keys)) {
           if (!apiKey) continue;
-          applyProviderApiKey(this.config.providers, type, apiKey);
+          // The key travels with whatever endpoint was typed beside it in the
+          // same save, and a key saved with NO endpoint is a public-host key.
+          // This loop used to call `applyProviderApiKey()`, which leaves a
+          // stored `baseUrl` untouched — and the Settings panel sends endpoint
+          // fields only for `openai-compatible` and `ollama`, so an Anthropic
+          // key typed over a row pointing at a corporate gateway replaced the
+          // secret and kept the gateway, sending the new public-host key there.
+          // The desktop IPC save fixed this on its own path; this one is
+          // reached whenever that path is unavailable and by the standalone
+          // `cascade dashboard`, so it has to hold the rule itself.
+          applyProviderCredential(this.config.providers, type, apiKey, data.endpoints?.[type]);
         }
       }
       if (data.models) {

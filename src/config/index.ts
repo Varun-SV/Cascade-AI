@@ -15,7 +15,7 @@ import { validateConfig } from './validate.js';
 import { loadGlobalCredentials, mergeGlobalCredentials, saveGlobalCredentials } from './global-credentials.js';
 import { normalizeAzureEndpoint, sameAzureEndpoint } from './azure-endpoint.js';
 import { resolveAzureRouting } from './azure-routing.js';
-import { credentialEndpointsConflict, hasDefaultEndpoint } from './endpoint-identity.js';
+import { hasDefaultEndpoint, sameCredentialEndpoint } from './endpoint-identity.js';
 import {
   describeCleanup,
   didCleanupChangeAnything,
@@ -100,6 +100,71 @@ export function applyProviderApiKey(
   }
   providers.push({ type, apiKey, ...(extra.baseUrl ? { baseUrl: extra.baseUrl } : {}) });
 }
+
+/**
+ * Write a user-supplied key TOGETHER with the endpoint it belongs to, retiring
+ * a stored endpoint the new key was never issued by.
+ *
+ * `applyProviderApiKey()` only touches `baseUrl` when it is given one. That is
+ * right for the field and wrong for the pairing: a key typed with no endpoint
+ * is scoped to the provider's PUBLIC host, so leaving a previously stored
+ * gateway attached replaces the secret and then sends the new public-host key
+ * to the gateway on the very next request.
+ *
+ * Every place a key arrives from user input goes through here rather than
+ * calling `applyProviderApiKey()` directly, because three of them got this
+ * wrong independently — desktop onboarding, the desktop Settings save, and the
+ * live dashboard `config:update`. The last two never sent an endpoint at all
+ * for anthropic/openai/gemini, so no amount of care in the endpoint-editing
+ * code could have caught them; the rule has to live on the key write.
+ *
+ * Only types with a canonical public host are detached. `openai-compatible`
+ * and `azure` have none, so absence there means genuinely unconfigured rather
+ * than "the public one", and clearing the URL would leave the key addressing
+ * nothing.
+ */
+export function applyProviderCredential(
+  providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string; local?: boolean }>,
+  type: string,
+  apiKey: string,
+  baseUrl?: string,
+): void {
+  const existing = providers.find((p) => p.type === type);
+  // A stored endpoint is retired only when the provider has a public host to
+  // fall back to. A type with no default keeps whatever the row already named,
+  // since the key would otherwise address nothing at all.
+  const retiresStoredEndpoint = !baseUrl && hasDefaultEndpoint(type);
+  // Where this key will actually be used once the write lands.
+  const nextBaseUrl = retiresStoredEndpoint ? undefined : (baseUrl ?? existing?.baseUrl);
+  if (existing && !sameCredentialEndpoint(type, existing.baseUrl, nextBaseUrl)) {
+    // `local` is a statement about the endpoint being replaced, not about the
+    // provider. `isLocalEndpoint()` gives an explicit `local` precedence over
+    // inference from the URL, so carrying it across a host change prices every
+    // model at the new endpoint as free and slips the budget caps. Deleted
+    // rather than recomputed: absence is what makes `isLocalEndpoint()` read
+    // the new URL.
+    delete existing.local;
+  }
+  // Cleared BEFORE the write, so `applyProviderApiKey` cannot re-attach it.
+  if (existing && retiresStoredEndpoint) existing.baseUrl = undefined;
+  applyProviderApiKey(providers, type, apiKey, baseUrl ? { baseUrl } : {});
+}
+
+/**
+ * Providers whose ENDPOINT the environment can name, not just their key.
+ *
+ * Anthropic alone: `ANTHROPIC_BASE_URL` is read beside `ANTHROPIC_API_KEY` and
+ * travels with it as a pair. Cascade reads no `OPENAI_BASE_URL` and no Gemini
+ * equivalent, so for those types the environment CANNOT express "this key is
+ * for my gateway" however much the user wants to.
+ *
+ * That distinction is the whole content of this set. Where the channel exists,
+ * a key exported without an endpoint is evidence the key belongs to the public
+ * host. Where it does not, the same absence is evidence of nothing — it is a
+ * limit of the surface — and treating it as a claim deleted endpoints the user
+ * had configured by hand.
+ */
+const ENV_ENDPOINT_CHANNEL: ReadonlySet<string> = new Set(['anthropic']);
 
 export class ConfigManager {
   private config!: CascadeConfig;
@@ -500,6 +565,30 @@ export class ConfigManager {
         && !p.baseUrl?.trim()
         && (p.deploymentName?.trim() ?? '') === name);
       if (!row) return undefined;
+      // Whatever credential the row was carrying does NOT come with it.
+      //
+      // An Azure row with no endpoint names no resource, so a key sitting on it
+      // is scoped to nothing — it cannot be shown to belong to the resource
+      // routing just inferred, and grafting the resource on while keeping the
+      // key is precisely the endpoint-grafting this release exists to stop. It
+      // also silently defeated the export that triggered this: the injection
+      // loop skips a target that already holds a credential, so the freshly
+      // exported, correctly scoped key was dropped and the unscoped one was
+      // sent to the resource in its place.
+      //
+      // Dropping it is safe because this path is only reached with an Azure key
+      // in the environment — `injectEnvKeys` bails before calling us when there
+      // is none — so the row is re-credentialled with a key that IS scoped
+      // here, a few lines later, rather than left empty.
+      if (row.apiKey || row.authToken) {
+        console.warn(
+          `Ignoring the stored key on Azure deployment "${name}": it was saved without an `
+          + `endpoint, so there is nothing to show it belongs to ${routing.resource}. `
+          + `AZURE_OPENAI_KEY is being used instead.`,
+        );
+        row.apiKey = undefined;
+        row.authToken = undefined;
+      }
       row.baseUrl = routing.resource;
       onResource.push(row);
       return row;
@@ -709,15 +798,35 @@ export class ConfigManager {
             target.baseUrl = anthropicGateway;
             continue;
           }
-          // Exported WITHOUT a gateway, so this key belongs to the provider's
-          // public host. The row's own `baseUrl` was left in place — the
-          // creation branch above stopped inheriting a stored endpoint, but
-          // this sibling still filled a public key into a row addressed to a
-          // configured gateway and sent it there. Detached for a provider that
-          // has a public host to fall back to; a type with no default (an
-          // OpenAI-compatible endpoint) has nowhere else to go and keeps its
-          // URL, since the key would otherwise address nothing.
-          if (hasDefaultEndpoint(type) && target.baseUrl) target.baseUrl = undefined;
+          // Exported WITHOUT a gateway — and what that means depends entirely
+          // on whether the environment HAD a way to say otherwise.
+          //
+          // For Anthropic it did: `ANTHROPIC_BASE_URL` is read beside the key,
+          // so a user routing through a gateway would have exported it, and its
+          // absence is real evidence the key belongs to the public host. The
+          // row's own `baseUrl` used to survive that, and a public key was sent
+          // to a configured gateway.
+          //
+          // For OpenAI and Gemini it did NOT. Cascade reads no endpoint from
+          // the environment for them, so absence is a limit of the surface and
+          // says nothing about scope. Generalising the Anthropic rule by
+          // `hasDefaultEndpoint` alone therefore deleted a `baseUrl` the user
+          // had configured by hand, and a key exported for a corporate gateway
+          // went to the public host instead — the same leak, pointed the other
+          // way. The workspace's own endpoint stands, and the key fills the row
+          // as addressed; it is only worth saying out loud, because the row is
+          // deciding where an exported secret gets sent.
+          if (target.baseUrl && hasDefaultEndpoint(type)
+            && !sameCredentialEndpoint(type, undefined, target.baseUrl)) {
+            if (ENV_ENDPOINT_CHANNEL.has(type)) target.baseUrl = undefined;
+            else {
+              console.warn(
+                `${env} will be used at the ${type} endpoint configured in this workspace `
+                + `(${target.baseUrl}), not at the provider's public host. Remove that `
+                + `\`baseUrl\` if the key was issued by ${type} directly.`,
+              );
+            }
+          }
           target.apiKey = key;
         }
       }

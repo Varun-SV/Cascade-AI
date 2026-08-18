@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { applyProviderApiKey, ConfigManager, hasProviderCredential, hasUsableProvider } from './index.js';
+import { applyProviderApiKey, applyProviderCredential, ConfigManager, hasProviderCredential, hasUsableProvider } from './index.js';
 import { CASCADE_CONFIG_FILE } from '../constants.js';
 
 const tempDirs: string[] = [];
@@ -418,6 +418,253 @@ describe('applyProviderApiKey — a new key must not be shadowed', () => {
     applyProviderApiKey(providers, 'openai', 'new');
     expect(providers[0]!.authToken).toBe('keep-me');
     expect(providers[1]!.apiKey).toBe('new');
+  });
+});
+
+describe('applyProviderCredential — a key and the host it was issued by', () => {
+  // `applyProviderApiKey` only rewrites `baseUrl` when it is handed one, which
+  // is right for the field and wrong for the pairing. Every settings surface
+  // that wrote a key through it therefore kept whatever host was already on the
+  // row, and a public-host key was then sent to a corporate gateway.
+  it('retires a stored gateway when a key arrives with no endpoint', () => {
+    const providers = [{ type: 'anthropic', apiKey: 'old-gateway-key', baseUrl: 'https://corp-gateway.example' }];
+    applyProviderCredential(providers, 'anthropic', 'sk-ant-public');
+
+    expect(providers[0]!.apiKey).toBe('sk-ant-public');
+    expect(providers[0]!.baseUrl).toBeUndefined();
+  });
+
+  it('keeps an endpoint supplied alongside the key', () => {
+    const providers = [{ type: 'anthropic', apiKey: 'old', baseUrl: 'https://old-gw.example' }];
+    applyProviderCredential(providers, 'anthropic', 'gw-key', 'https://new-gw.example');
+    expect(providers[0]).toMatchObject({ apiKey: 'gw-key', baseUrl: 'https://new-gw.example' });
+  });
+
+  it('keeps an OpenAI-compatible endpoint, which has no public host to fall back to', () => {
+    // Clearing here would leave the key addressing nothing at all.
+    const providers = [{ type: 'openai-compatible', apiKey: 'old', baseUrl: 'https://api.groq.com/openai/v1' }];
+    applyProviderCredential(providers, 'openai-compatible', 'new-key');
+    expect(providers[0]).toMatchObject({ apiKey: 'new-key', baseUrl: 'https://api.groq.com/openai/v1' });
+  });
+
+  it('still clears a bearer the key replaces', () => {
+    // Inherited from applyProviderApiKey and worth pinning: AnthropicProvider
+    // prefers authToken when both are set, so a surviving bearer would make the
+    // key the user just typed silently unused.
+    const providers = [{ type: 'anthropic', authToken: 'stale', baseUrl: 'https://corp-gateway.example' }];
+    applyProviderCredential(providers, 'anthropic', 'sk-ant-public');
+    expect(providers[0]!.authToken).toBeUndefined();
+    expect(providers[0]!.baseUrl).toBeUndefined();
+  });
+
+  it('creates the entry when the provider is not configured yet', () => {
+    const providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }> = [];
+    applyProviderCredential(providers, 'openai', 'sk-new');
+    expect(providers).toEqual([{ type: 'openai', apiKey: 'sk-new' }]);
+  });
+});
+
+describe('every user-input key write is wired to applyProviderCredential', () => {
+  // A source-level check, deliberately. The unit tests above prove the helper
+  // is correct; they say nothing about whether the save handlers call it, and
+  // that is the defect that kept recurring — three handlers wrote a key with
+  // `applyProviderApiKey` and left a stored gateway attached, and reverting any
+  // one of those call sites leaves every other test in the suite green.
+  //
+  // Comments are stripped first so the prose in these files, which necessarily
+  // names the function it stopped calling, cannot fail the check.
+  const stripComments = (src: string): string => src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^[ \t]*\/\/.*$/gm, '');
+
+  const handlers = [
+    ['dashboard config:update (the live backend)', '../dashboard/server.ts'],
+    ['desktop Settings save', '../../app/electron/settings-merge.ts'],
+  ] as const;
+
+  it.each(handlers)('%s writes keys through the provider-aware helper', async (_name, rel) => {
+    const fs = await import('node:fs/promises');
+    const url = await import('node:url');
+    const nodePath = await import('node:path');
+    const here = nodePath.dirname(url.fileURLToPath(import.meta.url));
+    const code = stripComments(await fs.readFile(nodePath.join(here, rel), 'utf-8'));
+
+    expect(code).not.toMatch(/applyProviderApiKey/);
+    expect(code).toMatch(/applyProviderCredential/);
+  });
+});
+
+describe('an env key does not delete an endpoint the environment cannot name', () => {
+  // `ANTHROPIC_API_KEY` exported with no `ANTHROPIC_BASE_URL` is evidence: the
+  // pair is modeled, so the user COULD have named a gateway and did not. There
+  // is no `OPENAI_BASE_URL` and no Gemini equivalent, so for those types the
+  // same absence is evidence of nothing — and generalising the rule by
+  // "provider has a public host" deleted a `baseUrl` configured by hand,
+  // sending a gateway key to api.openai.com.
+  const saved = {
+    OPENAI_API_KEY: process.env['OPENAI_API_KEY'],
+    ANTHROPIC_API_KEY: process.env['ANTHROPIC_API_KEY'],
+    ANTHROPIC_BASE_URL: process.env['ANTHROPIC_BASE_URL'],
+    GOOGLE_API_KEY: process.env['GOOGLE_API_KEY'],
+  };
+  beforeEach(() => {
+    for (const k of Object.keys(saved)) delete process.env[k];
+  });
+  afterEach(() => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  });
+
+  const seed = async (providers: unknown): Promise<{ workspace: string; globalDir: string }> => {
+    const workspace = await makeTempWorkspace();
+    const globalDir = await makeTempWorkspace();
+    const configPath = path.join(workspace, CASCADE_CONFIG_FILE);
+    await fs.mkdir(path.dirname(configPath), { recursive: true });
+    await fs.writeFile(configPath, JSON.stringify({ providers }), 'utf-8');
+    return { workspace, globalDir };
+  };
+
+  it('keeps a configured OpenAI gateway when only OPENAI_API_KEY is exported', async () => {
+    const { workspace, globalDir } = await seed([
+      { type: 'openai', baseUrl: 'https://corp-openai-gateway.example/v1' },
+    ]);
+    process.env['OPENAI_API_KEY'] = 'gateway-key';
+
+    const cm = new ConfigManager(workspace, globalDir);
+    await cm.load();
+
+    const openai = cm.getConfig().providers.find((p) => p.type === 'openai');
+    expect(openai).toMatchObject({
+      apiKey: 'gateway-key',
+      baseUrl: 'https://corp-openai-gateway.example/v1',
+    });
+  });
+
+  it('keeps a configured Gemini endpoint too', async () => {
+    const { workspace, globalDir } = await seed([
+      { type: 'gemini', baseUrl: 'https://gemini-proxy.internal' },
+    ]);
+    process.env['GOOGLE_API_KEY'] = 'proxy-key';
+
+    const cm = new ConfigManager(workspace, globalDir);
+    await cm.load();
+
+    expect(cm.getConfig().providers.find((p) => p.type === 'gemini')).toMatchObject({
+      apiKey: 'proxy-key',
+      baseUrl: 'https://gemini-proxy.internal',
+    });
+  });
+
+  it('still detaches an Anthropic gateway, where the environment HAS a channel for it', async () => {
+    // The round-32 behaviour, which is correct and must not regress: with
+    // ANTHROPIC_BASE_URL unset, the exported key belongs to the public host.
+    const { workspace, globalDir } = await seed([
+      { type: 'anthropic', baseUrl: 'https://corp-gateway.example' },
+    ]);
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-public';
+
+    const cm = new ConfigManager(workspace, globalDir);
+    await cm.load();
+
+    const anthropic = cm.getConfig().providers.find((p) => p.type === 'anthropic');
+    expect(anthropic?.apiKey).toBe('sk-ant-public');
+    expect(anthropic?.baseUrl).toBeUndefined();
+  });
+
+  it('keeps the Anthropic gateway when the environment names it', async () => {
+    const { workspace, globalDir } = await seed([
+      { type: 'anthropic', baseUrl: 'https://corp-gateway.example' },
+    ]);
+    process.env['ANTHROPIC_API_KEY'] = 'gw-key';
+    process.env['ANTHROPIC_BASE_URL'] = 'https://corp-gateway.example';
+
+    const cm = new ConfigManager(workspace, globalDir);
+    await cm.load();
+
+    expect(cm.getConfig().providers.find((p) => p.type === 'anthropic')).toMatchObject({
+      apiKey: 'gw-key',
+      baseUrl: 'https://corp-gateway.example',
+    });
+  });
+});
+
+describe('an endpointless Azure row is completed, not credentialled by accident', () => {
+  const saved = {
+    AZURE_OPENAI_KEY: process.env['AZURE_OPENAI_KEY'],
+    AZURE_OPENAI_ENDPOINT: process.env['AZURE_OPENAI_ENDPOINT'],
+    AZURE_OPENAI_DEPLOYMENT: process.env['AZURE_OPENAI_DEPLOYMENT'],
+    AZURE_OPENAI_DEPLOYMENT_NAME: process.env['AZURE_OPENAI_DEPLOYMENT_NAME'],
+  };
+  beforeEach(() => {
+    for (const k of Object.keys(saved)) delete process.env[k];
+  });
+  afterEach(() => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  });
+
+  it('drops a key that named no resource rather than grafting one onto it', async () => {
+    // The full load order. A workspace row `{ azure, deploymentName: 'prod',
+    // apiKey }` names no resource, so its key is scoped to nothing. Routing
+    // infers resource A from the sibling row; the endpointless row is then
+    // completed with A. Assigning the resource while keeping the key sent an
+    // unscoped secret to A — and, because the injection loop skips a target
+    // that already holds a credential, the correctly scoped exported key was
+    // dropped on the floor.
+    const workspace = await makeTempWorkspace();
+    const globalDir = await makeTempWorkspace();
+    const configPath = path.join(workspace, CASCADE_CONFIG_FILE);
+    await fs.mkdir(path.dirname(configPath), { recursive: true });
+    await fs.writeFile(configPath, JSON.stringify({
+      providers: [
+        { type: 'azure', deploymentName: 'prod', apiKey: 'unknown-resource-key' },
+        { type: 'azure', deploymentName: 'chat', baseUrl: 'https://resource-a.openai.azure.com' },
+      ],
+    }), 'utf-8');
+
+    process.env['AZURE_OPENAI_KEY'] = 'fresh-key-for-a';
+    process.env['AZURE_OPENAI_DEPLOYMENT'] = 'prod';
+
+    const cm = new ConfigManager(workspace, globalDir);
+    await cm.load();
+
+    const rows = cm.getConfig().providers.filter((p) => p.type === 'azure');
+    const prod = rows.filter((p) => p.deploymentName === 'prod');
+    // Still ONE row for the deployment — the claim exists so a duplicate is not
+    // pushed beside it.
+    expect(prod).toHaveLength(1);
+    expect(prod[0]?.baseUrl).toBe('https://resource-a.openai.azure.com');
+    // The env key, which routing scoped to this resource — not the stored one,
+    // which was scoped to nothing.
+    expect(prod[0]?.apiKey).toBe('fresh-key-for-a');
+  });
+
+  it('leaves a credentialless endpointless row to be filled as before', async () => {
+    const workspace = await makeTempWorkspace();
+    const globalDir = await makeTempWorkspace();
+    const configPath = path.join(workspace, CASCADE_CONFIG_FILE);
+    await fs.mkdir(path.dirname(configPath), { recursive: true });
+    await fs.writeFile(configPath, JSON.stringify({
+      providers: [
+        { type: 'azure', deploymentName: 'prod' },
+        { type: 'azure', deploymentName: 'chat', baseUrl: 'https://resource-a.openai.azure.com' },
+      ],
+    }), 'utf-8');
+
+    process.env['AZURE_OPENAI_KEY'] = 'fresh-key-for-a';
+    process.env['AZURE_OPENAI_DEPLOYMENT'] = 'prod';
+
+    const cm = new ConfigManager(workspace, globalDir);
+    await cm.load();
+
+    const prod = cm.getConfig().providers.filter((p) => p.type === 'azure' && p.deploymentName === 'prod');
+    expect(prod).toHaveLength(1);
+    expect(prod[0]).toMatchObject({
+      baseUrl: 'https://resource-a.openai.azure.com',
+      apiKey: 'fresh-key-for-a',
+    });
   });
 });
 

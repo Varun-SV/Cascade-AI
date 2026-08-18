@@ -435,4 +435,32 @@ describe('ConfigManager + global credentials (the "AppImage forgets my keys" bug
     // …and the two Anthropic spellings are the same host, so this must match.
     expect(merged.find((p) => p.type === 'anthropic')?.apiKey).toBe('gw-key');
   });
+
+  it('refuses a bare OpenAI-compatible key for a row that names a host', () => {
+    // `openai-compatible` has no public host, so a stored key with no baseUrl
+    // names nothing — unknown scope, not universal scope. The desktop can save
+    // exactly this shape (key typed, URL field left blank), and reading it as
+    // "compatible with anything" copied a Groq key onto a DeepSeek endpoint.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'openai-compatible', baseUrl: 'https://api.deepseek.com/v1' }],
+      [{ type: 'openai-compatible', apiKey: 'groq-key' }],
+    );
+
+    const row = merged.find((p) => p.type === 'openai-compatible' && p.baseUrl === 'https://api.deepseek.com/v1')!;
+    expect(row.apiKey).toBeUndefined();
+    expect(row.baseUrl).toBe('https://api.deepseek.com/v1');
+  });
+
+  it('still adopts an OpenAI-compatible key and endpoint together', () => {
+    // The pair, which is what the store is for — and the case the refusal
+    // above must not break.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'openai-compatible' }],
+      [{ type: 'openai-compatible', apiKey: 'groq-key', baseUrl: 'https://api.groq.com/openai/v1' }],
+    );
+    expect(merged.find((p) => p.type === 'openai-compatible')).toMatchObject({
+      apiKey: 'groq-key',
+      baseUrl: 'https://api.groq.com/openai/v1',
+    });
+  });
 });

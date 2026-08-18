@@ -26,6 +26,22 @@ interface DashboardSocketOptions {
   corsOrigin?: string | string[];
 }
 
+/**
+ * The Settings save as it arrives over the socket.
+ *
+ * `endpoints` is declared because the panel has always SENT it — the desktop
+ * and web Settings views post one payload to both the Electron IPC bridge and
+ * this socket. Leaving it off the type here did not make it absent from the
+ * wire; it just hid the endpoint a key was typed beside from the code writing
+ * that key, which is how a public-host key ended up stored against a gateway.
+ */
+export interface ConfigUpdatePayload {
+  keys?: Record<string, string | undefined>;
+  endpoints?: Record<string, string | undefined>;
+  models?: Record<string, string>;
+  budget?: { maxCostPerRun?: number; autoBias?: string };
+}
+
 export class DashboardSocket {
   private io: SocketServer;
   private authRequired: boolean;
@@ -239,15 +255,11 @@ export class DashboardSocket {
     });
   }
 
-  onConfigUpdate(callback: (data: {
-    keys?: Record<string, string>;
-    models?: Record<string, string>;
-    budget?: { maxCostPerRun?: number; autoBias?: string };
-  }) => void): void {
+  onConfigUpdate(callback: (data: ConfigUpdatePayload) => void): void {
     this.io.on('connection', (socket) => {
       socket.on('config:update', (payload: unknown) => {
         if (typeof payload === 'object' && payload !== null) {
-          callback(payload as { keys?: Record<string, string>; models?: Record<string, string>; budget?: { maxCostPerRun?: number; autoBias?: string } });
+          callback(payload as ConfigUpdatePayload);
         }
       });
     });
