@@ -29,21 +29,57 @@ export function credentialsPath(globalDir: string): string {
 }
 
 /**
- * Identity of a provider entry for merge purposes. Azure supports multiple
- * deployments, so its entries are keyed by deployment (name, else endpoint,
- * else label); every other provider type is a singleton keyed by type.
+ * Identity of a NON-Azure provider entry. Every other type is a singleton, so
+ * the type alone is the key. Azure is matched by `sameAzureEntry` instead —
+ * see there for why a single string key cannot express it.
  */
 function providerKey(p: ProviderConfig): string {
-  if (p.type === 'azure') {
-    // The endpoint goes through the shared normalizer, so a row whose URL
-    // differs only by a trailing slash is the same row here as it is to
-    // `cascade link` and to the environment injection.
-    // `?? p.label` still has to be reachable, so an absent baseUrl must stay
-    // nullish rather than normalizing to the empty string.
-    const endpoint = p.baseUrl === undefined ? undefined : normalizeAzureEndpoint(p.baseUrl);
-    return `azure:${p.deploymentName ?? endpoint ?? p.label ?? ''}`;
-  }
   return p.type;
+}
+
+/** The endpoint of an Azure row, normalized, or undefined when it has none. */
+function azureEndpoint(p: ProviderConfig): string | undefined {
+  // An absent baseUrl must stay nullish rather than normalizing to the empty
+  // string, or "has no endpoint" and "has an empty endpoint" stop being
+  // distinguishable and the fallbacks below become unreachable.
+  return p.baseUrl === undefined ? undefined : normalizeAzureEndpoint(p.baseUrl);
+}
+
+/**
+ * Whether two Azure rows are the same entry.
+ *
+ * Azure keys are RESOURCE-scoped and the deployment name is only unique within
+ * a resource, so identity needs both — but not symmetrically, which is why
+ * this is a predicate rather than a key string.
+ *
+ * Keying on `deploymentName` alone (what this did) meant the endpoint never
+ * participated in the normal routed shape, where a deployment name is always
+ * present. A global row for resource A named `prod` then collided with a
+ * workspace row named `prod` on resource B: the merge below keeps B's own
+ * `baseUrl` but fills its missing `apiKey`, so resource A's key was sent to
+ * resource B. `cascade link` already refuses to reuse a deployment name across
+ * resources for exactly this reason; the global store now holds the same
+ * invariant.
+ *
+ * The rule: every identifier present on BOTH rows must agree, and at least one
+ * must be present on both. That keeps the case the store exists for — a
+ * workspace row naming only `deploymentName`, adopting the endpoint AND key
+ * from the global row — because an identifier absent on one side is not a
+ * disagreement. Only a row that names a DIFFERENT resource is rejected.
+ */
+function sameAzureEntry(a: ProviderConfig, b: ProviderConfig): boolean {
+  const pairs: Array<[string | undefined, string | undefined]> = [
+    [a.deploymentName, b.deploymentName],
+    [azureEndpoint(a), azureEndpoint(b)],
+    [a.label, b.label],
+  ];
+  let shared = 0;
+  for (const [x, y] of pairs) {
+    if (!x || !y) continue;      // absent on one side — says nothing either way
+    if (x !== y) return false;   // present on both and different — different entries
+    shared++;
+  }
+  return shared > 0;
 }
 
 /** An entry is worth persisting globally if it carries a credential or endpoint. */
@@ -97,17 +133,29 @@ export function mergeGlobalCredentials(
   globalProviders: ProviderConfig[],
 ): ProviderConfig[] {
   const merged = [...workspaceProviders];
-  const byKey = new Map(merged.map((p) => [providerKey(p), p]));
+  const byKey = new Map(merged.filter((p) => p.type !== 'azure').map((p) => [providerKey(p), p]));
 
   for (const g of globalProviders) {
-    const existing = byKey.get(providerKey(g));
+    // Azure is scanned rather than looked up: its identity is a predicate over
+    // two rows (see sameAzureEntry), not a string one row can produce alone.
+    const existing = g.type === 'azure'
+      ? merged.find((p) => p.type === 'azure' && sameAzureEntry(p, g))
+      : byKey.get(providerKey(g));
     if (!existing) {
       merged.push({ ...g });
-      byKey.set(providerKey(g), merged[merged.length - 1]!);
+      if (g.type !== 'azure') byKey.set(providerKey(g), merged[merged.length - 1]!);
       continue;
     }
-    if (!existing.apiKey && g.apiKey) existing.apiKey = g.apiKey;
-    if (!existing.authToken && g.authToken) existing.authToken = g.authToken;
+    // `apiKey` and `authToken` are COMPETING credentials for one provider, not
+    // two independent fields — AnthropicProvider prefers the bearer when both
+    // are set. Filling one beside the other therefore silently overrides the
+    // credential already there: a workspace row holding a freshly exported API
+    // key would gain the global row's stale bearer and send THAT to the newly
+    // exported gateway. A row that already has a credential keeps it and gains
+    // no rival; only a row with neither adopts one.
+    const credentialled = Boolean(existing.apiKey || existing.authToken);
+    if (!credentialled && g.apiKey) existing.apiKey = g.apiKey;
+    if (!credentialled && !existing.apiKey && g.authToken) existing.authToken = g.authToken;
     if (!existing.baseUrl && g.baseUrl) existing.baseUrl = g.baseUrl;
     if (!existing.apiVersion && g.apiVersion) existing.apiVersion = g.apiVersion;
     if (!existing.label && g.label) existing.label = g.label;

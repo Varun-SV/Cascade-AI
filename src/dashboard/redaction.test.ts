@@ -62,4 +62,97 @@ describe('redactProviderSecrets', () => {
     const safe = redactProviderSecrets({ models: {} } as unknown as CascadeConfig);
     expect(safe.providers).toEqual([]);
   });
+
+  // ── Secrets outside `providers` ────────────
+  //
+  // `safe` was otherwise the whole config, so every credential that does not
+  // live on a provider was served in plaintext by the same route this
+  // redaction exists to harden.
+
+  it('masks the web-search API keys', () => {
+    const safe = redactProviderSecrets({
+      providers: [],
+      models: {},
+      tools: { webSearch: { braveApiKey: 'brave-secret', tavilyApiKey: 'tavily-secret', searxngUrl: 'https://searx.internal' } },
+    } as unknown as CascadeConfig);
+
+    const json = JSON.stringify(safe);
+    expect(json).not.toContain('brave-secret');
+    expect(json).not.toContain('tavily-secret');
+    // A non-secret setting stays readable, or the route stops being useful.
+    expect(safe.tools.webSearch?.searxngUrl).toBe('https://searx.internal');
+  });
+
+  it('masks MCP server auth headers and env, keeping their names', () => {
+    const safe = redactProviderSecrets({
+      providers: [],
+      models: {},
+      tools: {
+        mcpServers: [
+          { name: 'remote', url: 'https://mcp.internal', headers: { Authorization: 'Bearer super-secret' } },
+          { name: 'local', command: 'node', env: { GITHUB_TOKEN: 'ghp-secret' } },
+        ],
+      },
+    } as unknown as CascadeConfig);
+
+    const json = JSON.stringify(safe);
+    expect(json).not.toContain('super-secret');
+    expect(json).not.toContain('ghp-secret');
+    // Which keys are configured is useful; their values never are.
+    expect(safe.tools.mcpServers![0]!.headers).toEqual({ Authorization: '***' });
+    expect(safe.tools.mcpServers![1]!.env).toEqual({ GITHUB_TOKEN: '***' });
+    expect(safe.tools.mcpServers![0]!.url).toBe('https://mcp.internal');
+  });
+
+  it('masks the dashboard\u2019s own JWT secret', () => {
+    // Served BY the dashboard: anyone reading it can mint a session for the
+    // very route they read it from.
+    const safe = redactProviderSecrets({
+      providers: [], models: {}, tools: {},
+      dashboard: { port: 3000, host: '127.0.0.1', auth: true, teamMode: 'single', secret: 'jwt-signing-secret' },
+    } as unknown as CascadeConfig);
+
+    expect(JSON.stringify(safe)).not.toContain('jwt-signing-secret');
+    expect(safe.dashboard.secret).toBe('***');
+    expect(safe.dashboard.port).toBe(3000);
+  });
+
+  it('masks the telemetry key', () => {
+    const safe = redactProviderSecrets({
+      providers: [], models: {}, tools: {},
+      telemetry: { enabled: true, posthogApiKey: 'phc-secret', distinctId: 'user-1' },
+    } as unknown as CascadeConfig);
+
+    expect(JSON.stringify(safe)).not.toContain('phc-secret');
+    expect(safe.telemetry.distinctId).toBe('user-1');
+  });
+
+  it('does not mutate the live config when redacting nested branches', () => {
+    // `{ ...config }` shares every nested object, so redacting in place would
+    // have destroyed the running server's own credentials.
+    const config = {
+      providers: [],
+      models: {},
+      tools: {
+        webSearch: { braveApiKey: 'brave-secret' },
+        mcpServers: [{ name: 'remote', headers: { Authorization: 'Bearer super-secret' } }],
+      },
+      dashboard: { port: 3000, host: '127.0.0.1', auth: true, teamMode: 'single', secret: 'jwt-signing-secret' },
+      telemetry: { enabled: true, posthogApiKey: 'phc-secret' },
+    } as unknown as CascadeConfig;
+
+    redactProviderSecrets(config);
+
+    expect(config.tools.webSearch?.braveApiKey).toBe('brave-secret');
+    expect(config.tools.mcpServers![0]!.headers).toEqual({ Authorization: 'Bearer super-secret' });
+    expect(config.dashboard.secret).toBe('jwt-signing-secret');
+    expect(config.telemetry.posthogApiKey).toBe('phc-secret');
+  });
+
+  it('survives a config with none of those branches present', () => {
+    const safe = redactProviderSecrets({ providers: [], models: {} } as unknown as CascadeConfig);
+    expect(safe.tools).toBeUndefined();
+    expect(safe.dashboard).toBeUndefined();
+    expect(safe.telemetry).toBeUndefined();
+  });
 });

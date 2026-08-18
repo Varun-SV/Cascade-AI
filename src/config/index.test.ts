@@ -465,6 +465,71 @@ describe('an environment key and gateway are a pair', () => {
     return globalDir;
   }
 
+  it('lets an exported API key outrank a provider that exists only globally', async () => {
+    // `mayCreate` is false whenever the workspace file holds any other
+    // provider, and the API-key path searched only the workspace list — so an
+    // Anthropic row living only in ~/.cascade-ai/credentials.json had nothing
+    // to fill and no permission to be created. The exported key was dropped,
+    // and mergeGlobalCredentials() then restored the stored row, stale key and
+    // endpoint included. The bearer branch already consulted the global store;
+    // this is the same rule on its sibling path.
+    await seed([{ type: 'openai', apiKey: 'ws-openai' }]);
+    const globalDir = await seedGlobal([
+      { type: 'anthropic', apiKey: 'old-global-key', baseUrl: 'https://old-gateway.internal' },
+    ]);
+    process.env['ANTHROPIC_API_KEY'] = 'fresh-env-key';
+    process.env['ANTHROPIC_BASE_URL'] = 'https://new-gateway.internal';
+
+    const cm = new ConfigManager(dir, globalDir);
+    await cm.load();
+
+    const anthropic = cm.getConfig().providers.filter((p) => p.type === 'anthropic');
+    expect(anthropic).toHaveLength(1);
+    expect(anthropic[0]).toMatchObject({
+      apiKey: 'fresh-env-key',
+      baseUrl: 'https://new-gateway.internal',
+    });
+  });
+
+  it('inherits the global endpoint when the environment exports only a key', async () => {
+    // Creating the row from the env key alone would leave it endpoint-less and
+    // send a gateway credential to the public host — the defect the bearer
+    // branch was fixed for.
+    await seed([{ type: 'openai', apiKey: 'ws-openai' }]);
+    const globalDir = await seedGlobal([
+      { type: 'anthropic', apiKey: 'old-global-key', baseUrl: 'https://gateway.internal' },
+    ]);
+    process.env['ANTHROPIC_API_KEY'] = 'fresh-env-key';
+
+    const cm = new ConfigManager(dir, globalDir);
+    await cm.load();
+    expect(cm.getConfig().providers.find((p) => p.type === 'anthropic')).toMatchObject({
+      apiKey: 'fresh-env-key',
+      baseUrl: 'https://gateway.internal',
+    });
+  });
+
+  it('does not let a stored bearer shadow the key the environment just set', async () => {
+    // apiKey and authToken compete: AnthropicProvider prefers the bearer. The
+    // merge filled authToken into the row the env injection had just given an
+    // API key, so the exported key was ignored AND the stale bearer travelled
+    // to the newly exported gateway.
+    await seed([{ type: 'openai', apiKey: 'ws-openai' }]);
+    const globalDir = await seedGlobal([
+      { type: 'anthropic', authToken: 'stale-bearer', baseUrl: 'https://old-gateway.internal' },
+    ]);
+    process.env['ANTHROPIC_API_KEY'] = 'fresh-env-key';
+    process.env['ANTHROPIC_BASE_URL'] = 'https://new-gateway.internal';
+
+    const cm = new ConfigManager(dir, globalDir);
+    await cm.load();
+
+    const anthropic = cm.getConfig().providers.find((p) => p.type === 'anthropic')!;
+    expect(anthropic.apiKey).toBe('fresh-env-key');
+    expect(anthropic.authToken).toBeUndefined();
+    expect(anthropic.baseUrl).toBe('https://new-gateway.internal');
+  });
+
   it('replaces a stale endpoint rather than sending the new key to the old host', async () => {
     // `??=` kept the configured URL, so a key exported alongside a different
     // gateway went to the host that did not issue it.

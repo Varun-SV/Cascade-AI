@@ -52,26 +52,82 @@ interface PendingEscalationEntry {
   graceTimer?: NodeJS.Timeout;
 }
 
+/** What a redacted secret reads as on the wire. */
+const MASK = '***';
+
+/** Mask a value if present; drop the field entirely if not. */
+function masked<K extends string>(key: K, value: unknown): Record<K, string> | Record<K, undefined> {
+  return { [key]: value ? MASK : undefined } as Record<K, string> | Record<K, undefined>;
+}
+
 /**
- * A copy of the config with every provider secret masked.
+ * A copy of the config with every credential masked.
  *
- * Every credential field, not a list of the ones someone remembered. This was
- * previously inline in the /api/config handler and masked `apiKey` only, so a
- * provider configured with a bearer token — which `cascade link` and
- * ANTHROPIC_AUTH_TOKEN both produce — had that token served in plaintext to
- * anyone who could reach the route, under a comment claiming sensitive fields
- * were stripped.
+ * Every credential field, not a list of the ones someone remembered. It masked
+ * `apiKey` only at first, so a provider configured with a bearer token — which
+ * `cascade link` and ANTHROPIC_AUTH_TOKEN both produce — had that token served
+ * in plaintext to anyone who could reach the route, under a comment claiming
+ * sensitive fields were stripped. Then it masked only `providers`, while `safe`
+ * was otherwise the whole config: the web-search keys, every MCP server's auth
+ * `headers` and `env`, the dashboard's own JWT `secret`, and the telemetry key
+ * all went out untouched on that same hardened route.
+ *
+ * The shallow copy was itself part of the problem — `{ ...config }` shares
+ * every nested object, so redacting in place would have corrupted the LIVE
+ * config the server runs on. Each branch holding a secret is therefore rebuilt
+ * rather than mutated; branches with no secrets are shared as before.
  *
  * Exported so the redaction is testable on its own rather than only through a
- * running HTTP server, which is why the gap survived as long as it did.
+ * running HTTP server, which is why the gaps survived as long as they did.
  */
 export function redactProviderSecrets(config: CascadeConfig): CascadeConfig {
   const safe = { ...config };
-  safe.providers = (safe.providers ?? []).map((p) => ({
+
+  safe.providers = (config.providers ?? []).map((p) => ({
     ...p,
-    ...(p.apiKey ? { apiKey: '***' } : { apiKey: undefined }),
-    ...(p.authToken ? { authToken: '***' } : { authToken: undefined }),
+    ...masked('apiKey', p.apiKey),
+    ...masked('authToken', p.authToken),
   }));
+
+  if (config.tools) {
+    safe.tools = { ...config.tools };
+    if (config.tools.webSearch) {
+      safe.tools.webSearch = {
+        ...config.tools.webSearch,
+        ...masked('braveApiKey', config.tools.webSearch.braveApiKey),
+        ...masked('tavilyApiKey', config.tools.webSearch.tavilyApiKey),
+      };
+    }
+    if (config.tools.mcpServers) {
+      // `headers` carry the remote server's auth (a bearer, an API key) and
+      // `env` is passed to a spawned process, so both routinely hold secrets.
+      // Their KEYS are useful for showing what is configured; their values are
+      // never safe to serve, so each is masked per entry rather than dropped.
+      safe.tools.mcpServers = config.tools.mcpServers.map((server) => ({
+        ...server,
+        ...(server.headers
+          ? { headers: Object.fromEntries(Object.keys(server.headers).map((k) => [k, MASK])) }
+          : {}),
+        ...(server.env
+          ? { env: Object.fromEntries(Object.keys(server.env).map((k) => [k, MASK])) }
+          : {}),
+      }));
+    }
+  }
+
+  // The dashboard's own JWT signing secret, served by the dashboard. Anyone
+  // holding it can mint a session for the route they read it from.
+  if (config.dashboard) {
+    safe.dashboard = { ...config.dashboard, ...masked('secret', config.dashboard.secret) };
+  }
+
+  if (config.telemetry) {
+    safe.telemetry = {
+      ...config.telemetry,
+      ...masked('posthogApiKey', config.telemetry.posthogApiKey),
+    };
+  }
+
   return safe;
 }
 

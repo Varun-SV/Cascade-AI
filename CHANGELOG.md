@@ -21,6 +21,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## 0.75.0 - 2026-08-14
 
 ### Fixed
+- **An Azure key could be sent to a different Azure resource.** The global
+  credential store keyed Azure entries by deployment name alone, so in the
+  normal routed shape — where a deployment name is always present — the
+  endpoint never participated in the merge. A stored row for resource A named
+  `prod` therefore matched a workspace row named `prod` on resource B: the
+  merge kept B's own endpoint but filled its missing key from A. Azure rows are
+  now matched on every identifier present on both sides, so a row naming a
+  different resource is a different entry, while a workspace row that names
+  only a deployment still adopts both endpoint and key from the store — the
+  case the store exists for.
+
+- **An exported API key was ignored for a provider held only in the global
+  store.** Environment injection runs before the global merge specifically so
+  an exported value outranks a stored one, but the API-key path searched only
+  the workspace providers. With any other provider in the workspace file the
+  creation gate was closed, so a fresh `ANTHROPIC_API_KEY` had nothing to fill
+  and no permission to create a row — and the merge then restored the stored
+  row, stale key and endpoint included. The bearer branch already consulted the
+  global store; both paths do now, and a row created this way inherits the
+  stored endpoint when the environment exports none, rather than defaulting to
+  the public host. Relatedly, `apiKey` and `authToken` are competing
+  credentials for one provider, so the merge no longer fills one alongside the
+  other — a stored bearer used to shadow the key that had just been exported,
+  and travel to the newly exported gateway with it.
+
+- **`/api/config` served every credential that was not on a provider.** The
+  redaction covered `providers` while the response was otherwise the whole
+  config, so the Brave and Tavily search keys, every MCP server's auth
+  `headers` and `env`, the dashboard's own JWT signing secret, and the
+  telemetry key all went out in plaintext on the route this release hardened
+  for `authToken`. Each is masked now, with the nested branches rebuilt rather
+  than mutated — the shallow copy shared them with the live config the server
+  runs on.
+
 - **A bearer token was served in plaintext by `/api/config`.** The handler
   masked `apiKey` and nothing else, under a comment saying "Strip sensitive
   fields before sending". A provider configured with `authToken` — which both

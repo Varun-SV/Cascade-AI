@@ -559,13 +559,28 @@ export class ConfigManager {
         : [this.config.providers.find((p) => p.type === type)].filter((p) => !!p);
       const existing = targets[0];
 
+      // The GLOBAL store counts as evidence the user configured this provider,
+      // exactly as the bearer branch below already treats it. `mayCreate` is
+      // false whenever the workspace file holds any other provider, so a
+      // provider that lives only in ~/.cascade-ai/credentials.json had no
+      // workspace row for the loop to fill and no permission to create one —
+      // and an exported API key was dropped on the floor. mergeGlobalCredentials()
+      // then restored the stored row a few lines later, stale key and all, so
+      // exporting a fresh credential appeared to do nothing at all. Creating
+      // the row here is not inventing a provider: the merge is about to add
+      // that very entry. Azure is excluded because a key alone cannot address
+      // a deployment (see the branch below).
+      const globalMatch = type === 'azure'
+        ? undefined
+        : globalProviders.find((p) => p.type === type);
+
       // ANTHROPIC_BASE_URL is the gateway for whichever Anthropic credential
       // is in play, key or bearer. Carrying it only on the bearer path meant an
       // API key exported alongside a gateway produced an entry with no
       // endpoint — and model discovery then sent that gateway's key to the
       // public host.
       const anthropicGateway = type === 'anthropic' ? process.env['ANTHROPIC_BASE_URL'] : undefined;
-      if (!existing && mayCreate(type)) {
+      if (!existing && (mayCreate(type) || globalMatch)) {
         // Azure cannot be configured by a key alone. Without a deployment name
         // it resolves to no model at all (azureModelForDeployment returns
         // null), and without an endpoint the client falls back to a literal
@@ -586,9 +601,14 @@ export class ConfigManager {
           });
           continue;
         }
+        // The exported gateway wins; otherwise inherit the endpoint the global
+        // entry already carries. Without this an exported key for a gateway
+        // provider is created with no endpoint and goes to the public host —
+        // the same defect the bearer branch was fixed for.
+        const baseUrl = anthropicGateway ?? globalMatch?.baseUrl;
         this.config.providers.push({
           type, apiKey: key,
-          ...(anthropicGateway ? { baseUrl: anthropicGateway } : {}),
+          ...(baseUrl ? { baseUrl } : {}),
         });
       } else if (existing) {
         // EVERY keyless target, not just the first: for Azure that is all the

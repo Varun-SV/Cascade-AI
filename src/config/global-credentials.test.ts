@@ -71,6 +71,51 @@ describe('global credentials store', () => {
     expect(merged.find((p) => p.type === 'gemini')?.apiKey).toBe('global-gemini');
   });
 
+  it('never sends one Azure resource\u2019s key to a different resource', () => {
+    // Azure keys are resource-scoped, and a deployment name is only unique
+    // WITHIN a resource. Keying the merge on the deployment name alone meant
+    // the endpoint never participated in the normal routed shape, so a global
+    // row for resource A named "prod" matched a workspace row named "prod" on
+    // resource B — the merge kept B's own baseUrl and filled its missing
+    // apiKey from A. `cascade link` already refuses to reuse a deployment name
+    // across resources; the global store has to hold the same invariant.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://resource-b.openai.azure.com' }],
+      [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://resource-a.openai.azure.com', apiKey: 'key-for-a' }],
+    );
+
+    const onB = merged.find((p) => p.baseUrl === 'https://resource-b.openai.azure.com')!;
+    expect(onB.apiKey).toBeUndefined();
+
+    // Resource A's row is a DIFFERENT entry, kept whole rather than folded in.
+    const onA = merged.find((p) => p.baseUrl === 'https://resource-a.openai.azure.com')!;
+    expect(onA.apiKey).toBe('key-for-a');
+    expect(merged.filter((p) => p.type === 'azure')).toHaveLength(2);
+  });
+
+  it('still adopts the resource for a workspace row that names only a deployment', () => {
+    // The case the global store exists for, and the one a strict
+    // endpoint+deployment key would have broken: an identifier absent on one
+    // side is not a disagreement, so this row adopts both endpoint and key.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'azure', deploymentName: 'prod' }],
+      [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://resource-a.openai.azure.com', apiKey: 'key-for-a' }],
+    );
+
+    expect(merged.filter((p) => p.type === 'azure')).toHaveLength(1);
+    expect(merged[0]!.baseUrl).toBe('https://resource-a.openai.azure.com');
+    expect(merged[0]!.apiKey).toBe('key-for-a');
+  });
+
+  it('treats a trailing slash as the same resource, not a second one', () => {
+    const merged = mergeGlobalCredentials(
+      [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://resource-a.openai.azure.com/' }],
+      [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://resource-a.openai.azure.com', apiKey: 'key-for-a' }],
+    );
+    expect(merged.filter((p) => p.type === 'azure')).toHaveLength(1);
+    expect(merged[0]!.apiKey).toBe('key-for-a');
+  });
+
   it('merges azure entries per deployment, not per type', () => {
     const workspace: ProviderConfig[] = [
       { type: 'azure', deploymentName: 'gpt-4o', apiKey: 'ws-key' },
