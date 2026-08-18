@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { applySettingsCredentials, credentialDispositionForEdit, priorAzureRow, type SettingsMergeDeps } from './settings-merge.js';
-import { sameEndpoint, sameAzureEndpoint } from '../../src/index.js';
+import { applyEndpointEdit, applySettingsCredentials, credentialDispositionForEdit, priorAzureRow, type SettingsMergeDeps } from './settings-merge.js';
+import { sameCredentialEndpoint, sameAzureEndpoint } from '../../src/index.js';
 
 describe('credentialDispositionForEdit', () => {
   it('keeps the key when the endpoint has not moved', () => {
     expect(credentialDispositionForEdit(
-      { baseUrl: 'https://api.groq.com/openai/v1' },
+      { type: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1' },
       'https://api.groq.com/openai/v1/',
       undefined,
-      sameEndpoint,
+      sameCredentialEndpoint,
     )).toBe('keep');
   });
 
@@ -18,16 +18,16 @@ describe('credentialDispositionForEdit', () => {
     // field means "keep the existing key" and the two fields were handled
     // independently.
     expect(credentialDispositionForEdit(
-      { baseUrl: 'https://api.groq.com/openai/v1' },
+      { type: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1' },
       'https://api.deepseek.com/v1',
       undefined,
-      sameEndpoint,
+      sameCredentialEndpoint,
     )).toBe('clear');
   });
 
   it('drops the key when the endpoint is cleared', () => {
     expect(credentialDispositionForEdit(
-      { baseUrl: 'https://api.groq.com/openai/v1' }, '', undefined, sameEndpoint,
+      { type: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1' }, '', undefined, sameCredentialEndpoint,
     )).toBe('clear');
   });
 
@@ -36,23 +36,52 @@ describe('credentialDispositionForEdit', () => {
     // deleted the credential on `false`. So a save carrying a new key and a new
     // endpoint installed the key and immediately removed it.
     expect(credentialDispositionForEdit(
-      { baseUrl: 'https://api.groq.com/openai/v1' },
+      { type: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1' },
       'https://api.deepseek.com/v1',
       'new-key',
-      sameEndpoint,
+      sameCredentialEndpoint,
     )).toBe('replaced');
     // …and likewise when the endpoint did not move at all.
     expect(credentialDispositionForEdit(
-      { baseUrl: 'https://api.groq.com/openai/v1' },
+      { type: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1' },
       'https://api.groq.com/openai/v1',
       'new-key',
-      sameEndpoint,
+      sameCredentialEndpoint,
     )).toBe('replaced');
   });
 
-  it('keeps a key on a provider that never had an endpoint', () => {
-    // A plain `openai`/`anthropic` row is not endpoint-scoped.
-    expect(credentialDispositionForEdit({}, 'https://gw.example', undefined, sameEndpoint)).toBe('keep');
+  it('retires a public-host key when a gateway is typed in beside it', () => {
+    // This previously asserted 'keep', on the reasoning that a row with no
+    // baseUrl "is not endpoint-scoped". It is: for anthropic/openai/gemini a
+    // missing baseUrl means the provider's own PUBLIC host, which is where the
+    // client sends. Keeping the key while writing in a corporate gateway sent a
+    // console.anthropic.com key to that gateway on the next request.
+    expect(credentialDispositionForEdit(
+      { type: 'anthropic' }, 'https://corp-gateway.example', undefined, sameCredentialEndpoint,
+    )).toBe('clear');
+  });
+
+  it('keeps a key when the edit does not change where requests go', () => {
+    // Anthropic's optional /v1 suffix names the same API root — anthropicApiRoot()
+    // says so and its tests assert it — so this edit must not retire anything.
+    expect(credentialDispositionForEdit(
+      { type: 'anthropic', baseUrl: 'https://gw.example' },
+      'https://gw.example/v1',
+      undefined,
+      sameCredentialEndpoint,
+    )).toBe('keep');
+    // …and writing the public host explicitly over an implicit one is a no-op.
+    expect(credentialDispositionForEdit(
+      { type: 'anthropic' }, 'https://api.anthropic.com', undefined, sameCredentialEndpoint,
+    )).toBe('keep');
+  });
+
+  it('retires a key when an endpoint appears on a type with no default', () => {
+    // openai-compatible has no canonical host, so "none → some" is still a host
+    // being introduced where the credential was not scoped to one.
+    expect(credentialDispositionForEdit(
+      { type: 'openai-compatible' }, 'https://openrouter.ai/api/v1', undefined, sameCredentialEndpoint,
+    )).toBe('clear');
   });
 });
 
@@ -96,7 +125,7 @@ describe('applySettingsCredentials — the real save sequence', () => {
     }
     providers.push({ type, apiKey, ...(extra?.baseUrl ? { baseUrl: extra.baseUrl } : {}) });
   };
-  const deps = { applyProviderApiKey, sameEndpoint };
+  const deps = { applyProviderApiKey, sameCredentialEndpoint };
 
   it('keeps a key and endpoint saved together', () => {
     // The reported P1: typing a new key alongside a new endpoint wrote the key
@@ -151,5 +180,54 @@ describe('applySettingsCredentials — the real save sequence', () => {
     const providers = [{ type: 'azure', apiKey: 'az', baseUrl: 'https://r1.openai.azure.com' }];
     applySettingsCredentials(providers, { endpoints: { azure: 'https://r2.openai.azure.com' } }, deps);
     expect(providers[0]).toMatchObject({ apiKey: 'az', baseUrl: 'https://r1.openai.azure.com' });
+  });
+
+});
+
+describe('applyEndpointEdit — shared by both desktop save paths', () => {
+  // `cascade:setConfig`, the key-optional onboarding save, wrote an endpoint
+  // through its own branch and bypassed applySettingsCredentials entirely — so
+  // an OpenAI-compatible row could have its endpoint changed with a blank key
+  // and keep the previous host's key attached.
+  it('clears the key when onboarding repoints a compatible provider', () => {
+    const row = {
+      type: 'openai-compatible',
+      apiKey: 'openrouter-key',
+      baseUrl: 'https://openrouter.ai/api/v1',
+    };
+    applyEndpointEdit(row, 'https://api.groq.com/openai/v1', undefined, { sameCredentialEndpoint });
+
+    expect(row.apiKey).toBeUndefined();
+    expect(row.baseUrl).toBe('https://api.groq.com/openai/v1');
+  });
+
+  it('keeps the key when onboarding supplies one with the endpoint', () => {
+    const row = { type: 'openai-compatible', apiKey: 'old', baseUrl: 'https://openrouter.ai/api/v1' };
+    applyEndpointEdit(row, 'https://api.groq.com/openai/v1', 'groq-key', { sameCredentialEndpoint });
+    // The caller writes the replacement; this must not delete it.
+    expect(row.apiKey).toBe('old');
+    expect(row.baseUrl).toBe('https://api.groq.com/openai/v1');
+  });
+});
+
+describe('both desktop save paths are actually wired to the shared rule', () => {
+  // A source-level check, deliberately. The tests above prove `applyEndpointEdit`
+  // is correct; they say nothing about whether `main.ts` calls it, and the bug
+  // was precisely that one save path did not. Reverting the call site left every
+  // other test green. `desktop-core-contract.test.ts` already checks desktop
+  // wiring from source for the same reason.
+  it('cascade:setConfig does not assign baseUrl without the credential rule', async () => {
+    const fs = await import('node:fs/promises');
+    const url = await import('node:url');
+    const path = await import('node:path');
+    const here = path.dirname(url.fileURLToPath(import.meta.url));
+    const source = await fs.readFile(path.join(here, 'main.ts'), 'utf-8');
+
+    // The shape the finding described: an endpoint written straight onto an
+    // existing row, leaving whatever credential was there attached to a new host.
+    expect(source).not.toMatch(/if \(baseUrl\) existing\.baseUrl = baseUrl;/);
+    // Both save paths reach the shared rule.
+    expect(source).toMatch(/applyEndpointEdit\(existing, baseUrl, cfg\.apiKey/);
+    expect(source).toMatch(/applySettingsCredentials\(cascadeConfig\.providers, data/);
   });
 });

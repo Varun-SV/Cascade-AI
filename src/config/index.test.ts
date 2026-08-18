@@ -553,10 +553,13 @@ describe('an environment key and gateway are a pair', () => {
     });
   });
 
-  it('inherits the global endpoint when the environment exports only a key', async () => {
-    // Creating the row from the env key alone would leave it endpoint-less and
-    // send a gateway credential to the public host — the defect the bearer
-    // branch was fixed for.
+  it('leaves an exported key on the public host when no gateway is exported', async () => {
+    // This previously asserted the opposite — that the row should inherit
+    // `baseUrl` from the global store — on the reasoning that an endpointless
+    // row "goes to the public host". For a bare ANTHROPIC_API_KEY the public
+    // host is exactly right: that is where a console.anthropic.com key belongs.
+    // Inheriting a stored corporate gateway paired a brand-new public key with
+    // a host that never issued it.
     await seed([{ type: 'openai', apiKey: 'ws-openai' }]);
     const globalDir = await seedGlobal([
       { type: 'anthropic', apiKey: 'old-global-key', baseUrl: 'https://gateway.internal' },
@@ -565,9 +568,24 @@ describe('an environment key and gateway are a pair', () => {
 
     const cm = new ConfigManager(dir, globalDir);
     await cm.load();
+    const anthropic = cm.getConfig().providers.find((p) => p.type === 'anthropic')!;
+    expect(anthropic.apiKey).toBe('fresh-env-key');
+    expect(anthropic.baseUrl).toBeUndefined();
+  });
+
+  it('still pairs an exported key with an exported gateway', async () => {
+    await seed([{ type: 'openai', apiKey: 'ws-openai' }]);
+    const globalDir = await seedGlobal([
+      { type: 'anthropic', apiKey: 'old-global-key', baseUrl: 'https://old-gateway.internal' },
+    ]);
+    process.env['ANTHROPIC_API_KEY'] = 'fresh-env-key';
+    process.env['ANTHROPIC_BASE_URL'] = 'https://new-gateway.internal';
+
+    const cm = new ConfigManager(dir, globalDir);
+    await cm.load();
     expect(cm.getConfig().providers.find((p) => p.type === 'anthropic')).toMatchObject({
       apiKey: 'fresh-env-key',
-      baseUrl: 'https://gateway.internal',
+      baseUrl: 'https://new-gateway.internal',
     });
   });
 

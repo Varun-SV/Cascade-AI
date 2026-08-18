@@ -649,14 +649,18 @@ export class ConfigManager {
           });
           continue;
         }
-        // The exported gateway wins; otherwise inherit the endpoint the global
-        // entry already carries. Without this an exported key for a gateway
-        // provider is created with no endpoint and goes to the public host —
-        // the same defect the bearer branch was fixed for.
-        const baseUrl = anthropicGateway ?? globalMatch?.baseUrl;
+        // ONLY the exported gateway. A previous revision inherited
+        // `globalMatch?.baseUrl` as well, reasoning that a key created with no
+        // endpoint would otherwise go to the public host — but for a bare
+        // `ANTHROPIC_API_KEY` the public host is exactly right, and that is
+        // where a console.anthropic.com key belongs. Inheriting a stored
+        // corporate gateway paired a brand-new public key with a host that
+        // never issued it. A stored endpoint is adopted only when the
+        // credential arrived with evidence it belongs there — which, for the
+        // environment, means `ANTHROPIC_BASE_URL` exported alongside it.
         this.config.providers.push({
           type, apiKey: key,
-          ...(baseUrl ? { baseUrl } : {}),
+          ...(anthropicGateway ? { baseUrl: anthropicGateway } : {}),
         });
       } else if (existing) {
         // EVERY keyless target, not just the first: for Azure that is all the

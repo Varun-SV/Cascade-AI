@@ -68,6 +68,19 @@ export function normalizeEndpoint(url: string | undefined | null): string {
   }
 }
 
+/**
+ * An endpoint with a trailing API version segment removed.
+ *
+ * `https://gw.example/v1` and `https://gw.example` address the same API root —
+ * the Anthropic SDK appends its own `/v1`, so both spellings generate against
+ * the identical host and path. Lives here rather than in the provider so
+ * `config/` can reach it without importing `providers/`, which imports back
+ * into `config/`.
+ */
+export function stripVersionSuffix(url: string): string {
+  return stripTrailingSlashes(url.trim()).replace(/\/v\d+$/, '');
+}
+
 /** Whether two endpoint URLs address the same host. */
 export function sameEndpoint(a: string | undefined | null, b: string | undefined | null): boolean {
   return normalizeEndpoint(a) === normalizeEndpoint(b);

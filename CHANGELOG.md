@@ -21,6 +21,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## 0.75.0 - 2026-08-14
 
 ### Fixed
+- **A public-host key could be repointed at a gateway.** A provider row with no
+  `baseUrl` is not unscoped — for Anthropic, OpenAI and Gemini it means the
+  provider's own public host, which is where the client sends. Three paths read
+  the absence as "compatible with any host": entering a gateway in desktop
+  Settings with the key field blank kept the public key and attached it to that
+  gateway; the key-optional onboarding save did the same on its own separate
+  branch; and an exported `ANTHROPIC_API_KEY` with no `ANTHROPIC_BASE_URL`
+  inherited whatever endpoint the machine-global store happened to hold. All
+  three now resolve a missing endpoint to the provider's canonical host before
+  deciding whether a credential still belongs to it, and a stored endpoint is
+  adopted only when the credential arrived with evidence it belongs there.
+
+- **An endpoint edit that changed nothing could still discard a key.** Anthropic
+  treats `https://gw.example` and `https://gw.example/v1` as one API root — the
+  client appends its own version segment — but credential scoping compared them
+  as raw paths, so switching between the two spellings looked like a host change
+  and retired a working key. Endpoint identity is provider-aware now, and shares
+  its version-suffix rule with the provider itself rather than restating it.
+
 - **Saving a new API key in desktop Settings deleted it.** The endpoint step
   asked "does the stored credential survive this edit?" and got back `false`
   both when the endpoint had moved and when a replacement key had been typed —

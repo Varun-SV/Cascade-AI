@@ -18,6 +18,10 @@ export { ConfigManager, hasUsableProvider, hasProviderCredential, applyProviderA
 // reimplemented in app/: a second copy of this rule is how the answer starts
 // differing between the surfaces that share the config.
 export { sameEndpoint, normalizeEndpoint } from './utils/net.js';
+// Provider-aware: absence of a baseUrl means the provider's own public host,
+// not "any host". The desktop decides credential scope with this, not with the
+// generic string compare above.
+export { sameCredentialEndpoint, credentialEndpointIdentity } from './config/endpoint-identity.js';
 export { sameAzureEndpoint } from './config/azure-endpoint.js';
 export { Keystore } from './config/keystore.js';
 export { CascadeIgnore } from './config/ignore.js';

@@ -11,8 +11,16 @@
 //  Pure and exported so they can be tested at all — the originals lived inside
 //  an `ipcMain.handle` body in a 900-line file, which is why neither had a test.
 
-/** Comparison injected so the desktop uses the SDK's rule, not a second copy. */
-type SameEndpoint = (a: string | undefined | null, b: string | undefined | null) => boolean;
+/**
+ * Comparison injected so the desktop uses the SDK's rule, not a second copy.
+ *
+ * Provider-AWARE: a missing `baseUrl` means the provider's own public host for
+ * anthropic/openai/gemini, not "compatible with anything", and Anthropic's
+ * optional `/v1` suffix names the same root. Taking a generic string compare
+ * here is what let a public-host key survive a gateway being typed in beside
+ * it.
+ */
+type SameCredentialEndpoint = (type: string, a?: string, b?: string) => boolean;
 
 /** What happens to the credential already on a row when its endpoint is edited. */
 export type CredentialDisposition =
@@ -38,15 +46,18 @@ export type CredentialDisposition =
  * credential that was paired with it.
  */
 export function credentialDispositionForEdit(
-  existing: { baseUrl?: string },
+  existing: { type: string; baseUrl?: string },
   nextBaseUrl: string | undefined,
   replacementKey: string | undefined,
-  sameEndpoint: SameEndpoint,
+  sameCredentialEndpoint: SameCredentialEndpoint,
 ): CredentialDisposition {
   if (replacementKey) return 'replaced';
-  if (!existing.baseUrl) return 'keep';      // never was endpoint-scoped
-  if (!nextBaseUrl) return 'clear';          // endpoint cleared — pairing gone
-  return sameEndpoint(existing.baseUrl, nextBaseUrl) ? 'keep' : 'clear';
+  // No `!existing.baseUrl → keep` shortcut. That read absence as "this key was
+  // never scoped to anywhere", but for a default-host provider it means the key
+  // IS scoped — to the public host. Typing a gateway with the key field left
+  // blank therefore kept a console.anthropic.com key and pointed it at the
+  // gateway.
+  return sameCredentialEndpoint(existing.type, existing.baseUrl, nextBaseUrl) ? 'keep' : 'clear';
 }
 
 /**
@@ -60,7 +71,9 @@ export function credentialDispositionForEdit(
 export function priorAzureRow<T extends { deploymentName?: string; baseUrl?: string }>(
   prior: readonly T[],
   incoming: { deploymentName?: string; baseUrl?: string },
-  sameAzureEndpoint: SameEndpoint,
+  // Azure keeps the plain host comparison: a deployment row always names its
+  // resource explicitly, so there is no default to resolve.
+  sameAzureEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean,
 ): T | undefined {
   if (!incoming.deploymentName) return undefined;
   return prior.find((p) => p.deploymentName === incoming.deploymentName
@@ -75,7 +88,30 @@ export interface SettingsMergeDeps {
     apiKey: string,
     extra?: { baseUrl?: string },
   ) => void;
-  sameEndpoint: SameEndpoint;
+  sameCredentialEndpoint: SameCredentialEndpoint;
+}
+
+/**
+ * Apply ONE provider's endpoint edit, retiring the credential when the host
+ * changes and nothing was typed to replace it.
+ *
+ * Exported because `cascade:setConfig` — the key-optional onboarding save —
+ * writes an endpoint through a different path and bypassed
+ * `applySettingsCredentials()` entirely, so an OpenAI-compatible row could have
+ * its endpoint changed with a blank key and keep the old host's key attached.
+ * Two save paths, one rule.
+ */
+export function applyEndpointEdit(
+  existing: { type: string; apiKey?: string; authToken?: string; baseUrl?: string },
+  nextBaseUrl: string | undefined,
+  replacementKey: string | undefined,
+  deps: Pick<SettingsMergeDeps, 'sameCredentialEndpoint'>,
+): void {
+  if (credentialDispositionForEdit(existing, nextBaseUrl, replacementKey, deps.sameCredentialEndpoint) === 'clear') {
+    existing.apiKey = undefined;
+    existing.authToken = undefined;
+  }
+  existing.baseUrl = nextBaseUrl || undefined;
 }
 
 /**
@@ -112,10 +148,6 @@ export function applySettingsCredentials(
       if (baseUrl) providers.push({ type, baseUrl });
       continue;
     }
-    if (credentialDispositionForEdit(existing, baseUrl, data.keys?.[type], deps.sameEndpoint) === 'clear') {
-      existing.apiKey = undefined;
-      existing.authToken = undefined;
-    }
-    existing.baseUrl = baseUrl || undefined;
+    applyEndpointEdit(existing, baseUrl, data.keys?.[type], deps);
   }
 }
