@@ -63,3 +63,18 @@ cloud/web/test-results/
 cloud/web/playwright-report/
 
 .cascade/dead-models.json
+
+# Workspace lockfiles. This is an npm-workspaces monorepo (root package.json
+# "workspaces": web, app, cloud/server, cloud/web) and the ROOT
+# package-lock.json already contains every workspace's dependency tree — every
+# `npm ci`, in CI and in both Dockerfiles, runs from the root and reads only
+# that one.
+#
+# A lockfile committed inside a workspace is therefore never consulted, but it
+# IS what Dependabot updates: it bumps `web/package.json` + `web/package-lock.json`
+# and leaves the root lock untouched, so package.json and the root lock disagree
+# and `npm ci` fails before any code runs. Seven security PRs (#206-#212) all
+# failed that way, including a postcss patch bump — the dependency changes were
+# fine, the lockfiles were not.
+/*/package-lock.json
+/cloud/*/package-lock.json
