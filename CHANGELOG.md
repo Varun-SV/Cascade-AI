@@ -21,6 +21,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## 0.75.0 - 2026-08-14
 
 ### Fixed
+- **A gateway bearer could still reach the public Anthropic host.** Every
+  config path refuses to configure `authToken` without the `baseUrl` of the
+  gateway that issued it, but the provider itself enforced nothing — and the
+  programmatic SDK skips those paths entirely: `createCascade()` runs schema
+  validation alone, and the schema permits a bearer with no endpoint. The
+  client was then built with no `baseURL`, which is the SDK's public default
+  host. `listModels()` had the same hole independently, reading `authToken`
+  straight off the config, so a bearer *and* an API key with no gateway had
+  generation correctly use the key while discovery sent the bearer to the
+  public host. Both now take one decision: a bearer is used only with its
+  gateway, an API key alongside it is used instead, and a bearer with neither
+  is refused rather than sent. "Has a credential" carries the same rule, so a
+  bearer with no gateway no longer skips onboarding or passes the router's
+  discovery gate.
+
+- **Two Azure rows for one deployment could be split by their display names.**
+  The resource-scoping fix above weighed `label` beside the deployment name and
+  endpoint, but a label is a name the user types — "project prod" and "prod"
+  are routinely the same deployment. A differing pair made the rows
+  non-matching, so the global row was appended rather than filling the
+  workspace row, and since the router binds an Azure model by deployment name
+  the first, keyless row won while a correctly keyed duplicate sat behind it.
+  `label` decides only when neither resource nor deployment can, which is the
+  role it had before.
+
+- **The browser vault accepted a credential it can never use.** A pull into an
+  empty vault kept a desktop/CLI gateway row whose only credential is a bearer.
+  The web client has no bearer field and the hosted run schema strips it, so
+  the vault displayed a configured provider and the server received a keyless
+  one — a restore reporting success for something that could not run. Such rows
+  are dropped and named in the restore notice, which now distinguishes three
+  cases: a retired provider, a revoked credential, and a live credential that
+  simply cannot be used from a browser.
+
 - **An Azure key could be sent to a different Azure resource.** The global
   credential store keyed Azure entries by deployment name alone, so in the
   normal routed shape — where a deployment name is always present — the

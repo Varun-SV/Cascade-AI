@@ -46,28 +46,49 @@ function providerSig(p: ProviderConfig): string {
 export function mergeProviders(
   local: ProviderConfig[],
   incoming: ProviderConfig[],
-): { merged: ProviderConfig[]; removed: string[]; revoked: number } {
+): { merged: ProviderConfig[]; removed: string[]; revoked: number; unusable: string[] } {
   const map = new Map<string, ProviderConfig>();
   for (const l of local) map.set(providerSig(l), l);
   const { kept: live, removed } = stripRetiredProviders(incoming);
   const { kept, removed: revoked } = stripRevokedCredentials(live);
+  const unusable: string[] = [];
   for (const i of kept) {
     // The browser can only USE `apiKey` — its ProviderConfig has no bearer
     // field and neither does the hosted run schema — so an incoming row
     // carrying only a gateway `authToken` is a valid credential elsewhere and
-    // no credential here. Letting it win outright replaced a working browser
-    // key with something unusable and persisted that to localStorage, leaving
-    // the next chat with nothing. The incoming row still wins for everything
-    // else, so the gateway's own fields survive to be pushed back.
+    // no credential here.
     const prior = map.get(providerSig(i));
-    const merged = !i.apiKey && prior?.apiKey ? { ...i, apiKey: prior.apiKey } : i;
-    map.set(providerSig(merged), merged);
+    if (!i.apiKey) {
+      if (prior?.apiKey) {
+        // Keep the local key rather than letting the bearer row displace it.
+        // That overwrote a working browser key with something unusable and
+        // persisted it, leaving the next chat with nothing.
+        map.set(providerSig(i), { ...i, apiKey: prior.apiKey });
+        continue;
+      }
+      // Nothing local to fall back on, so this row would enter the vault with
+      // no credential the browser can send. It is not harmless: KeyVault shows
+      // it as a configured provider and useChatSession puts it in `providers`,
+      // where the hosted ChatRunPayloadSchema — which has no `authToken` field
+      // — strips the bearer and the server receives a keyless Anthropic
+      // provider. The restore reported success for a credential that cannot
+      // run here. Dropped instead, and named in the notice.
+      //
+      // Consequence, deliberately accepted: a bundle pulled and later re-pushed
+      // FROM the browser no longer carries that row. Keeping a gateway bearer
+      // in localStorage where nothing can ever use it is storage risk with no
+      // benefit, and the notice tells the user to keep managing it from the
+      // desktop or CLI, which do support bearers.
+      unusable.push(i.type);
+      continue;
+    }
+    map.set(providerSig(i), i);
   }
   // `removed` is returned rather than dropped so the restore can SAY a synced
   // key was skipped. The CLI and desktop pull paths both explain it; the
   // browser staying silent would be the one surface where a key disappears
   // with no reason given.
-  return { merged: [...map.values()], removed, revoked };
+  return { merged: [...map.values()], removed, revoked, unusable };
 }
 
 /** Rebuild the web's `backend` discriminator from whichever key is present. */
@@ -117,10 +138,12 @@ export default function AccountSyncPanel({ keys, webSearch, onRestoreKeys, onRes
       const bundle = await decryptJSON<WebSyncBundle>(blob as EncryptedBlob, passphrase);
       let skippedProviders: string[] = [];
       let revokedCount = 0;
+      let unusableHere: string[] = [];
       if (bundle.providers) {
-        const { merged, removed, revoked } = mergeProviders(keys, bundle.providers);
+        const { merged, removed, revoked, unusable } = mergeProviders(keys, bundle.providers);
         skippedProviders = removed;
         revokedCount = revoked;
+        unusableHere = unusable;
         onRestoreKeys(merged);
       }
       if (bundle.webSearch) onRestoreWebSearch(toWebSearch(bundle.webSearch));
@@ -130,7 +153,15 @@ export default function AccountSyncPanel({ keys, webSearch, onRestoreKeys, onRes
       // Named separately from "no longer supported": the PROVIDER is fine, the
       // credential is the problem, and the two ask different things of the user.
       const revokedNote = revokedCount ? ` ${describeRevokedRemoval()}` : '';
-      setStatus(`Restored from your account${updatedAt ? ` (synced ${relativeTime(updatedAt)})` : ''}.${skippedNote}${revokedNote}`);
+      // A third, distinct case: the provider is supported and the credential is
+      // live — it just cannot be used from a browser, which can only send an
+      // API key. Saying which one, and where it still works, is the difference
+      // between a missing provider and a mystery.
+      const unusableNote = unusableHere.length
+        ? ` Skipped ${[...new Set(unusableHere)].join(', ')} — a gateway token can't be used from the browser;`
+          + ' keep using it from the desktop app or CLI.'
+        : '';
+      setStatus(`Restored from your account${updatedAt ? ` (synced ${relativeTime(updatedAt)})` : ''}.${skippedNote}${revokedNote}${unusableNote}`);
     } catch {
       // AES-GCM's auth-tag check is what fails on a wrong passphrase — say so
       // plainly rather than surfacing a raw WebCrypto "OperationError".

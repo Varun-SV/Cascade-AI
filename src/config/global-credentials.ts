@@ -61,25 +61,37 @@ function azureEndpoint(p: ProviderConfig): string | undefined {
  * resources for exactly this reason; the global store now holds the same
  * invariant.
  *
- * The rule: every identifier present on BOTH rows must agree, and at least one
- * must be present on both. That keeps the case the store exists for — a
+ * The rule: every REAL identifier present on both rows must agree, and at least
+ * one must be present on both. That keeps the case the store exists for — a
  * workspace row naming only `deploymentName`, adopting the endpoint AND key
  * from the global row — because an identifier absent on one side is not a
  * disagreement. Only a row that names a DIFFERENT resource is rejected.
+ *
+ * `label` is a FALLBACK, never a constraint. It is a display name the user
+ * types, so two rows for the same deployment on the same resource routinely
+ * carry different ones ("project prod" vs "prod"). Weighing it beside the real
+ * identifiers made that pair non-matching: the global row was appended instead
+ * of filling the workspace row, and since the router binds an Azure model with
+ * `configs.find(... deploymentName === model.id)`, the first — keyless —
+ * workspace row won and every request failed while a correctly keyed duplicate
+ * sat behind it. So label decides only when neither resource nor deployment
+ * can, which is the role it had before.
  */
 function sameAzureEntry(a: ProviderConfig, b: ProviderConfig): boolean {
-  const pairs: Array<[string | undefined, string | undefined]> = [
+  const strong: Array<[string | undefined, string | undefined]> = [
     [a.deploymentName, b.deploymentName],
     [azureEndpoint(a), azureEndpoint(b)],
-    [a.label, b.label],
   ];
   let shared = 0;
-  for (const [x, y] of pairs) {
+  for (const [x, y] of strong) {
     if (!x || !y) continue;      // absent on one side — says nothing either way
     if (x !== y) return false;   // present on both and different — different entries
     shared++;
   }
-  return shared > 0;
+  if (shared > 0) return true;
+  // Neither resource nor deployment is stated on both sides, so the display
+  // name is all there is to go on.
+  return Boolean(a.label && b.label && a.label === b.label);
 }
 
 /** An entry is worth persisting globally if it carries a credential or endpoint. */

@@ -314,3 +314,66 @@ describe('AnthropicProvider.listModels — a gateway that redirects', () => {
     expect(models.every((m) => m.provider === 'anthropic')).toBe(true); // fell back to the catalogue
   });
 });
+
+describe('AnthropicProvider — a bearer is never sent to the public host', () => {
+  // The config paths all refuse to configure a bearer without its gateway, but
+  // the public SDK reaches this constructor without touching them:
+  // `createCascade()` runs `CascadeConfigSchema.parse()` alone, and
+  // `ProviderConfigSchema` permits `authToken` with no `baseUrl`. The
+  // constructor then built a client with `baseURL` undefined — the SDK's
+  // public default — and sent a gateway's token to api.anthropic.com.
+
+  it('refuses to construct with a bearer and no gateway', () => {
+    expect(() => new AnthropicProvider({ type: 'anthropic', authToken: 'gw-token' }))
+      .toThrow(/without a gateway URL/i);
+  });
+
+  it('uses the API key instead when both are configured without a gateway', async () => {
+    // The key IS valid for the public host, so the run should succeed with the
+    // right credential rather than fail over a bearer that was never usable.
+    // This also covers listModels(), which builds its request by hand: reading
+    // `config.authToken` directly, it sent Bearer to the public default host
+    // while the constructor was correctly using the key — discovery and
+    // generation disagreeing about the same credential.
+    //
+    // Its OWN spy: the redirect suite above calls fetchSpy.mockRestore(),
+    // which detaches the module-level spy for good, so anything after it
+    // silently stops intercepting and reaches the network instead.
+    const localFetch = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{"data":[]}', { status: 200 }));
+    try {
+      const provider = new AnthropicProvider({
+        type: 'anthropic', authToken: 'gw-token', apiKey: 'sk-ant-real',
+      });
+      await provider.listModels();
+
+      const headers = new Headers(
+        (localFetch.mock.calls[0]?.[1] as RequestInit | undefined)?.headers as HeadersInit,
+      );
+      expect(headers.get('x-api-key')).toBe('sk-ant-real');
+      expect(headers.get('authorization')).toBeNull();
+    } finally {
+      localFetch.mockRestore();
+    }
+  });
+
+  it('still accepts a bearer that names its gateway', () => {
+    expect(() => new AnthropicProvider({
+      type: 'anthropic', authToken: 'gw-token', baseUrl: 'https://gateway.internal/v1',
+    })).not.toThrow();
+  });
+
+  it('rejects the same shape through the programmatic config path', async () => {
+    // The route the finding names: a config the schema accepts, straight into
+    // createCascade(), with nothing in between to catch it.
+    const { createCascade } = await import('../sdk/index.js');
+    const build = async () => {
+      const cascade = await createCascade({
+        providers: [{ type: 'anthropic', authToken: 'gw-token' }],
+      } as never);
+      // Construction is lazy in some paths; force a provider to be built.
+      await cascade.getRouter().generate('T3', { messages: [{ role: 'user', content: 'hi' }] });
+    };
+    await expect(build()).rejects.toThrow();
+  });
+});

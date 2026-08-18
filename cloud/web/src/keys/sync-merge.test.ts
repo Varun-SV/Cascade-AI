@@ -60,4 +60,48 @@ describe('browser sync merge', () => {
     expect(removed).toEqual([]);
     expect(merged).toHaveLength(2);
   });
+
+  it('drops a bearer-only row when the vault has nothing to fall back on', () => {
+    // The empty-vault pull: a legitimate desktop/CLI gateway row arrives, there
+    // is no local key to keep, so the row entered the vault with no credential
+    // the browser can send. KeyVault then showed it as a configured provider
+    // and useChatSession put it in `providers`, where the hosted
+    // ChatRunPayloadSchema — which has no `authToken` field — stripped the
+    // bearer and the server got a keyless Anthropic provider. The restore
+    // reported success for something that could not run.
+    const local: ProviderConfig[] = [];
+    const incoming: ProviderConfig[] = [
+      { type: 'anthropic', authToken: 'gw-token', baseUrl: 'https://gateway.internal' } as ProviderConfig,
+    ];
+
+    const { merged, unusable } = mergeProviders(local, incoming);
+    expect(merged).toHaveLength(0);
+    expect(unusable).toEqual(['anthropic']);
+  });
+
+  it('keeps a bearer row that also carries a usable API key', () => {
+    // Only the UNUSABLE case is dropped. A row the browser can actually send
+    // is kept whole, bearer and all, so a later push still carries it.
+    const local: ProviderConfig[] = [];
+    const incoming: ProviderConfig[] = [
+      { type: 'anthropic', apiKey: 'sk-ant-real', authToken: 'gw-token' } as ProviderConfig,
+    ];
+
+    const { merged, unusable } = mergeProviders(local, incoming);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.apiKey).toBe('sk-ant-real');
+    expect(unusable).toEqual([]);
+  });
+
+  it('does not drop an unrelated local provider when one incoming row is unusable', () => {
+    const local: ProviderConfig[] = [{ type: 'openai', apiKey: 'sk-o' }];
+    const incoming: ProviderConfig[] = [
+      { type: 'anthropic', authToken: 'gw-token', baseUrl: 'https://gateway.internal' } as ProviderConfig,
+    ];
+
+    const { merged, unusable } = mergeProviders(local, incoming);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.type).toBe('openai');
+    expect(unusable).toEqual(['anthropic']);
+  });
 });

@@ -51,15 +51,24 @@ const KEY_OPTIONAL_PROVIDER_TYPES = new Set(['ollama', 'openai-compatible']);
  * of them two rounds after the first.
  */
 export function hasProviderCredential(
-  p: { apiKey?: string; authToken?: string } | undefined | null,
+  p: { apiKey?: string; authToken?: string; baseUrl?: string } | undefined | null,
 ): boolean {
   if (!p) return false;
-  return (typeof p.apiKey === 'string' && p.apiKey.length > 0)
-    || (typeof p.authToken === 'string' && p.authToken.length > 0);
+  if (typeof p.apiKey === 'string' && p.apiKey.length > 0) return true;
+  // A bearer counts ONLY with the gateway that issued it. This is the rule the
+  // rest of the release states — discovery, `cascade link` and the environment
+  // injection all refuse to configure a bearer without an endpoint — but the
+  // predicate they all funnel through did not hold it, so a row carrying a
+  // lone `authToken` reported itself as credentialed. `hasUsableProvider()`
+  // then skipped onboarding, the router's discovery gate let it through, and
+  // AnthropicProvider sent a gateway's token to api.anthropic.com because the
+  // SDK falls back to its public default host when no baseURL is given.
+  return typeof p.authToken === 'string' && p.authToken.length > 0
+    && typeof p.baseUrl === 'string' && p.baseUrl.length > 0;
 }
 
 export function hasUsableProvider(
-  providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined,
+  providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }> | undefined,
 ): boolean {
   if (!providers?.length) return false;
   return providers.some((p) => KEY_OPTIONAL_PROVIDER_TYPES.has(p.type) || hasProviderCredential(p));

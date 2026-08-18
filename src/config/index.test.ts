@@ -246,13 +246,27 @@ describe('hasUsableProvider (CLI re-init bug fix)', () => {
     expect(hasUsableProvider([{ type: 'anthropic', apiKey: 'sk-ant-x' }])).toBe(true);
   });
 
-  it('returns true for an Anthropic OAuth token adopted by `cascade link`', () => {
-    // cli/commands/link.ts stores a discovered OAuth credential in authToken,
-    // NOT apiKey, and AnthropicProvider.isAvailable() accepts either. Counting
-    // only apiKey called that working install unconfigured: `cascade run`
-    // aborted with "No providers configured" and the desktop reopened the
-    // full-screen wizard over a config that runs fine.
-    expect(hasUsableProvider([{ type: 'anthropic', authToken: 'sk-ant-oat-x' }])).toBe(true);
+  it('returns true for a bearer credential that names its gateway', () => {
+    // cli/commands/link.ts stores a discovered credential in authToken, NOT
+    // apiKey, and AnthropicProvider accepts either. Counting only apiKey called
+    // that working install unconfigured: `cascade run` aborted with "No
+    // providers configured" and the desktop reopened the full-screen wizard
+    // over a config that runs fine.
+    expect(hasUsableProvider([
+      { type: 'anthropic', authToken: 'gw-token', baseUrl: 'https://gateway.internal' },
+    ])).toBe(true);
+  });
+
+  it('returns false for a bearer with no gateway to send it to', () => {
+    // This case previously asserted TRUE, for a subscription OAuth token
+    // `cascade link` used to adopt. This release makes such a token
+    // non-adoptable, and holds that a bearer is only ever configured with the
+    // gateway that issued it — so the shape is no longer reachable through any
+    // config path. Calling it usable is not harmless: it skipped onboarding and
+    // let the router select the provider, and AnthropicProvider then sent the
+    // gateway's token to api.anthropic.com, because the SDK falls back to its
+    // public default host when given no baseURL.
+    expect(hasUsableProvider([{ type: 'anthropic', authToken: 'gw-token' }])).toBe(false);
   });
 
   it('still returns false for a provider with neither key nor token', () => {
@@ -353,8 +367,16 @@ describe('hasProviderCredential — one answer for every surface', () => {
     // two review rounds after the first. This is the single predicate they all
     // go through now.
     expect(hasProviderCredential({ apiKey: 'sk' })).toBe(true);
-    expect(hasProviderCredential({ authToken: 'gw-token' })).toBe(true);
+    expect(hasProviderCredential({ authToken: 'gw-token', baseUrl: 'https://gateway.internal' })).toBe(true);
     expect(hasProviderCredential({})).toBe(false);
+  });
+
+  it('does not count a bearer with no gateway', () => {
+    // Previously TRUE. A bearer is only valid at the gateway that issued it, so
+    // without one there is nowhere it can be sent — and reporting it as a
+    // credential is what let it reach the public host.
+    expect(hasProviderCredential({ authToken: 'gw-token' })).toBe(false);
+    expect(hasProviderCredential({ authToken: 'gw-token', baseUrl: '' })).toBe(false);
   });
 
   it('treats an empty string as no credential, and tolerates a missing entry', () => {

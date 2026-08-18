@@ -105,6 +105,37 @@ const sameOriginFetch = ((input: string | URL | Request, init?: RequestInit) => 
   return fetchSameOrigin(url, init);
 }) as unknown as typeof fetch;
 
+/**
+ * Which credential this config may put on the wire, and how to send it.
+ *
+ * ONE decision, because the constructor and `listModels()` each made it
+ * separately and disagreed — the third time in this release that discovery and
+ * generation have diverged on the same question. `listModels()` builds its
+ * request by hand and read `config.authToken` directly, so a config carrying a
+ * bearer AND an api key with no gateway had generation correctly use the key
+ * while discovery sent `Authorization: Bearer` to the public default host.
+ *
+ * The rule both now share: a bearer is valid only at the gateway that issued
+ * it, so without `baseUrl` it is not sendable. An api key alongside it is, and
+ * is used instead. A bearer with neither gateway nor key is refused outright
+ * rather than downgraded to an anonymous request.
+ */
+export function anthropicAuth(
+  config: { apiKey?: string; authToken?: string; baseUrl?: string },
+): { mode: 'bearer'; token: string } | { mode: 'apiKey'; key: string } | { mode: 'none' } {
+  const gateway = anthropicApiRoot(config.baseUrl);
+  if (config.authToken && gateway) return { mode: 'bearer', token: config.authToken };
+  if (config.apiKey) return { mode: 'apiKey', key: config.apiKey };
+  if (config.authToken) {
+    throw new Error(
+      'Anthropic bearer token configured without a gateway URL. A bearer is only valid at the '
+      + 'gateway that issued it, so it will not be sent to the public API. Set `baseUrl` to that '
+      + 'gateway, or configure `apiKey` instead.',
+    );
+  }
+  return { mode: 'none' };
+}
+
 export class AnthropicProvider extends BaseProvider {
   private client: Anthropic;
 
@@ -126,15 +157,20 @@ export class AnthropicProvider extends BaseProvider {
     // only bearer that can reach here now is a gateway's, and asking a gateway
     // to honour an Anthropic beta it knows nothing about is a way to have a
     // perfectly valid credential rejected.
-    if (config.authToken) {
-      this.client = new Anthropic({
-        authToken: config.authToken,
-        fetch: sameOriginFetch,
-        ...(baseURL ? { baseURL } : {}),
-      });
+    //
+    // This constructor is the last gate before the credential goes on the wire
+    // and it enforced nothing. The public SDK reaches it without touching the
+    // config paths that do: `createCascade()` runs `CascadeConfigSchema.parse()`
+    // alone, and `ProviderConfigSchema` permits `authToken` with no `baseUrl`,
+    // so `createCascade({ providers: [{ type: 'anthropic', authToken }] })`
+    // built a client with `baseURL` undefined — the SDK's public default host
+    // — and sent a gateway's token to api.anthropic.com.
+    const auth = anthropicAuth(config);
+    if (auth.mode === 'bearer') {
+      this.client = new Anthropic({ authToken: auth.token, fetch: sameOriginFetch, baseURL });
     } else {
       this.client = new Anthropic({
-        apiKey: config.apiKey,
+        apiKey: auth.mode === 'apiKey' ? auth.key : undefined,
         fetch: sameOriginFetch,
         ...(baseURL ? { baseURL } : {}),
       });
@@ -249,15 +285,19 @@ export class AnthropicProvider extends BaseProvider {
       // still pointed at /v1/v1/messages.
       const base = anthropicApiRoot(this.config.baseUrl) ?? 'https://api.anthropic.com';
       const modelsUrl = `${base}/v1/models`;
+      const auth = anthropicAuth(this.config);
       // Same-origin redirects only: `x-api-key` is a custom header, so the
       // platform does NOT strip it across origins the way it strips
       // Authorization. A gateway that redirected elsewhere would be handed the
       // key configured for it.
       const resp = await fetchSameOrigin(modelsUrl, {
         headers: {
-          ...(this.config.authToken
-            ? { authorization: `Bearer ${this.config.authToken}` }
-            : { 'x-api-key': this.config.apiKey ?? '' }),
+          // Same decision the constructor makes — see anthropicAuth(). Read
+          // straight off `config`, this branch sent a bearer to the public
+          // default host whenever no gateway was configured.
+          ...(auth.mode === 'bearer'
+            ? { authorization: `Bearer ${auth.token}` }
+            : { 'x-api-key': auth.mode === 'apiKey' ? auth.key : '' }),
           'anthropic-version': '2023-06-01',
         },
       });

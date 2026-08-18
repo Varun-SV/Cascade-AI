@@ -107,6 +107,45 @@ describe('global credentials store', () => {
     expect(merged[0]!.apiKey).toBe('key-for-a');
   });
 
+  it('does not let differing display labels split one deployment in two', () => {
+    // `label` is a name the user types, so the same deployment on the same
+    // resource routinely carries two of them. Weighing it beside the real
+    // identifiers made this pair non-matching, so the global row was APPENDED
+    // rather than filling the workspace row — and the router binds an Azure
+    // model with `configs.find(... deploymentName === model.id)`, so the
+    // first, keyless workspace row won and every request failed while a
+    // correctly keyed duplicate sat behind it.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://resource-a.openai.azure.com', label: 'project prod' }],
+      [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://resource-a.openai.azure.com', label: 'prod', apiKey: 'key-for-a' }],
+    );
+
+    const azure = merged.filter((p) => p.type === 'azure');
+    expect(azure).toHaveLength(1);
+    expect(azure[0]!.apiKey).toBe('key-for-a');
+    // The workspace's own display name is not overwritten by the global one.
+    expect(azure[0]!.label).toBe('project prod');
+  });
+
+  it('still refuses to match across resources even when the labels agree', () => {
+    // Label must not rescue a match the real identifiers reject, either.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://resource-b.openai.azure.com', label: 'prod' }],
+      [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://resource-a.openai.azure.com', label: 'prod', apiKey: 'key-for-a' }],
+    );
+    expect(merged.filter((p) => p.type === 'azure')).toHaveLength(2);
+    expect(merged.find((p) => p.baseUrl?.includes('resource-b'))?.apiKey).toBeUndefined();
+  });
+
+  it('falls back to the label when neither resource nor deployment is stated', () => {
+    const merged = mergeGlobalCredentials(
+      [{ type: 'azure', label: 'prod' }],
+      [{ type: 'azure', label: 'prod', apiKey: 'key-for-a', baseUrl: 'https://resource-a.openai.azure.com' }],
+    );
+    expect(merged.filter((p) => p.type === 'azure')).toHaveLength(1);
+    expect(merged[0]!.apiKey).toBe('key-for-a');
+  });
+
   it('treats a trailing slash as the same resource, not a second one', () => {
     const merged = mergeGlobalCredentials(
       [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://resource-a.openai.azure.com/' }],
