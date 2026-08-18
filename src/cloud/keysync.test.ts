@@ -376,4 +376,53 @@ describe('keysync — reporting a credential the sync discarded', () => {
     expect(cleanup.revokedCredentials).toBe(0);
     expect(didCleanupChangeAnything(cleanup)).toBe(false);
   });
+
+  it('drops an incoming bearer that has no gateway, rather than let it erase a good key', () => {
+    // The revoked filter removes KNOWN subscription tokens; an ordinary
+    // `{ type: 'anthropic', authToken: 'gw-token' }` is a live credential and
+    // survives it. mergeByKey then lets the incoming row win on provider
+    // signature — so the local API key was erased and a bearer persisted that
+    // AnthropicProvider now refuses for lacking `baseUrl`, leaving the device
+    // unable to run at all.
+    const local = { providers: [{ type: 'anthropic', apiKey: 'good-key' }] } as never as CascadeConfig;
+    const bundle = { v: 1, providers: [{ type: 'anthropic', authToken: 'gw-token' }] } as never;
+
+    const cleanup = { removed: [], clearedPins: [] };
+    const next = applySyncBundle(bundle, local, cleanup as never);
+
+    const anthropic = next.providers.find((p) => p.type === 'anthropic')!;
+    expect(anthropic.apiKey).toBe('good-key');
+    expect(anthropic.authToken).toBeUndefined();
+    expect(cleanup).toMatchObject({ unusableCredentials: 1 });
+    expect(didCleanupChangeAnything(cleanup as never)).toBe(true);
+  });
+
+  it('keeps an incoming bearer that names its gateway', () => {
+    const local = { providers: [] } as never as CascadeConfig;
+    const bundle = {
+      v: 1,
+      providers: [{ type: 'anthropic', authToken: 'gw-token', baseUrl: 'https://gateway.internal' }],
+    } as never;
+
+    const cleanup = { removed: [], clearedPins: [] };
+    const next = applySyncBundle(bundle, local, cleanup as never);
+    expect(next.providers[0]).toMatchObject({ authToken: 'gw-token', baseUrl: 'https://gateway.internal' });
+    expect(cleanup).toMatchObject({ unusableCredentials: 0 });
+  });
+
+  it('does not mistake a genuinely keyless provider for an unusable bearer', () => {
+    const local = { providers: [] } as never as CascadeConfig;
+    const bundle = {
+      v: 1,
+      providers: [
+        { type: 'ollama' },
+        { type: 'openai-compatible', baseUrl: 'http://localhost:8000/v1' },
+      ],
+    } as never;
+
+    const cleanup = { removed: [], clearedPins: [] };
+    const next = applySyncBundle(bundle, local, cleanup as never);
+    expect(next.providers).toHaveLength(2);
+    expect(cleanup).toMatchObject({ unusableCredentials: 0 });
+  });
 });

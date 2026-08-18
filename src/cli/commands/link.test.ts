@@ -565,4 +565,42 @@ describe('cascade link — adoption', () => {
     expect(anthropic?.['authToken']).toBeUndefined();
     expect(anthropic?.['apiKey']).toBeUndefined();
   });
+
+  it('creates a deployment the environment named but the config lacks', async () => {
+    // With one configured resource, AZURE_OPENAI_DEPLOYMENT naming a NEW
+    // deployment and no AZURE_OPENAI_ENDPOINT fell through
+    // azureDeploymentsForCredential's `scoped ??= deployments`: every existing
+    // deployment had its key rotated and the command reported success, while
+    // the deployment the user actually asked for was never created. The fully
+    // routed branch upserts it; this one did not.
+    await seedConfig([
+      { type: 'azure', deploymentName: 'gpt-4o', baseUrl: 'https://acme.openai.azure.com', apiKey: 'old' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'new-key';
+    process.env['AZURE_OPENAI_DEPLOYMENT'] = 'gpt-4o-mini';
+
+    const providers = await providersAfterLink('azure');
+    const azure = providers.filter((p) => p['type'] === 'azure');
+
+    const created = azure.find((p) => p['deploymentName'] === 'gpt-4o-mini');
+    expect(created).toBeDefined();
+    expect(created).toMatchObject({
+      baseUrl: 'https://acme.openai.azure.com',
+      apiKey: 'new-key',
+    });
+    // …and the existing sibling on that resource is rotated, as before.
+    expect(azure.find((p) => p['deploymentName'] === 'gpt-4o')).toMatchObject({ apiKey: 'new-key' });
+  });
+
+  it('does not duplicate a named deployment that is already configured', async () => {
+    await seedConfig([
+      { type: 'azure', deploymentName: 'gpt-4o', baseUrl: 'https://acme.openai.azure.com', apiKey: 'old' },
+    ]);
+    process.env['AZURE_OPENAI_KEY'] = 'new-key';
+    process.env['AZURE_OPENAI_DEPLOYMENT'] = 'gpt-4o';
+
+    const azure = (await providersAfterLink('azure')).filter((p) => p['type'] === 'azure');
+    expect(azure).toHaveLength(1);
+    expect(azure[0]).toMatchObject({ apiKey: 'new-key' });
+  });
 });

@@ -90,8 +90,18 @@ function sameAzureEntry(a: ProviderConfig, b: ProviderConfig): boolean {
     shared++;
   }
   if (shared > 0) return true;
-  // Neither resource nor deployment is stated on both sides, so the display
-  // name is all there is to go on.
+
+  // No real identifier is stated on BOTH sides. Label decides only when neither
+  // side states one at all — never to join rows whose strong identities are
+  // merely uncorrelated. A workspace row `{ deploymentName: 'prod', label:
+  // 'main' }` and a global row `{ baseUrl: resourceA, label: 'main' }` each
+  // name something real, and nothing relates the two; joining them on a display
+  // name the user typed would assign resource A's key to `prod` on a guess.
+  // Label is metadata, not identity.
+  const aNamesSomething = Boolean(a.deploymentName || azureEndpoint(a));
+  const bNamesSomething = Boolean(b.deploymentName || azureEndpoint(b));
+  if (aNamesSomething || bNamesSomething) return false;
+
   return Boolean(a.label && b.label && a.label === b.label);
 }
 
@@ -167,18 +177,32 @@ export function mergeGlobalCredentials(
     // exported gateway. A row that already has a credential keeps it and gains
     // no rival; only a row with neither adopts one.
     const credentialled = Boolean(existing.apiKey || existing.authToken);
-    if (!credentialled && g.apiKey) existing.apiKey = g.apiKey;
-    // A bearer and the gateway that issued it are ONE credential, and travel
-    // together or not at all. Filling the token while leaving the row's own
+
+    // A credential and the endpoint it was issued for are ONE unit, and travel
+    // together or not at all. Filling the secret while leaving the row's own
     // endpoint in place — which the `!existing.baseUrl` guard below does — sent
-    // gateway A's token to gateway B: a workspace row naming gateway B with no
-    // credential adopted the global row's token from gateway A, and the result
+    // host A's credential to host B: a workspace row naming gateway B with no
+    // credential adopted the global row's secret from gateway A, and the result
     // passes every usability check on the way to the wire.
     //
-    // Non-Azure rows still match on provider type alone, so this pairing is the
-    // only thing standing between two different gateways for one provider.
-    if (!credentialled && !existing.apiKey && g.authToken && g.baseUrl
-        && (!existing.baseUrl || sameEndpoint(existing.baseUrl, g.baseUrl))) {
+    // This applies to `apiKey` exactly as it does to `authToken`. The
+    // environment path already treats `ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL`
+    // as a pair, and an OpenAI-compatible key is endpoint-bound too — a
+    // provider key is only meaningful at the host that issued it, whichever
+    // field carries it. Non-Azure rows still match on provider type alone, so
+    // this pairing is the only thing standing between two hosts for one
+    // provider type.
+    const endpointsDiffer = Boolean(
+      existing.baseUrl && g.baseUrl && !sameEndpoint(existing.baseUrl, g.baseUrl),
+    );
+
+    if (!credentialled && !endpointsDiffer && g.apiKey) {
+      existing.apiKey = g.apiKey;
+      if (g.baseUrl) existing.baseUrl = g.baseUrl;
+    }
+    // A bearer additionally REQUIRES a gateway: without one there is nowhere it
+    // can be sent, so adopting it would only make the row look configured.
+    if (!credentialled && !endpointsDiffer && !existing.apiKey && g.authToken && g.baseUrl) {
       existing.authToken = g.authToken;
       existing.baseUrl = g.baseUrl;
     }

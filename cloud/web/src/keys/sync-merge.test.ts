@@ -41,8 +41,12 @@ describe('browser sync merge', () => {
     const { merged, revoked } = mergeProviders(local, incoming);
     expect(revoked).toBe(0);                                   // nothing was revoked
     expect(merged[0]?.apiKey).toBe('sk-ant-browser');          // the usable key survives
-    // …and the gateway's own fields ride along, so a later push still carries them.
-    expect((merged[0] as { authToken?: string }).authToken).toBe('gw-token');
+    // The bearer does NOT ride along. This previously asserted it did, on the
+    // reasoning that a later push should still carry the gateway's own fields —
+    // but that is exactly the round trip that undid the fix: the pushed bundle
+    // handed the token back to a desktop pull, and anthropicAuth() prefers a
+    // bearer, so the browser key this branch protected was shadowed again.
+    expect((merged[0] as { authToken?: string }).authToken).toBeUndefined();
   });
 
   it('lets an incoming API key replace the local one, as a sync should', () => {
@@ -76,7 +80,7 @@ describe('browser sync merge', () => {
 
     const { merged, unusable } = mergeProviders(local, incoming);
     expect(merged).toHaveLength(0);
-    expect(unusable).toEqual(['anthropic']);
+    expect(unusable.map((u) => u.type)).toEqual(['anthropic']);
   });
 
   it('keeps a bearer row that also carries a usable API key', () => {
@@ -102,41 +106,99 @@ describe('browser sync merge', () => {
     const { merged, unusable } = mergeProviders(local, incoming);
     expect(merged).toHaveLength(1);
     expect(merged[0]?.type).toBe('openai');
-    expect(unusable).toEqual(['anthropic']);
+    expect(unusable.map((u) => u.type)).toEqual(['anthropic']);
   });
 
   it('keeps a keyless openai-compatible endpoint, which is key-optional', () => {
     // The bearer quarantine keyed off "no apiKey", but keyless is not the same
     // as unusable: OpenAICompatibleProvider substitutes `not-required` when no
-    // key is set, and the vault accepts a row with just a baseUrl. A synced
-    // self-hosted endpoint was being dropped and reported as unusable in the
-    // browser, which is exactly where it does work.
+    // key is set, and the vault accepts a row with just a baseUrl.
+    //
+    // Uses a HOSTED url. This case originally used http://localhost:8000/v1,
+    // which was the wrong example: keyless is fine, but a hosted run executes
+    // on the cloud server, so a loopback endpoint is unreachable there whether
+    // it has a key or not. That is covered separately below.
     const local: ProviderConfig[] = [];
     const incoming: ProviderConfig[] = [
-      { type: 'openai-compatible', baseUrl: 'http://localhost:8000/v1' },
+      { type: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1' },
     ];
 
     const { merged, unusable } = mergeProviders(local, incoming);
     expect(merged).toHaveLength(1);
-    expect(merged[0]?.baseUrl).toBe('http://localhost:8000/v1');
+    expect(merged[0]?.baseUrl).toBe('https://api.groq.com/openai/v1');
     expect(unusable).toEqual([]);
   });
 
-  it('keeps a keyless ollama row too', () => {
+  it('drops a keyless ollama row — a hosted page cannot reach a local daemon', () => {
+    // Previously asserted the opposite, as part of "keep every keyless row".
+    // KeyVault deliberately excludes Ollama from the types a user can add here
+    // for this exact reason; a restore must not put one in behind that.
     const { merged, unusable } = mergeProviders([], [{ type: 'ollama' }]);
-    expect(merged).toHaveLength(1);
-    expect(unusable).toEqual([]);
+    expect(merged).toHaveLength(0);
+    expect(unusable.map((u) => u.reason)).toEqual(['local-endpoint']);
   });
 
   it('still quarantines a bearer-only row alongside a kept keyless one', () => {
     const incoming: ProviderConfig[] = [
-      { type: 'openai-compatible', baseUrl: 'http://localhost:8000/v1' },
+      { type: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1' },
       { type: 'anthropic', authToken: 'gw-token', baseUrl: 'https://gateway.internal' } as ProviderConfig,
     ];
 
     const { merged, unusable } = mergeProviders([], incoming);
     expect(merged).toHaveLength(1);
     expect(merged[0]?.type).toBe('openai-compatible');
-    expect(unusable).toEqual(['anthropic']);
+    expect(unusable.map((u) => u.type)).toEqual(['anthropic']);
+  });
+
+  it('drops a synced endpoint only the user\u2019s own machine can reach', () => {
+    // A hosted run executes on the cloud server, so `localhost` resolves in the
+    // SERVER's network — it cannot reach the user's box, and it may address
+    // something server-local. KeyVault already refuses to let anyone create
+    // such a provider here; a restore must not introduce one behind that.
+    const incoming: ProviderConfig[] = [
+      { type: 'openai-compatible', baseUrl: 'http://localhost:8000/v1' },
+      { type: 'openai-compatible', baseUrl: 'http://192.168.1.50:11434/v1', apiKey: 'k' },
+      { type: 'ollama' },
+    ];
+
+    const { merged, unusable } = mergeProviders([], incoming);
+    expect(merged).toHaveLength(0);
+    expect(unusable.every((u) => u.reason === 'local-endpoint')).toBe(true);
+    expect(unusable).toHaveLength(3);
+  });
+
+  it('keeps a hosted openai-compatible endpoint, keyless or not', () => {
+    const { merged, unusable } = mergeProviders([], [
+      { type: 'openai-compatible', baseUrl: 'https://openrouter.ai/api/v1' },
+    ]);
+    expect(merged).toHaveLength(1);
+    expect(unusable).toEqual([]);
+  });
+
+  it('strips the bearer when it preserves the local API key', () => {
+    // `{ ...i, apiKey: prior.apiKey }` also carried the runtime-only authToken,
+    // so the vault held both and a later PUSH sent both back. A desktop pull
+    // then took that row and anthropicAuth() prefers the bearer — so the token
+    // this branch refused to let displace the browser key displaced it anyway,
+    // one web→native round trip later.
+    const local: ProviderConfig[] = [{ type: 'anthropic', apiKey: 'good-key' }];
+    const incoming: ProviderConfig[] = [
+      { type: 'anthropic', authToken: 'gw-token', baseUrl: 'https://gateway.internal' } as ProviderConfig,
+    ];
+
+    const { merged } = mergeProviders(local, incoming);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.apiKey).toBe('good-key');
+    expect((merged[0] as { authToken?: string }).authToken).toBeUndefined();
+    // …and therefore a push built from this vault cannot carry it back.
+    expect(JSON.stringify(merged)).not.toContain('gw-token');
+  });
+
+  it('strips a bearer riding along on a row that has its own key', () => {
+    const { merged } = mergeProviders([], [
+      { type: 'anthropic', apiKey: 'sk-ant-real', authToken: 'gw-token' } as ProviderConfig,
+    ]);
+    expect(merged[0]?.apiKey).toBe('sk-ant-real');
+    expect((merged[0] as { authToken?: string }).authToken).toBeUndefined();
   });
 });

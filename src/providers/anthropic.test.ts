@@ -413,4 +413,79 @@ describe('AnthropicProvider — a bearer is never sent to the public host', () =
     expect(() => new AnthropicProvider(parsed.providers[0]!))
       .toThrow(/subscription token/i);
   });
+
+  it('rejects a subscription token that arrives in apiKey', () => {
+    // The field a secret arrives in proves nothing about what it is. The guard
+    // classified `authToken` only, so `ANTHROPIC_API_KEY=sk-ant-oat…`, a
+    // hand-written config, or a sync row with the token in the wrong slot sent
+    // it as `x-api-key` — past a release-wide "refused wherever it appears".
+    expect(() => new AnthropicProvider({ type: 'anthropic', apiKey: 'sk-ant-oat01-abc' }))
+      .toThrow(/subscription token/i);
+  });
+
+  it('uses a real API key configured beside a subscription bearer', () => {
+    expect(() => new AnthropicProvider({
+      type: 'anthropic', apiKey: 'sk-ant-real', authToken: 'sk-ant-oat01-abc',
+    })).not.toThrow();
+  });
+});
+
+describe('AnthropicProvider.listModels — a failed gateway is not a validated catalog', () => {
+  // listModels() falls back to the bundled catalogue on 401/403, a malformed
+  // body, a refused cross-origin redirect or a network error. Harmless for a
+  // settings list; NOT harmless for router validation, which reads a non-empty
+  // result as "the endpoint confirmed these ids", caches it, and pins Auto to
+  // them — so a gateway's failure was recorded as confirmation of the PUBLIC
+  // Anthropic catalogue, models it may not serve at all.
+
+  it('still returns the bundled catalog by default, for the UI', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{"type":"error"}', { status: 401 }));
+    try {
+      const models = await new AnthropicProvider({ type: 'anthropic', apiKey: 'k' }).listModels();
+      expect(models.length).toBeGreaterThan(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('returns nothing when the caller asked for confirmed models only', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{"type":"error"}', { status: 401 }));
+    try {
+      const models = await new AnthropicProvider({
+        type: 'anthropic', apiKey: 'k', baseUrl: 'https://gateway.internal/v1',
+      }).listModels({ staticFallback: false });
+      expect(models).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('returns nothing on a network failure too', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('ENOTFOUND'));
+    try {
+      const models = await new AnthropicProvider({
+        type: 'anthropic', apiKey: 'k', baseUrl: 'https://gateway.internal/v1',
+      }).listModels({ staticFallback: false });
+      expect(models).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('returns the gateway\u2019s real models when discovery succeeds', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({ data: [{ id: 'gw-model-1', display_name: 'GW One' }] }),
+      { status: 200 },
+    ));
+    try {
+      const models = await new AnthropicProvider({
+        type: 'anthropic', apiKey: 'k', baseUrl: 'https://gateway.internal/v1',
+      }).listModels({ staticFallback: false });
+      expect(models.map((m) => m.id)).toEqual(['gw-model-1']);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });

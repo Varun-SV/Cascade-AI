@@ -739,7 +739,18 @@ export class CascadeRouter extends EventEmitter {
         try {
           const provider = this.createProvider(cfg, seed);
           if (typeof provider.listModels !== 'function') return;
-          const models = await withTimeout(provider.listModels(), DISCOVERY_TIMEOUT_MS, `${type} model discovery timed out`);
+          // `staticFallback: false`: this call decides what Auto is allowed to
+          // route to, so it must hear "the endpoint confirmed these" and not
+          // "here is the bundled list because discovery failed". A provider
+          // that answered the second way had a gateway's 401, cross-origin
+          // redirect refusal or outage recorded as confirmation of the PUBLIC
+          // catalogue — and setValidatedModels then pinned Auto to ids that
+          // gateway may not serve.
+          const models = await withTimeout(
+            provider.listModels({ staticFallback: false }),
+            DISCOVERY_TIMEOUT_MS,
+            `${type} model discovery timed out`,
+          );
           if (!models.length) return; // empty/unreachable → keep the static catalog
           entry = { models, ids: models.map((m) => m.id), at: Date.now() };
           cloudDiscoveryCache.set(cacheKey, entry);

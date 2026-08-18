@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Cloud, Loader2, UploadCloud, DownloadCloud } from 'lucide-react';
 import type { ProviderConfig, WebSearchSettings } from '../lib/types.js';
 import { stripRetiredProviders } from '../lib/retired-providers.js';
-import { describeRevokedRemoval, stripRevokedCredentials } from '../lib/revoked-credentials.js';
+import { describeRevokedRemoval, stripRevokedCredentials, webUnusableReason, withoutBearer, type WebUnusableReason } from '../lib/revoked-credentials.js';
 import { decryptJSON, encryptJSON, type EncryptedBlob } from './crypto.js';
 import { pullKeySync, pushKeySync } from '../lib/api.js';
 
@@ -43,15 +43,39 @@ function providerSig(p: ProviderConfig): string {
  * field it sends — and let that row overwrite a perfectly good local API key,
  * ready to be pushed back on the next sync.
  */
+/** A synced row the hosted browser client cannot use, and why. */
+export interface UnusableRow { type: string; reason: WebUnusableReason }
+
+/**
+ * The restore notice for rows the browser cannot use — one clause per REASON,
+ * because they ask different things of the user. A gateway token still works on
+ * the desktop; a local endpoint is not reachable from a hosted run at all.
+ */
+export function describeUnusable(rows: readonly UnusableRow[]): string {
+  if (rows.length === 0) return '';
+  const named = (r: WebUnusableReason) =>
+    [...new Set(rows.filter((x) => x.reason === r).map((x) => x.type))].join(', ');
+  const parts: string[] = [];
+  const bearer = named('bearer-only');
+  if (bearer) {
+    parts.push(`${bearer} — a gateway token can't be used from the browser; keep using it from the desktop app or CLI`);
+  }
+  const local = named('local-endpoint');
+  if (local) {
+    parts.push(`${local} — a hosted run happens on our servers, so an endpoint on your own machine isn't reachable from here`);
+  }
+  return ` Skipped ${parts.join('. Skipped ')}.`;
+}
+
 export function mergeProviders(
   local: ProviderConfig[],
   incoming: ProviderConfig[],
-): { merged: ProviderConfig[]; removed: string[]; revoked: number; unusable: string[] } {
+): { merged: ProviderConfig[]; removed: string[]; revoked: number; unusable: UnusableRow[] } {
   const map = new Map<string, ProviderConfig>();
   for (const l of local) map.set(providerSig(l), l);
   const { kept: live, removed } = stripRetiredProviders(incoming);
   const { kept, removed: revoked } = stripRevokedCredentials(live);
-  const unusable: string[] = [];
+  const unusable: UnusableRow[] = [];
   for (const i of kept) {
     // The browser can only USE `apiKey` — its ProviderConfig has no bearer
     // field and neither does the hosted run schema — so an incoming row
@@ -65,14 +89,26 @@ export function mergeProviders(
     // whose sole credential is a bearer cannot be used, and `authToken` is not
     // on the web's ProviderConfig at all, so it is read off the runtime object
     // the bundle actually carries.
-    const bearer = (i as { authToken?: unknown }).authToken;
-    const bearerOnly = !i.apiKey && typeof bearer === 'string' && bearer.length > 0;
+    const reason = webUnusableReason(i);
+    if (reason === 'local-endpoint') {
+      // Nothing here can rescue it: a hosted run executes on the cloud server,
+      // so the user's own machine is not on the other end of that URL.
+      unusable.push({ type: i.type, reason });
+      continue;
+    }
     if (!i.apiKey) {
       if (prior?.apiKey) {
         // Keep the local key rather than letting the bearer row displace it.
         // That overwrote a working browser key with something unusable and
         // persisted it, leaving the next chat with nothing.
-        map.set(providerSig(i), { ...i, apiKey: prior.apiKey });
+        //
+        // `withoutBearer` matters as much as the key: `{ ...i }` also carries
+        // the runtime-only `authToken`, so the vault held both credentials and
+        // a later account PUSH sent both back. A desktop pull then took that
+        // row, and anthropicAuth() prefers the bearer — so the token this
+        // branch refused to let displace the browser key displaced it anyway,
+        // one web→native round trip later.
+        map.set(providerSig(i), withoutBearer({ ...i, apiKey: prior.apiKey }));
         continue;
       }
       // Nothing local to fall back on, so this row would enter the vault with
@@ -88,13 +124,17 @@ export function mergeProviders(
       // in localStorage where nothing can ever use it is storage risk with no
       // benefit, and the notice tells the user to keep managing it from the
       // desktop or CLI, which do support bearers.
-      if (bearerOnly) {
-        unusable.push(i.type);
+      if (reason === 'bearer-only') {
+        unusable.push({ type: i.type, reason });
         continue;
       }
       // Keyless and no bearer: a legitimate key-optional endpoint. Kept.
     }
-    map.set(providerSig(i), i);
+    // Any bearer riding along on a row the browser CAN use is dropped for the
+    // same round-trip reason as above — the web never sends it, and keeping it
+    // only lets a later push hand it back to a native client that will prefer
+    // it over the key.
+    map.set(providerSig(i), withoutBearer(i));
   }
   // `removed` is returned rather than dropped so the restore can SAY a synced
   // key was skipped. The CLI and desktop pull paths both explain it; the
@@ -150,7 +190,7 @@ export default function AccountSyncPanel({ keys, webSearch, onRestoreKeys, onRes
       const bundle = await decryptJSON<WebSyncBundle>(blob as EncryptedBlob, passphrase);
       let skippedProviders: string[] = [];
       let revokedCount = 0;
-      let unusableHere: string[] = [];
+      let unusableHere: UnusableRow[] = [];
       if (bundle.providers) {
         const { merged, removed, revoked, unusable } = mergeProviders(keys, bundle.providers);
         skippedProviders = removed;
@@ -169,10 +209,7 @@ export default function AccountSyncPanel({ keys, webSearch, onRestoreKeys, onRes
       // live — it just cannot be used from a browser, which can only send an
       // API key. Saying which one, and where it still works, is the difference
       // between a missing provider and a mystery.
-      const unusableNote = unusableHere.length
-        ? ` Skipped ${[...new Set(unusableHere)].join(', ')} — a gateway token can't be used from the browser;`
-          + ' keep using it from the desktop app or CLI.'
-        : '';
+      const unusableNote = describeUnusable(unusableHere);
       setStatus(`Restored from your account${updatedAt ? ` (synced ${relativeTime(updatedAt)})` : ''}.${skippedNote}${revokedNote}${unusableNote}`);
     } catch {
       // AES-GCM's auth-tag check is what fails on a wrong passphrase — say so

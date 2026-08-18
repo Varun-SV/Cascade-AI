@@ -68,3 +68,65 @@ export function describeRevokedRemoval(): string {
   return 'Discarded a linked Claude subscription token — Anthropic no longer permits third-party tools '
     + 'to use one, and refuses it. Add an API key from the Claude Console instead.';
 }
+
+/**
+ * Endpoints only the user's own machine can reach.
+ *
+ * A hosted chat run executes on the CLOUD SERVER, not in the page, so a
+ * `localhost` or private-range URL synced from a desktop resolves in the
+ * server's network — it cannot reach the user's Ollama, and it may address
+ * something server-local that was never meant to be addressed. `KeyVault`
+ * already refuses to let anyone CREATE such a provider here; a restore must not
+ * introduce one behind that.
+ */
+function isUnreachableFromServer(baseUrl: unknown): boolean {
+  if (typeof baseUrl !== 'string' || !baseUrl.trim()) return false;
+  let host: string;
+  try {
+    host = new URL(baseUrl).hostname.toLowerCase();
+  } catch {
+    return false; // not a URL we can judge — leave it to the server to reject
+  }
+  if (host === 'localhost' || host.endsWith('.localhost') || host === '::1') return true;
+  if (host === '0.0.0.0' || host.startsWith('127.')) return true;
+  // RFC1918 and link-local.
+  if (/^10\./.test(host) || /^192\.168\./.test(host) || /^169\.254\./.test(host)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true;
+  // `.local` mDNS names resolve on the user's LAN only.
+  if (host.endsWith('.local')) return true;
+  return false;
+}
+
+/** Why a synced provider row cannot be used from the hosted web client. */
+export type WebUnusableReason = 'bearer-only' | 'local-endpoint';
+
+/**
+ * Whether the hosted browser client can actually use this row, and if not, why.
+ *
+ * Three distinct shapes reach the vault and none of them work here:
+ * - a row whose only credential is a bearer (`authToken` is not on the web's
+ *   ProviderConfig and the hosted run schema strips it, so the server receives
+ *   a keyless provider);
+ * - `ollama`, which KeyVault deliberately excludes because a hosted page cannot
+ *   reach a local daemon;
+ * - any endpoint that resolves only on the user's own network.
+ *
+ * Keyless on its own is NOT a reason: `openai-compatible` is key-optional and a
+ * hosted one works fine.
+ */
+export function webUnusableReason(p: unknown): WebUnusableReason | null {
+  const row = p as { type?: unknown; apiKey?: unknown; authToken?: unknown; baseUrl?: unknown } | null;
+  if (!row) return null;
+  if (row.type === 'ollama') return 'local-endpoint';
+  if (isUnreachableFromServer(row.baseUrl)) return 'local-endpoint';
+  const hasKey = typeof row.apiKey === 'string' && row.apiKey.length > 0;
+  const hasBearer = typeof row.authToken === 'string' && row.authToken.length > 0;
+  if (!hasKey && hasBearer) return 'bearer-only';
+  return null;
+}
+
+/** A row the browser CAN use, with any runtime-only bearer removed. */
+export function withoutBearer<T extends object>(row: T): T {
+  const { authToken: _t, ...rest } = row as T & { authToken?: unknown };
+  return rest as T;
+}

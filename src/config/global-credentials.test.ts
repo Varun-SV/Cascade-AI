@@ -137,13 +137,31 @@ describe('global credentials store', () => {
     expect(merged.find((p) => p.baseUrl?.includes('resource-b'))?.apiKey).toBeUndefined();
   });
 
-  it('falls back to the label when neither resource nor deployment is stated', () => {
+  it('falls back to the label only when neither row names anything real', () => {
     const merged = mergeGlobalCredentials(
       [{ type: 'azure', label: 'prod' }],
-      [{ type: 'azure', label: 'prod', apiKey: 'key-for-a', baseUrl: 'https://resource-a.openai.azure.com' }],
+      [{ type: 'azure', label: 'prod', apiKey: 'key-for-a' }],
     );
     expect(merged.filter((p) => p.type === 'azure')).toHaveLength(1);
     expect(merged[0]!.apiKey).toBe('key-for-a');
+  });
+
+  it('will not join two rows on a label when their real identities are unrelated', () => {
+    // Previously joined. Neither strong identifier is present on BOTH rows —
+    // one names a deployment, the other a resource — so the old check fell
+    // through to the label and matched on a display name the user typed,
+    // assigning resource A's key to `prod` on a guess. Label is metadata, not
+    // identity: uncorrelated strong identities mean "different rows", not
+    // "ask the label".
+    const merged = mergeGlobalCredentials(
+      [{ type: 'azure', deploymentName: 'prod', label: 'main' }],
+      [{ type: 'azure', baseUrl: 'https://resource-a.openai.azure.com', label: 'main', apiKey: 'key-for-a' }],
+    );
+
+    const azure = merged.filter((p) => p.type === 'azure');
+    expect(azure).toHaveLength(2);
+    expect(azure.find((p) => p.deploymentName === 'prod')?.apiKey).toBeUndefined();
+    expect(azure.find((p) => p.deploymentName === 'prod')?.baseUrl).toBeUndefined();
   });
 
   it('treats a trailing slash as the same resource, not a second one', () => {
@@ -266,5 +284,39 @@ describe('ConfigManager + global credentials (the "AppImage forgets my keys" bug
       [{ type: 'anthropic', authToken: 'token-a' }],
     );
     expect(merged.find((p) => p.type === 'anthropic')?.authToken).toBeUndefined();
+  });
+
+  it('never pairs a global API key with a different endpoint either', () => {
+    // The round-27 guard covered `authToken` only, so this line still copied
+    // `apiKey` before considering the endpoint: a credentialless workspace row
+    // on gateway B took the global row's key from gateway A and kept B's URL.
+    // The environment path already treats ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL
+    // as a pair; the store has to hold the same invariant.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'anthropic', baseUrl: 'https://gw-b.example' }],
+      [{ type: 'anthropic', apiKey: 'key-a', baseUrl: 'https://gw-a.example' }],
+    );
+
+    const anthropic = merged.find((p) => p.type === 'anthropic')!;
+    expect(anthropic.apiKey).toBeUndefined();
+    expect(anthropic.baseUrl).toBe('https://gw-b.example');
+  });
+
+  it('adopts an API key together with the endpoint it belongs to', () => {
+    const merged = mergeGlobalCredentials(
+      [{ type: 'openai-compatible' }],
+      [{ type: 'openai-compatible', apiKey: 'key-a', baseUrl: 'https://openrouter.ai/api/v1' }],
+    );
+    const row = merged.find((p) => p.type === 'openai-compatible')!;
+    expect(row.apiKey).toBe('key-a');
+    expect(row.baseUrl).toBe('https://openrouter.ai/api/v1');
+  });
+
+  it('still adopts a plain API key when neither row names an endpoint', () => {
+    const merged = mergeGlobalCredentials(
+      [{ type: 'openai' }],
+      [{ type: 'openai', apiKey: 'sk-o' }],
+    );
+    expect(merged.find((p) => p.type === 'openai')?.apiKey).toBe('sk-o');
   });
 });

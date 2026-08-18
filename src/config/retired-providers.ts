@@ -43,11 +43,20 @@ export interface RetiredProviderCleanup {
    * discarded.
    */
   revokedCredentials?: number;
+  /**
+   * Incoming rows dropped for carrying a bearer with no gateway.
+   *
+   * A separate count from `revokedCredentials`: that one is a credential
+   * Anthropic has revoked, this one is a live token with nowhere to send it.
+   * Distinct causes, distinct advice.
+   */
+  unusableCredentials?: number;
 }
 
 /** True when anything was actually removed — the signal to persist and warn. */
 export function didCleanupChangeAnything(c: RetiredProviderCleanup): boolean {
-  return c.removed.length > 0 || c.clearedPins.length > 0 || (c.revokedCredentials ?? 0) > 0;
+  return c.removed.length > 0 || c.clearedPins.length > 0
+    || (c.revokedCredentials ?? 0) > 0 || (c.unusableCredentials ?? 0) > 0;
 }
 
 /**

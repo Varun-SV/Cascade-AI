@@ -52,7 +52,16 @@ export abstract class BaseProvider {
 
   abstract countTokens(text: string): Promise<number>;
 
-  abstract listModels(): Promise<ModelInfo[]>;
+  /**
+   * The provider's model catalogue.
+   *
+   * `staticFallback` (default true) is what a provider may return when live
+   * discovery fails — the bundled catalogue, so a UI still has something to
+   * show. A caller that needs to know the models were CONFIRMED by the endpoint
+   * passes false and gets an empty list instead of a guess. See
+   * AnthropicProvider.listModels for why that distinction matters.
+   */
+  abstract listModels(options?: { staticFallback?: boolean }): Promise<ModelInfo[]>;
 
   abstract isAvailable(): Promise<boolean>;
 

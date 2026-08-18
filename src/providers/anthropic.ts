@@ -133,8 +133,17 @@ export function anthropicAuth(
   // the credential this release exists to stop using. Anthropic refuses it
   // whatever header holds it; pointing it at a gateway does not make it a
   // gateway's bearer.
-  if (config.authToken && isSubscriptionToken(config.authToken)) {
-    if (config.apiKey) return { mode: 'apiKey', key: config.apiKey };
+  //
+  // Classified by VALUE, before either auth mode is chosen, because the field a
+  // secret arrives in proves nothing about what it is. `ANTHROPIC_API_KEY` set
+  // to an `sk-ant-oat…` token, a hand-written config, or a sync row with the
+  // token in the wrong slot all put a subscription credential in `apiKey`,
+  // where a check on `authToken` alone waved it through as `x-api-key`.
+  const bearerIsSubscription = isSubscriptionToken(config.authToken);
+  const keyIsSubscription = isSubscriptionToken(config.apiKey);
+  if (bearerIsSubscription || keyIsSubscription) {
+    // A genuine API key beside the dead token is still usable; the token is not.
+    if (config.apiKey && !keyIsSubscription) return { mode: 'apiKey', key: config.apiKey };
     throw new Error(
       'This Anthropic credential is a Claude subscription token, which Anthropic does not permit '
       + 'third-party clients to use. Configure an API key from console.anthropic.com instead.',
@@ -282,7 +291,16 @@ export class AnthropicProvider extends BaseProvider {
     return Math.ceil(text.length / 4);
   }
 
-  async listModels(): Promise<ModelInfo[]> {
+  async listModels(options: { staticFallback?: boolean } = {}): Promise<ModelInfo[]> {
+    // The bundled catalogue, returned when live discovery fails. Harmless for a
+    // settings list; NOT harmless for router validation, which reads a
+    // non-empty result as "the endpoint confirmed these ids" and pins Auto to
+    // them. A gateway that 401s, redirects cross-origin, or is simply
+    // unreachable would have its failure recorded as confirmation of the PUBLIC
+    // Anthropic catalogue — models it may not serve at all.
+    const staticCatalog = () => (options.staticFallback === false
+      ? []
+      : Object.values(MODELS).filter((m) => m.provider === 'anthropic'));
     try {
       // Discovery follows the SAME endpoint and auth mode as generation. It
       // used to hardcode api.anthropic.com with `x-api-key`, which meant a
@@ -321,13 +339,9 @@ export class AnthropicProvider extends BaseProvider {
       // for 4xx/5xx responses. Calling `.data.map` on that crashes the caller
       // and hides the real authentication / network error. Fall through to
       // the hardcoded model list instead.
-      if (!resp.ok) {
-        return Object.values(MODELS).filter((m) => m.provider === 'anthropic');
-      }
+      if (!resp.ok) return staticCatalog();
       const data = await resp.json() as { data?: Array<{ id: string; display_name: string }> };
-      if (!Array.isArray(data?.data)) {
-        return Object.values(MODELS).filter((m) => m.provider === 'anthropic');
-      }
+      if (!Array.isArray(data?.data)) return staticCatalog();
 
       return data.data.filter((m) => isChatModel(m.id)).map((m) => {
         const known = Object.values(MODELS).find((km) => km.id === m.id && km.provider === 'anthropic');
@@ -348,7 +362,9 @@ export class AnthropicProvider extends BaseProvider {
         });
       });
     } catch {
-      return Object.values(MODELS).filter((m) => m.provider === 'anthropic');
+      // Network failure, a refused cross-origin redirect, a timeout — all
+      // discovery failures, none of them evidence about the catalogue.
+      return staticCatalog();
     }
   }
 

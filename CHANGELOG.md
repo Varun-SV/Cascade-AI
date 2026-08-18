@@ -21,6 +21,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## 0.75.0 - 2026-08-14
 
 ### Fixed
+- **A credential could be paired with the wrong endpoint on adoption.** The
+  machine-global merge copied an `apiKey` before considering the endpoint it
+  came with, so a workspace row naming gateway B with no credential took the
+  stored key from gateway A and kept B's URL. A credential and its endpoint are
+  one unit now, for API keys exactly as for bearers — the environment path
+  already treated `ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL` as a pair, and an
+  OpenAI-compatible key is endpoint-bound too.
+
+- **A display label could join two unrelated Azure rows.** `label` was consulted
+  whenever no strong identifier was present on both sides — including when each
+  side named something real but different, e.g. one row naming a deployment and
+  the other a resource. Matching those on a name the user typed assigned one
+  resource's key to the other's deployment. Label now decides only when neither
+  row names a resource or a deployment at all.
+
+- **A Claude subscription token in `apiKey` was still sent.** The provider
+  classified `authToken` only, so `ANTHROPIC_API_KEY=sk-ant-oat…` — or any
+  config with the token in the other field — went out as `x-api-key`. The secret
+  is classified by value now, before either auth mode is chosen.
+
+- **A failed gateway was recorded as a validated catalog.** `listModels()`
+  returns the bundled Anthropic models when discovery fails, which is right for
+  a settings list and wrong for router validation: a 401, a refused cross-origin
+  redirect or an outage was cached as "the gateway confirmed these ids", pinning
+  Auto to models that gateway may not serve. Validation now asks for confirmed
+  models only and gets nothing when discovery failed.
+
+- **`cascade link azure` discarded a deployment it was told to create.** With one
+  configured resource, `AZURE_OPENAI_DEPLOYMENT` naming a new deployment and no
+  endpoint rotated the key on every existing deployment and reported success,
+  without ever creating the one named. It is created on the inferred resource.
+
+- **A synced bearer with no gateway erased a good local key.** The revoked-token
+  filter only removes credentials Anthropic has revoked; an ordinary
+  endpoint-less bearer is live, so it survived and won the merge — replacing a
+  working API key with something the provider now refuses outright. Such rows
+  are dropped from an incoming bundle and counted separately from revoked ones.
+
+- **The browser vault held credentials it cannot send.** A bearer preserved
+  alongside a rescued API key was pushed back on the next sync, where a native
+  pull preferred it over that key — undoing the rescue one round trip later; a
+  vault written before 0.75 kept a subscription token or bearer-only row that
+  was never cleaned until the next pull; and a restore could introduce an Ollama
+  or locally-addressed endpoint, which a hosted run cannot reach because it
+  executes on the server, not in the page. Bearers are stripped, unusable rows
+  are dropped with a reason-specific notice, and the migration runs on load as
+  well as on restore. A locally-addressed endpoint the user typed themselves is
+  left alone — only a restore is stopped from adding one.
+
 - **A stored bearer could be paired with the wrong gateway.** Non-Azure rows
   merge on provider type alone, so a workspace row naming gateway B with no
   credential adopted the machine-global row's token from gateway A — and the

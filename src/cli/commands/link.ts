@@ -431,16 +431,39 @@ async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): P
     // that requires a preview version then fails on its first request. Only
     // when the environment actually supplied one, so a row keeps its own
     // otherwise.
-    const providers = config.providers.map((p) => (
-      scoped.includes(p)
-        ? {
-          ...p,
-          apiKey: cred.secret,
-          credentialSource: cred.sourceTool,
-          ...(cred.apiVersion ? { apiVersion: cred.apiVersion } : {}),
-        }
-        : p
-    ));
+    const patch = {
+      apiKey: cred.secret,
+      credentialSource: cred.sourceTool,
+      ...(cred.apiVersion ? { apiVersion: cred.apiVersion } : {}),
+    };
+    const providers = config.providers.map((p) => (scoped.includes(p) ? { ...p, ...patch } : p));
+
+    // A deployment the environment NAMED but the config does not have yet.
+    //
+    // Without this it was silently discarded: with one configured resource,
+    // `AZURE_OPENAI_DEPLOYMENT=new-deployment` and no endpoint fell through
+    // azureDeploymentsForCredential's `scoped ??= deployments`, so every
+    // EXISTING deployment had its key rotated and the command reported success
+    // — while the deployment the user actually asked for was never created.
+    // The fully routed branch above upserts it; this one has to as well.
+    //
+    // The resource is not a guess: `scoped` is only non-empty when its rows
+    // resolve to exactly one endpoint, so that endpoint is the one this key
+    // belongs to. A name already claimed by a DIFFERENT resource cannot reach
+    // here — azureDeploymentsForCredential would have scoped to that resource
+    // instead, and the row would already exist.
+    const named = cred.deploymentName?.trim();
+    const alreadyConfigured = !named || config.providers.some(
+      (p) => p.type === 'azure' && (p.deploymentName?.trim() ?? '') === named,
+    );
+    if (named && !alreadyConfigured) {
+      const resource = scoped[0]?.baseUrl;
+      if (resource) {
+        providers.push({ type: 'azure', deploymentName: named, baseUrl: resource, ...patch });
+        console.log(chalk.gray(`  Added deployment "${named}" on ${normalizeAzureEndpoint(resource)}.`));
+      }
+    }
+
     await cm.updateConfig({ providers });
     return true;
   }
