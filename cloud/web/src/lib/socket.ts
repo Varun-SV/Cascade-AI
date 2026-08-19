@@ -3,25 +3,39 @@ import { claimClientId } from './client-id.js';
 
 let socket: Socket | null = null;
 
-/** One shared socket per page — the server allows only one run in flight per connection. */
+/**
+ * One shared socket per page — the server allows only one run in flight per
+ * connection.
+ *
+ * Created disconnected and connected only once the resume identity has
+ * settled. That ordering is the whole point: the server treats a socket
+ * arriving on an existing resume key as that client coming back and moves its
+ * runs over immediately, so connecting on an id this tab might merely have
+ * INHERITED (session storage is copied into a duplicated tab) would take the
+ * original tab's work before the collision could be detected.
+ */
 export function getSocket(): Socket {
   if (!socket) {
-    // Rotation reconnects rather than mutating in place: the identity is sent
-    // on the handshake, so the server only learns the new one on a new
-    // connection. Until then this tab simply shares a key it will give up.
-    const clientId = claimClientId((rotated) => {
-      if (!socket) return;
-      socket.auth = { clientId: rotated };
-      socket.disconnect().connect();
-    });
-    socket = io({
+    const created = io({
       withCredentials: true,
-      autoConnect: true,
+      autoConnect: false,
       reconnection: true,
-      // Resent on every reconnection attempt, which is what makes it usable as
-      // the identity the server matches a held run against.
-      auth: { clientId },
     });
+    socket = created;
+    void claimClientId()
+      .then((clientId) => {
+        // Set before connecting: the identity travels on the handshake, and is
+        // resent on every reconnection attempt, which is what makes it usable
+        // as the key a held run is matched against.
+        created.auth = clientId ? { clientId } : {};
+        created.connect();
+      })
+      .catch(() => {
+        // Never leave the page unable to talk to the server over an identity
+        // problem — connect without one and forgo resumability.
+        created.auth = {};
+        created.connect();
+      });
   }
   return socket;
 }
