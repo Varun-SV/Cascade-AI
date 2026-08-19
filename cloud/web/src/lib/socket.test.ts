@@ -1,8 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-interface IoOptions { autoConnect?: boolean; auth?: { clientId?: string } }
+interface IoOptions { auth?: { clientId?: string } }
 
-const created = { auth: undefined as { clientId?: string } | undefined, connect: vi.fn(), close: vi.fn() };
+type Handler = (...args: unknown[]) => void;
+
+const created = {
+  auth: undefined as { clientId?: string } | undefined,
+  handlers: new Map<string, Handler>(),
+  on(event: string, fn: Handler) { created.handlers.set(event, fn); return created; },
+  close: vi.fn(),
+};
 const io = vi.fn((_options?: IoOptions) => created);
 vi.mock('socket.io-client', () => ({ io: (options?: IoOptions) => io(options) }));
 
@@ -15,52 +22,27 @@ function optionsFromCall(n = 0): IoOptions {
   return io.mock.calls[n]?.[0] ?? {};
 }
 
-/**
- * The auth the module set, read through a call so TypeScript does not narrow
- * it to `undefined` from the reset in `beforeEach` — the assignment that
- * matters happens inside the module under test, which control flow cannot see.
- */
+/** Read through a call so control flow does not narrow it from the reset below. */
 function currentAuth(): { clientId?: string } | undefined {
   return created.auth;
 }
 
-/** Let the claim promise settle before asserting on the connection. */
-const flush = () => new Promise((r) => setTimeout(r, 0));
-
 beforeEach(() => {
   io.mockClear();
-  created.connect.mockClear();
+  created.handlers.clear();
   created.auth = undefined;
   sessionStorage.clear();
-  vi.stubGlobal('BroadcastChannel', undefined);
 });
 
-describe('getSocket — per-tab identity', () => {
-  it('does not connect until the identity has settled', async () => {
-    // The server treats a socket arriving on an existing resume key as that
-    // client coming back and moves its runs over at once. Connecting first and
-    // correcting the identity afterwards therefore hands another tab's work to
-    // this one inside that window — so the connection has to wait.
+describe('getSocket — resume identity', () => {
+  it('sends a client id on the handshake', async () => {
+    // Without one the server cannot match a held run to a returning client at
+    // all, so the whole resume path is only as real as this option being sent.
     const { getSocket } = await freshModule();
     getSocket();
 
-    expect(optionsFromCall().autoConnect).toBe(false);
-    expect(created.connect).not.toHaveBeenCalled();
-
-    await flush();
-    expect(created.connect).toHaveBeenCalledTimes(1);
-  });
-
-  it('connects with the settled client id on the handshake', async () => {
-    // Without this the server cannot tell a reconnect from a stranger and
-    // refuses to hold runs at all, so the whole resume path is only as real as
-    // this option actually being passed.
-    const { getSocket } = await freshModule();
-    getSocket();
-    await flush();
-
-    expect(currentAuth()?.clientId).toEqual(expect.any(String));
-    expect(sessionStorage.getItem('cascade.clientId')).toBe(currentAuth()?.clientId);
+    expect(optionsFromCall().auth?.clientId).toEqual(expect.any(String));
+    expect(sessionStorage.getItem('cascade.clientId')).toBe(optionsFromCall().auth?.clientId);
   });
 
   it('keeps the same id across a reload of the same tab', async () => {
@@ -69,26 +51,61 @@ describe('getSocket — per-tab identity', () => {
     // would never be adopted.
     const first = await freshModule();
     first.getSocket();
-    await flush();
-    const before = currentAuth()?.clientId;
+    const before = optionsFromCall().auth?.clientId;
 
-    created.auth = undefined;
+    io.mockClear();
     const reloaded = await freshModule();
     reloaded.getSocket();
-    await flush();
 
-    expect(currentAuth()?.clientId).toBe(before);
+    expect(optionsFromCall().auth?.clientId).toBe(before);
   });
 
-  it('still connects when no identity can be established', async () => {
-    // Losing resumability must not lose the connection.
+  it('answers the liveness probe, which is what stops another tab taking its run', async () => {
+    // The server asks the incumbent before letting a second socket claim its
+    // resume key. Not answering is indistinguishable from being gone, so a
+    // duplicated tab would be handed this tab's in-flight run.
+    const { getSocket } = await freshModule();
+    getSocket();
+
+    const probe = created.handlers.get('resume:probe');
+    expect(probe).toBeTypeOf('function');
+
+    const ack = vi.fn();
+    probe?.(ack);
+    expect(ack).toHaveBeenCalledWith(true);
+  });
+
+  it('adopts the identity the server issues on a collision', async () => {
+    // Issued when this connection was found colliding with a live one.
+    // Persisting it is what stops the same collision recurring on the next
+    // reload, since the copied value in storage is what would come back.
+    const { getSocket } = await freshModule();
+    getSocket();
+    const original = optionsFromCall().auth?.clientId;
+
+    created.handlers.get('run:resumed')?.({ active: 0, finished: [], clientId: 'assigned-by-server' });
+
+    expect(sessionStorage.getItem('cascade.clientId')).toBe('assigned-by-server');
+    expect(currentAuth()?.clientId).toBe('assigned-by-server');
+    expect(original).not.toBe('assigned-by-server');
+  });
+
+  it('leaves the identity alone on an ordinary resume', async () => {
+    const { getSocket } = await freshModule();
+    getSocket();
+    const original = optionsFromCall().auth?.clientId;
+
+    created.handlers.get('run:resumed')?.({ active: 1, finished: [] });
+
+    expect(sessionStorage.getItem('cascade.clientId')).toBe(original);
+  });
+
+  it('still connects when no identity can be stored', async () => {
     const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('denied'); });
     try {
       const { getSocket } = await freshModule();
       expect(() => getSocket()).not.toThrow();
-      await flush();
-      expect(created.connect).toHaveBeenCalledTimes(1);
-      expect(currentAuth()?.clientId).toBeUndefined();
+      expect(optionsFromCall().auth?.clientId).toBeUndefined();
     } finally {
       setItem.mockRestore();
     }

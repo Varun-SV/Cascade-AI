@@ -2,6 +2,7 @@
 //  Cascade Cloud Server — Socket.IO wiring
 // ─────────────────────────────────────────────
 
+import { randomUUID } from 'node:crypto';
 import type { Server as HttpServer } from 'node:http';
 import { Server as SocketIOServer, type Socket } from 'socket.io';
 import { ZodError } from 'zod';
@@ -167,7 +168,19 @@ const TERMINAL_EVENTS = new Set(['session:complete', 'session:error']);
 export interface SocketOptions {
   /** Overridable for tests, which cannot wait out the real grace window. */
   reconnectGraceMs?: number;
+  /** Overridable for tests. See OWNER_PROBE_MS. */
+  ownerProbeMs?: number;
 }
+
+/**
+ * How long an incumbent connection gets to prove it is still there.
+ *
+ * Only ever paid when a second socket arrives on a resume key that is already
+ * owned, and only when that owner has not already been reaped — a live tab
+ * answers in a round trip, and a dead one is usually `connected === false`
+ * before this is reached at all.
+ */
+const OWNER_PROBE_MS = 750;
 
 export function attachSocket(
   httpServer: HttpServer,
@@ -176,6 +189,7 @@ export function attachSocket(
   options: SocketOptions = {},
 ): SocketIOServer {
   const graceMs = options.reconnectGraceMs ?? RECONNECT_GRACE_MS;
+  const probeMs = options.ownerProbeMs ?? OWNER_PROBE_MS;
   const io = new SocketIOServer(httpServer, {
     cors: { origin: env.WEB_ORIGIN, credentials: true },
     // Images travel over REST (POST /api/uploads), so run payloads stay small;
@@ -262,6 +276,26 @@ export function attachSocket(
     return clientId ? `${userId}\u0000${clientId}` : undefined;
   };
 
+  /**
+   * Ask an incumbent connection whether it is still there.
+   *
+   * `connected` alone cannot answer it: a socket whose transport has died but
+   * whose `disconnect` has not yet been processed still reports true, which is
+   * exactly the case a reconnect produces. A round-trip acknowledgement is the
+   * difference between a tab that is really there and one that is already
+   * gone, and it is the only way to tell a duplicated tab from a returning one.
+   */
+  const ownerIsAlive = async (incumbent: Socket): Promise<boolean> => {
+    if (!incumbent.connected) return false;
+    try {
+      await incumbent.timeout(probeMs).emitWithAck('resume:probe');
+      return true;
+    } catch {
+      // No answer within the window, or the socket went away mid-probe.
+      return false;
+    }
+  };
+
   io.on('connection', (socket: Socket) => {
     const userId = (socket.data as CloudSocketData).userId;
 
@@ -271,71 +305,104 @@ export function attachSocket(
     // runChatTurn via entitlements.ts.
     const activeRuns = new Set<LiveRun>();
 
-    // This user is back. Whatever was held for them survives — a reconnect is
-    // the client saying it still wants the result.
-    //
-    // Adopting is the whole point, and clearing the timer is only half of it.
-    // Held runs move INTO this connection's `activeRuns`, and their transports
-    // are re-pointed at this socket. Without the first, `chat:stop` on the
-    // replacement socket had nothing to abort and a second disconnect saw no
-    // in-flight run, so it started no grace timer and the run could spend
-    // without any remaining way to halt it — the bounded-spend guarantee above
-    // inverted by the very block meant to preserve the run. Without the second,
-    // every later `stream:token`, the terminal `session:complete`, and the
-    // `context:decision` / `escalation:decide` listeners stayed bound to the
-    // dead socket, so the reconnected page waited forever on a run that was
-    // talking to nobody.
-    const key = resumeKey(socket);
+    /**
+     * Decide whether this socket is the client coming back — and act on it.
+     *
+     * Deferred rather than done inline because it can require ASKING the
+     * incumbent. Every handler below is registered synchronously first, so a
+     * client that starts a run immediately is served normally while this
+     * settles.
+     */
+    // Resolves when this connection knows what it owns. `chat:stop` waits on
+    // it: a page that was already busy before it reconnected can send Stop
+    // immediately, and an unawaited stop would be a no-op on a run still
+    // mid-transfer — the button doing nothing for the rest of that run.
+    let arbitrated: Promise<void> = Promise.resolve();
 
-    // Take the outgoing connection's live runs, rather than counting them.
-    //
-    // This socket claiming the key IS the client coming back, so the runs move
-    // now — not when the old socket's `disconnect` eventually fires. Merely
-    // COUNTING a handover that has not happened is a promise the server cannot
-    // keep: the run is still bound to the old transport, so if it finishes in
-    // that window its `session:complete` goes to the connection this path
-    // already treats as lost, the old socket's disconnect then finds nothing
-    // in flight and hands over nothing, and this client waits forever for an
-    // event that can never come. `chat:stop` has the same hole — it would be a
-    // no-op on a run this connection was told it owned.
-    //
-    // Under-reporting is the mirror bug and is just as fatal: a client told
-    // `active: 0` treats it as terminal and clears the flag saying its ack is
-    // lost, after which the real completion is discarded as a duplicate.
-    // Moving the runs makes the count true at the moment it is sent, which is
-    // the only version of this that is not a race.
-    const outgoing = key ? owners.get(key) : undefined;
-    if (outgoing && outgoing.socket !== socket) {
-      for (const run of outgoing.release()) {
-        run.transport.rebind(socket);
-        activeRuns.add(run);
+    const arbitrate = async (): Promise<void> => {
+      let key = resumeKey(socket);
+      let assignedClientId: string | undefined;
+
+      const incumbent = key ? owners.get(key) : undefined;
+      if (key && incumbent && incumbent.socket !== socket) {
+        // Two sockets on one resume key means one of two very different
+        // things, and the difference cannot be guessed: either the client
+        // reconnected and its old socket has not been reaped yet, or a second
+        // live tab is holding a COPY of the identity (session storage is
+        // copied into a duplicated tab). Treating the newcomer as
+        // authoritative steals a live run; refusing it strands a real
+        // reconnect. So the incumbent is asked.
+        //
+        // No client-side scheme can settle this. An earlier version waited a
+        // fixed 50ms for a duplicated tab to be told its id was taken, which
+        // is a heuristic wearing a guarantee's clothing: BroadcastChannel
+        // delivery has no upper bound, and a busy or backgrounded tab objects
+        // late — after the socket has already connected on the copied id and
+        // the run has already moved. Liveness is a fact only the server can
+        // establish, so it establishes it.
+        const alive = await ownerIsAlive(incumbent.socket);
+        // This connection may itself have gone while the question was out.
+        // Taking runs now would move them onto a socket that is already
+        // finished, where nothing will ever rebind them and no grace timer is
+        // armed — the run would spend with nobody attached.
+        if (!socket.connected) return;
+        if (alive) {
+          // A genuine duplicate. Take nothing, and hand this connection an
+          // identity of its own so it stops colliding — including on its next
+          // reload, since the client persists what it is given.
+          assignedClientId = randomUUID();
+          (socket.data as CloudSocketData).clientId = assignedClientId;
+          key = resumeKey(socket);
+        } else {
+          // The incumbent is gone. This IS the client coming back, so its runs
+          // move now rather than when that socket's disconnect finally fires:
+          // merely counting a handover that has not happened is a promise the
+          // server cannot keep — the run is still bound to the old transport,
+          // so a completion landing in that window goes to a connection
+          // already treated as lost, and `chat:stop` is a no-op on a run this
+          // connection was told it owned.
+          for (const run of incumbent.release()) {
+            run.transport.rebind(socket);
+            activeRuns.add(run);
+          }
+        }
       }
-    }
 
-    // Registered BEFORE anything is adopted, so an old socket disconnecting
-    // mid-handshake finds this connection and hands over rather than parking.
-    if (key) {
-      owners.set(key, {
-        socket,
-        adopt: (run: LiveRun) => { run.transport.rebind(socket); activeRuns.add(run); },
-        release: () => {
-          const live = [...activeRuns].filter((r) => !r.done);
-          for (const run of live) activeRuns.delete(run);
-          return live;
-        },
-      });
-    }
-
-    const held = key ? orphanedRuns.get(key) : undefined;
-    if (held && key) {
-      clearTimeout(held.timer);
-      orphanedRuns.delete(key);
-      for (const run of held.runs) {
-        if (run.done) continue;
-        run.transport.rebind(socket);
-        activeRuns.add(run);
+      if (key) {
+        owners.set(key, {
+          socket,
+          adopt: (run: LiveRun) => { run.transport.rebind(socket); activeRuns.add(run); },
+          release: () => {
+            const live = [...activeRuns].filter((r) => !r.done);
+            for (const run of live) activeRuns.delete(run);
+            return live;
+          },
+        });
       }
-    }
+
+      // Whatever was held for this key survives — a reconnect is the client
+      // saying it still wants the result. Adopting is the whole point, and
+      // clearing the timer is only half of it: the runs move INTO this
+      // connection's `activeRuns` and their transports are re-pointed here.
+      // Without the first, `chat:stop` had nothing to abort and a second
+      // disconnect saw no in-flight run, so it armed no timer and the run
+      // could spend with no way to halt it. Without the second, every later
+      // `stream:token`, the terminal `session:complete`, and the
+      // `context:decision` / `escalation:decide` listeners stayed bound to a
+      // dead socket.
+      const held = key ? orphanedRuns.get(key) : undefined;
+      if (held && key) {
+        clearTimeout(held.timer);
+        orphanedRuns.delete(key);
+        for (const run of held.runs) {
+          if (run.done) continue;
+          run.transport.rebind(socket);
+          activeRuns.add(run);
+        }
+      }
+
+      emitResume(assignedClientId, held);
+    };
 
     // Tell the replacement page whether anything is still running for it, and
     // which conversations ended while it was away.
@@ -352,12 +419,21 @@ export function attachSocket(
     // the answer that was persisted. A run that completed while nobody was
     // connected emitted its terminal event into the void, so this is the only
     // remaining place that id can come from.
-    socket.emit('run:resumed', {
-      active: activeRuns.size,
-      finished: [...(held?.runs ?? [])]
-        .filter((r) => r.done)
-        .map((r) => ({ conversationId: r.terminal?.conversationId ?? r.conversationId, error: r.terminal?.error })),
-    });
+    function emitResume(
+      assignedClientId: string | undefined,
+      held: { runs: Set<LiveRun> } | undefined,
+    ): void {
+      socket.emit('run:resumed', {
+        active: activeRuns.size,
+        finished: [...(held?.runs ?? [])]
+          .filter((r) => r.done)
+          .map((r) => ({ conversationId: r.terminal?.conversationId ?? r.conversationId, error: r.terminal?.error })),
+        // Present only when this connection was found to be colliding with a
+        // live one. The client persists it, so the duplicate stops sharing an
+        // identity on this connection AND on its next reload.
+        ...(assignedClientId ? { clientId: assignedClientId } : {}),
+      });
+    }
 
     socket.on('chat:run', async (payload: unknown, ack?: ChatRunAck) => {
       // The run holds a transport, not this socket. Same structural surface
@@ -402,7 +478,9 @@ export function attachSocket(
     // Stop every run in flight on this connection. The run resolves with its
     // partial output, which still gets persisted and acked normally.
     socket.on('chat:stop', () => {
-      for (const r of activeRuns) r.controller.abort();
+      void arbitrated.then(() => {
+        for (const r of activeRuns) r.controller.abort();
+      });
     });
 
     // Connection lost. That is NOT the same as "the user left": a missed
@@ -468,6 +546,12 @@ export function attachSocket(
       timer.unref?.();
       orphanedRuns.set(parkKey, { runs, timer });
     });
+
+    // Every handler above is registered, so arbitration can take a full round
+    // trip — asking the incumbent whether it is still alive — without a fast
+    // client's first message falling on the floor.
+    arbitrated = arbitrate();
+    void arbitrated;
   });
 
   return io;

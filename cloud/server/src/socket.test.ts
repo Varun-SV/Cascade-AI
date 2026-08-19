@@ -160,7 +160,14 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
   let stub: StubOpenAIServer | undefined;
   const clients: ClientSocket[] = [];
 
-  async function start(graceMs: number): Promise<void> {
+  /** Answer the server's liveness probe, as the real web client does. */
+  function stayAlive(client: ClientSocket): void {
+    client.on('resume:probe', (ack?: (alive: boolean) => void) => {
+      if (typeof ack === 'function') ack(true);
+    });
+  }
+
+  async function start(graceMs: number, ownerProbeMs = 300): Promise<void> {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-grace-'));
     store = new CloudStore(path.join(dir, 'cloud.db'));
     env = {
@@ -177,7 +184,7 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
       MAX_COST_PER_RUN_USD: 1,
     };
     httpServer = http.createServer();
-    attachSocket(httpServer, env, store, { reconnectGraceMs: graceMs });
+    attachSocket(httpServer, env, store, { reconnectGraceMs: graceMs, ownerProbeMs });
     await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', resolve));
     baseUrl = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}`;
   }
@@ -733,6 +740,54 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
     const conversations = store.listConversations(user.id) as Array<{ id: string }>;
     const reply = conversations.length ? assistantReply(conversations[0]!.id) : '';
     expect(reply).not.toContain('Hello from the stub model.');
+  }, 40_000);
+
+  it('refuses to take a run from a tab that is still alive, and renames the duplicate', async () => {
+    // The case no client-side scheme can settle. Session storage is COPIED into
+    // a duplicated tab, so the duplicate connects holding the original's id —
+    // and it can do so before any in-page collision detection has objected,
+    // because BroadcastChannel delivery has no upper bound. If the server
+    // treats a same-key socket as authoritative it hands over a live run, and
+    // the duplicate then walks off with it.
+    //
+    // So the server asks. The original answers, and therefore keeps its run;
+    // the duplicate is given an identity of its own instead.
+    await start(8_000);
+    stub = await startStubOpenAIServer({ delayMs: 2_000 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'grace-dup', email: null, name: 'Dup', avatar: null });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+
+    const original = connect(cookie, 'tab-shared');
+    stayAlive(original);
+    let completedOnOriginal = false;
+    original.on('session:complete', () => { completedOnOriginal = true; });
+    await connected(original);
+    original.emit(
+      'chat:run',
+      { prompt: 'hello', providers: [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }] },
+      () => { /* this socket is staying put */ },
+    );
+    await new Promise((r) => setTimeout(r, 200));
+
+    // The duplicate arrives on the copied identity while the original is live.
+    const duplicate = connect(cookie, 'tab-shared');
+    stayAlive(duplicate);
+    const seenByDuplicate: Array<{ active?: number; clientId?: string }> = [];
+    let completedOnDuplicate = false;
+    duplicate.on('run:resumed', (e: { active?: number; clientId?: string }) => { seenByDuplicate.push(e); });
+    duplicate.on('session:complete', () => { completedOnDuplicate = true; });
+    await connected(duplicate);
+
+    await until(() => seenByDuplicate.length > 0, 5_000);
+    // It inherits nothing, and is told who it is instead.
+    expect(seenByDuplicate[0]?.active).toBe(0);
+    expect(seenByDuplicate[0]?.clientId).toEqual(expect.any(String));
+    expect(seenByDuplicate[0]?.clientId).not.toBe('tab-shared');
+
+    // The run stays where it belongs and finishes there.
+    const finished = await until(() => completedOnOriginal, 12_000);
+    expect(finished).toBe(true);
+    expect(completedOnDuplicate).toBe(false);
   }, 40_000);
 
   it('tells a fresh connection there is nothing to wait for', async () => {
