@@ -69,7 +69,7 @@ function mapProvider(id: string): { type: string | null; baseUrl?: string } {
 // ─── Backend ─────────────────────────────────────────────────────────────────
 // Resolve the cascade-ai core package (built CommonJS output). In dev it lives at
 // the repo's ../dist; in a packaged app it's bundled under resources/cascade-core.
-function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined) => boolean; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response> } {
+function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined) => boolean; hasProviderCredential: (p: { apiKey?: string; authToken?: string } | undefined | null) => boolean; applyProviderApiKey: (providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>, type: string, apiKey: string, extra?: { baseUrl?: string }) => void; applyProviderCredential: (providers: Array<Record<string, unknown>>, type: string, apiKey: string, endpoint: { kind: 'at'; baseUrl: string } | { kind: 'cleared' } | { kind: 'preserve' }) => { written: boolean; reason: 'ambiguous-scope' | 'unroutable' }; applyEndpointEdit: (existing: Record<string, unknown>, nextBaseUrl: string | undefined, replacementKey: string | undefined) => void; commitSettings: (live: Record<string, unknown>, data: Record<string, unknown>, write: (config: never) => Promise<{ ok: true } | { ok: false; error: string }>) => Promise<{ ok: boolean; refused: Array<{ type: string; reason: 'ambiguous-scope' | 'unroutable' }>; error?: string }>; settingsSnapshot: (config: Record<string, unknown>) => { models: Record<string, string>; budget: Record<string, unknown>; providersWithKey: string[]; endpoints: Record<string, string>; azureDeployments: Array<Record<string, unknown>>; webSearch: Record<string, unknown>; advanced: Record<string, unknown> }; explainRefusal: (type: string, reason: 'ambiguous-scope' | 'unroutable') => string; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response>; sameEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean; sameCredentialEndpoint: (type: string, a?: string, b?: string) => boolean; hasDefaultEndpoint: (type: string) => boolean; sameAzureEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean } {
   // Dev: the repo's external-deps build (node_modules resolves the requires).
   // Packaged: the self-contained `desktop-core.cjs` bundle (no node_modules to
   // resolve from — every JS dep is bundled in; only native modules like
@@ -399,18 +399,26 @@ function registerIPC(): void {
       // ConfigManager only logs the migration to a console nobody reads, so
       // the renderer has to be told why the provider vanished.
       const migrationNotice = configManager?.takeRetiredNotice?.() ?? undefined;
-      let apiKey = '';
+      // Whether a credential exists — never the credential. The renderer reads
+      // only onboardingDone, migrationNotice and workspace from this; the secret
+      // was passed across the bridge for nothing, where any renderer script or
+      // DevTools session could read it. Widening it to cover `authToken` would
+      // have put a bearer token on that same wire, in a change whose whole
+      // subject is not leaking them.
       const { type } = mapProvider(provider);
-      if (type && cascadeConfig?.providers) {
-        apiKey = cascadeConfig.providers.find((p: { type: string; apiKey?: string }) => p.type === type)?.apiKey ?? '';
-      }
-      return { provider, apiKey, workspace, onboardingDone, migrationNotice };
+      const entry = type && cascadeConfig?.providers
+        ? cascadeConfig.providers.find(
+          (p: { type: string; apiKey?: string; authToken?: string }) => p.type === type,
+        )
+        : undefined;
+      const hasCredential = Boolean(entry?.apiKey || entry?.authToken);
+      return { provider, hasCredential, workspace, onboardingDone, migrationNotice };
     } catch {
-      return { provider: '', apiKey: '', workspace: '', onboardingDone: false };
+      return { provider: '', hasCredential: false, workspace: '', onboardingDone: false };
     }
   });
 
-  ipcMain.handle('cascade:setConfig', async (_e, cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string }) => {
+  ipcMain.handle('cascade:setConfig', async (_e, cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string; endpointOffered?: boolean }) => {
     try {
       // `onboarding_done` is written AFTER the provider write below, not
       // before, and only when something usable actually landed. Marking it
@@ -434,15 +442,57 @@ function registerIPC(): void {
       if (type && (cfg.apiKey || keyOptional) && cascadeConfig && configManager) {
         if (!Array.isArray(cascadeConfig.providers)) cascadeConfig.providers = [];
         const existing = cascadeConfig.providers.find((p: { type: string }) => p.type === type);
-        if (existing) {
-          existing.apiKey = cfg.apiKey;
-          if (baseUrl) existing.baseUrl = baseUrl;
+        const { applyProviderCredential, applyEndpointEdit, explainRefusal } = loadCore();
+        // Which providers the wizard renders a base-URL input for — mirrors
+        // `needsBaseUrl` in OnboardingView, which shows it for
+        // `openai-compatible` alone. A blank field the user was SHOWN is a
+        // statement; a field that was never rendered is not, and reading the
+        // second as the first moved a rotated gateway key onto the provider's
+        // public API.
+        // `endpointOffered` comes from the screen that renders the field, not
+        // from a second list of provider ids kept in step with it here. That
+        // duplication is the sibling-drift this release keeps finding, and the
+        // renderer is the only place that actually knows.
+        //
+        // Older renderers (a packaged app updated out of step with the core)
+        // send nothing, and the conservative reading of silence is `preserve`:
+        // it never moves a credential to a host the user did not name.
+        const endpoint = baseUrl
+          ? { kind: 'at' as const, baseUrl }
+          : cfg.endpointOffered ? { kind: 'cleared' as const } : { kind: 'preserve' as const };
+
+        if (cfg.apiKey) {
+          // Whether or not a row already exists. Creating one used to bypass
+          // this rule entirely and push `{ type, apiKey }` straight in — so an
+          // OpenAI-compatible key entered with the URL box empty was stored
+          // scoped to nothing, and `OpenAICompatibleProvider` hands an absent
+          // `baseUrl` to the OpenAI SDK, which falls back to api.openai.com.
+          // A first-run Groq key went to OpenAI.
+          const outcome = applyProviderCredential(cascadeConfig.providers, type, cfg.apiKey, endpoint);
+          if (!outcome.written) {
+            // Nothing was stored, so the wizard must not advance as though it
+            // had been.
+            return { ok: false, onboardingDone: false, error: explainRefusal(type, outcome.reason) };
+          }
+        } else if (existing) {
+          // The SAME rule the Settings save uses. This path bypassed it, so a
+          // key-optional provider could have its endpoint changed here with a
+          // blank key field and keep the previous host's key attached — the
+          // provider then sent that key to the new host.
+          applyEndpointEdit(existing, baseUrl, cfg.apiKey);
         } else {
-          cascadeConfig.providers.push({
-            type,
-            ...(cfg.apiKey ? { apiKey: cfg.apiKey } : {}),
-            ...(baseUrl ? { baseUrl } : {}),
-          });
+          // Genuinely keyless, which is a real choice: Ollama, or a compatible
+          // endpoint on the user's own hardware. It still needs somewhere to
+          // send — a compatible row with neither key nor URL is not "local", it
+          // is an uncredentialed request to api.openai.com.
+          if (type === 'openai-compatible' && !baseUrl) {
+            return {
+              ok: false, onboardingDone: false,
+              error: 'An OpenAI-compatible provider needs its Base URL — without one the request '
+                + 'goes to api.openai.com rather than your endpoint.',
+            };
+          }
+          cascadeConfig.providers.push({ type, ...(baseUrl ? { baseUrl } : {}) });
         }
         await configManager.save();
       }
@@ -472,12 +522,18 @@ function registerIPC(): void {
       // its own Redux store and was closing the wizard regardless — so this
       // guard previously took effect only after an app restart, and the
       // current window walked straight into providerless chat.
-      return { onboardingDone };
+      return { ok: true, onboardingDone };
     } catch (err) {
       console.warn('[main] setConfig failed:', err);
+      // TOTAL contract: every exit carries `ok`. Returning only
+      // `{ onboardingDone: false }` here meant a thrown save read as success to
+      // a renderer branching on `ok === false`, so Verify advanced past a
+      // failure and blamed it on the provider choice a step later.
+      return {
+        ok: false, onboardingDone: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
     }
-    // A failure above leaves onboarding open rather than claiming success.
-    return { onboardingDone: false };
   });
 
   // Settings panel — a backend-independent path to read/write keys, per-tier
@@ -486,74 +542,17 @@ function registerIPC(): void {
   // failed cascade-core build), the Save button silently no-op'd. Routing through
   // the same ConfigManager the backend uses guarantees Settings can always
   // persist, even when there is no socket.
-  function settingsSnapshot(): {
-    models: Record<string, string>;
-    budget: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number };
-    providersWithKey: string[];
-    endpoints: Record<string, string>;
-    azureDeployments: Array<{ label?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string; hasKey: boolean }>;
-    webSearch: { searxngUrl?: string; hasBraveKey: boolean; hasTavilyKey: boolean };
-    advanced: Record<string, unknown>;
-  } {
-    const models = (cascadeConfig?.models ?? {}) as Record<string, string>;
-    const budget = {
-      maxCostPerRun: cascadeConfig?.budget?.maxCostPerRunUsd as number | undefined,
-      autoBias: cascadeConfig?.autoBias as string | undefined,
-      dailyBudgetUsd: cascadeConfig?.budget?.dailyBudgetUsd as number | undefined,
-      sessionBudgetUsd: cascadeConfig?.budget?.sessionBudgetUsd as number | undefined,
-      maxTokensPerRun: cascadeConfig?.budget?.maxTokensPerRun as number | undefined,
-      warnAtPct: cascadeConfig?.budget?.warnAtPct as number | undefined,
-    };
-    const providers = (cascadeConfig?.providers ?? []) as Array<{
-      type: string; apiKey?: string; baseUrl?: string; label?: string; deploymentName?: string; apiVersion?: string;
-    }>;
-    const providersWithKey = providers
-      .filter((p) => typeof p.apiKey === 'string' && p.apiKey.length > 0)
-      .map((p) => p.type);
-    const endpoints: Record<string, string> = {};
-    for (const p of providers) { if (p?.type && p?.baseUrl && p.type !== 'azure') endpoints[p.type] = p.baseUrl; }
-    // Azure supports multiple deployments (each its own resource/endpoint), so
-    // it can't be represented in the single-entry `endpoints`/`providersWithKey`
-    // maps above — surface every azure provider entry as its own row instead.
-    // The raw key is never sent back, only whether one is already set.
-    const azureDeployments = providers
-      .filter((p) => p.type === 'azure')
-      .map((p) => ({
-        label: p.label,
-        baseUrl: p.baseUrl,
-        deploymentName: p.deploymentName,
-        apiVersion: p.apiVersion,
-        hasKey: typeof p.apiKey === 'string' && p.apiKey.length > 0,
-      }));
-    // Web-search backends (tools.webSearch) — URL is shown, keys only as set/unset.
-    const ws = (cascadeConfig?.tools?.webSearch ?? {}) as { searxngUrl?: string; braveApiKey?: string; tavilyApiKey?: string };
-    const webSearch = {
-      searxngUrl: ws.searxngUrl,
-      hasBraveKey: typeof ws.braveApiKey === 'string' && ws.braveApiKey.length > 0,
-      hasTavilyKey: typeof ws.tavilyApiKey === 'string' && ws.tavilyApiKey.length > 0,
-    };
-    // Advanced knobs surfaced in the Settings "Advanced" tab — read back from
-    // the same config so the panel always reflects what's on disk.
-    const advanced: Record<string, unknown> = {
-      autonomy: cascadeConfig?.autonomy,
-      planApproval: cascadeConfig?.planApproval,
-      approvalTimeoutMs: cascadeConfig?.approvalTimeoutMs,
-      t3Execution: cascadeConfig?.t3Execution,
-      localConcurrency: cascadeConfig?.localConcurrency,
-      localInferenceTimeoutMs: cascadeConfig?.localInferenceTimeoutMs,
-      cloudInferenceTimeoutMs: cascadeConfig?.cloudInferenceTimeoutMs,
-      reflectionEnabled: cascadeConfig?.reflection?.enabled,
-      cascadeAuto: cascadeConfig?.cascadeAuto,
-      forceTier: cascadeConfig?.routing?.forceTier,
-      benchmarksLive: cascadeConfig?.benchmarks?.live,
-      dynamicToolSandbox: cascadeConfig?.tools?.dynamicToolSandbox,
-      factsExtraction: cascadeConfig?.knowledge?.factsExtraction,
-      rememberSessions: cascadeConfig?.memory?.rememberSessions,
-      enableToolCreation: cascadeConfig?.enableToolCreation,
-      persistDynamicTools: cascadeConfig?.persistDynamicTools,
-      telemetryEnabled: cascadeConfig?.telemetry?.enabled,
-    };
-    return { models, budget, providersWithKey, endpoints, azureDeployments, webSearch, advanced };
+  /**
+   * The redacted Settings snapshot, from the SDK's builder.
+   *
+   * It used to be written out here, and the socket's `config:current` was a
+   * shorter hand-written sibling — which the panel could not tell apart, since
+   * it keeps its own defaults for whatever a snapshot omits and serializes them
+   * on the next save. One builder, so a section cannot go missing from one
+   * surface and take the user's configuration with it.
+   */
+  function settingsSnapshot(): ReturnType<ReturnType<typeof loadCore>['settingsSnapshot']> {
+    return loadCore().settingsSnapshot(cascadeConfig ?? {});
   }
 
   ipcMain.handle('cascade:getSettings', async () => settingsSnapshot());
@@ -615,107 +614,33 @@ function registerIPC(): void {
     try {
       if (!cascadeConfig || !configManager) return { ok: false, error: 'backend-unavailable' };
       if (!Array.isArray(cascadeConfig.providers)) cascadeConfig.providers = [];
-      if (data.keys) {
-        for (const [type, apiKey] of Object.entries(data.keys)) {
-          if (!apiKey) continue; // blank means "keep the existing key"
-          const existing = cascadeConfig.providers.find((p: { type: string }) => p.type === type);
-          if (existing) existing.apiKey = apiKey;
-          else cascadeConfig.providers.push({ type, apiKey });
-        }
-      }
-      if (data.endpoints) {
-        for (const [type, baseUrl] of Object.entries(data.endpoints)) {
-          if (baseUrl === undefined || type === 'azure') continue; // azure goes through azureDeployments below
-          const existing = cascadeConfig.providers.find((pr: { type: string }) => pr.type === type);
-          if (existing) existing.baseUrl = baseUrl || undefined;
-          else if (baseUrl) cascadeConfig.providers.push({ type, baseUrl });
-        }
-      }
-      // Azure supports multiple deployments — unlike every other provider type,
-      // it can't be addressed by a bare `type` string, so it gets its own
-      // replace-the-whole-list field instead of the keys/endpoints maps above.
-      // Blank/omitted apiKey on an incoming row keeps that deployment's
-      // existing key (matched by deploymentName, its natural stable identity).
-      if (Array.isArray(data.azureDeployments)) {
-        const priorAzure = cascadeConfig.providers.filter((p: { type: string }) => p.type === 'azure') as
-          Array<{ deploymentName?: string; apiKey?: string }>;
-        const nonAzure = cascadeConfig.providers.filter((p: { type: string }) => p.type !== 'azure');
-        const nextAzure = data.azureDeployments
-          .map((d) => {
-            const prior = d.deploymentName ? priorAzure.find((p) => p.deploymentName === d.deploymentName) : undefined;
-            const apiKey = d.apiKey ? d.apiKey : prior?.apiKey;
-            return {
-              type: 'azure' as const,
-              ...(d.label ? { label: d.label } : {}),
-              ...(d.baseUrl ? { baseUrl: d.baseUrl } : {}),
-              ...(d.deploymentName ? { deploymentName: d.deploymentName } : {}),
-              ...(d.apiVersion ? { apiVersion: d.apiVersion } : {}),
-              ...(apiKey ? { apiKey } : {}),
-            };
-          })
-          // Drop rows the user added then left completely empty.
-          .filter((d) => d.apiKey || d.baseUrl || d.deploymentName);
-        cascadeConfig.providers = [...nonAzure, ...nextAzure];
-      }
-      if (data.models) {
-        cascadeConfig.models = cascadeConfig.models ?? {};
-        for (const [tier, val] of Object.entries(data.models)) {
-          if (val && val !== 'auto') cascadeConfig.models[tier] = val;
-          else delete cascadeConfig.models[tier];
-        }
-      }
-      if (data.budget) {
-        cascadeConfig.budget = cascadeConfig.budget ?? {};
-        if (typeof data.budget.maxCostPerRun === 'number') cascadeConfig.budget.maxCostPerRunUsd = data.budget.maxCostPerRun;
-        if (data.budget.autoBias === 'balanced' || data.budget.autoBias === 'quality' || data.budget.autoBias === 'cost') {
-          cascadeConfig.autoBias = data.budget.autoBias;
-        }
-        if (typeof data.budget.dailyBudgetUsd === 'number' && data.budget.dailyBudgetUsd >= 0) cascadeConfig.budget.dailyBudgetUsd = data.budget.dailyBudgetUsd;
-        if (typeof data.budget.sessionBudgetUsd === 'number' && data.budget.sessionBudgetUsd >= 0) cascadeConfig.budget.sessionBudgetUsd = data.budget.sessionBudgetUsd;
-        if (typeof data.budget.maxTokensPerRun === 'number' && data.budget.maxTokensPerRun > 0) cascadeConfig.budget.maxTokensPerRun = Math.floor(data.budget.maxTokensPerRun);
-        if (typeof data.budget.warnAtPct === 'number' && data.budget.warnAtPct > 0 && data.budget.warnAtPct <= 100) cascadeConfig.budget.warnAtPct = data.budget.warnAtPct;
-      }
-      // Web-search backends: URL is set/cleared directly ('' clears it); API
-      // keys keep the "blank means keep the existing key" semantics of the
-      // provider key fields above.
-      if (data.webSearch && typeof data.webSearch === 'object') {
-        cascadeConfig.tools = cascadeConfig.tools ?? {};
-        const prior = (cascadeConfig.tools.webSearch ?? {}) as { searxngUrl?: string; braveApiKey?: string; tavilyApiKey?: string };
-        const next = { ...prior };
-        if (typeof data.webSearch.searxngUrl === 'string') next.searxngUrl = data.webSearch.searxngUrl.trim() || undefined;
-        if (data.webSearch.braveApiKey) next.braveApiKey = data.webSearch.braveApiKey;
-        if (data.webSearch.tavilyApiKey) next.tavilyApiKey = data.webSearch.tavilyApiKey;
-        cascadeConfig.tools.webSearch = next;
-      }
-      // Advanced settings: every field is individually validated against an
-      // explicit allowlist — an unknown or malformed key is IGNORED, never
-      // written, so the renderer can't inject arbitrary config.
-      if (data.advanced && typeof data.advanced === 'object') {
-        const a = data.advanced;
-        const num = (v: unknown, min: number, max: number): number | undefined => {
-          const n = Number(v);
-          return Number.isFinite(n) && n >= min && n <= max ? n : undefined;
-        };
-        if (a['autonomy'] === 'manual' || a['autonomy'] === 'auto') cascadeConfig.autonomy = a['autonomy'];
-        if (['never', 'complex', 'all', 'always'].includes(a['planApproval'] as string)) cascadeConfig.planApproval = a['planApproval'];
-        { const n = num(a['approvalTimeoutMs'], 0, 86_400_000); if (n !== undefined) cascadeConfig.approvalTimeoutMs = n; }
-        if (['auto', 'parallel', 'sequential'].includes(a['t3Execution'] as string)) cascadeConfig.t3Execution = a['t3Execution'];
-        { const n = num(a['localConcurrency'], 1, 16); if (n !== undefined) cascadeConfig.localConcurrency = Math.floor(n); }
-        { const n = num(a['localInferenceTimeoutMs'], 10_000, 3_600_000); if (n !== undefined) cascadeConfig.localInferenceTimeoutMs = n; }
-        { const n = num(a['cloudInferenceTimeoutMs'], 10_000, 3_600_000); if (n !== undefined) cascadeConfig.cloudInferenceTimeoutMs = n; }
-        if (typeof a['reflectionEnabled'] === 'boolean') cascadeConfig.reflection = { ...(cascadeConfig.reflection ?? {}), enabled: a['reflectionEnabled'] };
-        if (typeof a['cascadeAuto'] === 'boolean') cascadeConfig.cascadeAuto = a['cascadeAuto'];
-        if (['auto', 'T1', 'T2', 'T3'].includes(a['forceTier'] as string)) cascadeConfig.routing = { ...(cascadeConfig.routing ?? {}), forceTier: a['forceTier'] };
-        if (typeof a['benchmarksLive'] === 'boolean') cascadeConfig.benchmarks = { ...(cascadeConfig.benchmarks ?? {}), live: a['benchmarksLive'] };
-        if (['isolate', 'worker', 'auto'].includes(a['dynamicToolSandbox'] as string)) cascadeConfig.tools = { ...(cascadeConfig.tools ?? {}), dynamicToolSandbox: a['dynamicToolSandbox'] };
-        if (typeof a['factsExtraction'] === 'boolean') cascadeConfig.knowledge = { ...(cascadeConfig.knowledge ?? {}), factsExtraction: a['factsExtraction'] };
-        if (typeof a['rememberSessions'] === 'boolean') cascadeConfig.memory = { ...(cascadeConfig.memory ?? {}), rememberSessions: a['rememberSessions'] };
-        if (typeof a['enableToolCreation'] === 'boolean') cascadeConfig.enableToolCreation = a['enableToolCreation'];
-        if (typeof a['persistDynamicTools'] === 'boolean') cascadeConfig.persistDynamicTools = a['persistDynamicTools'];
-        if (typeof a['telemetryEnabled'] === 'boolean') cascadeConfig.telemetry = { ...(cascadeConfig.telemetry ?? {}), enabled: a['telemetryEnabled'] };
-      }
-      await configManager.save();
-      return { ok: true, ...settingsSnapshot() };
+      // Both halves in one call, because the ORDER matters: keys are written
+      // first, so the endpoint step has to know a key it might retire could be
+      // the one just installed. Split across two loops here, it deleted it.
+      // The WHOLE payload, through the one function the live socket handler
+      // also runs. Both surfaces receive the identical object from the panel,
+      // and keeping two implementations of "apply it" is what let the socket
+      // path quietly support four fields fewer.
+      const { commitSettings, explainRefusal } = loadCore();
+      // The SAME transaction the socket handler runs. This path applied the
+      // payload to the live config and persisted afterwards, so a failed write
+      // left the embedded backend running settings the panel had just reported
+      // as unsaved — and it is the path Settings tries FIRST, so the desktop
+      // had the bug on its normal route while the fallback did not.
+      const committed = await commitSettings(cascadeConfig, data, (next) => configManager!.save(next).then(
+        () => ({ ok: true as const }),
+        (err: unknown) => ({ ok: false as const, error: err instanceof Error ? err.message : String(err) }),
+      ));
+      if (!committed.ok) return { ok: false, error: committed.error };
+      const credentials = { refused: committed.refused };
+      // Reported through the response the panel already renders as an error. A
+      // key that was typed and not stored has to say so; the alternative is a
+      // save that looks identical to one that worked.
+      const refusals = credentials.refused.map((r) => explainRefusal(r.type, r.reason));
+      // `ok` stays true — models, budget and every other key DID save. The
+      // refusal rides alongside so the panel can name what it declined and
+      // why, rather than reporting a clean success over a key it dropped.
+      return { ok: true, ...settingsSnapshot(), ...(refusals.length ? { error: refusals.join(' ') } : {}) };
     } catch (err) {
       console.warn('[main] updateSettings failed:', err);
       return { ok: false, error: err instanceof Error ? err.message : String(err) };

@@ -569,4 +569,18 @@ describe('retiredCleanup is per-load state (review round 11)', () => {
     await mgr.load();
     expect(mgr.getConfig().providers.map((p) => p.type)).toContain('ollama');
   });
+
+  it('names a discarded orphan bearer instead of printing an empty migration', () => {
+    // didCleanupChangeAnything() already returned true for it, so a sync whose
+    // only removal was an orphan bearer printed "Cascade config migration: ."
+    // — telling the user something happened and not what.
+    const line = describeCleanup({ removed: [], clearedPins: [], unusableCredentials: 1 });
+    expect(line).toMatch(/gateway token/i);
+    expect(line).toMatch(/named no gateway URL/i);
+    expect(line).not.toMatch(/migration: \./);
+  });
+
+  it('says nothing at all when nothing was cleaned', () => {
+    expect(describeCleanup({ removed: [], clearedPins: [] })).toBe('');
+  });
 });

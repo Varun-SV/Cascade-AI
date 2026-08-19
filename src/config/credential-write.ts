@@ -1,0 +1,305 @@
+// ─────────────────────────────────────────────
+//  Cascade AI — writing a credential and the host it belongs to
+// ─────────────────────────────────────────────
+//
+//  A provider key is issued BY a host and valid only AT that host, so a write
+//  that sets one without deciding the other is incomplete. Three surfaces —
+//  desktop onboarding, desktop Settings, and the live dashboard — each answered
+//  that second question on their own, and each answered it differently. This
+//  module is where it is answered once.
+//
+//  The hard part is not the rule. It is that an endpoint field can be ABSENT
+//  for two unrelated reasons, and they demand opposite behaviour:
+//
+//    - the user was shown the field and left it blank — the key is scoped to
+//      the provider's public host, and a stored gateway must be retired;
+//    - the surface never had the field — nothing has been said, and whatever
+//      the row already names must stand.
+//
+//  Deriving that from `baseUrl === undefined` cannot distinguish them, and
+//  guessing either way leaks: guess "public" and a rotated gateway key is sent
+//  to the provider's own API; guess "preserve" and a fresh public key is sent
+//  to a corporate gateway. Both were observed. So callers state which case they
+//  are in, and only a caller that genuinely exposes an endpoint channel is
+//  allowed to read absence as a claim about scope.
+
+import { applyProviderApiKey } from './index.js';
+import { hasDefaultEndpoint, sameCredentialEndpoint } from './endpoint-identity.js';
+
+/** A provider row, as every settings surface manipulates it. */
+export interface WritableProvider {
+  type: string;
+  apiKey?: string;
+  authToken?: string;
+  baseUrl?: string;
+  /** See `isLocalEndpoint` in core/router/pricing.ts. */
+  local?: boolean;
+}
+
+/**
+ * What the caller is able to say about where the key it is writing belongs.
+ *
+ * Not an endpoint value — a statement about the SURFACE. That is the whole
+ * point: `{ kind: 'provider-default' }` and `{ kind: 'preserve' }` both carry
+ * no URL and mean opposite things, and only the caller knows which it is.
+ */
+export type CredentialEndpoint =
+  /** The user named a host in the same save. The key belongs there. */
+  | { kind: 'at'; baseUrl: string }
+  /**
+   * The caller HAS an endpoint field for this provider and the user left it
+   * empty. That is a statement, and what it states depends on the provider: for
+   * one with a public host the key belongs there, and for one WITHOUT the row
+   * now addresses nothing at all.
+   *
+   * Not the same as `preserve`, though both arrive carrying no URL — collapsing
+   * them turned an explicit clear into "keep the old host", so a replacement
+   * key stayed attached to a URL the user had just deleted.
+   */
+  | { kind: 'cleared' }
+  /**
+   * The caller has no endpoint field for this provider at all.
+   *
+   * Absence here is a limit of the surface, not evidence, so an untouched
+   * credential keeps whatever host the row names. It is NOT enough to place a
+   * NEW secret: see the refusal in `applyProviderCredential`.
+   */
+  | { kind: 'preserve' };
+
+/** Whether a key was written, and if not, why the caller has to ask a human. */
+export type CredentialWriteOutcome =
+  | { written: true }
+  | { written: false; reason: 'ambiguous-scope' | 'unroutable' };
+
+/**
+ * Read the intent out of a settings payload's `endpoints` map.
+ *
+ * The KEY's presence is the signal, not its value. A surface that can address a
+ * provider's endpoint sends an entry for it — possibly `undefined`, meaning the
+ * field was shown and left blank — and one that cannot sends no entry at all.
+ * That distinction is exactly the one `CredentialEndpoint` needs and the only
+ * place it survives.
+ */
+export function endpointFromSettingsPayload(
+  endpoints: Record<string, string | undefined> | undefined,
+  type: string,
+): CredentialEndpoint {
+  if (!endpoints || !Object.hasOwn(endpoints, type)) return { kind: 'preserve' };
+  const baseUrl = endpoints[type]?.trim();
+  return baseUrl ? { kind: 'at', baseUrl } : { kind: 'cleared' };
+}
+
+/** The host this key will actually be used at once the write lands. */
+function targetEndpoint(
+  endpoint: CredentialEndpoint,
+  existing: WritableProvider | undefined,
+): string | undefined {
+  switch (endpoint.kind) {
+    case 'at': return endpoint.baseUrl;
+    // An explicit clear, always. Whether the row then falls back to a public
+    // host or becomes unroutable is the provider's business, decided before we
+    // get here.
+    case 'cleared': return undefined;
+    case 'preserve': return existing?.baseUrl;
+  }
+}
+
+/** Whether this row names a host that is not simply the provider's own API. */
+function namesCustomHost(row: WritableProvider | undefined): boolean {
+  if (!row?.baseUrl) return false;
+  return !sameCredentialEndpoint(row.type, row.baseUrl, undefined);
+}
+
+/**
+ * Write a user-supplied key together with the host it belongs to.
+ *
+ * `applyProviderApiKey()` only touches `baseUrl` when it is handed one, which
+ * is right for the field and wrong for the pairing — so every surface that
+ * wrote a key through it kept whatever host was already on the row. Callers go
+ * through here instead, and say what they know.
+ */
+export function applyProviderCredential(
+  providers: WritableProvider[],
+  type: string,
+  apiKey: string,
+  endpoint: CredentialEndpoint,
+): CredentialWriteOutcome {
+  const existing = providers.find((p) => p.type === type);
+
+  if (endpoint.kind === 'cleared' && !hasDefaultEndpoint(type)) {
+    // The field was shown, the user emptied it, and this provider has no public
+    // host to fall back on — the row addresses nothing now. Writing the key
+    // anyway would not merely leave it unused: `OpenAICompatibleProvider` hands
+    // an absent `baseUrl` to the OpenAI SDK, which defaults to
+    // `api.openai.com`, so a Groq or DeepSeek key would be sent to OpenAI. The
+    // credential and the endpoint were a pair and are retired as one.
+    if (existing) {
+      existing.baseUrl = undefined;
+      existing.apiKey = undefined;
+      existing.authToken = undefined;
+      delete existing.local;
+    }
+    return { written: false, reason: 'unroutable' };
+  }
+
+  if (endpoint.kind === 'preserve' && namesCustomHost(existing)) {
+    // A brand-new secret, a row pointing at a custom host, and a surface with
+    // no way to say which of the two issued it.
+    //
+    // Both guesses have now shipped as leaks in this release. Keeping the host
+    // sends a freshly typed public-API key to a corporate gateway; dropping it
+    // sends a freshly rotated gateway key to the provider's own API. There is
+    // no third inference to make — the information is genuinely absent — so
+    // nothing is written and the caller has to ask.
+    //
+    // `preserve` remains correct for a credential nobody touched; it was only
+    // ever wrong as a claim about where a NEW one belongs.
+    return { written: false, reason: 'ambiguous-scope' };
+  }
+
+  const nextBaseUrl = targetEndpoint(endpoint, existing);
+  if (existing && !sameCredentialEndpoint(type, existing.baseUrl, nextBaseUrl)) {
+    // `local` is a statement about the endpoint being replaced, not about the
+    // provider. `isLocalEndpoint()` gives an explicit `local` precedence over
+    // inference from the URL, so carrying it across a host change prices every
+    // model at the new endpoint as free and slips the budget caps.
+    delete existing.local;
+  }
+  // Cleared BEFORE the write, so `applyProviderApiKey` cannot re-attach it.
+  if (existing && nextBaseUrl === undefined) existing.baseUrl = undefined;
+  applyProviderApiKey(providers, type, apiKey, nextBaseUrl ? { baseUrl: nextBaseUrl } : {});
+  return { written: true };
+}
+
+/** What happens to the credential already on a row when its endpoint is edited. */
+export type CredentialDisposition =
+  /** Nothing typed, and the endpoint still identifies the same host — it stays. */
+  | 'keep'
+  /** The endpoint moved or was cleared with nothing typed — the pairing is gone. */
+  | 'clear'
+  /** A key was typed in this save; it is the credential now, and must not be touched. */
+  | 'replaced';
+
+/**
+ * What becomes of a stored credential when the endpoint field is edited.
+ *
+ * Three outcomes, not two. This started life as a boolean "does the credential
+ * survive?", and the caller read `false` as "delete the credential" — so a save
+ * carrying BOTH a new key and a new endpoint wrote the key and then deleted it,
+ * because `false` also meant "a replacement was supplied". A user typing a key
+ * into Settings watched it vanish. `'replaced'` exists so that case cannot be
+ * confused with `'clear'` again.
+ */
+export function credentialDispositionForEdit(
+  existing: { type: string; baseUrl?: string },
+  nextBaseUrl: string | undefined,
+  replacementKey: string | undefined,
+): CredentialDisposition {
+  if (replacementKey) return 'replaced';
+  // No `!existing.baseUrl → keep` shortcut. That read absence as "this key was
+  // never scoped to anywhere", but for a default-host provider it means the key
+  // IS scoped — to the public host. Typing a gateway with the key field left
+  // blank therefore kept a console.anthropic.com key and pointed it at the
+  // gateway.
+  return sameCredentialEndpoint(existing.type, existing.baseUrl, nextBaseUrl) ? 'keep' : 'clear';
+}
+
+/**
+ * Apply ONE provider's endpoint edit, retiring the credential when the host
+ * changes and nothing was typed to replace it.
+ *
+ * This is the endpoint-ONLY half — the key field left blank. It is reached from
+ * three places (onboarding, the Settings save, and the live dashboard), and the
+ * dashboard did not reach it at all until the sibling was noticed: a standalone
+ * `cascade dashboard` reported a saved endpoint change it had never applied.
+ */
+export function applyEndpointEdit(
+  existing: WritableProvider,
+  nextBaseUrl: string | undefined,
+  replacementKey: string | undefined,
+): void {
+  if (credentialDispositionForEdit(existing, nextBaseUrl, replacementKey) === 'clear') {
+    existing.apiKey = undefined;
+    existing.authToken = undefined;
+  }
+  // Endpoint-scoped state does not survive the endpoint. See the note in
+  // `applyProviderCredential`; `cascade link` has done this since the same
+  // defect was found on its side.
+  if (!sameCredentialEndpoint(existing.type, existing.baseUrl, nextBaseUrl)) {
+    delete existing.local;
+  }
+  existing.baseUrl = nextBaseUrl || undefined;
+}
+
+/** What a settings save could not store, and why. */
+export interface SettingsCredentialResult {
+  refused: Array<{ type: string; reason: 'ambiguous-scope' | 'unroutable' }>;
+}
+
+/** A refusal, phrased for the person who typed the key. */
+export function explainRefusal(type: string, reason: 'ambiguous-scope' | 'unroutable'): string {
+  return reason === 'unroutable'
+    ? `The ${type} key was not saved: its endpoint was cleared, and ${type} has no default host, `
+      + 'so there is nowhere the key could be sent. Enter the endpoint URL alongside the key.'
+    : `The ${type} key was not saved: this provider is configured with a custom endpoint, and Cascade `
+      + 'cannot tell whether the new key was issued by that endpoint or by the provider directly. '
+      + 'Set the endpoint field alongside the key — clear it if the key is for the provider itself.';
+}
+
+/** The non-Azure halves of a settings save. */
+export interface SettingsCredentialPayload {
+  keys?: Record<string, string | undefined>;
+  endpoints?: Record<string, string | undefined>;
+}
+
+/**
+ * Apply the non-Azure `keys` and `endpoints` halves of a settings save, in order.
+ *
+ * The ORDER is the whole point, and it is why this is one function rather than
+ * two loops in each caller. Keys are written first and endpoints second, so the
+ * endpoint step has to know that a key it is about to consider retiring may be
+ * the one just written. Expressed as two loops with a boolean between them,
+ * that knowledge went missing and the save deleted the key it had installed a
+ * few lines earlier — with no test able to see it, because the loops lived
+ * inside `ipcMain.handle`.
+ */
+export function applySettingsCredentials(
+  providers: WritableProvider[],
+  data: SettingsCredentialPayload,
+): SettingsCredentialResult {
+  const refused: SettingsCredentialResult['refused'] = [];
+  if (data.keys) {
+    for (const [type, apiKey] of Object.entries(data.keys)) {
+      if (!apiKey) continue; // blank means "keep the existing key"
+      const outcome = applyProviderCredential(
+        providers, type, apiKey, endpointFromSettingsPayload(data.endpoints, type),
+      );
+      // Surfaced, never swallowed. A key the user typed that Cascade declined
+      // to store has to say so — silently dropping it is indistinguishable
+      // from a save that worked, which is the failure mode this whole area
+      // keeps producing.
+      if (!outcome.written) refused.push({ type, reason: outcome.reason });
+    }
+  }
+  if (!data.endpoints) return { refused };
+  for (const [type, baseUrl] of Object.entries(data.endpoints)) {
+    // Azure is addressed per deployment and goes through its own field.
+    if (type === 'azure') continue;
+    // A present property holding `undefined` is the CLEAR, not an absent one.
+    // `SettingsView` sends `ocUrl.trim() || undefined`, so emptying the field
+    // produces exactly that — and skipping it here meant clearing an
+    // OpenAI-compatible URL with the key box left blank did nothing at all: the
+    // keys loop skipped the blank key, this loop skipped the blank URL, and the
+    // stale host kept its credential. Absence of the PROPERTY still means the
+    // surface cannot address this provider, and that is handled by
+    // `endpointFromSettingsPayload` above, not here.
+    if (!Object.hasOwn(data.endpoints, type)) continue;
+    const existing = providers.find((p) => p.type === type);
+    if (!existing) {
+      if (baseUrl) providers.push({ type, baseUrl });
+      continue;
+    }
+    applyEndpointEdit(existing, baseUrl, data.keys?.[type]);
+  }
+  return { refused };
+}

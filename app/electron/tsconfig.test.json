@@ -1,0 +1,24 @@
+{
+  // Typechecks the Electron tests, which nothing else does.
+  //
+  // `tsconfig.json` beside this one BUILDS the shipped main process, so its
+  // `rootDir` is `app/electron` and a test importing the SDK breaks the desktop
+  // build outright. Excluding tests there was correct — but it left them
+  // typechecked by nothing at all: the root config includes only `src/**/*`
+  // (and excludes `**/*.test.ts`), and `app/tsconfig.json` excludes `electron`.
+  // A comment in the build config claimed the root check covered them. It did
+  // not, and this file is what makes that claim true.
+  //
+  // No `rootDir` and no emit, so a test may reach into `src/` for the real
+  // implementation it is testing without dragging the SDK into a build.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": null,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["vitest/globals", "node"]
+  },
+  "include": ["**/*.test.ts", "**/*.ts"],
+  "exclude": ["node_modules"]
+}

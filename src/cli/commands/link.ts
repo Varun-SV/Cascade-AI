@@ -7,23 +7,35 @@
 //
 //    cascade link                 List detected credentials
 //    cascade link <provider>      Adopt the best credential for a provider
-//        --accept-risk            Required to adopt a subscription OAuth token
+//        --accept-risk            Required for any bearer-token credential
 //
-//  ⚠ Adopting a subscription OAuth token (e.g. Claude Code) reuses it
-//  outside its own CLI, which may violate the vendor's terms of service.
-//  Cascade only reads YOUR local files and never adopts an OAuth token
-//  without --accept-risk.
+//  ⚠ Subscription OAuth tokens are NOT adoptable. Each is locked to its own
+//  vendor's backend, and Anthropic prohibits third-party use of Claude
+//  subscription credentials outright. `cascade link` surfaces them so the
+//  user knows what is on the machine, and refuses to configure a provider
+//  that cannot work. Cascade only reads YOUR local files.
 
 import chalk from 'chalk';
 import { ConfigManager } from '../../config/index.js';
+import { normalizeAzureEndpoint, sameAzureEndpoint } from '../../config/azure-endpoint.js';
+import { resolveAzureRouting } from '../../config/azure-routing.js';
+import { hasDefaultEndpoint } from '../../config/endpoint-identity.js';
 import {
   discoverCredentials,
   maskSecret,
+  OPENAI_COMPATIBLE_ENV,
   type DiscoveredCredential,
 } from '../../config/credential-discovery.js';
 import type { ProviderConfig, ProviderType } from '../../types.js';
 
 export interface LinkOptions {
+  /**
+   * Deprecated and inert. It gated adoption of a subscription OAuth token,
+   * which Anthropic now prohibits and refuses server-side — so every such
+   * credential is reported unusable and returns before any adoption path. Kept
+   * so `cascade link --accept-risk` in an existing script does not fail on an
+   * unknown option; the refusal says explicitly that it no longer applies.
+   */
   acceptRisk?: boolean;
   workspace?: string;
 }
@@ -43,80 +55,488 @@ export async function linkCommand(target: string | undefined, options: LinkOptio
     return;
   }
 
-  const provider = normalizeProvider(target);
-  if (!provider) {
-    console.log(chalk.red(`\n  Unknown provider "${target}". Use one of: anthropic, openai, gemini.\n`));
+  const resolved = normalizeProvider(target);
+  if (!resolved) {
+    const services = OPENAI_COMPATIBLE_ENV.map((s) => s.id).join(', ');
+    console.log(chalk.red(`\n  Unknown provider "${target}".`));
+    console.log(chalk.gray(`  Use one of: anthropic, openai, gemini, azure, openai-compatible`));
+    console.log(chalk.gray(`  …or name a compatible service directly: ${services}\n`));
+    return;
+  }
+  const { provider, serviceId } = resolved;
+
+  // Prefer a directly-usable credential for this provider. When the target
+  // named a specific OpenAI-compatible service, only that service's key
+  // counts — they all share one provider type, so matching on type alone
+  // would configure whichever key happened to be discovered first.
+  const candidates = found.filter((c) => c.provider === provider
+    && (!serviceId || c.serviceId === serviceId));
+
+  // The bare `openai-compatible` target names a TYPE, and several services
+  // share it. With keys for more than one exported, picking the first left the
+  // choice to the order of a table in credential-discovery.ts and silently
+  // overwrote the single compatible provider entry with whichever service that
+  // happened to be. The user knows which one they meant; ask for it by name.
+  const services = [...new Set(candidates.map((c) => c.serviceId).filter((id): id is string => !!id))];
+  if (!serviceId && services.length > 1) {
+    console.log(chalk.yellow(`\n  Keys for several OpenAI-compatible services are set, and "${target}" does not say which.`));
+    console.log(chalk.gray('  Name the one you mean:\n'));
+    for (const id of services) console.log(chalk.cyan(`      cascade link ${id}`));
+    console.log('');
     return;
   }
 
-  // Prefer a directly-usable credential for this provider.
-  const candidates = found.filter((c) => c.provider === provider);
   const chosen = candidates.find((c) => c.directlyUsable) ?? candidates[0];
   if (!chosen) {
     console.log(chalk.yellow(`\n  No detected credential maps to "${provider}".\n`));
     return;
   }
 
-  if (!chosen.directlyUsable) {
+  // Azure's routing can come from the workspace instead of the environment.
+  // Discovery only sees env vars, so a key exported beside deployments that
+  // are ALREADY fully configured looked unusable — and bailing here made the
+  // fill-into-existing-deployments path below reachable only by re-exporting
+  // routing the config already had.
+  const cm = new ConfigManager(options.workspace ?? process.cwd());
+  await cm.load();
+  // Routing can live in the workspace rather than the environment. Discovery
+  // sees env vars only, so it cannot know that — and the bearer warning it
+  // writes says "or configure `baseUrl` for the anthropic provider", advice
+  // this gate then refused to honour.
+  const configured = cm.getConfig().providers;
+  const routedByConfig = isRoutedByConfig(chosen, configured);
+
+  if (!chosen.directlyUsable && !routedByConfig) {
     console.log(chalk.yellow(`\n  Found a ${chosen.sourceTool} credential, but it can't be used against the standard ${provider} API.`));
     if (chosen.warning) console.log(chalk.gray(`  ${chosen.warning}`));
     console.log(chalk.gray('  Cascade won\'t adopt it because it would create a non-working provider.\n'));
+    // `--accept-risk` used to be the way past this for a subscription token, so
+    // silently ignoring it would leave the user waiting for an effect that is
+    // never coming. There is no risk left to accept: the token is refused at
+    // the API, so adopting it cannot produce a working provider.
+    if (options.acceptRisk && chosen.kind === 'oauth') {
+      console.log(chalk.gray('  --accept-risk no longer applies — a subscription token is refused by the'));
+      console.log(chalk.gray('  provider itself, so there is no working configuration to opt into.\n'));
+    }
+    // Say what WOULD work, rather than leaving the user at a dead end.
+    console.log(chalk.gray(`  Set ${chalk.white(envKeyFor(provider))} instead, or add a key with `) + chalk.cyan('cascade init') + chalk.gray('.\n'));
     return;
   }
 
-  if (chosen.kind === 'oauth' && !options.acceptRisk) {
-    console.log(chalk.yellow(`\n  ${chosen.sourceTool} provides a subscription OAuth token, not an API key.`));
-    if (chosen.warning) console.log(chalk.gray(`  ${chosen.warning}`));
-    console.log(chalk.gray('  Re-run with --accept-risk to adopt it anyway:\n'));
-    console.log(chalk.cyan(`      cascade link ${provider} --accept-risk\n`));
-    return;
-  }
-
-  await adoptCredential(chosen, options.workspace ?? process.cwd());
+  // Adoption can decline — several Azure resources with nothing to choose
+  // between them, for one — and it explains why when it does. Printing
+  // "✓ Linked" and "run cascade doctor to verify" over that told the user the
+  // opposite of what had just happened.
+  const adopted = await adoptCredential(chosen, cm);
+  if (!adopted) return;
   console.log(chalk.green(`\n  ✓ Linked ${provider} using your ${chosen.sourceTool} credential (${maskSecret(chosen.secret)}).`));
-  if (chosen.kind === 'oauth') {
-    console.log(chalk.gray('  Adopted as an OAuth bearer token — revoke it in the source tool to disable.'));
+  if (chosen.kind === 'bearer') {
+    console.log(chalk.gray('  Adopted as a bearer token — set `baseUrl` to the gateway that issued it.'));
   }
   console.log(chalk.gray('  Run `cascade doctor` to verify, or `cascade` to start.\n'));
+}
+
+/**
+ * Whether the LOADED configuration already supplies the routing a credential
+ * needs but the environment did not carry.
+ *
+ * Discovery sees environment variables only, so it cannot know that an Azure
+ * deployment or an Anthropic gateway is already configured — it reports such a
+ * credential `directlyUsable: false`. This command accepts it anyway, which
+ * means `directlyUsable` alone is not the same question as "will linking work".
+ *
+ * Exported because `cascade doctor` has to ask the identical question: it was
+ * reporting "none usable" about credentials this command adopts successfully a
+ * moment later, and answering that from a second hand-written copy of the rule
+ * is how these two drift.
+ */
+export function isRoutedByConfig(
+  cred: Pick<DiscoveredCredential, 'provider' | 'kind'>,
+  configured: readonly ProviderConfig[],
+): boolean {
+  if (cred.provider === 'azure') {
+    return configured.some((p) => p.type === 'azure' && p.deploymentName?.trim() && p.baseUrl?.trim());
+  }
+  return cred.kind === 'bearer'
+    && configured.some((p) => p.type === cred.provider && p.baseUrl?.trim());
+}
+
+/**
+ * Whether adoption would actually SUCCEED using routing already in the config.
+ *
+ * Deliberately stricter than `isRoutedByConfig`, and a different question. That
+ * one is a gate: it lets a credential reach `adoptCredential()` so the refusal
+ * can name the real obstacle ("several Azure resources are configured — set
+ * AZURE_OPENAI_ENDPOINT"), which is far more useful than the generic "can't be
+ * used against the standard API" this command prints when it stops earlier.
+ *
+ * This one is the verdict `cascade doctor` needs. Doctor makes no attempt and
+ * prints no follow-up, so an optimistic answer there is just wrong: it reported
+ * an Azure key as usable when adoption would refuse it as ambiguous, or when
+ * the exported endpoint matched no configured deployment at all.
+ */
+export function willAdoptFromConfig(
+  cred: Pick<DiscoveredCredential, 'provider' | 'kind' | 'baseUrl' | 'deploymentName' | 'directlyUsable'>,
+  configured: readonly ProviderConfig[],
+): boolean {
+  if (cred.provider === 'azure') {
+    const target = cred.baseUrl?.trim();
+    const deployment = cred.deploymentName?.trim();
+    // A FULLY ROUTED credential does not need the config to supply anything,
+    // so `directlyUsable` is true and an earlier version of this let it through
+    // unexamined. Adoption still refuses one case: a deployment name another
+    // resource already claims, because the name is the model id and the router
+    // would never select the second row. Checked here too, or doctor promises a
+    // link that refuses.
+    if (target && deployment) return !azureRoutedTarget(deployment, target, configured).collision;
+    return azureDeploymentsForCredential(cred, configured).length > 0;
+  }
+  return cred.directlyUsable || isRoutedByConfig(cred, configured);
+}
+
+/**
+ * Where a FULLY ROUTED Azure credential lands among the configured rows.
+ *
+ * One function because two callers need the identical answer and had drifted
+ * apart twice: `adoptCredential()` decides what to write, and
+ * `willAdoptFromConfig()` tells `cascade doctor` whether that write would
+ * succeed. Doctor reported "none usable" for a credential adoption accepts a
+ * moment later, because only one of them had learned the endpointless case.
+ *
+ * - A row with this deployment name and NO endpoint is THIS deployment waiting
+ *   for one, and the credential supplies exactly what it lacks — so it is the
+ *   row to update, not a conflict.
+ * - A row with this deployment name and a DIFFERENT, non-empty endpoint is a
+ *   real collision: the name is the model id, the router binds the first row
+ *   that matches without consulting the endpoint, so the second could never be
+ *   selected.
+ */
+export function azureRoutedTarget(
+  deployment: string,
+  target: string,
+  configured: readonly ProviderConfig[],
+): { existing?: ProviderConfig; collision: boolean } {
+  const named = (p: ProviderConfig): boolean =>
+    p.type === 'azure' && (p.deploymentName?.trim() ?? '') === deployment;
+  const existing = configured.find((p) => named(p)
+    && (sameAzureEndpoint(p.baseUrl, target) || !p.baseUrl?.trim()));
+  if (existing) return { existing, collision: false };
+  return {
+    collision: configured.some((p) => named(p)
+      && !!p.baseUrl?.trim()
+      && !sameAzureEndpoint(p.baseUrl, target)),
+  };
+}
+
+/**
+ * The configured Azure deployments an adopted key would actually be written to.
+ *
+ * Empty when the resource cannot be determined: an Azure key belongs to ONE
+ * resource, so with several configured and nothing to choose between them
+ * there is no safe write — filling them all would break the deployments on the
+ * other resources and overwrite the keys they already had.
+ *
+ * `cred.baseUrl` narrows first when the environment supplied one, because that
+ * names the resource even when no deployment name came with it.
+ */
+export function azureDeploymentsForCredential(
+  cred: Pick<DiscoveredCredential, 'baseUrl' | 'deploymentName'>,
+  configured: readonly ProviderConfig[],
+): ProviderConfig[] {
+  // Delegates to the one shared rule (config/azure-routing.ts). This function
+  // and `ConfigManager.azureEntriesForEnv()` were two hand-written copies of
+  // the same reasoning, and every round of review found them disagreeing —
+  // last on a deployment name occurring on two resources, which both resolved
+  // with `find()` and therefore settled arbitrarily.
+  const routing = resolveAzureRouting(configured, configured, {
+    endpoint: cred.baseUrl,
+    deployment: cred.deploymentName,
+  });
+  return routing.ok ? routing.rows : [];
+}
+
+/**
+ * The resource a credential resolves to, and whether a named deployment still
+ * has to be created on it. Exported so `linkCommand` can act on the same answer
+ * `azureDeploymentsForCredential` returns rows for, rather than re-deriving it.
+ */
+export function azureRoutingForCredential(
+  cred: Pick<DiscoveredCredential, 'baseUrl' | 'deploymentName'>,
+  configured: readonly ProviderConfig[],
+): ReturnType<typeof resolveAzureRouting<ProviderConfig>> {
+  return resolveAzureRouting(configured, configured, {
+    endpoint: cred.baseUrl,
+    deployment: cred.deploymentName,
+  });
 }
 
 function printDiscovered(found: DiscoveredCredential[]): void {
   console.log(chalk.magenta('\n  ◈ Detected credentials\n'));
   for (const c of found) {
     const usable = c.directlyUsable ? chalk.green('usable') : chalk.yellow('needs vendor backend');
-    const kind = c.kind === 'oauth' ? chalk.yellow('oauth') : chalk.gray('api-key');
+    const kind = c.kind === 'oauth' ? chalk.yellow('subscription')
+      : c.kind === 'bearer' ? chalk.cyan('bearer')
+      : chalk.gray('api-key');
     console.log(`  ${chalk.white(c.provider.padEnd(18))} ${chalk.gray(maskSecret(c.secret).padEnd(12))} ${kind}  ${usable}`);
     console.log(chalk.gray(`    from ${c.sourceTool}`));
     if (c.warning) console.log(chalk.yellow(`    ⚠ ${c.warning}`));
   }
-  console.log(chalk.gray('\n  Adopt one with:  ') + chalk.cyan('cascade link <provider> [--accept-risk]'));
-  console.log(chalk.gray('  --accept-risk is required for subscription OAuth tokens.\n'));
+  console.log(chalk.gray('\n  Adopt one with:  ') + chalk.cyan('cascade link <provider>'));
+  console.log(chalk.gray('  Subscription tokens are listed for visibility and cannot be adopted.\n'));
 }
 
-function normalizeProvider(target: string): ProviderType | null {
+/** The env var that would configure this provider the supported way. */
+function envKeyFor(provider: ProviderType): string {
+  if (provider === 'openai') return 'OPENAI_API_KEY';
+  if (provider === 'gemini') return 'GEMINI_API_KEY';
+  if (provider === 'anthropic') return 'ANTHROPIC_API_KEY';
+  if (provider === 'azure') return 'AZURE_OPENAI_KEY';
+  return 'the provider\'s API key';
+}
+
+/**
+ * A link target resolves to a provider type, and — for the OpenAI-compatible
+ * services, which all share one type — which service was actually meant.
+ */
+function normalizeProvider(target: string): { provider: ProviderType; serviceId?: string } | null {
   const t = target.toLowerCase();
-  if (t === 'anthropic' || t === 'claude' || t === 'claude-code') return 'anthropic';
-  if (t === 'openai' || t === 'codex' || t === 'gpt') return 'openai';
-  if (t === 'gemini' || t === 'google') return 'gemini';
+  if (t === 'anthropic' || t === 'claude' || t === 'claude-code') return { provider: 'anthropic' };
+  if (t === 'openai' || t === 'codex' || t === 'gpt') return { provider: 'openai' };
+  if (t === 'gemini' || t === 'google') return { provider: 'gemini' };
+  if (t === 'azure' || t === 'azure-openai') return { provider: 'azure' };
+  if (t === 'openai-compatible' || t === 'compatible') return { provider: 'openai-compatible' };
+  // Naming the service is how a user actually thinks about this: they have a
+  // Groq key, not an "openai-compatible" key.
+  const service = OPENAI_COMPATIBLE_ENV.find((s) => s.id === t || s.label.toLowerCase() === t);
+  if (service) return { provider: 'openai-compatible', serviceId: service.id };
   return null;
 }
 
-async function adoptCredential(cred: DiscoveredCredential, workspace: string): Promise<void> {
-  const cm = new ConfigManager(workspace);
-  await cm.load();
+async function adoptCredential(cred: DiscoveredCredential, cm: ConfigManager): Promise<boolean> {
   const config = cm.getConfig();
 
+  // Azure is configured one entry PER DEPLOYMENT — `init()` maps each to its
+  // own model, and the deployment name IS the model id. Collapsing them to a
+  // single entry, as the replace-by-type path below does, would delete every
+  // other deployment's name, endpoint and key, and the save is authoritative
+  // for the global credential store, so they would not come back. A key is not
+  // a reason to forget a user's topology: fill it into the deployments that
+  // are already there and leave everything else alone.
+  const azureDeployments = cred.provider === 'azure'
+    ? config.providers.filter((p) => p.type === 'azure' && p.deploymentName?.trim())
+    : [];
+  if (azureDeployments.length > 0) {
+    // A FULLY ROUTED credential names the deployment it belongs to, so there is
+    // nothing to infer: upsert that exact row. Requiring its endpoint to already
+    // exist meant a key exported with a brand-new resource — everything needed
+    // to add it — was refused, and a new deployment on a known resource silently
+    // updated the old rows without ever being created.
+    const target = cred.baseUrl?.trim();
+    const deployment = cred.deploymentName?.trim();
+    if (target && deployment) {
+      // Endpoints compared through the shared normalizer, not as typed. The
+      // provider strips trailing slashes before it builds a client, so
+      // `https://acme.openai.azure.com` and the same URL with one address the
+      // same resource — but an exact comparison called them different, missed
+      // the existing row, and appended a DUPLICATE deployment. The router takes
+      // the first row matching a deployment name, so it kept using the old
+      // keyless one while this printed "✓ Linked".
+      // Both halves of this decision — which row to update, and whether the
+      // name is claimed by another resource — come from the one function
+      // `cascade doctor` also asks, so the two cannot answer differently.
+      const { existing, collision: claimedElsewhere } = azureRoutedTarget(deployment, target, config.providers);
+      if (claimedElsewhere) {
+        console.log(chalk.yellow(`\n  A different Azure resource already has a deployment named "${deployment}".`));
+        console.log(chalk.gray('  Deployment names are model ids in Cascade, so two resources cannot share one —'));
+        console.log(chalk.gray('  the second would never be selected. Rename one deployment, or remove the entry'));
+        console.log(chalk.gray('  you no longer use, then run this again.\n'));
+        return false;
+      }
+
+      // The key is RESOURCE-scoped, so it lands on every deployment of that
+      // resource — not only the one `AZURE_OPENAI_DEPLOYMENT` happens to name.
+      // Keying just that row left its siblings holding the previous key, and
+      // injectEnvKeys skips rows that already have one, so after the old key
+      // was revoked every other deployment on the resource failed. This is the
+      // same resource-scoping the workspace-routed branch below applies.
+      const patch = {
+        apiKey: cred.secret,
+        credentialSource: cred.sourceTool,
+        ...(cred.apiVersion ? { apiVersion: cred.apiVersion } : {}),
+      };
+      const updated = config.providers.map((p) => {
+        if (p === existing) return { ...p, baseUrl: target, ...patch };
+        const sibling = p.type === 'azure' && p.deploymentName?.trim()
+          && sameAzureEndpoint(p.baseUrl, target);
+        return sibling ? { ...p, ...patch } : p;
+      });
+      const providers = existing
+        ? updated
+        : [...updated, {
+          type: 'azure' as const,
+          baseUrl: target,
+          deploymentName: deployment,
+          ...patch,
+        }];
+      await cm.updateConfig({ providers });
+      return true;
+    }
+
+    // Routing came from the workspace instead. An Azure key belongs to ONE
+    // RESOURCE, so writing it across every deployment would break the ones on
+    // other resources and overwrite keys they already had — permanently, since
+    // the save is authoritative for the global credential store.
+    //
+    // An exported AZURE_OPENAI_ENDPOINT names that resource even when no
+    // deployment name came with it, so it narrows the candidates before the
+    // ambiguity check rather than after. Counting every configured resource
+    // first refused a key whose resource was never in doubt — and because the
+    // refusal returns before updateConfig(), the key injectEnvKeys had already
+    // put into those deployments in memory was never persisted, so the command
+    // failed with the routing sitting right there.
+    //
+    // Which rows those are is answered by azureDeploymentsForCredential(), the
+    // same function `cascade doctor` asks whether this key is usable at all —
+    // it was reporting "usable" for a key this branch then refused.
+    const scoped = azureDeploymentsForCredential(cred, config.providers);
+    if (scoped.length === 0) {
+      const all = [...new Set(azureDeployments.map((p) => normalizeAzureEndpoint(p.baseUrl)))];
+      const onTarget = target
+        ? azureDeployments.some((p) => sameAzureEndpoint(p.baseUrl, target))
+        : true;
+      const anyRouted = azureDeployments.some((p) => p.baseUrl?.trim());
+      if (!anyRouted) {
+        console.log(chalk.yellow('\n  The configured Azure deployments have no endpoint.'));
+        console.log(chalk.gray('  A deployment needs its resource URL before a key can reach it —'));
+        console.log(chalk.gray('  set AZURE_OPENAI_ENDPOINT, or add `baseUrl` to the entries in'));
+        console.log(chalk.gray('  .cascade/config.json, then run this again.\n'));
+        return false;
+      }
+      if (target && !onTarget) {
+        console.log(chalk.yellow(`\n  No configured Azure deployment is on ${target}.`));
+        console.log(chalk.gray('  Set AZURE_OPENAI_DEPLOYMENT as well to add one, or point'));
+        console.log(chalk.gray('  AZURE_OPENAI_ENDPOINT at a resource you have configured:\n'));
+      } else {
+        console.log(chalk.yellow('\n  Several Azure resources are configured, and an Azure key belongs to one of them.'));
+        console.log(chalk.gray('  Set AZURE_OPENAI_ENDPOINT to the resource this key is for, then run again:\n'));
+      }
+      for (const r of all) console.log(chalk.gray(`      ${r || '(no endpoint set)'}`));
+      console.log('');
+      return false;
+    }
+    // `apiVersion` travels with the key, as it does on the fully routed branch
+    // above. Dropping it here left each deployment on its stale or default
+    // version while the user had exported the one they meant — and a deployment
+    // that requires a preview version then fails on its first request. Only
+    // when the environment actually supplied one, so a row keeps its own
+    // otherwise.
+    const patch = {
+      apiKey: cred.secret,
+      credentialSource: cred.sourceTool,
+      ...(cred.apiVersion ? { apiVersion: cred.apiVersion } : {}),
+    };
+    const providers = config.providers.map((p) => (scoped.includes(p) ? { ...p, ...patch } : p));
+
+    // A deployment the environment NAMED but the config does not have yet.
+    //
+    // Without this it was silently discarded: with one configured resource,
+    // `AZURE_OPENAI_DEPLOYMENT=new-deployment` and no endpoint fell through
+    // azureDeploymentsForCredential's `scoped ??= deployments`, so every
+    // EXISTING deployment had its key rotated and the command reported success
+    // — while the deployment the user actually asked for was never created.
+    // The fully routed branch above upserts it; this one has to as well.
+    //
+    // The resource is not a guess: `scoped` is only non-empty when its rows
+    // resolve to exactly one endpoint, so that endpoint is the one this key
+    // belongs to. A name already claimed by a DIFFERENT resource cannot reach
+    // here — azureDeploymentsForCredential would have scoped to that resource
+    // instead, and the row would already exist.
+    // Asked of the shared rule, not re-derived. The local check looked for the
+    // name across EVERY resource, so a name already used on another one
+    // suppressed creating it here — the key rotated this resource's siblings
+    // and the deployment the user named was silently discarded. The rule now
+    // raises that as a collision before this point is reached.
+    const routing = azureRoutingForCredential(cred, config.providers);
+    if (routing.ok && routing.createDeployment) {
+      providers.push({
+        type: 'azure',
+        deploymentName: routing.createDeployment,
+        baseUrl: routing.resource,
+        ...patch,
+      });
+      console.log(chalk.gray(
+        `  Added deployment "${routing.createDeployment}" on ${normalizeAzureEndpoint(routing.resource)}.`,
+      ));
+    }
+
+    await cm.updateConfig({ providers });
+    return true;
+  }
+
+  // Build ON TOP of whatever is already configured for this provider. The
+  // entry is replaced wholesale below, so starting from scratch discarded
+  // every non-credential field the user had set — `baseUrl` above all. That
+  // was invisible while the Anthropic client ignored baseUrl; now that it
+  // honours it, linking a gateway token would have wiped the gateway and sent
+  // the token to api.anthropic.com, which is the one place it is not valid.
+  const existing = config.providers.find((p) => p.type === cred.provider);
   const next: ProviderConfig = {
+    ...existing,
     type: cred.provider,
     credentialSource: cred.sourceTool,
+    // Both cleared first: adopting a credential REPLACES the old one, and
+    // leaving a stale key beside a new token makes which one is in use depend
+    // on provider-internal precedence.
+    apiKey: undefined,
+    authToken: undefined,
   };
-  if (cred.kind === 'oauth' && cred.provider === 'anthropic') {
+  // A bearer token goes to authToken; everything else is an API key. The only
+  // bearer credential discovery still yields is ANTHROPIC_AUTH_TOKEN, which is
+  // the gateway case Anthropic documents.
+  if (cred.kind === 'bearer') {
     next.authToken = cred.secret;
   } else {
     next.apiKey = cred.secret;
   }
+  // A discovered endpoint wins over a configured one — it is the endpoint this
+  // particular key belongs to.
+  //
+  // Without one, "whatever was already there stands" was wrong for a provider
+  // with a public host. `fromEnv()` attaches ANTHROPIC_BASE_URL only when it is
+  // exported, so a bare ANTHROPIC_API_KEY deliberately arrives with no
+  // `baseUrl` — it belongs to api.anthropic.com. The spread above has already
+  // copied the existing row's URL, so linking that key against a preconfigured
+  // gateway saved a public-host key addressed to the gateway. The endpoint is
+  // dropped instead, letting the client fall back to the public host it was
+  // issued for. A type with no canonical host keeps its URL: there the key
+  // would otherwise address nothing.
+  //
+  // API KEYS only. A bearer is the opposite case: it is valid ONLY at a
+  // gateway, has no public host to fall back to, and adopting one against an
+  // endpoint already configured in the workspace is a supported path in this
+  // release. Dropping the URL there would leave a credential that can be sent
+  // nowhere.
+  if (cred.kind !== 'bearer' && !cred.baseUrl && hasDefaultEndpoint(cred.provider) && next.baseUrl) {
+    delete next.baseUrl;
+    delete next.local;
+  }
+  if (cred.baseUrl) {
+    next.baseUrl = cred.baseUrl;
+    // `local` is a statement about the endpoint that is being REPLACED. Carried
+    // across by the spread above, a self-hosted entry's `local: true` would
+    // survive onto a hosted URL — and isLocalEndpoint() gives an explicit
+    // `local` precedence over the URL, so every model from that paid service
+    // would be priced at zero and slip the budget caps entirely. Dropping it
+    // lets it be recomputed from the new URL, in both directions.
+    delete next.local;
+  }
+  // Azure's routing is as required as its key; discovery only reports the
+  // credential as usable when it carried both.
+  if (cred.deploymentName) next.deploymentName = cred.deploymentName;
+  if (cred.apiVersion) next.apiVersion = cred.apiVersion;
 
   const providers = config.providers.filter((p) => p.type !== cred.provider);
   providers.push(next);
   await cm.updateConfig({ providers });
+  return true;
 }

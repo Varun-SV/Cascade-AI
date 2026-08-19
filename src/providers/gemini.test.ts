@@ -1,4 +1,6 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeAll, afterAll } from 'vitest';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { GeminiProvider } from './gemini.js';
 import { ProviderUnreachableError } from './base.js';
 import type { ModelInfo } from '../types.js';
@@ -220,5 +222,328 @@ describe('GeminiProvider — availability is about the KEY, not one model', () =
   it('says so plainly when no key is configured at all', async () => {
     const provider = new GeminiProvider({ type: 'gemini' }, MODEL);
     await expect(provider.isAvailable()).rejects.toThrow(/no Gemini API key/);
+  });
+});
+
+describe('a configured Gemini endpoint is actually used', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  // `baseUrl` was accepted by the schema, preserved across settings edits and
+  // compared by `credentialEndpointIdentity` — while this provider ignored it,
+  // so a proxy-issued key was sent to Google's public backend and the proxy's
+  // catalogue was silently replaced by the public one. Asserting the REQUEST,
+  // not the stored config, is the whole point: the config assertion passed
+  // throughout.
+  const listOk = () => new Response(JSON.stringify({ models: [] }), { status: 200 });
+
+  it('sends model discovery to the configured host', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(listOk());
+    const provider = new GeminiProvider(
+      { type: 'gemini', apiKey: 'proxy-key', baseUrl: 'https://gemini-proxy.internal' },
+      MODEL,
+    );
+    await provider.listModels();
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(String(spy.mock.calls[0]?.[0]))
+      .toBe('https://gemini-proxy.internal/v1beta/models');
+  });
+
+  it('still reaches the public host when nothing is configured', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(listOk());
+    await new GeminiProvider({ type: 'gemini', apiKey: 'k' }, MODEL).listModels();
+
+    expect(String(spy.mock.calls[0]?.[0]))
+      .toBe('https://generativelanguage.googleapis.com/v1beta/models');
+  });
+
+  it('does not double the version segment the client appends itself', async () => {
+    // A user copying the URL out of Google's docs writes the versioned form.
+    // The SDK adds `/v1beta` to whatever root it is given, so trusting the
+    // configured string verbatim would generate against `/v1beta/v1beta`.
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(listOk());
+    await new GeminiProvider(
+      { type: 'gemini', apiKey: 'k', baseUrl: 'https://gemini-proxy.internal/v1beta' },
+      MODEL,
+    ).listModels();
+
+    expect(String(spy.mock.calls[0]?.[0]))
+      .toBe('https://gemini-proxy.internal/v1beta/models');
+  });
+
+  it('strips ONLY the segment this client appends, keeping other paths', async () => {
+    // `/v1beta` is the client's; anything else that looks like a version is a
+    // path the user chose, and proxy paths are scope-bearing in this release.
+    // Stripping `/v2` would silently move generation to a different route AND
+    // make endpoint identity call two different routes the same host — so a
+    // key would survive an edit that relocated it.
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(listOk());
+    await new GeminiProvider(
+      { type: 'gemini', apiKey: 'k', baseUrl: 'https://gemini-proxy.internal/v2/' },
+      MODEL,
+    ).listModels();
+
+    expect(String(spy.mock.calls[0]?.[0]))
+      .toBe('https://gemini-proxy.internal/v2/v1beta/models');
+  });
+
+  it('hands the same root to the SDK client that discovery uses', async () => {
+    // Generation goes through the SDK rather than `fetch`, so the two could
+    // disagree without either test noticing — which is exactly what happened.
+    const provider = new GeminiProvider(
+      { type: 'gemini', apiKey: 'proxy-key', baseUrl: 'https://gemini-proxy.internal/v1beta' },
+      MODEL,
+    );
+    const client = (provider as unknown as { client: { apiClient?: unknown } }).client;
+    const options = (client as unknown as Record<string, unknown>);
+    expect(JSON.stringify(options)).toContain('https://gemini-proxy.internal');
+    expect(JSON.stringify(options)).not.toContain('v1beta/v1beta');
+  });
+});
+
+describe('GeminiProvider — the key never follows a cross-origin redirect', () => {
+  // A real server, not a mocked `fetch`. Replacing the global swallows redirect
+  // following entirely, so a mock-based test of this passes whether the guard
+  // is there or not — it asserted nothing. Same reason
+  // `openai-compatible-redirect.test.ts` is its own file.
+  //
+  // `x-goog-api-key` is a CUSTOM header, so the fetch spec does not strip it
+  // across origins the way it strips `Authorization`. Once `baseUrl` can name a
+  // user-configured proxy, a 302 from that proxy would otherwise deliver the
+  // key to a host that never issued it.
+  let sink: http.Server;
+  let redirector: http.Server;
+  let sinkUrl = '';
+  let redirectorBase = '';
+  const sinkKeys: Array<string | undefined> = [];
+
+  beforeAll(async () => {
+    sink = http.createServer((req, res) => {
+      sinkKeys.push(req.headers['x-goog-api-key'] as string | undefined);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ models: [{ name: 'models/sink-model' }] }));
+    });
+    await new Promise<void>((r) => sink.listen(0, '127.0.0.1', r));
+    sinkUrl = `http://127.0.0.1:${(sink.address() as AddressInfo).port}`;
+
+    redirector = http.createServer((_req, res) => {
+      // Same path, different origin — the shape a compromised or misconfigured
+      // gateway produces. The target is a CONSTANT rather than an echo of
+      // `req.url`: reflecting a request path into `Location` is an open
+      // redirect, which CodeQL flags whether or not the server is a fixture,
+      // and the path here is known anyway.
+      res.writeHead(302, { Location: `${sinkUrl}/v1beta/models` });
+      res.end();
+    });
+    await new Promise<void>((r) => redirector.listen(0, '127.0.0.1', r));
+    redirectorBase = `http://127.0.0.1:${(redirector.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    await new Promise((r) => sink.close(r));
+    await new Promise((r) => redirector.close(r));
+  });
+
+  it('does not deliver x-goog-api-key to the redirect target', async () => {
+    sinkKeys.length = 0;
+    const provider = new GeminiProvider(
+      { type: 'gemini', apiKey: 'proxy-issued-key', baseUrl: redirectorBase },
+      MODEL,
+    );
+
+    // Whatever it returns, the one thing that must not happen is the key
+    // arriving at the other origin.
+    await provider.listModels().catch(() => undefined);
+
+    expect(sinkKeys).toEqual([]);
+  });
+
+  it('still follows a same-origin redirect, which endpoints legitimately use', async () => {
+    // Canonicalising a path is normal; the guard is about the ORIGIN, not about
+    // refusing redirects wholesale.
+    const hops: string[] = [];
+    const server = http.createServer((req, res) => {
+      hops.push(req.url ?? '');
+      if (hops.length === 1) {
+        // Constant target, for the same reason as above.
+        res.writeHead(308, { Location: '/v1beta/models/' });
+        res.end();
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ models: [{ name: 'models/gemini-2.5-flash' }] }));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+      await new GeminiProvider({ type: 'gemini', apiKey: 'k', baseUrl: base }, MODEL).listModels();
+      expect(hops).toEqual(['/v1beta/models', '/v1beta/models/']);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});
+
+describe('GeminiProvider — generation against a configured endpoint', () => {
+  // The SDK is bypassed here on purpose: `GoogleGenAI` takes no custom fetch
+  // and sets no redirect policy, so it cannot be stopped from replaying
+  // `x-goog-api-key` on whatever a configured proxy redirects to. These tests
+  // run against real servers, since a mocked global fetch never follows a
+  // redirect and so cannot tell a guarded transport from an unguarded one.
+  const sse = (frames: unknown[]): string =>
+    frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join('');
+
+  const textFrame = (text: string) => ({ candidates: [{ content: { parts: [{ text }] } }] });
+
+  it('streams text, tool calls and usage the same way the SDK path does', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const server = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        seen.push({ url: req.url, key: req.headers['x-goog-api-key'], body: JSON.parse(body || '{}') });
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.end(sse([
+          textFrame('Hel'),
+          textFrame('lo'),
+          { candidates: [{ content: { parts: [{ functionCall: { name: 'read_file', args: { path: 'a.ts' } } }] } }] },
+          { candidates: [{ finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 11, candidatesTokenCount: 4 } },
+        ]));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+      const chunks: string[] = [];
+      const result = await new GeminiProvider({ type: 'gemini', apiKey: 'proxy-key', baseUrl: base }, MODEL)
+        .generateStream(
+          { messages: [{ role: 'user', content: 'hi' }], systemPrompt: 'be brief' },
+          (c) => { if (c.text) chunks.push(c.text); },
+        );
+
+      expect(chunks).toEqual(['Hel', 'lo']);
+      expect(result.content).toBe('Hello');
+      expect(result.toolCalls).toEqual([{ id: 'read_file', name: 'read_file', input: { path: 'a.ts' } }]);
+      expect(result.finishReason).toBe('tool_use');
+      expect(result.usage.inputTokens).toBe(11);
+      expect(result.usage.outputTokens).toBe(4);
+
+      // Addressed at the configured host, on the route the client would build.
+      expect(seen[0]?.['url']).toBe('/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse');
+      expect(seen[0]?.['key']).toBe('proxy-key');
+      // The system prompt reaches REST in the object form it requires — sent as
+      // a bare string it is silently dropped by the API.
+      expect((seen[0]?.['body'] as Record<string, unknown>)['systemInstruction'])
+        .toEqual({ parts: [{ text: 'be brief' }] });
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('never replays the key on a cross-origin redirect while GENERATING', async () => {
+    // The gap this transport exists to close.
+    const sinkKeys: Array<string | undefined> = [];
+    const sink = http.createServer((req, res) => {
+      sinkKeys.push(req.headers['x-goog-api-key'] as string | undefined);
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.end(sse([textFrame('leaked')]));
+    });
+    await new Promise<void>((r) => sink.listen(0, '127.0.0.1', r));
+    const sinkUrl = `http://127.0.0.1:${(sink.address() as AddressInfo).port}`;
+
+    const redirector = http.createServer((_req, res) => {
+      res.writeHead(307, { Location: `${sinkUrl}/v1beta/models/x:streamGenerateContent?alt=sse` });
+      res.end();
+    });
+    await new Promise<void>((r) => redirector.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${(redirector.address() as AddressInfo).port}`;
+
+    try {
+      await new GeminiProvider({ type: 'gemini', apiKey: 'proxy-issued-key', baseUrl: base }, MODEL)
+        .generateStream({ messages: [{ role: 'user', content: 'hi' }] }, () => {})
+        .catch(() => undefined);
+
+      expect(sinkKeys).toEqual([]);
+    } finally {
+      await new Promise((r) => sink.close(r));
+      await new Promise((r) => redirector.close(r));
+    }
+  });
+
+  it('reports an endpoint that rejects the request instead of returning empty content', async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'proxy denied' } }));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+      await expect(
+        new GeminiProvider({ type: 'gemini', apiKey: 'k', baseUrl: base }, MODEL)
+          .generateStream({ messages: [{ role: 'user', content: 'hi' }] }, () => {}),
+      ).rejects.toThrow(/403/);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});
+
+describe('GeminiProvider — countTokens is on the same guarded transport', () => {
+  // The third route carrying the key, and the one left on the SDK when
+  // discovery and generation moved off it. `GoogleGenAI` takes no redirect
+  // policy, so a proxy redirecting THIS route cross-origin replayed
+  // `x-goog-api-key` just as the other two would have.
+  it('counts against the configured host without following it elsewhere', async () => {
+    const sinkKeys: Array<string | undefined> = [];
+    const sink = http.createServer((req, res) => {
+      sinkKeys.push(req.headers['x-goog-api-key'] as string | undefined);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ totalTokens: 999 }));
+    });
+    await new Promise<void>((r) => sink.listen(0, '127.0.0.1', r));
+    const sinkUrl = `http://127.0.0.1:${(sink.address() as AddressInfo).port}`;
+
+    const redirector = http.createServer((_req, res) => {
+      res.writeHead(307, { Location: `${sinkUrl}/v1beta/models/x:countTokens` });
+      res.end();
+    });
+    await new Promise<void>((r) => redirector.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${(redirector.address() as AddressInfo).port}`;
+
+    try {
+      const n = await new GeminiProvider({ type: 'gemini', apiKey: 'proxy-key', baseUrl: base }, MODEL)
+        .countTokens('hello there');
+
+      expect(sinkKeys).toEqual([]);
+      // Falls back to the estimate rather than failing the run — a token count
+      // is never worth aborting over.
+      expect(n).toBe(Math.ceil('hello there'.length / 4));
+    } finally {
+      await new Promise((r) => sink.close(r));
+      await new Promise((r) => redirector.close(r));
+    }
+  });
+
+  it('uses the count the configured endpoint returns', async () => {
+    const seen: string[] = [];
+    const server = http.createServer((req, res) => {
+      seen.push(req.url ?? '');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ totalTokens: 42 }));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+      const n = await new GeminiProvider({ type: 'gemini', apiKey: 'k', baseUrl: base }, MODEL)
+        .countTokens('hello');
+      expect(n).toBe(42);
+      expect(seen).toEqual(['/v1beta/models/gemini-2.5-flash:countTokens']);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
   });
 });

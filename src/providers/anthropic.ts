@@ -18,6 +18,8 @@ import { MODELS } from '../constants.js';
 import { BaseProvider } from './base.js';
 import { withResolvedPricing } from '../core/router/pricing.js';
 import { isChatModel } from './model-filter.js';
+import { clientApiRoot, fetchSameOrigin, stripTrailingSlashes } from '../utils/net.js';
+import { isSubscriptionToken } from '../config/revoked-credentials.js';
 
 // Anthropic extended thinking — only the 4.x reasoning models (Opus 4 / Sonnet 4)
 // support it. budget_tokens must be >= 1024 and < max_tokens; we cap well under
@@ -62,21 +64,142 @@ export function toAnthropicToolUse(toolCalls: readonly ToolCall[]): Anthropic.To
   }));
 }
 
+/**
+ * A configured Anthropic endpoint reduced to the ROOT the SDK expects.
+ *
+ * The SDK owns the version segment: every resource path it builds already
+ * starts `/v1/…`, and `buildURL()` is a plain `baseURL + path` concatenation.
+ * So a gateway written the natural way — `https://gw.example/v1`, the form
+ * discovery and `cascade link` both accept — produced `/v1/v1/messages` and
+ * failed EVERY generation call. Model discovery did not fail with it, because
+ * that request is issued by hand, so a gateway could list its models and then
+ * refuse every message: the two disagreed about what `baseUrl` meant.
+ *
+ * One trailing version segment is stripped, and both callers below derive their
+ * URL from this, so they cannot drift apart again.
+ */
+export function anthropicApiRoot(configured: string | undefined): string | undefined {
+  if (!configured) return undefined;
+  // Delegates: credential-scope comparison in `config/` has to agree with this
+  // about which spellings are the same API root, and a second copy of the rule
+  // is how the two start disagreeing.
+  const root = clientApiRoot('anthropic', configured);
+  return root || undefined;
+}
+
+/**
+ * The fetch the SDK client uses, refusing to follow a redirect off-origin.
+ *
+ * Generation carries `x-api-key`, and a custom header is not stripped across
+ * origins the way `Authorization` is — the same leak closed for the model-list
+ * request, arriving by the other door. Model discovery issues its request by
+ * hand and was guarded first; generation goes through the SDK, so the guard has
+ * to be installed there rather than at a call site.
+ *
+ * The SDK invokes this as `fetch(url, init)` with a string URL (`client.js`
+ * `this.fetch.call(undefined, url, fetchOptions)`), so unwrapping a `Request`
+ * is not a case that arises; it is handled for the URL only, and would fail
+ * loudly rather than quietly skip the guard.
+ */
+const sameOriginFetch = ((input: string | URL | Request, init?: RequestInit) => {
+  const url = typeof input === 'string' ? input
+    : input instanceof URL ? input.toString()
+    : input.url;
+  return fetchSameOrigin(url, init);
+}) as unknown as typeof fetch;
+
+/**
+ * Which credential this config may put on the wire, and how to send it.
+ *
+ * ONE decision, because the constructor and `listModels()` each made it
+ * separately and disagreed — the third time in this release that discovery and
+ * generation have diverged on the same question. `listModels()` builds its
+ * request by hand and read `config.authToken` directly, so a config carrying a
+ * bearer AND an api key with no gateway had generation correctly use the key
+ * while discovery sent `Authorization: Bearer` to the public default host.
+ *
+ * The rule both now share: a bearer is valid only at the gateway that issued
+ * it, so without `baseUrl` it is not sendable. An api key alongside it is, and
+ * is used instead. A bearer with neither gateway nor key is refused outright
+ * rather than downgraded to an anonymous request.
+ */
+export function anthropicAuth(
+  config: { apiKey?: string; authToken?: string; baseUrl?: string },
+): { mode: 'bearer'; token: string } | { mode: 'apiKey'; key: string } | { mode: 'none' } {
+  const gateway = anthropicApiRoot(config.baseUrl);
+  // A Claude subscription token is refused wherever it appears, gateway or not.
+  // The environment, `cascade link` and config-load paths all classify it, but
+  // the public SDK runs none of them — `createCascade()` schema-validates and
+  // nothing else — so `{ authToken: 'sk-ant-oat…', baseUrl: 'https://gw' }`
+  // walked straight past the gateway check and onto the wire, carrying exactly
+  // the credential this release exists to stop using. Anthropic refuses it
+  // whatever header holds it; pointing it at a gateway does not make it a
+  // gateway's bearer.
+  //
+  // Classified by VALUE, before either auth mode is chosen, because the field a
+  // secret arrives in proves nothing about what it is. `ANTHROPIC_API_KEY` set
+  // to an `sk-ant-oat…` token, a hand-written config, or a sync row with the
+  // token in the wrong slot all put a subscription credential in `apiKey`,
+  // where a check on `authToken` alone waved it through as `x-api-key`.
+  const bearerIsSubscription = isSubscriptionToken(config.authToken);
+  const keyIsSubscription = isSubscriptionToken(config.apiKey);
+  if (bearerIsSubscription || keyIsSubscription) {
+    // A genuine API key beside the dead token is still usable; the token is not.
+    if (config.apiKey && !keyIsSubscription) return { mode: 'apiKey', key: config.apiKey };
+    throw new Error(
+      'This Anthropic credential is a Claude subscription token, which Anthropic does not permit '
+      + 'third-party clients to use. Configure an API key from console.anthropic.com instead.',
+    );
+  }
+  if (config.authToken && gateway) return { mode: 'bearer', token: config.authToken };
+  if (config.apiKey) return { mode: 'apiKey', key: config.apiKey };
+  if (config.authToken) {
+    throw new Error(
+      'Anthropic bearer token configured without a gateway URL. A bearer is only valid at the '
+      + 'gateway that issued it, so it will not be sent to the public API. Set `baseUrl` to that '
+      + 'gateway, or configure `apiKey` instead.',
+    );
+  }
+  return { mode: 'none' };
+}
+
 export class AnthropicProvider extends BaseProvider {
   private client: Anthropic;
 
   constructor(config: ProviderConfig, model: ModelInfo) {
     super(config, model);
-    // OAuth bearer (e.g. a Claude Code subscription token) authenticates via
-    // Authorization: Bearer + the oauth beta header instead of x-api-key.
-    if (config.authToken) {
-      this.client = new Anthropic({
-        authToken: config.authToken,
-        defaultHeaders: { 'anthropic-beta': 'oauth-2025-04-20' },
-      });
+    // `baseUrl` is honoured on BOTH paths. Dropping it was what made
+    // `authToken` close to useless: the sanctioned use of a bearer credential
+    // is routing through an LLM gateway or corporate proxy — which is what
+    // Anthropic documents ANTHROPIC_AUTH_TOKEN for — and that needs the
+    // endpoint. Without it, a user who configured a gateway had their request
+    // sent to api.anthropic.com with a token that gateway had issued.
+    // Through anthropicApiRoot(), because the SDK appends its own `/v1`.
+    const baseURL = anthropicApiRoot(config.baseUrl);
+    // A bearer token authenticates via Authorization: Bearer instead of
+    // x-api-key, which the SDK's `authToken` option does on its own.
+    //
+    // NO oauth beta header. `anthropic-beta: oauth-2025-04-20` belongs to the
+    // Claude subscription flow, which this release makes non-adoptable — the
+    // only bearer that can reach here now is a gateway's, and asking a gateway
+    // to honour an Anthropic beta it knows nothing about is a way to have a
+    // perfectly valid credential rejected.
+    //
+    // This constructor is the last gate before the credential goes on the wire
+    // and it enforced nothing. The public SDK reaches it without touching the
+    // config paths that do: `createCascade()` runs `CascadeConfigSchema.parse()`
+    // alone, and `ProviderConfigSchema` permits `authToken` with no `baseUrl`,
+    // so `createCascade({ providers: [{ type: 'anthropic', authToken }] })`
+    // built a client with `baseURL` undefined — the SDK's public default host
+    // — and sent a gateway's token to api.anthropic.com.
+    const auth = anthropicAuth(config);
+    if (auth.mode === 'bearer') {
+      this.client = new Anthropic({ authToken: auth.token, fetch: sameOriginFetch, baseURL });
     } else {
       this.client = new Anthropic({
-        apiKey: config.apiKey,
+        apiKey: auth.mode === 'apiKey' ? auth.key : undefined,
+        fetch: sameOriginFetch,
+        ...(baseURL ? { baseURL } : {}),
       });
     }
   }
@@ -170,11 +293,47 @@ export class AnthropicProvider extends BaseProvider {
     return Math.ceil(text.length / 4);
   }
 
-  async listModels(): Promise<ModelInfo[]> {
+  async listModels(options: { staticFallback?: boolean } = {}): Promise<ModelInfo[]> {
+    // The bundled catalogue, returned when live discovery fails. Harmless for a
+    // settings list; NOT harmless for router validation, which reads a
+    // non-empty result as "the endpoint confirmed these ids" and pins Auto to
+    // them. A gateway that 401s, redirects cross-origin, or is simply
+    // unreachable would have its failure recorded as confirmation of the PUBLIC
+    // Anthropic catalogue — models it may not serve at all.
+    const staticCatalog = () => (options.staticFallback === false
+      ? []
+      : Object.values(MODELS).filter((m) => m.provider === 'anthropic'));
     try {
-      const resp = await fetch('https://api.anthropic.com/v1/models', {
+      // Discovery follows the SAME endpoint and auth mode as generation. It
+      // used to hardcode api.anthropic.com with `x-api-key`, which meant a
+      // gateway deployment sent the GATEWAY'S key to Anthropic's real API — a
+      // credential going to a host that was never meant to see it — and then
+      // replaced the gateway's own catalogue with the public one, so routing
+      // picked models the gateway may not serve. With a bearer token
+      // configured it sent an empty `x-api-key` and always fell through.
+      // The version segment comes from the SAME place the client's does. A
+      // gateway baseUrl is commonly written with the version in it, and
+      // appending unconditionally produced /v1/v1/models — a 404 that fell
+      // silently back to the bundled catalogue and looked exactly like a
+      // gateway with no models of its own. Deriving both from
+      // anthropicApiRoot() is what keeps discovery and generation addressing
+      // one host: an earlier fix corrected this URL alone, leaving the client
+      // still pointed at /v1/v1/messages.
+      const base = anthropicApiRoot(this.config.baseUrl) ?? 'https://api.anthropic.com';
+      const modelsUrl = `${base}/v1/models`;
+      const auth = anthropicAuth(this.config);
+      // Same-origin redirects only: `x-api-key` is a custom header, so the
+      // platform does NOT strip it across origins the way it strips
+      // Authorization. A gateway that redirected elsewhere would be handed the
+      // key configured for it.
+      const resp = await fetchSameOrigin(modelsUrl, {
         headers: {
-          'x-api-key': this.config.apiKey ?? '',
+          // Same decision the constructor makes — see anthropicAuth(). Read
+          // straight off `config`, this branch sent a bearer to the public
+          // default host whenever no gateway was configured.
+          ...(auth.mode === 'bearer'
+            ? { authorization: `Bearer ${auth.token}` }
+            : { 'x-api-key': auth.mode === 'apiKey' ? auth.key : '' }),
           'anthropic-version': '2023-06-01',
         },
       });
@@ -182,13 +341,9 @@ export class AnthropicProvider extends BaseProvider {
       // for 4xx/5xx responses. Calling `.data.map` on that crashes the caller
       // and hides the real authentication / network error. Fall through to
       // the hardcoded model list instead.
-      if (!resp.ok) {
-        return Object.values(MODELS).filter((m) => m.provider === 'anthropic');
-      }
+      if (!resp.ok) return staticCatalog();
       const data = await resp.json() as { data?: Array<{ id: string; display_name: string }> };
-      if (!Array.isArray(data?.data)) {
-        return Object.values(MODELS).filter((m) => m.provider === 'anthropic');
-      }
+      if (!Array.isArray(data?.data)) return staticCatalog();
 
       return data.data.filter((m) => isChatModel(m.id)).map((m) => {
         const known = Object.values(MODELS).find((km) => km.id === m.id && km.provider === 'anthropic');
@@ -209,7 +364,9 @@ export class AnthropicProvider extends BaseProvider {
         });
       });
     } catch {
-      return Object.values(MODELS).filter((m) => m.provider === 'anthropic');
+      // Network failure, a refused cross-origin redirect, a timeout — all
+      // discovery failures, none of them evidence about the catalogue.
+      return staticCatalog();
     }
   }
 

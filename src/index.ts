@@ -12,7 +12,28 @@ export * from './core/verification/index.js';
 
 export { runCascade, createCascade, streamCascade } from './sdk/index.js';
 
-export { ConfigManager, hasUsableProvider } from './config/index.js';
+export { ConfigManager, hasUsableProvider, hasProviderCredential, applyProviderApiKey } from './config/index.js';
+export {
+  applyProviderCredential, applyEndpointEdit, applySettingsCredentials,
+  credentialDispositionForEdit, endpointFromSettingsPayload, explainRefusal,
+  type CredentialEndpoint, type CredentialDisposition,
+  type CredentialWriteOutcome, type SettingsCredentialResult,
+} from './config/credential-write.js';
+export {
+  applySettingsPayload, commitSettings, priorAzureRow, settingsSnapshot,
+  type SettingsPayload, type AzureDeploymentInput, type SettingsSnapshot,
+  type SettingsCommitResult,
+} from './config/settings-payload.js';
+// The desktop settings save has to ask "is this the same endpoint?" to decide
+// whether a stored key may be kept across an edit. Exported rather than
+// reimplemented in app/: a second copy of this rule is how the answer starts
+// differing between the surfaces that share the config.
+export { sameEndpoint, normalizeEndpoint } from './utils/net.js';
+// Provider-aware: absence of a baseUrl means the provider's own public host,
+// not "any host". The desktop decides credential scope with this, not with the
+// generic string compare above.
+export { sameCredentialEndpoint, credentialEndpointIdentity, hasDefaultEndpoint } from './config/endpoint-identity.js';
+export { sameAzureEndpoint } from './config/azure-endpoint.js';
 export { Keystore } from './config/keystore.js';
 export { CascadeIgnore } from './config/ignore.js';
 export { MemoryStore } from './memory/store.js';

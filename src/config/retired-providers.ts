@@ -33,11 +33,30 @@ export interface RetiredProviderCleanup {
   removed: string[];
   /** Tier keys (`t1`/`t2`/`t3`) whose pin named a retired provider and was cleared. */
   clearedPins: string[];
+  /**
+   * Dead Claude subscription credentials dropped from an incoming sync bundle.
+   *
+   * Reported here rather than left to `removed`, which names retired provider
+   * TYPES — `anthropic` is not retired, its credential is. Without this a
+   * bundle whose only content was the dead token produced an empty cleanup, so
+   * both callers announced a clean sync while the one key it carried had been
+   * discarded.
+   */
+  revokedCredentials?: number;
+  /**
+   * Incoming rows dropped for carrying a bearer with no gateway.
+   *
+   * A separate count from `revokedCredentials`: that one is a credential
+   * Anthropic has revoked, this one is a live token with nowhere to send it.
+   * Distinct causes, distinct advice.
+   */
+  unusableCredentials?: number;
 }
 
 /** True when anything was actually removed — the signal to persist and warn. */
 export function didCleanupChangeAnything(c: RetiredProviderCleanup): boolean {
-  return c.removed.length > 0 || c.clearedPins.length > 0;
+  return c.removed.length > 0 || c.clearedPins.length > 0
+    || (c.revokedCredentials ?? 0) > 0 || (c.unusableCredentials ?? 0) > 0;
 }
 
 /**
@@ -137,8 +156,24 @@ export function describeCleanup(c: RetiredProviderCleanup): string {
   for (const type of c.removed) {
     parts.push(`removed the retired "${type}" provider (${RETIRED_PROVIDER_TYPES[type]})`);
   }
+  if ((c.revokedCredentials ?? 0) > 0) {
+    parts.push('discarded a linked Claude subscription token, which Anthropic no longer permits third-party tools to use');
+  }
+  // Named here as well as counted. `didCleanupChangeAnything()` already returns
+  // true for it, so a sync whose ONLY removal was an orphan bearer printed the
+  // migration banner with nothing after the colon — "Cascade config migration:
+  // ." — telling the user something happened and not what.
+  const unusable = c.unusableCredentials ?? 0;
+  if (unusable > 0) {
+    parts.push(
+      `discarded ${unusable} synced gateway token${unusable === 1 ? '' : 's'} that named no gateway URL`
+      + ' — a bearer is only valid at the gateway that issued it',
+    );
+  }
   if (c.clearedPins.length > 0) {
     parts.push(`reset ${c.clearedPins.map((t) => t.toUpperCase()).join('/')} to Auto, since the pin named it`);
   }
+  // Nothing to report is not the same as a migration with an empty list.
+  if (parts.length === 0) return '';
   return `Cascade config migration: ${parts.join('; ')}.`;
 }

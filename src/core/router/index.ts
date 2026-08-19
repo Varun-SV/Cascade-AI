@@ -34,6 +34,7 @@ import type { FeedbackSource } from './feedback-prior.js';
 import { DeadModelStore } from './dead-models.js';
 import { MODELS, OLLAMA_BASE_URL } from '../../constants.js';
 import { buildTokenUsage, resolveModelPricing } from '../../utils/cost.js';
+import { hasProviderCredential } from '../../config/index.js';
 import { estimateTokens, contentToText, CHARS_PER_TOKEN } from '../context/compaction.js';
 import { withTimeout, withTimeoutAbort, anySignal, CascadeCancelledError } from '../../utils/retry.js';
 import { wireProfile, geminiImageCopies } from './wire-profile.js';
@@ -233,9 +234,169 @@ const DISCOVERY_TIMEOUT_MS = 4_000;
 interface DiscoveryEntry { ids: string[]; models: ModelInfo[]; at: number }
 const cloudDiscoveryCache = new Map<string, DiscoveryEntry>();
 
-function discoveryCacheKey(type: ProviderType, cfg: ProviderConfig): string {
-  const raw = `${type}|${cfg.apiKey ?? ''}|${cfg.baseUrl ?? ''}`;
-  return crypto.createHash('sha256').update(raw).digest('hex').slice(0, 24);
+/**
+ * Random stand-ins for credentials seen this process, so the discovery cache
+ * key can be built without a credential reaching a digest at all.
+ *
+ * The cache needs to tell credentials APART; it never needs to represent one.
+ * It used to hash the key with sha256 — precisely the artifact an offline guess
+ * is tested against, had it ever reached a heap dump, a crash report or a debug
+ * log of cache keys. Strengthening that into a MAC would have kept a credential
+ * flowing into a hash for no reason; a KDF stiff enough to be a *correct*
+ * password hash would be worse still, since this sits on the init path and is
+ * deliberately slow by design.
+ *
+ * So the secret is used for one thing only — an equality lookup — and what
+ * travels onward is an opaque random id carrying none of its bits.
+ *
+ * RETENTION IS TIED TO THE CACHE ENTRY, which is the part two earlier attempts
+ * got wrong in opposite directions:
+ *
+ * - Keyed by the secret with no expiry, this retained every credential the
+ *   process had ever seen. Pruning at `init()` fixed only the paths that
+ *   re-initialise the router — not a settings save, which is the ordinary way a
+ *   credential is replaced.
+ * - Keyed WEAKLY by the provider object, it retained nothing but lost value
+ *   stability: the hosted server rebuilds its config for EVERY chat run
+ *   (`cloud/server/src/runs.ts` → `buildCloudConfig`), so an equivalent
+ *   credential got a fresh identity per request. That missed the cache on every
+ *   run, re-listed each provider's models, and grew the cache with request
+ *   volume — trading a bounded retention problem for an unbounded one.
+ *
+ * Entries expire on the same clock as the discovery entries they exist to name,
+ * so a secret is held exactly as long as it is being used and no longer, and
+ * the map cannot outgrow the number of credentials active in one TTL window.
+ */
+/** How often the sweep runs at most — cheap, and unrelated to how full the map is. */
+const IDENTITY_SWEEP_INTERVAL_MS = 60 * 1000;
+const credentialIdentities = new Map<string, { id: string; at: number }>();
+let lastIdentitySweep = 0;
+/**
+ * Expiry runs on a REAL timer, not only when someone next asks for an identity.
+ *
+ * Sweeping from `credentialIdentity()` alone meant retention was bounded only
+ * for a process that kept making lookups: one that inserted a credential, had
+ * it rotated, and then went idle held the old value until it exited. The
+ * documented fifteen-minute retention was in practice "until the next lookup,
+ * whenever that is".
+ *
+ * An HMAC of the secret under a process-random key was tried instead — not
+ * storing the raw value at all — and reverted: CodeQL's
+ * `js/insufficient-password-hash` flags any fast hash of a credential, and it
+ * is not wrong to, since the rule cannot see that the security here comes from
+ * the random key rather than a work factor. Arguing with it in a suppression
+ * comment on a high-severity credential alert is worse than making retention
+ * actually bounded, which is what this does.
+ *
+ * `unref()` so it never holds the process open, and it stops entirely once the
+ * map is empty — an idle process ends up with no timer and nothing retained.
+ */
+let identitySweepTimer: NodeJS.Timeout | undefined;
+
+function ensureIdentitySweeper(): void {
+  if (identitySweepTimer) return;
+  identitySweepTimer = setInterval(() => {
+    sweepExpired(Date.now());
+    if (credentialIdentities.size === 0 && identitySweepTimer) {
+      clearInterval(identitySweepTimer);
+      identitySweepTimer = undefined;
+    }
+  }, IDENTITY_SWEEP_INTERVAL_MS);
+  identitySweepTimer.unref?.();
+}
+
+/** Drop identities, and the discovery entries naming them, once their TTL is up. */
+function sweepExpired(now: number): void {
+  for (const [key, held] of credentialIdentities) {
+    if (now - held.at > DISCOVERY_TTL_MS) credentialIdentities.delete(key);
+  }
+  // The discovery cache is swept here too. It was never evicted at all, so on a
+  // hosted server it grew for the life of the process.
+  for (const [key, entry] of cloudDiscoveryCache) {
+    if (now - entry.at > DISCOVERY_TTL_MS) cloudDiscoveryCache.delete(key);
+  }
+}
+
+/**
+ * The keys currently held in the identity map.
+ *
+ * Exported for its test, and safe to export precisely because of what this
+ * fixes: every key is an HMAC digest under a process-random key, so the list
+ * carries no credential. A test asserting "the raw secret is not retained"
+ * cannot be written against a private Map, and the earlier version of that
+ * claim went unverified for two rounds.
+ */
+export function credentialIdentityKeys(): string[] {
+  return [...credentialIdentities.keys()];
+}
+
+/**
+ * Clears the identity map and its sweep timer.
+ *
+ * For tests only. The sweeper is created lazily on first insert, so a test that
+ * switches to fake timers AFTER some earlier test has already armed it cannot
+ * drive it — the interval belongs to the real clock. Resetting first makes the
+ * timer be created under whatever clock the test installed.
+ */
+export function resetCredentialIdentitiesForTest(): void {
+  credentialIdentities.clear();
+  if (identitySweepTimer) {
+    clearInterval(identitySweepTimer);
+    identitySweepTimer = undefined;
+  }
+  lastIdentitySweep = 0;
+}
+
+function credentialIdentity(secret: string | undefined): string {
+  if (!secret) return '-';
+  const now = Date.now();
+  // Swept on a TIME trigger, not a size one. Gating the sweep on map size meant
+  // that below the threshold — the ordinary case, a handful of credentials —
+  // nothing ever expired, so a rotated key stayed a raw Map key for the life of
+  // the process. That is precisely the retention this expiry exists to end, and
+  // the threshold quietly exempted almost every deployment from it.
+  if (now - lastIdentitySweep > IDENTITY_SWEEP_INTERVAL_MS) {
+    lastIdentitySweep = now;
+    sweepExpired(now);
+  }
+  const held = credentialIdentities.get(secret);
+  // `at` is the moment this secret was FIRST held, and it is never moved. The
+  // comment here used to say that refreshing on lookup would let a credential
+  // in occasional use keep its identity for ever — and the line below it did
+  // exactly that, so any secret used at least once per TTL window stayed a raw
+  // Map key for the life of the process. That is the retention this expiry
+  // exists to end.
+  //
+  // Retention is therefore capped at DISCOVERY_TTL_MS from first use, whatever
+  // the traffic. A credential still in use past that simply gets a new opaque
+  // id, which invalidates a discovery entry that was expiring on the same clock
+  // anyway — a re-probe every fifteen minutes, not a correctness change.
+  if (held && now - held.at <= DISCOVERY_TTL_MS) return held.id;
+  const id = crypto.randomUUID();
+  credentialIdentities.set(secret, { id, at: now });
+  ensureIdentitySweeper();
+  return id;
+}
+
+/**
+ * Identity of a provider's credential + endpoint, for the discovery cache.
+ *
+ * Exported for its test: that the result carries nothing derived from the
+ * credential is invisible from the outside otherwise.
+ */
+export function discoveryCacheKey(type: ProviderType, cfg: ProviderConfig): string {
+  // `authToken` is part of the identity, not just `apiKey`. Two gateways
+  // reachable at the same URL with different bearers serve different
+  // catalogues, and omitting it also collapsed every bearer-only config for a
+  // provider onto one key — so switching credentials would have been answered
+  // from the previous one's cache. Kept in separate slots so an apiKey and an
+  // authToken with the same value are still two different configurations.
+  return [
+    type,
+    credentialIdentity(cfg.apiKey),
+    credentialIdentity(cfg.authToken),
+    cfg.baseUrl ?? '',
+  ].join('|');
 }
 
 /**
@@ -396,6 +557,7 @@ export class CascadeRouter extends EventEmitter {
 
   async init(config: CascadeConfig): Promise<void> {
     this.config = config;
+
     const availableProviders = await this.detectAvailableProviders(config.providers);
     this.selector = new ModelSelector(availableProviders);
     this.failover = new FailoverManager(this.selector);
@@ -631,7 +793,13 @@ export class CascadeRouter extends EventEmitter {
     await Promise.all(providers.map(async (type) => {
       if (!this.selector.isProviderAvailable(type)) return;
       const cfg = config.providers.find((p) => p.type === type);
-      if (!cfg?.apiKey) return;
+      // `authToken` qualifies too. Requiring an apiKey meant a bearer-only
+      // gateway never had its catalogue validated: the availability probe uses
+      // listModels() as a boolean and throws the models away, so AUTO routing
+      // stayed pinned to the BUNDLED public Anthropic catalogue and could pick
+      // a model the gateway does not serve — failing the first real request
+      // from a gateway that had advertised its models correctly.
+      if (!cfg || !hasProviderCredential(cfg)) return;
       const cacheKey = discoveryCacheKey(type, cfg);
       let entry = cloudDiscoveryCache.get(cacheKey);
       if (!entry || Date.now() - entry.at > DISCOVERY_TTL_MS) {
@@ -640,7 +808,18 @@ export class CascadeRouter extends EventEmitter {
         try {
           const provider = this.createProvider(cfg, seed);
           if (typeof provider.listModels !== 'function') return;
-          const models = await withTimeout(provider.listModels(), DISCOVERY_TIMEOUT_MS, `${type} model discovery timed out`);
+          // `staticFallback: false`: this call decides what Auto is allowed to
+          // route to, so it must hear "the endpoint confirmed these" and not
+          // "here is the bundled list because discovery failed". A provider
+          // that answered the second way had a gateway's 401, cross-origin
+          // redirect refusal or outage recorded as confirmation of the PUBLIC
+          // catalogue — and setValidatedModels then pinned Auto to ids that
+          // gateway may not serve.
+          const models = await withTimeout(
+            provider.listModels({ staticFallback: false }),
+            DISCOVERY_TIMEOUT_MS,
+            `${type} model discovery timed out`,
+          );
           if (!models.length) return; // empty/unreachable → keep the static catalog
           entry = { models, ids: models.map((m) => m.id), at: Date.now() };
           cloudDiscoveryCache.set(cacheKey, entry);

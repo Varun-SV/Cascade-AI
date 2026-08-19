@@ -12,6 +12,10 @@ import rateLimit from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
 import type { CascadeConfig } from '../types.js';
 import { MemoryStore } from '../memory/store.js';
+import { hasProviderCredential } from '../config/index.js';
+import { explainRefusal } from '../config/credential-write.js';
+import { commitSettings, settingsSnapshot } from '../config/settings-payload.js';
+import { writeConfigFile } from '../config/write-config.js';
 import type { RuntimeNode, RuntimeNodeLog, RuntimeSession } from '../types.js';
 import { CASCADE_DB_FILE, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE, CASCADE_CONFIG_FILE, CASCADE_DASHBOARD_SECRET_FILE } from '../constants.js';
 import { DashboardSocket } from './websocket.js';
@@ -49,6 +53,85 @@ interface PendingEscalationEntry {
   /** Server clock when raised — the replayed `timeoutMs` is measured from here. */
   raisedAt: number;
   graceTimer?: NodeJS.Timeout;
+}
+
+/** What a redacted secret reads as on the wire. */
+const MASK = '***';
+
+/** Mask a value if present; drop the field entirely if not. */
+function masked<K extends string>(key: K, value: unknown): Record<K, string> | Record<K, undefined> {
+  return { [key]: value ? MASK : undefined } as Record<K, string> | Record<K, undefined>;
+}
+
+/**
+ * A copy of the config with every credential masked.
+ *
+ * Every credential field, not a list of the ones someone remembered. It masked
+ * `apiKey` only at first, so a provider configured with a bearer token — which
+ * `cascade link` and ANTHROPIC_AUTH_TOKEN both produce — had that token served
+ * in plaintext to anyone who could reach the route, under a comment claiming
+ * sensitive fields were stripped. Then it masked only `providers`, while `safe`
+ * was otherwise the whole config: the web-search keys, every MCP server's auth
+ * `headers` and `env`, the dashboard's own JWT `secret`, and the telemetry key
+ * all went out untouched on that same hardened route.
+ *
+ * The shallow copy was itself part of the problem — `{ ...config }` shares
+ * every nested object, so redacting in place would have corrupted the LIVE
+ * config the server runs on. Each branch holding a secret is therefore rebuilt
+ * rather than mutated; branches with no secrets are shared as before.
+ *
+ * Exported so the redaction is testable on its own rather than only through a
+ * running HTTP server, which is why the gaps survived as long as they did.
+ */
+export function redactProviderSecrets(config: CascadeConfig): CascadeConfig {
+  const safe = { ...config };
+
+  safe.providers = (config.providers ?? []).map((p) => ({
+    ...p,
+    ...masked('apiKey', p.apiKey),
+    ...masked('authToken', p.authToken),
+  }));
+
+  if (config.tools) {
+    safe.tools = { ...config.tools };
+    if (config.tools.webSearch) {
+      safe.tools.webSearch = {
+        ...config.tools.webSearch,
+        ...masked('braveApiKey', config.tools.webSearch.braveApiKey),
+        ...masked('tavilyApiKey', config.tools.webSearch.tavilyApiKey),
+      };
+    }
+    if (config.tools.mcpServers) {
+      // `headers` carry the remote server's auth (a bearer, an API key) and
+      // `env` is passed to a spawned process, so both routinely hold secrets.
+      // Their KEYS are useful for showing what is configured; their values are
+      // never safe to serve, so each is masked per entry rather than dropped.
+      safe.tools.mcpServers = config.tools.mcpServers.map((server) => ({
+        ...server,
+        ...(server.headers
+          ? { headers: Object.fromEntries(Object.keys(server.headers).map((k) => [k, MASK])) }
+          : {}),
+        ...(server.env
+          ? { env: Object.fromEntries(Object.keys(server.env).map((k) => [k, MASK])) }
+          : {}),
+      }));
+    }
+  }
+
+  // The dashboard's own JWT signing secret, served by the dashboard. Anyone
+  // holding it can mint a session for the route they read it from.
+  if (config.dashboard) {
+    safe.dashboard = { ...config.dashboard, ...masked('secret', config.dashboard.secret) };
+  }
+
+  if (config.telemetry) {
+    safe.telemetry = {
+      ...config.telemetry,
+      ...masked('posthogApiKey', config.telemetry.posthogApiKey),
+    };
+  }
+
+  return safe;
 }
 
 export class DashboardServer {
@@ -133,49 +216,37 @@ export class DashboardServer {
     // current per-tier models, budget, and which providers already have a key
     // (the keys themselves are never sent back to the renderer).
     this.socket.onConfigGet((socketId) => {
-      this.socket.emitToSocket(socketId, 'config:current', {
-        models: this.config.models ?? {},
-        budget: {
-          maxCostPerRun: this.config.budget?.maxCostPerRunUsd,
-          autoBias: this.config.autoBias,
-        },
-        providersWithKey: (this.config.providers ?? [])
-          .filter((p) => typeof p.apiKey === 'string' && p.apiKey.length > 0)
-          .map((p) => p.type),
-      });
+      // The COMPLETE snapshot, from the same builder the desktop IPC reply
+      // uses. A partial one was not merely incomplete: the panel keeps its own
+      // defaults for any section a snapshot does not fill and serializes them
+      // on every save, so once the save applied the whole payload, a
+      // socket-only save of one unrelated setting could delete every Azure
+      // deployment and reset advanced knobs the user had never seen.
+      this.socket.emitToSocket(socketId, 'config:current', settingsSnapshot(this.config));
     });
-    this.socket.onConfigUpdate((data) => {
-      if (data.keys) {
-        for (const [type, apiKey] of Object.entries(data.keys)) {
-          if (!apiKey) continue;
-          const provider = this.config.providers.find((p) => p.type === (type as import('../types.js').ProviderType));
-          if (provider) provider.apiKey = apiKey;
-          else this.config.providers.push({ type: type as import('../types.js').ProviderType, apiKey });
-        }
+    this.socket.onConfigUpdate(async (data) => {
+      // The WHOLE payload, through the same function the desktop IPC handler
+      // runs. This handler used to apply keys, endpoints, models and two budget
+      // fields and ignore the rest — while the panel, which sends one payload
+      // to both, reported the save as successful. Every other control on this
+      // path appeared to work and did nothing.
+      // One transaction, shared with the desktop IPC writer: staged, validated,
+      // adopted, written, rolled back on failure. See `commitSettings`.
+      const result = await commitSettings(this.config, data, (committed) => this.persistConfig(committed));
+      const refused = result.refused.map((r) => ({
+        type: r.type, reason: r.reason, message: explainRefusal(r.type, r.reason),
+      }));
+      // The warning is for the operator's log; the ACK is what stops the panel
+      // clearing the input and reporting success over a key it declined.
+      for (const r of refused) console.warn(r.message);
+      if (!result.ok) {
+        // Nothing was adopted — the live config is exactly what it was.
+        return { refused, snapshot: settingsSnapshot(this.config), error: result.error };
       }
-      if (data.models) {
-        // A tier value may be a bare model id, a `provider:model` binding, or
-        // 'auto' / '' meaning "no override — let routing pick". Store explicit
-        // bindings; clear the override entirely for auto so the router falls
-        // back to its priority defaults instead of hunting for a model named
-        // "auto".
-        const models = this.config.models as Record<string, string | undefined>;
-        for (const [tier, val] of Object.entries(data.models)) {
-          if (val && val !== 'auto') models[tier] = val;
-          else delete models[tier];
-        }
-      }
-      if (data.budget) {
-        if (typeof data.budget.maxCostPerRun === 'number') {
-          this.config.budget.maxCostPerRunUsd = data.budget.maxCostPerRun;
-        }
-        if (data.budget.autoBias === 'balanced' || data.budget.autoBias === 'quality' || data.budget.autoBias === 'cost') {
-          this.config.autoBias = data.budget.autoBias;
-        }
-      }
-      // Persist so Settings changes survive a restart and are visible to the CLI
-      // (the desktop app and `cascade` share the same workspace config file).
-      this.persistConfig();
+      this.syncGlobalCredentials();
+      // The fresh snapshot rides back with the acknowledgement, so the panel
+      // re-hydrates from what was actually stored rather than from what it sent.
+      return { refused, snapshot: settingsSnapshot(this.config) };
     });
 
     this.socket.onCascadeRun(async (prompt, model, socketId, requestedSessionId, forceTier) => {
@@ -394,16 +465,46 @@ export class DashboardServer {
    * made over the socket (Settings → Save) persist across restarts. Best-effort:
    * a write failure is logged but never crashes the running dashboard.
    */
-  private persistConfig(): void {
-    try {
-      const configPath = path.join(this.workspacePath, CASCADE_CONFIG_FILE);
-      fs.mkdirSync(path.dirname(configPath), { recursive: true });
-      fs.writeFileSync(configPath, JSON.stringify(this.config, null, 2), 'utf-8');
-    } catch (err) {
-      console.warn(`[dashboard] Failed to persist config: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    // Keys saved over the socket path must survive workspace switches too —
-    // same global sync ConfigManager.save() performs.
+  /**
+   * Returns the durability of the WORKSPACE write, because a caller
+   * acknowledging a save has to know it happened.
+   *
+   * This was `void` and swallowed every filesystem error, so a read-only
+   * config path or a full disk produced: the live object mutated, the write
+   * failed, the socket acknowledged success, and the panel cleared the keys the
+   * user had typed. The changes then vanished at the next restart. "The handler
+   * ran" is not "the save is durable".
+   *
+   * The global-credential sync below is genuinely best-effort — it is a
+   * convenience copy, and failing it does not lose what the user just entered.
+   */
+  /**
+   * @param config REQUIRED, with no default. `commitSettings` writes the
+   * validated copy BEFORE adopting it, so a writer that reached for
+   * `this.config` instead would persist the configuration being replaced — and
+   * a default parameter is exactly the affordance that lets that happen
+   * silently and still typecheck.
+   */
+  private persistConfig(config: typeof this.config): { ok: true } | { ok: false; error: string } {
+    const result = writeConfigFile(path.join(this.workspacePath, CASCADE_CONFIG_FILE), config);
+    if (!result.ok) console.warn(`[dashboard] Failed to persist config: ${result.error}`);
+    return result;
+  }
+
+  /**
+   * Copy provider credentials to the machine-global store, so keys saved over
+   * the socket survive a workspace switch — the same sync `ConfigManager.save()`
+   * performs.
+   *
+   * Separate from the workspace write, and called only AFTER it succeeds. It
+   * used to run unconditionally inside `persistConfig()`, so a failed workspace
+   * write still pushed the provider half of a rejected save into the global
+   * store: half the change persisted, behind an error saying none of it had.
+   *
+   * Best-effort on its own account: this is a convenience copy, and failing it
+   * does not lose what the user just entered.
+   */
+  private syncGlobalCredentials(): void {
     try {
       saveGlobalCredentials(path.join(os.homedir(), GLOBAL_CONFIG_DIR), this.config.providers ?? []);
     } catch (err) {
@@ -1240,9 +1341,7 @@ export class DashboardServer {
     });
 
     this.app.get('/api/config', auth, (_req, res) => {
-      // Strip sensitive fields before sending
-      const safe = { ...this.config };
-      safe.providers = safe.providers.map((p) => ({ ...p, apiKey: p.apiKey ? '***' : undefined }));
+      const safe = redactProviderSecrets(this.config);
       res.json(safe);
     });
 

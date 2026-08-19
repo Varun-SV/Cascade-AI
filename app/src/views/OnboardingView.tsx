@@ -9,6 +9,12 @@ interface Provider {
   name: string;
   description: string;
   keyPlaceholder: string;
+  /**
+   * Whether this provider takes an endpoint the user must supply outright
+   * (Azure, a bare OpenAI-compatible server). The others accept an OPTIONAL
+   * gateway, which is a different prompt but the same field — see
+   * `endpointOffered` below.
+   */
   needsBaseUrl?: boolean;
   noKey?: boolean;
 }
@@ -89,6 +95,37 @@ export function OnboardingView({ notice, initialWorkspace }: { notice?: string; 
   };
   const [saving, setSaving] = useState(false);
 
+  /**
+   * Whether this screen is showing an endpoint field for the current choice.
+   *
+   * Sent to the main process rather than re-derived there. A blank field the
+   * user was SHOWN means "the provider's own API"; a field that was never
+   * rendered means nothing at all, and the write has to tell those apart. Two
+   * copies of "which providers get a field" is precisely the sibling-drift this
+   * release keeps tripping over, so the screen that renders it is the one that
+   * says so.
+   */
+  const endpointOffered = Boolean(selectedProvider && !selectedProvider.noKey);
+
+  /**
+   * Selecting a provider starts a NEW credential draft.
+   *
+   * `apiKey` and `baseUrl` were component-wide, so Back → pick another provider
+   * carried them across: an OpenAI-compatible endpoint typed for Groq stayed in
+   * `baseUrl` and was then submitted with an Anthropic key as an explicit
+   * `{ kind: 'at' }` pair, which the write layer quite correctly trusts — and
+   * sends the key to Groq. The secret has the same problem on its own.
+   */
+  const chooseProvider = (p: Provider) => {
+    if (p.id !== selectedProvider?.id) {
+      setApiKey('');
+      setBaseUrl('');
+      setVerifyError('');
+      setSaveError(null);
+    }
+    setSelectedProvider(p);
+  };
+
   const handleProviderContinue = () => {
     if (!selectedProvider) return;
     if (selectedProvider.noKey) {
@@ -105,7 +142,19 @@ export function OnboardingView({ notice, initialWorkspace }: { notice?: string; 
     setVerifyError('');
     try {
       if (window.cascade?.setConfig) {
-        await window.cascade.setConfig({ provider: selectedProvider.id, apiKey, workspace: workspace || '', baseUrl: baseUrl || undefined });
+        const r = await window.cascade.setConfig({ provider: selectedProvider.id, apiKey, workspace: workspace || '', baseUrl: baseUrl || undefined, endpointOffered });
+        // A refusal is not a verification failure to shrug off: nothing was
+        // stored, and advancing here presented a key that had been declined as
+        // though it were saved. The explanation names what to do about it, so
+        // it is shown verbatim rather than replaced by a generic message a step
+        // later.
+        // Only an explicit success counts. `ok === false` alone missed the
+        // catch block, which returned no `ok` at all, so a thrown save advanced
+        // the wizard exactly as a successful one did.
+        if (!r?.ok) {
+          setVerifyError(r?.error ?? 'That key could not be saved.');
+          return;
+        }
       }
       setStep('workspace');
     } catch (err) {
@@ -123,8 +172,17 @@ export function OnboardingView({ notice, initialWorkspace }: { notice?: string; 
     let done = false;
     try {
       if (window.cascade?.setConfig) {
-        const r = await window.cascade.setConfig({ provider: selectedProvider?.id ?? '', apiKey, workspace, baseUrl: baseUrl || undefined });
-        done = Boolean(r?.onboardingDone);
+        const r = await window.cascade.setConfig({ provider: selectedProvider?.id ?? '', apiKey, workspace, baseUrl: baseUrl || undefined, endpointOffered });
+        // Same as Verify: a specific refusal beats the generic message below,
+        // which would blame the provider choice for a key that was declined for
+        // a stated reason.
+        if (!r?.ok) {
+          setSaveError(r?.error ?? 'That key could not be saved.');
+          setSaving(false);
+          setStep('apikey');
+          return;
+        }
+        done = Boolean(r.onboardingDone);
       }
     } catch { /* leave `done` false — see above */ }
     // Guarded for the same reason main's setConfig omits a blank workspace:
@@ -255,7 +313,7 @@ export function OnboardingView({ notice, initialWorkspace }: { notice?: string; 
               {PROVIDERS.map((p) => (
                 <div
                   key={p.id}
-                  onClick={() => setSelectedProvider(p)}
+                  onClick={() => chooseProvider(p)}
                   style={{
                     padding: '10px 14px', borderRadius: 'var(--radius-md)',
                     border: `1px solid ${selectedProvider?.id === p.id ? 'var(--accent)' : 'var(--border)'}`,
@@ -328,10 +386,12 @@ export function OnboardingView({ notice, initialWorkspace }: { notice?: string; 
               </div>
             </div>
 
-            {selectedProvider?.needsBaseUrl && (
+            {endpointOffered && (
               <div>
                 <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'block', marginBottom: 8 }}>
-                  Base URL (e.g. https://your-azure-endpoint.openai.azure.com)
+                  {selectedProvider?.needsBaseUrl
+                    ? 'Base URL (e.g. https://your-azure-endpoint.openai.azure.com)'
+                    : `Gateway URL — leave blank for ${selectedProvider?.name ?? 'the provider'}'s own API`}
                 </label>
                 <input
                   type="text"

@@ -6,12 +6,42 @@ import chalk from 'chalk';
 import path from 'node:path';
 import { CASCADE_CONFIG_FILE, LM_STUDIO_BASE_URL, OLLAMA_BASE_URL } from '../../constants.js';
 import { ConfigManager } from '../../config/index.js';
-import { discoverCredentials } from '../../config/credential-discovery.js';
+import { discoverCredentials, type DiscoveredCredential } from '../../config/credential-discovery.js';
+import { willAdoptFromConfig } from './link.js';
+import type { ProviderConfig } from '../../types.js';
 
 interface CheckResult {
   label: string;
   ok: boolean;
   detail?: string;
+}
+
+/**
+ * What `doctor` says about credentials it found on the machine.
+ *
+ * Exported so the wording can be tested on its own rather than by running the
+ * whole diagnostic. `cascade link` is only offered as a remedy when something
+ * would actually be adopted: a machine whose one discovered credential is a
+ * Claude subscription token — which link is required to refuse — was told to
+ * run a command that cannot succeed, and a diagnostic prescribing an impossible
+ * step reads as a mistake the user made rather than a credential Cascade is not
+ * permitted to use.
+ */
+export function linkableCredentialsDetail(
+  discovered: ReadonlyArray<DiscoveredCredential>,
+  configured: readonly ProviderConfig[] = [],
+): string {
+  // `willAdoptFromConfig` is asked about EVERY credential, not just the ones
+  // the environment could not route on its own. `directlyUsable` is only the
+  // environment's view, and it cuts both ways: it misses a credential the
+  // config can route (a bearer beside a configured gateway, an Azure key beside
+  // configured deployments), and it over-reports a fully routed Azure key whose
+  // deployment name another resource has already claimed — which adoption
+  // refuses. Short-circuiting on the flag skipped exactly that check.
+  const usable = discovered.filter((d) => willAdoptFromConfig(d, configured)).length;
+  return usable > 0
+    ? `${discovered.length} found (${usable} usable) — run \`cascade link\` to adopt`
+    : `${discovered.length} found, none usable — run \`cascade link\` to see why`;
 }
 
 export async function doctorCommand(): Promise<void> {
@@ -47,11 +77,16 @@ export async function doctorCommand(): Promise<void> {
   ];
 
   for (const { type, name } of providers) {
+    // A bearer token configures a provider just as completely as a key does.
+    // Checking only getApiKey() reported "Missing" for a provider that runs
+    // fine — and `cascade link` sends the user straight here to verify, so the
+    // first thing they saw after a successful link was a failure.
     const key = cm.getApiKey(type);
+    const token = key ? undefined : cm.getAuthToken(type);
     checks.push({
-      label: `${name} API key`,
-      ok: Boolean(key),
-      detail: key ? 'Set' : 'Missing',
+      label: `${name} credential`,
+      ok: Boolean(key || token),
+      detail: key ? 'API key set' : token ? 'Bearer token set' : 'Missing',
     });
   }
 
@@ -126,11 +161,10 @@ export async function doctorCommand(): Promise<void> {
   try {
     const discovered = await discoverCredentials();
     if (discovered.length > 0) {
-      const usable = discovered.filter((d) => d.directlyUsable).length;
       checks.push({
         label: 'Linkable credentials',
         ok: true,
-        detail: `${discovered.length} found (${usable} usable) — run \`cascade link\` to adopt`,
+        detail: linkableCredentialsDetail(discovered, config.providers ?? []),
       });
     }
   } catch { /* discovery is best-effort */ }
@@ -149,7 +183,7 @@ export async function doctorCommand(): Promise<void> {
   if (failures.length === 0) {
     console.log(chalk.green('  All checks passed!\n'));
   } else {
-    const critical = failures.filter((c) => c.label.includes('Node') || c.label.includes('API key'));
+    const critical = failures.filter((c) => c.label.includes('Node') || c.label.includes('credential'));
     if (critical.length) {
       console.log(chalk.yellow(`  ${critical.length} issue(s) need attention.\n`));
     } else {

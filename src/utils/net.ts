@@ -19,8 +19,196 @@ export function preferIpv4Host(url: string | undefined): string | undefined {
   return url;
 }
 
+/**
+ * Drop trailing `/` characters from a URL, in linear time.
+ *
+ * Written as a scan rather than `replace(/\/+$/, '')` because that regex is
+ * polynomial: the engine retries the anchored repetition from every start
+ * position, so a string of many slashes costs O(n²). CodeQL flags it as a
+ * ReDoS risk on any function reachable with caller-supplied input, which the
+ * endpoint normalizers are. The behaviour is identical for every input.
+ */
+export function stripTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47 /* '/' */) end--;
+  return end === value.length ? value : value.slice(0, end);
+}
+
+/**
+ * An endpoint URL reduced to what identifies the host it addresses.
+ *
+ * Trailing slashes go because every provider client drops them anyway; case
+ * goes because the meaningful part is a hostname, which is case-insensitive.
+ * A missing or blank endpoint normalizes to the empty string, so rows with no
+ * endpoint compare equal to each other and to nothing else.
+ *
+ * Lives here rather than in `azure-endpoint.ts` because the question is not
+ * Azure's: "is this bearer's gateway the same host as the one already
+ * configured?" needs the identical normalization, and writing it out a second
+ * time is how two call sites start disagreeing about what "same endpoint"
+ * means.
+ */
+export function normalizeEndpoint(url: string | undefined | null): string {
+  const raw = stripTrailingSlashes((url ?? '').trim());
+  if (!raw) return '';
+  try {
+    const u = new URL(raw);
+    // Scheme and host are case-insensitive by spec. THE PATH IS NOT, and
+    // lowercasing it made `https://gw.example/TenantA` and `/tenanta` the same
+    // endpoint — which, since this decides whether a stored credential may be
+    // adopted into a row, would authorize moving a key between two distinct
+    // tenant routes on one gateway.
+    const path = stripTrailingSlashes(`${u.pathname}${u.search}`);
+    return `${u.protocol}//${u.host.toLowerCase()}${path}`;
+  } catch {
+    // Not a parseable URL — nothing to reason about structurally, so fall back
+    // to the old whole-string rule. Two identical strings still compare equal,
+    // which is all a non-URL can support.
+    return raw.toLowerCase();
+  }
+}
+
+/**
+ * Drop one EXACT trailing path segment, in linear time.
+ *
+ * No regex, deliberately. The obvious `replace(/\/v\d+[a-z]*$/, '')` is both a
+ * polynomial-ReDoS shape on caller-supplied input and too greedy for the job
+ * below — it removes any version-looking segment, not the one segment a client
+ * actually appends.
+ */
+export function stripPathSegment(url: string, segment: string): string {
+  const trimmed = stripTrailingSlashes(url.trim());
+  const suffix = `/${segment}`;
+  return trimmed.endsWith(suffix) ? trimmed.slice(0, -suffix.length) : trimmed;
+}
+
+/**
+ * The exact version segment each provider's CLIENT appends for itself.
+ *
+ * Per-provider, because the segment differs and the difference matters: the
+ * Anthropic SDK concatenates `/v1`, the Gemini SDK `/v1beta`. Anything ELSE
+ * that looks like a version in a configured URL is a path the user chose, and
+ * this release treats proxy paths as scope-bearing — `/openai/v1` and
+ * `/openai` are different routes on the same host.
+ *
+ * A generic "strip any trailing /vN" got this wrong in both directions at once:
+ * `https://proxy/v2` compared equal to `https://proxy` for credential scope,
+ * while the Gemini client would have sent one to `/v2/v1beta/...` and the other
+ * to `/v1beta/...` — identity saying "same host" about two different routes is
+ * exactly how a key survives an edit that moved generation elsewhere.
+ */
+const CLIENT_VERSION_SEGMENT: Readonly<Record<string, string>> = {
+  anthropic: 'v1',
+  gemini: 'v1beta',
+};
+
+/**
+ * A configured endpoint reduced to the root its client will build on.
+ *
+ * The one place that answers "which spellings name the same API root?", so
+ * credential-scope comparison in `config/` and the providers' own request
+ * construction cannot drift apart on it. Lives here rather than in either so
+ * both can reach it: `providers/` imports `config/`, so the reverse would
+ * cycle.
+ */
+export function clientApiRoot(type: string, url: string): string {
+  const segment = CLIENT_VERSION_SEGMENT[type];
+  return segment ? stripPathSegment(url, segment) : stripTrailingSlashes(url.trim());
+}
+
+/** Whether two endpoint URLs address the same host. */
+export function sameEndpoint(a: string | undefined | null, b: string | undefined | null): boolean {
+  return normalizeEndpoint(a) === normalizeEndpoint(b);
+}
+
+/** The statuses Fetch treats as redirects. 300/304/305 are deliberately absent. */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/** Statuses the Response constructor refuses to attach a body to. */
+const NULL_BODY_STATUSES = new Set([204, 205, 304]);
+
+/**
+ * Response headers, minus the ones describing a wire encoding this helper has
+ * already undone — otherwise a consumer decompresses twice or trusts a length
+ * that no longer matches.
+ */
+function headersFrom(raw: http.IncomingHttpHeaders): Headers {
+  const out = new Headers();
+  for (const [k, v] of Object.entries(raw)) {
+    if (k === 'content-encoding' || k === 'content-length') continue;
+    if (Array.isArray(v)) out.set(k, v.join(', '));
+    else if (typeof v === 'string') out.set(k, v);
+  }
+  return out;
+}
+
 /** Max redirect hops before nodeHttpFetch gives up (matches browser/curl-ish defaults). */
 const MAX_REDIRECTS = 5;
+
+/**
+ * `fetch`, following redirects only while they stay on the ORIGINAL origin.
+ *
+ * The platform's own rule is not enough here. On a cross-origin redirect the
+ * fetch spec strips `Authorization`, `Cookie` and friends — but a custom header
+ * is not on that list, so `x-api-key` is replayed verbatim to wherever the
+ * `Location` points. A provider's model-list request carries exactly that
+ * header, so a gateway that is misconfigured or compromised could hand a user's
+ * key to a third host, which is the same class of leak as sending a gateway's
+ * key to `api.anthropic.com`.
+ *
+ * Same-origin hops are still followed, because endpoints legitimately
+ * canonicalise paths (a trailing slash, `/models` → `/models/`). This is the
+ * policy `nodeHttpFetch`'s `allowedRedirectOrigin` already applies, expressed
+ * for callers that use the global fetch.
+ */
+export async function fetchSameOrigin(
+  url: string,
+  init: RequestInit = {},
+  maxRedirects = MAX_REDIRECTS,
+): Promise<Response> {
+  const origin = new URL(url).origin;
+  let current = url;
+  let options: RequestInit = { ...init };
+  for (let hop = 0; hop <= maxRedirects; hop++) {
+    const res = await fetch(current, { ...options, redirect: 'manual' });
+    // Only the statuses Fetch itself treats as redirects. 300, 304 and 305 can
+    // carry a `Location` without being one, and following a 304 in particular
+    // would turn a cache revalidation into a second request.
+    if (![301, 302, 303, 307, 308].includes(res.status)) return res;
+    const location = res.headers.get('location');
+    if (!location) return res;
+    // The redirect's own body is drained before the next request goes out.
+    // Undici cannot reuse a connection whose body is still unread, so a chain
+    // of redirects would tie up a socket each, and a redirect that streams
+    // indefinitely would hold one open for as long as it kept writing.
+    await res.body?.cancel().catch(() => { /* already consumed or closed */ });
+    const next = new URL(location, current);
+    if (next.origin !== origin) {
+      throw new Error(
+        `Refusing cross-origin redirect to ${next.origin}: the request carries a credential for ${origin}.`,
+      );
+    }
+    // Fetch's own method/body transitions, which following blindly would skip:
+    // 303 always becomes GET, and 301/302 do for POST. Replaying the original
+    // POST body at the redirect target would re-submit a generation request —
+    // duplicating it, or failing a gateway's result/poll redirect outright.
+    // 307/308 exist precisely to preserve the method, and are left alone.
+    const method = (options.method ?? 'GET').toUpperCase();
+    const downgrades = res.status === 303
+      ? method !== 'GET' && method !== 'HEAD'
+      : (res.status === 301 || res.status === 302) && method === 'POST';
+    if (downgrades) {
+      const headers = new Headers(options.headers as Record<string, string> | undefined);
+      // The body is gone, so its framing headers must go with it.
+      for (const h of ['content-type', 'content-length', 'content-encoding', 'content-language', 'content-location']) {
+        headers.delete(h);
+      }
+      options = { ...options, method: 'GET', body: undefined, headers };
+    }
+    current = next.toString();
+  }
+  throw new Error(`Too many redirects from ${url}`);
+}
 
 // A fetch() implemented on Node's http/https modules. In the Electron MAIN
 // process the global fetch (undici) — and Chromium's net.fetch — can fail to
@@ -90,19 +278,37 @@ export async function nodeHttpFetch(
         // Follow redirects so endpoints that canonicalise paths (trailing slash,
         // http→https, reverse-proxy rewrites) still resolve to the real response.
         const location = res.headers.location;
-        if (status >= 300 && status < 400 && location && redirectCount < MAX_REDIRECTS) {
+        // Only the statuses Fetch itself treats as redirects — the same list
+        // `fetchSameOrigin` uses. `>= 300 && < 400` also swept in 300, 304 and
+        // 305: following a 304 turns a cache revalidation into a second
+        // request, and neither 300 nor 305 is a redirect to follow.
+        if (REDIRECT_STATUSES.has(status) && location && redirectCount < MAX_REDIRECTS) {
           res.resume(); // drain the redirect body so the socket can be reused
           const nextUrl = new URL(location, u).href;
           if (opts.allowedRedirectOrigin && new URL(nextUrl).origin !== opts.allowedRedirectOrigin) {
             reject(new Error(`Refusing cross-origin redirect to ${new URL(nextUrl).origin}`));
             return;
           }
-          // 303 (and legacy 301/302 on non-GET) downgrade to GET without a body;
-          // 307/308 preserve method + body.
-          const downgrade = status === 303 || ((status === 301 || status === 302) && method !== 'GET' && method !== 'HEAD');
-          const nextInit: RequestInit = downgrade
-            ? { ...init, method: 'GET', body: undefined }
-            : init;
+          // Fetch's own transitions, matching fetchSameOrigin: 303 becomes GET
+          // for anything except HEAD — HEAD is preserved, and downgrading it
+          // turned a metadata probe into a full body fetch — and 301/302 do so
+          // only for POST.
+          const downgrade = status === 303
+            ? method !== 'GET' && method !== 'HEAD'
+            : (status === 301 || status === 302) && method === 'POST';
+          let nextInit: RequestInit = init;
+          if (downgrade) {
+            // The body is gone, so its framing headers must go with it. Reusing
+            // them left `Content-Length`/`Content-Type` describing a body that
+            // no longer existed, which a target can legitimately hang on or
+            // reject — and this helper now carries the OpenAI-compatible
+            // security fix, so its behaviour has to match the sibling.
+            const headers = new Headers(init.headers as Record<string, string> | undefined);
+            for (const h of ['content-type', 'content-length', 'content-encoding', 'content-language', 'content-location']) {
+              headers.delete(h);
+            }
+            nextInit = { ...init, method: 'GET', body: undefined, headers };
+          }
           resolve(nodeHttpFetch(nextUrl, nextInit, redirectCount + 1, opts));
           return;
         }
@@ -115,19 +321,26 @@ export async function nodeHttpFetch(
         else if (encoding === 'deflate') bodyStream = res.pipe(zlib.createInflate());
         else if (encoding === 'br') bodyStream = res.pipe(zlib.createBrotliDecompress());
 
-        const stream = Readable.toWeb(bodyStream) as unknown as ReadableStream<Uint8Array>;
-        const respHeaders = new Headers();
-        for (const [k, v] of Object.entries(res.headers)) {
-          // The body is now decoded — drop headers that describe the wire encoding
-          // so consumers don't try to decompress again or trust a stale length.
-          if (k === 'content-encoding' || k === 'content-length') continue;
-          if (Array.isArray(v)) respHeaders.set(k, v.join(', '));
-          else if (typeof v === 'string') respHeaders.set(k, v);
+        // 204/205/304 are null-body statuses: `new Response(body, { status })`
+        // THROWS for them. That throw happened inside this http callback, so the
+        // promise never settled and the caller hung until its own timeout — a
+        // 304 from any endpoint was an indefinite stall, not an error. The
+        // response body is drained so the socket can be reused.
+        if (NULL_BODY_STATUSES.has(status)) {
+          bodyStream.resume();
+          resolve(new Response(null, {
+            status,
+            statusText: res.statusMessage ?? '',
+            headers: headersFrom(res.headers),
+          }));
+          return;
         }
+
+        const stream = Readable.toWeb(bodyStream) as unknown as ReadableStream<Uint8Array>;
         resolve(new Response(stream, {
           status,
           statusText: res.statusMessage ?? '',
-          headers: respHeaders,
+          headers: headersFrom(res.headers),
         }));
       },
     );

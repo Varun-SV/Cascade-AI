@@ -5,7 +5,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { CascadeRouter } from './index.js';
+import { CascadeRouter, credentialIdentityKeys, discoveryCacheKey, resetCredentialIdentitiesForTest } from './index.js';
+import crypto from 'node:crypto';
 import type { CascadeConfig } from '../../types.js';
 import { CascadeConfigSchema } from '../../config/schema.js';
 import { DEFAULT_PROVIDER_TPM, TpmLimiter } from './tpm-limiter.js';
@@ -503,5 +504,250 @@ describe('CascadeRouter — a transient probe failure does not erase a provider'
 
     expect(router.getAvailableModels().some((m) => m.provider === 'gemini')).toBe(false);
     expect(router.providerProbeFailures()[0]?.reason).toContain('API key not valid');
+  });
+});
+
+describe('CascadeRouter — a bearer-only Anthropic gateway is validated too', () => {
+  let gw: http.Server;
+  let gwUrl: string;
+  const authSeen: string[] = [];
+
+  beforeAll(async () => {
+    gw = http.createServer((req, res) => {
+      authSeen.push(String(req.headers['authorization'] ?? ''));
+      if (req.url === '/v1/models') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ data: [{ id: 'gw-claude-a', display_name: 'GW A' }] }));
+      }
+      res.writeHead(404);
+      res.end('nope');
+    });
+    await new Promise<void>((r) => gw.listen(0, '127.0.0.1', r));
+    gwUrl = `http://127.0.0.1:${(gw.address() as AddressInfo).port}`;
+  });
+  afterAll(() => new Promise<void>((r) => gw.close(() => r())));
+
+  it('registers the gateway catalogue for a provider configured with only authToken', async () => {
+    // validateCloudProviderModels() required `cfg.apiKey`, so a bearer-only
+    // gateway never had its catalogue validated: the availability probe uses
+    // listModels() as a boolean and discards the models, leaving AUTO routing
+    // pinned to the BUNDLED public Anthropic catalogue — free to pick a model
+    // the gateway does not serve and fail the first real request.
+    authSeen.length = 0;
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['anthropic']));
+
+    await router.init(makeConfig({
+      providers: [{ type: 'anthropic', authToken: 'gw-token', baseUrl: gwUrl }],
+    }));
+
+    expect(router.getAvailableModels().some((m) => m.id === 'gw-claude-a')).toBe(true);
+    // And it authenticated as a bearer, not with an empty x-api-key.
+    expect(authSeen.some((a) => a === 'Bearer gw-token')).toBe(true);
+  });
+});
+
+describe('discoveryCacheKey', () => {
+  const cfg = (over: Record<string, unknown>) => ({ type: 'anthropic', ...over }) as never;
+
+  it('separates credentials, and is stable for the same configured entry', () => {
+    // Identity is per CONFIG ENTRY: the router passes the same object from
+    // `config.providers.find(...)` on every call, and the desktop mutates that
+    // object in place across settings saves, so this is the shape that decides
+    // whether the cache hits.
+    const entryA = cfg({ apiKey: 'sk-a' });
+    const entryB = cfg({ apiKey: 'sk-b' });
+    const a = discoveryCacheKey('anthropic', entryA);
+    expect(a).not.toBe(discoveryCacheKey('anthropic', entryB));
+    expect(discoveryCacheKey('anthropic', entryA)).toBe(a);
+  });
+
+  it('expires an identity once its TTL is up, however small the map is', async () => {
+    // The sweep used to run only when the map grew past a threshold, so in the
+    // ordinary case — a handful of credentials — nothing ever expired and a
+    // rotated key stayed a raw Map key for the life of the process. That is
+    // exactly the retention the expiry exists to end.
+    vi.useFakeTimers();
+    try {
+      const before = discoveryCacheKey('anthropic', cfg({ apiKey: 'sk-ttl' }));
+      vi.advanceTimersByTime(16 * 60 * 1000); // past the 15-minute TTL
+      expect(discoveryCacheKey('anthropic', cfg({ apiKey: 'sk-ttl' }))).not.toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('is stable for an EQUIVALENT config rebuilt from scratch', () => {
+    // The hosted server rebuilds its config for every chat run
+    // (cloud/server/src/runs.ts → buildCloudConfig), so identity keyed on the
+    // object missed the cache on every request: each run re-listed every
+    // provider's models and appended another entry to a cache that was never
+    // evicted.
+    const a = discoveryCacheKey('anthropic', cfg({ apiKey: 'sk-a', baseUrl: 'https://gw' }));
+    const b = discoveryCacheKey('anthropic', cfg({ apiKey: 'sk-a', baseUrl: 'https://gw' }));
+    expect(b).toBe(a);
+  });
+
+  it('changes the moment the entry\'s credential is rotated in place', () => {
+    // The security property, and the one an init-time prune could not deliver:
+    // a settings save mutates the provider object and never re-initialises the
+    // router, so the replacement has to be noticed here, on the next call.
+    const entry = cfg({ apiKey: 'sk-old' }) as { apiKey: string };
+    const before = discoveryCacheKey('anthropic', entry as never);
+    entry.apiKey = 'sk-new';
+    const after = discoveryCacheKey('anthropic', entry as never);
+    expect(after).not.toBe(before);
+    // …and it does not flap: the new secret keeps its own identity.
+    expect(discoveryCacheKey('anthropic', entry as never)).toBe(after);
+  });
+
+  it('separates two bearers at the same endpoint', () => {
+    // Two gateways on one URL serve different catalogues. Keying on apiKey
+    // alone collapsed every bearer-only config onto one entry, so switching
+    // credentials was answered from the previous one's cache.
+    const url = 'https://gw.internal';
+    const entry = cfg({ authToken: 'tok-a', baseUrl: url }) as { authToken: string };
+    const a = discoveryCacheKey('anthropic', entry as never);
+    entry.authToken = 'tok-b';
+    expect(discoveryCacheKey('anthropic', entry as never)).not.toBe(a);
+  });
+
+  it('carries nothing derived from the credential', () => {
+    // The security property. The key used to be sha256(apiKey) — the artifact
+    // an offline guess is tested against, anywhere it surfaced (heap dump,
+    // crash report, a future log of cache keys). The credential is now used
+    // only for an equality lookup, so the key can neither contain it nor be
+    // reproduced from it.
+    const secret = 'sk-a-very-secret';
+    const baseUrl = 'https://gw.internal';
+    const key = discoveryCacheKey('anthropic', cfg({ apiKey: secret, baseUrl }));
+    expect(key).not.toContain(secret);
+
+    // The exact construction this used to have. Reproducing it here is what
+    // makes the assertion bite: an earlier version of this test hashed the
+    // secret ALONE, which never matched the tuple the code actually digested,
+    // so it passed against the very implementation it was meant to reject.
+    const previous = crypto.createHash('sha256')
+      .update(`anthropic|${secret}||${baseUrl}`).digest('hex');
+    expect(key).not.toBe(previous.slice(0, 24));
+    expect(key).not.toContain(previous.slice(0, 16));
+
+    // …and nothing else obvious either.
+    for (const algo of ['sha256', 'sha1', 'md5']) {
+      for (const input of [secret, `anthropic|${secret}`, `${secret}|${baseUrl}`]) {
+        const digest = crypto.createHash(algo).update(input).digest('hex');
+        expect(key).not.toContain(digest.slice(0, 16));
+      }
+    }
+  });
+
+  it('tells an apiKey and an authToken of the same value apart', () => {
+    // The identity of a secret is the same whichever field holds it — the map
+    // is keyed by the secret — but the two occupy different SLOTS in the key,
+    // so a value used as an API key never collides with the same value used as
+    // a bearer.
+    const asKey = discoveryCacheKey('anthropic', cfg({ apiKey: 'same' }));
+    const asToken = discoveryCacheKey('anthropic', cfg({ authToken: 'same' }));
+    expect(asKey).not.toBe(asToken);
+  });
+
+  it('treats an absent credential as its own case, not as a collision', () => {
+    const bare = cfg({ baseUrl: 'https://gw' });
+    const none = discoveryCacheKey('anthropic', bare);
+    expect(none).toBe(discoveryCacheKey('anthropic', bare));
+    expect(none).not.toBe(discoveryCacheKey('anthropic', cfg({ apiKey: 'k', baseUrl: 'https://gw' })));
+  });
+});
+
+describe('discoveryCacheKey — a rotated credential is not retained', () => {
+  it('survives a settings save that never re-initialises the router', async () => {
+    // The path an init-time prune could not reach, and the ordinary way a
+    // credential is replaced: DashboardServer's config:update mutates the
+    // provider entry and persists it without calling init(). The replacement
+    // has to be noticed on the next call, not at some later lifecycle event.
+    const entry = { type: 'anthropic', apiKey: 'old-key' };
+    const before = discoveryCacheKey('anthropic', entry as never);
+
+    const { applyProviderApiKey } = await import('../../config/index.js');
+    applyProviderApiKey([entry], 'anthropic', 'rotated-key');
+
+    expect(discoveryCacheKey('anthropic', entry as never)).not.toBe(before);
+  });
+
+  it('keeps the identity of a credential that did not change, so the cache still hits', async () => {
+    const entry = { type: 'anthropic', apiKey: 'kept-key' };
+    const before = discoveryCacheKey('anthropic', entry as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set());
+    await router.init(makeConfig({ providers: [entry] }));
+
+    expect(discoveryCacheKey('anthropic', entry as never)).toBe(before);
+  });
+
+});
+
+describe('credential identity retention is capped, not slid', () => {
+  // The comment above this code said that refreshing an entry on lookup would
+  // let a credential in occasional use keep its identity for ever — and the
+  // line below it did exactly that (`held.at = now`). Any secret used at least
+  // once per TTL window therefore stayed a raw Map key for the life of the
+  // process, which is precisely the retention the expiry exists to end.
+  const TTL_MS = 15 * 60 * 1000;
+
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('does not let repeated use extend how long a raw secret is held', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+
+    const cfg = { type: 'anthropic' as const, apiKey: 'secret-value' };
+    const first = discoveryCacheKey('anthropic', cfg);
+
+    // Used steadily, well inside the window each time — the traffic pattern
+    // that used to pin the entry open indefinitely.
+    for (let i = 0; i < 4; i++) {
+      vi.advanceTimersByTime(TTL_MS / 3);
+      discoveryCacheKey('anthropic', cfg);
+    }
+
+    // Past the TTL measured from FIRST use, the identity must have rotated:
+    // the original entry was not kept alive by the lookups.
+    vi.advanceTimersByTime(TTL_MS);
+    expect(discoveryCacheKey('anthropic', cfg)).not.toBe(first);
+  });
+
+  it('releases a secret on a real timer, with no later lookup to trigger it', () => {
+    // Retention used to be bounded only by the NEXT lookup: `sweepExpired()`
+    // ran from `credentialIdentity()` and nowhere else, so a process that
+    // inserted a credential, had it rotated, and then went idle held the old
+    // value until it exited. The documented fifteen-minute retention was really
+    // "until someone asks again, whenever that is".
+    // Reset FIRST, so the sweep interval is armed under the fake clock rather
+    // than one an earlier test left running on the real one.
+    resetCredentialIdentitiesForTest();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-01T00:00:00Z'));
+
+    const secret = 'sk-raw-secret-value-should-not-be-retained';
+    discoveryCacheKey('anthropic', { type: 'anthropic', apiKey: secret });
+    expect(credentialIdentityKeys()).toContain(secret);
+
+    // Time passes and NOTHING calls back in — exactly the idle case.
+    vi.advanceTimersByTime(TTL_MS * 2);
+
+    expect(credentialIdentityKeys()).not.toContain(secret);
+  });
+
+  it('is stable within one window, so the discovery cache still hits', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-02-01T00:00:00Z'));
+
+    const cfg = { type: 'anthropic' as const, apiKey: 'another-secret' };
+    const first = discoveryCacheKey('anthropic', cfg);
+    vi.advanceTimersByTime(TTL_MS / 2);
+    expect(discoveryCacheKey('anthropic', cfg)).toBe(first);
   });
 });

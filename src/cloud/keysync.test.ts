@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { CascadeConfig } from '../types.js';
 import { gatherSyncBundle, applySyncBundle } from './keysync.js';
+import { didCleanupChangeAnything, describeCleanup } from '../config/retired-providers.js';
 import { mcpServerPrefix } from '../tools/tool-name.js';
 
 // A minimal config stub — only the fields key-sync touches matter here.
@@ -229,5 +230,199 @@ describe('keysync — MCP per-tool selections', () => {
     );
     expect(next.tools.mcpServers).toHaveLength(1);
     expect(next.tools.mcpServers![0]!.url).toBe('https://new.example.com/mcp');
+  });
+});
+
+describe('keysync — a bundle predating 0.75 must not reinstate a dead token', () => {
+  it('drops a Claude subscription token instead of letting it win the merge', () => {
+    // The incoming entry wins the provider merge, and the result is persisted.
+    // Without this filter, pulling an old bundle overwrote a valid API key with
+    // a token this release cannot use — and the next launch stripped that
+    // token, leaving the good key permanently gone.
+    const local = cfg({ providers: [{ type: 'anthropic', apiKey: 'sk-ant-still-good' }] });
+    const stale = {
+      v: 2,
+      providers: [{ type: 'anthropic', authToken: 'sk-ant-oat01-dead', credentialSource: 'Claude Code' }],
+    } as unknown as Parameters<typeof applySyncBundle>[0];
+
+    const merged = applySyncBundle(stale, local);
+    const anthropic = merged.providers.find((p) => p.type === 'anthropic');
+    expect(anthropic?.apiKey).toBe('sk-ant-still-good');
+    expect(anthropic?.authToken).toBeUndefined();
+  });
+
+  it('still carries a legitimate gateway bearer through the merge', () => {
+    const local = cfg({ providers: [] });
+    const bundle = {
+      v: 2,
+      providers: [{ type: 'anthropic', authToken: 'gw-token', baseUrl: 'https://gateway.internal' }],
+    } as unknown as Parameters<typeof applySyncBundle>[0];
+
+    const merged = applySyncBundle(bundle, local);
+    const anthropic = merged.providers.find((p) => p.type === 'anthropic');
+    expect(anthropic?.authToken).toBe('gw-token');
+    expect(anthropic?.baseUrl).toBe('https://gateway.internal');
+  });
+});
+
+describe('keysync — an endpoint-only revoked row must not win either', () => {
+  it('drops the whole row, so a valid local key survives the merge', () => {
+    // Keeping the entry minus its token is right for local config, where the
+    // row holds a gateway the user configured. It is wrong for an incoming
+    // bundle: mergeByKey treats a matching incoming row as authoritative, so an
+    // endpoint-only row replaced a valid local key and persisted with no
+    // credential at all — the exact loss the filter was added to prevent.
+    const local = cfg({
+      providers: [{ type: 'anthropic', apiKey: 'sk-ant-still-good', baseUrl: 'https://gw.internal' }],
+    });
+    const stale = {
+      v: 2,
+      providers: [{
+        type: 'anthropic', authToken: 'sk-ant-oat01-dead',
+        baseUrl: 'https://gw.internal', credentialSource: 'Claude Code',
+      }],
+    } as unknown as Parameters<typeof applySyncBundle>[0];
+
+    const merged = applySyncBundle(stale, local);
+    const anthropic = merged.providers.find((p) => p.type === 'anthropic');
+    expect(anthropic?.apiKey).toBe('sk-ant-still-good');
+    expect(anthropic?.authToken).toBeUndefined();
+  });
+
+  it('keeps a synced row that carries a replacement API key beside the dead token', () => {
+    // Dropping the row wholesale lost the key. This is the state the
+    // settings-save paths fixed in this release used to produce, so a device
+    // still on an older build syncs exactly this shape — and the key is the
+    // thing the user is trying to transfer.
+    const local = cfg({ providers: [{ type: 'anthropic', apiKey: 'sk-ant-old' }] });
+    const bundle = {
+      v: 2,
+      providers: [{
+        type: 'anthropic', authToken: 'sk-ant-oat01-dead',
+        apiKey: 'sk-ant-replacement', credentialSource: 'Claude Code',
+      }],
+    } as unknown as Parameters<typeof applySyncBundle>[0];
+
+    const merged = applySyncBundle(bundle, local);
+    const anthropic = merged.providers.find((p) => p.type === 'anthropic');
+    expect(anthropic?.apiKey).toBe('sk-ant-replacement');
+    expect(anthropic?.authToken).toBeUndefined();
+  });
+});
+
+describe('keysync — a pin the removed credential leaves dangling', () => {
+  it('clears an Anthropic pin the bundle brought with the dead token', () => {
+    // clearRetiredPins() does not cover this: `anthropic` is not a retired
+    // provider type, it is a supported one whose credential died. The models
+    // merge lets the incoming pin win, so without this the pull persisted a pin
+    // naming a provider that is not there — and the router throws on that
+    // rather than falling back to the provider that still works.
+    const local = cfg({ providers: [{ type: 'openai', apiKey: 'sk-openai' }], models: { t1: 'gpt-5' } });
+    const stale = {
+      v: 2,
+      providers: [{ type: 'anthropic', authToken: 'sk-ant-oat01-dead', credentialSource: 'Claude Code' }],
+      models: { t1: 'anthropic:claude-opus-4' },
+    } as unknown as Parameters<typeof applySyncBundle>[0];
+
+    const cleanup = { removed: [] as string[], clearedPins: [] as string[] };
+    const merged = applySyncBundle(stale, local, cleanup as never);
+    expect((merged.models as Record<string, unknown>)['t1']).toBeUndefined();
+    expect(cleanup.clearedPins).toContain('t1');
+  });
+
+  it('leaves the pin alone when the local side still has a usable Anthropic key', () => {
+    // The pin resolves fine — clearing it would be data loss caused by a stale
+    // remote snapshot, which is the same reasoning the retired-pin
+    // reconciliation already applies.
+    const local = cfg({ providers: [{ type: 'anthropic', apiKey: 'sk-ant-good' }] });
+    const stale = {
+      v: 2,
+      providers: [{ type: 'anthropic', authToken: 'sk-ant-oat01-dead', credentialSource: 'Claude Code' }],
+      models: { t1: 'anthropic:claude-opus-4' },
+    } as unknown as Parameters<typeof applySyncBundle>[0];
+
+    const merged = applySyncBundle(stale, local);
+    expect((merged.models as Record<string, unknown>)['t1']).toBe('anthropic:claude-opus-4');
+  });
+});
+
+describe('keysync — reporting a credential the sync discarded', () => {
+  it('reports the removal even when no pin was cleared', () => {
+    // A bundle whose only content was the dead token produced an empty
+    // cleanup, so `cascade cloud pull` printed "Your keys are ready here" and
+    // the desktop returned no `skipped` — over the one key it had carried.
+    const local = cfg({ providers: [] });
+    const stale = {
+      v: 2,
+      providers: [{ type: 'anthropic', authToken: 'sk-ant-oat01-dead', credentialSource: 'Claude Code' }],
+    } as unknown as Parameters<typeof applySyncBundle>[0];
+
+    const cleanup = { removed: [] as string[], clearedPins: [] as string[], revokedCredentials: 0 };
+    applySyncBundle(stale, local, cleanup as never);
+    expect(cleanup.revokedCredentials).toBe(1);
+    expect(didCleanupChangeAnything(cleanup)).toBe(true);
+    expect(describeCleanup(cleanup)).toMatch(/Claude subscription token/);
+  });
+
+  it('reports nothing when the bundle carried nothing dead', () => {
+    const local = cfg({ providers: [] });
+    const bundle = {
+      v: 2,
+      providers: [{ type: 'anthropic', apiKey: 'sk-ant-good' }],
+    } as unknown as Parameters<typeof applySyncBundle>[0];
+
+    const cleanup = { removed: [] as string[], clearedPins: [] as string[], revokedCredentials: 0 };
+    applySyncBundle(bundle, local, cleanup as never);
+    expect(cleanup.revokedCredentials).toBe(0);
+    expect(didCleanupChangeAnything(cleanup)).toBe(false);
+  });
+
+  it('drops an incoming bearer that has no gateway, rather than let it erase a good key', () => {
+    // The revoked filter removes KNOWN subscription tokens; an ordinary
+    // `{ type: 'anthropic', authToken: 'gw-token' }` is a live credential and
+    // survives it. mergeByKey then lets the incoming row win on provider
+    // signature — so the local API key was erased and a bearer persisted that
+    // AnthropicProvider now refuses for lacking `baseUrl`, leaving the device
+    // unable to run at all.
+    const local = { providers: [{ type: 'anthropic', apiKey: 'good-key' }] } as never as CascadeConfig;
+    const bundle = { v: 1, providers: [{ type: 'anthropic', authToken: 'gw-token' }] } as never;
+
+    const cleanup = { removed: [], clearedPins: [] };
+    const next = applySyncBundle(bundle, local, cleanup as never);
+
+    const anthropic = next.providers.find((p) => p.type === 'anthropic')!;
+    expect(anthropic.apiKey).toBe('good-key');
+    expect(anthropic.authToken).toBeUndefined();
+    expect(cleanup).toMatchObject({ unusableCredentials: 1 });
+    expect(didCleanupChangeAnything(cleanup as never)).toBe(true);
+  });
+
+  it('keeps an incoming bearer that names its gateway', () => {
+    const local = { providers: [] } as never as CascadeConfig;
+    const bundle = {
+      v: 1,
+      providers: [{ type: 'anthropic', authToken: 'gw-token', baseUrl: 'https://gateway.internal' }],
+    } as never;
+
+    const cleanup = { removed: [], clearedPins: [] };
+    const next = applySyncBundle(bundle, local, cleanup as never);
+    expect(next.providers[0]).toMatchObject({ authToken: 'gw-token', baseUrl: 'https://gateway.internal' });
+    expect(cleanup).toMatchObject({ unusableCredentials: 0 });
+  });
+
+  it('does not mistake a genuinely keyless provider for an unusable bearer', () => {
+    const local = { providers: [] } as never as CascadeConfig;
+    const bundle = {
+      v: 1,
+      providers: [
+        { type: 'ollama' },
+        { type: 'openai-compatible', baseUrl: 'http://localhost:8000/v1' },
+      ],
+    } as never;
+
+    const cleanup = { removed: [], clearedPins: [] };
+    const next = applySyncBundle(bundle, local, cleanup as never);
+    expect(next.providers).toHaveLength(2);
+    expect(cleanup).toMatchObject({ unusableCredentials: 0 });
   });
 });

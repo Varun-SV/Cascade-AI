@@ -63,12 +63,17 @@ contextBridge.exposeInMainWorld('cascade', {
   // Config: read/write provider key + workspace for onboarding
   getConfig: () => ipcRenderer.invoke('cascade:getConfig') as Promise<{
     provider: string;
-    apiKey: string;
+    /** Whether a credential is configured — deliberately not the credential. */
+    hasCredential: boolean;
     workspace: string;
     onboardingDone: boolean;
   }>,
-  setConfig: (cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string }) =>
-    ipcRenderer.invoke('cascade:setConfig', cfg) as Promise<{ onboardingDone: boolean }>,
+  setConfig: (cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string; endpointOffered?: boolean }) =>
+    // `ok`/`error` are part of this contract, not an internal detail: the main
+    // process can DECLINE to store a key whose host it cannot determine, and a
+    // renderer typed to see only `onboardingDone` advanced the wizard as though
+    // the key had been saved.
+    ipcRenderer.invoke('cascade:setConfig', cfg) as Promise<{ onboardingDone?: boolean; ok?: boolean; error?: string }>,
 
   // Settings panel: backend-independent read/write of keys, per-tier models,
   // budget (incl. daily/session caps), and the allowlisted "advanced" knobs.
@@ -194,7 +199,7 @@ contextBridge.exposeInMainWorld('cascade', {
     // Key sync (E2E-encrypted): passphrase stays in the main process; only
     // ciphertext leaves the machine.
     syncPush: (passphrase: string) => ipcRenderer.invoke('cloud:syncPush', passphrase) as Promise<{ ok: boolean; error?: string; version?: number }>,
-    syncPull: (passphrase: string) => ipcRenderer.invoke('cloud:syncPull', passphrase) as Promise<{ ok: boolean; error?: string; empty?: boolean; applied?: boolean; skipped?: { removed: string[]; clearedPins: string[] } }>,
+    syncPull: (passphrase: string) => ipcRenderer.invoke('cloud:syncPull', passphrase) as Promise<{ ok: boolean; error?: string; empty?: boolean; applied?: boolean; skipped?: { removed: string[]; clearedPins: string[]; revokedCredentials?: number; unusableCredentials?: number } }>,
   },
 
   // MCP servers — connect a remote server via OAuth (loopback in the main

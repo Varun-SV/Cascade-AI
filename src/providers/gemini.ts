@@ -26,6 +26,94 @@ import { BaseProvider, ProviderUnreachableError } from './base.js';
 import { withResolvedPricing } from '../core/router/pricing.js';
 import { isChatModel } from './model-filter.js';
 import { toGeminiParameters } from './gemini-schema.js';
+import { clientApiRoot, fetchSameOrigin } from '../utils/net.js';
+
+/**
+ * The version segment the Gemini client owns.
+ *
+ * The SDK appends it to whatever `httpOptions.baseUrl` it is given, so a
+ * configured endpoint is an API ROOT, not a versioned path — and discovery has
+ * to append the same thing to reach the same service.
+ */
+const GEMINI_API_VERSION = 'v1beta';
+
+/** Where Gemini sends when nothing is configured. */
+const GEMINI_PUBLIC_ROOT = 'https://generativelanguage.googleapis.com';
+
+/**
+ * The `?alt=sse` body, as the objects the chunk walker already understands.
+ *
+ * Gemini frames each update as `data: {json}` separated by blank lines. Only
+ * `data:` lines carry payload — comments and any future field name are skipped
+ * rather than parsed, so an unrecognised frame cannot throw mid-generation.
+ */
+async function* parseSseChunks(body: ReadableStream<Uint8Array>): AsyncGenerator<unknown> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffered = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffered += decoder.decode(value, { stream: true });
+      // Split on newlines only — a `data:` line is complete at its newline, and
+      // waiting for the blank-line frame terminator would hold the last chunk
+      // of a stream that ends without one.
+      let cut = buffered.indexOf('\n');
+      while (cut !== -1) {
+        const line = buffered.slice(0, cut).trim();
+        buffered = buffered.slice(cut + 1);
+        if (line.startsWith('data:')) {
+          const payload = line.slice(5).trim();
+          if (payload && payload !== '[DONE]') {
+            try {
+              yield JSON.parse(payload);
+            } catch {
+              // A frame we cannot parse is skipped, not fatal: the alternative
+              // is aborting a generation that is otherwise streaming fine.
+            }
+          }
+        }
+        cut = buffered.indexOf('\n');
+      }
+    }
+  } finally {
+    // Releases the socket when the consumer stops early — an abort signal, or a
+    // caller that breaks out of the loop.
+    reader.releaseLock();
+    await body.cancel().catch(() => { /* already closed */ });
+  }
+}
+
+/**
+ * One list, used by BOTH transports. Written out twice, the SDK path and the
+ * REST path would quietly generate under different safety configuration
+ * depending on whether an endpoint happened to be configured.
+ */
+const SAFETY_SETTINGS = [
+  { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+  { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+];
+
+/**
+ * The API root for a configured Gemini endpoint.
+ *
+ * A trailing version segment is stripped rather than trusted: the SDK adds its
+ * own, so a user who writes the URL the way it appears in Google's docs would
+ * otherwise generate against `/v1beta/v1beta`.
+ *
+ * Delegates, exactly as `anthropicApiRoot()` does and for the same two
+ * reasons. Credential-scope comparison in `config/` has to agree with this
+ * about which spellings name one root — `CLIENT_OWNS_VERSION` lists Gemini
+ * precisely because of the concatenation above — and a hand-rolled copy also
+ * reintroduced the polynomial `replace(/\/+$/, '')` that
+ * `stripTrailingSlashes()` exists to keep out of the codebase.
+ */
+export function geminiApiRoot(baseUrl?: string): string {
+  const configured = baseUrl?.trim();
+  if (!configured) return GEMINI_PUBLIC_ROOT;
+  return clientApiRoot('gemini', configured) || GEMINI_PUBLIC_ROOT;
+}
 
 /**
  * Tool definitions in the shape this provider actually submits.
@@ -101,7 +189,15 @@ export class GeminiProvider extends BaseProvider {
 
   constructor(config: ProviderConfig, model: ModelInfo) {
     super(config, model);
-    this.client = new GoogleGenAI({ apiKey: config.apiKey ?? '' });
+    // `baseUrl` was accepted by the config schema, preserved across edits and
+    // compared by `credentialEndpointIdentity` — and then ignored here, so a
+    // key configured for a proxy was sent to Google's public backend anyway.
+    // A configured endpoint that silently does nothing is worse than one that
+    // is refused: everything upstream reports the routing as honoured.
+    this.client = new GoogleGenAI({
+      apiKey: config.apiKey ?? '',
+      ...(config.baseUrl ? { httpOptions: { baseUrl: geminiApiRoot(config.baseUrl) } } : {}),
+    });
   }
 
   async generate(options: GenerateOptions): Promise<GenerateResult> {
@@ -115,21 +211,33 @@ export class GeminiProvider extends BaseProvider {
   ): Promise<GenerateResult> {
     const contents = this.buildContents(options.messages, options.images);
 
-    const stream = await this.client.models.generateContentStream({
-      model: this.model.id,
-      contents,
-      config: {
-        systemInstruction: options.systemPrompt,
-        safetySettings: [
-          { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-          { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
-        ],
-        tools: options.tools?.length
-          ? [{ functionDeclarations: toGeminiTools(options.tools) }]
-          : undefined,
-        abortSignal: options.signal,
-      },
-    });
+    // A CONFIGURED endpoint does not go through the SDK.
+    //
+    // `GoogleGenAI` calls the global fetch with no injectable transport and no
+    // redirect option, so its requests follow a 3xx wherever it points — and
+    // `x-goog-api-key` is a custom header, which the fetch spec does NOT strip
+    // across origins the way it strips `Authorization`. Once `baseUrl` can name
+    // a user-configured proxy, that is a credential replay path with no
+    // configuration-level fix available. Discovery was guarded by issuing its
+    // own request; generation needs the same treatment for the same reason.
+    //
+    // The public host keeps the SDK. There is no proxy in that path to redirect
+    // anywhere, and the SDK is the better-tested route for the case almost
+    // everyone is on.
+    const stream = this.config.baseUrl
+      ? await this.streamOverRest(contents, options)
+      : await this.client.models.generateContentStream({
+        model: this.model.id,
+        contents,
+        config: {
+          systemInstruction: options.systemPrompt,
+          safetySettings: SAFETY_SETTINGS,
+          tools: options.tools?.length
+            ? [{ functionDeclarations: toGeminiTools(options.tools) }]
+            : undefined,
+          abortSignal: options.signal,
+        },
+      });
 
     let fullContent = '';
     let inputTokens = 0;
@@ -191,24 +299,56 @@ export class GeminiProvider extends BaseProvider {
   }
 
   async countTokens(text: string): Promise<number> {
+    const contents = [{ role: 'user', parts: [{ text }] }];
     try {
-      const result = await this.client.models.countTokens({
-        model: this.model.id,
-        contents: [{ role: 'user', parts: [{ text }] }],
-      });
+      // The third route that carries the key, and the one left behind when
+      // discovery and generation moved off the SDK. `GoogleGenAI` cannot be
+      // given a redirect policy, so a configured proxy redirecting THIS route
+      // cross-origin would still have replayed `x-goog-api-key` — the same hole
+      // in a quieter place. The public host keeps the SDK, as elsewhere.
+      if (this.config.baseUrl) {
+        const resp = await fetchSameOrigin(
+          `${geminiApiRoot(this.config.baseUrl)}/${GEMINI_API_VERSION}`
+          + `/models/${encodeURIComponent(this.model.id)}:countTokens`,
+          {
+            method: 'POST',
+            headers: {
+              'x-goog-api-key': this.config.apiKey ?? '',
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({ contents }),
+          },
+        );
+        if (!resp.ok) return Math.ceil(text.length / 4);
+        const data = await resp.json() as { totalTokens?: number };
+        return data.totalTokens ?? 0;
+      }
+      const result = await this.client.models.countTokens({ model: this.model.id, contents });
       return result.totalTokens ?? 0;
     } catch {
+      // Including a refused cross-origin redirect: an estimate is the right
+      // answer for a token count, and it is never worth failing a run over.
       return Math.ceil(text.length / 4);
     }
   }
 
-  async listModels(): Promise<ModelInfo[]> {
+  async listModels(options: { staticFallback?: boolean } = {}): Promise<ModelInfo[]> {
+  // Same contract Anthropic honours (see BaseProvider.listModels). The bundled
+  // catalogue is right for a settings list and wrong for router validation,
+  // which reads a non-empty result as "the endpoint confirmed these ids",
+  // caches it and pins Auto to them — so a 401 or an outage was being recorded
+  // as confirmation of the PUBLIC catalogue. The parameter existed and this
+  // provider ignored it, which is worse than not having it: the router asked
+  // for confirmed models and was answered with a guess.
+    const staticCatalog = () => (options.staticFallback === false
+      ? []
+      : Object.values(MODELS).filter((m) => m.provider === 'gemini'));
     try {
       const resp = await this.fetchModelList();
       if (!resp.ok) {
         // Invalid key / network error — fall back to the built-in model list
         // instead of crashing downstream consumers with a shape mismatch.
-        return Object.values(MODELS).filter((m) => m.provider === 'gemini');
+        return staticCatalog();
       }
       const data = await resp.json() as {
         models?: Array<{
@@ -220,7 +360,7 @@ export class GeminiProvider extends BaseProvider {
         }>;
       };
       if (!Array.isArray(data?.models)) {
-        return Object.values(MODELS).filter((m) => m.provider === 'gemini');
+        return staticCatalog();
       }
 
       return data.models
@@ -250,7 +390,7 @@ export class GeminiProvider extends BaseProvider {
         });
       });
     } catch {
-      return Object.values(MODELS).filter((m) => m.provider === 'gemini');
+      return staticCatalog();
     }
   }
 
@@ -315,8 +455,65 @@ export class GeminiProvider extends BaseProvider {
    * logs, error reports and shell history, and this one would carry the key
    * with it.
    */
+  /**
+   * Generation against a configured endpoint, issued by hand.
+   *
+   * Same wire protocol the SDK speaks — `:streamGenerateContent?alt=sse` on
+   * `/v1beta`, with the same body — so the chunk shapes the caller walks are
+   * identical and neither transport needs its own parsing. The difference that
+   * matters is `fetchSameOrigin`: the key is never replayed on a host the
+   * configured origin redirects to.
+   */
+  private async streamOverRest(
+    contents: Content[],
+    options: GenerateOptions,
+  ): Promise<AsyncIterable<unknown>> {
+    const url = `${geminiApiRoot(this.config.baseUrl)}/${GEMINI_API_VERSION}`
+      + `/models/${encodeURIComponent(this.model.id)}:streamGenerateContent?alt=sse`;
+    const resp = await fetchSameOrigin(url, {
+      method: 'POST',
+      headers: {
+        'x-goog-api-key': this.config.apiKey ?? '',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        contents,
+        // REST wants the object form; the SDK accepts a bare string and wraps
+        // it itself.
+        ...(options.systemPrompt
+          ? { systemInstruction: { parts: [{ text: options.systemPrompt }] } }
+          : {}),
+        safetySettings: SAFETY_SETTINGS,
+        ...(options.tools?.length
+          ? { tools: [{ functionDeclarations: toGeminiTools(options.tools) }] }
+          : {}),
+      }),
+      signal: options.signal,
+    });
+    if (!resp.ok || !resp.body) {
+      const detail = await resp.text().catch(() => '');
+      throw new ProviderUnreachableError(
+        `Gemini generation failed at ${geminiApiRoot(this.config.baseUrl)}: `
+        + `${resp.status}${detail ? ` — ${detail.slice(0, 200)}` : ''}`,
+      );
+    }
+    return parseSseChunks(resp.body);
+  }
+
   private fetchModelList(): Promise<Response> {
-    return fetch('https://generativelanguage.googleapis.com/v1beta/models', {
+    // Built from the SAME root the SDK client was given. Hardcoding the public
+    // host here meant discovery and generation asked different endpoints the
+    // moment a proxy was configured: the proxy's restricted catalogue was
+    // replaced by Google's public one, and routing then picked models the
+    // proxy does not serve — with the key going to the wrong host on the way.
+    //
+    // Same-origin redirects only, now that the root can be a proxy the user
+    // configured. `x-goog-api-key` is a CUSTOM header, so the fetch spec does
+    // not strip it across origins the way it strips `Authorization` — a
+    // gateway answering with a 302 elsewhere would be handing that host the
+    // key it was never issued by. Identical guard to the Anthropic model-list
+    // request, and the reason it exists there.
+    return fetchSameOrigin(`${geminiApiRoot(this.config.baseUrl)}/${GEMINI_API_VERSION}/models`, {
       headers: { 'x-goog-api-key': this.config.apiKey ?? '' },
     });
   }

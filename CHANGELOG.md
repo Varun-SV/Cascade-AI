@@ -18,6 +18,774 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+## 0.75.0 - 2026-08-14
+
+### Fixed
+- **Three more ways a public-host key could end up addressed to a gateway.**
+  The rule that a missing `baseUrl` means the provider's own public host reached
+  the desktop Settings save first; three sibling ingress paths still read the
+  absence as "compatible with anything". The machine-global merge compared
+  endpoints only when *both* rows had one, so a stored bare API key filled a
+  workspace row pointing at a corporate gateway. The environment injection
+  stopped inheriting a stored endpoint when it CREATED a row, but the branch
+  that fills an existing one still left that row's gateway attached. And
+  `cascade link` spread the configured row first, so a bare exported key was
+  saved against whatever endpoint was already there. All three resolve the
+  omission to the provider's canonical host before deciding, and detach an
+  endpoint the key does not belong to. A bearer is exempt — it has no public
+  host to fall back on, and adopting one against a configured gateway is
+  supported.
+
+- **A replacement key in desktop onboarding kept the old gateway.** The
+  blank-key path was fixed; the keyed one still wrote through a helper that
+  only rewrites the endpoint when given one. The Anthropic onboarding form has
+  no base-URL field, so entering a normal API key against a row pointing at a
+  corporate gateway replaced the secret and left the gateway in place.
+
+- **Anthropic's `/v1` equivalence was being applied to every provider.**
+  Anthropic's client appends its own version segment, so both spellings name one
+  API root — but `OpenAICompatibleProvider` passes the URL through and builds
+  discovery as `base + '/models'`, making `…/openai/v1` and `…/openai` different
+  routes. Collapsing them let a key survive an edit that moved generation
+  elsewhere. The normalization is now scoped to providers whose client owns the
+  segment.
+
+- **An Azure deployment could end up configured twice on one resource.** A
+  workspace row naming only its deployment is excluded from the routable set, so
+  the environment injection did not see it and added a second row for the same
+  deployment on the same resource. The global merge then matched the *original*
+  row by deployment name and filled it with the stored key — and the router,
+  which takes the first deployment-name match, used that stale key, discarding
+  the exported one. The endpointless row is completed in place instead.
+
+- **A public-host key could be repointed at a gateway.** A provider row with no
+  `baseUrl` is not unscoped — for Anthropic, OpenAI and Gemini it means the
+  provider's own public host, which is where the client sends. Three paths read
+  the absence as "compatible with any host": entering a gateway in desktop
+  Settings with the key field blank kept the public key and attached it to that
+  gateway; the key-optional onboarding save did the same on its own separate
+  branch; and an exported `ANTHROPIC_API_KEY` with no `ANTHROPIC_BASE_URL`
+  inherited whatever endpoint the machine-global store happened to hold. All
+  three now resolve a missing endpoint to the provider's canonical host before
+  deciding whether a credential still belongs to it, and a stored endpoint is
+  adopted only when the credential arrived with evidence it belongs there.
+
+- **An endpoint edit that changed nothing could still discard a key.** Anthropic
+  treats `https://gw.example` and `https://gw.example/v1` as one API root — the
+  client appends its own version segment — but credential scoping compared them
+  as raw paths, so switching between the two spellings looked like a host change
+  and retired a working key. Endpoint identity is provider-aware now, and shares
+  its version-suffix rule with the provider itself rather than restating it.
+
+- **Saving a new API key in desktop Settings deleted it.** The endpoint step
+  asked "does the stored credential survive this edit?" and got back `false`
+  both when the endpoint had moved and when a replacement key had been typed —
+  and the caller cleared the credential on `false`. So a save carrying a key and
+  an endpoint wrote the key and immediately removed it, and a key typed with no
+  endpoint change went the same way. The answer is now three-valued, and the
+  whole save sequence is one tested function rather than two loops with a
+  boolean between them.
+
+- **A workspace Azure key could be addressed to another resource.** The global
+  merge let a row that already owned a key adopt a stored endpoint when the
+  deployment names matched. A deployment name is unique only *within* a
+  resource — which is why linking refuses to reuse one across resources — so a
+  row holding resource B's key took resource A's endpoint. A row with no
+  credential still adopts endpoint and key together; only one bringing its own
+  is refused.
+
+- **A deployment name on two resources picked one arbitrarily.** Both Azure
+  routing paths resolved a named deployment with `find`, taking whichever row
+  came first, and the automatic path checked "already configured" across every
+  resource — so a name in use elsewhere silently suppressed creating the one the
+  environment asked for while the key rotated another resource's deployments.
+  The rule is now one function both paths call: without an endpoint a name must
+  resolve to exactly one resource, with an endpoint a name claimed elsewhere is
+  a reported collision, and the upsert check is scoped to the chosen resource.
+
+- **A dead Anthropic tier pin could survive migration.** The check for "is there
+  still a usable Anthropic provider" counted a bearer with no gateway, unlike
+  every other usability check in the release — so a stale row kept the pin
+  clearing from running and the router later threw on a pin it could not
+  resolve instead of falling back.
+
+- **Raw credentials could stay in memory for the life of the process.** The
+  identity map was swept only during a later lookup, so a process that inserted
+  a credential, had it rotated, and then went idle held the old value until it
+  exited — the documented fifteen-minute retention was really "until someone
+  asks again". Expiry now runs on its own timer, which stops once nothing is
+  held.
+
+- **`nodeHttpFetch` followed redirects unlike Fetch does.** It treated any
+  3xx carrying a `Location` as a redirect (including 304, turning a cache
+  revalidation into a second request), downgraded `HEAD` to GET on a 303, and
+  kept `Content-Type`/`Content-Length` describing a body it had just dropped.
+  It now runs the same state machine as `fetchSameOrigin` — which matters
+  because OpenAI-compatible generation and discovery were routed through it for
+  the cross-origin credential fix. Found alongside: any null-body status
+  (204/205/304) made it **hang forever**, because constructing a `Response` with
+  a body for those throws inside a callback and the promise never settled.
+
+- **Electron tests were typechecked by nothing.** Excluding them from the
+  desktop build was right — the build's root is `app/electron`, so a test
+  importing the SDK broke it — but the root `tsc` covers only `src/**/*` and
+  excludes tests, and the app config excludes `electron` entirely. A dedicated
+  no-emit config now typechecks them, wired into `npm run lint`.
+
+- **Desktop Settings could move a key to a host that never issued it.** The key
+  and endpoint fields were handled independently, and a blank key means "keep
+  the existing key" — so repointing an OpenAI-compatible provider at another
+  host carried the old host's key with it. The Azure editor matched a prior key
+  by deployment name alone, so moving a deployment between resources copied the
+  first resource's key onto the second. Keeping a credential across an edit is
+  now conditional on the endpoint being the same one.
+
+- **A stored endpoint could be grafted onto a credential it was never paired
+  with.** The global merge refused to import a secret into a row naming a
+  different host, but not the reverse: a workspace row holding its own key and
+  no endpoint silently adopted the stored gateway. Atomic in both directions
+  now. An Azure row is the exception and stays one — a matching deployment name
+  pins its resource, so the stored endpoint is the only record of where that
+  deployment lives, not a guess.
+
+- **A resource-scoped Azure key reached only one deployment.** A global row
+  naming a resource and no deployment matched the first workspace row on it and
+  stopped; its siblings stayed keyless and failed every request. Azure keys are
+  resource-scoped, so it now applies to every deployment on that resource.
+
+- **OpenAI-compatible keys were replayed across cross-origin redirects.** The
+  provider installed the raw Node fetch helper as the SDK's transport and used
+  it directly for model discovery, both carrying `Authorization: Bearer`, with
+  no redirect origin policy — so an endpoint that redirected elsewhere handed
+  the key to the second host. Same protection the Anthropic paths already had.
+
+- **A Claude subscription token was only refused when it sat in `authToken`.**
+  Discovery reported `ANTHROPIC_API_KEY=sk-ant-oat…` as usable, the environment
+  injection wrote it into `apiKey` on every load, and both the native and
+  browser migrations looked at the wrong field — so the provider boundary threw
+  on a credential everything upstream had called healthy. All of them classify
+  the secret by value now, and the migration removes whichever field holds it
+  rather than a fixed one.
+
+- **A failed model discovery could still be cached as endpoint-confirmed.** The
+  OpenAI and Gemini providers accepted the "no static fallback" flag and ignored
+  it, so a 401 or a network failure returned the bundled catalogue and router
+  validation recorded it as confirmation. Both honour it now.
+
+- **The automatic Azure environment path disagreed with `cascade link azure`.**
+  It never created a deployment the environment named, and could not see
+  deployments held only in the machine-global store — so an exported replacement
+  key was dropped and the stale stored rows restored. Both paths now resolve the
+  resource over the same workspace-plus-global view and upsert the named
+  deployment, keeping the refusal when several resources are configured.
+
+- **A discarded sync credential was counted but never named.** The CLI could
+  print `Cascade config migration: .` when an orphan bearer was the only
+  removal, and the desktop knew nothing about that count at all — reporting a
+  clean sync over a credential it had just dropped.
+
+- **The desktop reported every sync failure as a bad passphrase.** Decrypt,
+  apply and persist shared one `catch`, so a read-only config or a failed write
+  sent the user to retry a passphrase that was already correct.
+
+- **Two security fixes were narrower than they looked.** The browser's
+  local-endpoint filter missed bracketed IPv6 (`[::1]`), unique-local and
+  link-local IPv6, IPv4-mapped addresses in their re-serialized hex form, and a
+  trailing DNS dot. And the discovery credential-identity TTL was refreshed on
+  every lookup — directly contradicting the comment above it — so a credential
+  used once per window stayed a raw map key indefinitely; retention is measured
+  from first use and no longer slides.
+
+- **A credential could be paired with the wrong endpoint on adoption.** The
+  machine-global merge copied an `apiKey` before considering the endpoint it
+  came with, so a workspace row naming gateway B with no credential took the
+  stored key from gateway A and kept B's URL. A credential and its endpoint are
+  one unit now, for API keys exactly as for bearers — the environment path
+  already treated `ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL` as a pair, and an
+  OpenAI-compatible key is endpoint-bound too.
+
+- **A display label could join two unrelated Azure rows.** `label` was consulted
+  whenever no strong identifier was present on both sides — including when each
+  side named something real but different, e.g. one row naming a deployment and
+  the other a resource. Matching those on a name the user typed assigned one
+  resource's key to the other's deployment. Label now decides only when neither
+  row names a resource or a deployment at all.
+
+- **A Claude subscription token in `apiKey` was still sent.** The provider
+  classified `authToken` only, so `ANTHROPIC_API_KEY=sk-ant-oat…` — or any
+  config with the token in the other field — went out as `x-api-key`. The secret
+  is classified by value now, before either auth mode is chosen.
+
+- **A failed gateway was recorded as a validated catalog.** `listModels()`
+  returns the bundled Anthropic models when discovery fails, which is right for
+  a settings list and wrong for router validation: a 401, a refused cross-origin
+  redirect or an outage was cached as "the gateway confirmed these ids", pinning
+  Auto to models that gateway may not serve. Validation now asks for confirmed
+  models only and gets nothing when discovery failed.
+
+- **`cascade link azure` discarded a deployment it was told to create.** With one
+  configured resource, `AZURE_OPENAI_DEPLOYMENT` naming a new deployment and no
+  endpoint rotated the key on every existing deployment and reported success,
+  without ever creating the one named. It is created on the inferred resource.
+
+- **A synced bearer with no gateway erased a good local key.** The revoked-token
+  filter only removes credentials Anthropic has revoked; an ordinary
+  endpoint-less bearer is live, so it survived and won the merge — replacing a
+  working API key with something the provider now refuses outright. Such rows
+  are dropped from an incoming bundle and counted separately from revoked ones.
+
+- **The browser vault held credentials it cannot send.** A bearer preserved
+  alongside a rescued API key was pushed back on the next sync, where a native
+  pull preferred it over that key — undoing the rescue one round trip later; a
+  vault written before 0.75 kept a subscription token or bearer-only row that
+  was never cleaned until the next pull; and a restore could introduce an Ollama
+  or locally-addressed endpoint, which a hosted run cannot reach because it
+  executes on the server, not in the page. Bearers are stripped, unusable rows
+  are dropped with a reason-specific notice, and the migration runs on load as
+  well as on restore. A locally-addressed endpoint the user typed themselves is
+  left alone — only a restore is stopped from adding one.
+
+- **A stored bearer could be paired with the wrong gateway.** Non-Azure rows
+  merge on provider type alone, so a workspace row naming gateway B with no
+  credential adopted the machine-global row's token from gateway A — and the
+  endpoint fill, which only ran when the row had none, left B in place. The
+  result passed every usability check on the way to the wire. A bearer and its
+  gateway are one credential now: adopted together, or not at all, and never
+  when the two rows name different hosts.
+
+- **A Claude subscription token could still reach the wire programmatically.**
+  The provider accepted any bearer once a gateway was named, but the public SDK
+  runs no credential classification — `createCascade()` schema-validates and
+  nothing else — so a config carrying `sk-ant-oat…` with a `baseUrl` walked past
+  the gateway check that had just been added. Pointing such a token at a gateway
+  does not make it a gateway's bearer; it is refused wherever it appears, with a
+  configured API key used instead when there is one.
+
+- **The browser vault dropped keyless providers it can actually use.**
+  Quarantining bearer-only rows keyed off "has no API key", but
+  `openai-compatible` is deliberately key-optional — the provider substitutes
+  `not-required` and the vault accepts a row with just a `baseUrl` — so a synced
+  self-hosted endpoint was discarded and reported as unusable in the one place
+  it works. Only a row whose sole credential is a bearer is quarantined.
+
+- **A gateway bearer could still reach the public Anthropic host.** Every
+  config path refuses to configure `authToken` without the `baseUrl` of the
+  gateway that issued it, but the provider itself enforced nothing — and the
+  programmatic SDK skips those paths entirely: `createCascade()` runs schema
+  validation alone, and the schema permits a bearer with no endpoint. The
+  client was then built with no `baseURL`, which is the SDK's public default
+  host. `listModels()` had the same hole independently, reading `authToken`
+  straight off the config, so a bearer *and* an API key with no gateway had
+  generation correctly use the key while discovery sent the bearer to the
+  public host. Both now take one decision: a bearer is used only with its
+  gateway, an API key alongside it is used instead, and a bearer with neither
+  is refused rather than sent. "Has a credential" carries the same rule, so a
+  bearer with no gateway no longer skips onboarding or passes the router's
+  discovery gate.
+
+- **Two Azure rows for one deployment could be split by their display names.**
+  The resource-scoping fix above weighed `label` beside the deployment name and
+  endpoint, but a label is a name the user types — "project prod" and "prod"
+  are routinely the same deployment. A differing pair made the rows
+  non-matching, so the global row was appended rather than filling the
+  workspace row, and since the router binds an Azure model by deployment name
+  the first, keyless row won while a correctly keyed duplicate sat behind it.
+  `label` decides only when neither resource nor deployment can, which is the
+  role it had before.
+
+- **The browser vault accepted a credential it can never use.** A pull into an
+  empty vault kept a desktop/CLI gateway row whose only credential is a bearer.
+  The web client has no bearer field and the hosted run schema strips it, so
+  the vault displayed a configured provider and the server received a keyless
+  one — a restore reporting success for something that could not run. Such rows
+  are dropped and named in the restore notice, which now distinguishes three
+  cases: a retired provider, a revoked credential, and a live credential that
+  simply cannot be used from a browser.
+
+- **An Azure key could be sent to a different Azure resource.** The global
+  credential store keyed Azure entries by deployment name alone, so in the
+  normal routed shape — where a deployment name is always present — the
+  endpoint never participated in the merge. A stored row for resource A named
+  `prod` therefore matched a workspace row named `prod` on resource B: the
+  merge kept B's own endpoint but filled its missing key from A. Azure rows are
+  now matched on every identifier present on both sides, so a row naming a
+  different resource is a different entry, while a workspace row that names
+  only a deployment still adopts both endpoint and key from the store — the
+  case the store exists for.
+
+- **An exported API key was ignored for a provider held only in the global
+  store.** Environment injection runs before the global merge specifically so
+  an exported value outranks a stored one, but the API-key path searched only
+  the workspace providers. With any other provider in the workspace file the
+  creation gate was closed, so a fresh `ANTHROPIC_API_KEY` had nothing to fill
+  and no permission to create a row — and the merge then restored the stored
+  row, stale key and endpoint included. The bearer branch already consulted the
+  global store; both paths do now, and a row created this way inherits the
+  stored endpoint when the environment exports none, rather than defaulting to
+  the public host. Relatedly, `apiKey` and `authToken` are competing
+  credentials for one provider, so the merge no longer fills one alongside the
+  other — a stored bearer used to shadow the key that had just been exported,
+  and travel to the newly exported gateway with it.
+
+- **`/api/config` served every credential that was not on a provider.** The
+  redaction covered `providers` while the response was otherwise the whole
+  config, so the Brave and Tavily search keys, every MCP server's auth
+  `headers` and `env`, the dashboard's own JWT signing secret, and the
+  telemetry key all went out in plaintext on the route this release hardened
+  for `authToken`. Each is masked now, with the nested branches rebuilt rather
+  than mutated — the shallow copy shared them with the live config the server
+  runs on.
+
+- **A bearer token was served in plaintext by `/api/config`.** The handler
+  masked `apiKey` and nothing else, under a comment saying "Strip sensitive
+  fields before sending". A provider configured with `authToken` — which both
+  `cascade link` and `ANTHROPIC_AUTH_TOKEN` produce — had that credential
+  returned in full to anyone who could reach the route. The redaction is now a
+  single exported function covering every secret field, and is tested on its own
+  rather than only through a running server, which is how the gap survived.
+
+- **Claude subscription tokens are no longer offered as usable.** Discovery
+  marked the Claude Code OAuth token `directlyUsable: true` and `cascade link
+  anthropic --accept-risk` would adopt it. Anthropic's terms now state plainly
+  that it "does not permit third-party developers to offer Claude.ai login or to
+  route requests through Free, Pro, or Max plan credentials on behalf of their
+  users", and it is refused server-side as well — so adopting one produced a
+  provider that failed on its first call. The token is still *surfaced*, because
+  knowing it is there and why it cannot be used beats silence, but it is no
+  longer adoptable, and the warning names the policy and the alternatives
+  instead of hedging with "may violate".
+
+- **A desktop settings save threw after persisting.** `setGithubModelsKey` was
+  still called when clearing the key inputs, having been removed with the rest
+  of the GitHub Models provider in 0.71.0. Keys were written and then the
+  handler died on an undefined function, so the UI never confirmed the save.
+  This also left `app` failing to typecheck on main.
+
+- **A provider configured with a bearer token showed as unconfigured** in every
+  status surface, not just one. The dashboard route, `cascade doctor` (which
+  reported "Anthropic API key — Missing" as a critical failure, and is exactly
+  where `cascade link` sends you to verify), and the desktop onboarding gate all
+  counted `apiKey` alone. `ConfigManager.getAuthToken()` is the companion to
+  `getApiKey()`, and all three consult both now.
+
+- **Linking a credential wiped the rest of the provider's configuration.**
+  `cascade link` replaced the whole entry, so a configured `baseUrl` was lost —
+  harmless while the Anthropic client ignored it, and not harmless now that it
+  honours it: adopting a gateway token would have discarded the gateway and sent
+  that token to `api.anthropic.com`, the one endpoint where it is not valid.
+  Non-credential fields are preserved, and adopting a credential now clears the
+  other kind rather than leaving a stale key beside a new token.
+
+### Added
+- **`ANTHROPIC_AUTH_TOKEN` is read from the environment.** It was the one
+  documented Anthropic credential no environment path picked up, so a user
+  following Anthropic's own gateway instructions got "No providers configured".
+
+- **A gateway API key was being sent to `api.anthropic.com`.** Model discovery
+  hardcoded the public host and `x-api-key`, ignoring both the configured
+  endpoint and the configured auth mode — so a gateway deployment sent the
+  *gateway's* credential to a host that was never meant to see it, and then
+  replaced the gateway's own model catalogue with the public one, leaving
+  routing free to pick models the gateway does not serve. With a bearer token
+  configured it sent an empty key and always fell through to the bundled list.
+  Discovery now follows the same endpoint and authentication as generation.
+
+- **A newly entered API key could be silently ignored.** `AnthropicProvider`
+  reads `authToken` in preference to `apiKey` whenever both are set, and three
+  separate settings-save paths wrote the key without clearing the token it was
+  replacing — so the key the user had just typed was never used, which from the
+  UI is indistinguishable from the save having failed. All three now go through
+  one `applyProviderApiKey()`.
+
+- **A Claude subscription token adopted by an earlier release is now removed on
+  load.** `cascade link anthropic --accept-risk` used to configure one, and this
+  release cannot use it — but nothing was taking it out, so those installs kept
+  a dead credential, kept skipping onboarding because something counted as
+  configured, and had every request refused. It is stripped from the workspace
+  config and the machine-global store, with a notice explaining why and what to
+  set instead, reusing the migration path built for retired providers.
+  Identification is narrow — the `sk-ant-oat` prefix, or the `credentialSource`
+  `cascade link` stamped on it — so a gateway bearer is untouched, and the entry
+  survives (minus the token) when it still holds a key or an endpoint. A tier
+  pinned to `anthropic:<model>` is reset to Auto when the removal takes the last
+  usable Anthropic entry with it, since a pin naming a provider that no longer
+  exists fails the run outright rather than falling back — decided from the
+  final merged provider list, because a key arriving from the machine-global
+  store or the environment keeps that pin perfectly valid. The same filter runs
+  on an incoming key-sync bundle: one written before this release can still
+  carry the token, the incoming entry wins the provider merge, and pulling it
+  would have overwritten a valid API key with a dead one — which the next launch
+  would then strip, leaving the good key gone for good.
+
+- **A gateway bearer no longer asks for the Claude OAuth beta.**
+  `anthropic-beta: oauth-2025-04-20` belongs to the subscription flow this
+  release makes non-adoptable; the SDK maps a bearer to `Authorization: Bearer`
+  without it. Sending it to a gateway that validates beta requests is a way to
+  have a perfectly valid credential rejected.
+
+- **`ANTHROPIC_BASE_URL` now applies to an API key too**, not only a bearer. A
+  key exported beside a gateway produced a provider with no endpoint, and model
+  discovery then sent that gateway's key to the public host.
+
+- **A Claude Code file holding both a token and an API key offers the key.**
+  Switching authentication modes leaves the old value behind, and returning only
+  the non-adoptable token made `cascade link anthropic` refuse with a usable key
+  in the same file it had just read.
+
+- **The desktop no longer hands a credential to the renderer.** `getConfig`
+  returned the provider's API key across the IPC bridge, where any renderer
+  script or DevTools session could read it, and the renderer used only
+  `onboardingDone`, `migrationNotice` and `workspace`. It returns
+  `hasCredential` now — the fact, not the secret.
+
+- **`cascade link` no longer reports success when it changed nothing.** Azure
+  adoption can decline, explaining why, and "✓ Linked" was printed over the
+  explanation along with an invitation to verify it.
+
+- **A configured gateway satisfies the bearer's routing requirement.** The
+  warning tells the user to set `baseUrl` on the anthropic provider; the gate
+  then checked the workspace for Azure only and refused to honour its own
+  advice.
+
+- **A bearer token could be adopted with no gateway to send it to.** It is
+  issued BY a gateway and valid only AT it, so configuring one without an
+  endpoint pointed the client at `api.anthropic.com` — the same credential leak
+  closed above in model discovery, arriving by a different door. It is adopted
+  only alongside `ANTHROPIC_BASE_URL`, or a `baseUrl` the workspace already has.
+
+- **An Azure key was written across every configured deployment.** Azure keys
+  are resource-scoped, so a key linked while deployments on other resources were
+  configured would break them and overwrite the keys they already had —
+  permanently, the global credential store included. The update is now confined
+  to one resource: the one the credential names, or the only one present. With
+  several configured and nothing to disambiguate them, `cascade link` lists them
+  and changes nothing.
+
+- **Model discovery could ask a gateway for `/v1/v1/models`.** A gateway
+  `baseUrl` is commonly written with the version already in it, and the path was
+  appended unconditionally — a 404 that fell silently back to the bundled
+  catalogue and looked like a gateway with no models of its own.
+
+- **`ANTHROPIC_AUTH_TOKEN` was treated as a subscription token.** It is the
+  credential Anthropic documents for gateway routing, but sharing the `oauth`
+  classification with the subscription tokens sent the documented `cascade link
+  anthropic` down the risk-gate path and refused to persist it. Bearer
+  credentials are their own kind now.
+
+- **Linking a hosted service could mark it free.** Adopting a credential
+  preserves the provider's other settings, which meant a self-hosted
+  `openai-compatible` entry's `local: true` survived onto the hosted endpoint
+  replacing it — and an explicit `local` outranks the URL, so every model from a
+  paid service would have been priced at zero and slipped the budget caps
+  entirely. The flag is dropped whenever adoption changes the endpoint, so it is
+  recomputed from the new URL.
+
+- **`config.baseUrl` now reaches the Anthropic client.** It was dropped on both
+  the key and bearer paths, which made `authToken` close to useless: routing
+  through an LLM gateway or corporate proxy is the sanctioned use of a bearer
+  credential, and the request was going to `api.anthropic.com` regardless,
+  carrying a token only the gateway had issued.
+
+- **Credential discovery covers more of what is already in your shell.**
+  `AZURE_OPENAI_KEY`, and OpenAI-compatible keys for OpenRouter, Groq, DeepSeek,
+  xAI, Mistral, Together and Fireworks — each adopted together with the endpoint
+  it belongs to, since a key alone would configure a provider with nowhere to
+  send a request. `CLAUDE_CONFIG_DIR` is honoured when locating Claude Code's
+  store.
+
+  An Azure key is accepted when the WORKSPACE already carries the routing, not
+  only when the environment repeats it — discovery sees environment variables
+  alone, so a key exported beside already-configured deployments looked
+  unusable.
+
+  A fully routed Azure credential — one naming both its endpoint and its
+  deployment — is added rather than refused. Requiring the endpoint to already
+  exist turned away a key that carried everything needed to configure it, and a
+  new deployment on a known resource silently updated the old rows instead of
+  being created.
+
+  Azure is the exception: a key alone cannot configure it — without a deployment
+  name it resolves to no model at all, and without an endpoint the client falls
+  back to a placeholder URL — so it is adopted only when `AZURE_OPENAI_ENDPOINT`
+  and `AZURE_OPENAI_DEPLOYMENT` came with it, and the warning names whichever is
+  missing. The same guard now applies to the environment injection that would
+  otherwise create a routing-less Azure entry, mark the install "configured",
+  skip onboarding, and fail later with "No model available for tier".
+
+  Linking an Azure key also no longer collapses a multi-deployment setup. Azure
+  is configured one entry per deployment, and adoption replaced every entry of a
+  type with a single one — deleting the other deployments' names, endpoints and
+  keys, from the global credential store as well. The key is filled into the
+  deployments that are already there instead.
+
+  Those services are linkable by name — `cascade link groq` — and the one you
+  name is the one you get. They share a single provider type, so every one of
+  them is reported rather than just the first, and matching on type alone would
+  have configured whichever key sorted earliest.
+
+- **A synced bundle could replace a working key with nothing.** The revoked
+  subscription token was stripped from an incoming bundle's providers, but the
+  entry itself was kept — the right call for local config, where the row still
+  carries a gateway the user configured, and the wrong one here: the merge
+  treats a matching incoming row as authoritative, so a row left holding only an
+  endpoint overwrote a valid local API key and persisted with no credential at
+  all. A row with nothing usable in it is now dropped whole.
+
+- **An exported key and gateway are adopted as a pair.** `ANTHROPIC_API_KEY`
+  filled an existing keyless entry, but `ANTHROPIC_BASE_URL` was applied with
+  `??=` — so a stale configured endpoint survived and the newly exported
+  credential went to a host that had not issued it.
+
+- **An Azure key from the environment could land on the wrong resource.** Azure
+  keys are resource-scoped, and `AZURE_OPENAI_KEY` was filled into the first
+  keyless entry of that type regardless of which resource it was for. The entry
+  is now chosen by `AZURE_OPENAI_ENDPOINT`, or by there being exactly one
+  resource configured; with several and nothing to disambiguate them, no key is
+  written. That mirrors what `cascade link azure` already does, which was
+  otherwise scoping its own write correctly and then persisting the environment
+  injection's mistake alongside it.
+
+- **Removing a Claude subscription credential now clears the ordinary tier pin
+  too.** Only `anthropic:<model>` was cleared, but the documented config shape
+  and the setup wizard both write a bare model id — README's own example is
+  `"t1": "claude-opus-4"` — so the common pin was left behind, pointing at a
+  provider that had just been removed. The router throws on a pin it cannot
+  resolve rather than falling back, so the migration meant to get an install
+  working again left that tier dead.
+
+  A bare pin is kept only when a configured provider is KNOWN to serve it —
+  which, at config load, means an Azure deployment of that exact name. A gateway
+  might serve `claude-sonnet-4`, since the router accepts any registered id
+  whatever vendor its name suggests, but its catalogue is discovered at runtime
+  and its mere presence proves nothing. Guessing wrong in that direction is the
+  costlier mistake: an unresolvable pin makes the router throw on every run,
+  where a cleared one costs a tier its pin and is announced. The notice names
+  the model as well as the tier, so putting it back is one line.
+
+- **The same dangling pin could arrive by sync.** `applySyncBundle` dropped the
+  revoked provider and then reconciled pins with `clearRetiredPins()` alone —
+  which does not cover this, because `anthropic` is not a retired provider type
+  but a supported one whose credential died. The models merge lets the incoming
+  pin win, so a pull from a pre-0.75 device persisted a pin naming a provider
+  that was no longer there. Cleared now under the same two conditions the config
+  loader applies: this pull actually removed one, and no usable Anthropic
+  survives the merge.
+
+- **A synced row holding a replacement key beside the dead token kept the key.**
+  Dropping the row whole — right when it carries nothing but an endpoint — lost
+  an API key stored alongside the revoked token, which is exactly the shape the
+  settings-save paths fixed in this release used to produce, and exactly the
+  credential the user was trying to transfer.
+
+- **An environment Azure key now reaches every deployment on its resource.**
+  Azure keys are resource-scoped and Azure is configured one entry per
+  deployment, so filling only the first left the rest issuing requests with no
+  credential at all — the router binds each model to its own row.
+
+- **Azure endpoints are compared through one normalizer.** The provider strips
+  trailing slashes before it builds a client, so `https://acme.openai.azure.com`
+  and the same URL with one address the same service — but every comparison was
+  done on the strings as typed. `cascade link` missed the existing row and
+  appended a duplicate deployment while reporting success, and the router, which
+  takes the first row matching a deployment name, went on using the old keyless
+  one.
+
+- **`cascade link openai-compatible` no longer guesses which service you meant.**
+  They share one provider type, so with keys for several exported it adopted
+  whichever came first in the discovery table and overwrote the single
+  compatible entry with it. It now lists the candidates and asks for one by
+  name; naming a service directly (`cascade link groq`) is unchanged.
+
+- **An exported API key no longer moves someone else's bearer to a new host.**
+  Environment injection filled a key into any entry without one — including an
+  entry holding a gateway `authToken` — and moved `baseUrl` with it. The
+  provider prefers `authToken` when both are set, so the exported key was
+  ignored and the old gateway's token was sent to the new host. A bearer counts
+  as a credential here, exactly as the bearer branch beside it already read it;
+  replacing one is what the settings paths do, and they clear it when they do.
+
+- **`ANTHROPIC_AUTH_TOKEN` finds a gateway configured in another workspace.**
+  The endpoint check ran before the machine-global credential store was merged
+  in, so a gateway entered once and stored globally was invisible: the bearer
+  was refused for want of a gateway, and the merge then added that very
+  endpoint a few lines later. The lookup reads the global store too, and the
+  bearer is adopted whenever that store holds an Anthropic entry rather than
+  only on a completely empty config. Refusing a bearer with no gateway anywhere
+  is unchanged — sending it to `api.anthropic.com` is the case that rule exists
+  for.
+
+- **`cascade link` refuses a deployment name another Azure resource already
+  uses.** A deployment name is the model id everywhere downstream, and the
+  router binds an Azure model to the first row whose name matches without
+  consulting the endpoint. Adding a second `prod` on a different resource
+  created a row that could never be selected, while the command reported
+  success and requests carried on to the other resource.
+
+- **`ANTHROPIC_BASE_URL` travels with an exported API key through `cascade
+  link`, not only through startup.** Adoption keeps whatever the credential says
+  nothing about, and discovery attached the endpoint only to the bearer — so
+  linking an exported key left the old gateway in place and sent the new key to
+  the host that had not issued it. The environment injection cannot cover this
+  case: the entry already holds a credential, so it is skipped by design.
+
+- **`cascade link azure` accepts a key whose resource is named but whose
+  deployment is not.** The configured deployments already supply that routing,
+  and `AZURE_OPENAI_ENDPOINT` says which resource — but every configured
+  resource was counted before narrowing, so the key was refused as ambiguous
+  when nothing was in doubt. The refusal returns before the write, so nothing
+  was persisted either.
+
+- **`cascade doctor` stopped prescribing a step that cannot work.** With a
+  Claude subscription token as the only credential on the machine it reported
+  "1 found (0 usable) — run `cascade link` to adopt", about a credential
+  `cascade link` is required to refuse. It now offers adoption only when
+  something is adoptable, and otherwise points at `cascade link` for the
+  explanation.
+
+- **A gateway written with its version in the URL now works for generation, not
+  just discovery.** The Anthropic SDK owns the version segment — it builds
+  `/v1/messages` onto whatever `baseURL` it is given — so
+  `https://gateway.example/v1`, the form discovery and `cascade link` both
+  accept, produced `/v1/v1/messages` and failed every request. Model discovery
+  issues its request by hand and had already been corrected, so a gateway could
+  list its catalogue and then refuse every message. Both now derive their URL
+  from one function.
+
+- **A bearer-configured provider showed as having no credential in desktop
+  Settings** whenever the backend socket was down and the IPC snapshot was used
+  instead. That was the fourth hand-written copy of "does this provider have a
+  credential", each fixed separately as it was noticed; they now share one
+  exported predicate.
+
+- **An exported API key can replace the subscription token the migration
+  removed.** With any other provider in the config the list was not empty after
+  the removal, so `ANTHROPIC_API_KEY` was not allowed to seed a replacement
+  entry — the merged config ended up with no Anthropic at all, and the pin
+  clearing above then removed the user's Claude pins, with a working key in the
+  environment the whole time.
+
+- **A Claude subscription token exported as `ANTHROPIC_AUTH_TOKEN` is refused
+  like any other.** The variable is the documented way to configure a *gateway*
+  bearer, and neither discovery nor the environment injection checked what the
+  token actually was — so exporting a subscription token made it a "usable
+  gateway bearer", adoptable by `cascade link` and written back into config on
+  every load, immediately after the migration had stripped the stored copy. It
+  went around this entire release. Anthropic refuses the token whatever header
+  carries it, so it is now surfaced and explained rather than adopted.
+
+- **A redirecting gateway can no longer be handed your API key.** Requests send
+  `x-api-key`, and a custom header — unlike `Authorization` — is *not* stripped
+  when a redirect crosses origins, so a gateway that was misconfigured or
+  compromised received the key configured for it. Redirects are now followed
+  only while they stay on the original origin, which is the policy the
+  local-endpoint fetch already applied. Both paths are covered: model discovery,
+  which issues its request by hand, and **generation**, which goes through the
+  SDK client and therefore needed the guard installed as the client's own
+  `fetch` rather than at a call site.
+
+- **`cascade link azure` applies an exported `AZURE_OPENAI_API_VERSION`** to the
+  deployments it keys, not only to a fully routed new one. Each configured
+  deployment otherwise kept its stale or default version, and one that requires
+  a preview version fails on its first request.
+
+- **The model-discovery cache no longer derives its key from your API key.** It
+  was a bare `sha256` of the credential — the exact artifact an offline guess is
+  tested against, had it ever reached a heap dump, a crash report, or a log of
+  cache keys. The cache only ever needed to tell credentials apart, so the
+  secret is now used for an equality lookup and an opaque random id travels in
+  its place; nothing derived from the credential reaches the key at all.
+  (Pre-existing; surfaced because this release extends the same key to cover
+  bearer tokens.) The identity that replaced it expires on the same clock as the
+  discovery entry it exists to name, so a secret is held while it is in use and
+  no longer, and the cache — which was never evicted at all — no longer grows
+  for the life of a hosted process. The expiry runs on a timer rather than
+  when the map grows past a threshold, so it applies to the ordinary case of a
+  handful of credentials instead of exempting it.
+
+- **`cascade link azure` rotates a key across the whole resource.** An Azure key
+  is resource-scoped, but a fully routed credential updated only the deployment
+  `AZURE_OPENAI_DEPLOYMENT` named. Its siblings kept the previous key — and the
+  environment injection skips rows that already have one — so once the old key
+  was revoked, every other deployment on that resource failed. It also fills a
+  configured deployment that has no endpoint yet, rather than mistaking it for
+  another resource's and refusing — and `cascade doctor` answers that question
+  from the same function, so it no longer reports "none usable" a moment before
+  `cascade link` accepts the credential. An Azure key is also scoped by an
+  exported `AZURE_OPENAI_DEPLOYMENT` alone — a configured row carrying that name
+  pins its resource as well as the endpoint would — and a row with no endpoint
+  at all is never counted as a resource, since it cannot route a request.
+
+- **A bearer-only gateway's model list now reaches routing.** Catalogue
+  validation required an `apiKey`, and the availability probe uses `listModels()`
+  only as a yes/no — so a gateway configured with `authToken` alone had its
+  catalogue fetched, discarded, and replaced by the bundled public Anthropic
+  list, leaving Auto free to pick a model the gateway does not serve. The
+  discovery cache is keyed on the bearer as well, so switching credentials is
+  not answered from the previous one's cache.
+
+- **`cascade doctor` and `cascade link` agree on what is usable.** Doctor
+  counted only the environment's own view, so it reported "none usable" about
+  credentials `cascade link` adopts successfully — a bearer beside a configured
+  gateway, an Azure key beside configured deployments. It also has to be
+  *exact*: an Azure key is scoped to one resource at adoption, so "some
+  deployment is configured" would have gone the other way and promised a link
+  that then refuses as ambiguous. Doctor asks whether adoption would actually
+  succeed; `cascade link` keeps a laxer gate on purpose, so that a credential
+  reaching it gets the specific reason ("set `AZURE_OPENAI_ENDPOINT`") rather
+  than a generic refusal.
+
+- **An exported bearer and gateway are adopted as a pair.** The API-key path
+  was fixed for this; the bearer branch beside it kept `??=` and so installed a
+  newly exported `ANTHROPIC_AUTH_TOKEN` against the endpoint already in the
+  config, sending it to the host that had not issued it.
+
+- **A synced gateway bearer no longer costs the browser its API key.** A
+  legitimate `authToken` is not revoked, so it survives the filter and won the
+  merge — but the web can only use `apiKey`, and the restored value is
+  persisted, so the browser's own key was gone for good and the next chat had no
+  credential. The incoming row still wins for everything else, so the gateway's
+  fields survive to be pushed back.
+
+- **A redirect follows Fetch's own rules.** The same-origin guard treated any
+  3xx carrying `Location` as a redirect and replayed the original request
+  unchanged — so a `303` after a generation POST re-submitted the prompt body
+  instead of becoming a bodiless GET, and a `304` was followed as though it were
+  a redirect at all. A redirect's own body is drained before the next
+  hop, so a chain of them cannot tie up a connection each.
+
+- **A malformed provider entry reaches the validator again.** The
+  revoked-credential migration runs before schema validation by design, and a
+  `null` in a hand-edited `providers` array made it throw a bare `TypeError` —
+  replacing the actionable "providers[0] is invalid" the schema would have
+  produced.
+
+- **The browser's sync path drops the dead credential too.** The web app runs
+  its own merge and never reaches the SDK's, so a pre-0.75 bundle pulled there
+  kept an Anthropic row holding only a subscription token — `authToken` is not
+  even a field the browser sends — and let it overwrite a working local API key,
+  ready to be pushed back on the next sync. It is filtered and explained now, in
+  terms of the credential rather than the provider.
+
+- **A sync that discards a dead credential now says so.** `cascade cloud pull`
+  printed "Your keys are ready here" — and the desktop reported nothing — when
+  the bundle's only content was a Claude subscription token the pull had just
+  thrown away. The cleanup report covered retired provider *types* and cleared
+  pins, and `anthropic` is neither: the provider is still supported, its
+  credential is not. Both surfaces name it now.
+
+- **`cascade doctor` checks the Azure deployment-name collision too.** A fully
+  routed Azure credential is "directly usable" as far as the environment is
+  concerned, which short-circuited the check — but adoption refuses a
+  deployment name another resource already claims, so doctor promised a link
+  that then refused.
+
+- **`cascade link --accept-risk` says it no longer applies instead of doing
+  nothing.** Every subscription token is now reported unusable and refused
+  before any adoption path, which left the flag inert while `--help` still
+  advertised it as the way to adopt one. It is still accepted, so an existing
+  script does not start failing on an unknown option, and the refusal explains
+  that there is no longer a risk to accept.
+
 ## 0.74.0 - 2026-08-11
 
 ### Fixed

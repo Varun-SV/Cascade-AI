@@ -70,8 +70,11 @@ declare global {
       restartBackend(): Promise<{ port: number; token: string; error: string | null }>;
       setWorkspace(dir: string): Promise<{ ok: boolean }>;
       onBackendStatus(cb: (s: { port: number; token: string; error: string | null }) => void): void;
-      getConfig(): Promise<{ provider: string; apiKey: string; workspace: string; onboardingDone: boolean; migrationNotice?: string }>;
-      setConfig(cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string }): Promise<{ onboardingDone: boolean }>;
+      getConfig(): Promise<{ provider: string; hasCredential: boolean; workspace: string; onboardingDone: boolean; migrationNotice?: string }>;
+      // `ok`/`error` are part of this contract: the main process can DECLINE to
+      // store a key whose host it cannot determine, and a renderer typed to see
+      // only `onboardingDone` advanced the wizard as though it had been saved.
+      setConfig(cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string; endpointOffered?: boolean }): Promise<{ onboardingDone?: boolean; ok?: boolean; error?: string }>;
       getSettings(): Promise<{ models: Record<string, string>; budget: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; providersWithKey: string[]; endpoints: Record<string, string>; azureDeployments?: Array<{ label?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string; hasKey: boolean }>; webSearch?: { searxngUrl?: string; hasBraveKey: boolean; hasTavilyKey: boolean }; advanced?: Record<string, unknown> }>;
       updateSettings(data: { keys?: Record<string, string | undefined>; models?: Record<string, string | undefined>; budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; endpoints?: Record<string, string | undefined>; azureDeployments?: Array<{ label?: string; apiKey?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string }>; webSearch?: { searxngUrl?: string; braveApiKey?: string; tavilyApiKey?: string }; advanced?: Record<string, unknown> }): Promise<{ ok: boolean; error?: string; models?: Record<string, string>; budget?: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number }; providersWithKey?: string[]; advanced?: Record<string, unknown> }>;
       selectDirectory(): Promise<string | null>;
@@ -121,7 +124,7 @@ declare global {
         renameConversation(id: string, title: string): Promise<{ ok: boolean; error?: string }>;
         deleteConversation(id: string): Promise<{ ok: boolean; error?: string }>;
         syncPush(passphrase: string): Promise<{ ok: boolean; error?: string; version?: number }>;
-        syncPull(passphrase: string): Promise<{ ok: boolean; error?: string; empty?: boolean; applied?: boolean; skipped?: { removed: string[]; clearedPins: string[] } }>;
+        syncPull(passphrase: string): Promise<{ ok: boolean; error?: string; empty?: boolean; applied?: boolean; skipped?: { removed: string[]; clearedPins: string[]; revokedCredentials?: number; unusableCredentials?: number } }>;
       };
       mcp?: {
         list(): Promise<{ servers: Array<{ name: string; target: string; kind: 'oauth' | 'token' | 'local' | 'open' }> }>;

@@ -14,6 +14,7 @@ import type {
   SessionSubscriptionPayload,
 } from '../types.js';
 import { verifyToken } from './auth.js';
+import type { SettingsPayload, SettingsSnapshot } from '../config/settings-payload.js';
 import {
   normalizePermissionDecisionPayload,
   normalizeRuntimeRefreshPayload,
@@ -24,6 +25,32 @@ interface DashboardSocketOptions {
   authRequired: boolean;
   secret: string;
   corsOrigin?: string | string[];
+}
+
+/**
+ * The Settings save as it arrives over the socket — the SAME type the desktop
+ * IPC bridge takes.
+ *
+ * It was a narrower hand-written copy, and the narrowing was not harmless: the
+ * panel posts one payload to both surfaces, so a field missing from this
+ * declaration was not missing from the wire, merely invisible to the code
+ * handling it. That hid the endpoint a key was typed beside (a public-host key
+ * ended up stored against a gateway) and then hid budget, Azure, web-search and
+ * advanced entirely (controls that reported success and changed nothing).
+ */
+export type ConfigUpdatePayload = SettingsPayload;
+
+/** What the save could not store, phrased for the person who typed it. */
+export interface ConfigUpdateResult {
+  refused: Array<{ type: string; reason: string; message: string }>;
+  /** What is actually stored now — the panel re-hydrates from this. */
+  snapshot?: SettingsSnapshot;
+  /**
+   * Set when the save could not be written to disk. Its absence is the only
+   * thing that makes this acknowledgement mean "durable" rather than merely
+   * "the handler ran".
+   */
+  error?: string;
 }
 
 export class DashboardSocket {
@@ -239,16 +266,25 @@ export class DashboardSocket {
     });
   }
 
-  onConfigUpdate(callback: (data: {
-    keys?: Record<string, string>;
-    models?: Record<string, string>;
-    budget?: { maxCostPerRun?: number; autoBias?: string };
-  }) => void): void {
+  /**
+   * The handler's result is ACKNOWLEDGED to the caller.
+   *
+   * A settings save can be partly refused — a key whose host cannot be
+   * determined is deliberately not stored — and this path had no way to say so,
+   * so the panel cleared the input and reported success over a key the backend
+   * had dropped. Socket.IO's own ack channel carries it back, which needs no
+   * new event name and cannot be missed by a client that forgot to subscribe.
+   */
+  onConfigUpdate(callback: (data: ConfigUpdatePayload) => Promise<ConfigUpdateResult>): void {
     this.io.on('connection', (socket) => {
-      socket.on('config:update', (payload: unknown) => {
-        if (typeof payload === 'object' && payload !== null) {
-          callback(payload as { keys?: Record<string, string>; models?: Record<string, string>; budget?: { maxCostPerRun?: number; autoBias?: string } });
-        }
+      socket.on('config:update', (payload: unknown, ack?: (result: ConfigUpdateResult) => void) => {
+        if (typeof payload !== 'object' || payload === null) return;
+        // The save is a transaction and the write is async, so the
+        // acknowledgement waits for it. Sending one before the write landed
+        // would put this back to meaning "the handler started".
+        void callback(payload as ConfigUpdatePayload).then((result) => {
+          if (typeof ack === 'function') ack(result);
+        });
       });
     });
   }

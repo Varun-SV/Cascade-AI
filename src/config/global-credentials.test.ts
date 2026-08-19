@@ -71,6 +71,108 @@ describe('global credentials store', () => {
     expect(merged.find((p) => p.type === 'gemini')?.apiKey).toBe('global-gemini');
   });
 
+  it('never sends one Azure resource\u2019s key to a different resource', () => {
+    // Azure keys are resource-scoped, and a deployment name is only unique
+    // WITHIN a resource. Keying the merge on the deployment name alone meant
+    // the endpoint never participated in the normal routed shape, so a global
+    // row for resource A named "prod" matched a workspace row named "prod" on
+    // resource B — the merge kept B's own baseUrl and filled its missing
+    // apiKey from A. `cascade link` already refuses to reuse a deployment name
+    // across resources; the global store has to hold the same invariant.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://resource-b.openai.azure.com' }],
+      [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://resource-a.openai.azure.com', apiKey: 'key-for-a' }],
+    );
+
+    const onB = merged.find((p) => p.baseUrl === 'https://resource-b.openai.azure.com')!;
+    expect(onB.apiKey).toBeUndefined();
+
+    // Resource A's row is a DIFFERENT entry, kept whole rather than folded in.
+    const onA = merged.find((p) => p.baseUrl === 'https://resource-a.openai.azure.com')!;
+    expect(onA.apiKey).toBe('key-for-a');
+    expect(merged.filter((p) => p.type === 'azure')).toHaveLength(2);
+  });
+
+  it('still adopts the resource for a workspace row that names only a deployment', () => {
+    // The case the global store exists for, and the one a strict
+    // endpoint+deployment key would have broken: an identifier absent on one
+    // side is not a disagreement, so this row adopts both endpoint and key.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'azure', deploymentName: 'prod' }],
+      [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://resource-a.openai.azure.com', apiKey: 'key-for-a' }],
+    );
+
+    expect(merged.filter((p) => p.type === 'azure')).toHaveLength(1);
+    expect(merged[0]!.baseUrl).toBe('https://resource-a.openai.azure.com');
+    expect(merged[0]!.apiKey).toBe('key-for-a');
+  });
+
+  it('does not let differing display labels split one deployment in two', () => {
+    // `label` is a name the user types, so the same deployment on the same
+    // resource routinely carries two of them. Weighing it beside the real
+    // identifiers made this pair non-matching, so the global row was APPENDED
+    // rather than filling the workspace row — and the router binds an Azure
+    // model with `configs.find(... deploymentName === model.id)`, so the
+    // first, keyless workspace row won and every request failed while a
+    // correctly keyed duplicate sat behind it.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://resource-a.openai.azure.com', label: 'project prod' }],
+      [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://resource-a.openai.azure.com', label: 'prod', apiKey: 'key-for-a' }],
+    );
+
+    const azure = merged.filter((p) => p.type === 'azure');
+    expect(azure).toHaveLength(1);
+    expect(azure[0]!.apiKey).toBe('key-for-a');
+    // The workspace's own display name is not overwritten by the global one.
+    expect(azure[0]!.label).toBe('project prod');
+  });
+
+  it('still refuses to match across resources even when the labels agree', () => {
+    // Label must not rescue a match the real identifiers reject, either.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://resource-b.openai.azure.com', label: 'prod' }],
+      [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://resource-a.openai.azure.com', label: 'prod', apiKey: 'key-for-a' }],
+    );
+    expect(merged.filter((p) => p.type === 'azure')).toHaveLength(2);
+    expect(merged.find((p) => p.baseUrl?.includes('resource-b'))?.apiKey).toBeUndefined();
+  });
+
+  it('falls back to the label only when neither row names anything real', () => {
+    const merged = mergeGlobalCredentials(
+      [{ type: 'azure', label: 'prod' }],
+      [{ type: 'azure', label: 'prod', apiKey: 'key-for-a' }],
+    );
+    expect(merged.filter((p) => p.type === 'azure')).toHaveLength(1);
+    expect(merged[0]!.apiKey).toBe('key-for-a');
+  });
+
+  it('will not join two rows on a label when their real identities are unrelated', () => {
+    // Previously joined. Neither strong identifier is present on BOTH rows —
+    // one names a deployment, the other a resource — so the old check fell
+    // through to the label and matched on a display name the user typed,
+    // assigning resource A's key to `prod` on a guess. Label is metadata, not
+    // identity: uncorrelated strong identities mean "different rows", not
+    // "ask the label".
+    const merged = mergeGlobalCredentials(
+      [{ type: 'azure', deploymentName: 'prod', label: 'main' }],
+      [{ type: 'azure', baseUrl: 'https://resource-a.openai.azure.com', label: 'main', apiKey: 'key-for-a' }],
+    );
+
+    const azure = merged.filter((p) => p.type === 'azure');
+    expect(azure).toHaveLength(2);
+    expect(azure.find((p) => p.deploymentName === 'prod')?.apiKey).toBeUndefined();
+    expect(azure.find((p) => p.deploymentName === 'prod')?.baseUrl).toBeUndefined();
+  });
+
+  it('treats a trailing slash as the same resource, not a second one', () => {
+    const merged = mergeGlobalCredentials(
+      [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://resource-a.openai.azure.com/' }],
+      [{ type: 'azure', deploymentName: 'prod', baseUrl: 'https://resource-a.openai.azure.com', apiKey: 'key-for-a' }],
+    );
+    expect(merged.filter((p) => p.type === 'azure')).toHaveLength(1);
+    expect(merged[0]!.apiKey).toBe('key-for-a');
+  });
+
   it('merges azure entries per deployment, not per type', () => {
     const workspace: ProviderConfig[] = [
       { type: 'azure', deploymentName: 'gpt-4o', apiKey: 'ws-key' },
@@ -84,7 +186,12 @@ describe('global credentials store', () => {
     expect(azure).toHaveLength(2);
     const gpt4o = azure.find((p) => p.deploymentName === 'gpt-4o')!;
     expect(gpt4o.apiKey).toBe('ws-key');                        // workspace key wins
-    expect(gpt4o.baseUrl).toBe('https://r1.openai.azure.com');  // missing endpoint filled
+    // The endpoint is NOT filled. This asserted that it was — "missing endpoint
+    // filled" — but a deployment name is unique only WITHIN a resource, so the
+    // stale global `gpt-4o` may name a different one. Filling it addressed the
+    // workspace row's own key to that other resource. A row with no credential
+    // still adopts endpoint and key together; this row brought its own.
+    expect(gpt4o.baseUrl).toBeUndefined();
     expect(azure.find((p) => p.deploymentName === 'gpt-35')?.apiKey).toBe('global-35');
   });
 });
@@ -136,5 +243,224 @@ describe('ConfigManager + global credentials (the "AppImage forgets my keys" bug
     cm2.getStore().close();
 
     expect(loadGlobalCredentials(globalDir).find((p) => p.type === 'openai')).toBeUndefined();
+  });
+
+  it('never pairs a global bearer with a different gateway', () => {
+    // Non-Azure rows match on provider type alone, so a credentialless
+    // workspace row naming gateway B accepted the global row's token from
+    // gateway A — and the `!existing.baseUrl` guard left B's endpoint in place.
+    // The result passes every usability check on the way to the wire, and
+    // AnthropicProvider sends A's bearer to B.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'anthropic', baseUrl: 'https://gw-b.example' }],
+      [{ type: 'anthropic', authToken: 'token-a', baseUrl: 'https://gw-a.example' }],
+    );
+
+    const anthropic = merged.find((p) => p.type === 'anthropic')!;
+    expect(anthropic.authToken).toBeUndefined();
+    expect(anthropic.baseUrl).toBe('https://gw-b.example');
+  });
+
+  it('adopts a bearer together with the gateway that issued it', () => {
+    // A workspace row with no endpoint of its own takes both.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'anthropic' }],
+      [{ type: 'anthropic', authToken: 'token-a', baseUrl: 'https://gw-a.example' }],
+    );
+
+    const anthropic = merged.find((p) => p.type === 'anthropic')!;
+    expect(anthropic.authToken).toBe('token-a');
+    expect(anthropic.baseUrl).toBe('https://gw-a.example');
+  });
+
+  it('adopts a bearer when both name the same gateway, trailing slash aside', () => {
+    const merged = mergeGlobalCredentials(
+      [{ type: 'anthropic', baseUrl: 'https://gw-a.example/' }],
+      [{ type: 'anthropic', authToken: 'token-a', baseUrl: 'https://gw-a.example' }],
+    );
+    expect(merged.find((p) => p.type === 'anthropic')?.authToken).toBe('token-a');
+  });
+
+  it('will not adopt a stored bearer that names no gateway at all', () => {
+    // Nowhere to send it, so it is not a credential — the rule the rest of the
+    // release holds. Adopting it would make the row look configured.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'anthropic' }],
+      [{ type: 'anthropic', authToken: 'token-a' }],
+    );
+    expect(merged.find((p) => p.type === 'anthropic')?.authToken).toBeUndefined();
+  });
+
+  it('never pairs a global API key with a different endpoint either', () => {
+    // The round-27 guard covered `authToken` only, so this line still copied
+    // `apiKey` before considering the endpoint: a credentialless workspace row
+    // on gateway B took the global row's key from gateway A and kept B's URL.
+    // The environment path already treats ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL
+    // as a pair; the store has to hold the same invariant.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'anthropic', baseUrl: 'https://gw-b.example' }],
+      [{ type: 'anthropic', apiKey: 'key-a', baseUrl: 'https://gw-a.example' }],
+    );
+
+    const anthropic = merged.find((p) => p.type === 'anthropic')!;
+    expect(anthropic.apiKey).toBeUndefined();
+    expect(anthropic.baseUrl).toBe('https://gw-b.example');
+  });
+
+  it('adopts an API key together with the endpoint it belongs to', () => {
+    const merged = mergeGlobalCredentials(
+      [{ type: 'openai-compatible' }],
+      [{ type: 'openai-compatible', apiKey: 'key-a', baseUrl: 'https://openrouter.ai/api/v1' }],
+    );
+    const row = merged.find((p) => p.type === 'openai-compatible')!;
+    expect(row.apiKey).toBe('key-a');
+    expect(row.baseUrl).toBe('https://openrouter.ai/api/v1');
+  });
+
+  it('still adopts a plain API key when neither row names an endpoint', () => {
+    const merged = mergeGlobalCredentials(
+      [{ type: 'openai' }],
+      [{ type: 'openai', apiKey: 'sk-o' }],
+    );
+    expect(merged.find((p) => p.type === 'openai')?.apiKey).toBe('sk-o');
+  });
+
+  it('does not graft a global endpoint onto a row that has its own credential', () => {
+    // The refusal was one-sided: a secret could not be imported into a row
+    // naming a different host, but the endpoint fill ran unconditionally. So a
+    // workspace row holding a project key and no endpoint silently acquired the
+    // global row's corporate gateway — sending that key to a host it was never
+    // paired with.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'anthropic', apiKey: 'project-key' }],
+      [{ type: 'anthropic', apiKey: 'old-gateway-key', baseUrl: 'https://corp-gw.example' }],
+    );
+
+    const anthropic = merged.find((p) => p.type === 'anthropic')!;
+    expect(anthropic.apiKey).toBe('project-key');
+    expect(anthropic.baseUrl).toBeUndefined();
+  });
+
+  it('still gives an endpoint to a row that brought no credential', () => {
+    const merged = mergeGlobalCredentials(
+      [{ type: 'anthropic' }],
+      [{ type: 'anthropic', apiKey: 'gw-key', baseUrl: 'https://corp-gw.example' }],
+    );
+    expect(merged.find((p) => p.type === 'anthropic')).toMatchObject({
+      apiKey: 'gw-key', baseUrl: 'https://corp-gw.example',
+    });
+  });
+
+  it('spreads a resource-scoped Azure key across every deployment on it', () => {
+    // Azure keys are resource-scoped. A global row naming the RESOURCE and no
+    // deployment matched through `find`, so only the first workspace deployment
+    // got the key and its siblings stayed keyless — failing every request while
+    // the first worked.
+    const merged = mergeGlobalCredentials(
+      [
+        { type: 'azure', deploymentName: 'gpt-4o', baseUrl: 'https://r1.openai.azure.com' },
+        { type: 'azure', deploymentName: 'gpt-4o-mini', baseUrl: 'https://r1.openai.azure.com' },
+        { type: 'azure', deploymentName: 'other', baseUrl: 'https://r2.openai.azure.com' },
+      ],
+      [{ type: 'azure', baseUrl: 'https://r1.openai.azure.com', apiKey: 'key-r1' }],
+    );
+
+    const on = (name: string) => merged.find((p) => p.deploymentName === name);
+    expect(on('gpt-4o')?.apiKey).toBe('key-r1');
+    expect(on('gpt-4o-mini')?.apiKey).toBe('key-r1');
+    // …and nothing on the other resource.
+    expect(on('other')?.apiKey).toBeUndefined();
+  });
+
+  it('never addresses a workspace Azure key to a resource inferred from a name', () => {
+    // Previously asserted the opposite, on the reasoning that a matching
+    // deployment name pins its resource. It does not — the name is unique only
+    // within a resource, which is exactly why `cascade link` refuses to reuse
+    // one across resources. So a workspace row holding resource B's key took
+    // the endpoint off a stale global `prod` on resource A, and B's key was
+    // sent to A.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'azure', deploymentName: 'prod', apiKey: 'resource-B-key' }],
+      [{
+        type: 'azure', deploymentName: 'prod', apiKey: 'resource-A-key',
+        baseUrl: 'https://resource-a.openai.azure.com',
+      }],
+    );
+    const row = merged.find((p) => p.deploymentName === 'prod')!;
+    expect(row.apiKey).toBe('resource-B-key');
+    expect(row.baseUrl).toBeUndefined();
+  });
+
+  it('still adopts endpoint AND key together for a credentialless Azure row', () => {
+    // The case the store exists for, unaffected: nothing of its own to protect.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'azure', deploymentName: 'prod' }],
+      [{
+        type: 'azure', deploymentName: 'prod', apiKey: 'key-a',
+        baseUrl: 'https://resource-a.openai.azure.com',
+      }],
+    );
+    expect(merged.find((p) => p.deploymentName === 'prod')).toMatchObject({
+      apiKey: 'key-a', baseUrl: 'https://resource-a.openai.azure.com',
+    });
+  });
+
+  it('refuses a bare global key for a workspace row pointing at a gateway', () => {
+    // The endpoint check only ran when BOTH rows had a `baseUrl`, so a missing
+    // one on the global side was read as "compatible with anything". It is not:
+    // `{ anthropic, apiKey }` with no endpoint is a PUBLIC-host key, and this
+    // merged it into a row addressed to a corporate gateway.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'anthropic', baseUrl: 'https://corp-gateway.example' }],
+      [{ type: 'anthropic', apiKey: 'public-key' }],
+    );
+
+    const row = merged.find((p) => p.type === 'anthropic' && p.baseUrl === 'https://corp-gateway.example')!;
+    expect(row.apiKey).toBeUndefined();
+  });
+
+  it('still adopts a bare global key for a row that names no host', () => {
+    const merged = mergeGlobalCredentials(
+      [{ type: 'anthropic' }],
+      [{ type: 'anthropic', apiKey: 'public-key' }],
+    );
+    expect(merged.find((p) => p.type === 'anthropic')?.apiKey).toBe('public-key');
+  });
+
+  it('adopts a gateway key into a row already naming that same gateway', () => {
+    const merged = mergeGlobalCredentials(
+      [{ type: 'anthropic', baseUrl: 'https://gw.example' }],
+      [{ type: 'anthropic', apiKey: 'gw-key', baseUrl: 'https://gw.example/v1' }],
+    );
+    // …and the two Anthropic spellings are the same host, so this must match.
+    expect(merged.find((p) => p.type === 'anthropic')?.apiKey).toBe('gw-key');
+  });
+
+  it('refuses a bare OpenAI-compatible key for a row that names a host', () => {
+    // `openai-compatible` has no public host, so a stored key with no baseUrl
+    // names nothing — unknown scope, not universal scope. The desktop can save
+    // exactly this shape (key typed, URL field left blank), and reading it as
+    // "compatible with anything" copied a Groq key onto a DeepSeek endpoint.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'openai-compatible', baseUrl: 'https://api.deepseek.com/v1' }],
+      [{ type: 'openai-compatible', apiKey: 'groq-key' }],
+    );
+
+    const row = merged.find((p) => p.type === 'openai-compatible' && p.baseUrl === 'https://api.deepseek.com/v1')!;
+    expect(row.apiKey).toBeUndefined();
+    expect(row.baseUrl).toBe('https://api.deepseek.com/v1');
+  });
+
+  it('still adopts an OpenAI-compatible key and endpoint together', () => {
+    // The pair, which is what the store is for — and the case the refusal
+    // above must not break.
+    const merged = mergeGlobalCredentials(
+      [{ type: 'openai-compatible' }],
+      [{ type: 'openai-compatible', apiKey: 'groq-key', baseUrl: 'https://api.groq.com/openai/v1' }],
+    );
+    expect(merged.find((p) => p.type === 'openai-compatible')).toMatchObject({
+      apiKey: 'groq-key',
+      baseUrl: 'https://api.groq.com/openai/v1',
+    });
   });
 });
