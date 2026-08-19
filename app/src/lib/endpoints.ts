@@ -38,27 +38,26 @@ export function addressableEndpoints(
 }
 
 /**
- * The endpoint values to apply when a snapshot arrives.
+ * What ONE endpoint field becomes when a snapshot arrives.
  *
- * A late snapshot must not overwrite a field the user has already edited.
- * Settings hydrates asynchronously, so someone can type gateway B, have the
- * snapshot land holding the old gateway A, and watch their edit vanish — while
- * the key they typed for B stays in the form and is then saved against A.
+ * Per field, and taking `current` as an argument rather than reading a captured
+ * object, because the callers are asynchronous: `getSettings().then(applyConfig)`
+ * runs under a mount-time closure and the socket listener under a per-socket
+ * one. A batch version that received "all the current values" received the
+ * values from the render that registered the callback — so the rule correctly
+ * refused to overwrite a dirty field and then wrote back the stale empty string
+ * it had captured, erasing the edit anyway. Used inside a functional state
+ * update, `current` is whatever React holds right now and there is nothing to
+ * go stale.
  *
- * The same `touched` set governs sending and receiving, which is the point: one
- * fact about the field, used by both directions. Split across two rules they
- * disagreed, and the disagreement is invisible in the UI.
+ * A field the user has already edited is never replaced: the snapshot can land
+ * after they have typed, and overwriting loses the edit while keeping the key
+ * typed beside it — which the next save then pairs with the host they replaced.
  */
-export function hydrateEndpoints(
-  current: Readonly<Record<string, string>>,
-  snapshot: Readonly<Record<string, string | undefined>> | undefined,
-  touched: ReadonlySet<string>,
-): Record<string, string> {
-  const next: Record<string, string> = { ...current };
-  if (!snapshot) return next;
-  for (const type of Object.keys(current)) {
-    if (touched.has(type)) continue;
-    next[type] = snapshot[type] ?? '';
-  }
-  return next;
+export function endpointAfterSnapshot(
+  current: string,
+  snapshotValue: string | undefined,
+  touched: boolean,
+): string {
+  return touched ? current : (snapshotValue ?? '');
 }

@@ -55,3 +55,38 @@ describe('the config:current snapshot is the shared, complete one', () => {
     expect(source).toMatch(/snapshot: settingsSnapshot\(this\.config\)/);
   });
 });
+
+describe('the save acknowledgement means durable, not merely handled', () => {
+  // `persistConfig()` swallowed every filesystem error and the handler ACKed
+  // success regardless, so a read-only config path produced: live object
+  // mutated, disk write failed, panel cleared the typed keys and showed
+  // "Saved", and the changes vanished at the next restart.
+  it('reports a failed disk write in the acknowledgement', async () => {
+    const fs = await import('node:fs/promises');
+    const url = await import('node:url');
+    const nodePath = await import('node:path');
+    const here = nodePath.dirname(url.fileURLToPath(import.meta.url));
+    const source = await fs.readFile(nodePath.join(here, 'server.ts'), 'utf-8');
+
+    // persistConfig reports its outcome rather than returning void, and gets it
+    // from the helper whose failure path `write-config.test.ts` exercises for
+    // real rather than by inspection.
+    expect(source).toMatch(/private persistConfig\(\): \{ ok: true \} \| \{ ok: false; error: string \}/);
+    expect(source).toMatch(/const result = writeConfigFile\(/);
+    expect(source).toMatch(/return result;/);
+    // …and the handler puts it in the ack.
+    expect(source).toMatch(/const persisted = this\.persistConfig\(\)/);
+    expect(source).toMatch(/persisted\.ok \? \{\} : \{ error:/);
+  });
+
+  it('keeps the global-credential sync best-effort, which it genuinely is', async () => {
+    const fs = await import('node:fs/promises');
+    const url = await import('node:url');
+    const nodePath = await import('node:path');
+    const here = nodePath.dirname(url.fileURLToPath(import.meta.url));
+    const source = await fs.readFile(nodePath.join(here, 'server.ts'), 'utf-8');
+    // Failing the convenience copy does not lose what the user just typed, so
+    // it must not fail the save.
+    expect(source).toMatch(/Failed to sync global credentials/);
+  });
+});

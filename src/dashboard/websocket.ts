@@ -45,6 +45,12 @@ export interface ConfigUpdateResult {
   refused: Array<{ type: string; reason: string; message: string }>;
   /** What is actually stored now — the panel re-hydrates from this. */
   snapshot?: SettingsSnapshot;
+  /**
+   * Set when the save could not be written to disk. Its absence is the only
+   * thing that makes this acknowledgement mean "durable" rather than merely
+   * "the handler ran".
+   */
+  error?: string;
 }
 
 export class DashboardSocket {

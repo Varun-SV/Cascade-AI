@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import type { Socket } from 'socket.io-client';
-import { addressableEndpoints, hydrateEndpoints } from '../lib/endpoints';
+import { addressableEndpoints, endpointAfterSnapshot } from '../lib/endpoints';
+import { fieldFromSnapshot, numberFieldFromSnapshot } from '../lib/snapshot-apply';
 import { X, Monitor, Sun, Moon, Sparkles, RefreshCw, List } from 'lucide-react';
 import { useAppDispatch, useAppSelector, type ThemePref } from '../store/index.js';
 import { setShowSettings } from '../store/index.js';
@@ -213,14 +214,18 @@ export function SettingsView({ socket }: Props) {
     setT1(parseOverride(cfg.models?.t1));
     setT2(parseOverride(cfg.models?.t2));
     setT3(parseOverride(cfg.models?.t3));
-    if (typeof cfg.budget?.maxCostPerRun === 'number') setMaxCost(String(cfg.budget.maxCostPerRun));
-    if (cfg.budget?.autoBias === 'balanced' || cfg.budget?.autoBias === 'quality' || cfg.budget?.autoBias === 'cost') {
-      setBias(cfg.budget.autoBias);
+    // A section that is PRESENT is authoritative for every field in it,
+    // including the ones that are unset. Applying only the values that happened
+    // to be numbers made this a merge: a budget cap cleared elsewhere stayed in
+    // the form, and the next unrelated Save wrote it straight back.
+    if (cfg.budget) {
+      setMaxCost(numberFieldFromSnapshot(cfg.budget.maxCostPerRun));
+      setBias(cfg.budget.autoBias === 'quality' || cfg.budget.autoBias === 'cost' ? cfg.budget.autoBias : 'balanced');
+      setDailyBudget(numberFieldFromSnapshot(cfg.budget.dailyBudgetUsd));
+      setSessionBudget(numberFieldFromSnapshot(cfg.budget.sessionBudgetUsd));
+      setMaxTokens(numberFieldFromSnapshot(cfg.budget.maxTokensPerRun));
+      setWarnAt(numberFieldFromSnapshot(cfg.budget.warnAtPct));
     }
-    if (typeof cfg.budget?.dailyBudgetUsd === 'number') setDailyBudget(String(cfg.budget.dailyBudgetUsd));
-    if (typeof cfg.budget?.sessionBudgetUsd === 'number') setSessionBudget(String(cfg.budget.sessionBudgetUsd));
-    if (typeof cfg.budget?.maxTokensPerRun === 'number') setMaxTokens(String(cfg.budget.maxTokensPerRun));
-    if (typeof cfg.budget?.warnAtPct === 'number') setWarnAt(String(cfg.budget.warnAtPct));
     if (cfg.providersWithKey) setProvidersWithKey(cfg.providersWithKey);
     // ONLY when the snapshot actually carries endpoints. Two different
     // payloads reach this function — the IPC `getSettings` reply, which is
@@ -231,26 +236,24 @@ export function SettingsView({ socket }: Props) {
     // reconnect would have been written to the provider's public API.
     if (cfg.endpoints) {
       setEndpointsHydrated(true);
-      // A field the user has already edited is NOT replaced. The snapshot can
-      // land after they have typed, and overwriting then loses the edit while
-      // keeping the key typed alongside it — which the next save pairs with the
-      // host they just replaced.
-      const next = hydrateEndpoints(
-        {
-          anthropic: anthropicUrl, openai: openaiUrl, gemini: geminiUrl,
-          'openai-compatible': ocUrl, ollama: ollamaUrl,
-        },
-        cfg.endpoints,
-        touchedEndpoints.current,
-      );
-      setAnthropicUrl(next['anthropic'] ?? '');
-      setOpenaiUrl(next['openai'] ?? '');
-      setGeminiUrl(next['gemini'] ?? '');
-      setOcUrl(next['openai-compatible'] ?? '');
-      setOllamaUrl(next['ollama'] ?? '');
+      // FUNCTIONAL updates, so `current` is what React holds now rather than
+      // what this callback captured when it was registered. Both hydration
+      // paths are async — `getSettings()` resolves through a mount-time closure
+      // and the socket listener lives as long as its socket — so reading the
+      // values from the enclosing render wrote back a stale empty string and
+      // erased an edit the dirty flag had correctly protected.
+      const fromSnapshot = (type: string) => (current: string) =>
+        endpointAfterSnapshot(current, cfg.endpoints?.[type], touchedEndpoints.current.has(type));
+      setAnthropicUrl(fromSnapshot('anthropic'));
+      setOpenaiUrl(fromSnapshot('openai'));
+      setGeminiUrl(fromSnapshot('gemini'));
+      setOcUrl(fromSnapshot('openai-compatible'));
+      setOllamaUrl(fromSnapshot('ollama'));
     }
     if (cfg.webSearch) {
-      if (cfg.webSearch.searxngUrl) setSearxngUrl(cfg.webSearch.searxngUrl);
+      // Replaced, not merged: a SearXNG URL removed elsewhere would otherwise
+      // survive in the form and be recreated by the next save.
+      setSearxngUrl(fieldFromSnapshot(cfg.webSearch.searxngUrl, ''));
       setSearchKeysSet({ brave: cfg.webSearch.hasBraveKey, tavily: cfg.webSearch.hasTavilyKey });
     }
     if (cfg.azureDeployments) {
@@ -269,7 +272,11 @@ export function SettingsView({ socket }: Props) {
         const next = { ...prev };
         for (const key of Object.keys(ADVANCED_DEFAULTS) as Array<keyof AdvancedSettings>) {
           const v = cfg.advanced![key];
-          if (v !== undefined && v !== null) (next as Record<string, unknown>)[key] = v;
+          // An unset knob falls back to its DEFAULT rather than keeping
+          // whatever the form last held. Skipping it made this a merge, so a
+          // value reset elsewhere came back from renderer state on the next
+          // save.
+          (next as Record<string, unknown>)[key] = fieldFromSnapshot(v, ADVANCED_DEFAULTS[key]);
         }
         return next;
       });
@@ -384,9 +391,9 @@ export function SettingsView({ socket }: Props) {
       // that threw, or a backend too old to reply. That is NOT the same as
       // `{ refused: [] }`, and collapsing the two reported a successful save
       // and cleared the typed keys over a socket that had confirmed nothing.
-      const ack = await new Promise<{ refused?: Array<{ message: string }>; snapshot?: unknown } | null>((resolve) => {
+      const ack = await new Promise<{ refused?: Array<{ message: string }>; snapshot?: unknown; error?: string } | null>((resolve) => {
         const timer = setTimeout(() => resolve(null), 3000);
-        socket.emit('config:update', payload, (result: { refused?: Array<{ message: string }>; snapshot?: unknown }) => {
+        socket.emit('config:update', payload, (result: { refused?: Array<{ message: string }>; snapshot?: unknown; error?: string }) => {
           clearTimeout(timer);
           resolve(result ?? {});
         });
@@ -406,6 +413,13 @@ export function SettingsView({ socket }: Props) {
       }
 
       persisted = true;
+      // The disk write is what makes an acknowledgement mean "saved". Without
+      // this, a read-only config path produced a mutated live object, a failed
+      // write, a cheerful ACK, and settings that vanished at the next restart.
+      if (ack.error) {
+        setSaveError(ack.error);
+        return;
+      }
       if (ack.refused?.length) {
         setSaveError(ack.refused.map((r) => r.message).join(' '));
         return;

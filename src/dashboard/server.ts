@@ -15,6 +15,7 @@ import { MemoryStore } from '../memory/store.js';
 import { hasProviderCredential } from '../config/index.js';
 import { explainRefusal } from '../config/credential-write.js';
 import { applySettingsPayload, settingsSnapshot } from '../config/settings-payload.js';
+import { writeConfigFile } from '../config/write-config.js';
 import type { RuntimeNode, RuntimeNodeLog, RuntimeSession } from '../types.js';
 import { CASCADE_DB_FILE, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE, CASCADE_CONFIG_FILE, CASCADE_DASHBOARD_SECRET_FILE } from '../constants.js';
 import { DashboardSocket } from './websocket.js';
@@ -238,10 +239,15 @@ export class DashboardServer {
       for (const r of refused) console.warn(r.message);
       // Persist so Settings changes survive a restart and are visible to the CLI
       // (the desktop app and `cascade` share the same workspace config file).
-      this.persistConfig();
+      const persisted = this.persistConfig();
       // The fresh snapshot rides back with the acknowledgement, so the panel
-      // re-hydrates from what was actually stored rather than from what it sent.
-      return { refused, snapshot: settingsSnapshot(this.config) };
+      // re-hydrates from what was actually stored rather than from what it sent
+      // — and the acknowledgement says whether "stored" is even true.
+      return {
+        refused,
+        snapshot: settingsSnapshot(this.config),
+        ...(persisted.ok ? {} : { error: `Could not write the config file: ${persisted.error}` }),
+      };
     });
 
     this.socket.onCascadeRun(async (prompt, model, socketId, requestedSessionId, forceTier) => {
@@ -460,14 +466,22 @@ export class DashboardServer {
    * made over the socket (Settings → Save) persist across restarts. Best-effort:
    * a write failure is logged but never crashes the running dashboard.
    */
-  private persistConfig(): void {
-    try {
-      const configPath = path.join(this.workspacePath, CASCADE_CONFIG_FILE);
-      fs.mkdirSync(path.dirname(configPath), { recursive: true });
-      fs.writeFileSync(configPath, JSON.stringify(this.config, null, 2), 'utf-8');
-    } catch (err) {
-      console.warn(`[dashboard] Failed to persist config: ${err instanceof Error ? err.message : String(err)}`);
-    }
+  /**
+   * Returns the durability of the WORKSPACE write, because a caller
+   * acknowledging a save has to know it happened.
+   *
+   * This was `void` and swallowed every filesystem error, so a read-only
+   * config path or a full disk produced: the live object mutated, the write
+   * failed, the socket acknowledged success, and the panel cleared the keys the
+   * user had typed. The changes then vanished at the next restart. "The handler
+   * ran" is not "the save is durable".
+   *
+   * The global-credential sync below is genuinely best-effort — it is a
+   * convenience copy, and failing it does not lose what the user just entered.
+   */
+  private persistConfig(): { ok: true } | { ok: false; error: string } {
+    const result = writeConfigFile(path.join(this.workspacePath, CASCADE_CONFIG_FILE), this.config);
+    if (!result.ok) console.warn(`[dashboard] Failed to persist config: ${result.error}`);
     // Keys saved over the socket path must survive workspace switches too —
     // same global sync ConfigManager.save() performs.
     try {
@@ -475,6 +489,7 @@ export class DashboardServer {
     } catch (err) {
       console.warn(`[dashboard] Failed to sync global credentials: ${err instanceof Error ? err.message : String(err)}`);
     }
+    return result;
   }
 
   /**

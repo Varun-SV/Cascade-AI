@@ -529,7 +529,24 @@ describe('every settings surface is actually wired to the shared rules', () => {
     // Endpoints are applied only from a payload that actually carries them,
     // and a late one does not overwrite what the user already typed.
     expect(settings).toMatch(/if \(cfg\.endpoints\) \{/);
-    expect(settings).toMatch(/hydrateEndpoints\(/);
+    // Applied through FUNCTIONAL state updates: both hydration callbacks are
+    // async, so reading the values from the enclosing render wrote back a stale
+    // empty string and erased an edit the dirty flag had just protected.
+    expect(settings).toMatch(/endpointAfterSnapshot\(current,/);
+    expect(settings).not.toMatch(/hydrateEndpoints\(/);
+    // The updater is handed to setState UNCALLED. Invoking it here — with any
+    // argument at all — reads the enclosing render's value and reinstates the
+    // stale-closure bug while leaving the helper itself untouched.
+    for (const type of ['anthropic', 'openai', 'gemini', 'openai-compatible', 'ollama']) {
+      expect(settings, type).not.toMatch(new RegExp(`fromSnapshot\\('${type}'\\)\\(`));
+    }
+    // A present section is authoritative for the fields it does NOT set, or
+    // hydration is a merge and a cleared setting comes back on the next save.
+    expect(settings).toMatch(/fieldFromSnapshot\(/);
+    expect(settings).toMatch(/numberFieldFromSnapshot\(/);
+    expect(settings).not.toMatch(/if \(cfg\.webSearch\.searxngUrl\) setSearxngUrl/);
+    // A failed disk write is a failed save.
+    expect(settings).toMatch(/ack\.error/);
     // Every endpoint input MARKS ITS FIELD DIRTY. The wrapper existed and
     // nothing called it, so `touched` was always empty: a gateway typed before
     // the snapshot landed was dropped from the payload, and the helper's own

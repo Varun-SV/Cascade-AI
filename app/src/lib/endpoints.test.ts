@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addressableEndpoints, hydrateEndpoints } from './endpoints';
+import { addressableEndpoints, endpointAfterSnapshot } from './endpoints';
 
 describe('addressableEndpoints — a blank field is not a clear until it has loaded', () => {
   const fields = [
@@ -59,41 +59,36 @@ describe('addressableEndpoints — a blank field is not a clear until it has loa
   });
 });
 
-describe('hydrateEndpoints — a late snapshot does not overwrite an edit', () => {
-  const current = { anthropic: '', 'openai-compatible': '' };
-
-  it('fills untouched fields from the snapshot', () => {
-    expect(hydrateEndpoints(current, { anthropic: 'https://gw.example' }, new Set()))
-      .toEqual({ anthropic: 'https://gw.example', 'openai-compatible': '' });
+describe('endpointAfterSnapshot — a late snapshot does not overwrite an edit', () => {
+  it('fills an untouched field from the snapshot', () => {
+    expect(endpointAfterSnapshot('', 'https://gw.example', false)).toBe('https://gw.example');
   });
 
-  it('leaves a field the user has already typed in', () => {
+  it('keeps a field the user has already typed in', () => {
     // The race: the user types gateway B, the snapshot lands holding gateway A,
     // and overwriting loses the edit — while the key they typed for B stays in
     // the form and the next save pairs it with A.
-    expect(hydrateEndpoints(
-      { anthropic: 'https://gateway-b.example' },
-      { anthropic: 'https://gateway-a.example' },
-      new Set(['anthropic']),
-    )).toEqual({ anthropic: 'https://gateway-b.example' });
+    expect(endpointAfterSnapshot('https://gateway-b.example', 'https://gateway-a.example', true))
+      .toBe('https://gateway-b.example');
   });
 
-  it('leaves a field the user deliberately emptied', () => {
-    expect(hydrateEndpoints(
-      { anthropic: '' },
-      { anthropic: 'https://gateway-a.example' },
-      new Set(['anthropic']),
-    )).toEqual({ anthropic: '' });
+  it('keeps a field the user deliberately emptied', () => {
+    expect(endpointAfterSnapshot('', 'https://gateway-a.example', true)).toBe('');
   });
 
   it('clears an untouched field the snapshot no longer names', () => {
-    expect(hydrateEndpoints({ anthropic: 'stale' }, {}, new Set()))
-      .toEqual({ anthropic: '' });
+    expect(endpointAfterSnapshot('stale', undefined, false)).toBe('');
   });
 
-  it('changes nothing when there is no snapshot to apply', () => {
-    expect(hydrateEndpoints({ anthropic: 'typed' }, undefined, new Set()))
-      .toEqual({ anthropic: 'typed' });
+  it('reads `current` per call, which is what defeats a stale closure', () => {
+    // The value comes in as an argument rather than off a captured object, so a
+    // functional state update supplies whatever React holds NOW. A batch
+    // version taking "all the current values" received the ones captured when
+    // the async callback was registered, refused to overwrite the dirty field,
+    // and then wrote back the stale empty string it was holding.
+    const applied = ['', 'https://typed-after-mount.example']
+      .map((current) => endpointAfterSnapshot(current, 'https://snapshot.example', true));
+    expect(applied).toEqual(['', 'https://typed-after-mount.example']);
   });
 });
 
@@ -109,10 +104,12 @@ describe('the edit → late snapshot → save transition, end to end', () => {
     const typed = { anthropic: 'https://gateway-b.example', 'openai-compatible': '' };
 
     // 2. The snapshot arrives late, holding the OLD host.
-    const afterSnapshot = hydrateEndpoints(
-      typed,
-      { anthropic: 'https://gateway-a.example', 'openai-compatible': 'https://api.groq.com/openai/v1' },
-      touched,
+    const snapshot: Record<string, string | undefined> = {
+      anthropic: 'https://gateway-a.example', 'openai-compatible': 'https://api.groq.com/openai/v1',
+    };
+    const afterSnapshot = Object.fromEntries(
+      Object.entries(typed).map(([type, current]) =>
+        [type, endpointAfterSnapshot(current, snapshot[type], touched.has(type))]),
     );
     expect(afterSnapshot['anthropic']).toBe('https://gateway-b.example');
     // …and the field they never touched IS filled from it.

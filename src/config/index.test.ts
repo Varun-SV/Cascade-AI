@@ -444,6 +444,28 @@ describe('hasUsableProvider — key-optional is not endpoint-optional', () => {
     expect(hasUsableProvider([{ type: 'ollama' }])).toBe(true);
   });
 
+  it('needs BOTH halves of an Azure address', () => {
+    // `azureModelForDeployment()` resolves nothing without a deployment name,
+    // and `AzureOpenAIProvider` falls back to a literal `YOUR_RESOURCE` URL
+    // without an endpoint — while the schema permits a bare
+    // `{ type: 'azure', apiKey }`, which the Settings serializer also keeps.
+    // An install whose only row was that shape looked configured and could name
+    // neither a resource nor a deployment.
+    expect(hasUsableProvider([{ type: 'azure', apiKey: 'az' }])).toBe(false);
+    expect(hasUsableProvider([{ type: 'azure', apiKey: 'az', baseUrl: 'https://r1.openai.azure.com' }])).toBe(false);
+    expect(hasUsableProvider([{ type: 'azure', apiKey: 'az', deploymentName: 'prod' }])).toBe(false);
+    expect(hasUsableProvider([
+      { type: 'azure', apiKey: 'az', baseUrl: 'https://r1.openai.azure.com', deploymentName: 'prod' },
+    ])).toBe(true);
+  });
+
+  it('still requires a credential for a fully routed Azure row', () => {
+    // Routable is not the same as usable: Azure is not key-optional.
+    expect(hasUsableProvider([
+      { type: 'azure', baseUrl: 'https://r1.openai.azure.com', deploymentName: 'prod' },
+    ])).toBe(false);
+  });
+
   it('still finds a usable provider beside an unusable compatible row', () => {
     expect(hasUsableProvider([
       { type: 'openai-compatible' },

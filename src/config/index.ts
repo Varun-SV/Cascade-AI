@@ -82,12 +82,23 @@ export function hasProviderCredential(
  * Ollama keeps the plain key-optional reading: it has a built-in localhost
  * default, so a bare row genuinely does address something.
  */
-function isRoutable(p: { type: string; baseUrl?: string }): boolean {
-  return p.type !== 'openai-compatible' || Boolean(p.baseUrl?.trim());
+function isRoutable(p: { type: string; baseUrl?: string; deploymentName?: string }): boolean {
+  // No public host of its own: the OpenAI SDK would fall back to
+  // api.openai.com, so an endpointless row succeeds against the WRONG host
+  // rather than failing.
+  if (p.type === 'openai-compatible') return Boolean(p.baseUrl?.trim());
+  // Azure needs both halves of its address. `azureModelForDeployment()` returns
+  // null without a deployment name, and `AzureOpenAIProvider` falls back to a
+  // literal `YOUR_RESOURCE` URL without an endpoint — and the schema permits a
+  // bare `{ type: 'azure', apiKey }`, which the Settings serializer will also
+  // keep. An install whose only row is that shape looked configured and could
+  // name neither a resource nor a deployment.
+  if (p.type === 'azure') return Boolean(p.baseUrl?.trim() && p.deploymentName?.trim());
+  return true;
 }
 
 export function hasUsableProvider(
-  providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }> | undefined,
+  providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string; deploymentName?: string }> | undefined,
 ): boolean {
   if (!providers?.length) return false;
   return providers.some((p) => isRoutable(p)
