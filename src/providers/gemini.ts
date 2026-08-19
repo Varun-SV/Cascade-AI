@@ -41,6 +41,61 @@ const GEMINI_API_VERSION = 'v1beta';
 const GEMINI_PUBLIC_ROOT = 'https://generativelanguage.googleapis.com';
 
 /**
+ * The `?alt=sse` body, as the objects the chunk walker already understands.
+ *
+ * Gemini frames each update as `data: {json}` separated by blank lines. Only
+ * `data:` lines carry payload — comments and any future field name are skipped
+ * rather than parsed, so an unrecognised frame cannot throw mid-generation.
+ */
+async function* parseSseChunks(body: ReadableStream<Uint8Array>): AsyncGenerator<unknown> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffered = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffered += decoder.decode(value, { stream: true });
+      // Split on newlines only — a `data:` line is complete at its newline, and
+      // waiting for the blank-line frame terminator would hold the last chunk
+      // of a stream that ends without one.
+      let cut = buffered.indexOf('\n');
+      while (cut !== -1) {
+        const line = buffered.slice(0, cut).trim();
+        buffered = buffered.slice(cut + 1);
+        if (line.startsWith('data:')) {
+          const payload = line.slice(5).trim();
+          if (payload && payload !== '[DONE]') {
+            try {
+              yield JSON.parse(payload);
+            } catch {
+              // A frame we cannot parse is skipped, not fatal: the alternative
+              // is aborting a generation that is otherwise streaming fine.
+            }
+          }
+        }
+        cut = buffered.indexOf('\n');
+      }
+    }
+  } finally {
+    // Releases the socket when the consumer stops early — an abort signal, or a
+    // caller that breaks out of the loop.
+    reader.releaseLock();
+    await body.cancel().catch(() => { /* already closed */ });
+  }
+}
+
+/**
+ * One list, used by BOTH transports. Written out twice, the SDK path and the
+ * REST path would quietly generate under different safety configuration
+ * depending on whether an endpoint happened to be configured.
+ */
+const SAFETY_SETTINGS = [
+  { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+  { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+];
+
+/**
  * The API root for a configured Gemini endpoint.
  *
  * A trailing version segment is stripped rather than trusted: the SDK adds its
@@ -156,21 +211,33 @@ export class GeminiProvider extends BaseProvider {
   ): Promise<GenerateResult> {
     const contents = this.buildContents(options.messages, options.images);
 
-    const stream = await this.client.models.generateContentStream({
-      model: this.model.id,
-      contents,
-      config: {
-        systemInstruction: options.systemPrompt,
-        safetySettings: [
-          { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-          { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
-        ],
-        tools: options.tools?.length
-          ? [{ functionDeclarations: toGeminiTools(options.tools) }]
-          : undefined,
-        abortSignal: options.signal,
-      },
-    });
+    // A CONFIGURED endpoint does not go through the SDK.
+    //
+    // `GoogleGenAI` calls the global fetch with no injectable transport and no
+    // redirect option, so its requests follow a 3xx wherever it points — and
+    // `x-goog-api-key` is a custom header, which the fetch spec does NOT strip
+    // across origins the way it strips `Authorization`. Once `baseUrl` can name
+    // a user-configured proxy, that is a credential replay path with no
+    // configuration-level fix available. Discovery was guarded by issuing its
+    // own request; generation needs the same treatment for the same reason.
+    //
+    // The public host keeps the SDK. There is no proxy in that path to redirect
+    // anywhere, and the SDK is the better-tested route for the case almost
+    // everyone is on.
+    const stream = this.config.baseUrl
+      ? await this.streamOverRest(contents, options)
+      : await this.client.models.generateContentStream({
+        model: this.model.id,
+        contents,
+        config: {
+          systemInstruction: options.systemPrompt,
+          safetySettings: SAFETY_SETTINGS,
+          tools: options.tools?.length
+            ? [{ functionDeclarations: toGeminiTools(options.tools) }]
+            : undefined,
+          abortSignal: options.signal,
+        },
+      });
 
     let fullContent = '';
     let inputTokens = 0;
@@ -366,6 +433,51 @@ export class GeminiProvider extends BaseProvider {
    * logs, error reports and shell history, and this one would carry the key
    * with it.
    */
+  /**
+   * Generation against a configured endpoint, issued by hand.
+   *
+   * Same wire protocol the SDK speaks — `:streamGenerateContent?alt=sse` on
+   * `/v1beta`, with the same body — so the chunk shapes the caller walks are
+   * identical and neither transport needs its own parsing. The difference that
+   * matters is `fetchSameOrigin`: the key is never replayed on a host the
+   * configured origin redirects to.
+   */
+  private async streamOverRest(
+    contents: Content[],
+    options: GenerateOptions,
+  ): Promise<AsyncIterable<unknown>> {
+    const url = `${geminiApiRoot(this.config.baseUrl)}/${GEMINI_API_VERSION}`
+      + `/models/${encodeURIComponent(this.model.id)}:streamGenerateContent?alt=sse`;
+    const resp = await fetchSameOrigin(url, {
+      method: 'POST',
+      headers: {
+        'x-goog-api-key': this.config.apiKey ?? '',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        contents,
+        // REST wants the object form; the SDK accepts a bare string and wraps
+        // it itself.
+        ...(options.systemPrompt
+          ? { systemInstruction: { parts: [{ text: options.systemPrompt }] } }
+          : {}),
+        safetySettings: SAFETY_SETTINGS,
+        ...(options.tools?.length
+          ? { tools: [{ functionDeclarations: toGeminiTools(options.tools) }] }
+          : {}),
+      }),
+      signal: options.signal,
+    });
+    if (!resp.ok || !resp.body) {
+      const detail = await resp.text().catch(() => '');
+      throw new ProviderUnreachableError(
+        `Gemini generation failed at ${geminiApiRoot(this.config.baseUrl)}: `
+        + `${resp.status}${detail ? ` — ${detail.slice(0, 200)}` : ''}`,
+      );
+    }
+    return parseSseChunks(resp.body);
+  }
+
   private fetchModelList(): Promise<Response> {
     // Built from the SAME root the SDK client was given. Hardcoding the public
     // host here meant discovery and generation asked different endpoints the

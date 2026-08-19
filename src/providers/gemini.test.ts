@@ -384,3 +384,109 @@ describe('GeminiProvider — the key never follows a cross-origin redirect', () 
     }
   });
 });
+
+describe('GeminiProvider — generation against a configured endpoint', () => {
+  // The SDK is bypassed here on purpose: `GoogleGenAI` takes no custom fetch
+  // and sets no redirect policy, so it cannot be stopped from replaying
+  // `x-goog-api-key` on whatever a configured proxy redirects to. These tests
+  // run against real servers, since a mocked global fetch never follows a
+  // redirect and so cannot tell a guarded transport from an unguarded one.
+  const sse = (frames: unknown[]): string =>
+    frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join('');
+
+  const textFrame = (text: string) => ({ candidates: [{ content: { parts: [{ text }] } }] });
+
+  it('streams text, tool calls and usage the same way the SDK path does', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const server = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        seen.push({ url: req.url, key: req.headers['x-goog-api-key'], body: JSON.parse(body || '{}') });
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.end(sse([
+          textFrame('Hel'),
+          textFrame('lo'),
+          { candidates: [{ content: { parts: [{ functionCall: { name: 'read_file', args: { path: 'a.ts' } } }] } }] },
+          { candidates: [{ finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 11, candidatesTokenCount: 4 } },
+        ]));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+      const chunks: string[] = [];
+      const result = await new GeminiProvider({ type: 'gemini', apiKey: 'proxy-key', baseUrl: base }, MODEL)
+        .generateStream(
+          { messages: [{ role: 'user', content: 'hi' }], systemPrompt: 'be brief' },
+          (c) => { if (c.text) chunks.push(c.text); },
+        );
+
+      expect(chunks).toEqual(['Hel', 'lo']);
+      expect(result.content).toBe('Hello');
+      expect(result.toolCalls).toEqual([{ id: 'read_file', name: 'read_file', input: { path: 'a.ts' } }]);
+      expect(result.finishReason).toBe('tool_use');
+      expect(result.usage.inputTokens).toBe(11);
+      expect(result.usage.outputTokens).toBe(4);
+
+      // Addressed at the configured host, on the route the client would build.
+      expect(seen[0]?.['url']).toBe('/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse');
+      expect(seen[0]?.['key']).toBe('proxy-key');
+      // The system prompt reaches REST in the object form it requires — sent as
+      // a bare string it is silently dropped by the API.
+      expect((seen[0]?.['body'] as Record<string, unknown>)['systemInstruction'])
+        .toEqual({ parts: [{ text: 'be brief' }] });
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('never replays the key on a cross-origin redirect while GENERATING', async () => {
+    // The gap this transport exists to close.
+    const sinkKeys: Array<string | undefined> = [];
+    const sink = http.createServer((req, res) => {
+      sinkKeys.push(req.headers['x-goog-api-key'] as string | undefined);
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.end(sse([textFrame('leaked')]));
+    });
+    await new Promise<void>((r) => sink.listen(0, '127.0.0.1', r));
+    const sinkUrl = `http://127.0.0.1:${(sink.address() as AddressInfo).port}`;
+
+    const redirector = http.createServer((_req, res) => {
+      res.writeHead(307, { Location: `${sinkUrl}/v1beta/models/x:streamGenerateContent?alt=sse` });
+      res.end();
+    });
+    await new Promise<void>((r) => redirector.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${(redirector.address() as AddressInfo).port}`;
+
+    try {
+      await new GeminiProvider({ type: 'gemini', apiKey: 'proxy-issued-key', baseUrl: base }, MODEL)
+        .generateStream({ messages: [{ role: 'user', content: 'hi' }] }, () => {})
+        .catch(() => undefined);
+
+      expect(sinkKeys).toEqual([]);
+    } finally {
+      await new Promise((r) => sink.close(r));
+      await new Promise((r) => redirector.close(r));
+    }
+  });
+
+  it('reports an endpoint that rejects the request instead of returning empty content', async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'proxy denied' } }));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+      await expect(
+        new GeminiProvider({ type: 'gemini', apiKey: 'k', baseUrl: base }, MODEL)
+          .generateStream({ messages: [{ role: 'user', content: 'hi' }] }, () => {}),
+      ).rejects.toThrow(/403/);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});
