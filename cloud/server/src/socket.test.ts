@@ -393,6 +393,49 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
     expect(resumed.at(-1)?.active).toBe(1);
   }, 30_000);
 
+  it('names the conversation that finished while nobody was connected', async () => {
+    // Ending the client's wait is not enough when the run was a NEW chat: the
+    // conversation id was created server-side and delivered only by the ack,
+    // which died with the socket. The terminal event went to nobody, so this
+    // is the last place that id can come from — without it the page stops
+    // spinning over an empty chat while the answer sits somewhere it cannot
+    // name.
+    await start(8_000);
+    stub = await startStubOpenAIServer({ delayMs: 700 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'grace-id', email: null, name: 'Ident', avatar: null });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+
+    const first = connect(cookie);
+    await connected(first);
+    // No conversationId in the payload — a brand-new chat, the case where the
+    // ack is the only thing that would ever have carried the id.
+    first.emit(
+      'chat:run',
+      { prompt: 'hello', providers: [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }] },
+      () => { /* dies with the socket */ },
+    );
+
+    // Leave while it is still running, and stay away until it has finished.
+    await new Promise((r) => setTimeout(r, 200));
+    first.close();
+
+    const conversations = store.listConversations(user.id) as Array<{ id: string }>;
+    const cid = conversations[0]!.id;
+    const landed = await until(() => assistantReply(cid).includes('Hello from the stub model.'), 10_000);
+    expect(landed).toBe(true);
+
+    // Now come back. Nothing is running, and the id has to arrive anyway.
+    const second = connect(cookie);
+    const seen: Array<{ active?: number; finished?: string[] }> = [];
+    second.on('run:resumed', (e: { active?: number; finished?: string[] }) => { seen.push(e); });
+    await connected(second);
+
+    const arrived = await until(() => seen.length > 0, 5_000);
+    expect(arrived).toBe(true);
+    expect(seen[0]?.active).toBe(0);
+    expect(seen[0]?.finished).toEqual([cid]);
+  }, 30_000);
+
   it('tells a fresh connection there is nothing to wait for', async () => {
     // The other half of the same signal. A client that reconnects after its
     // run already finished must be able to stop showing a spinner, and this is
@@ -402,13 +445,14 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
     const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
 
     const client = connect(cookie);
-    const seen: Array<{ active?: number }> = [];
-    client.on('run:resumed', (e: { active?: number }) => { seen.push(e); });
+    const seen: Array<{ active?: number; finished?: string[] }> = [];
+    client.on('run:resumed', (e: { active?: number; finished?: string[] }) => { seen.push(e); });
     await connected(client);
 
     const arrived = await until(() => seen.length > 0, 5_000);
     expect(arrived).toBe(true);
     expect(seen[0]?.active).toBe(0);
+    expect(seen[0]?.finished).toEqual([]);
   }, 20_000);
 });
 

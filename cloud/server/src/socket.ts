@@ -121,6 +121,16 @@ interface LiveRun {
   controller: AbortController;
   transport: RebindableTransport;
   done: boolean;
+  /**
+   * Which conversation this run belongs to, once anything knows.
+   *
+   * On a NEW chat the client has no id at all until the ack tells it — and the
+   * ack is exactly what a reconnect loses. So the id is recorded here as soon
+   * as it exists (from the payload for an existing conversation, from the
+   * result for a new one) and handed to the replacement connection, which
+   * otherwise has no way to name the conversation whose answer it should load.
+   */
+  conversationId?: string;
 }
 
 export interface SocketOptions {
@@ -199,13 +209,25 @@ export function attachSocket(
       }
     }
 
-    // Tell the replacement page whether anything is still running for it. A
-    // client that reconnects mid-run cannot know on its own: the ack for
-    // `chat:run` was bound to the connection that went away and will never
-    // arrive, so `active: 0` is the only signal that says "your run is over,
-    // stop waiting for it" — and `active: 1` is what tells it to keep waiting
-    // for the `session:complete` that now really is coming.
-    socket.emit('run:resumed', { active: activeRuns.size });
+    // Tell the replacement page whether anything is still running for it, and
+    // which conversations ended while it was away.
+    //
+    // A client that reconnects mid-run cannot know either on its own: the ack
+    // for `chat:run` was bound to the connection that went away and will never
+    // arrive, so `active: 1` is what tells it to keep waiting for the
+    // `session:complete` that now really is coming, and `active: 0` says the
+    // run is over and it should stop waiting.
+    //
+    // `finished` exists because ending the wait is not enough when the run was
+    // a NEW chat: its conversation id lived only in that lost ack, so the page
+    // would clear its spinner while still not knowing which conversation holds
+    // the answer that was persisted. A run that completed while nobody was
+    // connected emitted its terminal event into the void, so this is the only
+    // remaining place that id can come from.
+    socket.emit('run:resumed', {
+      active: activeRuns.size,
+      finished: [...(held?.runs ?? [])].filter((r) => r.done && r.conversationId).map((r) => r.conversationId),
+    });
 
     socket.on('chat:run', async (payload: unknown, ack?: ChatRunAck) => {
       // The run holds a transport, not this socket. Same structural surface
@@ -216,9 +238,14 @@ export function attachSocket(
       activeRuns.add(run);
       try {
         const parsed = parseChatRunPayload(payload);
+        // Known now for an existing conversation; only the result knows it for
+        // a new one. Recorded at both points because a run can be orphaned
+        // before it ever reaches the second.
+        run.conversationId = parsed.conversationId;
         const result: ChatRunResult = await runChatTurn(parsed, {
           env, store, userId, socket: run.transport, signal: run.controller.signal,
         });
+        run.conversationId = result.conversationId;
         ack?.(result);
       } catch (err) {
         const message = err instanceof ZodError ? formatZodError(err) : err instanceof Error ? err.message : String(err);

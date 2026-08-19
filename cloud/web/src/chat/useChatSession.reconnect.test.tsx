@@ -2,12 +2,21 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import type { Socket } from 'socket.io-client';
 import { useChatSession } from './useChatSession.js';
+import { getMessages } from '../lib/api.js';
 
-// The hook reconciles against the server tree after every ending. None of that
-// is what these tests are about, so it is stubbed to empty rather than mocked
-// per-case — an unstubbed fetch would fail the reload and swallow its own error.
+// The persisted transcript, keyed by conversation. `getMessages` is what the
+// recovery path calls once it knows which conversation to load, so asserting on
+// its argument — and on the rows reaching the hook — is how these tests tell
+// "stopped waiting" apart from "actually recovered the answer".
+const PERSISTED: Record<string, Array<{ id: string; role: string; content: string }>> = {
+  'server-made-id': [
+    { id: 'm1', role: 'user', content: 'hello' },
+    { id: 'm2', role: 'assistant', content: 'the answer that survived' },
+  ],
+};
+
 vi.mock('../lib/api.js', () => ({
-  getMessages: vi.fn(async () => ({ messages: [] })),
+  getMessages: vi.fn(async (cid: string) => ({ messages: PERSISTED[cid] ?? [] })),
   fetchFeedback: vi.fn(async () => ({ feedback: {} })),
   selectBranch: vi.fn(async () => ({ messages: [] })),
   deleteMessage: vi.fn(async () => ({ messages: [] })),
@@ -51,33 +60,91 @@ function startRun(fake: ReturnType<typeof fakeSocket>) {
 beforeEach(() => { vi.clearAllMocks(); });
 
 describe('useChatSession — a run that outlives the connection that started it', () => {
-  it('finishes on session:complete once the ack is known lost', async () => {
+  it('finishes on session:complete once the ack is known lost, and adopts its id', async () => {
     // The reviewer's case: the page comes back BEFORE the run ends. The ack
     // belongs to the emit made on the old socket and can never be re-routed,
     // so without a second ending the composer stays disabled forever behind a
     // reply that did arrive.
+    //
+    // The hook starts with NO conversation id, exactly as App.tsx calls it for
+    // a new chat. That id is created server-side and delivered only by the ack,
+    // so ending the wait without taking it from the event leaves the spinner
+    // cleared over an empty chat while the answer sits somewhere unnamed.
     const fake = fakeSocket();
     const view = startRun(fake);
     await waitFor(() => expect(view.result.current.busy).toBe(true));
+    expect(view.result.current.conversationId).toBeUndefined();
 
     // Reconnected mid-run: the server says one run is still going.
-    act(() => { fake.fire('run:resumed', { active: 1 }); });
+    act(() => { fake.fire('run:resumed', { active: 1, finished: [] }); });
     expect(view.result.current.busy).toBe(true);
 
-    // That run now ends on the new socket.
-    act(() => { fake.fire('session:complete', { conversationId: 'c1' }); });
+    // That run now ends on the new socket, carrying the id with it.
+    act(() => { fake.fire('session:complete', { conversationId: 'server-made-id' }); });
+
     await waitFor(() => expect(view.result.current.busy).toBe(false));
+    expect(view.result.current.conversationId).toBe('server-made-id');
+    expect(getMessages).toHaveBeenCalledWith('server-made-id');
+    await waitFor(() => {
+      expect(view.result.current.messages.map((m) => m.content))
+        .toContain('the answer that survived');
+    });
   });
 
-  it('stops waiting when the run already finished during the gap', async () => {
-    // The other half: nothing is running any more, and no further event is
-    // coming. `active: 0` is the only thing that can say so.
+  it('stops waiting when the run already finished during the gap, and loads it', async () => {
+    // The other half, and the harder one: the terminal event was emitted while
+    // no socket was bound, so nothing later carries the id. `run:resumed` has
+    // to bring both facts — that nothing is running, and which conversation
+    // ended — or the reply still looks like it died.
     const fake = fakeSocket();
     const view = startRun(fake);
     await waitFor(() => expect(view.result.current.busy).toBe(true));
 
-    act(() => { fake.fire('run:resumed', { active: 0 }); });
+    act(() => { fake.fire('run:resumed', { active: 0, finished: ['server-made-id'] }); });
+
     await waitFor(() => expect(view.result.current.busy).toBe(false));
+    expect(view.result.current.conversationId).toBe('server-made-id');
+    expect(getMessages).toHaveBeenCalledWith('server-made-id');
+    await waitFor(() => {
+      expect(view.result.current.messages.map((m) => m.content))
+        .toContain('the answer that survived');
+    });
+  });
+
+  it('ends and surfaces the reason when an inherited run fails', async () => {
+    // `runChatTurn` emits `session:error` and then throws, and the throw only
+    // reaches the original `chat:run` ack — the callback this whole path knows
+    // is gone. Unhandled, a failed run left `busy` true forever and said
+    // nothing about why.
+    const fake = fakeSocket();
+    const view = startRun(fake);
+    await waitFor(() => expect(view.result.current.busy).toBe(true));
+
+    act(() => { fake.fire('run:resumed', { active: 1, finished: [] }); });
+    expect(view.result.current.busy).toBe(true);
+
+    act(() => {
+      fake.fire('session:error', { conversationId: 'server-made-id', error: 'provider refused the request' });
+    });
+
+    await waitFor(() => expect(view.result.current.busy).toBe(false));
+    expect(view.result.current.error).toBe('provider refused the request');
+    // The failed turn still belongs to a conversation, and its user message is
+    // persisted — so the id is adopted here too.
+    expect(view.result.current.conversationId).toBe('server-made-id');
+  });
+
+  it('ignores session:error on a healthy connection, where the ack reports it', async () => {
+    // The mirror of the session:complete gate. On a live socket the ack
+    // carries `{ error }` and does the full cleanup; acting on both would
+    // surface the same failure twice.
+    const fake = fakeSocket();
+    const view = startRun(fake);
+    await waitFor(() => expect(view.result.current.busy).toBe(true));
+
+    act(() => { fake.fire('session:error', { conversationId: 'c1', error: 'boom' }); });
+    expect(view.result.current.busy).toBe(true);
+    expect(view.result.current.error).toBeNull();
   });
 
   it('leaves the ordinary ending to the ack', async () => {

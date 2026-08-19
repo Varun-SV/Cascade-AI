@@ -248,6 +248,11 @@ export function useChatSession(
   // no longer the one which emitted it — the ack is gone, so `session:complete`
   // becomes the ending. Cleared by whichever ending arrives first.
   const ackLostRef = useRef(false);
+  // The socket handlers are registered once per connection, so reading
+  // `conversationId` from their closure pins whatever it was at subscribe time
+  // — which on a first turn is `undefined` for the whole run.
+  const conversationIdRef = useRef(conversationId);
+  conversationIdRef.current = conversationId;
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [lastTokens, setLastTokens] = useState<number>(0);
@@ -447,7 +452,16 @@ export function useChatSession(
     // The streaming bubble is stitched from tokens that stopped arriving; the
     // persisted answer replaces it.
     setMessages((prev) => prev.filter((m) => !m.streaming));
-    if (cid) void reloadActivePath(cid);
+    // Adopt the id as well as the transcript. On a first turn the client has
+    // NO conversation id — the server creates it and the client learns it from
+    // the ack, which is the one thing a reconnect is guaranteed to lose. Ending
+    // the wait without it clears the spinner over an empty chat while the
+    // answer sits on a conversation the page cannot name.
+    const target = cid ?? conversationIdRef.current;
+    if (!target) return;
+    conversationIdRef.current = target;
+    setConversationId(target);
+    void reloadActivePath(target);
   }, [reloadActivePath]);
 
   // A reconnect re-reads the transcript, and settles what the lost ack cannot.
@@ -469,25 +483,49 @@ export function useChatSession(
   // symptom, one connection later.
   useEffect(() => {
     if (!socket) return;
-    const onConnect = () => { if (conversationId) void reloadActivePath(conversationId); };
-    const onResumed = (e: { active?: number }) => {
+    const onConnect = () => {
+      const cid = conversationIdRef.current;
+      if (cid) void reloadActivePath(cid);
+    };
+    const onResumed = (e: { active?: number; finished?: Array<string | undefined> }) => {
       if (!busyRef.current) return;
       if (e?.active) { ackLostRef.current = true; return; }
-      finishWithoutAck(conversationId);
+      // Nothing is running. The terminal event was emitted while no socket was
+      // bound, so `finished` is the only remaining carrier of the id for a run
+      // that was a brand-new chat.
+      finishWithoutAck(e?.finished?.find((id): id is string => !!id) ?? conversationIdRef.current);
     };
-    // Only meaningful once the ack is known lost. In the ordinary path this
-    // event precedes the ack on the same socket, and finalising here would end
-    // the run a beat early — before the reply bubble the ack carries.
-    const onComplete = () => { if (ackLostRef.current) finishWithoutAck(conversationId); };
+    // Both endings take their id from the PAYLOAD, not from React state: on a
+    // first turn that state is still undefined, and these events carry the id
+    // the lost ack was going to deliver.
+    //
+    // Only meaningful once the ack is known lost. In the ordinary path
+    // `session:complete` precedes the ack on the same socket, and finalising
+    // here would end the run a beat early — before the reply bubble the ack
+    // carries.
+    const onComplete = (e: { conversationId?: string }) => {
+      if (ackLostRef.current) finishWithoutAck(e?.conversationId);
+    };
+    // An inherited run can fail rather than finish. `runChatTurn` emits this
+    // and then throws, and the throw only reaches the original `chat:run` ack —
+    // the very callback this path knows is gone. Without handling it here a
+    // failed run left the composer disabled forever and said nothing about why.
+    const onError = (e: { conversationId?: string; error?: string }) => {
+      if (!ackLostRef.current) return;
+      setError(e?.error ?? 'The run failed after the connection dropped.');
+      finishWithoutAck(e?.conversationId);
+    };
     socket.on('connect', onConnect);
     socket.on('run:resumed', onResumed);
     socket.on('session:complete', onComplete);
+    socket.on('session:error', onError);
     return () => {
       socket.off('connect', onConnect);
       socket.off('run:resumed', onResumed);
       socket.off('session:complete', onComplete);
+      socket.off('session:error', onError);
     };
-  }, [socket, conversationId, reloadActivePath, finishWithoutAck]);
+  }, [socket, reloadActivePath, finishWithoutAck]);
 
   // Shared run path for a fresh send, an edit (new branch), and a regenerate.
   // `appendUser` is false when regenerating (no new user turn is created). The
