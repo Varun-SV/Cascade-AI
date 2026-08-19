@@ -105,7 +105,16 @@ export function OnboardingView({ notice, initialWorkspace }: { notice?: string; 
     setVerifyError('');
     try {
       if (window.cascade?.setConfig) {
-        await window.cascade.setConfig({ provider: selectedProvider.id, apiKey, workspace: workspace || '', baseUrl: baseUrl || undefined });
+        const r = await window.cascade.setConfig({ provider: selectedProvider.id, apiKey, workspace: workspace || '', baseUrl: baseUrl || undefined });
+        // A refusal is not a verification failure to shrug off: nothing was
+        // stored, and advancing here presented a key that had been declined as
+        // though it were saved. The explanation names what to do about it, so
+        // it is shown verbatim rather than replaced by a generic message a step
+        // later.
+        if (r?.ok === false) {
+          setVerifyError(r.error ?? 'That key could not be saved.');
+          return;
+        }
       }
       setStep('workspace');
     } catch (err) {
@@ -124,6 +133,15 @@ export function OnboardingView({ notice, initialWorkspace }: { notice?: string; 
     try {
       if (window.cascade?.setConfig) {
         const r = await window.cascade.setConfig({ provider: selectedProvider?.id ?? '', apiKey, workspace, baseUrl: baseUrl || undefined });
+        // Same as Verify: a specific refusal beats the generic message below,
+        // which would blame the provider choice for a key that was declined for
+        // a stated reason.
+        if (r?.ok === false) {
+          setSaveError(r.error ?? 'That key could not be saved.');
+          setSaving(false);
+          setStep('key');
+          return;
+        }
         done = Boolean(r?.onboardingDone);
       }
     } catch { /* leave `done` false — see above */ }

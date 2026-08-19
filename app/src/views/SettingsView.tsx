@@ -200,11 +200,21 @@ export function SettingsView({ socket }: Props) {
     if (typeof cfg.budget?.maxTokensPerRun === 'number') setMaxTokens(String(cfg.budget.maxTokensPerRun));
     if (typeof cfg.budget?.warnAtPct === 'number') setWarnAt(String(cfg.budget.warnAtPct));
     if (cfg.providersWithKey) setProvidersWithKey(cfg.providersWithKey);
-    if (cfg.endpoints?.['openai-compatible']) setOcUrl(cfg.endpoints['openai-compatible']);
-    setAnthropicUrl(cfg.endpoints?.['anthropic'] ?? '');
-    setOpenaiUrl(cfg.endpoints?.['openai'] ?? '');
-    setGeminiUrl(cfg.endpoints?.['gemini'] ?? '');
-    if (cfg.endpoints?.['ollama']) setOllamaUrl(cfg.endpoints['ollama']);
+    // ONLY when the snapshot actually carries endpoints. Two different
+    // payloads reach this function — the IPC `getSettings` reply, which is
+    // complete, and the socket's `config:current`, which is partial. Blanking
+    // the fields from a payload that simply omits them turns a reconnect into
+    // an endpoint clear on the next save, and an explicit clear now retires the
+    // credential paired with that host: a rotated gateway key typed after a
+    // reconnect would have been written to the provider's public API.
+    if (cfg.endpoints) {
+      const at = (type: string): string => cfg.endpoints?.[type] ?? '';
+      setAnthropicUrl(at('anthropic'));
+      setOpenaiUrl(at('openai'));
+      setGeminiUrl(at('gemini'));
+      setOcUrl(at('openai-compatible'));
+      setOllamaUrl(at('ollama'));
+    }
     if (cfg.webSearch) {
       if (cfg.webSearch.searxngUrl) setSearxngUrl(cfg.webSearch.searxngUrl);
       setSearchKeysSet({ brave: cfg.webSearch.hasBraveKey, tavily: cfg.webSearch.hasTavilyKey });

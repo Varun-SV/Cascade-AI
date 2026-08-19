@@ -443,30 +443,28 @@ function registerIPC(): void {
       if (type && (cfg.apiKey || keyOptional) && cascadeConfig && configManager) {
         if (!Array.isArray(cascadeConfig.providers)) cascadeConfig.providers = [];
         const existing = cascadeConfig.providers.find((p: { type: string }) => p.type === type);
-        if (existing && cfg.apiKey) {
-          // The wizard renders a base-URL field for `openai-compatible` ONLY
-          // (`needsBaseUrl` in OnboardingView), so a blank `baseUrl` here means
-          // two different things depending on the provider, and the write is
-          // told which. Where the field exists and was left empty there is
-          // nothing to preserve anyway; where it was never shown, absence is a
-          // limit of this screen and must not be read as "the public host" —
-          // that reading moved a rotated gateway key onto the provider's own
-          // API.
-          const { applyProviderCredential, explainRefusal } = loadCore();
-          // Which providers the wizard renders a base-URL input for — mirrors
-          // `needsBaseUrl` in OnboardingView. A blank field the user was SHOWN
-          // is a statement; a field that was never rendered is not, and reading
-          // the second as the first moved a rotated gateway key onto the
-          // provider's public API.
-          const endpoint = baseUrl
-            ? { kind: 'at' as const, baseUrl }
-            : type === 'openai-compatible' ? { kind: 'cleared' as const } : { kind: 'preserve' as const };
+        const { applyProviderCredential, applyEndpointEdit, explainRefusal } = loadCore();
+        // Which providers the wizard renders a base-URL input for — mirrors
+        // `needsBaseUrl` in OnboardingView, which shows it for
+        // `openai-compatible` alone. A blank field the user was SHOWN is a
+        // statement; a field that was never rendered is not, and reading the
+        // second as the first moved a rotated gateway key onto the provider's
+        // public API.
+        const endpoint = baseUrl
+          ? { kind: 'at' as const, baseUrl }
+          : type === 'openai-compatible' ? { kind: 'cleared' as const } : { kind: 'preserve' as const };
+
+        if (cfg.apiKey) {
+          // Whether or not a row already exists. Creating one used to bypass
+          // this rule entirely and push `{ type, apiKey }` straight in — so an
+          // OpenAI-compatible key entered with the URL box empty was stored
+          // scoped to nothing, and `OpenAICompatibleProvider` hands an absent
+          // `baseUrl` to the OpenAI SDK, which falls back to api.openai.com.
+          // A first-run Groq key went to OpenAI.
           const outcome = applyProviderCredential(cascadeConfig.providers, type, cfg.apiKey, endpoint);
           if (!outcome.written) {
             // Nothing was stored, so the wizard must not advance as though it
-            // had been. Onboarding has no endpoint control for these providers;
-            // Settings does, which is where the user can say what this key is
-            // for.
+            // had been.
             return { ok: false, error: explainRefusal(type, outcome.reason) };
           }
         } else if (existing) {
@@ -474,13 +472,20 @@ function registerIPC(): void {
           // key-optional provider could have its endpoint changed here with a
           // blank key field and keep the previous host's key attached — the
           // provider then sent that key to the new host.
-          loadCore().applyEndpointEdit(existing, baseUrl, cfg.apiKey);
+          applyEndpointEdit(existing, baseUrl, cfg.apiKey);
         } else {
-          cascadeConfig.providers.push({
-            type,
-            ...(cfg.apiKey ? { apiKey: cfg.apiKey } : {}),
-            ...(baseUrl ? { baseUrl } : {}),
-          });
+          // Genuinely keyless, which is a real choice: Ollama, or a compatible
+          // endpoint on the user's own hardware. It still needs somewhere to
+          // send — a compatible row with neither key nor URL is not "local", it
+          // is an uncredentialed request to api.openai.com.
+          if (type === 'openai-compatible' && !baseUrl) {
+            return {
+              ok: false,
+              error: 'An OpenAI-compatible provider needs its Base URL — without one the request '
+                + 'goes to api.openai.com rather than your endpoint.',
+            };
+          }
+          cascadeConfig.providers.push({ type, ...(baseUrl ? { baseUrl } : {}) });
         }
         await configManager.save();
       }

@@ -196,6 +196,47 @@ describe('applySettingsCredentials — the real save sequence', () => {
     expect(providers[1]).toMatchObject({ apiKey: 'groq-key', baseUrl: 'https://api.groq.com/openai/v1' });
   });
 
+  it('treats a present-but-undefined endpoint as the explicit clear it is', () => {
+    // The Settings payload represents a CLEARED OpenAI-compatible URL as the
+    // property being present with value `undefined` — `ocUrl.trim() ||
+    // undefined`. Skipping those entries meant emptying the URL with the key
+    // box left blank changed nothing: the keys loop skipped the blank key and
+    // the endpoint loop skipped the blank URL, so the stale host kept its
+    // credential. `openai-compatible` has no public host to fall back to, so
+    // the pair is retired together.
+    const providers = [{ type: 'openai-compatible', apiKey: 'groq-key', baseUrl: 'https://api.groq.com/openai/v1' }];
+    applySettingsCredentials(providers, {
+      keys: { 'openai-compatible': undefined },
+      endpoints: { 'openai-compatible': undefined, ollama: undefined },
+    });
+
+    expect(providers[0]?.baseUrl).toBeUndefined();
+    expect(providers[0]?.apiKey).toBeUndefined();
+  });
+
+  it('does not read an ABSENT endpoint property as a clear', () => {
+    // The other side of the same distinction: a surface with no field for this
+    // provider sends no entry, and that must leave the row alone.
+    const providers = [{ type: 'anthropic', apiKey: 'gw-key', baseUrl: 'https://corp-gateway.example' }];
+    applySettingsCredentials(providers, {
+      keys: { 'openai-compatible': undefined },
+      endpoints: { 'openai-compatible': undefined, ollama: undefined },
+    });
+
+    expect(providers[0]).toMatchObject({ apiKey: 'gw-key', baseUrl: 'https://corp-gateway.example' });
+  });
+
+  it('clears an Anthropic gateway when its field is emptied, retiring the key with it', () => {
+    const providers = [{ type: 'anthropic', apiKey: 'gw-key', baseUrl: 'https://corp-gateway.example' }];
+    applySettingsCredentials(providers, {
+      keys: {},
+      endpoints: { anthropic: undefined },
+    });
+
+    expect(providers[0]?.baseUrl).toBeUndefined();
+    expect(providers[0]?.apiKey).toBeUndefined();
+  });
+
   it('applies an endpoint-only edit, which the dashboard used to drop on the floor', () => {
     // Key field blank, URL changed. The live backend ran a key-only loop, so it
     // persisted a config in which nothing had moved while telling the user the
@@ -382,6 +423,38 @@ describe('applyProviderCredential — intent decides, absence never does', () =>
   });
 });
 
+describe('a NEW row is held to the same routability rule as an existing one', () => {
+  // Onboarding used to create rows by pushing an object literal, so every rule
+  // in this module applied to edits and to nothing else. The first key a user
+  // ever enters is exactly the one that skipped them.
+  it('refuses a fresh compatible key that names no host', () => {
+    const providers: Array<{ type: string; apiKey?: string; baseUrl?: string }> = [];
+    const outcome = applyProviderCredential(providers, 'openai-compatible', 'groq-key', { kind: 'cleared' });
+
+    expect(outcome).toEqual({ written: false, reason: 'unroutable' });
+    // …and no half-configured row is left behind.
+    expect(providers).toEqual([]);
+  });
+
+  it('creates it when the host is named', () => {
+    const providers: Array<{ type: string; apiKey?: string; baseUrl?: string }> = [];
+    expect(applyProviderCredential(
+      providers, 'openai-compatible', 'groq-key', { kind: 'at', baseUrl: 'https://api.groq.com/openai/v1' },
+    )).toEqual({ written: true });
+    expect(providers).toEqual([
+      { type: 'openai-compatible', apiKey: 'groq-key', baseUrl: 'https://api.groq.com/openai/v1' },
+    ]);
+  });
+
+  it('creates a fresh public-host row for a provider that HAS a default', () => {
+    // Anthropic with no endpoint is not unroutable — it has somewhere to go.
+    const providers: Array<{ type: string; apiKey?: string; baseUrl?: string }> = [];
+    expect(applyProviderCredential(providers, 'anthropic', 'sk-ant', { kind: 'preserve' }))
+      .toEqual({ written: true });
+    expect(providers).toEqual([{ type: 'anthropic', apiKey: 'sk-ant' }]);
+  });
+});
+
 describe('every settings surface is actually wired to the shared rules', () => {
   // Source-level, deliberately. The tests above prove these helpers are
   // correct; they say nothing about whether the save handlers call them, and
@@ -408,6 +481,14 @@ describe('every settings surface is actually wired to the shared rules', () => {
     // onto an existing row, leaving whatever credential was there attached.
     expect(source).not.toMatch(/if \(baseUrl\) existing\.baseUrl = baseUrl;/);
     expect(source).toMatch(/applyEndpointEdit\(existing, baseUrl, cfg\.apiKey\)/);
+    // Creation goes through the rule too — it used to push an object literal,
+    // so a first-run key was the one credential no rule applied to. Asserted as
+    // the UNCONDITIONAL branch: re-adding `&& existing` reintroduces exactly
+    // that gap while leaving a "does not push a literal" check green, which is
+    // how the first version of this assertion missed it.
+    expect(source).not.toMatch(/providers\.push\(\{\s*type,\s*\.\.\.\(cfg\.apiKey/);
+    expect(source).toMatch(/if \(cfg\.apiKey\) \{/);
+    expect(source).not.toMatch(/if \(cfg\.apiKey && existing\)/);
     // Intent is DECLARED, never inferred from an absent field.
     expect(source).toMatch(/kind: 'preserve'/);
     expect(source).not.toMatch(/applyProviderApiKey\(/);

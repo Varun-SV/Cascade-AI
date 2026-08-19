@@ -226,6 +226,16 @@ export class DashboardServer {
         providersWithKey: (this.config.providers ?? [])
           .filter(hasProviderCredential)
           .map((p) => p.type),
+        // Endpoints too, matching the desktop's IPC snapshot. Omitting them
+        // made this the PARTIAL half of two payloads feeding one form, and the
+        // renderer could not tell "not included" from "cleared". Azure is
+        // excluded because it is addressed per deployment, not per type, and
+        // has its own field.
+        endpoints: Object.fromEntries(
+          (this.config.providers ?? [])
+            .filter((p) => p.type !== 'azure' && p.baseUrl)
+            .map((p) => [p.type, p.baseUrl as string]),
+        ),
       });
     });
     this.socket.onConfigUpdate((data) => {

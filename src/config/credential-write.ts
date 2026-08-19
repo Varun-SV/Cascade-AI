@@ -284,7 +284,16 @@ export function applySettingsCredentials(
   if (!data.endpoints) return { refused };
   for (const [type, baseUrl] of Object.entries(data.endpoints)) {
     // Azure is addressed per deployment and goes through its own field.
-    if (baseUrl === undefined || type === 'azure') continue;
+    if (type === 'azure') continue;
+    // A present property holding `undefined` is the CLEAR, not an absent one.
+    // `SettingsView` sends `ocUrl.trim() || undefined`, so emptying the field
+    // produces exactly that — and skipping it here meant clearing an
+    // OpenAI-compatible URL with the key box left blank did nothing at all: the
+    // keys loop skipped the blank key, this loop skipped the blank URL, and the
+    // stale host kept its credential. Absence of the PROPERTY still means the
+    // surface cannot address this provider, and that is handled by
+    // `endpointFromSettingsPayload` above, not here.
+    if (!Object.hasOwn(data.endpoints, type)) continue;
     const existing = providers.find((p) => p.type === type);
     if (!existing) {
       if (baseUrl) providers.push({ type, baseUrl });

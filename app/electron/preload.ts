@@ -69,7 +69,11 @@ contextBridge.exposeInMainWorld('cascade', {
     onboardingDone: boolean;
   }>,
   setConfig: (cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string }) =>
-    ipcRenderer.invoke('cascade:setConfig', cfg) as Promise<{ onboardingDone: boolean }>,
+    // `ok`/`error` are part of this contract, not an internal detail: the main
+    // process can DECLINE to store a key whose host it cannot determine, and a
+    // renderer typed to see only `onboardingDone` advanced the wizard as though
+    // the key had been saved.
+    ipcRenderer.invoke('cascade:setConfig', cfg) as Promise<{ onboardingDone?: boolean; ok?: boolean; error?: string }>,
 
   // Settings panel: backend-independent read/write of keys, per-tier models,
   // budget (incl. daily/session caps), and the allowlisted "advanced" knobs.

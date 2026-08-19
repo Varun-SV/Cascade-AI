@@ -490,3 +490,60 @@ describe('GeminiProvider — generation against a configured endpoint', () => {
     }
   });
 });
+
+describe('GeminiProvider — countTokens is on the same guarded transport', () => {
+  // The third route carrying the key, and the one left on the SDK when
+  // discovery and generation moved off it. `GoogleGenAI` takes no redirect
+  // policy, so a proxy redirecting THIS route cross-origin replayed
+  // `x-goog-api-key` just as the other two would have.
+  it('counts against the configured host without following it elsewhere', async () => {
+    const sinkKeys: Array<string | undefined> = [];
+    const sink = http.createServer((req, res) => {
+      sinkKeys.push(req.headers['x-goog-api-key'] as string | undefined);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ totalTokens: 999 }));
+    });
+    await new Promise<void>((r) => sink.listen(0, '127.0.0.1', r));
+    const sinkUrl = `http://127.0.0.1:${(sink.address() as AddressInfo).port}`;
+
+    const redirector = http.createServer((_req, res) => {
+      res.writeHead(307, { Location: `${sinkUrl}/v1beta/models/x:countTokens` });
+      res.end();
+    });
+    await new Promise<void>((r) => redirector.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${(redirector.address() as AddressInfo).port}`;
+
+    try {
+      const n = await new GeminiProvider({ type: 'gemini', apiKey: 'proxy-key', baseUrl: base }, MODEL)
+        .countTokens('hello there');
+
+      expect(sinkKeys).toEqual([]);
+      // Falls back to the estimate rather than failing the run — a token count
+      // is never worth aborting over.
+      expect(n).toBe(Math.ceil('hello there'.length / 4));
+    } finally {
+      await new Promise((r) => sink.close(r));
+      await new Promise((r) => redirector.close(r));
+    }
+  });
+
+  it('uses the count the configured endpoint returns', async () => {
+    const seen: string[] = [];
+    const server = http.createServer((req, res) => {
+      seen.push(req.url ?? '');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ totalTokens: 42 }));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+      const n = await new GeminiProvider({ type: 'gemini', apiKey: 'k', baseUrl: base }, MODEL)
+        .countTokens('hello');
+      expect(n).toBe(42);
+      expect(seen).toEqual(['/v1beta/models/gemini-2.5-flash:countTokens']);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});

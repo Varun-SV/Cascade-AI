@@ -299,13 +299,35 @@ export class GeminiProvider extends BaseProvider {
   }
 
   async countTokens(text: string): Promise<number> {
+    const contents = [{ role: 'user', parts: [{ text }] }];
     try {
-      const result = await this.client.models.countTokens({
-        model: this.model.id,
-        contents: [{ role: 'user', parts: [{ text }] }],
-      });
+      // The third route that carries the key, and the one left behind when
+      // discovery and generation moved off the SDK. `GoogleGenAI` cannot be
+      // given a redirect policy, so a configured proxy redirecting THIS route
+      // cross-origin would still have replayed `x-goog-api-key` — the same hole
+      // in a quieter place. The public host keeps the SDK, as elsewhere.
+      if (this.config.baseUrl) {
+        const resp = await fetchSameOrigin(
+          `${geminiApiRoot(this.config.baseUrl)}/${GEMINI_API_VERSION}`
+          + `/models/${encodeURIComponent(this.model.id)}:countTokens`,
+          {
+            method: 'POST',
+            headers: {
+              'x-goog-api-key': this.config.apiKey ?? '',
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({ contents }),
+          },
+        );
+        if (!resp.ok) return Math.ceil(text.length / 4);
+        const data = await resp.json() as { totalTokens?: number };
+        return data.totalTokens ?? 0;
+      }
+      const result = await this.client.models.countTokens({ model: this.model.id, contents });
       return result.totalTokens ?? 0;
     } catch {
+      // Including a refused cross-origin redirect: an estimate is the right
+      // answer for a token count, and it is never worth failing a run over.
       return Math.ceil(text.length / 4);
     }
   }
