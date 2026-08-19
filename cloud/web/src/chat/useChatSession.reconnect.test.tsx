@@ -157,6 +157,54 @@ describe('useChatSession — a run that outlives the connection that started it'
     expect(view.result.current.conversationId).toBe('server-made-id');
   });
 
+  it('keeps waiting when the resume arrives before the run is handed over', async () => {
+    // The full sequence the server's own overlap ordering produces: this page
+    // reconnects while the previous socket is still holding the run, so the
+    // resume status has to already count the handover that has not happened
+    // yet. If it says `active: 0` the page treats it as terminal — and it does
+    // not merely clear `busy`, it clears the flag saying the ack is lost, so
+    // the `session:complete` that arrives after the handover is then discarded
+    // as an ordinary duplicate and the answer never loads. The run survives on
+    // the server and the user still sees it die.
+    const fake = fakeSocket();
+    const view = startRun(fake);
+    await waitFor(() => expect(view.result.current.busy).toBe(true));
+
+    // Reconnected mid-run, told there is one run coming to it.
+    act(() => { fake.fire('run:resumed', { active: 1, finished: [] }); });
+    expect(view.result.current.busy).toBe(true);
+
+    // The handover happens server-side, and only then does the run end.
+    act(() => { fake.fire('session:complete', { conversationId: 'server-made-id' }); });
+
+    await waitFor(() => expect(view.result.current.busy).toBe(false));
+    expect(view.result.current.conversationId).toBe('server-made-id');
+    await waitFor(() => {
+      expect(view.result.current.messages.map((m) => m.content))
+        .toContain('the answer that survived');
+    });
+  });
+
+  it('cannot be revived by a completion once it was told nothing was running', async () => {
+    // The inverse, and the reason the count above has to be right rather than
+    // merely optimistic: `active: 0` is terminal and IRREVERSIBLE on the
+    // client. Nothing arriving afterwards puts the page back into waiting, so
+    // a server that under-reports cannot be rescued by a later event.
+    const fake = fakeSocket();
+    const view = startRun(fake);
+    await waitFor(() => expect(view.result.current.busy).toBe(true));
+
+    act(() => { fake.fire('run:resumed', { active: 0, finished: [] }); });
+    await waitFor(() => expect(view.result.current.busy).toBe(false));
+
+    // A completion for the run that was, in fact, still going.
+    act(() => { fake.fire('session:complete', { conversationId: 'server-made-id' }); });
+
+    // Still finished, and — the point — the reply never got loaded by it.
+    expect(view.result.current.busy).toBe(false);
+    expect(view.result.current.conversationId).toBeUndefined();
+  });
+
   it('ignores session:error on a healthy connection, where the ack reports it', async () => {
     // The mirror of the session:complete gate. On a live socket the ack
     // carries `{ error }` and does the full cleanup; acting on both would

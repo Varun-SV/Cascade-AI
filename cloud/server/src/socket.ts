@@ -220,7 +220,12 @@ export function attachSocket(
    * duplicated tab (session storage is COPIED into a tab opened from another)
    * detects the collision and rotates to a fresh id.
    */
-  const owners = new Map<string, { socket: Socket; adopt: (run: LiveRun) => void }>();
+  const owners = new Map<string, {
+    socket: Socket;
+    adopt: (run: LiveRun) => void;
+    /** Runs this connection would hand over if it dropped right now. */
+    pending: () => number;
+  }>();
 
   io.use((socket, next) => {
     const cookies = parseCookies(socket.handshake.headers.cookie);
@@ -281,12 +286,29 @@ export function attachSocket(
     // dead socket, so the reconnected page waited forever on a run that was
     // talking to nobody.
     const key = resumeKey(socket);
+
+    // Runs the OUTGOING connection on this key still holds.
+    //
+    // Read before this socket takes ownership, and counted as active below,
+    // because a handover that has not happened yet is still a run this client
+    // is going to be given. Reporting `active: 0` here and moving the run
+    // afterwards is a race the client loses in a way it cannot recover from:
+    // it treats no-active-runs as terminal, clears `busy`, and — critically —
+    // clears the flag that says the ack is lost, so the `session:complete`
+    // that arrives after the handover is then ignored as an ordinary
+    // duplicate. The run survives on the server and the page still says it
+    // died, which is the whole symptom.
+    const outgoing = key ? owners.get(key) : undefined;
+    const pendingHandover =
+      outgoing && outgoing.socket !== socket && outgoing.socket.connected ? outgoing.pending() : 0;
+
     // Registered BEFORE anything is adopted, so an old socket disconnecting
     // mid-handshake finds this connection and hands over rather than parking.
     if (key) {
       owners.set(key, {
         socket,
         adopt: (run: LiveRun) => { run.transport.rebind(socket); activeRuns.add(run); },
+        pending: () => [...activeRuns].filter((r) => !r.done).length,
       });
     }
 
@@ -317,7 +339,7 @@ export function attachSocket(
     // connected emitted its terminal event into the void, so this is the only
     // remaining place that id can come from.
     socket.emit('run:resumed', {
-      active: activeRuns.size,
+      active: activeRuns.size + pendingHandover,
       finished: [...(held?.runs ?? [])]
         .filter((r) => r.done)
         .map((r) => ({ conversationId: r.terminal?.conversationId ?? r.conversationId, error: r.terminal?.error })),
@@ -374,6 +396,23 @@ export function attachSocket(
     // client is already reconnecting. Hold the runs for the grace window and
     // abort only if nobody comes back — see RECONNECT_GRACE_MS.
     socket.on('disconnect', () => {
+      const parkKey = resumeKey(socket);
+
+      // Release ownership FIRST, on every disconnect — including the idle one
+      // that owns no runs at all.
+      //
+      // Releasing it only on the run-carrying path left a dead socket named as
+      // the owner of a key forever, and the handover below trusts that name: a
+      // later disconnect would rebind a live run onto a closed socket and
+      // return without arming a grace timer, so the run went on spending with
+      // nothing attached and nothing able to stop it. The rotation path makes
+      // that ordinary rather than exotic — a duplicated tab connects on the
+      // copied id, rotates, and drops that first socket having run nothing.
+      //
+      // Guarded on still being the owner, so an older socket leaving does not
+      // evict the replacement that has already taken the key.
+      if (parkKey && owners.get(parkKey)?.socket === socket) owners.delete(parkKey);
+
       const inFlight = [...activeRuns].filter((r) => !r.done);
       activeRuns.clear();
       // Nothing more may be written to a socket that is gone; the listeners go
@@ -384,7 +423,6 @@ export function attachSocket(
       // No tab identity means nothing can ever prove it is this client coming
       // back, so there is nobody to hold the run FOR. Abort now rather than
       // spend for 90 seconds on an answer no connection can claim.
-      const parkKey = resumeKey(socket);
       if (!parkKey) {
         for (const r of inFlight) r.controller.abort();
         return;
@@ -392,13 +430,13 @@ export function attachSocket(
 
       // Someone else already answers for this key: the replacement connected
       // before this disconnect was processed. Hand the runs over rather than
-      // parking them under a key nobody will look up again.
+      // parking them under a key nobody will look up again — but only to a
+      // connection that is actually still there.
       const owner = owners.get(parkKey);
-      if (owner && owner.socket !== socket) {
+      if (owner && owner.socket !== socket && owner.socket.connected) {
         for (const r of inFlight) owner.adopt(r);
         return;
       }
-      owners.delete(parkKey);
 
       // A second disconnect while the first is still held must not drop the
       // first set on the floor: merge, and restart the clock from the latest.

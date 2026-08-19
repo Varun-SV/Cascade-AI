@@ -596,8 +596,19 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
     // The replacement arrives first, on the same tab identity.
     const second = connect(cookie, 'tab-race');
     let completedOnSecond = false;
+    const resumed: Array<{ active?: number }> = [];
     second.on('session:complete', () => { completedOnSecond = true; });
+    second.on('run:resumed', (e: { active?: number }) => { resumed.push(e); });
     await connected(second);
+
+    // The status must already account for the handover that has not happened
+    // yet. `active: 0` here is not merely imprecise — the client treats it as
+    // terminal, clears `busy` AND clears the flag saying its ack is lost, so
+    // the `session:complete` that arrives after the handover is discarded as a
+    // duplicate. The run would survive on the server and the page would still
+    // report that it died.
+    await until(() => resumed.length > 0, 5_000);
+    expect(resumed[0]?.active).toBe(1);
 
     // Only now does the old connection go away.
     first.close();
@@ -613,6 +624,46 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
       10_000,
     );
     expect(landed).toBe(true);
+  }, 40_000);
+
+  it('parks a run rather than handing it to a socket that has already gone', async () => {
+    // The client's rotation path makes this ordinary: a duplicated tab
+    // connects on the COPIED id, discovers the collision, rotates to a fresh
+    // one and drops that first socket having run nothing at all. An idle
+    // disconnect that did not release ownership left the dead duplicate named
+    // as the owner of the original tab's key — so when the original later
+    // dropped mid-run, its run was rebound onto a closed socket and no grace
+    // timer was armed. It then spent with nothing attached and no way to stop.
+    await start(1_500);
+    stub = await startStubOpenAIServer({ delayMs: 4_000 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'grace-stale', email: null, name: 'Stale', avatar: null });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+
+    // The original tab, running something.
+    const original = connect(cookie, 'tab-orig');
+    await connected(original);
+    original.emit(
+      'chat:run',
+      { prompt: 'hello', providers: [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }] },
+      () => { /* dies with this socket */ },
+    );
+    await new Promise((r) => setTimeout(r, 200));
+
+    // The duplicate briefly claims the same key, then rotates away and drops.
+    const duplicate = connect(cookie, 'tab-orig');
+    await connected(duplicate);
+    duplicate.close();
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Now the original drops mid-run. Its run must be PARKED under its own key
+    // — not handed to the duplicate's dead socket — and therefore aborted by
+    // the grace timer when nobody returns.
+    original.close();
+    await new Promise((r) => setTimeout(r, 4_500));
+
+    const conversations = store.listConversations(user.id) as Array<{ id: string }>;
+    const reply = conversations.length ? assistantReply(conversations[0]!.id) : '';
+    expect(reply).not.toContain('Hello from the stub model.');
   }, 40_000);
 
   it('tells a fresh connection there is nothing to wait for', async () => {
