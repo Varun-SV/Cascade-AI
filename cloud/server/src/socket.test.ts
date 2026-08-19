@@ -626,6 +626,75 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
     expect(landed).toBe(true);
   }, 40_000);
 
+  it('delivers a completion that lands during the overlap, before the old socket drops', async () => {
+    // The inverse of the under-report. Promising `active: 1` while the run is
+    // still bound to the OLD transport is a promise the server cannot keep: if
+    // the run finishes in that window its `session:complete` goes to the
+    // connection this path already treats as lost, the old socket's eventual
+    // disconnect finds nothing in flight and hands over nothing, and this
+    // client waits forever for an event that can never arrive.
+    //
+    // Note the old socket is never closed here — the run finishes first, on
+    // purpose.
+    await start(8_000);
+    stub = await startStubOpenAIServer({ delayMs: 1_200 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'grace-mid', email: null, name: 'Mid', avatar: null });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+
+    const first = connect(cookie, 'tab-mid');
+    await connected(first);
+    first.emit(
+      'chat:run',
+      { prompt: 'hello', providers: [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }] },
+      () => { /* the ack this path assumes is lost */ },
+    );
+    await new Promise((r) => setTimeout(r, 200));
+
+    // The replacement takes the key while the run is still going.
+    const second = connect(cookie, 'tab-mid');
+    const resumed: Array<{ active?: number }> = [];
+    let completedOnSecond = false;
+    second.on('run:resumed', (e: { active?: number }) => { resumed.push(e); });
+    second.on('session:complete', () => { completedOnSecond = true; });
+    await connected(second);
+
+    await until(() => resumed.length > 0, 5_000);
+    expect(resumed[0]?.active).toBe(1);
+
+    // The run ends while the old socket is STILL connected. Whatever was
+    // promised above has to be honoured by the connection it was promised to.
+    const finished = await until(() => completedOnSecond, 12_000);
+    expect(finished).toBe(true);
+  }, 40_000);
+
+  it('lets the replacement stop a run during the overlap', async () => {
+    // Same ownership gap, seen from the user's side: a Stop pressed on the
+    // page that was told it had a run in flight must actually abort it, not
+    // wait on the old socket's disconnect to transfer ownership first.
+    await start(8_000);
+    stub = await startStubOpenAIServer({ delayMs: 3_000 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'grace-stopmid', email: null, name: 'StopMid', avatar: null });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+
+    const first = connect(cookie, 'tab-stopmid');
+    await connected(first);
+    first.emit(
+      'chat:run',
+      { prompt: 'hello', providers: [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }] },
+      () => { /* gone with the old connection */ },
+    );
+    await new Promise((r) => setTimeout(r, 200));
+
+    const second = connect(cookie, 'tab-stopmid');
+    await connected(second);
+    second.emit('chat:stop');
+
+    await new Promise((r) => setTimeout(r, 3_500));
+    const conversations = store.listConversations(user.id) as Array<{ id: string }>;
+    const reply = conversations.length ? assistantReply(conversations[0]!.id) : '';
+    expect(reply).not.toContain('Hello from the stub model.');
+  }, 30_000);
+
   it('parks a run rather than handing it to a socket that has already gone', async () => {
     // The client's rotation path makes this ordinary: a duplicated tab
     // connects on the COPIED id, discovers the collision, rotates to a fresh

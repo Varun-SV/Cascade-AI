@@ -223,8 +223,8 @@ export function attachSocket(
   const owners = new Map<string, {
     socket: Socket;
     adopt: (run: LiveRun) => void;
-    /** Runs this connection would hand over if it dropped right now. */
-    pending: () => number;
+    /** Give up every live run, so the taker owns them outright. */
+    release: () => LiveRun[];
   }>();
 
   io.use((socket, next) => {
@@ -287,20 +287,30 @@ export function attachSocket(
     // talking to nobody.
     const key = resumeKey(socket);
 
-    // Runs the OUTGOING connection on this key still holds.
+    // Take the outgoing connection's live runs, rather than counting them.
     //
-    // Read before this socket takes ownership, and counted as active below,
-    // because a handover that has not happened yet is still a run this client
-    // is going to be given. Reporting `active: 0` here and moving the run
-    // afterwards is a race the client loses in a way it cannot recover from:
-    // it treats no-active-runs as terminal, clears `busy`, and — critically —
-    // clears the flag that says the ack is lost, so the `session:complete`
-    // that arrives after the handover is then ignored as an ordinary
-    // duplicate. The run survives on the server and the page still says it
-    // died, which is the whole symptom.
+    // This socket claiming the key IS the client coming back, so the runs move
+    // now — not when the old socket's `disconnect` eventually fires. Merely
+    // COUNTING a handover that has not happened is a promise the server cannot
+    // keep: the run is still bound to the old transport, so if it finishes in
+    // that window its `session:complete` goes to the connection this path
+    // already treats as lost, the old socket's disconnect then finds nothing
+    // in flight and hands over nothing, and this client waits forever for an
+    // event that can never come. `chat:stop` has the same hole — it would be a
+    // no-op on a run this connection was told it owned.
+    //
+    // Under-reporting is the mirror bug and is just as fatal: a client told
+    // `active: 0` treats it as terminal and clears the flag saying its ack is
+    // lost, after which the real completion is discarded as a duplicate.
+    // Moving the runs makes the count true at the moment it is sent, which is
+    // the only version of this that is not a race.
     const outgoing = key ? owners.get(key) : undefined;
-    const pendingHandover =
-      outgoing && outgoing.socket !== socket && outgoing.socket.connected ? outgoing.pending() : 0;
+    if (outgoing && outgoing.socket !== socket) {
+      for (const run of outgoing.release()) {
+        run.transport.rebind(socket);
+        activeRuns.add(run);
+      }
+    }
 
     // Registered BEFORE anything is adopted, so an old socket disconnecting
     // mid-handshake finds this connection and hands over rather than parking.
@@ -308,7 +318,11 @@ export function attachSocket(
       owners.set(key, {
         socket,
         adopt: (run: LiveRun) => { run.transport.rebind(socket); activeRuns.add(run); },
-        pending: () => [...activeRuns].filter((r) => !r.done).length,
+        release: () => {
+          const live = [...activeRuns].filter((r) => !r.done);
+          for (const run of live) activeRuns.delete(run);
+          return live;
+        },
       });
     }
 
@@ -339,7 +353,7 @@ export function attachSocket(
     // connected emitted its terminal event into the void, so this is the only
     // remaining place that id can come from.
     socket.emit('run:resumed', {
-      active: activeRuns.size + pendingHandover,
+      active: activeRuns.size,
       finished: [...(held?.runs ?? [])]
         .filter((r) => r.done)
         .map((r) => ({ conversationId: r.terminal?.conversationId ?? r.conversationId, error: r.terminal?.error })),
