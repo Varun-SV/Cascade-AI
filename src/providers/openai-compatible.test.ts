@@ -79,3 +79,33 @@ describe('OpenAICompatibleProvider listModels — local vs hosted pricing', () =
     expect(m!.pricingUnknown).toBe(false);
   });
 });
+
+describe('an OpenAI-compatible provider must name its endpoint', () => {
+  // The OpenAI SDK defaults `baseURL` to api.openai.com, so an endpointless row
+  // does not fail — it succeeds against the wrong host. The settings writers
+  // refuse to create one, but `createCascade()` validates against
+  // `ProviderConfigSchema`, where `baseUrl` is optional, so a programmatic
+  // config reaches the constructor having passed none of those guards.
+  const model = {
+    id: 'seed', name: 'seed', provider: 'openai-compatible' as const,
+    contextWindow: 32_000, isVisionCapable: false,
+    inputCostPer1kTokens: 0, outputCostPer1kTokens: 0,
+    maxOutputTokens: 4_000, supportsStreaming: true, isLocal: false,
+  };
+
+  it('refuses a key with nowhere to send it', () => {
+    expect(() => new OpenAICompatibleProvider({ type: 'openai-compatible', apiKey: 'groq-key' }, model))
+      .toThrow(/requires `baseUrl`/);
+  });
+
+  it('refuses a keyless one too — "no key" is not "no address"', () => {
+    expect(() => new OpenAICompatibleProvider({ type: 'openai-compatible' }, model))
+      .toThrow(/requires `baseUrl`/);
+  });
+
+  it('accepts one that names its host', () => {
+    expect(() => new OpenAICompatibleProvider(
+      { type: 'openai-compatible', apiKey: 'k', baseUrl: 'https://api.groq.com/openai/v1' }, model,
+    )).not.toThrow();
+  });
+});

@@ -68,7 +68,7 @@ contextBridge.exposeInMainWorld('cascade', {
     workspace: string;
     onboardingDone: boolean;
   }>,
-  setConfig: (cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string }) =>
+  setConfig: (cfg: { provider: string; apiKey: string; workspace: string; baseUrl?: string; endpointOffered?: boolean }) =>
     // `ok`/`error` are part of this contract, not an internal detail: the main
     // process can DECLINE to store a key whose host it cannot determine, and a
     // renderer typed to see only `onboardingDone` advanced the wizard as though

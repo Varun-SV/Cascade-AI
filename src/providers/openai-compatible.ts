@@ -20,6 +20,25 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
     // this subclass's constructor body ever runs. Pass the same "not-required"
     // fallback used below so super() never sees an undefined key.
     super({ ...config, apiKey: config.apiKey ?? 'not-required' }, model);
+    // An endpoint is REQUIRED here, and this is the boundary that has to say so.
+    //
+    // The OpenAI SDK falls back to `api.openai.com` when `baseURL` is absent,
+    // so an endpointless row does not fail — it succeeds against the wrong
+    // host, handing a Groq or DeepSeek key to OpenAI. The settings writers
+    // refuse to create such a row, but `createCascade()` runs only
+    // `ProviderConfigSchema`, where `baseUrl` is optional, so a programmatic
+    // config reaches this constructor having passed none of them. Same
+    // reasoning as the endpointless Anthropic bearer: the provider boundary is
+    // the only one every caller goes through.
+    //
+    // Keyless local servers need the URL just as much — "no key" is not "no
+    // address".
+    if (!config.baseUrl?.trim()) {
+      throw new Error(
+        'An OpenAI-compatible provider requires `baseUrl`: without one the OpenAI SDK sends to '
+        + 'api.openai.com, so a key issued by another service would go to OpenAI.',
+      );
+    }
     // Talk to the endpoint via Node's http stack (see net.ts) — the Electron
     // main process can't always reach loopback servers through global fetch.
     this.client = new OpenAI({

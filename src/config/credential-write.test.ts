@@ -3,6 +3,7 @@ import {
   applyEndpointEdit, applyProviderCredential, applySettingsCredentials,
   credentialDispositionForEdit, endpointFromSettingsPayload,
 } from './credential-write.js';
+import { priorAzureRow } from './settings-payload.js';
 
 describe('credentialDispositionForEdit', () => {
   it('keeps the key when the endpoint has not moved', () => {
@@ -423,6 +424,29 @@ describe('applyProviderCredential — intent decides, absence never does', () =>
   });
 });
 
+describe('priorAzureRow — a key is inherited only within its resource', () => {
+  const prior = [
+    { deploymentName: 'prod', baseUrl: 'https://resource-a.openai.azure.com', apiKey: 'a-key' },
+    { deploymentName: 'chat', baseUrl: 'https://resource-b.openai.azure.com', apiKey: 'b-key' },
+  ];
+
+  it('matches on deployment name AND resource', () => {
+    expect(priorAzureRow(prior, { deploymentName: 'prod', baseUrl: 'https://resource-a.openai.azure.com/' }))
+      .toMatchObject({ apiKey: 'a-key' });
+  });
+
+  it('inherits nothing when the deployment moved to another resource', () => {
+    // An Azure key is resource-scoped, so matching the name alone copied
+    // resource A's key onto resource B.
+    expect(priorAzureRow(prior, { deploymentName: 'prod', baseUrl: 'https://resource-b.openai.azure.com' }))
+      .toBeUndefined();
+  });
+
+  it('inherits nothing for a row with no deployment name', () => {
+    expect(priorAzureRow(prior, { baseUrl: 'https://resource-a.openai.azure.com' })).toBeUndefined();
+  });
+});
+
 describe('a NEW row is held to the same routability rule as an existing one', () => {
   // Onboarding used to create rows by pushing an object literal, so every rule
   // in this module applied to edits and to nothing else. The first key a user
@@ -494,13 +518,41 @@ describe('every settings surface is actually wired to the shared rules', () => {
     expect(source).not.toMatch(/applyProviderApiKey\(/);
   });
 
+  it('the renderer states its endpoint intent and never reads an omission as a clear', async () => {
+    // Renderer behaviour with no test harness of its own, so asserted from
+    // source. Each of these is a defect that shipped: the panel blanking
+    // gateway fields from a PARTIAL snapshot, the wizard carrying one
+    // provider's draft to another, and the wizard re-deriving which providers
+    // it had shown a field for.
+    const settings = await read('../../app/src/views/SettingsView.tsx');
+    expect(settings).toMatch(/addressableEndpoints\(/);
+    // Endpoints are applied only from a payload that actually carries them.
+    expect(settings).toMatch(/if \(cfg\.endpoints\) \{/);
+    // The socket save is AWAITED, so a refusal cannot be reported as success.
+    expect(settings).toMatch(/ack\.refused/);
+
+    const onboarding = await read('../../app/src/views/OnboardingView.tsx');
+    expect(onboarding).toMatch(/endpointOffered/);
+    // Switching provider starts a new draft rather than inheriting a secret.
+    expect(onboarding).toMatch(/chooseProvider/);
+    expect(onboarding).not.toMatch(/onClick=\{\(\) => setSelectedProvider\(p\)\}/);
+  });
+
   it('both live save handlers run the one shared implementation', async () => {
     for (const rel of ['../../app/electron/main.ts', '../dashboard/server.ts']) {
       const source = await read(rel);
-      expect(source, rel).toMatch(/applySettingsCredentials\(/);
+      // The WHOLE payload, not just its credential half. Applying the rest
+      // separately is how the socket path came to support four fields fewer
+      // than the panel offered on it.
+      expect(source, rel).toMatch(/applySettingsPayload\(/);
       // No hand-rolled key loop beside it — that is how the dashboard drifted
       // into writing keys without endpoints and ignoring `endpoints` entirely.
       expect(source, rel).not.toMatch(/applyProviderApiKey\(/);
+      // …and no private copy of the non-credential halves either. Matched on
+      // the ASSIGNMENT: both files still legitimately READ budget fields to
+      // build their redacted snapshots, and that is not a second writer.
+      expect(source, rel).not.toMatch(/budget\.maxCostPerRunUsd\s*=/);
+      expect(source, rel).not.toMatch(/budget\.dailyBudgetUsd\s*=/);
     }
   });
 });

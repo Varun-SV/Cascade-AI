@@ -34,7 +34,7 @@
     "dev:cloud-web": "npm run dev -w cascade-cloud-web",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "tsc --noEmit && tsc -p app/electron/tsconfig.test.json",
+    "lint": "tsc --noEmit && tsc -p app/electron/tsconfig.test.json && tsc -p app/tsconfig.json --noEmit",
     "prepublishOnly": "npm run build",
     "cascade": "node bin/cascade.js"
   },

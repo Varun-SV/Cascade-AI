@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { Socket } from 'socket.io-client';
+import { addressableEndpoints } from '../lib/endpoints';
 import { X, Monitor, Sun, Moon, Sparkles, RefreshCw, List } from 'lucide-react';
 import { useAppDispatch, useAppSelector, type ThemePref } from '../store/index.js';
 import { setShowSettings } from '../store/index.js';
@@ -128,6 +129,27 @@ export function SettingsView({ socket }: Props) {
   const [anthropicUrl, setAnthropicUrl] = useState('');
   const [openaiUrl, setOpenaiUrl] = useState('');
   const [geminiUrl, setGeminiUrl] = useState('');
+  /**
+   * Whether a snapshot carrying endpoints has actually arrived.
+   *
+   * These fields start blank and are filled asynchronously, while the save
+   * payload sends every endpoint property and a present-but-empty one is an
+   * explicit CLEAR. Between mount and the first snapshot the two combine into a
+   * clear the user never made: hitting Save — or pasting a rotated gateway key
+   * and saving — retired the credential paired with a gateway still sitting in
+   * the config.
+   *
+   * Until it lands, only fields the user actually touched are sent. Omitting a
+   * property means "this surface cannot address that provider", which is the
+   * honest description of not knowing yet, and the write layer treats it as
+   * `preserve` rather than acting on it.
+   */
+  const [endpointsHydrated, setEndpointsHydrated] = useState(false);
+  const touchedEndpoints = useRef<Set<string>>(new Set());
+  const touchEndpoint = (type: string, set: (v: string) => void) => (value: string) => {
+    touchedEndpoints.current.add(type);
+    set(value);
+  };
   const [ollamaUrl, setOllamaUrl] = useState('');
   // Web-search backends (tools.webSearch) — without one configured, the
   // web_search tool depends entirely on scraping DuckDuckGo.
@@ -208,6 +230,7 @@ export function SettingsView({ socket }: Props) {
     // credential paired with that host: a rotated gateway key typed after a
     // reconnect would have been written to the provider's public API.
     if (cfg.endpoints) {
+      setEndpointsHydrated(true);
       const at = (type: string): string => cfg.endpoints?.[type] ?? '';
       setAnthropicUrl(at('anthropic'));
       setOpenaiUrl(at('openai'));
@@ -293,13 +316,16 @@ export function SettingsView({ socket }: Props) {
         maxTokensPerRun: maxTokens ? parseInt(maxTokens, 10) : undefined,
         warnAtPct: warnAt ? parseFloat(warnAt) : undefined,
       },
-      endpoints: {
-        anthropic: anthropicUrl.trim() || undefined,
-        openai: openaiUrl.trim() || undefined,
-        gemini: geminiUrl.trim() || undefined,
-        'openai-compatible': ocUrl.trim() || undefined,
-        ollama: ollamaUrl.trim() || undefined,
-      },
+      // Only providers this panel can currently speak for. A property that is
+      // PRESENT and empty is an explicit clear, so sending one for a field that
+      // has never been populated would retire a credential on the user's behalf.
+      endpoints: addressableEndpoints(
+        [
+          ['anthropic', anthropicUrl], ['openai', openaiUrl], ['gemini', geminiUrl],
+          ['openai-compatible', ocUrl], ['ollama', ollamaUrl],
+        ],
+        { hydrated: endpointsHydrated, touched: touchedEndpoints.current },
+      ),
       webSearch: { searxngUrl: searxngUrl.trim(), braveApiKey: braveKey || undefined, tavilyApiKey: tavilyKey || undefined },
       azureDeployments: azureDeployments
         .filter((d) => d.label.trim() || d.baseUrl.trim() || d.apiKey.trim() || d.deploymentName.trim())
@@ -335,7 +361,27 @@ export function SettingsView({ socket }: Props) {
 
     // Also notify the live backend (when connected) so the running session picks
     // up the new keys/models immediately, with no restart.
-    if (socket) { socket.emit('config:update', payload); persisted = true; }
+    //
+    // AWAITED, because the backend can decline to store a key whose host it
+    // cannot determine. Emitting and moving on reported success and cleared the
+    // input over a value that was never saved — which is the standalone
+    // `cascade dashboard` path in full, and the desktop's whenever the IPC
+    // bridge is unavailable. The timeout keeps an older backend, which sends no
+    // acknowledgement at all, from hanging the save.
+    if (socket) {
+      const ack = await new Promise<{ refused?: Array<{ message: string }> }>((resolve) => {
+        const timer = setTimeout(() => resolve({}), 3000);
+        socket.emit('config:update', payload, (result: { refused?: Array<{ message: string }> }) => {
+          clearTimeout(timer);
+          resolve(result ?? {});
+        });
+      });
+      persisted = true;
+      if (ack.refused?.length) {
+        setSaveError(ack.refused.map((r) => r.message).join(' '));
+        return;
+      }
+    }
     void fetchModels(); // re-discover endpoint models after saving (no restart)
 
     if (!persisted) {

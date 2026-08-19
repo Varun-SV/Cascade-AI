@@ -19,6 +19,10 @@ export {
   type CredentialEndpoint, type CredentialDisposition,
   type CredentialWriteOutcome, type SettingsCredentialResult,
 } from './config/credential-write.js';
+export {
+  applySettingsPayload, priorAzureRow,
+  type SettingsPayload, type AzureDeploymentInput,
+} from './config/settings-payload.js';
 // The desktop settings save has to ask "is this the same endpoint?" to decide
 // whether a stored key may be kept across an edit. Exported rather than
 // reimplemented in app/: a second copy of this rule is how the answer starts

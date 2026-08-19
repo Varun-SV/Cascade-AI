@@ -14,6 +14,7 @@ import type {
   SessionSubscriptionPayload,
 } from '../types.js';
 import { verifyToken } from './auth.js';
+import type { SettingsPayload } from '../config/settings-payload.js';
 import {
   normalizePermissionDecisionPayload,
   normalizeRuntimeRefreshPayload,
@@ -27,19 +28,21 @@ interface DashboardSocketOptions {
 }
 
 /**
- * The Settings save as it arrives over the socket.
+ * The Settings save as it arrives over the socket — the SAME type the desktop
+ * IPC bridge takes.
  *
- * `endpoints` is declared because the panel has always SENT it — the desktop
- * and web Settings views post one payload to both the Electron IPC bridge and
- * this socket. Leaving it off the type here did not make it absent from the
- * wire; it just hid the endpoint a key was typed beside from the code writing
- * that key, which is how a public-host key ended up stored against a gateway.
+ * It was a narrower hand-written copy, and the narrowing was not harmless: the
+ * panel posts one payload to both surfaces, so a field missing from this
+ * declaration was not missing from the wire, merely invisible to the code
+ * handling it. That hid the endpoint a key was typed beside (a public-host key
+ * ended up stored against a gateway) and then hid budget, Azure, web-search and
+ * advanced entirely (controls that reported success and changed nothing).
  */
-export interface ConfigUpdatePayload {
-  keys?: Record<string, string | undefined>;
-  endpoints?: Record<string, string | undefined>;
-  models?: Record<string, string>;
-  budget?: { maxCostPerRun?: number; autoBias?: string };
+export type ConfigUpdatePayload = SettingsPayload;
+
+/** What the save could not store, phrased for the person who typed it. */
+export interface ConfigUpdateResult {
+  refused: Array<{ type: string; reason: string; message: string }>;
 }
 
 export class DashboardSocket {
@@ -255,12 +258,21 @@ export class DashboardSocket {
     });
   }
 
-  onConfigUpdate(callback: (data: ConfigUpdatePayload) => void): void {
+  /**
+   * The handler's result is ACKNOWLEDGED to the caller.
+   *
+   * A settings save can be partly refused — a key whose host cannot be
+   * determined is deliberately not stored — and this path had no way to say so,
+   * so the panel cleared the input and reported success over a key the backend
+   * had dropped. Socket.IO's own ack channel carries it back, which needs no
+   * new event name and cannot be missed by a client that forgot to subscribe.
+   */
+  onConfigUpdate(callback: (data: ConfigUpdatePayload) => ConfigUpdateResult): void {
     this.io.on('connection', (socket) => {
-      socket.on('config:update', (payload: unknown) => {
-        if (typeof payload === 'object' && payload !== null) {
-          callback(payload as ConfigUpdatePayload);
-        }
+      socket.on('config:update', (payload: unknown, ack?: (result: ConfigUpdateResult) => void) => {
+        if (typeof payload !== 'object' || payload === null) return;
+        const result = callback(payload as ConfigUpdatePayload);
+        if (typeof ack === 'function') ack(result);
       });
     });
   }

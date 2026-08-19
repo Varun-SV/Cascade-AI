@@ -1,0 +1,168 @@
+// ─────────────────────────────────────────────
+//  Cascade AI — applying a Settings save
+// ─────────────────────────────────────────────
+//
+//  One function for the whole payload, because there are two live callers and
+//  they had drifted apart on WHICH FIELDS EXIST.
+//
+//  The desktop IPC handler applied keys, endpoints, Azure deployments, models,
+//  six budget fields, the web-search backends and the advanced allowlist. The
+//  socket handler — reached by a standalone `cascade dashboard`, and by the
+//  desktop whenever the Electron bridge is unavailable — applied keys,
+//  endpoints, models and two budget fields, and silently ignored the rest while
+//  the panel reported the save as successful. The panel sends ONE payload to
+//  both, so every field it offered on that path was a control that appeared to
+//  work and did nothing.
+//
+//  Credential rules live next door in `credential-write.ts`; this is everything
+//  else, plus the ordering between them.
+
+import type { CascadeConfig } from '../types.js';
+import { sameAzureEndpoint } from './azure-endpoint.js';
+import { applySettingsCredentials, type SettingsCredentialResult } from './credential-write.js';
+
+/** One Azure deployment as the settings panel sends it. */
+export interface AzureDeploymentInput {
+  label?: string;
+  apiKey?: string;
+  baseUrl?: string;
+  deploymentName?: string;
+  apiVersion?: string;
+}
+
+/** The complete Settings save, as both surfaces send it. */
+export interface SettingsPayload {
+  keys?: Record<string, string | undefined>;
+  endpoints?: Record<string, string | undefined>;
+  models?: Record<string, string | undefined>;
+  budget?: {
+    maxCostPerRun?: number;
+    autoBias?: string;
+    dailyBudgetUsd?: number;
+    sessionBudgetUsd?: number;
+    maxTokensPerRun?: number;
+    warnAtPct?: number;
+  };
+  azureDeployments?: AzureDeploymentInput[];
+  webSearch?: { searxngUrl?: string; braveApiKey?: string; tavilyApiKey?: string };
+  advanced?: Record<string, unknown>;
+}
+
+/**
+ * The prior Azure row a saved deployment may inherit its key from.
+ *
+ * Matched on deployment name AND resource. An Azure key is resource-scoped, so
+ * matching the name alone meant moving deployment "prod" from resource A to
+ * resource B with a blank key field copied A's key onto B — a credential sent
+ * to a resource that never issued it.
+ */
+export function priorAzureRow<T extends { deploymentName?: string; baseUrl?: string }>(
+  prior: readonly T[],
+  incoming: { deploymentName?: string; baseUrl?: string },
+): T | undefined {
+  if (!incoming.deploymentName) return undefined;
+  return prior.find((p) => p.deploymentName === incoming.deploymentName
+    && sameAzureEndpoint(p.baseUrl, incoming.baseUrl));
+}
+
+/** Apply the whole payload to a live config, in place. */
+export function applySettingsPayload(
+  config: CascadeConfig,
+  data: SettingsPayload,
+): SettingsCredentialResult {
+  if (!Array.isArray(config.providers)) config.providers = [];
+  const result = applySettingsCredentials(config.providers, data);
+
+  // Azure supports multiple deployments — unlike every other provider type it
+  // cannot be addressed by a bare `type`, so it gets its own replace-the-list
+  // field rather than an entry in `keys`/`endpoints`.
+  if (Array.isArray(data.azureDeployments)) {
+    const priorAzure = config.providers.filter((p) => p.type === 'azure');
+    const nonAzure = config.providers.filter((p) => p.type !== 'azure');
+    const nextAzure = data.azureDeployments
+      .map((d) => {
+        // A row whose resource changed inherits nothing and needs a key typed
+        // in the same save: an Azure key belongs to ONE resource.
+        const prior = priorAzureRow(priorAzure, d);
+        const apiKey = d.apiKey ? d.apiKey : prior?.apiKey;
+        return {
+          type: 'azure' as const,
+          ...(d.label ? { label: d.label } : {}),
+          ...(d.baseUrl ? { baseUrl: d.baseUrl } : {}),
+          ...(d.deploymentName ? { deploymentName: d.deploymentName } : {}),
+          ...(d.apiVersion ? { apiVersion: d.apiVersion } : {}),
+          ...(apiKey ? { apiKey } : {}),
+        };
+      })
+      // Drop rows the user added then left completely empty.
+      .filter((d) => d.apiKey || d.baseUrl || d.deploymentName);
+    config.providers = [...nonAzure, ...nextAzure];
+  }
+
+  if (data.models) {
+    const models = (config.models ?? {}) as Record<string, string | undefined>;
+    // 'auto' / '' mean "no override — let routing pick", so the binding is
+    // DELETED rather than stored, or the router hunts for a model called "auto".
+    for (const [tier, val] of Object.entries(data.models)) {
+      if (val && val !== 'auto') models[tier] = val;
+      else delete models[tier];
+    }
+    config.models = models as CascadeConfig['models'];
+  }
+
+  if (data.budget) {
+    const b = data.budget;
+    config.budget = config.budget ?? {};
+    if (typeof b.maxCostPerRun === 'number') config.budget.maxCostPerRunUsd = b.maxCostPerRun;
+    if (b.autoBias === 'balanced' || b.autoBias === 'quality' || b.autoBias === 'cost') {
+      config.autoBias = b.autoBias;
+    }
+    if (typeof b.dailyBudgetUsd === 'number' && b.dailyBudgetUsd >= 0) config.budget.dailyBudgetUsd = b.dailyBudgetUsd;
+    if (typeof b.sessionBudgetUsd === 'number' && b.sessionBudgetUsd >= 0) config.budget.sessionBudgetUsd = b.sessionBudgetUsd;
+    if (typeof b.maxTokensPerRun === 'number' && b.maxTokensPerRun > 0) config.budget.maxTokensPerRun = Math.floor(b.maxTokensPerRun);
+    if (typeof b.warnAtPct === 'number' && b.warnAtPct > 0 && b.warnAtPct <= 100) config.budget.warnAtPct = b.warnAtPct;
+  }
+
+  // Web-search backends: the URL is set/cleared directly ('' clears it); API
+  // keys keep the "blank means keep the existing key" semantics of the provider
+  // key fields.
+  if (data.webSearch && typeof data.webSearch === 'object') {
+    config.tools = config.tools ?? {};
+    const prior = (config.tools.webSearch ?? {}) as { searxngUrl?: string; braveApiKey?: string; tavilyApiKey?: string };
+    const next = { ...prior };
+    if (typeof data.webSearch.searxngUrl === 'string') next.searxngUrl = data.webSearch.searxngUrl.trim() || undefined;
+    if (data.webSearch.braveApiKey) next.braveApiKey = data.webSearch.braveApiKey;
+    if (data.webSearch.tavilyApiKey) next.tavilyApiKey = data.webSearch.tavilyApiKey;
+    config.tools.webSearch = next;
+  }
+
+  // Advanced settings: every field is individually validated against an
+  // explicit allowlist — an unknown or malformed key is IGNORED, never written,
+  // so a renderer cannot inject arbitrary config.
+  if (data.advanced && typeof data.advanced === 'object') {
+    const a = data.advanced;
+    const num = (v: unknown, min: number, max: number): number | undefined => {
+      const n = Number(v);
+      return Number.isFinite(n) && n >= min && n <= max ? n : undefined;
+    };
+    if (a['autonomy'] === 'manual' || a['autonomy'] === 'auto') config.autonomy = a['autonomy'];
+    if (['never', 'complex', 'all', 'always'].includes(a['planApproval'] as string)) config.planApproval = a['planApproval'] as CascadeConfig['planApproval'];
+    { const n = num(a['approvalTimeoutMs'], 0, 86_400_000); if (n !== undefined) config.approvalTimeoutMs = n; }
+    if (['auto', 'parallel', 'sequential'].includes(a['t3Execution'] as string)) config.t3Execution = a['t3Execution'] as CascadeConfig['t3Execution'];
+    { const n = num(a['localConcurrency'], 1, 16); if (n !== undefined) config.localConcurrency = Math.floor(n); }
+    { const n = num(a['localInferenceTimeoutMs'], 10_000, 3_600_000); if (n !== undefined) config.localInferenceTimeoutMs = n; }
+    { const n = num(a['cloudInferenceTimeoutMs'], 10_000, 3_600_000); if (n !== undefined) config.cloudInferenceTimeoutMs = n; }
+    if (typeof a['reflectionEnabled'] === 'boolean') config.reflection = { ...(config.reflection ?? {}), enabled: a['reflectionEnabled'] };
+    if (typeof a['cascadeAuto'] === 'boolean') config.cascadeAuto = a['cascadeAuto'];
+    if (['auto', 'T1', 'T2', 'T3'].includes(a['forceTier'] as string)) config.routing = { ...(config.routing ?? {}), forceTier: a['forceTier'] as NonNullable<CascadeConfig['routing']>['forceTier'] };
+    if (typeof a['benchmarksLive'] === 'boolean') config.benchmarks = { ...(config.benchmarks ?? {}), live: a['benchmarksLive'] };
+    if (['isolate', 'worker', 'auto'].includes(a['dynamicToolSandbox'] as string)) config.tools = { ...(config.tools ?? {}), dynamicToolSandbox: a['dynamicToolSandbox'] as NonNullable<CascadeConfig['tools']>['dynamicToolSandbox'] };
+    if (typeof a['factsExtraction'] === 'boolean') config.knowledge = { ...(config.knowledge ?? {}), factsExtraction: a['factsExtraction'] };
+    if (typeof a['rememberSessions'] === 'boolean') config.memory = { ...(config.memory ?? {}), rememberSessions: a['rememberSessions'] };
+    if (typeof a['enableToolCreation'] === 'boolean') config.enableToolCreation = a['enableToolCreation'];
+    if (typeof a['persistDynamicTools'] === 'boolean') config.persistDynamicTools = a['persistDynamicTools'];
+    if (typeof a['telemetryEnabled'] === 'boolean') config.telemetry = { ...(config.telemetry ?? {}), enabled: a['telemetryEnabled'] };
+  }
+
+  return result;
+}
