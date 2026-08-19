@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import type { Socket } from 'socket.io-client';
 import { addressableEndpoints, endpointAfterSnapshot } from '../lib/endpoints';
 import { fieldFromSnapshot, numberFieldFromSnapshot } from '../lib/snapshot-apply';
+import { canHydrate, canSerialize, type SettingsSection } from '../lib/form-state';
 import { X, Monitor, Sun, Moon, Sparkles, RefreshCw, List } from 'lucide-react';
 import { useAppDispatch, useAppSelector, type ThemePref } from '../store/index.js';
 import { setShowSettings } from '../store/index.js';
@@ -145,10 +146,50 @@ export function SettingsView({ socket }: Props) {
    * honest description of not knowing yet, and the write layer treats it as
    * `preserve` rather than acting on it.
    */
-  const [endpointsHydrated, setEndpointsHydrated] = useState(false);
+  /**
+   * Which sections have loaded, and which the user has edited.
+   *
+   * Per SECTION rather than per field, and covering all of them rather than
+   * endpoints alone — every round that added the rule to one place found
+   * another place that needed it. See `lib/form-state.ts` for what each answers.
+   *
+   * Refs, not state: both hydration callbacks are asynchronous and would
+   * otherwise read the sets captured when they were registered.
+   */
+  /**
+   * Which individual endpoint FIELDS the user has edited.
+   *
+   * Finer than the section flag beside it: one gateway URL being typed must not
+   * stop the others hydrating, and `addressableEndpoints` decides per provider
+   * which entries a save may carry.
+   */
   const touchedEndpoints = useRef<Set<string>>(new Set());
+  const hydratedSections = useRef<Set<SettingsSection>>(new Set());
+  const touchedSections = useRef<Set<SettingsSection>>(new Set());
+  const [, forceFormState] = useState(0);
+  const markTouched = (section: SettingsSection): void => {
+    if (touchedSections.current.has(section)) return;
+    touchedSections.current.add(section);
+    forceFormState((n) => n + 1); // Save's payload depends on this.
+  };
+  const sectionState = () => ({ hydrated: hydratedSections.current, touched: touchedSections.current });
+
+  /**
+   * A setter that records which section the user just edited.
+   *
+   * Every writeable control goes through one of these, because the dirty flag
+   * decides two things a form cannot get right on its own: whether a save may
+   * serialize the section, and whether a snapshot arriving later may replace
+   * it.
+   */
+  const edits = <T,>(section: SettingsSection, set: (value: T) => void) => (value: T): void => {
+    markTouched(section);
+    set(value);
+  };
+
   const touchEndpoint = (type: string, set: (v: string) => void) => (value: string) => {
     touchedEndpoints.current.add(type);
+    markTouched('endpoints');
     set(value);
   };
   const [ollamaUrl, setOllamaUrl] = useState('');
@@ -160,10 +201,12 @@ export function SettingsView({ socket }: Props) {
   const [searchKeysSet, setSearchKeysSet] = useState<{ brave: boolean; tavily: boolean }>({ brave: false, tavily: false });
   // Azure configuration — multiple deployments, each its own resource/endpoint.
   const [azureDeployments, setAzureDeployments] = useState<AzureDeploymentDraft[]>([]);
-  const updateAzureRow = (id: string, patch: Partial<AzureDeploymentDraft>) =>
+  const updateAzureRow = (id: string, patch: Partial<AzureDeploymentDraft>) => {
+    markTouched('azure');
     setAzureDeployments((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
-  const addAzureRow = () => setAzureDeployments((prev) => [...prev, emptyAzureRow()]);
-  const removeAzureRow = (id: string) => setAzureDeployments((prev) => prev.filter((r) => r.id !== id));
+  };
+  const addAzureRow = () => { markTouched('azure'); setAzureDeployments((prev) => [...prev, emptyAzureRow()]); };
+  const removeAzureRow = (id: string) => { markTouched('azure'); setAzureDeployments((prev) => prev.filter((r) => r.id !== id)); };
 
   // Per-tier provider + model
   const [t1, setT1] = useState<TierSel>({ provider: 'auto', model: '' });
@@ -180,8 +223,10 @@ export function SettingsView({ socket }: Props) {
 
   // Advanced (1:1 with core config fields; see ADVANCED_DEFAULTS)
   const [adv, setAdv] = useState<AdvancedSettings>(ADVANCED_DEFAULTS);
-  const setAdvField = <K extends keyof AdvancedSettings>(key: K, value: AdvancedSettings[K]) =>
+  const setAdvField = <K extends keyof AdvancedSettings>(key: K, value: AdvancedSettings[K]) => {
+    markTouched('advanced');
     setAdv((prev) => ({ ...prev, [key]: value }));
+  };
 
   // Data (export/import)
   const { backendPort, authToken } = useAppSelector((s) => s.app);
@@ -211,14 +256,18 @@ export function SettingsView({ socket }: Props) {
     webSearch?: { searxngUrl?: string; hasBraveKey: boolean; hasTavilyKey: boolean };
     advanced?: Record<string, unknown>;
   }) => {
-    setT1(parseOverride(cfg.models?.t1));
-    setT2(parseOverride(cfg.models?.t2));
-    setT3(parseOverride(cfg.models?.t3));
+    if (cfg.models && canHydrate('models', touchedSections.current)) {
+      hydratedSections.current.add('models');
+      setT1(parseOverride(cfg.models.t1));
+      setT2(parseOverride(cfg.models.t2));
+      setT3(parseOverride(cfg.models.t3));
+    }
     // A section that is PRESENT is authoritative for every field in it,
     // including the ones that are unset. Applying only the values that happened
     // to be numbers made this a merge: a budget cap cleared elsewhere stayed in
     // the form, and the next unrelated Save wrote it straight back.
-    if (cfg.budget) {
+    if (cfg.budget && canHydrate('budget', touchedSections.current)) {
+      hydratedSections.current.add('budget');
       setMaxCost(numberFieldFromSnapshot(cfg.budget.maxCostPerRun));
       setBias(cfg.budget.autoBias === 'quality' || cfg.budget.autoBias === 'cost' ? cfg.budget.autoBias : 'balanced');
       setDailyBudget(numberFieldFromSnapshot(cfg.budget.dailyBudgetUsd));
@@ -226,6 +275,7 @@ export function SettingsView({ socket }: Props) {
       setMaxTokens(numberFieldFromSnapshot(cfg.budget.maxTokensPerRun));
       setWarnAt(numberFieldFromSnapshot(cfg.budget.warnAtPct));
     }
+    // Read-only status, so no dirty rule applies.
     if (cfg.providersWithKey) setProvidersWithKey(cfg.providersWithKey);
     // ONLY when the snapshot actually carries endpoints. Two different
     // payloads reach this function — the IPC `getSettings` reply, which is
@@ -235,7 +285,7 @@ export function SettingsView({ socket }: Props) {
     // credential paired with that host: a rotated gateway key typed after a
     // reconnect would have been written to the provider's public API.
     if (cfg.endpoints) {
-      setEndpointsHydrated(true);
+      hydratedSections.current.add('endpoints');
       // FUNCTIONAL updates, so `current` is what React holds now rather than
       // what this callback captured when it was registered. Both hydration
       // paths are async — `getSettings()` resolves through a mount-time closure
@@ -250,13 +300,15 @@ export function SettingsView({ socket }: Props) {
       setOcUrl(fromSnapshot('openai-compatible'));
       setOllamaUrl(fromSnapshot('ollama'));
     }
-    if (cfg.webSearch) {
+    if (cfg.webSearch && canHydrate('webSearch', touchedSections.current)) {
+      hydratedSections.current.add('webSearch');
       // Replaced, not merged: a SearXNG URL removed elsewhere would otherwise
       // survive in the form and be recreated by the next save.
       setSearxngUrl(fieldFromSnapshot(cfg.webSearch.searxngUrl, ''));
       setSearchKeysSet({ brave: cfg.webSearch.hasBraveKey, tavily: cfg.webSearch.hasTavilyKey });
     }
-    if (cfg.azureDeployments) {
+    if (cfg.azureDeployments && canHydrate('azure', touchedSections.current)) {
+      hydratedSections.current.add('azure');
       setAzureDeployments(cfg.azureDeployments.map((d) => ({
         id: crypto.randomUUID(),
         label: d.label ?? '',
@@ -267,7 +319,8 @@ export function SettingsView({ socket }: Props) {
         hasKey: d.hasKey,
       })));
     }
-    if (cfg.advanced && typeof cfg.advanced === 'object') {
+    if (cfg.advanced && typeof cfg.advanced === 'object' && canHydrate('advanced', touchedSections.current)) {
+      hydratedSections.current.add('advanced');
       setAdv((prev) => {
         const next = { ...prev };
         for (const key of Object.keys(ADVANCED_DEFAULTS) as Array<keyof AdvancedSettings>) {
@@ -323,38 +376,56 @@ export function SettingsView({ socket }: Props) {
 
   const save = async () => {
     setSaveError('');
+    // Each section is included only if this panel can actually speak for it —
+    // it has loaded, or the user has edited it. A mount-time default is not a
+    // statement, and every field here is applied as authoritative by the
+    // writer, so sending one prematurely DELETES what is configured: `models:
+    // auto` clears every tier pin, `azureDeployments: []` clears every row, a
+    // blank SearXNG URL clears the URL, and the advanced defaults overwrite the
+    // lot — including `planApproval`, whose form default differs from the
+    // schema's, so a no-op Save turned plan approval on.
+    const speaks = (section: SettingsSection): boolean => canSerialize(section, sectionState());
     const payload = {
+      // Keys are not a hydrated section: they are write-only, never sent back,
+      // and a blank one already means "keep the existing key".
       keys: { anthropic: anthropicKey || undefined, openai: openaiKey || undefined, gemini: geminiKey || undefined, 'openai-compatible': ocKey || undefined },
-      models: { t1: composeOverride(t1), t2: composeOverride(t2), t3: composeOverride(t3) },
-      budget: {
-        maxCostPerRun: maxCost ? parseFloat(maxCost) : undefined,
-        autoBias: bias,
-        dailyBudgetUsd: dailyBudget ? parseFloat(dailyBudget) : undefined,
-        sessionBudgetUsd: sessionBudget ? parseFloat(sessionBudget) : undefined,
-        maxTokensPerRun: maxTokens ? parseInt(maxTokens, 10) : undefined,
-        warnAtPct: warnAt ? parseFloat(warnAt) : undefined,
-      },
-      // Only providers this panel can currently speak for. A property that is
-      // PRESENT and empty is an explicit clear, so sending one for a field that
-      // has never been populated would retire a credential on the user's behalf.
+      ...(speaks('models') ? {
+        models: { t1: composeOverride(t1), t2: composeOverride(t2), t3: composeOverride(t3) },
+      } : {}),
+      ...(speaks('budget') ? {
+        budget: {
+          maxCostPerRun: maxCost ? parseFloat(maxCost) : undefined,
+          autoBias: bias,
+          dailyBudgetUsd: dailyBudget ? parseFloat(dailyBudget) : undefined,
+          sessionBudgetUsd: sessionBudget ? parseFloat(sessionBudget) : undefined,
+          maxTokensPerRun: maxTokens ? parseInt(maxTokens, 10) : undefined,
+          warnAtPct: warnAt ? parseFloat(warnAt) : undefined,
+        },
+      } : {}),
+      // Per PROVIDER rather than per section: one gateway typed early is the
+      // user's statement about that provider and nothing else.
       endpoints: addressableEndpoints(
         [
           ['anthropic', anthropicUrl], ['openai', openaiUrl], ['gemini', geminiUrl],
           ['openai-compatible', ocUrl], ['ollama', ollamaUrl],
         ],
-        { hydrated: endpointsHydrated, touched: touchedEndpoints.current },
+        { hydrated: hydratedSections.current.has('endpoints'), touched: touchedEndpoints.current },
       ),
-      webSearch: { searxngUrl: searxngUrl.trim(), braveApiKey: braveKey || undefined, tavilyApiKey: tavilyKey || undefined },
-      azureDeployments: azureDeployments
-        .filter((d) => d.label.trim() || d.baseUrl.trim() || d.apiKey.trim() || d.deploymentName.trim())
-        .map((d) => ({
-          label: d.label.trim() || undefined,
-          apiKey: d.apiKey.trim() || undefined,
-          baseUrl: d.baseUrl.trim() || undefined,
-          deploymentName: d.deploymentName.trim() || undefined,
-          apiVersion: d.apiVersion.trim() || undefined,
-        })),
-      advanced: { ...adv },
+      ...(speaks('webSearch') ? {
+        webSearch: { searxngUrl: searxngUrl.trim(), braveApiKey: braveKey || undefined, tavilyApiKey: tavilyKey || undefined },
+      } : {}),
+      ...(speaks('azure') ? {
+        azureDeployments: azureDeployments
+          .filter((d) => d.label.trim() || d.baseUrl.trim() || d.apiKey.trim() || d.deploymentName.trim())
+          .map((d) => ({
+            label: d.label.trim() || undefined,
+            apiKey: d.apiKey.trim() || undefined,
+            baseUrl: d.baseUrl.trim() || undefined,
+            deploymentName: d.deploymentName.trim() || undefined,
+            apiVersion: d.apiVersion.trim() || undefined,
+          })),
+      } : {}),
+      ...(speaks('advanced') ? { advanced: { ...adv } } : {}),
     };
 
     // Primary path: persist via the Electron IPC bridge. This works even when the
@@ -573,14 +644,14 @@ export function SettingsView({ socket }: Props) {
                 <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                   Web search — without a backend, the <code>web_search</code> tool relies on scraping DuckDuckGo (works, but rate-limited and less reliable)
                 </label>
-                <input type="text" value={searxngUrl} onChange={(e) => setSearxngUrl(e.target.value)}
+                <input type="text" value={searxngUrl} onChange={(e) => edits('webSearch', setSearxngUrl)(e.target.value)}
                   placeholder="SearXNG URL (self-hosted) — e.g. https://searx.example.com"
                   style={{ width: '100%', background: 'var(--bg-overlay)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text)', padding: '6px 8px', fontSize: 11.5, outline: 'none', boxSizing: 'border-box' }} />
                 <div style={{ display: 'flex', gap: 8 }}>
-                  <input type="password" value={braveKey} onChange={(e) => setBraveKey(e.target.value)}
+                  <input type="password" value={braveKey} onChange={(e) => edits('webSearch', setBraveKey)(e.target.value)}
                     placeholder={searchKeysSet.brave ? 'Brave key •••• (blank to keep)' : 'Brave Search API key'}
                     style={{ flex: 1, background: 'var(--bg-overlay)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text)', padding: '6px 8px', fontSize: 11.5, outline: 'none', boxSizing: 'border-box' }} />
-                  <input type="password" value={tavilyKey} onChange={(e) => setTavilyKey(e.target.value)}
+                  <input type="password" value={tavilyKey} onChange={(e) => edits('webSearch', setTavilyKey)(e.target.value)}
                     placeholder={searchKeysSet.tavily ? 'Tavily key •••• (blank to keep)' : 'Tavily API key'}
                     style={{ flex: 1, background: 'var(--bg-overlay)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text)', padding: '6px 8px', fontSize: 11.5, outline: 'none', boxSizing: 'border-box' }} />
                 </div>
@@ -593,7 +664,7 @@ export function SettingsView({ socket }: Props) {
               <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: 0 }}>
                 Choose a provider and model per tier. <code>Auto</code> lets Cascade pick the best model dynamically.
               </p>
-              {([['T1 (Planner)', t1, setT1], ['T2 (Manager)', t2, setT2], ['T3 (Worker)', t3, setT3]] as const).map(([label, sel, setSel]) => {
+              {([['T1 (Planner)', t1, edits('models', setT1)], ['T2 (Manager)', t2, edits('models', setT2)], ['T3 (Worker)', t3, edits('models', setT3)]] as const).map(([label, sel, setSel]) => {
                 const def = TIER_PROVIDERS.find((p) => p.id === sel.provider) ?? TIER_PROVIDERS[0];
                 return (
                   <div key={label}>
@@ -717,7 +788,7 @@ export function SettingsView({ socket }: Props) {
             <>
               <div>
                 <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>Max cost per run (USD)</label>
-                <input type="number" min="0" step="0.01" value={maxCost} onChange={(e) => setMaxCost(e.target.value)}
+                <input type="number" min="0" step="0.01" value={maxCost} onChange={(e) => edits('budget', setMaxCost)(e.target.value)}
                   placeholder="e.g. 0.50 (leave blank for no cap)"
                   style={{ width: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
               </div>
@@ -725,7 +796,7 @@ export function SettingsView({ socket }: Props) {
                 <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 8 }}>Routing bias</label>
                 {(['balanced', 'quality', 'cost'] as Bias[]).map((b) => (
                   <label key={b} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 8, fontSize: 12 }}>
-                    <input type="radio" name="bias" checked={bias === b} onChange={() => setBias(b)} />
+                    <input type="radio" name="bias" checked={bias === b} onChange={() => edits('budget', setBias)(b)} />
                     <span style={{ fontWeight: bias === b ? 600 : 400, color: bias === b ? 'var(--accent)' : 'var(--text)' }}>
                       {b.charAt(0).toUpperCase() + b.slice(1)}
                     </span>
@@ -737,10 +808,10 @@ export function SettingsView({ socket }: Props) {
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 {[
-                  { label: 'Daily budget (USD)', val: dailyBudget, set: setDailyBudget, ph: 'no cap', step: '0.5' },
-                  { label: 'Per-session budget (USD)', val: sessionBudget, set: setSessionBudget, ph: 'no cap', step: '0.5' },
-                  { label: 'Max tokens per run', val: maxTokens, set: setMaxTokens, ph: '200000', step: '1000' },
-                  { label: 'Warn at % of budget', val: warnAt, set: setWarnAt, ph: '80', step: '5' },
+                  { label: 'Daily budget (USD)', val: dailyBudget, set: edits('budget', setDailyBudget), ph: 'no cap', step: '0.5' },
+                  { label: 'Per-session budget (USD)', val: sessionBudget, set: edits('budget', setSessionBudget), ph: 'no cap', step: '0.5' },
+                  { label: 'Max tokens per run', val: maxTokens, set: edits('budget', setMaxTokens), ph: '200000', step: '1000' },
+                  { label: 'Warn at % of budget', val: warnAt, set: edits('budget', setWarnAt), ph: '80', step: '5' },
                 ].map(({ label, val, set, ph, step }) => (
                   <div key={label}>
                     <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>{label}</label>

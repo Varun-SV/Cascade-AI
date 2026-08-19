@@ -141,6 +141,61 @@ describe('applySettingsPayload — the whole Settings save, not part of it', () 
   });
 });
 
+describe('an optional cap can be cleared, and never stored invalid', () => {
+  it('removes a cap the user blanked', () => {
+    // The panel says blank means no cap. Acting only on numbers made blank mean
+    // "preserve", so an existing cap could not be removed — and the save ACK
+    // rehydrated the old value, making the control impossible to clear.
+    const config = base();
+    config.budget = { maxCostPerRunUsd: 5, dailyBudgetUsd: 20 } as CascadeConfig['budget'];
+    applySettingsPayload(config, { budget: { maxCostPerRun: undefined, dailyBudgetUsd: undefined } });
+
+    expect('maxCostPerRunUsd' in config.budget).toBe(false);
+    expect('dailyBudgetUsd' in config.budget).toBe(false);
+  });
+
+  it('leaves a cap alone when the payload does not mention it', () => {
+    // Absent property still means "this surface is not speaking for that
+    // field" — the same contract `endpoints` uses.
+    const config = base();
+    config.budget = { maxCostPerRunUsd: 5 } as CascadeConfig['budget'];
+    applySettingsPayload(config, { budget: { dailyBudgetUsd: 20 } });
+    expect(config.budget.maxCostPerRunUsd).toBe(5);
+  });
+
+  it('treats a zero cost cap as no cap rather than writing what the schema rejects', () => {
+    // `BudgetConfigSchema.maxCostPerRunUsd` is `z.number().positive()`, and the
+    // input allows 0 — so saving 0 wrote a config file that failed validation
+    // on the very next load.
+    const config = base();
+    config.budget = { maxCostPerRunUsd: 5 } as CascadeConfig['budget'];
+    applySettingsPayload(config, { budget: { maxCostPerRun: 0 } });
+    expect('maxCostPerRunUsd' in config.budget).toBe(false);
+  });
+
+  it('refuses an approval timeout below the schema floor', () => {
+    // `z.number().int().min(1000)`.
+    const config = base();
+    applySettingsPayload(config, { advanced: { approvalTimeoutMs: 0 } });
+    expect(config.approvalTimeoutMs).toBeUndefined();
+    applySettingsPayload(config, { advanced: { approvalTimeoutMs: 999 } });
+    expect(config.approvalTimeoutMs).toBeUndefined();
+    applySettingsPayload(config, { advanced: { approvalTimeoutMs: 1000 } });
+    expect(config.approvalTimeoutMs).toBe(1000);
+  });
+
+  it('produces a config the schema accepts, for the values the panel allows', async () => {
+    // The end of the reported sequence: Settings value → save → next load.
+    const { validateConfig } = await import('./validate.js');
+    const config = base();
+    applySettingsPayload(config, {
+      budget: { maxCostPerRun: 0, dailyBudgetUsd: 0, warnAtPct: 0 },
+      advanced: { approvalTimeoutMs: 0 },
+    });
+    expect(() => validateConfig(config)).not.toThrow();
+  });
+});
+
 describe('settingsSnapshot — as complete as the save is', () => {
   // The panel keeps its own defaults for any section a snapshot does not fill,
   // and serializes them on every save. While the socket save was also partial

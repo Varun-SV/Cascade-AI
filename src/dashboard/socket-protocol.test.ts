@@ -71,12 +71,25 @@ describe('the save acknowledgement means durable, not merely handled', () => {
     // persistConfig reports its outcome rather than returning void, and gets it
     // from the helper whose failure path `write-config.test.ts` exercises for
     // real rather than by inspection.
-    expect(source).toMatch(/private persistConfig\(\): \{ ok: true \} \| \{ ok: false; error: string \}/);
+    expect(source).toMatch(/private persistConfig\([^)]*\): \{ ok: true \} \| \{ ok: false; error: string \}/);
     expect(source).toMatch(/const result = writeConfigFile\(/);
     expect(source).toMatch(/return result;/);
-    // …and the handler puts it in the ack.
-    expect(source).toMatch(/const persisted = this\.persistConfig\(\)/);
-    expect(source).toMatch(/persisted\.ok \? \{\} : \{ error:/);
+    // The save is TRANSACTIONAL: staged, validated, written, and only then
+    // adopted. Mutating the live config first left a failed write running the
+    // change anyway, and the global credential sync had already copied the
+    // provider half of it.
+    expect(source).toMatch(/const staged = JSON\.parse\(JSON\.stringify\(this\.config\)\)/);
+    expect(source).toMatch(/applySettingsPayload\(staged, data\)/);
+    expect(source).toMatch(/validateConfig\(staged\)/);
+    expect(source).toMatch(/this\.persistConfig\(staged\)/);
+    // Globals sync only after the workspace write succeeded.
+    expect(source).toMatch(/Object\.assign\(this\.config, staged\);\s*\n\s*this\.syncGlobalCredentials\(\);/);
+    expect(source).not.toMatch(/saveGlobalCredentials\([^)]*\);\s*\n\s*\}\s*catch[\s\S]{0,80}return result;/);
+    // …and the handler puts it in the ack. Now as an EARLY RETURN, because a
+    // failed write must also abandon the staged change rather than adopt it
+    // with an error attached.
+    expect(source).toMatch(/if \(!persisted\.ok\) \{/);
+    expect(source).toMatch(/Could not write the config file/);
   });
 
   it('keeps the global-credential sync best-effort, which it genuinely is', async () => {

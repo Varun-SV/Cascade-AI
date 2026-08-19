@@ -114,14 +114,36 @@ export function applySettingsPayload(
   if (data.budget) {
     const b = data.budget;
     config.budget = config.budget ?? {};
-    if (typeof b.maxCostPerRun === 'number') config.budget.maxCostPerRunUsd = b.maxCostPerRun;
+    // Each cap is OPTIONAL and the panel says so: blank means no cap. Acting
+    // only on numbers made a blank field mean "preserve", so an existing cap
+    // could not be removed — the save ACK then rehydrated the old value and the
+    // control was simply impossible to clear.
+    //
+    // Present-but-not-a-number is the clear; an ABSENT property still means the
+    // surface is not speaking for that field. Same contract as `endpoints`.
+    const cap = (
+      key: keyof typeof b,
+      target: 'maxCostPerRunUsd' | 'dailyBudgetUsd' | 'sessionBudgetUsd' | 'maxTokensPerRun' | 'warnAtPct',
+      accept: (n: number) => boolean,
+      round = false,
+    ): void => {
+      if (!Object.hasOwn(b, key)) return;
+      const v = b[key];
+      // A value the schema would reject is treated as "no cap" rather than
+      // stored: `maxCostPerRunUsd` is `.positive()`, so writing the 0 this
+      // panel allows produced a config file that fails validation on the very
+      // next load.
+      if (typeof v === 'number' && accept(v)) config.budget[target] = round ? Math.floor(v) : v;
+      else delete config.budget[target];
+    };
+    cap('maxCostPerRun', 'maxCostPerRunUsd', (n) => n > 0);
+    cap('dailyBudgetUsd', 'dailyBudgetUsd', (n) => n > 0);
+    cap('sessionBudgetUsd', 'sessionBudgetUsd', (n) => n > 0);
+    cap('maxTokensPerRun', 'maxTokensPerRun', (n) => n > 0, true);
+    cap('warnAtPct', 'warnAtPct', (n) => n > 0 && n <= 100);
     if (b.autoBias === 'balanced' || b.autoBias === 'quality' || b.autoBias === 'cost') {
       config.autoBias = b.autoBias;
     }
-    if (typeof b.dailyBudgetUsd === 'number' && b.dailyBudgetUsd >= 0) config.budget.dailyBudgetUsd = b.dailyBudgetUsd;
-    if (typeof b.sessionBudgetUsd === 'number' && b.sessionBudgetUsd >= 0) config.budget.sessionBudgetUsd = b.sessionBudgetUsd;
-    if (typeof b.maxTokensPerRun === 'number' && b.maxTokensPerRun > 0) config.budget.maxTokensPerRun = Math.floor(b.maxTokensPerRun);
-    if (typeof b.warnAtPct === 'number' && b.warnAtPct > 0 && b.warnAtPct <= 100) config.budget.warnAtPct = b.warnAtPct;
   }
 
   // Web-search backends: the URL is set/cleared directly ('' clears it); API
@@ -148,7 +170,9 @@ export function applySettingsPayload(
     };
     if (a['autonomy'] === 'manual' || a['autonomy'] === 'auto') config.autonomy = a['autonomy'];
     if (['never', 'complex', 'all', 'always'].includes(a['planApproval'] as string)) config.planApproval = a['planApproval'] as CascadeConfig['planApproval'];
-    { const n = num(a['approvalTimeoutMs'], 0, 86_400_000); if (n !== undefined) config.approvalTimeoutMs = n; }
+    // Floor is the SCHEMA's (`z.number().int().min(1000)`), not zero: a 0 here
+    // saved a config that failed validation on the next load.
+    { const n = num(a['approvalTimeoutMs'], 1000, 86_400_000); if (n !== undefined) config.approvalTimeoutMs = Math.floor(n); }
     if (['auto', 'parallel', 'sequential'].includes(a['t3Execution'] as string)) config.t3Execution = a['t3Execution'] as CascadeConfig['t3Execution'];
     { const n = num(a['localConcurrency'], 1, 16); if (n !== undefined) config.localConcurrency = Math.floor(n); }
     { const n = num(a['localInferenceTimeoutMs'], 10_000, 3_600_000); if (n !== undefined) config.localInferenceTimeoutMs = n; }

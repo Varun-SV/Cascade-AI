@@ -547,6 +547,21 @@ describe('every settings surface is actually wired to the shared rules', () => {
     expect(settings).not.toMatch(/if \(cfg\.webSearch\.searxngUrl\) setSearxngUrl/);
     // A failed disk write is a failed save.
     expect(settings).toMatch(/ack\.error/);
+    // EVERY writeable section is gated, not just endpoints: a mount-time
+    // default is not a statement, and the writer applies whatever arrives as
+    // authoritative — so serializing an unloaded section deletes what is
+    // configured.
+    expect(settings).toMatch(/const speaks = \(section: SettingsSection\)/);
+    for (const section of ['models', 'budget', 'webSearch', 'azure', 'advanced']) {
+      expect(settings, section).toMatch(new RegExp(`speaks\\('${section}'\\)`));
+      expect(settings, section).toMatch(new RegExp(`canHydrate\\('${section}', touchedSections\\.current\\)`));
+    }
+    // …and every control marks its section, or the gate above never opens.
+    expect(settings).toMatch(/markTouched\('azure'\)/);
+    expect(settings).toMatch(/markTouched\('advanced'\)/);
+    for (const section of ['models', 'budget', 'webSearch']) {
+      expect(settings, section).toMatch(new RegExp(`edits\\('${section}',`));
+    }
     // Every endpoint input MARKS ITS FIELD DIRTY. The wrapper existed and
     // nothing called it, so `touched` was always empty: a gateway typed before
     // the snapshot landed was dropped from the payload, and the helper's own

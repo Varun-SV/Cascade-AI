@@ -16,6 +16,7 @@ import { hasProviderCredential } from '../config/index.js';
 import { explainRefusal } from '../config/credential-write.js';
 import { applySettingsPayload, settingsSnapshot } from '../config/settings-payload.js';
 import { writeConfigFile } from '../config/write-config.js';
+import { validateConfig } from '../config/validate.js';
 import type { RuntimeNode, RuntimeNodeLog, RuntimeSession } from '../types.js';
 import { CASCADE_DB_FILE, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE, CASCADE_CONFIG_FILE, CASCADE_DASHBOARD_SECRET_FILE } from '../constants.js';
 import { DashboardSocket } from './websocket.js';
@@ -230,7 +231,19 @@ export class DashboardServer {
       // fields and ignore the rest — while the panel, which sends one payload
       // to both, reported the save as successful. Every other control on this
       // path appeared to work and did nothing.
-      const credentials = applySettingsPayload(this.config, data);
+      // STAGED. `applySettingsPayload` mutates, and mutating the live config
+      // before the write meant a failed write left the change running: the
+      // panel was told the save failed while subsequent runs used the new
+      // settings anyway, and `saveGlobalCredentials()` had already copied the
+      // provider half into the machine-global store. Partial persistence behind
+      // an error message.
+      //
+      // The staged copy is validated and written first, and only then copied
+      // back — in place, because the desktop main process holds a reference to
+      // this very object and swapping it would leave that alias pointing at the
+      // old config.
+      const staged = JSON.parse(JSON.stringify(this.config)) as typeof this.config;
+      const credentials = applySettingsPayload(staged, data);
       const refused = credentials.refused.map((r) => ({
         type: r.type, reason: r.reason, message: explainRefusal(r.type, r.reason),
       }));
@@ -239,15 +252,39 @@ export class DashboardServer {
       for (const r of refused) console.warn(r.message);
       // Persist so Settings changes survive a restart and are visible to the CLI
       // (the desktop app and `cascade` share the same workspace config file).
-      const persisted = this.persistConfig();
+      // Validated BEFORE anything is written or adopted. The panel can send
+      // values the schema rejects — a `0` cost cap against
+      // `z.number().positive()` — and neither writer checked, so Save succeeded
+      // and the next `ConfigManager.load()` threw on a file the app had written
+      // itself.
+      try {
+        validateConfig(staged);
+      } catch (err) {
+        return {
+          refused,
+          snapshot: settingsSnapshot(this.config),
+          error: `Those settings are not valid: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+
+      const persisted = this.persistConfig(staged);
+      if (!persisted.ok) {
+        // Nothing is adopted. The live config is exactly what it was.
+        return {
+          refused,
+          snapshot: settingsSnapshot(this.config),
+          error: `Could not write the config file: ${persisted.error}`,
+        };
+      }
+      // Committed in place, so the desktop's alias sees it too. Keys the save
+      // REMOVED have to go, which `Object.assign` alone would not do.
+      for (const key of Object.keys(this.config)) delete (this.config as unknown as Record<string, unknown>)[key];
+      Object.assign(this.config, staged);
+      this.syncGlobalCredentials();
+
       // The fresh snapshot rides back with the acknowledgement, so the panel
-      // re-hydrates from what was actually stored rather than from what it sent
-      // — and the acknowledgement says whether "stored" is even true.
-      return {
-        refused,
-        snapshot: settingsSnapshot(this.config),
-        ...(persisted.ok ? {} : { error: `Could not write the config file: ${persisted.error}` }),
-      };
+      // re-hydrates from what was actually stored rather than from what it sent.
+      return { refused, snapshot: settingsSnapshot(this.config) };
     });
 
     this.socket.onCascadeRun(async (prompt, model, socketId, requestedSessionId, forceTier) => {
@@ -479,17 +516,31 @@ export class DashboardServer {
    * The global-credential sync below is genuinely best-effort — it is a
    * convenience copy, and failing it does not lose what the user just entered.
    */
-  private persistConfig(): { ok: true } | { ok: false; error: string } {
-    const result = writeConfigFile(path.join(this.workspacePath, CASCADE_CONFIG_FILE), this.config);
+  private persistConfig(config: typeof this.config = this.config): { ok: true } | { ok: false; error: string } {
+    const result = writeConfigFile(path.join(this.workspacePath, CASCADE_CONFIG_FILE), config);
     if (!result.ok) console.warn(`[dashboard] Failed to persist config: ${result.error}`);
-    // Keys saved over the socket path must survive workspace switches too —
-    // same global sync ConfigManager.save() performs.
+    return result;
+  }
+
+  /**
+   * Copy provider credentials to the machine-global store, so keys saved over
+   * the socket survive a workspace switch — the same sync `ConfigManager.save()`
+   * performs.
+   *
+   * Separate from the workspace write, and called only AFTER it succeeds. It
+   * used to run unconditionally inside `persistConfig()`, so a failed workspace
+   * write still pushed the provider half of a rejected save into the global
+   * store: half the change persisted, behind an error saying none of it had.
+   *
+   * Best-effort on its own account: this is a convenience copy, and failing it
+   * does not lose what the user just entered.
+   */
+  private syncGlobalCredentials(): void {
     try {
       saveGlobalCredentials(path.join(os.homedir(), GLOBAL_CONFIG_DIR), this.config.providers ?? []);
     } catch (err) {
       console.warn(`[dashboard] Failed to sync global credentials: ${err instanceof Error ? err.message : String(err)}`);
     }
-    return result;
   }
 
   /**
