@@ -91,15 +91,52 @@ const WITHOUT_FILES: PlanSpecShape = {
 };
 
 /**
- * The spec shape to show a planner, given whether the run can write files.
+ * No worker-addressable disk, but the run can still finish a real asset.
+ *
+ * Generation tools register outside `enabledTools` (cascade.ts
+ * registerMediaTools), so "no file tools" and "text is the only possible
+ * output" are different facts about a hosted run, and WITHOUT_FILES asserted
+ * the second from the first. On a run with `generate_video` that put this
+ * user prompt — "its written answer IS the deliverable", "work that is DONE by
+ * producing text" — directly against the system prompt's MEDIA GENERATION
+ * block, which says the tool call IS the deliverable and cannot be satisfied
+ * in words. The planner then has to pick one, and the failure mode that block
+ * exists to prevent is exactly the one it picks: a script, a storyboard, and
+ * no subtask that ever calls the tool.
+ *
+ * Everything else about the shape is unchanged — still `files: []`, still no
+ * filesystem acceptance — because a generation tool hands its result back as a
+ * location string in the worker's answer, not as a path this run can stat.
+ */
+const WITHOUT_FILES_WITH_GENERATORS: PlanSpecShape = {
+  ...WITHOUT_FILES,
+  preamble:
+    'ENVIRONMENT: this run has NO file, shell, or code-execution tools — the worker can read and write nothing on '
+    + 'disk. Its deliverables are what it writes in the answer itself AND whatever its generation tools return: '
+    + 'plan work that is DONE by producing text — research, analysis, comparison, explanation, a written design, '
+    + 'source code quoted in the answer — or by a generation tool returning a finished asset. Where this run has '
+    + 'such a tool, that call IS the deliverable and a subtask may absolutely depend on it; it can never be '
+    + 'satisfied by describing the result in words. Do NOT plan a subtask whose completion depends on creating a '
+    + 'directory, scaffolding a project, saving a file, installing a package, or running a command — those cannot '
+    + 'happen here, and a subtask that requires one fails however well the worker performs.',
+};
+
+/**
+ * The spec shape to show a planner, given what this run can actually finish.
  *
  * `canWriteFiles` should come from the tool registry the workers will actually
  * get — the same question `canProduceFiles()` answers for the verification
  * ladder (see t3-worker.ts). Planning and grading disagreeing about it is the
  * whole failure this addresses, so they read the same signal.
+ *
+ * `canGenerateAssets` is a SECOND question, not a refinement of the first:
+ * media tools register outside `enabledTools`, so a run can have no disk and
+ * still produce a finished video. Neither argument has a default — inferring
+ * one from the other is precisely the mistake being corrected here.
  */
-export function planSpecShape(canWriteFiles: boolean): PlanSpecShape {
-  return canWriteFiles ? WITH_FILES : WITHOUT_FILES;
+export function planSpecShape(canWriteFiles: boolean, canGenerateAssets: boolean): PlanSpecShape {
+  if (canWriteFiles) return WITH_FILES;
+  return canGenerateAssets ? WITHOUT_FILES_WITH_GENERATORS : WITHOUT_FILES;
 }
 
 /** The `files` and `acceptance` rules as T1's plan prompt labels them. */

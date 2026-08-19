@@ -179,8 +179,17 @@ Rules:
 ${rules.filter((r): r is string => r !== false).join('\n')}`;
 }
 
-/** File-writing tools — a worker can only produce a file artifact if it has one. */
-const ARTIFACT_TOOLS = new Set(['file_write', 'file_edit', 'shell', 'generate_document']);
+/**
+ * File-writing tools — a worker can only produce a file artifact if it has one.
+ *
+ * `pdf_create` is here because producing a file is its entire purpose: it takes
+ * a target path and opens a write stream on it. Leaving it out gave a run whose
+ * only writer was `pdf_create` two contradictory answers to the same question —
+ * the planner was told to leave `files: []` while the acceptance rung was
+ * willing to stat `report.pdf` — which is the drift this whole set exists to
+ * prevent.
+ */
+const ARTIFACT_TOOLS = new Set(['file_write', 'file_edit', 'shell', 'generate_document', 'pdf_create']);
 
 /**
  * Every tool through which a file can end up on disk.
@@ -212,6 +221,41 @@ const FILE_WRITING_TOOLS = new Set([...ARTIFACT_TOOLS, 'run_code']);
  */
 export function canProduceFiles(toolNames: readonly string[]): boolean {
   return toolNames.some((n) => FILE_WRITING_TOOLS.has(n));
+}
+
+/**
+ * The same capability for callers holding a `has()` predicate rather than a list.
+ *
+ * `buildT1SystemPrompt` spelled this out as its own disjunction — `file_write ||
+ * file_edit || run_code || pdf_create` — which is how the T1 prompt and the
+ * acceptance rung came to disagree about `pdf_create`, and how the prompt also
+ * quietly missed `shell` and `generate_document`. One set, asked two ways.
+ */
+export function hasFileWritingTool(has: (toolName: string) => boolean): boolean {
+  for (const name of FILE_WRITING_TOOLS) if (has(name)) return true;
+  return false;
+}
+
+/**
+ * Tools that hand back a finished deliverable without the worker touching disk.
+ *
+ * These register OUTSIDE `enabledTools` (see cascade.ts registerMediaTools), so
+ * a hosted run with no file tools at all can still have them — and for such a
+ * run `canProduceFiles()` is correctly false while "text is the only possible
+ * output" is flatly untrue. `transcribe_audio` is deliberately absent: it
+ * consumes a file and returns text, so the written answer really is its
+ * deliverable.
+ */
+const NON_DISK_DELIVERABLE_TOOLS = new Set(['generate_image', 'generate_speech', 'generate_video']);
+
+/**
+ * Whether this run can finish a deliverable that is neither a file on disk nor
+ * prose in the answer. Planning treats it as a third possibility; the
+ * verification ladder does not need it, because nothing here writes a path for
+ * `checkAcceptance()` to stat.
+ */
+export function canProduceNonDiskDeliverables(toolNames: readonly string[]): boolean {
+  return toolNames.some((n) => NON_DISK_DELIVERABLE_TOOLS.has(n));
 }
 
 /**

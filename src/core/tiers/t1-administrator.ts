@@ -30,7 +30,7 @@ import type { PermissionEscalator } from '../permissions/escalator.js';
 import type { ToolCreator } from '../../tools/tool-creator.js';
 import { parseFirstJsonObject } from '../../utils/json-extract.js';
 import { describeGenerationForPlanner } from '../multimodal/registry.js';
-import { canProduceFiles } from './t3-worker.js';
+import { canProduceFiles, canProduceNonDiskDeliverables, hasFileWritingTool } from './t3-worker.js';
 import { planSpecShape, quotedFieldRules } from './plan-spec.js';
 
 /** Case-insensitive shared keywords between two keyword lists. */
@@ -58,7 +58,10 @@ export function isStrongKeywordOverlap(a: string[] = [], b: string[] = []): bool
 // prompt); a restricted embed (e.g. hosted cloud/server, web tools only)
 // drops them so T1 never plans steps around tools the workers can't call.
 export function buildT1SystemPrompt(has: (toolName: string) => boolean): string {
-  const canWriteArtifacts = has('file_write') || has('file_edit') || has('run_code') || has('pdf_create');
+  // One shared set with the acceptance rung and the planner shape — see
+  // hasFileWritingTool(). Spelled out here, this line had already drifted:
+  // it missed `shell` and `generate_document`, both of which write files.
+  const canWriteArtifacts = hasFileWritingTool(has);
   // Generation tools are the one capability class whose plan SHAPE the planner
   // cannot guess: a video is one atomic, slow, per-second-billed call the plan
   // has to terminate on, and without being told so T1 planned script/direction
@@ -531,7 +534,7 @@ In 3-5 terse bullets, flag the most important RISKS, GAPS, or over-/under-decomp
     // it. A run with no file tools must not be shown a worked example that
     // scaffolds a project (see plan-spec.ts).
     const available = new Set(this.toolRegistry.getToolDefinitions().map((t) => t.name));
-    const spec = planSpecShape(canProduceFiles([...available]));
+    const spec = planSpecShape(canProduceFiles([...available]), canProduceNonDiskDeliverables([...available]));
     const decompositionPrompt = `Analyze this task and create an execution plan.${spec.preamble ? `\n\n${spec.preamble}` : ''}${contextSection}${worldStateContext}
 
     Task: ${prompt}

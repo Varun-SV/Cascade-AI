@@ -11,7 +11,7 @@ import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import { PeerBus } from '../peer/bus.js';
 import { PermissionEscalator } from '../permissions/escalator.js';
-import { T3Worker, buildWorkerRules, canProduceFiles, missingVisualEvidence, shouldRequireArtifact } from './t3-worker.js';
+import { T3Worker, buildWorkerRules, canProduceFiles, canProduceNonDiskDeliverables, hasFileWritingTool, missingVisualEvidence, shouldRequireArtifact } from './t3-worker.js';
 
 function makeResult(
   content: string,
@@ -605,9 +605,46 @@ describe('canProduceFiles', () => {
   });
 
   it('is true for anything that can put a file on disk', () => {
-    for (const tool of ['file_write', 'file_edit', 'shell', 'generate_document', 'run_code']) {
+    for (const tool of ['file_write', 'file_edit', 'shell', 'generate_document', 'run_code', 'pdf_create']) {
       expect(canProduceFiles([tool, 'web_search'])).toBe(true);
     }
+  });
+
+  it('counts pdf_create, whose entire purpose is writing a file', () => {
+    // PDFCreateTool takes a target path and opens a write stream on it, and
+    // buildT1SystemPrompt has always treated it as artifact-writing. Omitting
+    // it here gave one run two answers: the planner was told to leave
+    // `files: []` while the acceptance rung would happily stat `report.pdf`.
+    expect(canProduceFiles(['pdf_create'])).toBe(true);
+    expect(shouldRequireArtifact({ files: ['report.pdf'] }, ['pdf_create'])).toBe(true);
+  });
+
+  it('reads the same set through a has() predicate as through a list', () => {
+    // The T1 prompt asks with has(); the ladder asks with a list. Spelling the
+    // capability out twice is how pdf_create came to be in one and not the
+    // other, so the two forms are pinned to each other rather than to a
+    // hand-written list of names.
+    for (const tool of ['file_write', 'file_edit', 'shell', 'generate_document', 'run_code', 'pdf_create']) {
+      expect(hasFileWritingTool((n) => n === tool)).toBe(canProduceFiles([tool]));
+    }
+    expect(hasFileWritingTool((n) => n === 'web_search')).toBe(false);
+  });
+});
+
+describe('canProduceNonDiskDeliverables', () => {
+  it('is true for a hosted run whose only writer is a generation tool', () => {
+    // Media tools register OUTSIDE `enabledTools` (cascade.ts
+    // registerMediaTools), so this combination is not hypothetical: it is what
+    // cloud/server produces for an account with an image or video model.
+    expect(canProduceFiles(['web_search', 'generate_video'])).toBe(false);
+    expect(canProduceNonDiskDeliverables(['web_search', 'generate_video'])).toBe(true);
+    expect(canProduceNonDiskDeliverables(['web_search', 'generate_image'])).toBe(true);
+    expect(canProduceNonDiskDeliverables(['web_search', 'generate_speech'])).toBe(true);
+  });
+
+  it('does not count transcribe_audio, whose output is text in the answer', () => {
+    expect(canProduceNonDiskDeliverables(['transcribe_audio'])).toBe(false);
+    expect(canProduceNonDiskDeliverables(['web_search', 'web_fetch'])).toBe(false);
   });
 
   it('counts run_code, which shouldRequireArtifact deliberately does not', () => {

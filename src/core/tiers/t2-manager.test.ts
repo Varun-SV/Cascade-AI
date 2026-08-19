@@ -567,6 +567,21 @@ describe('T2 decomposition prompt — file capability awareness', () => {
     t3Subtasks: [],
   } as unknown as T1ToT2Assignment;
 
+  it('preserves the generation deliverable when the run has a media tool', async () => {
+    // Same split as T1's: no disk, but the run can still finish a real asset.
+    // T2 writes the acceptance a worker is held to, so a preamble telling it
+    // that text is the only possible output is the tier that actually costs
+    // the user the video.
+    const captured: { prompt?: string } = {};
+    const manager = makeManager(captured, ['web_search', 'generate_image']);
+
+    await (manager as unknown as { decomposeSection: Decompose }).decomposeSection(section);
+
+    expect(captured.prompt).toMatch(/NO file, shell, or code-execution tools/i);
+    expect(captured.prompt).not.toMatch(/written answer IS the deliverable/i);
+    expect(captured.prompt).toMatch(/that call IS the deliverable/i);
+  });
+
   it('asks for answer-shaped criteria when nothing can write a file', async () => {
     const captured: { prompt?: string } = {};
     const manager = makeManager(captured, ['web_search', 'web_fetch']);

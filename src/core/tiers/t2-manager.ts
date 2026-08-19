@@ -19,7 +19,7 @@ import type {
 import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import { BaseTier } from './base.js';
-import { T3Worker, canProduceFiles } from './t3-worker.js';
+import { T3Worker, canProduceFiles, canProduceNonDiskDeliverables } from './t3-worker.js';
 import { MemoryStore } from '../../memory/store.js';
 import { PeerBus } from '../peer/bus.js';
 import type { PermissionEscalator } from '../permissions/escalator.js';
@@ -461,7 +461,8 @@ export class T2Manager extends BaseTier {
     // against. T2 is a planner too — it is the tier that writes the `files` and
     // `acceptance` a worker is actually held to — so it asking for a file the
     // run cannot produce is enough on its own to fail the subtask.
-    const spec = planSpecShape(canProduceFiles(this.toolRegistry.getToolDefinitions().map((t) => t.name)));
+    const toolNames = this.toolRegistry.getToolDefinitions().map((t) => t.name);
+    const spec = planSpecShape(canProduceFiles(toolNames), canProduceNonDiskDeliverables(toolNames));
     const prompt = `Decompose this section into 1-4 concrete subtasks for T3 workers — the FEWEST that fully cover it (one subtask is the correct answer for a small section).${spec.preamble ? `\n\n${spec.preamble}` : ''}
 
 Section: ${assignment.sectionTitle}

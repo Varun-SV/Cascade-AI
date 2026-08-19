@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { T1Administrator, type TaskPlan } from './t1-administrator.js';
+import { T1Administrator, buildT1SystemPrompt, type TaskPlan } from './t1-administrator.js';
 import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import type { CascadeConfig, T1ToT2Assignment, T2Result } from '../../types.js';
@@ -292,6 +292,25 @@ describe('T1 planner prompt — media generation capability awareness', () => {
   });
 });
 
+describe('buildT1SystemPrompt artifact capability', () => {
+  const ARTIFACT_LINE = 'Ensure every plan includes explicit creation and verification steps for requested artifacts';
+
+  it('asks for creation-and-verification steps for every tool that writes files', () => {
+    // This was a hand-written disjunction — file_write || file_edit ||
+    // run_code || pdf_create — sitting alongside the acceptance rung's own
+    // set, and it had already drifted: `shell` and `generate_document` write
+    // files and were missing, while `pdf_create` was here and missing from the
+    // rung. Both now read one set, so neither can drift again.
+    for (const tool of ['file_write', 'file_edit', 'run_code', 'pdf_create', 'shell', 'generate_document']) {
+      expect(buildT1SystemPrompt((n) => n === tool)).toContain(ARTIFACT_LINE);
+    }
+  });
+
+  it('says nothing about artifacts on a run that cannot write one', () => {
+    expect(buildT1SystemPrompt((n) => n === 'web_search')).not.toContain(ARTIFACT_LINE);
+  });
+});
+
 describe('T1 planner prompt — file capability awareness', () => {
   // The system prompt has been capability-aware since the media work above.
   // The USER prompt — which carries the JSON schema, the SPEC RULES, and a
@@ -343,6 +362,25 @@ describe('T1 planner prompt — file capability awareness', () => {
 
     expect(captured.prompt).toMatch(/NO file, shell, or code-execution tools/i);
     expect(captured.prompt).toMatch(/NEVER phrase one as a file existing/i);
+  });
+
+  it('still asks a hosted run with a media tool to plan the generation call', async () => {
+    // The planner shape is chosen from `canProduceFiles`, which is correctly
+    // false here — generation tools register outside `enabledTools`, so this
+    // run has no disk. It does NOT follow that text is all it can produce: the
+    // system prompt's MEDIA GENERATION block tells this same planner that the
+    // generate_video call IS the deliverable. Reading "your written answer IS
+    // the deliverable" in the user prompt is how a video plan goes back to
+    // being a script and a storyboard with nothing that calls the tool.
+    const captured: { prompt?: string } = {};
+    const admin = makePlanner(captured, ['web_search', 'generate_video']);
+
+    await (admin as unknown as { decomposeTask: Decompose }).decomposeTask('make a 10 second clip of a cat skating');
+
+    expect(captured.prompt).toMatch(/NO file, shell, or code-execution tools/i);
+    expect(captured.prompt).toContain('"files": []');
+    expect(captured.prompt).not.toMatch(/written answer IS the deliverable/i);
+    expect(captured.prompt).toMatch(/that call IS the deliverable/i);
   });
 
   it('leaves a run that CAN write files planning exactly as before', async () => {
