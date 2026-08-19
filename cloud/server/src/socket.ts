@@ -199,6 +199,29 @@ export function attachSocket(
   // Keys are `${userId}\u0000${clientId}` — see resumeKey() for why the tab has
   // to be part of it.
 
+  /**
+   * The socket currently answering for each resume key.
+   *
+   * Adoption alone is edge-triggered — it happens when a connection is created
+   * and never again — which loses a run to pure event ordering. A client that
+   * reconnects fast enough for its NEW socket to be accepted before the old
+   * one's `disconnect` is processed found nothing held (there was nothing to
+   * hold yet, so it was told `active: 0`), and the old socket then parked its
+   * run under a key somebody was already connected on. Nobody was left to
+   * rebind it and it sat transport-less until the grace timer aborted it — the
+   * run dying on a reconnect that worked, which is the bug this whole path
+   * exists to remove.
+   *
+   * Tracking the live owner closes it: a disconnect that is no longer the owner
+   * hands its runs straight to whoever is, instead of parking them.
+   *
+   * This assumes one live socket per key, which is the client's job to
+   * guarantee — see `claimClientId` in cloud/web/src/lib/client-id.ts, where a
+   * duplicated tab (session storage is COPIED into a tab opened from another)
+   * detects the collision and rotates to a fresh id.
+   */
+  const owners = new Map<string, { socket: Socket; adopt: (run: LiveRun) => void }>();
+
   io.use((socket, next) => {
     const cookies = parseCookies(socket.handshake.headers.cookie);
     const token = cookies[SESSION_COOKIE_NAME];
@@ -258,6 +281,15 @@ export function attachSocket(
     // dead socket, so the reconnected page waited forever on a run that was
     // talking to nobody.
     const key = resumeKey(socket);
+    // Registered BEFORE anything is adopted, so an old socket disconnecting
+    // mid-handshake finds this connection and hands over rather than parking.
+    if (key) {
+      owners.set(key, {
+        socket,
+        adopt: (run: LiveRun) => { run.transport.rebind(socket); activeRuns.add(run); },
+      });
+    }
+
     const held = key ? orphanedRuns.get(key) : undefined;
     if (held && key) {
       clearTimeout(held.timer);
@@ -357,6 +389,16 @@ export function attachSocket(
         for (const r of inFlight) r.controller.abort();
         return;
       }
+
+      // Someone else already answers for this key: the replacement connected
+      // before this disconnect was processed. Hand the runs over rather than
+      // parking them under a key nobody will look up again.
+      const owner = owners.get(parkKey);
+      if (owner && owner.socket !== socket) {
+        for (const r of inFlight) owner.adopt(r);
+        return;
+      }
+      owners.delete(parkKey);
 
       // A second disconnect while the first is still held must not drop the
       // first set on the floor: merge, and restart the clock from the latest.

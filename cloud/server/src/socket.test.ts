@@ -568,6 +568,53 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
     expect(seen[0]?.finished?.[0]?.error).toBeTruthy();
   }, 30_000);
 
+  it('hands the run over when the replacement connects before the old socket drops', async () => {
+    // Adoption is edge-triggered: it happens when a connection is created, and
+    // never again. A client whose new socket is accepted BEFORE the old one's
+    // disconnect is processed therefore found nothing held — there was nothing
+    // to hold yet — and the old socket then parked its run under a key somebody
+    // was already connected on. Nobody was left to rebind it, so it sat
+    // transport-less until the grace timer aborted it: the run dying on a
+    // reconnect that worked.
+    //
+    // The overlap is created deliberately here — B connects while A is still
+    // connected, then A goes — which is the same ordering, made deterministic.
+    await start(8_000);
+    stub = await startStubOpenAIServer({ delayMs: 2_500 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'grace-race', email: null, name: 'Race', avatar: null });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+
+    const first = connect(cookie, 'tab-race');
+    await connected(first);
+    first.emit(
+      'chat:run',
+      { prompt: 'hello', providers: [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }] },
+      () => { /* dies with this socket */ },
+    );
+    await new Promise((r) => setTimeout(r, 300));
+
+    // The replacement arrives first, on the same tab identity.
+    const second = connect(cookie, 'tab-race');
+    let completedOnSecond = false;
+    second.on('session:complete', () => { completedOnSecond = true; });
+    await connected(second);
+
+    // Only now does the old connection go away.
+    first.close();
+
+    // The run must end up on the socket that is actually here, not parked
+    // under a key its owner already left.
+    const finished = await until(() => completedOnSecond, 12_000);
+    expect(finished).toBe(true);
+
+    const conversations = store.listConversations(user.id) as Array<{ id: string }>;
+    const landed = await until(
+      () => conversations.length > 0 && assistantReply(conversations[0]!.id).includes('Hello from the stub model.'),
+      10_000,
+    );
+    expect(landed).toBe(true);
+  }, 40_000);
+
   it('tells a fresh connection there is nothing to wait for', async () => {
     // The other half of the same signal. A client that reconnects after its
     // run already finished must be able to stop showing a spinner, and this is
