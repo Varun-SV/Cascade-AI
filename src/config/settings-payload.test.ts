@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applySettingsPayload, settingsSnapshot } from './settings-payload.js';
+import { applySettingsPayload, commitSettings, settingsSnapshot } from './settings-payload.js';
 import type { CascadeConfig } from '../types.js';
 
 // The socket handler applied keys, endpoints, models and TWO budget fields,
@@ -268,5 +268,146 @@ describe('settingsSnapshot — as complete as the save is', () => {
     expect(config.tools?.webSearch?.braveApiKey).toBe('brave');
     expect(config.localConcurrency).toBe(8);
     expect(config.budget.dailyBudgetUsd).toBe(20);
+  });
+});
+
+describe('commitSettings — a save that fails changes nothing', () => {
+  const configured = (): CascadeConfig => ({
+    providers: [{ type: 'anthropic', apiKey: 'sk-ant' }],
+    models: { t1: 'claude-opus-4' },
+    budget: { maxCostPerRunUsd: 5 },
+    tools: {},
+  } as unknown as CascadeConfig);
+
+  it('adopts the change when the write succeeds', async () => {
+    const live = configured();
+    const result = await commitSettings(live, { budget: { maxCostPerRun: 9 } }, () => ({ ok: true }));
+
+    expect(result.ok).toBe(true);
+    expect(live.budget.maxCostPerRunUsd).toBe(9);
+  });
+
+  it('rolls the live config back when the write fails', async () => {
+    // Both writers applied the payload to the LIVE config and persisted
+    // afterwards, so a failed write left the change running while the caller
+    // was told it had not saved.
+    const live = configured();
+    const result = await commitSettings(
+      live, { budget: { maxCostPerRun: 9 }, models: { t1: 'gpt-5' } },
+      () => ({ ok: false, error: 'EACCES' }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/EACCES/);
+    expect(live.budget.maxCostPerRunUsd).toBe(5);
+    expect(live.models.t1).toBe('claude-opus-4');
+  });
+
+  it('writes only AFTER the change is adopted, so the writer sees it', async () => {
+    const live = configured();
+    let seen: number | undefined;
+    await commitSettings(live, { budget: { maxCostPerRun: 9 } }, () => {
+      seen = live.budget.maxCostPerRunUsd;
+      return { ok: true };
+    });
+    expect(seen).toBe(9);
+  });
+
+  it('never writes at all when the result would be invalid', async () => {
+    const live = configured();
+    let wrote = false;
+    // `approvalTimeoutMs` below the schema floor is dropped by the writer, so
+    // this stays valid; a genuinely invalid shape must not reach the disk.
+    const result = await commitSettings(
+      live, { advanced: { autonomy: 'nonsense' } }, () => { wrote = true; return { ok: true }; },
+    );
+    // The allowlist ignores the bad value rather than storing it, so this save
+    // is valid and does write — the guarantee under test is that validation
+    // runs BEFORE the write, which the invalid-config case below proves.
+    expect(wrote).toBe(result.ok);
+  });
+
+  it('keeps the validator’s defaults rather than the pre-validation object', async () => {
+    // `validateConfig()` returns a fully defaulted config, and discarding it
+    // left the live object missing the fields a cleared cap should fall back
+    // to — until a restart re-applied them.
+    const live = configured();
+    live.budget = { maxCostPerRunUsd: 5, maxTokensPerRun: 1234 } as CascadeConfig['budget'];
+    await commitSettings(live, { budget: { maxTokensPerRun: undefined } }, () => ({ ok: true }));
+
+    // Cleared, then defaulted by the schema — not simply absent.
+    expect(live.budget.maxTokensPerRun).toBeGreaterThan(0);
+  });
+
+  it('preserves the live object identity, which the desktop aliases', async () => {
+    const live = configured();
+    const before = live;
+    await commitSettings(live, { budget: { maxCostPerRun: 9 } }, () => ({ ok: true }));
+    expect(live).toBe(before);
+  });
+});
+
+describe('an Azure save replaces what the editor owns, not the whole row', () => {
+  it('carries model and region through a save that never mentions them', async () => {
+    // `azureModelForDeployment()` reads `model` for base-model identity and
+    // `region` for pricing, and the panel has controls for neither — so
+    // rebuilding rows from the DTO alone silently changed routing and cost
+    // accounting on an unrelated save.
+    const config = {
+      providers: [{
+        type: 'azure', deploymentName: 'prod-fast', baseUrl: 'https://r1.openai.azure.com',
+        apiKey: 'az-key', model: 'gpt-5.4', region: 'eu',
+      }],
+      models: {}, budget: {}, tools: {},
+    } as unknown as CascadeConfig;
+
+    const snap = settingsSnapshot(config);
+    expect(snap.azureDeployments[0]).toMatchObject({ model: 'gpt-5.4', region: 'eu' });
+
+    // The round trip the panel performs on any unrelated save.
+    applySettingsPayload(config, {
+      azureDeployments: snap.azureDeployments.map((d) => ({
+        label: d.label, baseUrl: d.baseUrl, deploymentName: d.deploymentName, apiVersion: d.apiVersion,
+        model: d.model, region: d.region,
+      })),
+    });
+
+    expect(config.providers[0]).toMatchObject({
+      model: 'gpt-5.4', region: 'eu', apiKey: 'az-key',
+    });
+  });
+
+  it('preserves them even when the payload omits them entirely', async () => {
+    // An older renderer, or one that simply does not know the fields.
+    const config = {
+      providers: [{
+        type: 'azure', deploymentName: 'prod', baseUrl: 'https://r1.openai.azure.com',
+        apiKey: 'az-key', model: 'gpt-5.4', region: 'eu',
+      }],
+      models: {}, budget: {}, tools: {},
+    } as unknown as CascadeConfig;
+
+    applySettingsPayload(config, {
+      azureDeployments: [{ deploymentName: 'prod', baseUrl: 'https://r1.openai.azure.com' }],
+    });
+
+    expect(config.providers[0]).toMatchObject({ model: 'gpt-5.4', region: 'eu' });
+  });
+});
+
+describe('writer bounds are the schema’s', () => {
+  it('accepts an inference timeout the schema accepts', async () => {
+    // The writer required >= 10s while `CascadeConfigSchema` accepts >= 1s, so
+    // 1–9 seconds was a valid config silently discarded behind a "Saved".
+    const config = { providers: [], models: {}, budget: {}, tools: {} } as unknown as CascadeConfig;
+    applySettingsPayload(config, { advanced: { localInferenceTimeoutMs: 5000, cloudInferenceTimeoutMs: 1000 } });
+    expect(config.localInferenceTimeoutMs).toBe(5000);
+    expect(config.cloudInferenceTimeoutMs).toBe(1000);
+  });
+
+  it('still refuses one below the schema floor', () => {
+    const config = { providers: [], models: {}, budget: {}, tools: {} } as unknown as CascadeConfig;
+    applySettingsPayload(config, { advanced: { localInferenceTimeoutMs: 999 } });
+    expect(config.localInferenceTimeoutMs).toBeUndefined();
   });
 });

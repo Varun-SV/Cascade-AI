@@ -52,3 +52,25 @@ export function canHydrate(
 ): boolean {
   return !touched.has(section);
 }
+
+/**
+ * The dirty set after a save the backend acknowledged.
+ *
+ * Empty — that is the whole rule, and it was stated in this file and
+ * implemented nowhere, so a section went permanently deaf after one edit. The
+ * function exists so the boundary has a name and a test, rather than being a
+ * `.clear()` somewhere in a component.
+ */
+export function afterCommit(): Set<SettingsSection> {
+  return new Set();
+}
+
+/**
+ * Whether the form is still holding something the server has not confirmed.
+ *
+ * A snapshot arriving while this is true describes an older state for those
+ * sections; once a save is acknowledged it describes a newer one.
+ */
+export function hasUncommittedEdits(touched: ReadonlySet<SettingsSection>): boolean {
+  return touched.size > 0;
+}

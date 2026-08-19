@@ -69,7 +69,7 @@ function mapProvider(id: string): { type: string | null; baseUrl?: string } {
 // ─── Backend ─────────────────────────────────────────────────────────────────
 // Resolve the cascade-ai core package (built CommonJS output). In dev it lives at
 // the repo's ../dist; in a packaged app it's bundled under resources/cascade-core.
-function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined) => boolean; hasProviderCredential: (p: { apiKey?: string; authToken?: string } | undefined | null) => boolean; applyProviderApiKey: (providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>, type: string, apiKey: string, extra?: { baseUrl?: string }) => void; applyProviderCredential: (providers: Array<Record<string, unknown>>, type: string, apiKey: string, endpoint: { kind: 'at'; baseUrl: string } | { kind: 'cleared' } | { kind: 'preserve' }) => { written: boolean; reason: 'ambiguous-scope' | 'unroutable' }; applyEndpointEdit: (existing: Record<string, unknown>, nextBaseUrl: string | undefined, replacementKey: string | undefined) => void; applySettingsPayload: (config: Record<string, unknown>, data: Record<string, unknown>) => { refused: Array<{ type: string; reason: 'ambiguous-scope' | 'unroutable' }> }; settingsSnapshot: (config: Record<string, unknown>) => { models: Record<string, string>; budget: Record<string, unknown>; providersWithKey: string[]; endpoints: Record<string, string>; azureDeployments: Array<Record<string, unknown>>; webSearch: Record<string, unknown>; advanced: Record<string, unknown> }; explainRefusal: (type: string, reason: 'ambiguous-scope' | 'unroutable') => string; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response>; sameEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean; sameCredentialEndpoint: (type: string, a?: string, b?: string) => boolean; hasDefaultEndpoint: (type: string) => boolean; sameAzureEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean } {
+function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined) => boolean; hasProviderCredential: (p: { apiKey?: string; authToken?: string } | undefined | null) => boolean; applyProviderApiKey: (providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>, type: string, apiKey: string, extra?: { baseUrl?: string }) => void; applyProviderCredential: (providers: Array<Record<string, unknown>>, type: string, apiKey: string, endpoint: { kind: 'at'; baseUrl: string } | { kind: 'cleared' } | { kind: 'preserve' }) => { written: boolean; reason: 'ambiguous-scope' | 'unroutable' }; applyEndpointEdit: (existing: Record<string, unknown>, nextBaseUrl: string | undefined, replacementKey: string | undefined) => void; commitSettings: (live: Record<string, unknown>, data: Record<string, unknown>, write: () => Promise<{ ok: true } | { ok: false; error: string }>) => Promise<{ ok: boolean; refused: Array<{ type: string; reason: 'ambiguous-scope' | 'unroutable' }>; error?: string }>; settingsSnapshot: (config: Record<string, unknown>) => { models: Record<string, string>; budget: Record<string, unknown>; providersWithKey: string[]; endpoints: Record<string, string>; azureDeployments: Array<Record<string, unknown>>; webSearch: Record<string, unknown>; advanced: Record<string, unknown> }; explainRefusal: (type: string, reason: 'ambiguous-scope' | 'unroutable') => string; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response>; sameEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean; sameCredentialEndpoint: (type: string, a?: string, b?: string) => boolean; hasDefaultEndpoint: (type: string) => boolean; sameAzureEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean } {
   // Dev: the repo's external-deps build (node_modules resolves the requires).
   // Packaged: the self-contained `desktop-core.cjs` bundle (no node_modules to
   // resolve from — every JS dep is bundled in; only native modules like
@@ -621,13 +621,22 @@ function registerIPC(): void {
       // also runs. Both surfaces receive the identical object from the panel,
       // and keeping two implementations of "apply it" is what let the socket
       // path quietly support four fields fewer.
-      const { applySettingsPayload, explainRefusal } = loadCore();
-      const credentials = applySettingsPayload(cascadeConfig, data);
+      const { commitSettings, explainRefusal } = loadCore();
+      // The SAME transaction the socket handler runs. This path applied the
+      // payload to the live config and persisted afterwards, so a failed write
+      // left the embedded backend running settings the panel had just reported
+      // as unsaved — and it is the path Settings tries FIRST, so the desktop
+      // had the bug on its normal route while the fallback did not.
+      const committed = await commitSettings(cascadeConfig, data, () => configManager!.save().then(
+        () => ({ ok: true as const }),
+        (err: unknown) => ({ ok: false as const, error: err instanceof Error ? err.message : String(err) }),
+      ));
+      if (!committed.ok) return { ok: false, error: committed.error };
+      const credentials = { refused: committed.refused };
       // Reported through the response the panel already renders as an error. A
       // key that was typed and not stored has to say so; the alternative is a
       // save that looks identical to one that worked.
       const refusals = credentials.refused.map((r) => explainRefusal(r.type, r.reason));
-      await configManager.save();
       // `ok` stays true — models, budget and every other key DID save. The
       // refusal rides alongside so the panel can name what it declined and
       // why, rather than reporting a clean success over a key it dropped.

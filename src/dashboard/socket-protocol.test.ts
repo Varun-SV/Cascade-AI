@@ -74,22 +74,21 @@ describe('the save acknowledgement means durable, not merely handled', () => {
     expect(source).toMatch(/private persistConfig\([^)]*\): \{ ok: true \} \| \{ ok: false; error: string \}/);
     expect(source).toMatch(/const result = writeConfigFile\(/);
     expect(source).toMatch(/return result;/);
-    // The save is TRANSACTIONAL: staged, validated, written, and only then
-    // adopted. Mutating the live config first left a failed write running the
-    // change anyway, and the global credential sync had already copied the
-    // provider half of it.
-    expect(source).toMatch(/const staged = JSON\.parse\(JSON\.stringify\(this\.config\)\)/);
-    expect(source).toMatch(/applySettingsPayload\(staged, data\)/);
-    expect(source).toMatch(/validateConfig\(staged\)/);
-    expect(source).toMatch(/this\.persistConfig\(staged\)/);
-    // Globals sync only after the workspace write succeeded.
-    expect(source).toMatch(/Object\.assign\(this\.config, staged\);\s*\n\s*this\.syncGlobalCredentials\(\);/);
+    // The save is TRANSACTIONAL — staged, validated, adopted, written, rolled
+    // back on failure — and the transaction itself now lives in
+    // `commitSettings()`, shared with the desktop IPC writer, whose behaviour
+    // `settings-payload.test.ts` exercises directly. What this handler owes is
+    // to USE it, and to sync globals only on success.
+    expect(source).toMatch(/await commitSettings\(this\.config, data, \(\) => this\.persistConfig\(\)\)/);
+    expect(source).not.toMatch(/applySettingsPayload\(\s*this\.config/);
+    expect(source).toMatch(/if \(!result\.ok\) \{/);
+    expect(source).toMatch(/\}\s*\n\s*this\.syncGlobalCredentials\(\);/);
+    // The sync is not back inside the writer, where a failed write still ran it.
     expect(source).not.toMatch(/saveGlobalCredentials\([^)]*\);\s*\n\s*\}\s*catch[\s\S]{0,80}return result;/);
     // …and the handler puts it in the ack. Now as an EARLY RETURN, because a
     // failed write must also abandon the staged change rather than adopt it
     // with an error attached.
-    expect(source).toMatch(/if \(!persisted\.ok\) \{/);
-    expect(source).toMatch(/Could not write the config file/);
+    expect(source).toMatch(/if \(!result\.ok\) \{/);
   });
 
   it('keeps the global-credential sync best-effort, which it genuinely is', async () => {

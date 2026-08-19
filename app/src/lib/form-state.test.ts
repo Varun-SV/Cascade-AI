@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canHydrate, canSerialize, SETTINGS_SECTIONS, type SettingsSection } from './form-state';
+import { afterCommit, canHydrate, canSerialize, hasUncommittedEdits, SETTINGS_SECTIONS, type SettingsSection } from './form-state';
 
 const none = new Set<SettingsSection>();
 
@@ -68,6 +68,40 @@ describe('the two rules together, over the reported sequence', () => {
     // 4. The socket snapshot arrives afterwards and must not replace it…
     expect(canHydrate('budget', touched)).toBe(false);
     // …while the edit is still what a save sends.
+    expect(canSerialize('budget', { hydrated, touched })).toBe(true);
+  });
+});
+
+describe('the commit boundary', () => {
+  it('drops dirtiness once a save is acknowledged', () => {
+    // Stated in the module and implemented nowhere: nothing cleared the set, so
+    // one edit made that section ignore every later snapshot for the lifetime
+    // of the panel — server-side changes stayed invisible, and the next
+    // unrelated Save wrote the stale value back over them.
+    const touched = new Set<SettingsSection>(['budget', 'azure']);
+    expect(hasUncommittedEdits(touched)).toBe(true);
+    expect(hasUncommittedEdits(afterCommit())).toBe(false);
+  });
+
+  it('lets the save ACK snapshot through, which is the point of clearing first', () => {
+    const touched = afterCommit();
+    // The acknowledgement describes what was actually STORED — including any
+    // value the writer normalised or refused — so it must be able to correct
+    // the form.
+    for (const section of SETTINGS_SECTIONS) {
+      expect(canHydrate(section, touched), section).toBe(true);
+    }
+  });
+
+  it('edit → commit → external change → unrelated save sends the server truth', () => {
+    const hydrated = new Set<SettingsSection>(SETTINGS_SECTIONS);
+    let touched = new Set<SettingsSection>();
+
+    touched.add('budget');                                   // user edits
+    expect(canHydrate('budget', touched)).toBe(false);        // …snapshots wait
+
+    touched = afterCommit();                                  // save acknowledged
+    expect(canHydrate('budget', touched)).toBe(true);          // …server can speak again
     expect(canSerialize('budget', { hydrated, touched })).toBe(true);
   });
 });

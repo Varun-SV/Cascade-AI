@@ -275,12 +275,16 @@ export class DashboardSocket {
    * had dropped. Socket.IO's own ack channel carries it back, which needs no
    * new event name and cannot be missed by a client that forgot to subscribe.
    */
-  onConfigUpdate(callback: (data: ConfigUpdatePayload) => ConfigUpdateResult): void {
+  onConfigUpdate(callback: (data: ConfigUpdatePayload) => Promise<ConfigUpdateResult>): void {
     this.io.on('connection', (socket) => {
       socket.on('config:update', (payload: unknown, ack?: (result: ConfigUpdateResult) => void) => {
         if (typeof payload !== 'object' || payload === null) return;
-        const result = callback(payload as ConfigUpdatePayload);
-        if (typeof ack === 'function') ack(result);
+        // The save is a transaction and the write is async, so the
+        // acknowledgement waits for it. Sending one before the write landed
+        // would put this back to meaning "the handler started".
+        void callback(payload as ConfigUpdatePayload).then((result) => {
+          if (typeof ack === 'function') ack(result);
+        });
       });
     });
   }

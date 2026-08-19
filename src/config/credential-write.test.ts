@@ -547,6 +547,12 @@ describe('every settings surface is actually wired to the shared rules', () => {
     expect(settings).not.toMatch(/if \(cfg\.webSearch\.searxngUrl\) setSearxngUrl/);
     // A failed disk write is a failed save.
     expect(settings).toMatch(/ack\.error/);
+    // An acknowledged save is the commit boundary: dirtiness is dropped BEFORE
+    // the authoritative snapshot is applied, or that snapshot is itself ignored
+    // and the panel keeps showing what it sent rather than what was stored.
+    expect(settings).toMatch(/const commitSections = \(\): void => \{/);
+    expect(settings).toMatch(/commitSections\(\);\s*\n\s*applyConfig\(res\)/);
+    expect(settings).toMatch(/commitSections\(\);\s*\n\s*if \(ack\.snapshot\)/);
     // EVERY writeable section is gated, not just endpoints: a mount-time
     // default is not a statement, and the writer applies whatever arrives as
     // authoritative — so serializing an unloaded section deletes what is
@@ -591,7 +597,12 @@ describe('every settings surface is actually wired to the shared rules', () => {
       // The WHOLE payload, not just its credential half. Applying the rest
       // separately is how the socket path came to support four fields fewer
       // than the panel offered on it.
-      expect(source, rel).toMatch(/applySettingsPayload\(/);
+      // The whole payload, through the one TRANSACTION. Both writers applied it
+      // to the live config and persisted afterwards; only the socket one was
+      // fixed, and it is the fallback rather than the path Settings tries
+      // first, so the desktop kept the bug on its normal route.
+      expect(source, rel).toMatch(/commitSettings\(/);
+      expect(source, rel).not.toMatch(/applySettingsPayload\(\s*(cascadeConfig|this\.config)/);
       // No hand-rolled key loop beside it — that is how the dashboard drifted
       // into writing keys without endpoints and ignoring `endpoints` entirely.
       expect(source, rel).not.toMatch(/applyProviderApiKey\(/);

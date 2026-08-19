@@ -182,6 +182,24 @@ export function SettingsView({ socket }: Props) {
    * serialize the section, and whether a snapshot arriving later may replace
    * it.
    */
+  /**
+   * A save the backend acknowledged is the commit boundary: the form is no
+   * longer newer than the server, so it stops refusing snapshots.
+   *
+   * Cleared BEFORE the authoritative snapshot is applied, or that snapshot —
+   * the one describing what was actually stored — would itself be ignored, and
+   * the panel would keep showing what it sent rather than what was kept. Left
+   * uncleared entirely (as it was), one edit made a section deaf to every later
+   * snapshot for the lifetime of the panel: server-side changes stayed
+   * invisible, normalisation could not correct the form, and the next unrelated
+   * Save wrote the stale value back over them.
+   */
+  const commitSections = (): void => {
+    touchedSections.current.clear();
+    touchedEndpoints.current.clear();
+    forceFormState((n) => n + 1);
+  };
+
   const edits = <T,>(section: SettingsSection, set: (value: T) => void) => (value: T): void => {
     markTouched(section);
     set(value);
@@ -437,6 +455,7 @@ export function SettingsView({ socket }: Props) {
         const res = await window.cascade.updateSettings(payload);
         if (res?.ok) {
           persisted = true;
+          commitSections();
           applyConfig(res);
           // A save can succeed for models and budget while DECLINING to store a
           // key whose host it could not determine. That must not read as "✓
@@ -496,6 +515,7 @@ export function SettingsView({ socket }: Props) {
         return;
       }
       // Re-hydrate from what was actually stored, not from what we sent.
+      commitSections();
       if (ack.snapshot) applyConfig(ack.snapshot as Parameters<typeof applyConfig>[0]);
     }
 

@@ -20,6 +20,7 @@
 import type { CascadeConfig } from '../types.js';
 import { sameAzureEndpoint } from './azure-endpoint.js';
 import { applySettingsCredentials, type SettingsCredentialResult } from './credential-write.js';
+import { validateConfig } from './validate.js';
 import { hasProviderCredential } from './index.js';
 
 /** One Azure deployment as the settings panel sends it. */
@@ -29,6 +30,20 @@ export interface AzureDeploymentInput {
   baseUrl?: string;
   deploymentName?: string;
   apiVersion?: string;
+  /**
+   * Base-model override and pricing region.
+   *
+   * The panel has no controls for these, but the config does and
+   * `azureModelForDeployment()` reads both — `model` for the real base-model
+   * identity, `region` for Azure's regional pricing. The save REPLACES the
+   * whole Azure list, so leaving them out of the DTO meant an unrelated or
+   * no-op Settings save silently dropped a base-model mapping and a region,
+   * changing routing and cost accounting through controls that were never
+   * shown. Round-tripped so a replacement is a replacement of the fields the
+   * editor owns, not of the row.
+   */
+  model?: string;
+  region?: string;
 }
 
 /** The complete Settings save, as both surfaces send it. */
@@ -57,7 +72,7 @@ export interface SettingsPayload {
  * resource B with a blank key field copied A's key onto B — a credential sent
  * to a resource that never issued it.
  */
-export function priorAzureRow<T extends { deploymentName?: string; baseUrl?: string }>(
+export function priorAzureRow<T extends { deploymentName?: string; baseUrl?: string; model?: string; region?: string }>(
   prior: readonly T[],
   incoming: { deploymentName?: string; baseUrl?: string },
 ): T | undefined {
@@ -86,6 +101,12 @@ export function applySettingsPayload(
         // in the same save: an Azure key belongs to ONE resource.
         const prior = priorAzureRow(priorAzure, d);
         const apiKey = d.apiKey ? d.apiKey : prior?.apiKey;
+        // Fields the editor does not address are carried over from the matching
+        // prior row, exactly as its key is. Rebuilding the row from the DTO
+        // alone made every save a lossy rewrite of everything the panel happens
+        // not to show.
+        const model = d.model ?? prior?.model;
+        const region = d.region ?? prior?.region;
         return {
           type: 'azure' as const,
           ...(d.label ? { label: d.label } : {}),
@@ -93,6 +114,8 @@ export function applySettingsPayload(
           ...(d.deploymentName ? { deploymentName: d.deploymentName } : {}),
           ...(d.apiVersion ? { apiVersion: d.apiVersion } : {}),
           ...(apiKey ? { apiKey } : {}),
+          ...(model ? { model } : {}),
+          ...(region ? { region } : {}),
         };
       })
       // Drop rows the user added then left completely empty.
@@ -175,8 +198,11 @@ export function applySettingsPayload(
     { const n = num(a['approvalTimeoutMs'], 1000, 86_400_000); if (n !== undefined) config.approvalTimeoutMs = Math.floor(n); }
     if (['auto', 'parallel', 'sequential'].includes(a['t3Execution'] as string)) config.t3Execution = a['t3Execution'] as CascadeConfig['t3Execution'];
     { const n = num(a['localConcurrency'], 1, 16); if (n !== undefined) config.localConcurrency = Math.floor(n); }
-    { const n = num(a['localInferenceTimeoutMs'], 10_000, 3_600_000); if (n !== undefined) config.localInferenceTimeoutMs = n; }
-    { const n = num(a['cloudInferenceTimeoutMs'], 10_000, 3_600_000); if (n !== undefined) config.cloudInferenceTimeoutMs = n; }
+    // Floors are the SCHEMA's (`min(1000)`), not a stricter guess: 1–9 seconds
+    // is a valid config that this writer was silently discarding while the
+    // panel reported the save as successful.
+    { const n = num(a['localInferenceTimeoutMs'], 1000, 3_600_000); if (n !== undefined) config.localInferenceTimeoutMs = Math.floor(n); }
+    { const n = num(a['cloudInferenceTimeoutMs'], 1000, 3_600_000); if (n !== undefined) config.cloudInferenceTimeoutMs = Math.floor(n); }
     if (typeof a['reflectionEnabled'] === 'boolean') config.reflection = { ...(config.reflection ?? {}), enabled: a['reflectionEnabled'] };
     if (typeof a['cascadeAuto'] === 'boolean') config.cascadeAuto = a['cascadeAuto'];
     if (['auto', 'T1', 'T2', 'T3'].includes(a['forceTier'] as string)) config.routing = { ...(config.routing ?? {}), forceTier: a['forceTier'] as NonNullable<CascadeConfig['routing']>['forceTier'] };
@@ -217,7 +243,8 @@ export interface SettingsSnapshot {
   providersWithKey: string[];
   endpoints: Record<string, string>;
   azureDeployments: Array<{
-    label?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string; hasKey: boolean;
+    label?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string;
+    model?: string; region?: string; hasKey: boolean;
   }>;
   webSearch: { searxngUrl?: string; hasBraveKey: boolean; hasTavilyKey: boolean };
   advanced: Record<string, unknown>;
@@ -227,6 +254,7 @@ export function settingsSnapshot(config: CascadeConfig): SettingsSnapshot {
   const providers = (config.providers ?? []) as Array<{
     type: string; apiKey?: string; authToken?: string; baseUrl?: string;
     label?: string; deploymentName?: string; apiVersion?: string;
+    model?: string; region?: string;
   }>;
   const endpoints: Record<string, string> = {};
   for (const p of providers) {
@@ -256,6 +284,9 @@ export function settingsSnapshot(config: CascadeConfig): SettingsSnapshot {
         baseUrl: p.baseUrl,
         deploymentName: p.deploymentName,
         apiVersion: p.apiVersion,
+        // Surfaced so a panel that round-trips the snapshot cannot drop them.
+        model: p.model,
+        region: p.region,
         hasKey: typeof p.apiKey === 'string' && p.apiKey.length > 0,
       })),
     webSearch: {
@@ -283,4 +314,80 @@ export function settingsSnapshot(config: CascadeConfig): SettingsSnapshot {
       telemetryEnabled: config.telemetry?.enabled,
     },
   };
+}
+
+/** The outcome of a settings save, for whichever surface asked for it. */
+export interface SettingsCommitResult {
+  /** False only when nothing was stored — the live config is untouched. */
+  ok: boolean;
+  /** Credentials deliberately not written, with the reason to show the user. */
+  refused: SettingsCredentialResult['refused'];
+  /** Why the save failed, when it did. */
+  error?: string;
+}
+
+/**
+ * Apply a settings save as a TRANSACTION, for every surface that has one.
+ *
+ * Both writers had the same bug and it was fixed in only one of them: the
+ * payload was applied to the LIVE config and persisted afterwards, so a failed
+ * write left the change running while the caller was told it had not saved. The
+ * socket handler was made transactional; the desktop IPC bridge — the primary
+ * path, tried before the socket — was not. Rather than stage in two places,
+ * both call this.
+ *
+ * The order matters and each step exists for a reported failure:
+ *
+ *  1. keep a rollback image of the live config;
+ *  2. apply the payload to a copy, so a rejected save never runs;
+ *  3. VALIDATE, and keep what the validator returns — it applies schema
+ *     defaults, and discarding it left a config missing the fields a cleared
+ *     cap should have fallen back to until the next restart re-applied them;
+ *  4. adopt the validated config into the live object IN PLACE, because the
+ *     desktop main process holds a reference to it and swapping would strand
+ *     that alias;
+ *  5. write — the caller's own writer, reading the now-current live config;
+ *  6. on failure, restore the rollback image, also in place.
+ *
+ * The caller syncs machine-global credentials only when this returns `ok`.
+ */
+export async function commitSettings(
+  live: CascadeConfig,
+  data: SettingsPayload,
+  write: () => Promise<{ ok: true } | { ok: false; error: string }> | ({ ok: true } | { ok: false; error: string }),
+): Promise<SettingsCommitResult> {
+  const rollback = structuredClone(live);
+  const staged = structuredClone(live);
+  const { refused } = applySettingsPayload(staged, data);
+
+  let committed: CascadeConfig;
+  try {
+    committed = validateConfig(staged);
+  } catch (err) {
+    return {
+      ok: false,
+      refused,
+      error: `Those settings are not valid: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  replaceInPlace(live, committed);
+  const written = await write();
+  if (!written.ok) {
+    replaceInPlace(live, rollback);
+    return { ok: false, refused, error: `Could not write the config file: ${written.error}` };
+  }
+  return { ok: true, refused };
+}
+
+/**
+ * Overwrite one config object's contents with another's, keeping its identity.
+ *
+ * `Object.assign` alone would leave behind keys the save REMOVED — a cleared
+ * budget cap, a retired provider — so they are deleted first.
+ */
+function replaceInPlace(target: CascadeConfig, source: CascadeConfig): void {
+  const t = target as unknown as Record<string, unknown>;
+  for (const key of Object.keys(t)) delete t[key];
+  Object.assign(t, structuredClone(source));
 }
