@@ -364,15 +364,21 @@ export class ConfigManager {
     return this.workspacePath;
   }
 
-  async save(): Promise<void> {
+  /**
+   * @param config What to persist. Defaults to the manager's own, but a
+   * transactional save hands in the validated copy it has NOT adopted yet —
+   * writing before adopting is what stops a run picking up configuration that
+   * never reached the disk (see `commitSettings`).
+   */
+  async save(config: CascadeConfig = this.config): Promise<void> {
     const configPath = path.join(this.workspacePath, CASCADE_CONFIG_FILE);
     await fs.mkdir(path.dirname(configPath), { recursive: true });
-    await fs.writeFile(configPath, JSON.stringify(this.config, null, 2), 'utf-8');
+    await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8');
     // Sync credential-bearing provider entries to the global store so they
     // survive workspace switches. Best-effort: a read-only home dir must not
     // fail the workspace save.
     try {
-      saveGlobalCredentials(this.globalDir, this.config.providers);
+      saveGlobalCredentials(this.globalDir, config.providers);
     } catch (err) {
       console.warn(`Failed to sync credentials to global store: ${err instanceof Error ? err.message : String(err)}`);
     }

@@ -338,25 +338,35 @@ export interface SettingsCommitResult {
  *
  * The order matters and each step exists for a reported failure:
  *
- *  1. keep a rollback image of the live config;
- *  2. apply the payload to a copy, so a rejected save never runs;
- *  3. VALIDATE, and keep what the validator returns — it applies schema
+ *  1. apply the payload to a COPY, so a rejected save never runs;
+ *  2. VALIDATE, and keep what the validator returns — it applies schema
  *     defaults, and discarding it left a config missing the fields a cleared
  *     cap should have fallen back to until the next restart re-applied them;
- *  4. adopt the validated config into the live object IN PLACE, because the
- *     desktop main process holds a reference to it and swapping would strand
- *     that alias;
- *  5. write — the caller's own writer, reading the now-current live config;
- *  6. on failure, restore the rollback image, also in place.
+ *  3. write that validated copy, and only then
+ *  4. adopt it into the live object IN PLACE, because the desktop main process
+ *     holds a reference to it and swapping would strand that alias.
+ *
+ * Writing BEFORE adopting is the part that took two attempts. An earlier
+ * revision adopted first and rolled back on failure, which reads as
+ * equivalent and is not: `write()` is asynchronous filesystem I/O, and the
+ * embedded `DashboardServer` reads that same live object when a run starts. A
+ * run beginning inside that window used configuration that was never
+ * persisted — and for an endpoint or credential change, may already have sent
+ * the new secret somewhere — before the failed write rolled memory back and
+ * the panel truthfully reported that nothing had saved. Handing the writer the
+ * validated config as an argument, rather than letting it read the live one,
+ * is what removes the window rather than narrowing it.
+ *
+ * There is consequently no rollback image: nothing is modified until the write
+ * has landed.
  *
  * The caller syncs machine-global credentials only when this returns `ok`.
  */
 export async function commitSettings(
   live: CascadeConfig,
   data: SettingsPayload,
-  write: () => Promise<{ ok: true } | { ok: false; error: string }> | ({ ok: true } | { ok: false; error: string }),
+  write: (config: CascadeConfig) => Promise<{ ok: true } | { ok: false; error: string }> | ({ ok: true } | { ok: false; error: string }),
 ): Promise<SettingsCommitResult> {
-  const rollback = structuredClone(live);
   const staged = structuredClone(live);
   const { refused } = applySettingsPayload(staged, data);
 
@@ -371,12 +381,13 @@ export async function commitSettings(
     };
   }
 
-  replaceInPlace(live, committed);
-  const written = await write();
+  // The writer is HANDED the config. It must not reach for the live one, which
+  // is still the old configuration and stays that way until this resolves.
+  const written = await write(committed);
   if (!written.ok) {
-    replaceInPlace(live, rollback);
     return { ok: false, refused, error: `Could not write the config file: ${written.error}` };
   }
+  replaceInPlace(live, committed);
   return { ok: true, refused };
 }
 

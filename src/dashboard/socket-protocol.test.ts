@@ -79,7 +79,12 @@ describe('the save acknowledgement means durable, not merely handled', () => {
     // `commitSettings()`, shared with the desktop IPC writer, whose behaviour
     // `settings-payload.test.ts` exercises directly. What this handler owes is
     // to USE it, and to sync globals only on success.
-    expect(source).toMatch(/await commitSettings\(this\.config, data, \(\) => this\.persistConfig\(\)\)/);
+    // The writer is HANDED the validated config and must persist THAT: during
+    // the write the live object is still the old configuration, so a writer
+    // reaching for it would save what is being replaced.
+    expect(source).toMatch(/await commitSettings\(this\.config, data, \(committed\) => this\.persistConfig\(committed\)\)/);
+    // …and `persistConfig` takes no default, so that mistake cannot typecheck.
+    expect(source).not.toMatch(/private persistConfig\([^)]*= this\.config/);
     expect(source).not.toMatch(/applySettingsPayload\(\s*this\.config/);
     expect(source).toMatch(/if \(!result\.ok\) \{/);
     expect(source).toMatch(/\}\s*\n\s*this\.syncGlobalCredentials\(\);/);

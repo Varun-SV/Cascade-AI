@@ -303,14 +303,49 @@ describe('commitSettings — a save that fails changes nothing', () => {
     expect(live.models.t1).toBe('claude-opus-4');
   });
 
-  it('writes only AFTER the change is adopted, so the writer sees it', async () => {
+  it('writes BEFORE adopting, so the running backend never sees an unsaved config', async () => {
+    // This test asserted the opposite, and codified the bug: adopting first and
+    // rolling back on failure reads as equivalent and is not. `write()` is
+    // asynchronous filesystem I/O and the embedded `DashboardServer` reads this
+    // very object when a run starts, so a run beginning inside that window used
+    // configuration that was never persisted — and for a credential change may
+    // already have sent the new secret somewhere — before the rollback and the
+    // panel's truthful "not saved".
     const live = configured();
-    let seen: number | undefined;
-    await commitSettings(live, { budget: { maxCostPerRun: 9 } }, () => {
-      seen = live.budget.maxCostPerRunUsd;
+    let liveDuringWrite: number | undefined;
+    let handed: number | undefined;
+
+    await commitSettings(live, { budget: { maxCostPerRun: 9 } }, (committed) => {
+      // What a concurrent run would observe while the write is in flight.
+      liveDuringWrite = live.budget.maxCostPerRunUsd;
+      // …and what the writer is given instead of reaching for the live one.
+      handed = committed.budget.maxCostPerRunUsd;
       return { ok: true };
     });
-    expect(seen).toBe(9);
+
+    expect(liveDuringWrite).toBe(5);
+    expect(handed).toBe(9);
+    // Adopted once the write landed.
+    expect(live.budget.maxCostPerRunUsd).toBe(9);
+  });
+
+  it('never makes the new config observable when the write fails', async () => {
+    const live = configured();
+    const observed: Array<number | undefined> = [];
+
+    const result = await commitSettings(live, { budget: { maxCostPerRun: 9 } }, async (committed) => {
+      observed.push(live.budget.maxCostPerRunUsd);
+      // A real write yields to the event loop, which is where a run would start.
+      await Promise.resolve();
+      observed.push(live.budget.maxCostPerRunUsd);
+      void committed;
+      return { ok: false, error: 'EACCES' };
+    });
+
+    expect(result.ok).toBe(false);
+    // Old at every point a concurrent reader could have looked, and after.
+    expect(observed).toEqual([5, 5]);
+    expect(live.budget.maxCostPerRunUsd).toBe(5);
   });
 
   it('never writes at all when the result would be invalid', async () => {

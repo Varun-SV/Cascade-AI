@@ -232,7 +232,7 @@ export class DashboardServer {
       // path appeared to work and did nothing.
       // One transaction, shared with the desktop IPC writer: staged, validated,
       // adopted, written, rolled back on failure. See `commitSettings`.
-      const result = await commitSettings(this.config, data, () => this.persistConfig());
+      const result = await commitSettings(this.config, data, (committed) => this.persistConfig(committed));
       const refused = result.refused.map((r) => ({
         type: r.type, reason: r.reason, message: explainRefusal(r.type, r.reason),
       }));
@@ -478,7 +478,14 @@ export class DashboardServer {
    * The global-credential sync below is genuinely best-effort — it is a
    * convenience copy, and failing it does not lose what the user just entered.
    */
-  private persistConfig(config: typeof this.config = this.config): { ok: true } | { ok: false; error: string } {
+  /**
+   * @param config REQUIRED, with no default. `commitSettings` writes the
+   * validated copy BEFORE adopting it, so a writer that reached for
+   * `this.config` instead would persist the configuration being replaced — and
+   * a default parameter is exactly the affordance that lets that happen
+   * silently and still typecheck.
+   */
+  private persistConfig(config: typeof this.config): { ok: true } | { ok: false; error: string } {
     const result = writeConfigFile(path.join(this.workspacePath, CASCADE_CONFIG_FILE), config);
     if (!result.ok) console.warn(`[dashboard] Failed to persist config: ${result.error}`);
     return result;
