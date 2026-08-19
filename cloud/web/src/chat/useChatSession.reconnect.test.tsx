@@ -100,7 +100,7 @@ describe('useChatSession — a run that outlives the connection that started it'
     const view = startRun(fake);
     await waitFor(() => expect(view.result.current.busy).toBe(true));
 
-    act(() => { fake.fire('run:resumed', { active: 0, finished: ['server-made-id'] }); });
+    act(() => { fake.fire('run:resumed', { active: 0, finished: [{ conversationId: 'server-made-id' }] }); });
 
     await waitFor(() => expect(view.result.current.busy).toBe(false));
     expect(view.result.current.conversationId).toBe('server-made-id');
@@ -131,6 +131,29 @@ describe('useChatSession — a run that outlives the connection that started it'
     expect(view.result.current.error).toBe('provider refused the request');
     // The failed turn still belongs to a conversation, and its user message is
     // persisted — so the id is adopted here too.
+    expect(view.result.current.conversationId).toBe('server-made-id');
+  });
+
+  it('surfaces a failure that happened while nobody was connected', async () => {
+    // The run can die during the gap as easily as it can finish, and its
+    // `session:error` went to a socket that no longer existed. Reporting only
+    // the conversation id made the two endings identical to the client: the
+    // spinner cleared, a transcript with no reply in it loaded, and nothing
+    // said why. The outcome has to come back with the resume, not just the id.
+    const fake = fakeSocket();
+    const view = startRun(fake);
+    await waitFor(() => expect(view.result.current.busy).toBe(true));
+
+    act(() => {
+      fake.fire('run:resumed', {
+        active: 0,
+        finished: [{ conversationId: 'server-made-id', error: 'the provider rejected the request' }],
+      });
+    });
+
+    await waitFor(() => expect(view.result.current.busy).toBe(false));
+    expect(view.result.current.error).toBe('the provider rejected the request');
+    // Identity is still recovered — the failed turn belongs to a conversation.
     expect(view.result.current.conversationId).toBe('server-made-id');
   });
 

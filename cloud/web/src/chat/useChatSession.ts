@@ -487,13 +487,18 @@ export function useChatSession(
       const cid = conversationIdRef.current;
       if (cid) void reloadActivePath(cid);
     };
-    const onResumed = (e: { active?: number; finished?: Array<string | undefined> }) => {
+    const onResumed = (e: { active?: number; finished?: Array<{ conversationId?: string; error?: string }> }) => {
       if (!busyRef.current) return;
       if (e?.active) { ackLostRef.current = true; return; }
       // Nothing is running. The terminal event was emitted while no socket was
-      // bound, so `finished` is the only remaining carrier of the id for a run
-      // that was a brand-new chat.
-      finishWithoutAck(e?.finished?.find((id): id is string => !!id) ?? conversationIdRef.current);
+      // bound, so this is the only remaining carrier of BOTH the id — for a run
+      // that was a brand-new chat — and the outcome. A run can fail during the
+      // gap as easily as it can finish, and reporting only the id made the two
+      // indistinguishable: the page cleared its spinner, reloaded a transcript
+      // with no reply in it, and said nothing about why.
+      const outcome = e?.finished?.find((f) => f?.error) ?? e?.finished?.[0];
+      if (outcome?.error) setError(outcome.error);
+      finishWithoutAck(outcome?.conversationId);
     };
     // Both endings take their id from the PAYLOAD, not from React state: on a
     // first turn that state is still undefined, and these events carry the id

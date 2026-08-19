@@ -12,6 +12,14 @@ import { formatZodError, parseChatRunPayload, runChatTurn, type ChatRunResult, t
 
 interface CloudSocketData {
   userId: string;
+  /**
+   * Stable per-TAB id supplied by the client handshake.
+   *
+   * The session cookie identifies the account, which is not enough to decide
+   * who may inherit a held run — see resumeKey(). Absent for any client that
+   * does not send one, which simply makes that connection non-resumable.
+   */
+  clientId?: string;
 }
 
 type ChatRunAck = (
@@ -78,10 +86,18 @@ export class RebindableTransport implements RunSocket {
   private current: Socket | null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly listeners = new Map<string, Set<(...args: any[]) => void>>();
+  private readonly observe: (event: string, payload: unknown) => void;
 
-  constructor(socket: Socket) { this.current = socket; }
+  constructor(socket: Socket, observe: (event: string, payload: unknown) => void = () => {}) {
+    this.current = socket;
+    this.observe = observe;
+  }
 
   emit(event: string, payload: unknown): unknown {
+    // Observed BEFORE delivery, and whether or not anything is bound. A run
+    // that ends while its socket is gone emits into nothing, so this is the
+    // only moment its outcome exists anywhere.
+    this.observe(event, payload);
     return this.current?.emit(event, payload);
   }
 
@@ -131,7 +147,22 @@ interface LiveRun {
    * otherwise has no way to name the conversation whose answer it should load.
    */
   conversationId?: string;
+  /**
+   * How the run actually ended, captured from its own terminal event.
+   *
+   * Recording only the successful result was not enough: `runChatTurn` can
+   * create and persist a conversation and THEN fail, emitting `session:error`
+   * and throwing. With the transport unbound that event reached nobody, the
+   * success assignment was never made, and the held entry ended up
+   * indistinguishable from a clean completion — so a reconnect cleared the
+   * spinner, surfaced no error, and for a new chat had no id to reload either.
+   * Which is the original "the response just died", one disconnect later.
+   */
+  terminal?: { conversationId?: string; error?: string };
 }
+
+/** The events that mean a run is over, in either direction. */
+const TERMINAL_EVENTS = new Set(['session:complete', 'session:error']);
 
 export interface SocketOptions {
   /** Overridable for tests, which cannot wait out the real grace window. */
@@ -165,6 +196,8 @@ export function attachSocket(
    * so tests attaching several do not share state.
    */
   const orphanedRuns = new Map<string, { runs: Set<LiveRun>; timer: NodeJS.Timeout }>();
+  // Keys are `${userId}\u0000${clientId}` — see resumeKey() for why the tab has
+  // to be part of it.
 
   io.use((socket, next) => {
     const cookies = parseCookies(socket.handshake.headers.cookie);
@@ -172,8 +205,34 @@ export function attachSocket(
     const session = token ? verifySessionToken(token, env.SESSION_SECRET) : null;
     if (!session) { next(new Error('unauthorized')); return; }
     (socket.data as CloudSocketData).userId = session.userId;
+    // Which TAB this is, not just which account. See resumeKey().
+    const claimed = (socket.handshake.auth as { clientId?: unknown } | undefined)?.clientId;
+    (socket.data as CloudSocketData).clientId =
+      typeof claimed === 'string' && claimed.length > 0 && claimed.length <= 128 ? claimed : undefined;
     next();
   });
+
+  /**
+   * Who may inherit a held run.
+   *
+   * Keyed by user AND tab, because "the same account connected" is not "the
+   * client came back". A user can have several tabs open, and Pro allows three
+   * concurrent runs; with a user-only key the FIRST socket to arrive adopted
+   * every held run for that account. Tab A drops mid-run, tab B reconnects or
+   * refreshes first, and B inherits A's transport — A's tokens, statuses and
+   * approval prompts then render in B's chat (no client handler filters on
+   * conversationId), and B's Stop aborts a run it never started, while A is
+   * told `active: 0` and gives up on its own run.
+   *
+   * A connection that claims no tab identity is not resumable at all: its runs
+   * are aborted on disconnect exactly as they were before any of this existed.
+   * Silently falling back to the account would restore the cross-tab bug for
+   * precisely the clients that cannot prove which tab they are.
+   */
+  const resumeKey = (socket: Socket): string | undefined => {
+    const { userId, clientId } = socket.data as CloudSocketData;
+    return clientId ? `${userId}\u0000${clientId}` : undefined;
+  };
 
   io.on('connection', (socket: Socket) => {
     const userId = (socket.data as CloudSocketData).userId;
@@ -198,10 +257,11 @@ export function attachSocket(
     // `context:decision` / `escalation:decide` listeners stayed bound to the
     // dead socket, so the reconnected page waited forever on a run that was
     // talking to nobody.
-    const held = orphanedRuns.get(userId);
-    if (held) {
+    const key = resumeKey(socket);
+    const held = key ? orphanedRuns.get(key) : undefined;
+    if (held && key) {
       clearTimeout(held.timer);
-      orphanedRuns.delete(userId);
+      orphanedRuns.delete(key);
       for (const run of held.runs) {
         if (run.done) continue;
         run.transport.rebind(socket);
@@ -226,7 +286,9 @@ export function attachSocket(
     // remaining place that id can come from.
     socket.emit('run:resumed', {
       active: activeRuns.size,
-      finished: [...(held?.runs ?? [])].filter((r) => r.done && r.conversationId).map((r) => r.conversationId),
+      finished: [...(held?.runs ?? [])]
+        .filter((r) => r.done)
+        .map((r) => ({ conversationId: r.terminal?.conversationId ?? r.conversationId, error: r.terminal?.error })),
     });
 
     socket.on('chat:run', async (payload: unknown, ack?: ChatRunAck) => {
@@ -234,7 +296,16 @@ export function attachSocket(
       // (`RunSocket` in runs.ts — emit plus on/off), so runChatTurn is
       // unchanged; the difference is that it can be re-pointed at whatever
       // connection the user currently has.
-      const run: LiveRun = { controller: new AbortController(), transport: new RebindableTransport(socket), done: false };
+      const run: LiveRun = {
+        controller: new AbortController(),
+        transport: new RebindableTransport(socket, (event, payload) => {
+          if (!TERMINAL_EVENTS.has(event)) return;
+          const p = (payload ?? {}) as { conversationId?: string; error?: string };
+          run.terminal = { conversationId: p.conversationId, error: p.error };
+          if (p.conversationId) run.conversationId = p.conversationId;
+        }),
+        done: false,
+      };
       activeRuns.add(run);
       try {
         const parsed = parseChatRunPayload(payload);
@@ -278,21 +349,30 @@ export function attachSocket(
       for (const r of inFlight) r.transport.rebind(null);
       if (inFlight.length === 0) return;
 
+      // No tab identity means nothing can ever prove it is this client coming
+      // back, so there is nobody to hold the run FOR. Abort now rather than
+      // spend for 90 seconds on an answer no connection can claim.
+      const parkKey = resumeKey(socket);
+      if (!parkKey) {
+        for (const r of inFlight) r.controller.abort();
+        return;
+      }
+
       // A second disconnect while the first is still held must not drop the
       // first set on the floor: merge, and restart the clock from the latest.
-      const existing = orphanedRuns.get(userId);
+      const existing = orphanedRuns.get(parkKey);
       if (existing) clearTimeout(existing.timer);
       const runs = existing?.runs ?? new Set<LiveRun>();
       for (const r of inFlight) runs.add(r);
 
       const timer = setTimeout(() => {
-        orphanedRuns.delete(userId);
+        orphanedRuns.delete(parkKey);
         for (const r of runs) r.controller.abort();
       }, graceMs);
       // Never hold the process open for a grace window: a shutting-down server
       // should exit, and the abort is pointless once it has.
       timer.unref?.();
-      orphanedRuns.set(userId, { runs, timer });
+      orphanedRuns.set(parkKey, { runs, timer });
     });
   });
 

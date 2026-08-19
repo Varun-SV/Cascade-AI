@@ -182,11 +182,18 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
     baseUrl = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}`;
   }
 
-  function connect(cookie: string): ClientSocket {
+  /**
+   * `clientId` is the TAB identity a reconnect is matched on — the same tab
+   * coming back passes the same one. Tests that model a different tab pass a
+   * different one, and a test that models a client too old to send one passes
+   * `undefined`.
+   */
+  function connect(cookie: string, tab: string | null = 'tab-a'): ClientSocket {
     const client = ioClient(baseUrl, {
       transports: ['websocket'],
       reconnection: false,
       extraHeaders: { Cookie: cookie },
+      auth: tab ? { clientId: tab } : {},
     });
     clients.push(client);
     return client;
@@ -426,14 +433,139 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
 
     // Now come back. Nothing is running, and the id has to arrive anyway.
     const second = connect(cookie);
-    const seen: Array<{ active?: number; finished?: string[] }> = [];
-    second.on('run:resumed', (e: { active?: number; finished?: string[] }) => { seen.push(e); });
+    const seen: Array<{ active?: number; finished?: Array<{ conversationId?: string; error?: string }> }> = [];
+    second.on('run:resumed', (e: { active?: number; finished?: Array<{ conversationId?: string; error?: string }> }) => { seen.push(e); });
     await connected(second);
 
     const arrived = await until(() => seen.length > 0, 5_000);
     expect(arrived).toBe(true);
     expect(seen[0]?.active).toBe(0);
-    expect(seen[0]?.finished).toEqual([cid]);
+    expect(seen[0]?.finished).toEqual([{ conversationId: cid, error: undefined }]);
+  }, 30_000);
+
+  it('does not hand one tab\u2019s run to another tab on the same account', async () => {
+    // `orphanedRuns` used to be keyed by user alone, so the FIRST socket to
+    // arrive after a drop adopted every held run on the account. Pro allows
+    // three concurrent runs and any account can have two tabs open, so this is
+    // ordinary use, not a corner: tab B would inherit tab A's transport, render
+    // A's tokens in its own chat, and be able to Stop a run it never started —
+    // while A, arriving second, was told there was nothing running.
+    await start(8_000);
+    stub = await startStubOpenAIServer({ delayMs: 3_000 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'grace-tabs', email: null, name: 'Tabs', avatar: null });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+
+    const tabA = connect(cookie, 'tab-a');
+    await connected(tabA);
+    tabA.emit(
+      'chat:run',
+      { prompt: 'hello', providers: [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }] },
+      () => { /* dies with this socket */ },
+    );
+
+    await new Promise((r) => setTimeout(r, 300));
+    tabA.close();
+    await new Promise((r) => setTimeout(r, 100));
+
+    // A DIFFERENT tab connects first. It must be told nothing is running for
+    // it, must not receive the other tab's completion, and must not be able to
+    // stop it.
+    const tabB = connect(cookie, 'tab-b');
+    const seenByB: Array<{ active?: number }> = [];
+    let completedOnB = false;
+    tabB.on('run:resumed', (e: { active?: number }) => { seenByB.push(e); });
+    tabB.on('session:complete', () => { completedOnB = true; });
+    await connected(tabB);
+
+    await until(() => seenByB.length > 0, 5_000);
+    expect(seenByB[0]?.active).toBe(0);
+
+    tabB.emit('chat:stop');
+
+    // The original tab comes back and inherits its own run, which the other
+    // tab's Stop did not touch.
+    const tabAAgain = connect(cookie, 'tab-a');
+    const seenByA: Array<{ active?: number }> = [];
+    tabAAgain.on('run:resumed', (e: { active?: number }) => { seenByA.push(e); });
+    await connected(tabAAgain);
+
+    await until(() => seenByA.length > 0, 5_000);
+    expect(seenByA[0]?.active).toBe(1);
+    expect(completedOnB).toBe(false);
+
+    const conversations = store.listConversations(user.id) as Array<{ id: string }>;
+    const landed = await until(
+      () => conversations.length > 0 && assistantReply(conversations[0]!.id).includes('Hello from the stub model.'),
+      10_000,
+    );
+    expect(landed).toBe(true);
+  }, 40_000);
+
+  it('abandons a run when the client cannot say which tab it is', async () => {
+    // No tab identity means no connection can ever prove it is this client
+    // coming back, so there is nobody to hold the run for. Falling back to the
+    // account would reintroduce exactly the cross-tab adoption above.
+    await start(8_000);
+    stub = await startStubOpenAIServer({ delayMs: 3_000 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'grace-anon', email: null, name: 'Anon', avatar: null });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+
+    const only = connect(cookie, null);
+    await connected(only);
+    only.emit(
+      'chat:run',
+      { prompt: 'hello', providers: [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }] },
+      () => { /* never arrives */ },
+    );
+
+    await new Promise((r) => setTimeout(r, 300));
+    only.close();
+
+    // Aborted on disconnect, not held: well before the grace window would have
+    // expired, and before the stub would have answered.
+    await new Promise((r) => setTimeout(r, 3_500));
+    const conversations = store.listConversations(user.id) as Array<{ id: string }>;
+    const reply = conversations.length ? assistantReply(conversations[0]!.id) : '';
+    expect(reply).not.toContain('Hello from the stub model.');
+  }, 30_000);
+
+  it('reports the ERROR of a run that failed while nobody was connected', async () => {
+    // Recording only the successful result left a failure indistinguishable
+    // from a clean completion: `runChatTurn` can persist a conversation and
+    // THEN fail, and with the transport unbound its `session:error` reached
+    // nobody. The page came back, cleared its spinner, reloaded a transcript
+    // with no reply in it, and explained nothing — the original "the response
+    // just died", one disconnect later.
+    await start(8_000);
+    // A provider that accepts the model probe and then fails the completion.
+    stub = await startStubOpenAIServer({ delayMs: 200, failCompletion: true });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'grace-fail', email: null, name: 'Fail', avatar: null });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+
+    const first = connect(cookie, 'tab-fail');
+    await connected(first);
+    first.emit(
+      'chat:run',
+      { prompt: 'hello', providers: [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }] },
+      () => { /* dies with the socket */ },
+    );
+
+    await new Promise((r) => setTimeout(r, 200));
+    first.close();
+    // Long enough for the failure to happen with nothing bound.
+    await new Promise((r) => setTimeout(r, 6_000));
+
+    const second = connect(cookie, 'tab-fail');
+    const seen: Array<{ active?: number; finished?: Array<{ conversationId?: string; error?: string }> }> = [];
+    second.on('run:resumed', (e: { active?: number; finished?: Array<{ conversationId?: string; error?: string }> }) => { seen.push(e); });
+    await connected(second);
+
+    const arrived = await until(() => seen.length > 0, 5_000);
+    expect(arrived).toBe(true);
+    expect(seen[0]?.active).toBe(0);
+    // The outcome survived the disconnect, and says it failed.
+    expect(seen[0]?.finished?.length).toBe(1);
+    expect(seen[0]?.finished?.[0]?.error).toBeTruthy();
   }, 30_000);
 
   it('tells a fresh connection there is nothing to wait for', async () => {
@@ -445,8 +577,8 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
     const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
 
     const client = connect(cookie);
-    const seen: Array<{ active?: number; finished?: string[] }> = [];
-    client.on('run:resumed', (e: { active?: number; finished?: string[] }) => { seen.push(e); });
+    const seen: Array<{ active?: number; finished?: Array<{ conversationId?: string; error?: string }> }> = [];
+    client.on('run:resumed', (e: { active?: number; finished?: Array<{ conversationId?: string; error?: string }> }) => { seen.push(e); });
     await connected(client);
 
     const arrived = await until(() => seen.length > 0, 5_000);

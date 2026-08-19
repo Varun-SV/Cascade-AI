@@ -20,10 +20,20 @@ export interface StubOpenAIOptions {
    * unchanged.
    */
   delayMs?: number;
+  /**
+   * Fail the completion with a 500 after `delayMs` instead of answering.
+   *
+   * Lets a test drive the path where a run creates its conversation and THEN
+   * dies — the case where the terminal event is `session:error` rather than
+   * `session:complete`, and where a disconnected client would otherwise learn
+   * nothing about why its answer never came.
+   */
+  failCompletion?: boolean;
 }
 
 export function startStubOpenAIServer(options: StubOpenAIOptions = {}): Promise<StubOpenAIServer> {
   const delayMs = options.delayMs ?? 0;
+  const failCompletion = options.failCompletion ?? false;
   const requestLog: string[] = [];
   const server = http.createServer((req, res) => {
     requestLog.push(`${req.method} ${req.url}`);
@@ -31,6 +41,23 @@ export function startStubOpenAIServer(options: StubOpenAIOptions = {}): Promise<
     if (req.method === 'GET' && req.url?.endsWith('/models')) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ data: [{ id: 'stub-model' }] }));
+      return;
+    }
+
+    if (req.method === 'POST' && req.url?.endsWith('/chat/completions') && failCompletion) {
+      const fail = () => {
+        if (res.writableEnded || res.destroyed) return;
+        // 400 rather than 500 on purpose: a 5xx is retried, and a test that
+        // wants the run to DIE should not be racing a backoff schedule.
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'stub provider failure', type: 'invalid_request_error' } }));
+      };
+      if (delayMs > 0) {
+        const timer = setTimeout(fail, delayMs);
+        res.on('close', () => clearTimeout(timer));
+      } else {
+        fail();
+      }
       return;
     }
 
