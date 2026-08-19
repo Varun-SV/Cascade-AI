@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addressableEndpoints } from './endpoints';
+import { addressableEndpoints, hydrateEndpoints } from './endpoints';
 
 describe('addressableEndpoints — a blank field is not a clear until it has loaded', () => {
   const fields = [
@@ -56,5 +56,75 @@ describe('addressableEndpoints — a blank field is not a clear until it has loa
       [['anthropic', '  https://gw.example  ']],
       { hydrated: true, touched: new Set() },
     )).toEqual({ anthropic: 'https://gw.example' });
+  });
+});
+
+describe('hydrateEndpoints — a late snapshot does not overwrite an edit', () => {
+  const current = { anthropic: '', 'openai-compatible': '' };
+
+  it('fills untouched fields from the snapshot', () => {
+    expect(hydrateEndpoints(current, { anthropic: 'https://gw.example' }, new Set()))
+      .toEqual({ anthropic: 'https://gw.example', 'openai-compatible': '' });
+  });
+
+  it('leaves a field the user has already typed in', () => {
+    // The race: the user types gateway B, the snapshot lands holding gateway A,
+    // and overwriting loses the edit — while the key they typed for B stays in
+    // the form and the next save pairs it with A.
+    expect(hydrateEndpoints(
+      { anthropic: 'https://gateway-b.example' },
+      { anthropic: 'https://gateway-a.example' },
+      new Set(['anthropic']),
+    )).toEqual({ anthropic: 'https://gateway-b.example' });
+  });
+
+  it('leaves a field the user deliberately emptied', () => {
+    expect(hydrateEndpoints(
+      { anthropic: '' },
+      { anthropic: 'https://gateway-a.example' },
+      new Set(['anthropic']),
+    )).toEqual({ anthropic: '' });
+  });
+
+  it('clears an untouched field the snapshot no longer names', () => {
+    expect(hydrateEndpoints({ anthropic: 'stale' }, {}, new Set()))
+      .toEqual({ anthropic: '' });
+  });
+
+  it('changes nothing when there is no snapshot to apply', () => {
+    expect(hydrateEndpoints({ anthropic: 'typed' }, undefined, new Set()))
+      .toEqual({ anthropic: 'typed' });
+  });
+});
+
+describe('the edit → late snapshot → save transition, end to end', () => {
+  // The wiring bug the unit tests above could not see, because they build
+  // `touched` by hand: the inputs called the raw setters, so nothing was ever
+  // marked dirty and a pre-hydration edit was dropped from the payload.
+  it('sends a gateway typed before hydration, and keeps it across the snapshot', () => {
+    const touched = new Set<string>();
+    // 1. The user types a gateway before anything has loaded. The input marks
+    //    the field dirty — that is the step that was missing.
+    touched.add('anthropic');
+    const typed = { anthropic: 'https://gateway-b.example', 'openai-compatible': '' };
+
+    // 2. The snapshot arrives late, holding the OLD host.
+    const afterSnapshot = hydrateEndpoints(
+      typed,
+      { anthropic: 'https://gateway-a.example', 'openai-compatible': 'https://api.groq.com/openai/v1' },
+      touched,
+    );
+    expect(afterSnapshot['anthropic']).toBe('https://gateway-b.example');
+    // …and the field they never touched IS filled from it.
+    expect(afterSnapshot['openai-compatible']).toBe('https://api.groq.com/openai/v1');
+
+    // 3. Saving sends the edit, even though hydration had not completed when
+    //    they typed it.
+    const sent = addressableEndpoints(
+      [['anthropic', afterSnapshot['anthropic'] ?? ''], ['openai-compatible', afterSnapshot['openai-compatible'] ?? '']],
+      { hydrated: false, touched },
+    );
+    expect(Object.keys(sent)).toEqual(['anthropic']);
+    expect(sent['anthropic']).toBe('https://gateway-b.example');
   });
 });

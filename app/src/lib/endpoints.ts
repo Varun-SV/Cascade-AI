@@ -36,3 +36,29 @@ export function addressableEndpoints(
   }
   return out;
 }
+
+/**
+ * The endpoint values to apply when a snapshot arrives.
+ *
+ * A late snapshot must not overwrite a field the user has already edited.
+ * Settings hydrates asynchronously, so someone can type gateway B, have the
+ * snapshot land holding the old gateway A, and watch their edit vanish — while
+ * the key they typed for B stays in the form and is then saved against A.
+ *
+ * The same `touched` set governs sending and receiving, which is the point: one
+ * fact about the field, used by both directions. Split across two rules they
+ * disagreed, and the disagreement is invisible in the UI.
+ */
+export function hydrateEndpoints(
+  current: Readonly<Record<string, string>>,
+  snapshot: Readonly<Record<string, string | undefined>> | undefined,
+  touched: ReadonlySet<string>,
+): Record<string, string> {
+  const next: Record<string, string> = { ...current };
+  if (!snapshot) return next;
+  for (const type of Object.keys(current)) {
+    if (touched.has(type)) continue;
+    next[type] = snapshot[type] ?? '';
+  }
+  return next;
+}

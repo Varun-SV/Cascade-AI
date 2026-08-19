@@ -31,45 +31,27 @@ describe('dashboard socket protocol helpers', () => {
   });
 });
 
-describe('the config:current snapshot carries endpoints', () => {
-  // Two payloads feed one Settings form: the desktop's complete IPC snapshot
-  // and this partial socket one. While this omitted `endpoints`, a reconnect
-  // blanked the gateway fields in the form — and a save afterwards sent a
-  // present-but-empty endpoint, which is an explicit CLEAR. A rotated
-  // gateway-issued key typed after a reconnect would have been written to the
-  // provider's public API.
-  //
-  // Asserted on the projection rather than a live socket: the shape is the
-  // contract, and it is what the renderer reads.
-  const snapshot = (providers: Array<{ type: string; baseUrl?: string }>): Record<string, string> =>
-    Object.fromEntries(
-      providers.filter((p) => p.type !== 'azure' && p.baseUrl).map((p) => [p.type, p.baseUrl as string]),
-    );
-
-  it('includes a configured gateway for every non-Azure provider', () => {
-    expect(snapshot([
-      { type: 'anthropic', baseUrl: 'https://corp-gateway.example' },
-      { type: 'openai' },
-      { type: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1' },
-    ])).toEqual({
-      anthropic: 'https://corp-gateway.example',
-      'openai-compatible': 'https://api.groq.com/openai/v1',
-    });
-  });
-
-  it('leaves Azure out, since it is addressed per deployment', () => {
-    expect(snapshot([{ type: 'azure', baseUrl: 'https://r1.openai.azure.com' }])).toEqual({});
-  });
-
-  it('is the same projection the server emits', async () => {
+describe('the config:current snapshot is the shared, complete one', () => {
+  // This began as a check that the socket snapshot carried `endpoints` at all,
+  // asserted against an inline projection in the handler. That projection is
+  // gone: the panel keeps its own defaults for whatever a snapshot omits and
+  // re-serializes them on the next save, so once the save applied the whole
+  // payload a partial snapshot could delete Azure deployments and reset
+  // advanced knobs. `settingsSnapshot()` is now the one builder, tested for
+  // completeness in `config/settings-payload.test.ts`; what is left to check
+  // here is that this handler actually calls it.
+  it('emits the shared builder rather than a local projection', async () => {
     const fs = await import('node:fs/promises');
     const url = await import('node:url');
     const nodePath = await import('node:path');
     const here = nodePath.dirname(url.fileURLToPath(import.meta.url));
     const source = await fs.readFile(nodePath.join(here, 'server.ts'), 'utf-8');
-    // The projection above is a restatement; this keeps it honest about the
-    // handler it stands for.
-    expect(source).toMatch(/endpoints: Object\.fromEntries\(/);
-    expect(source).toMatch(/p\.type !== 'azure' && p\.baseUrl/);
+
+    expect(source).toMatch(/'config:current', settingsSnapshot\(this\.config\)/);
+    // No second projection beside it — that is what diverged.
+    expect(source).not.toMatch(/endpoints: Object\.fromEntries\(/);
+    // …and the save acknowledgement returns one too, so the panel re-hydrates
+    // from what was stored rather than from what it sent.
+    expect(source).toMatch(/snapshot: settingsSnapshot\(this\.config\)/);
   });
 });

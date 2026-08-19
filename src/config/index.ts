@@ -69,11 +69,29 @@ export function hasProviderCredential(
     && typeof p.baseUrl === 'string' && p.baseUrl.length > 0;
 }
 
+/**
+ * Whether a row can actually serve a run.
+ *
+ * Key-optional is NOT endpoint-optional. `openai-compatible` names no host of
+ * its own, and `OpenAICompatibleProvider` refuses to construct without one —
+ * the OpenAI SDK would otherwise fall back to api.openai.com. So a row left as
+ * a bare `{ type: 'openai-compatible' }`, whether by an explicit endpoint clear
+ * or by hand, counted as usable here, kept setup closed, and then threw the
+ * moment routing tried to instantiate it. A dead state that looks configured.
+ *
+ * Ollama keeps the plain key-optional reading: it has a built-in localhost
+ * default, so a bare row genuinely does address something.
+ */
+function isRoutable(p: { type: string; baseUrl?: string }): boolean {
+  return p.type !== 'openai-compatible' || Boolean(p.baseUrl?.trim());
+}
+
 export function hasUsableProvider(
   providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }> | undefined,
 ): boolean {
   if (!providers?.length) return false;
-  return providers.some((p) => KEY_OPTIONAL_PROVIDER_TYPES.has(p.type) || hasProviderCredential(p));
+  return providers.some((p) => isRoutable(p)
+    && (KEY_OPTIONAL_PROVIDER_TYPES.has(p.type) || hasProviderCredential(p)));
 }
 
 /**

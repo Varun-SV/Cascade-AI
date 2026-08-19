@@ -14,7 +14,7 @@ import type { CascadeConfig } from '../types.js';
 import { MemoryStore } from '../memory/store.js';
 import { hasProviderCredential } from '../config/index.js';
 import { explainRefusal } from '../config/credential-write.js';
-import { applySettingsPayload } from '../config/settings-payload.js';
+import { applySettingsPayload, settingsSnapshot } from '../config/settings-payload.js';
 import type { RuntimeNode, RuntimeNodeLog, RuntimeSession } from '../types.js';
 import { CASCADE_DB_FILE, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE, CASCADE_CONFIG_FILE, CASCADE_DASHBOARD_SECRET_FILE } from '../constants.js';
 import { DashboardSocket } from './websocket.js';
@@ -215,29 +215,13 @@ export class DashboardServer {
     // current per-tier models, budget, and which providers already have a key
     // (the keys themselves are never sent back to the renderer).
     this.socket.onConfigGet((socketId) => {
-      this.socket.emitToSocket(socketId, 'config:current', {
-        models: this.config.models ?? {},
-        budget: {
-          maxCostPerRun: this.config.budget?.maxCostPerRunUsd,
-          autoBias: this.config.autoBias,
-        },
-        // Through the shared predicate: `authToken` is a credential too, and
-        // counting only apiKey showed a bearer-configured provider as
-        // unconfigured in settings.
-        providersWithKey: (this.config.providers ?? [])
-          .filter(hasProviderCredential)
-          .map((p) => p.type),
-        // Endpoints too, matching the desktop's IPC snapshot. Omitting them
-        // made this the PARTIAL half of two payloads feeding one form, and the
-        // renderer could not tell "not included" from "cleared". Azure is
-        // excluded because it is addressed per deployment, not per type, and
-        // has its own field.
-        endpoints: Object.fromEntries(
-          (this.config.providers ?? [])
-            .filter((p) => p.type !== 'azure' && p.baseUrl)
-            .map((p) => [p.type, p.baseUrl as string]),
-        ),
-      });
+      // The COMPLETE snapshot, from the same builder the desktop IPC reply
+      // uses. A partial one was not merely incomplete: the panel keeps its own
+      // defaults for any section a snapshot does not fill and serializes them
+      // on every save, so once the save applied the whole payload, a
+      // socket-only save of one unrelated setting could delete every Azure
+      // deployment and reset advanced knobs the user had never seen.
+      this.socket.emitToSocket(socketId, 'config:current', settingsSnapshot(this.config));
     });
     this.socket.onConfigUpdate((data) => {
       // The WHOLE payload, through the same function the desktop IPC handler
@@ -255,7 +239,9 @@ export class DashboardServer {
       // Persist so Settings changes survive a restart and are visible to the CLI
       // (the desktop app and `cascade` share the same workspace config file).
       this.persistConfig();
-      return { refused };
+      // The fresh snapshot rides back with the acknowledgement, so the panel
+      // re-hydrates from what was actually stored rather than from what it sent.
+      return { refused, snapshot: settingsSnapshot(this.config) };
     });
 
     this.socket.onCascadeRun(async (prompt, model, socketId, requestedSessionId, forceTier) => {

@@ -526,9 +526,24 @@ describe('every settings surface is actually wired to the shared rules', () => {
     // it had shown a field for.
     const settings = await read('../../app/src/views/SettingsView.tsx');
     expect(settings).toMatch(/addressableEndpoints\(/);
-    // Endpoints are applied only from a payload that actually carries them.
+    // Endpoints are applied only from a payload that actually carries them,
+    // and a late one does not overwrite what the user already typed.
     expect(settings).toMatch(/if \(cfg\.endpoints\) \{/);
-    // The socket save is AWAITED, so a refusal cannot be reported as success.
+    expect(settings).toMatch(/hydrateEndpoints\(/);
+    // Every endpoint input MARKS ITS FIELD DIRTY. The wrapper existed and
+    // nothing called it, so `touched` was always empty: a gateway typed before
+    // the snapshot landed was dropped from the payload, and the helper's own
+    // tests could not see it because they build `touched` by hand.
+    for (const type of ['anthropic', 'openai', 'gemini', 'openai-compatible', 'ollama']) {
+      expect(settings, type).toMatch(new RegExp(`touchEndpoint\\('${type}'`));
+    }
+    expect(settings).not.toMatch(/setUrl: setAnthropicUrl/);
+    expect(settings).not.toMatch(/onChange=\{\(e\) => setOcUrl\(/);
+    // The socket save is AWAITED, and a MISSING acknowledgement is not an empty
+    // one — resolving a timeout as `{}` reported success over a socket that had
+    // confirmed nothing.
+    expect(settings).toMatch(/socket\?\.connected/);
+    expect(settings).toMatch(/ack === null/);
     expect(settings).toMatch(/ack\.refused/);
 
     const onboarding = await read('../../app/src/views/OnboardingView.tsx');

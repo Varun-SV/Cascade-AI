@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applySettingsPayload } from './settings-payload.js';
+import { applySettingsPayload, settingsSnapshot } from './settings-payload.js';
 import type { CascadeConfig } from '../types.js';
 
 // The socket handler applied keys, endpoints, models and TWO budget fields,
@@ -138,5 +138,80 @@ describe('applySettingsPayload — the whole Settings save, not part of it', () 
     // …and the rest of the payload still applied. A refused credential is not a
     // failed save.
     expect(config.budget.dailyBudgetUsd).toBe(12);
+  });
+});
+
+describe('settingsSnapshot — as complete as the save is', () => {
+  // The panel keeps its own defaults for any section a snapshot does not fill,
+  // and serializes them on every save. While the socket save was also partial
+  // that was merely incomplete; once the save applied the whole payload it
+  // became destructive, so the snapshot has to carry everything the save can
+  // write.
+  const configured = (): CascadeConfig => ({
+    providers: [
+      { type: 'anthropic', apiKey: 'sk-ant', baseUrl: 'https://corp-gateway.example' },
+      { type: 'azure', deploymentName: 'prod', baseUrl: 'https://r1.openai.azure.com', apiKey: 'az-key' },
+      { type: 'openai', authToken: 'bearer-only', baseUrl: 'https://gw.example' },
+    ],
+    models: { t1: 'claude-opus-4' },
+    budget: { maxCostPerRunUsd: 5, dailyBudgetUsd: 20, sessionBudgetUsd: 3, maxTokensPerRun: 90_000, warnAtPct: 75 },
+    autoBias: 'quality',
+    localConcurrency: 8,
+    tools: { webSearch: { searxngUrl: 'http://searx.internal', braveApiKey: 'brave' } },
+  } as unknown as CascadeConfig);
+
+  it('carries every section the save can write', () => {
+    const snap = settingsSnapshot(configured());
+
+    expect(snap.budget).toMatchObject({
+      maxCostPerRun: 5, dailyBudgetUsd: 20, sessionBudgetUsd: 3, maxTokensPerRun: 90_000, warnAtPct: 75,
+      autoBias: 'quality',
+    });
+    expect(snap.azureDeployments).toEqual([
+      { label: undefined, baseUrl: 'https://r1.openai.azure.com', deploymentName: 'prod', apiVersion: undefined, hasKey: true },
+    ]);
+    expect(snap.webSearch).toEqual({ searxngUrl: 'http://searx.internal', hasBraveKey: true, hasTavilyKey: false });
+    expect(snap.advanced['localConcurrency']).toBe(8);
+    expect(snap.endpoints).toEqual({ anthropic: 'https://corp-gateway.example', openai: 'https://gw.example' });
+  });
+
+  it('never returns a secret, only whether one is set', () => {
+    const serialized = JSON.stringify(settingsSnapshot(configured()));
+    expect(serialized).not.toContain('sk-ant');
+    expect(serialized).not.toContain('az-key');
+    expect(serialized).not.toContain('bearer-only');
+    expect(serialized).not.toContain('brave');
+  });
+
+  it('counts a bearer-only provider as credentialled', () => {
+    // Counting only `apiKey` showed a gateway-configured provider as
+    // unconfigured in the panel.
+    expect(settingsSnapshot(configured()).providersWithKey).toContain('openai');
+  });
+
+  it('round-trips: snapshot, save it back unchanged, nothing is lost', () => {
+    // The reported failure in one assertion. The panel hydrates from the
+    // snapshot and re-serializes every section on the next save, so anything
+    // the snapshot omits comes back as a UI default and overwrites what was
+    // stored.
+    const config = configured();
+    const snap = settingsSnapshot(config);
+
+    applySettingsPayload(config, {
+      models: snap.models,
+      budget: snap.budget,
+      azureDeployments: snap.azureDeployments.map((d) => ({
+        label: d.label, baseUrl: d.baseUrl, deploymentName: d.deploymentName, apiVersion: d.apiVersion,
+      })),
+      webSearch: { searxngUrl: snap.webSearch.searxngUrl },
+      advanced: snap.advanced,
+    });
+
+    expect(config.providers.filter((p) => p.type === 'azure')).toHaveLength(1);
+    expect(config.providers.find((p) => p.type === 'azure')?.apiKey).toBe('az-key');
+    expect(config.tools?.webSearch?.searxngUrl).toBe('http://searx.internal');
+    expect(config.tools?.webSearch?.braveApiKey).toBe('brave');
+    expect(config.localConcurrency).toBe(8);
+    expect(config.budget.dailyBudgetUsd).toBe(20);
   });
 });

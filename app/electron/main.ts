@@ -69,7 +69,7 @@ function mapProvider(id: string): { type: string | null; baseUrl?: string } {
 // ─── Backend ─────────────────────────────────────────────────────────────────
 // Resolve the cascade-ai core package (built CommonJS output). In dev it lives at
 // the repo's ../dist; in a packaged app it's bundled under resources/cascade-core.
-function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined) => boolean; hasProviderCredential: (p: { apiKey?: string; authToken?: string } | undefined | null) => boolean; applyProviderApiKey: (providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>, type: string, apiKey: string, extra?: { baseUrl?: string }) => void; applyProviderCredential: (providers: Array<Record<string, unknown>>, type: string, apiKey: string, endpoint: { kind: 'at'; baseUrl: string } | { kind: 'cleared' } | { kind: 'preserve' }) => { written: boolean; reason: 'ambiguous-scope' | 'unroutable' }; applyEndpointEdit: (existing: Record<string, unknown>, nextBaseUrl: string | undefined, replacementKey: string | undefined) => void; applySettingsPayload: (config: Record<string, unknown>, data: Record<string, unknown>) => { refused: Array<{ type: string; reason: 'ambiguous-scope' | 'unroutable' }> }; explainRefusal: (type: string, reason: 'ambiguous-scope' | 'unroutable') => string; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response>; sameEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean; sameCredentialEndpoint: (type: string, a?: string, b?: string) => boolean; hasDefaultEndpoint: (type: string) => boolean; sameAzureEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean } {
+function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: any; hasUsableProvider: (providers: Array<{ type: string; apiKey?: string; authToken?: string }> | undefined) => boolean; hasProviderCredential: (p: { apiKey?: string; authToken?: string } | undefined | null) => boolean; applyProviderApiKey: (providers: Array<{ type: string; apiKey?: string; authToken?: string; baseUrl?: string }>, type: string, apiKey: string, extra?: { baseUrl?: string }) => void; applyProviderCredential: (providers: Array<Record<string, unknown>>, type: string, apiKey: string, endpoint: { kind: 'at'; baseUrl: string } | { kind: 'cleared' } | { kind: 'preserve' }) => { written: boolean; reason: 'ambiguous-scope' | 'unroutable' }; applyEndpointEdit: (existing: Record<string, unknown>, nextBaseUrl: string | undefined, replacementKey: string | undefined) => void; applySettingsPayload: (config: Record<string, unknown>, data: Record<string, unknown>) => { refused: Array<{ type: string; reason: 'ambiguous-scope' | 'unroutable' }> }; settingsSnapshot: (config: Record<string, unknown>) => { models: Record<string, string>; budget: Record<string, unknown>; providersWithKey: string[]; endpoints: Record<string, string>; azureDeployments: Array<Record<string, unknown>>; webSearch: Record<string, unknown>; advanced: Record<string, unknown> }; explainRefusal: (type: string, reason: 'ambiguous-scope' | 'unroutable') => string; nodeHttpFetch: (input: string | URL, init?: RequestInit) => Promise<Response>; sameEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean; sameCredentialEndpoint: (type: string, a?: string, b?: string) => boolean; hasDefaultEndpoint: (type: string) => boolean; sameAzureEndpoint: (a: string | undefined | null, b: string | undefined | null) => boolean } {
   // Dev: the repo's external-deps build (node_modules resolves the requires).
   // Packaged: the self-contained `desktop-core.cjs` bundle (no node_modules to
   // resolve from — every JS dep is bundled in; only native modules like
@@ -542,80 +542,17 @@ function registerIPC(): void {
   // failed cascade-core build), the Save button silently no-op'd. Routing through
   // the same ConfigManager the backend uses guarantees Settings can always
   // persist, even when there is no socket.
-  function settingsSnapshot(): {
-    models: Record<string, string>;
-    budget: { maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number; sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number };
-    providersWithKey: string[];
-    endpoints: Record<string, string>;
-    azureDeployments: Array<{ label?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string; hasKey: boolean }>;
-    webSearch: { searxngUrl?: string; hasBraveKey: boolean; hasTavilyKey: boolean };
-    advanced: Record<string, unknown>;
-  } {
-    const models = (cascadeConfig?.models ?? {}) as Record<string, string>;
-    const budget = {
-      maxCostPerRun: cascadeConfig?.budget?.maxCostPerRunUsd as number | undefined,
-      autoBias: cascadeConfig?.autoBias as string | undefined,
-      dailyBudgetUsd: cascadeConfig?.budget?.dailyBudgetUsd as number | undefined,
-      sessionBudgetUsd: cascadeConfig?.budget?.sessionBudgetUsd as number | undefined,
-      maxTokensPerRun: cascadeConfig?.budget?.maxTokensPerRun as number | undefined,
-      warnAtPct: cascadeConfig?.budget?.warnAtPct as number | undefined,
-    };
-    const providers = (cascadeConfig?.providers ?? []) as Array<{
-      type: string; apiKey?: string; authToken?: string; baseUrl?: string; label?: string; deploymentName?: string; apiVersion?: string;
-    }>;
-    // Through the SDK's shared predicate, not a fourth hand-written copy.
-    // Settings falls back to this IPC snapshot whenever the backend socket is
-    // unavailable, so counting only `apiKey` showed a bearer-configured
-    // provider as having no credential in exactly the path that does not depend
-    // on the backend being up.
-    const { hasProviderCredential } = loadCore();
-    const providersWithKey = providers
-      .filter((p) => hasProviderCredential(p))
-      .map((p) => p.type);
-    const endpoints: Record<string, string> = {};
-    for (const p of providers) { if (p?.type && p?.baseUrl && p.type !== 'azure') endpoints[p.type] = p.baseUrl; }
-    // Azure supports multiple deployments (each its own resource/endpoint), so
-    // it can't be represented in the single-entry `endpoints`/`providersWithKey`
-    // maps above — surface every azure provider entry as its own row instead.
-    // The raw key is never sent back, only whether one is already set.
-    const azureDeployments = providers
-      .filter((p) => p.type === 'azure')
-      .map((p) => ({
-        label: p.label,
-        baseUrl: p.baseUrl,
-        deploymentName: p.deploymentName,
-        apiVersion: p.apiVersion,
-        hasKey: typeof p.apiKey === 'string' && p.apiKey.length > 0,
-      }));
-    // Web-search backends (tools.webSearch) — URL is shown, keys only as set/unset.
-    const ws = (cascadeConfig?.tools?.webSearch ?? {}) as { searxngUrl?: string; braveApiKey?: string; tavilyApiKey?: string };
-    const webSearch = {
-      searxngUrl: ws.searxngUrl,
-      hasBraveKey: typeof ws.braveApiKey === 'string' && ws.braveApiKey.length > 0,
-      hasTavilyKey: typeof ws.tavilyApiKey === 'string' && ws.tavilyApiKey.length > 0,
-    };
-    // Advanced knobs surfaced in the Settings "Advanced" tab — read back from
-    // the same config so the panel always reflects what's on disk.
-    const advanced: Record<string, unknown> = {
-      autonomy: cascadeConfig?.autonomy,
-      planApproval: cascadeConfig?.planApproval,
-      approvalTimeoutMs: cascadeConfig?.approvalTimeoutMs,
-      t3Execution: cascadeConfig?.t3Execution,
-      localConcurrency: cascadeConfig?.localConcurrency,
-      localInferenceTimeoutMs: cascadeConfig?.localInferenceTimeoutMs,
-      cloudInferenceTimeoutMs: cascadeConfig?.cloudInferenceTimeoutMs,
-      reflectionEnabled: cascadeConfig?.reflection?.enabled,
-      cascadeAuto: cascadeConfig?.cascadeAuto,
-      forceTier: cascadeConfig?.routing?.forceTier,
-      benchmarksLive: cascadeConfig?.benchmarks?.live,
-      dynamicToolSandbox: cascadeConfig?.tools?.dynamicToolSandbox,
-      factsExtraction: cascadeConfig?.knowledge?.factsExtraction,
-      rememberSessions: cascadeConfig?.memory?.rememberSessions,
-      enableToolCreation: cascadeConfig?.enableToolCreation,
-      persistDynamicTools: cascadeConfig?.persistDynamicTools,
-      telemetryEnabled: cascadeConfig?.telemetry?.enabled,
-    };
-    return { models, budget, providersWithKey, endpoints, azureDeployments, webSearch, advanced };
+  /**
+   * The redacted Settings snapshot, from the SDK's builder.
+   *
+   * It used to be written out here, and the socket's `config:current` was a
+   * shorter hand-written sibling — which the panel could not tell apart, since
+   * it keeps its own defaults for whatever a snapshot omits and serializes them
+   * on the next save. One builder, so a section cannot go missing from one
+   * surface and take the user's configuration with it.
+   */
+  function settingsSnapshot(): ReturnType<ReturnType<typeof loadCore>['settingsSnapshot']> {
+    return loadCore().settingsSnapshot(cascadeConfig ?? {});
   }
 
   ipcMain.handle('cascade:getSettings', async () => settingsSnapshot());

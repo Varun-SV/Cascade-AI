@@ -421,6 +421,37 @@ describe('applyProviderApiKey — a new key must not be shadowed', () => {
   });
 });
 
+describe('hasUsableProvider — key-optional is not endpoint-optional', () => {
+  // `OpenAICompatibleProvider` refuses to construct without a `baseUrl`, since
+  // the OpenAI SDK would otherwise fall back to api.openai.com. A bare
+  // `{ type: 'openai-compatible' }` counting as usable here kept setup closed
+  // and then threw when routing instantiated it — configured-looking, dead.
+  it('rejects an endpointless compatible row', () => {
+    expect(hasUsableProvider([{ type: 'openai-compatible' }])).toBe(false);
+    expect(hasUsableProvider([{ type: 'openai-compatible', baseUrl: '   ' }])).toBe(false);
+  });
+
+  it('rejects one that has a key but still no host', () => {
+    expect(hasUsableProvider([{ type: 'openai-compatible', apiKey: 'groq-key' }])).toBe(false);
+  });
+
+  it('accepts a keyless one that names its host', () => {
+    // Local hardware: no credential needed, but an address always is.
+    expect(hasUsableProvider([{ type: 'openai-compatible', baseUrl: 'http://localhost:8000/v1' }])).toBe(true);
+  });
+
+  it('leaves Ollama alone, which has a localhost default of its own', () => {
+    expect(hasUsableProvider([{ type: 'ollama' }])).toBe(true);
+  });
+
+  it('still finds a usable provider beside an unusable compatible row', () => {
+    expect(hasUsableProvider([
+      { type: 'openai-compatible' },
+      { type: 'anthropic', apiKey: 'sk-ant' },
+    ])).toBe(true);
+  });
+});
+
 describe('an env key does not delete an endpoint the environment cannot name', () => {
   // `ANTHROPIC_API_KEY` exported with no `ANTHROPIC_BASE_URL` is evidence: the
   // pair is modeled, so the user COULD have named a gateway and did not. There

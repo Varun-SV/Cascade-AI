@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import type { Socket } from 'socket.io-client';
-import { addressableEndpoints } from '../lib/endpoints';
+import { addressableEndpoints, hydrateEndpoints } from '../lib/endpoints';
 import { X, Monitor, Sun, Moon, Sparkles, RefreshCw, List } from 'lucide-react';
 import { useAppDispatch, useAppSelector, type ThemePref } from '../store/index.js';
 import { setShowSettings } from '../store/index.js';
@@ -231,12 +231,23 @@ export function SettingsView({ socket }: Props) {
     // reconnect would have been written to the provider's public API.
     if (cfg.endpoints) {
       setEndpointsHydrated(true);
-      const at = (type: string): string => cfg.endpoints?.[type] ?? '';
-      setAnthropicUrl(at('anthropic'));
-      setOpenaiUrl(at('openai'));
-      setGeminiUrl(at('gemini'));
-      setOcUrl(at('openai-compatible'));
-      setOllamaUrl(at('ollama'));
+      // A field the user has already edited is NOT replaced. The snapshot can
+      // land after they have typed, and overwriting then loses the edit while
+      // keeping the key typed alongside it — which the next save pairs with the
+      // host they just replaced.
+      const next = hydrateEndpoints(
+        {
+          anthropic: anthropicUrl, openai: openaiUrl, gemini: geminiUrl,
+          'openai-compatible': ocUrl, ollama: ollamaUrl,
+        },
+        cfg.endpoints,
+        touchedEndpoints.current,
+      );
+      setAnthropicUrl(next['anthropic'] ?? '');
+      setOpenaiUrl(next['openai'] ?? '');
+      setGeminiUrl(next['gemini'] ?? '');
+      setOcUrl(next['openai-compatible'] ?? '');
+      setOllamaUrl(next['ollama'] ?? '');
     }
     if (cfg.webSearch) {
       if (cfg.webSearch.searxngUrl) setSearxngUrl(cfg.webSearch.searxngUrl);
@@ -368,20 +379,41 @@ export function SettingsView({ socket }: Props) {
     // `cascade dashboard` path in full, and the desktop's whenever the IPC
     // bridge is unavailable. The timeout keeps an older backend, which sends no
     // acknowledgement at all, from hanging the save.
-    if (socket) {
-      const ack = await new Promise<{ refused?: Array<{ message: string }> }>((resolve) => {
-        const timer = setTimeout(() => resolve({}), 3000);
-        socket.emit('config:update', payload, (result: { refused?: Array<{ message: string }> }) => {
+    if (socket?.connected) {
+      // `null` means NO acknowledgement — a disconnect mid-flight, a handler
+      // that threw, or a backend too old to reply. That is NOT the same as
+      // `{ refused: [] }`, and collapsing the two reported a successful save
+      // and cleared the typed keys over a socket that had confirmed nothing.
+      const ack = await new Promise<{ refused?: Array<{ message: string }>; snapshot?: unknown } | null>((resolve) => {
+        const timer = setTimeout(() => resolve(null), 3000);
+        socket.emit('config:update', payload, (result: { refused?: Array<{ message: string }>; snapshot?: unknown }) => {
           clearTimeout(timer);
           resolve(result ?? {});
         });
       });
+
+      if (ack === null) {
+        // With no IPC bridge this was the only writer, so nothing is known to
+        // have been stored — say so and keep what the user typed. With one, the
+        // config IS saved and only the live sync failed, which costs a restart
+        // rather than the settings.
+        if (!persisted) {
+          setSaveError('The backend did not confirm the save. Check that Cascade is still running and try again.');
+          return;
+        }
+        setSaveError('Saved, but the running session did not pick it up — restart Cascade to apply it live.');
+        return;
+      }
+
       persisted = true;
       if (ack.refused?.length) {
         setSaveError(ack.refused.map((r) => r.message).join(' '));
         return;
       }
+      // Re-hydrate from what was actually stored, not from what we sent.
+      if (ack.snapshot) applyConfig(ack.snapshot as Parameters<typeof applyConfig>[0]);
     }
+
     void fetchModels(); // re-discover endpoint models after saving (no restart)
 
     if (!persisted) {
@@ -446,9 +478,9 @@ export function SettingsView({ socket }: Props) {
                 Keys are stored in your local Cascade config and never sent to any server other than the model provider.
               </p>
               {[
-                { id: 'anthropic', label: 'Anthropic', val: anthropicKey, set: setAnthropicKey, placeholder: 'sk-ant-…', url: anthropicUrl, setUrl: setAnthropicUrl },
-                { id: 'openai', label: 'OpenAI', val: openaiKey, set: setOpenaiKey, placeholder: 'sk-…', url: openaiUrl, setUrl: setOpenaiUrl },
-                { id: 'gemini', label: 'Google', val: geminiKey, set: setGeminiKey, placeholder: 'AIza…', url: geminiUrl, setUrl: setGeminiUrl },
+                { id: 'anthropic', label: 'Anthropic', val: anthropicKey, set: setAnthropicKey, placeholder: 'sk-ant-…', url: anthropicUrl, setUrl: touchEndpoint('anthropic', setAnthropicUrl) },
+                { id: 'openai', label: 'OpenAI', val: openaiKey, set: setOpenaiKey, placeholder: 'sk-…', url: openaiUrl, setUrl: touchEndpoint('openai', setOpenaiUrl) },
+                { id: 'gemini', label: 'Google', val: geminiKey, set: setGeminiKey, placeholder: 'AIza…', url: geminiUrl, setUrl: touchEndpoint('gemini', setGeminiUrl) },
               ].map(({ id, label, val, set, placeholder, url, setUrl }) => (
                 <div key={label}>
                   <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>
@@ -513,13 +545,13 @@ export function SettingsView({ socket }: Props) {
                 <input type="password" value={ocKey} onChange={(e) => setOcKey(e.target.value)}
                   placeholder={providersWithKey.includes('openai-compatible') ? '•••••••• (leave blank to keep)' : 'API key (optional for local servers)'}
                   style={{ width: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
-                <input type="text" value={ocUrl} onChange={(e) => setOcUrl(e.target.value)}
+                <input type="text" value={ocUrl} onChange={(e) => touchEndpoint('openai-compatible', setOcUrl)(e.target.value)}
                   placeholder="Base URL — e.g. http://localhost:8000/v1"
                   style={{ width: '100%', marginTop: 6, background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
               </div>
               <div>
                 <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>Ollama endpoint</label>
-                <input type="text" value={ollamaUrl} onChange={(e) => setOllamaUrl(e.target.value)}
+                <input type="text" value={ollamaUrl} onChange={(e) => touchEndpoint('ollama', setOllamaUrl)(e.target.value)}
                   placeholder="http://localhost:11434"
                   style={{ width: '100%', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '7px 10px', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
               </div>

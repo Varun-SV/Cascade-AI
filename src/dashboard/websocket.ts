@@ -14,7 +14,7 @@ import type {
   SessionSubscriptionPayload,
 } from '../types.js';
 import { verifyToken } from './auth.js';
-import type { SettingsPayload } from '../config/settings-payload.js';
+import type { SettingsPayload, SettingsSnapshot } from '../config/settings-payload.js';
 import {
   normalizePermissionDecisionPayload,
   normalizeRuntimeRefreshPayload,
@@ -43,6 +43,8 @@ export type ConfigUpdatePayload = SettingsPayload;
 /** What the save could not store, phrased for the person who typed it. */
 export interface ConfigUpdateResult {
   refused: Array<{ type: string; reason: string; message: string }>;
+  /** What is actually stored now — the panel re-hydrates from this. */
+  snapshot?: SettingsSnapshot;
 }
 
 export class DashboardSocket {

@@ -20,6 +20,7 @@
 import type { CascadeConfig } from '../types.js';
 import { sameAzureEndpoint } from './azure-endpoint.js';
 import { applySettingsCredentials, type SettingsCredentialResult } from './credential-write.js';
+import { hasProviderCredential } from './index.js';
 
 /** One Azure deployment as the settings panel sends it. */
 export interface AzureDeploymentInput {
@@ -165,4 +166,97 @@ export function applySettingsPayload(
   }
 
   return result;
+}
+
+/**
+ * The redacted Settings snapshot, as the panel reads it back.
+ *
+ * The read counterpart to `applySettingsPayload`, and it has to be as complete
+ * as the write is. The desktop's IPC reply carried every section; the socket's
+ * `config:current` carried models, two budget fields, key status and endpoints.
+ * That was merely incomplete while the socket save was also partial — and
+ * became DESTRUCTIVE the moment the save started applying the whole payload:
+ * the panel keeps its own defaults for anything a snapshot does not fill
+ * (`azureDeployments: []`, a blank SearXNG URL, the advanced defaults) and
+ * serializes them on every save. A socket-only save of an unrelated setting
+ * could therefore delete every Azure deployment and reset advanced knobs the
+ * user had never seen.
+ *
+ * Secrets never come back — only whether one is set.
+ */
+export interface SettingsSnapshot {
+  models: Record<string, string>;
+  budget: {
+    maxCostPerRun?: number; autoBias?: string; dailyBudgetUsd?: number;
+    sessionBudgetUsd?: number; maxTokensPerRun?: number; warnAtPct?: number;
+  };
+  providersWithKey: string[];
+  endpoints: Record<string, string>;
+  azureDeployments: Array<{
+    label?: string; baseUrl?: string; deploymentName?: string; apiVersion?: string; hasKey: boolean;
+  }>;
+  webSearch: { searxngUrl?: string; hasBraveKey: boolean; hasTavilyKey: boolean };
+  advanced: Record<string, unknown>;
+}
+
+export function settingsSnapshot(config: CascadeConfig): SettingsSnapshot {
+  const providers = (config.providers ?? []) as Array<{
+    type: string; apiKey?: string; authToken?: string; baseUrl?: string;
+    label?: string; deploymentName?: string; apiVersion?: string;
+  }>;
+  const endpoints: Record<string, string> = {};
+  for (const p of providers) {
+    // Azure is addressed per deployment, so it cannot be represented in a
+    // one-entry-per-type map; it gets its own rows below.
+    if (p?.type && p?.baseUrl && p.type !== 'azure') endpoints[p.type] = p.baseUrl;
+  }
+  const ws = (config.tools?.webSearch ?? {}) as { searxngUrl?: string; braveApiKey?: string; tavilyApiKey?: string };
+  return {
+    models: (config.models ?? {}) as Record<string, string>,
+    budget: {
+      maxCostPerRun: config.budget?.maxCostPerRunUsd,
+      autoBias: config.autoBias,
+      dailyBudgetUsd: config.budget?.dailyBudgetUsd,
+      sessionBudgetUsd: config.budget?.sessionBudgetUsd,
+      maxTokensPerRun: config.budget?.maxTokensPerRun,
+      warnAtPct: config.budget?.warnAtPct,
+    },
+    // Through the shared predicate: `authToken` is a credential too, and
+    // counting only `apiKey` showed a bearer-configured provider as unconfigured.
+    providersWithKey: providers.filter((p) => hasProviderCredential(p)).map((p) => p.type),
+    endpoints,
+    azureDeployments: providers
+      .filter((p) => p.type === 'azure')
+      .map((p) => ({
+        label: p.label,
+        baseUrl: p.baseUrl,
+        deploymentName: p.deploymentName,
+        apiVersion: p.apiVersion,
+        hasKey: typeof p.apiKey === 'string' && p.apiKey.length > 0,
+      })),
+    webSearch: {
+      searxngUrl: ws.searxngUrl,
+      hasBraveKey: typeof ws.braveApiKey === 'string' && ws.braveApiKey.length > 0,
+      hasTavilyKey: typeof ws.tavilyApiKey === 'string' && ws.tavilyApiKey.length > 0,
+    },
+    advanced: {
+      autonomy: config.autonomy,
+      planApproval: config.planApproval,
+      approvalTimeoutMs: config.approvalTimeoutMs,
+      t3Execution: config.t3Execution,
+      localConcurrency: config.localConcurrency,
+      localInferenceTimeoutMs: config.localInferenceTimeoutMs,
+      cloudInferenceTimeoutMs: config.cloudInferenceTimeoutMs,
+      reflectionEnabled: config.reflection?.enabled,
+      cascadeAuto: config.cascadeAuto,
+      forceTier: config.routing?.forceTier,
+      benchmarksLive: config.benchmarks?.live,
+      dynamicToolSandbox: config.tools?.dynamicToolSandbox,
+      factsExtraction: config.knowledge?.factsExtraction,
+      rememberSessions: config.memory?.rememberSessions,
+      enableToolCreation: config.enableToolCreation,
+      persistDynamicTools: config.persistDynamicTools,
+      telemetryEnabled: config.telemetry?.enabled,
+    },
+  };
 }
