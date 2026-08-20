@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeAll, afterAll } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { GeminiProvider } from './gemini.js';
+import { GeminiProvider, toGeminiFunctionCalls } from './gemini.js';
 import { ProviderUnreachableError } from './base.js';
 import type { ModelInfo } from '../types.js';
 
@@ -37,6 +37,77 @@ function providerWithStream(chunks: unknown[]): GeminiProvider {
   return p;
 }
 
+describe('GeminiProvider — a signed call survives the whole round trip', () => {
+  it('sends the signature back when replaying an assistant turn', async () => {
+    // The end the user actually hits. A worker's second step replays the
+    // assistant turn that asked for the tool, and the request is rejected
+    // before any generation if the signature is not on it — so a correct
+    // helper is worth nothing unless the message conversion reaches for it.
+    const provider = new GeminiProvider({ type: 'gemini', apiKey: 'test' }, MODEL);
+    const generateContentStream = vi.fn(async () => fakeStream([
+      { candidates: [{ content: { parts: [{ text: 'done' }] }, finishReason: 'STOP' }] },
+    ]));
+    (provider as unknown as { client: unknown }).client = { models: { generateContentStream } };
+
+    await provider.generateStream({
+      messages: [
+        { role: 'user', content: 'search for x' },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'web_search', name: 'web_search', input: { q: 'x' }, signature: 'CikBx7Ei0PQ==' }],
+        },
+        { role: 'tool', content: 'results', toolCallId: 'web_search' },
+      ],
+    }, () => {});
+
+    const sent = generateContentStream.mock.calls[0]?.[0] as unknown as {
+      contents: Array<{ role?: string; parts?: Array<{ functionCall?: unknown; thoughtSignature?: string }> }>;
+    };
+    const modelTurn = sent.contents.find((c) => c.role === 'model');
+    const callPart = modelTurn?.parts?.find((part) => part.functionCall);
+
+    expect(callPart?.thoughtSignature).toBe('CikBx7Ei0PQ==');
+  });
+});
+
+describe('toGeminiFunctionCalls — replaying a signed call', () => {
+  it('returns the signature as a sibling of functionCall, where it arrived', () => {
+    // Capturing the signature is half the fix and the useless half: the model
+    // rejects the follow-up unless the history hands it back, on the same part
+    // as the call it signed.
+    const [part] = toGeminiFunctionCalls([
+      { id: 'web_search', name: 'web_search', input: { q: 'x' }, signature: 'CikBx7Ei0PQ==' },
+    ]) as Array<{ functionCall?: unknown; thoughtSignature?: string }>;
+
+    expect(part?.functionCall).toEqual({ name: 'web_search', args: { q: 'x' } });
+    expect(part?.thoughtSignature).toBe('CikBx7Ei0PQ==');
+  });
+
+  it('emits no signature field at all for an unsigned call', () => {
+    // On the KEYS again: an explicit `thoughtSignature: undefined` would be a
+    // new field on every request a non-thinking model makes.
+    const [part] = toGeminiFunctionCalls([
+      { id: 'web_search', name: 'web_search', input: { q: 'x' } },
+    ]) as Array<Record<string, unknown>>;
+
+    expect(Object.keys(part ?? {})).toEqual(['functionCall']);
+  });
+
+  it('signs per call, so a mixed batch keeps each one\u2019s own', () => {
+    // Gemini signs the part, not the turn, so two calls in one assistant turn
+    // can differ — and pairing them wrongly is as fatal as dropping them.
+    const parts = toGeminiFunctionCalls([
+      { id: 'a', name: 'a', input: {}, signature: 'sig-a' },
+      { id: 'b', name: 'b', input: {} },
+      { id: 'c', name: 'c', input: {}, signature: 'sig-c' },
+    ]) as Array<{ functionCall?: { name?: string }; thoughtSignature?: string }>;
+
+    expect(parts.map((p) => p.functionCall?.name)).toEqual(['a', 'b', 'c']);
+    expect(parts.map((p) => p.thoughtSignature)).toEqual(['sig-a', undefined, 'sig-c']);
+  });
+});
+
 describe('GeminiProvider — part extraction', () => {
   it('keeps answer text, skips private "thought" parts, and captures functionCall', async () => {
     // A thinking-model response: a thought part, real answer text, and a tool call
@@ -70,6 +141,54 @@ describe('GeminiProvider — part extraction', () => {
     expect(result.toolCalls).toHaveLength(1);
     expect(result.toolCalls?.[0]?.name).toBe('web_search');
     expect(result.finishReason).toBe('tool_use');
+  });
+
+  it('carries the thought signature off a signed function call', async () => {
+    // Gemini's thinking models sign the part they ask a tool call on, and the
+    // NEXT request must return that signature verbatim or it is rejected with
+    // `400 … missing thought signature`. Capturing only {id,name,input} threw
+    // it away at the first opportunity, which is why conversation worked and
+    // anything needing a second tool step died.
+    const provider = providerWithStream([
+      {
+        candidates: [
+          {
+            content: {
+              parts: [{
+                functionCall: { name: 'web_search', args: { q: 'x' } },
+                thoughtSignature: 'CikBx7Ei0PQ==',
+              }],
+            },
+            finishReason: 'STOP',
+          },
+        ],
+      },
+    ]);
+
+    const result = await provider.generateStream({ messages: [{ role: 'user', content: 'hi' }] }, () => {});
+
+    expect(result.toolCalls?.[0]?.signature).toBe('CikBx7Ei0PQ==');
+  });
+
+  it('leaves the signature unset when the model did not sign the call', async () => {
+    // Asserted on the KEYS: a `signature: undefined` would survive `toEqual`
+    // against an object without the key at all, and the difference is the
+    // whole point — a non-thinking model's history has to stay exactly as it
+    // was, with no empty field appearing on the wire.
+    const provider = providerWithStream([
+      {
+        candidates: [
+          {
+            content: { parts: [{ functionCall: { name: 'web_search', args: { q: 'x' } } }] },
+            finishReason: 'STOP',
+          },
+        ],
+      },
+    ]);
+
+    const result = await provider.generateStream({ messages: [{ role: 'user', content: 'hi' }] }, () => {});
+
+    expect(Object.keys(result.toolCalls?.[0] ?? {})).not.toContain('signature');
   });
 
   it('returns empty content (not a crash) when the model emits only a thought part', async () => {
