@@ -83,3 +83,63 @@ describe('evaluateAcceptance', () => {
     expect(results.map((r) => r.verdict)).toEqual(['passed', 'undecidable', 'failed']);
   });
 });
+
+describe('evaluateAcceptance on a run that cannot write files', () => {
+  /** A probe that fails the test if consulted. */
+  const forbiddenProbe: AcceptanceProbe = {
+    stat: async (path) => { throw new Error(`stat must not be called for ${path}`); },
+    read: async (path) => { throw new Error(`read must not be called for ${path}`); },
+  };
+
+  it('defers a file criterion instead of failing the worker for it', async () => {
+    // The hosted-run case: cloud/server enables web_search/web_fetch only, so
+    // no tool in the registry can create docs/report.md — while T1/T2 still
+    // wrote "docs/report.md exists" as the acceptance criterion. Failing that
+    // is a verdict about a capability the worker never had.
+    const results = await evaluateAcceptance(
+      ['docs/report.md exists'],
+      ['docs/report.md'],
+      forbiddenProbe,
+      { workerCanWriteFiles: false },
+    );
+    expect(results[0]?.verdict).toBe('undecidable');
+    expect(failures(results)).toEqual([]);
+    // Still graded — by selfTest, which judges the output rather than the disk.
+    expect(undecided(results)).toEqual(['docs/report.md exists']);
+  });
+
+  it('defers a contains-criterion too, without reading anything', async () => {
+    const results = await evaluateAcceptance(
+      ['report.md contains "Conclusion"'],
+      ['report.md'],
+      forbiddenProbe,
+      { workerCanWriteFiles: false },
+    );
+    expect(results[0]?.verdict).toBe('undecidable');
+  });
+
+  it('says why, so the deferral is not silent', async () => {
+    const results = await evaluateAcceptance(
+      ['out.csv exists'], ['out.csv'], forbiddenProbe, { workerCanWriteFiles: false },
+    );
+    expect(results[0]?.detail).toContain('out.csv');
+    expect(results[0]?.detail).toMatch(/no tool on this run can create/i);
+  });
+
+  it('still grades normally when the run CAN write files', async () => {
+    // The guard must not weaken the rung it was added to. A desktop run with
+    // file tools keeps deciding missing files deterministically.
+    const results = await evaluateAcceptance(
+      ['docs/report.md exists'],
+      ['docs/report.md'],
+      probeOf({}),
+      { workerCanWriteFiles: true },
+    );
+    expect(results[0]).toMatchObject({ verdict: 'failed', detail: 'docs/report.md does not exist' });
+  });
+
+  it('defaults to grading, so no existing caller changes behaviour', async () => {
+    const results = await evaluateAcceptance(['a.md exists'], ['a.md'], probeOf({}));
+    expect(results[0]?.verdict).toBe('failed');
+  });
+});

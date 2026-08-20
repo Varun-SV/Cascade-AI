@@ -37,6 +37,31 @@ export interface AcceptanceProbe {
   read(path: string): Promise<string | null>;
 }
 
+export interface AcceptanceOptions {
+  /**
+   * Whether the worker being graded had ANY tool that could put a file on
+   * disk. Defaults to true, which is every caller that does not say otherwise.
+   *
+   * When false, a file-shaped criterion is `undecidable` rather than `failed`.
+   * `stat` still answers correctly — the file really is absent — but the
+   * verdict is a judgement about the WORKER, and "you did not write the file"
+   * is the wrong judgement when nothing in the run could write one. A hosted
+   * chat run enables `web_search`/`web_fetch` only (cloud/server/src/runs.ts),
+   * while T1 and T2 are asked for acceptance criteria phrased as "file exists
+   * / contains X" — so the planner names a file, the worker answers in prose
+   * because prose is all it can produce, and this rung failed it for that.
+   * correctOutput then re-ran, the file was still absent, and the subtask
+   * ESCALATED carrying a perfectly good answer.
+   *
+   * This is the same guard `shouldRequireArtifact()` applies one rung up (see
+   * t3-worker.ts); the artifact rung got it in #151 and this rung, added
+   * afterwards, never inherited it. Deferring keeps the module's governing
+   * rule: the criterion still reaches selfTest(), which judges the OUTPUT and
+   * can actually tell whether the work was done.
+   */
+  workerCanWriteFiles?: boolean;
+}
+
 /**
  * A filename-with-extension token, which is what a mechanical criterion names.
  *
@@ -89,7 +114,9 @@ export async function evaluateAcceptance(
   criteria: readonly string[],
   ownedFiles: readonly string[],
   probe: AcceptanceProbe,
+  options: AcceptanceOptions = {},
 ): Promise<AcceptanceResult[]> {
+  const canWriteFiles = options.workerCanWriteFiles ?? true;
   const results: AcceptanceResult[] = [];
 
   for (const criterion of criteria) {
@@ -118,6 +145,18 @@ export async function evaluateAcceptance(
     const file = targetFile(text, ownedFiles);
     if (!file) {
       results.push({ criterion, verdict: 'undecidable' });
+      continue;
+    }
+
+    // Decided before the probe runs, not after: on a run with no file-writing
+    // tool there is no reading of the filesystem that says anything about the
+    // worker, so there is no reason to look.
+    if (!canWriteFiles) {
+      results.push({
+        criterion,
+        verdict: 'undecidable',
+        detail: `no tool on this run can create ${file} — deferred to output review`,
+      });
       continue;
     }
 

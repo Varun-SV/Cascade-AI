@@ -19,7 +19,7 @@ import type {
 import type { CascadeRouter } from '../router/index.js';
 import type { ToolRegistry } from '../../tools/registry.js';
 import { BaseTier } from './base.js';
-import { T3Worker } from './t3-worker.js';
+import { T3Worker, canProduceFiles, canProduceNonDiskDeliverables } from './t3-worker.js';
 import { MemoryStore } from '../../memory/store.js';
 import { PeerBus } from '../peer/bus.js';
 import type { PermissionEscalator } from '../permissions/escalator.js';
@@ -30,6 +30,7 @@ import { RedactionLayer } from '../audit/redaction.js';
 import { sectionNeedsDecision, settledEscalationStatus } from './escalation-policy.js';
 import { describeGenerationForPlanner } from '../multimodal/registry.js';
 import { compileSubtaskGraph } from '../orchestration/adapters.js';
+import { planSpecShape, typedFieldRules } from './plan-spec.js';
 
 // Built per-run so the peer-coordination hint only appears when the
 // peer_message tool is actually registered. On a restricted host (e.g. cloud
@@ -456,7 +457,13 @@ export class T2Manager extends BaseTier {
       .map(p => `[Peer ${p.fromId} Plan]: ${(p.content as any).sectionTitle} - ${(p.content as any).subtaskTitles?.join(', ')}`)
       .join('\n');
 
-    const prompt = `Decompose this section into 1-4 concrete subtasks for T3 workers — the FEWEST that fully cover it (one subtask is the correct answer for a small section).
+    // The same capability signal T1 plans against and the acceptance rung grades
+    // against. T2 is a planner too — it is the tier that writes the `files` and
+    // `acceptance` a worker is actually held to — so it asking for a file the
+    // run cannot produce is enough on its own to fail the subtask.
+    const toolNames = this.toolRegistry.getToolDefinitions().map((t) => t.name);
+    const spec = planSpecShape(canProduceFiles(toolNames), canProduceNonDiskDeliverables(toolNames));
+    const prompt = `Decompose this section into 1-4 concrete subtasks for T3 workers — the FEWEST that fully cover it (one subtask is the correct answer for a small section).${spec.preamble ? `\n\n${spec.preamble}` : ''}
 
 Section: ${assignment.sectionTitle}
 Description: ${assignment.description}
@@ -472,8 +479,7 @@ Return a JSON array of subtask objects, each with:
 - peerT3Ids: string[] (empty for now)
 - dependsOn: string[] (array of subtaskIds this task depends on to start)
 - executionMode: "parallel|sequential" (default is parallel)
-- files: string[] (the EXACT relative paths this subtask creates or edits)
-- acceptance: string[] (1-3 mechanically checkable done-criteria: file exists / contains X / command exits 0)
+${typedFieldRules(spec)}
 - contextBrief: string (1-3 short sentences with ALL the background the worker needs — it sees nothing else)
 
 Return ONLY the JSON array.`;

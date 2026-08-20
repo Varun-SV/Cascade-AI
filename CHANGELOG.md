@@ -18,6 +18,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+### Fixed
+- **A hosted run failed the nodes it had no way to complete.** On the cloud
+  webapp the tool registry is an allowlist of `web_search` and `web_fetch` —
+  shell, file and code tools are genuinely absent, not approval-gated — while
+  T1 and T2 were asked, unconditionally, for acceptance criteria phrased as
+  "file exists / contains X / command exits 0", with a worked example that ran
+  `npm init` and asserted `package.json exists`. The planner obliged, so a
+  difficult prompt produced sections like "Project Scaffolding" and subtasks
+  like "Create Project Directory Structure". The deterministic rung of the
+  verification ladder then stat'd those paths, graded the missing file as
+  **failed** rather than undecidable, ran a correction round, failed the
+  recheck, and escalated — discarding a finished answer. Because a worker whose
+  dependency escalated returns `Blocked by failed dependency` immediately, one
+  impossible subtask turned every node downstream of it red.
+
+  Both halves are fixed. Planning is capability-aware: with no file tools the
+  prompts ask for criteria a reviewer checks by *reading the answer*, leave
+  `files` empty, and say outright that nothing on the run can touch the disk.
+  Grading is capability-aware too: a file criterion on a run that could not
+  have written one is `undecidable`, so it reaches the LLM grader — which
+  judges the output — instead of being decided against the worker by `stat`.
+
+  This is the third fix in this class and the first to cover this path.
+  `shouldRequireArtifact()` has gated the *artifact* rung on tool presence
+  since #151 (2026-07-21); the *acceptance* rung was added afterwards
+  (2026-08-04) and never inherited the guard, and the two fixes since then
+  patched the artifact side again. The capability question is now one exported
+  predicate per rung, and the planners' spec text lives in one module both
+  tiers render, so the pair cannot drift apart a fourth time.
+
+- **A run died whenever its websocket blinked.** The server aborted every
+  in-flight run on `disconnect`, which Socket.IO fires on a missed heartbeat or
+  a proxy idle-timeout as readily as on a closed tab — and a missed heartbeat is
+  exactly what a busy multi-tier run causes, since the pong is answered on the
+  event loop. The client reconnected, but as a new socket, so nothing brought
+  the run back: reported as a response that "just died" whether the user pressed
+  stop, navigated away, *or* left it alone. A dropped connection now holds its
+  runs for a grace window and abandons them only if nobody returns; the
+  heartbeat timeout allows for a blocked tick; and a reconnecting client
+  re-reads the transcript, so an answer that landed during the gap appears.
+  The assistant message was always persisted before any event was emitted — the
+  abort was what threw it away.
+
+- **The UI announced tools that were never registered.** `Using tool: run_code`
+  appeared on hosted runs where `run_code` does not exist: an unknown tool name
+  has no schema, so input validation passed it through, and the status went out
+  before anything consulted the registry. A hallucinated call now stays out of
+  the status line. Execution is unchanged — it still falls through to the
+  adaptive fallback that substitutes or synthesizes a real tool.
+
 ## 0.75.0 - 2026-08-14
 
 ### Fixed

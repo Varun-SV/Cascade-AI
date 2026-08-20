@@ -240,6 +240,19 @@ export function useChatSession(
   const [conversationId, setConversationId] = useState<string | undefined>(initialConversationId);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [busy, setBusy] = useState(false);
+  // Read inside socket handlers, which are registered once per connection and
+  // would otherwise close over whatever `busy` was at subscribe time.
+  const busyRef = useRef(false);
+  busyRef.current = busy;
+  // Set when the server reports a run still running for a connection that is
+  // no longer the one which emitted it — the ack is gone, so `session:complete`
+  // becomes the ending. Cleared by whichever ending arrives first.
+  const ackLostRef = useRef(false);
+  // The socket handlers are registered once per connection, so reading
+  // `conversationId` from their closure pins whatever it was at subscribe time
+  // — which on a first turn is `undefined` for the whole run.
+  const conversationIdRef = useRef(conversationId);
+  conversationIdRef.current = conversationId;
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [lastTokens, setLastTokens] = useState<number>(0);
@@ -351,13 +364,18 @@ export function useChatSession(
         setKnowledgeNotice('These documents are very large. The full text was still included — to retrieve just the most relevant parts of files this big, add an embeddings-capable key (OpenAI, an OpenAI-compatible endpoint, or a local Ollama).');
       }
     };
-    // The server aborts every run on this connection the moment the socket
-    // drops (cloud/server/src/socket.ts) — it settles the escalation gate as
-    // 'skip' locally and never gets to emit `escalation:timeout` over a socket
-    // that is already gone. Without this, a dropped connection left the modal
-    // up for up to five minutes, its buttons emitting into a run that had
-    // already ended and an acknowledgement that could never arrive anyway.
-    const onDisconnect = () => setEscalations([]);
+    // Deliberately does NOT clear the escalation prompt any more.
+    //
+    // It used to, and that was right when a dropped socket aborted the run
+    // outright: the gate settled as 'skip' server-side and the modal was
+    // answering into something already dead. The server now holds the run
+    // across the gap and re-points its `escalation:decide` listener at the
+    // replacement socket, so the question is still live and still answerable —
+    // discarding it here would throw away a gate the run is genuinely waiting
+    // on, and the run would then sit until its own timeout. The case that
+    // clearing protected against is covered by `run:resumed` reporting no
+    // active run: that is the signal the run really is over.
+    const onDisconnect = () => {};
     // A run produced a file. `pending: true` means generated media the user
     // has not kept — refresh the unsaved list so its expiry badge and Save
     // button appear on the message as soon as the image lands. A saved file
@@ -414,6 +432,119 @@ export function useChatSession(
       }));
     } catch { /* keep the optimistic transcript on a transient fetch error */ }
   }, []);
+
+  /**
+   * Terminal cleanup for a run whose ack can never arrive.
+   *
+   * `onAck` is the normal ending and does this plus the token/cost bookkeeping
+   * it alone receives. But the ack is bound to the connection that emitted
+   * `chat:run`: once that socket is gone the callback is unreachable, so a run
+   * interrupted by a reconnect needs a second way to end or the composer stays
+   * disabled forever with no error and no reply.
+   */
+  const finishWithoutAck = useCallback((cid?: string) => {
+    ackLostRef.current = false;
+    setBusy(false);
+    setStatus(null);
+    setApproval(null);
+    setContextApproval(null);
+    setEscalations([]);
+    // The streaming bubble is stitched from tokens that stopped arriving; the
+    // persisted answer replaces it.
+    setMessages((prev) => prev.filter((m) => !m.streaming));
+    // Adopt the id as well as the transcript. On a first turn the client has
+    // NO conversation id — the server creates it and the client learns it from
+    // the ack, which is the one thing a reconnect is guaranteed to lose. Ending
+    // the wait without it clears the spinner over an empty chat while the
+    // answer sits on a conversation the page cannot name.
+    const target = cid ?? conversationIdRef.current;
+    if (!target) return;
+    conversationIdRef.current = target;
+    setConversationId(target);
+    void reloadActivePath(target);
+  }, [reloadActivePath]);
+
+  // A reconnect re-reads the transcript, and settles what the lost ack cannot.
+  //
+  // The server holds a run whose socket dropped rather than aborting it (see
+  // cloud/server/src/socket.ts RECONNECT_GRACE_MS), which splits the reconnect
+  // into two cases the client cannot tell apart on its own:
+  //
+  //   • the run FINISHED during the gap — its events and its ack went to the
+  //     dead socket, but the assistant message was persisted before any of
+  //     them were emitted, so the answer is on the conversation. Reloading
+  //     surfaces it; `busy` has to be cleared here because nothing else will.
+  //   • the run is STILL GOING — it has been re-pointed at this socket, so the
+  //     remaining tokens and the terminal `session:complete` do arrive. The
+  //     ack still will not, so completion has to come off that event instead.
+  //
+  // `run:resumed` is the server answering which one it is. Reloading on
+  // connect alone left the second case busy forever, which is the same
+  // symptom, one connection later.
+  useEffect(() => {
+    if (!socket) return;
+    const onConnect = () => {
+      const cid = conversationIdRef.current;
+      if (cid) void reloadActivePath(cid);
+    };
+    const onResumed = (e: { active?: number; finished?: Array<{ conversationId?: string; error?: string }> }) => {
+      // A live run is authoritative even on a page that has never seen one.
+      //
+      // The resume identity deliberately survives a reload, so the server can
+      // and does adopt a run for a FRESH mount — where `busy` is just React
+      // state initialised to false. Gating on it meant the recovered run was
+      // ignored precisely when recovery mattered most: the composer looked
+      // idle while the run really was executing, the flag saying the ack is
+      // lost was never set, so the eventual completion was discarded too, and
+      // the user could start a second run on a socket already carrying one.
+      if (e?.active) {
+        ackLostRef.current = true;
+        setBusy(true);
+        return;
+      }
+      // Nothing running, and nothing waiting on it.
+      if (!busyRef.current) return;
+      // Nothing is running. The terminal event was emitted while no socket was
+      // bound, so this is the only remaining carrier of BOTH the id — for a run
+      // that was a brand-new chat — and the outcome. A run can fail during the
+      // gap as easily as it can finish, and reporting only the id made the two
+      // indistinguishable: the page cleared its spinner, reloaded a transcript
+      // with no reply in it, and said nothing about why.
+      const outcome = e?.finished?.find((f) => f?.error) ?? e?.finished?.[0];
+      if (outcome?.error) setError(outcome.error);
+      finishWithoutAck(outcome?.conversationId);
+    };
+    // Both endings take their id from the PAYLOAD, not from React state: on a
+    // first turn that state is still undefined, and these events carry the id
+    // the lost ack was going to deliver.
+    //
+    // Only meaningful once the ack is known lost. In the ordinary path
+    // `session:complete` precedes the ack on the same socket, and finalising
+    // here would end the run a beat early — before the reply bubble the ack
+    // carries.
+    const onComplete = (e: { conversationId?: string }) => {
+      if (ackLostRef.current) finishWithoutAck(e?.conversationId);
+    };
+    // An inherited run can fail rather than finish. `runChatTurn` emits this
+    // and then throws, and the throw only reaches the original `chat:run` ack —
+    // the very callback this path knows is gone. Without handling it here a
+    // failed run left the composer disabled forever and said nothing about why.
+    const onError = (e: { conversationId?: string; error?: string }) => {
+      if (!ackLostRef.current) return;
+      setError(e?.error ?? 'The run failed after the connection dropped.');
+      finishWithoutAck(e?.conversationId);
+    };
+    socket.on('connect', onConnect);
+    socket.on('run:resumed', onResumed);
+    socket.on('session:complete', onComplete);
+    socket.on('session:error', onError);
+    return () => {
+      socket.off('connect', onConnect);
+      socket.off('run:resumed', onResumed);
+      socket.off('session:complete', onComplete);
+      socket.off('session:error', onError);
+    };
+  }, [socket, reloadActivePath, finishWithoutAck]);
 
   // Shared run path for a fresh send, an edit (new branch), and a regenerate.
   // `appendUser` is false when regenerating (no new user turn is created). The
@@ -521,6 +652,8 @@ export function useChatSession(
       };
 
       const onAck = (ack: ChatRunAck) => {
+          // The ack did arrive, so the reconnect fallback must not fire later.
+          ackLostRef.current = false;
           setBusy(false);
           setStatus(null);
           setApproval(null);
