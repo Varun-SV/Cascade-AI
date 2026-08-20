@@ -205,6 +205,48 @@ describe('useChatSession — a run that outlives the connection that started it'
     expect(view.result.current.conversationId).toBeUndefined();
   });
 
+  it('adopts an inherited run on a freshly mounted page', async () => {
+    // The case a reload actually produces. The resume identity survives a
+    // reload on purpose, so the server adopts the run for the NEW page — but
+    // `busy` is React state initialised to false, and gating on it meant the
+    // recovered run was ignored exactly when recovery mattered. The composer
+    // looked idle while the run was executing, the lost-ack flag was never
+    // set, so the eventual completion was discarded too, and the user could
+    // start a second run on a socket already carrying one.
+    const fake = fakeSocket();
+    // Mounted cold: nothing was ever sent from this hook.
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+    expect(view.result.current.busy).toBe(false);
+
+    act(() => { fake.fire('run:resumed', { active: 1, finished: [] }); });
+
+    await waitFor(() => expect(view.result.current.busy).toBe(true));
+
+    // And the run it inherited still ends properly, carrying its identity.
+    act(() => { fake.fire('session:complete', { conversationId: 'server-made-id' }); });
+
+    await waitFor(() => expect(view.result.current.busy).toBe(false));
+    expect(view.result.current.conversationId).toBe('server-made-id');
+    await waitFor(() => {
+      expect(view.result.current.messages.map((m) => m.content))
+        .toContain('the answer that survived');
+    });
+  });
+
+  it('stays idle on a fresh page when nothing is running', async () => {
+    // The control. `active: 0` on a cold mount must not disable the composer,
+    // and must not put the page into a state waiting for an ending.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { fake.fire('run:resumed', { active: 0, finished: [] }); });
+    expect(view.result.current.busy).toBe(false);
+
+    act(() => { fake.fire('session:complete', { conversationId: 'server-made-id' }); });
+    expect(view.result.current.busy).toBe(false);
+    expect(view.result.current.conversationId).toBeUndefined();
+  });
+
   it('ignores session:error on a healthy connection, where the ack reports it', async () => {
     // The mirror of the session:complete gate. On a live socket the ack
     // carries `{ error }` and does the full cleanup; acting on both would

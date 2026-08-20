@@ -60,21 +60,6 @@ describe('getSocket — resume identity', () => {
     expect(optionsFromCall().auth?.clientId).toBe(before);
   });
 
-  it('answers the liveness probe, which is what stops another tab taking its run', async () => {
-    // The server asks the incumbent before letting a second socket claim its
-    // resume key. Not answering is indistinguishable from being gone, so a
-    // duplicated tab would be handed this tab's in-flight run.
-    const { getSocket } = await freshModule();
-    getSocket();
-
-    const probe = created.handlers.get('resume:probe');
-    expect(probe).toBeTypeOf('function');
-
-    const ack = vi.fn();
-    probe?.(ack);
-    expect(ack).toHaveBeenCalledWith(true);
-  });
-
   it('adopts the identity the server issues on a collision', async () => {
     // Issued when this connection was found colliding with a live one.
     // Persisting it is what stops the same collision recurring on the next

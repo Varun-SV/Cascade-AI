@@ -160,14 +160,7 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
   let stub: StubOpenAIServer | undefined;
   const clients: ClientSocket[] = [];
 
-  /** Answer the server's liveness probe, as the real web client does. */
-  function stayAlive(client: ClientSocket): void {
-    client.on('resume:probe', (ack?: (alive: boolean) => void) => {
-      if (typeof ack === 'function') ack(true);
-    });
-  }
-
-  async function start(graceMs: number, ownerProbeMs = 300): Promise<void> {
+  async function start(graceMs: number): Promise<void> {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-cloud-grace-'));
     store = new CloudStore(path.join(dir, 'cloud.db'));
     env = {
@@ -184,7 +177,7 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
       MAX_COST_PER_RUN_USD: 1,
     };
     httpServer = http.createServer();
-    attachSocket(httpServer, env, store, { reconnectGraceMs: graceMs, ownerProbeMs });
+    attachSocket(httpServer, env, store, { reconnectGraceMs: graceMs });
     await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', resolve));
     baseUrl = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}`;
   }
@@ -599,8 +592,11 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
       () => { /* dies with this socket */ },
     );
     await new Promise((r) => setTimeout(r, 300));
+    // The old connection goes, and the replacement arrives immediately — close
+    // enough that the disconnect may still be queued behind it. That ordering
+    // is the one the successor path exists for.
+    first.close();
 
-    // The replacement arrives first, on the same tab identity.
     const second = connect(cookie, 'tab-race');
     let completedOnSecond = false;
     const resumed: Array<{ active?: number }> = [];
@@ -615,10 +611,6 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
     // duplicate. The run would survive on the server and the page would still
     // report that it died.
     await until(() => resumed.length > 0, 5_000);
-    expect(resumed[0]?.active).toBe(1);
-
-    // Only now does the old connection go away.
-    first.close();
 
     // The run must end up on the socket that is actually here, not parked
     // under a key its owner already left.
@@ -656,6 +648,7 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
       () => { /* the ack this path assumes is lost */ },
     );
     await new Promise((r) => setTimeout(r, 200));
+    first.close();
 
     // The replacement takes the key while the run is still going.
     const second = connect(cookie, 'tab-mid');
@@ -668,8 +661,8 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
     await until(() => resumed.length > 0, 5_000);
     expect(resumed[0]?.active).toBe(1);
 
-    // The run ends while the old socket is STILL connected. Whatever was
-    // promised above has to be honoured by the connection it was promised to.
+    // Whatever the resume status promised has to be honoured by the
+    // connection it was promised to.
     const finished = await until(() => completedOnSecond, 12_000);
     expect(finished).toBe(true);
   }, 40_000);
@@ -691,6 +684,7 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
       () => { /* gone with the old connection */ },
     );
     await new Promise((r) => setTimeout(r, 200));
+    first.close();
 
     const second = connect(cookie, 'tab-stopmid');
     await connected(second);
@@ -758,7 +752,6 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
     const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
 
     const original = connect(cookie, 'tab-shared');
-    stayAlive(original);
     let completedOnOriginal = false;
     original.on('session:complete', () => { completedOnOriginal = true; });
     await connected(original);
@@ -771,7 +764,6 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
 
     // The duplicate arrives on the copied identity while the original is live.
     const duplicate = connect(cookie, 'tab-shared');
-    stayAlive(duplicate);
     const seenByDuplicate: Array<{ active?: number; clientId?: string }> = [];
     let completedOnDuplicate = false;
     duplicate.on('run:resumed', (e: { active?: number; clientId?: string }) => { seenByDuplicate.push(e); });
@@ -788,6 +780,98 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
     const finished = await until(() => completedOnOriginal, 12_000);
     expect(finished).toBe(true);
     expect(completedOnDuplicate).toBe(false);
+  }, 40_000);
+
+  it('keeps a live tab\u2019s run even when that tab never answers anything', async () => {
+    // The case that killed two earlier designs. A tab can be alive and still
+    // fail to respond in any bounded window — main thread blocked, or frozen
+    // in a background tab — so "did not answer in time" is not evidence of
+    // death. This client registers NO handlers at all beyond the run it
+    // started: it answers nothing, ever, and must still keep its run.
+    await start(8_000);
+    stub = await startStubOpenAIServer({ delayMs: 2_000 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'grace-mute', email: null, name: 'Mute', avatar: null });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+
+    const original = connect(cookie, 'tab-mute');
+    let completedOnOriginal = false;
+    original.on('session:complete', () => { completedOnOriginal = true; });
+    await connected(original);
+    original.emit(
+      'chat:run',
+      { prompt: 'hello', providers: [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }] },
+      () => { /* stays put and stays silent */ },
+    );
+    await new Promise((r) => setTimeout(r, 200));
+
+    const duplicate = connect(cookie, 'tab-mute');
+    const seen: Array<{ active?: number; clientId?: string }> = [];
+    let completedOnDuplicate = false;
+    duplicate.on('run:resumed', (e: { active?: number; clientId?: string }) => { seen.push(e); });
+    duplicate.on('session:complete', () => { completedOnDuplicate = true; });
+    await connected(duplicate);
+
+    await until(() => seen.length > 0, 5_000);
+    expect(seen[0]?.active).toBe(0);
+    // Renamed, so its own future work can never be pooled with the incumbent's.
+    expect(seen[0]?.clientId).toEqual(expect.any(String));
+
+    const finished = await until(() => completedOnOriginal, 12_000);
+    expect(finished).toBe(true);
+    expect(completedOnDuplicate).toBe(false);
+  }, 40_000);
+
+  it('never hands a duplicate\u2019s OWN run to the tab it collided with', async () => {
+    // The leak in the other direction. While identity was still being decided
+    // asynchronously, a duplicate could start a run under the copied key and
+    // then drop — and its disconnect handed that run to the incumbent, which
+    // had never asked for it. Deciding synchronously removes the window; this
+    // pins that it stays removed.
+    await start(1_200);
+    stub = await startStubOpenAIServer({ delayMs: 4_000 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'grace-leak', email: null, name: 'Leak', avatar: null });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+
+    const original = connect(cookie, 'tab-leak');
+    const seenByOriginal: string[] = [];
+    original.on('stream:token', () => { seenByOriginal.push('token'); });
+    original.on('session:complete', () => { seenByOriginal.push('complete'); });
+    await connected(original);
+
+    // The duplicate claims the same identity and immediately starts its OWN run.
+    const duplicate = connect(cookie, 'tab-leak');
+    await connected(duplicate);
+    duplicate.emit(
+      'chat:run',
+      { prompt: 'hello', providers: [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }] },
+      () => { /* about to go */ },
+    );
+    await new Promise((r) => setTimeout(r, 200));
+    duplicate.close();
+
+    // The duplicate's run is its own to lose, and must never surface on the
+    // tab it collided with — not while that tab is connected...
+    await new Promise((r) => setTimeout(r, 300));
+    expect(seenByOriginal).toEqual([]);
+
+    // ...and not when that tab reconnects either. This is what the rename is
+    // for: without it the duplicate's work is parked under the SHARED key, and
+    // the original picks it up on its next reconnect as if it were its own.
+    original.close();
+    await new Promise((r) => setTimeout(r, 100));
+    const originalAgain = connect(cookie, 'tab-leak');
+    const resumedOnOriginal: Array<{ active?: number }> = [];
+    originalAgain.on('run:resumed', (e: { active?: number }) => { resumedOnOriginal.push(e); });
+    originalAgain.on('stream:token', () => { seenByOriginal.push('token'); });
+    originalAgain.on('session:complete', () => { seenByOriginal.push('complete'); });
+    await connected(originalAgain);
+
+    await until(() => resumedOnOriginal.length > 0, 5_000);
+    expect(resumedOnOriginal[0]?.active).toBe(0);
+
+    // Past the grace window and past the stub's delay.
+    await new Promise((r) => setTimeout(r, 2_000));
+    expect(seenByOriginal).toEqual([]);
   }, 40_000);
 
   it('tells a fresh connection there is nothing to wait for', async () => {

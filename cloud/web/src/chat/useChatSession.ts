@@ -488,8 +488,22 @@ export function useChatSession(
       if (cid) void reloadActivePath(cid);
     };
     const onResumed = (e: { active?: number; finished?: Array<{ conversationId?: string; error?: string }> }) => {
+      // A live run is authoritative even on a page that has never seen one.
+      //
+      // The resume identity deliberately survives a reload, so the server can
+      // and does adopt a run for a FRESH mount — where `busy` is just React
+      // state initialised to false. Gating on it meant the recovered run was
+      // ignored precisely when recovery mattered most: the composer looked
+      // idle while the run really was executing, the flag saying the ack is
+      // lost was never set, so the eventual completion was discarded too, and
+      // the user could start a second run on a socket already carrying one.
+      if (e?.active) {
+        ackLostRef.current = true;
+        setBusy(true);
+        return;
+      }
+      // Nothing running, and nothing waiting on it.
       if (!busyRef.current) return;
-      if (e?.active) { ackLostRef.current = true; return; }
       // Nothing is running. The terminal event was emitted while no socket was
       // bound, so this is the only remaining carrier of BOTH the id — for a run
       // that was a brand-new chat — and the outcome. A run can fail during the

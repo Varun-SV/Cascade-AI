@@ -15,14 +15,6 @@ export function getSocket(): Socket {
       auth: { clientId: clientId() },
     });
 
-    // The server asks this before letting another socket claim our resume key.
-    // Answering is what proves this tab is still here, and is the difference
-    // between a duplicated tab being given its own identity and it taking this
-    // tab's in-flight run.
-    created.on('resume:probe', (ack?: (alive: boolean) => void) => {
-      if (typeof ack === 'function') ack(true);
-    });
-
     // Issued when the server found this connection colliding with a live one.
     // Adopting it here — rather than only in the chat hook — keeps identity a
     // property of the connection, and applies even on a page that never runs
