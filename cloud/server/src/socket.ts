@@ -230,6 +230,8 @@ export function attachSocket(
     adopt: (run: LiveRun) => void;
     /** Give up every live run, so the taker owns them outright. */
     release: () => LiveRun[];
+    /** Live runs, left where they are — see `successors`. */
+    peek: () => LiveRun[];
   }>();
 
   io.use((socket, next) => {
@@ -278,7 +280,22 @@ export function attachSocket(
    * the incumbent does go, its runs go to the socket that was waiting instead
    * of being parked under a key nobody will ask for again.
    */
-  const successors = new Map<string, { socket: Socket; adopt: (run: LiveRun) => void }>();
+  const successors = new Map<string, {
+    socket: Socket;
+    adopt: (run: LiveRun) => void;
+    /** Re-announce what this connection owns, once it has inherited. */
+    announce: () => void;
+    /**
+     * The incumbent's runs AS THEY WERE at the moment of the collision.
+     *
+     * Succession is scoped to these and nothing else. An open-ended claim on a
+     * key makes a renamed duplicate a generic future owner of it: the
+     * incumbent could disconnect idle, reconnect, start entirely new work,
+     * drop again, and that work would land in a tab which has been sitting
+     * there since a collision minutes earlier.
+     */
+    runs: Set<LiveRun>;
+  }>();
 
   io.on('connection', (socket: Socket) => {
     const userId = (socket.data as CloudSocketData).userId;
@@ -338,7 +355,20 @@ export function attachSocket(
           // incumbent's, and waits in case the incumbent turns out to be on
           // its way out after all.
           successorFor = key;
-          successors.set(key, { socket, adopt });
+          successors.set(key, {
+            socket,
+            adopt,
+            // Succession must be VISIBLE. A socket told `active: 0` has, quite
+            // correctly, concluded nothing is running for it — including the
+            // flag that says its ack is lost — so a run injected silently
+            // afterwards streams into a page that will discard its own
+            // completion as a stray duplicate. Re-announcing is what turns an
+            // inheritance into something the client can act on.
+            announce: () => announceResume(),
+            // Only what the incumbent held at THIS moment. Anything it starts
+            // later belongs to whatever connection is around for it.
+            runs: new Set(incumbent.peek()),
+          });
           assignedClientId = randomUUID();
           (socket.data as CloudSocketData).clientId = assignedClientId;
           key = resumeKey(socket);
@@ -358,6 +388,7 @@ export function attachSocket(
           for (const run of live) activeRuns.delete(run);
           return live;
         },
+        peek: () => [...activeRuns].filter((r) => !r.done),
       });
     }
 
@@ -441,7 +472,8 @@ export function attachSocket(
       //
       // Guarded on still being the owner, so an older socket leaving does not
       // evict the replacement that has already taken the key.
-      if (parkKey && owners.get(parkKey)?.socket === socket) owners.delete(parkKey);
+      const wasOwner = !!parkKey && owners.get(parkKey)?.socket === socket;
+      if (parkKey && wasOwner) owners.delete(parkKey);
       // Stop waiting to inherit a key this connection will never use.
       if (successorFor && successors.get(successorFor)?.socket === socket) successors.delete(successorFor);
 
@@ -450,6 +482,14 @@ export function attachSocket(
       // Nothing more may be written to a socket that is gone; the listeners go
       // with it, and both come back on adoption.
       for (const r of inFlight) r.transport.rebind(null);
+
+      // The owner leaving ends any claim on its key, runs or no runs. Skipping
+      // this on the idle path left a renamed duplicate queued indefinitely,
+      // free to inherit work started by a connection that arrived long after
+      // the collision it was waiting on.
+      const successorClaim = parkKey && wasOwner ? successors.get(parkKey) : undefined;
+      if (parkKey && wasOwner) successors.delete(parkKey);
+
       if (inFlight.length === 0) return;
 
       // No tab identity means nothing can ever prove it is this client coming
@@ -472,16 +512,23 @@ export function attachSocket(
       // so the returning socket was renamed rather than recognised. It gets the
       // runs here, when the truth is finally known.
       const owner = owners.get(parkKey);
-      const waiting = successors.get(parkKey);
-      const target = owner && owner.socket !== socket && owner.socket.connected
-        ? owner
-        : waiting && waiting.socket !== socket && waiting.socket.connected
-          ? waiting
-          : undefined;
-      if (target) {
-        for (const r of inFlight) target.adopt(r);
-        successors.delete(parkKey);
+      if (owner && owner.socket !== socket && owner.socket.connected) {
+        for (const r of inFlight) owner.adopt(r);
         return;
+      }
+
+      // A socket renamed off this key may inherit — but only the runs it was
+      // told about, and only if it is told again. Anything outside that set
+      // parks as usual.
+      const waiting = wasOwner ? successorClaim : undefined;
+      if (waiting && waiting.socket !== socket && waiting.socket.connected) {
+        const inherited = inFlight.filter((r) => waiting.runs.has(r));
+        for (const r of inherited) waiting.adopt(r);
+        if (inherited.length) waiting.announce();
+        const rest = inFlight.filter((r) => !waiting.runs.has(r));
+        if (rest.length === 0) return;
+        inFlight.length = 0;
+        inFlight.push(...rest);
       }
 
       // A second disconnect while the first is still held must not drop the
@@ -506,7 +553,8 @@ export function attachSocket(
     // `chat:run` creating work under a key still being decided is how a
     // duplicate's OWN run could be handed to the incumbent it was colliding
     // with; there is no such window to exploit now.
-    // Tell this page what it owns, and who it is.
+    /** Tell this page what it owns, and who it is. */
+    const announceResume = (assigned?: string): void => {
     //
     // `active` is true at the moment it is sent because the runs have already
     // moved — a count of a transfer that has not happened is a promise the
@@ -521,13 +569,16 @@ export function attachSocket(
     // `clientId` appears only when this connection was renamed for colliding
     // with a live one. The client persists it, so the collision does not recur
     // on its next reload.
-    socket.emit('run:resumed', {
-      active: activeRuns.size,
-      finished: [...(held?.runs ?? [])]
-        .filter((r) => r.done)
-        .map((r) => ({ conversationId: r.terminal?.conversationId ?? r.conversationId, error: r.terminal?.error })),
-      ...(assignedClientId ? { clientId: assignedClientId } : {}),
-    });
+      socket.emit('run:resumed', {
+        active: activeRuns.size,
+        finished: [...(held?.runs ?? [])]
+          .filter((r) => r.done)
+          .map((r) => ({ conversationId: r.terminal?.conversationId ?? r.conversationId, error: r.terminal?.error })),
+        ...(assigned ? { clientId: assigned } : {}),
+      });
+    };
+
+    announceResume(assignedClientId);
   });
 
   return io;

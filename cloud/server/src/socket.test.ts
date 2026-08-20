@@ -874,6 +874,129 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
     expect(seenByOriginal).toEqual([]);
   }, 40_000);
 
+  it('tells a renamed tab when it inherits, rather than injecting the run silently', async () => {
+    // A tab told `active: 0` has concluded — correctly — that nothing is
+    // running for it, INCLUDING the flag that says its ack is lost. Handing it
+    // a run afterwards without saying so streams into a page that will discard
+    // that run's own completion as a stray duplicate: it finishes, invisibly,
+    // in a tab that never knew it had it.
+    await start(8_000);
+    stub = await startStubOpenAIServer({ delayMs: 2_500 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'grace-succ', email: null, name: 'Succ', avatar: null });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+
+    const original = connect(cookie, 'tab-succ');
+    await connected(original);
+    original.emit(
+      'chat:run',
+      { prompt: 'hello', providers: [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }] },
+      () => { /* about to go */ },
+    );
+    await new Promise((r) => setTimeout(r, 200));
+
+    // A second live tab on the copied identity: renamed, inherits nothing yet.
+    const duplicate = connect(cookie, 'tab-succ');
+    const resumed: Array<{ active?: number; clientId?: string }> = [];
+    let completedOnDuplicate = false;
+    duplicate.on('run:resumed', (e: { active?: number; clientId?: string }) => { resumed.push(e); });
+    duplicate.on('session:complete', () => { completedOnDuplicate = true; });
+    await connected(duplicate);
+
+    await until(() => resumed.length > 0, 5_000);
+    expect(resumed[0]?.active).toBe(0);
+    expect(resumed[0]?.clientId).toEqual(expect.any(String));
+
+    // The original goes mid-run, and its run passes to the tab that was queued.
+    original.close();
+
+    // The inheritance must be ANNOUNCED — a second resume saying a run is now
+    // active here — or the completion below would be thrown away.
+    const told = await until(() => resumed.length > 1, 8_000);
+    expect(told).toBe(true);
+    expect(resumed[resumed.length - 1]?.active).toBe(1);
+
+    const finished = await until(() => completedOnDuplicate, 12_000);
+    expect(finished).toBe(true);
+  }, 40_000);
+
+  it('inherits only the run that existed at the collision, not one started after it', async () => {
+    // The isolating case for scoping. The incumbent holds R1 when the
+    // duplicate collides, then starts R2 while still connected, then drops.
+    // R1 was what the duplicate was queued for; R2 belongs to whatever
+    // connection is around for it, and must park rather than follow.
+    await start(1_000);
+    stub = await startStubOpenAIServer({ delayMs: 5_000 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'grace-scope', email: null, name: 'Scope', avatar: null });
+    // Two concurrent runs is a Pro allowance; on free the second is refused by
+    // entitlements and the case under test cannot arise at all.
+    store.setUserSubscription(user.id, { subscriptionId: 'sub-test', status: 'active', currentEnd: null, plan: 'pro' });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+    const providers = [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }];
+
+    const original = connect(cookie, 'tab-scope');
+    await connected(original);
+    original.emit('chat:run', { prompt: 'first', providers }, () => { /* R1 */ });
+    await new Promise((r) => setTimeout(r, 200));
+
+    const duplicate = connect(cookie, 'tab-scope');
+    const resumed: Array<{ active?: number }> = [];
+    duplicate.on('run:resumed', (e: { active?: number }) => { resumed.push(e); });
+    await connected(duplicate);
+    await until(() => resumed.length > 0, 5_000);
+
+    // A SECOND run, started after the collision was recorded.
+    original.emit('chat:run', { prompt: 'second', providers }, () => { /* R2 */ });
+    await new Promise((r) => setTimeout(r, 200));
+    original.close();
+
+    // The duplicate is told about exactly one inherited run — not two. R2 was
+    // never its business and parks under the key instead.
+    const told = await until(() => resumed.length > 1, 8_000);
+    expect(told).toBe(true);
+    expect(resumed[resumed.length - 1]?.active).toBe(1);
+  }, 40_000);
+
+  it('does not let a stale collision inherit work started long afterwards', async () => {
+    // Succession is scoped to the runs the incumbent held AT the collision. An
+    // open-ended claim makes a renamed duplicate a generic future owner of the
+    // key: the incumbent can disconnect idle, come back, start something
+    // entirely new, drop again — and that work lands in a tab which has been
+    // waiting since a collision that had nothing to do with it.
+    await start(1_200);
+    stub = await startStubOpenAIServer({ delayMs: 4_000 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'grace-stale2', email: null, name: 'Stale2', avatar: null });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+
+    // Collision while the original is IDLE — nothing to inherit, ever.
+    const original = connect(cookie, 'tab-stale2');
+    await connected(original);
+    const duplicate = connect(cookie, 'tab-stale2');
+    const seenByDuplicate: string[] = [];
+    duplicate.on('run:resumed', () => { seenByDuplicate.push('resumed'); });
+    duplicate.on('stream:token', () => { seenByDuplicate.push('token'); });
+    duplicate.on('session:complete', () => { seenByDuplicate.push('complete'); });
+    await connected(duplicate);
+    await until(() => seenByDuplicate.length > 0, 5_000);
+    const afterCollision = seenByDuplicate.length;
+
+    // The original leaves and comes back on its own key, then starts new work.
+    original.close();
+    await new Promise((r) => setTimeout(r, 200));
+    const originalAgain = connect(cookie, 'tab-stale2');
+    await connected(originalAgain);
+    originalAgain.emit(
+      'chat:run',
+      { prompt: 'hello', providers: [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }] },
+      () => { /* about to go */ },
+    );
+    await new Promise((r) => setTimeout(r, 200));
+    originalAgain.close();
+
+    // Past the grace window: that run was never the duplicate's to receive.
+    await new Promise((r) => setTimeout(r, 2_000));
+    expect(seenByDuplicate.length).toBe(afterCollision);
+  }, 40_000);
+
   it('tells a fresh connection there is nothing to wait for', async () => {
     // The other half of the same signal. A client that reconnects after its
     // run already finished must be able to stop showing a spinner, and this is
