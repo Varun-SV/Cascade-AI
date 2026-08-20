@@ -151,6 +151,11 @@ export function toGeminiFunctionCalls(toolCalls: readonly ToolCall[]): Part[] {
       name: tc.name,
       args: tc.input as Record<string, unknown>,
     },
+    // Returned exactly where it arrived — a sibling of `functionCall` on the
+    // same part — because that is where the model expects to find its own
+    // signature. Replaying a signed call without it is rejected before any
+    // generation happens.
+    ...(tc.signature ? { thoughtSignature: tc.signature } : {}),
   } as Part));
 }
 
@@ -268,6 +273,16 @@ export class GeminiProvider extends BaseProvider {
               id: part.functionCall.name as string,
               name: part.functionCall.name as string,
               input: (part.functionCall.args ?? {}) as Record<string, unknown>,
+              // Carried, not read. A thinking model signs the part it asks the
+              // call on, and requires that signature back when the call is
+              // replayed in history — without it the NEXT request fails with
+              // `400 … missing thought signature`, so the tool loop cannot take
+              // a second step at all. Kept per call because that is the
+              // granularity Gemini signs at, and omitted entirely when absent
+              // so a non-thinking model's history stays byte-identical.
+              ...(typeof part.thoughtSignature === 'string' && part.thoughtSignature
+                ? { signature: part.thoughtSignature }
+                : {}),
             });
             finishReason = 'tool_use';
           }

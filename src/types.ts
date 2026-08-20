@@ -214,6 +214,21 @@ export interface ToolCall {
   id: string;
   name: string;
   input: Record<string, unknown>;
+  /**
+   * An opaque token the provider attached to this call, to be echoed back
+   * verbatim when the call is replayed as history.
+   *
+   * Normalized types usually strip provider specifics, and this one cannot be:
+   * Gemini's thinking models sign each `functionCall` part, and a follow-up
+   * turn that replays the call without its signature is rejected outright —
+   * `400 Bad Request`, "missing thought signature". Dropping it therefore does
+   * not degrade a reply, it prevents one, and only on the multi-turn tool-use
+   * path where every worker lives.
+   *
+   * Opaque on purpose: nothing here may interpret it, and a provider that
+   * issues no such token simply leaves it unset.
+   */
+  signature?: string;
 }
 
 export interface ToolResult {
