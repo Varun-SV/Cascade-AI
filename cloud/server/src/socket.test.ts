@@ -997,6 +997,63 @@ describe('attachSocket — a dropped connection does not kill the run', () => {
     expect(seenByDuplicate.length).toBe(afterCollision);
   }, 40_000);
 
+  it('does not stack an inherited run onto a successor that is already running one', async () => {
+    // A successor is told `active: 0` when it is renamed, so its page is idle
+    // and — on Pro — free to start work of its own. Handing it the incumbent's
+    // run as well puts two on one socket, and the client cannot represent
+    // that: one `busy` flag, one lost-ack flag, socket-wide stream and status
+    // handlers, and a Stop that iterates everything the connection owns. The
+    // first run to finish would settle the other's state, and Stop would abort
+    // both. So the inherited run parks instead, where its own client can still
+    // reclaim it.
+    await start(8_000);
+    stub = await startStubOpenAIServer({ delayMs: 2_500 });
+    const user = store.upsertUser({ provider: 'dev', providerId: 'grace-two', email: null, name: 'Two', avatar: null });
+    store.setUserSubscription(user.id, { subscriptionId: 'sub-test', status: 'active', currentEnd: null, plan: 'pro' });
+    const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: user.id }, env.SESSION_SECRET)}`;
+    const providers = [{ type: 'openai-compatible', baseUrl: stub.url, apiKey: 'test-key', model: 'stub-model' }];
+
+    const original = connect(cookie, 'tab-two');
+    await connected(original);
+    original.emit('chat:run', { prompt: 'original work', providers }, () => { /* dies with this socket */ });
+    await new Promise((r) => setTimeout(r, 200));
+
+    // The duplicate is renamed, told nothing is running, and starts its own run.
+    const duplicate = connect(cookie, 'tab-two');
+    const resumedOnDuplicate: Array<{ active?: number }> = [];
+    duplicate.on('run:resumed', (e: { active?: number }) => { resumedOnDuplicate.push(e); });
+    await connected(duplicate);
+    await until(() => resumedOnDuplicate.length > 0, 5_000);
+    expect(resumedOnDuplicate[0]?.active).toBe(0);
+
+    duplicate.emit('chat:run', { prompt: 'duplicate work', providers }, () => { /* its own */ });
+    await new Promise((r) => setTimeout(r, 200));
+
+    // The original goes. Its run must NOT land on the busy successor.
+    original.close();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(resumedOnDuplicate).toHaveLength(1);
+
+    // And Stop on the duplicate reaches only its own run.
+    duplicate.emit('chat:stop');
+
+    // The original's client comes back and finds its run still waiting.
+    const originalAgain = connect(cookie, 'tab-two');
+    const resumedOnOriginal: Array<{ active?: number }> = [];
+    originalAgain.on('run:resumed', (e: { active?: number }) => { resumedOnOriginal.push(e); });
+    await connected(originalAgain);
+    await until(() => resumedOnOriginal.length > 0, 5_000);
+    expect(resumedOnOriginal[0]?.active).toBe(1);
+
+    // Exactly one conversation carries a finished answer: the original's. The
+    // duplicate's was stopped, and was never the original's to lose.
+    const landed = await until(() => {
+      const conversations = store.listConversations(user.id) as Array<{ id: string }>;
+      return conversations.filter((c) => assistantReply(c.id).includes('Hello from the stub model.')).length === 1;
+    }, 12_000);
+    expect(landed).toBe(true);
+  }, 40_000);
+
   it('tells a fresh connection there is nothing to wait for', async () => {
     // The other half of the same signal. A client that reconnects after its
     // run already finished must be able to stop showing a spinner, and this is

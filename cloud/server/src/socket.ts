@@ -286,6 +286,17 @@ export function attachSocket(
     /** Re-announce what this connection owns, once it has inherited. */
     announce: () => void;
     /**
+     * Whether this connection is already running something of its own.
+     *
+     * A successor is told `active: 0` when it is renamed, so its page is idle
+     * and free to start work — and on Pro it may. Handing it a second run then
+     * puts two on one socket, which the client cannot represent: it has a
+     * single `busy` flag, a single lost-ack flag, and socket-wide stream and
+     * status handlers. Whichever run finished first would settle the other's
+     * state, and Stop would abort both.
+     */
+    busy: () => boolean;
+    /**
      * The incumbent's runs AS THEY WERE at the moment of the collision.
      *
      * Succession is scoped to these and nothing else. An open-ended claim on a
@@ -368,6 +379,7 @@ export function attachSocket(
             // Only what the incumbent held at THIS moment. Anything it starts
             // later belongs to whatever connection is around for it.
             runs: new Set(incumbent.peek()),
+            busy: () => [...activeRuns].some((r) => !r.done),
           });
           assignedClientId = randomUUID();
           (socket.data as CloudSocketData).clientId = assignedClientId;
@@ -520,8 +532,11 @@ export function attachSocket(
       // A socket renamed off this key may inherit — but only the runs it was
       // told about, and only if it is told again. Anything outside that set
       // parks as usual.
+      // A successor that has since started work of its own is no longer a
+      // place to put another run — the run parks instead, and the client that
+      // owns it can still come back for it inside the grace window.
       const waiting = wasOwner ? successorClaim : undefined;
-      if (waiting && waiting.socket !== socket && waiting.socket.connected) {
+      if (waiting && waiting.socket !== socket && waiting.socket.connected && !waiting.busy()) {
         const inherited = inFlight.filter((r) => waiting.runs.has(r));
         for (const r of inherited) waiting.adopt(r);
         if (inherited.length) waiting.announce();
