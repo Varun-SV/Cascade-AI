@@ -19,6 +19,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
 ### Fixed
+- **Gemini rejected every tool-using run after its first step.** Gemini's
+  2.5-generation thinking models attach an opaque `thoughtSignature` to the
+  part they request a function call on, and require it back, verbatim and in
+  the same place, when that call is replayed as history. Cascade captured a
+  tool call as `{id, name, input}` and rebuilt it bare, so the signature was
+  discarded at the first opportunity and the *next* request came back
+  `400 Bad Request … missing thought signature`. Plain conversation was
+  unaffected — it never replays a call — which is why this looked like
+  "difficult prompts fail" rather than a provider bug: every worker that
+  reached for a tool died on its second step, taking the nodes that depended
+  on it with it. The signature now rides on the normalized tool call and is
+  returned exactly where it arrived; a model that signs nothing still sends
+  byte-identical history.
+
 - **A hosted run failed the nodes it had no way to complete.** On the cloud
   webapp the tool registry is an allowlist of `web_search` and `web_fetch` —
   shell, file and code tools are genuinely absent, not approval-gated — while
