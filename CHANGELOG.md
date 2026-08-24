@@ -19,6 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
 ### Fixed
+- **A crashed CLI left the terminal unusable.** Ink puts stdin into raw mode to
+  read keystrokes and hides the cursor, and undoes both when it unmounts
+  cleanly. On a crash it never runs, and the exit handler restored the
+  alternate screen but not the terminal mode — so the shell came back with no
+  echo, no line editing and no working Enter, which reads as though a modifier
+  key were stuck down rather than as a program that died. (`stty sane` or
+  `reset` recovers a terminal already in that state.) The exit handler now
+  hands stdin back out of raw mode and shows the cursor, which covers a normal
+  quit, an uncaught exception and an unhandled rejection alike — `exit` fires
+  for all three.
+
 - **Gemini rejected every tool-using run after its first step.** Gemini's
   2.5-generation thinking models attach an opaque `thoughtSignature` to the
   part they request a function call on, and require it back, verbatim and in
