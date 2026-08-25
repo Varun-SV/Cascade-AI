@@ -597,6 +597,10 @@ export function useChatSession(
       setContextApproval(null);
       setCompactionNotice(null);
       setKnowledgeNotice(null);
+      // The banner says "out for THIS run". Verdicts are cleared at the router's
+      // run boundary, so carrying it into the next run would keep telling the
+      // user their spend is on a different account after it has moved back.
+      setProviderNotice(null);
       setActivity([]);
       streamingRef.current = '';
       // Id kept so the rejection path below can take this turn back out. It is

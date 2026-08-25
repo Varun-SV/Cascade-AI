@@ -973,7 +973,7 @@ export class CascadeRouter extends EventEmitter {
       // cannot run pretending to be a safeguard.
       const alt = this.selector.selectForTier(tier);
       if (alt && alt.id !== model.id && !this.failover.isPermanentlyFailed(this.scopeFor(alt))) {
-        if (!this.permanentRepoints.has(tier)) this.permanentRepoints.set(tier, model);
+        this.rememberRepoint(tier);
         this.tierModels.set(tier, alt);
         this.ensureProvider(alt, this.config.providers);
         this.emit('failover', {
@@ -1213,6 +1213,9 @@ export class CascadeRouter extends EventEmitter {
           estimatedCostUsd: corrected.estimatedCostUsd,
           ...(corrected.costUnknown ? { costUnknown: true } : { costUnknown: undefined }),
         },
+        // Which model ACTUALLY answered. A failover recursion returns its own
+        // result from the inner call, so this is always the one that ran.
+        servedBy: { provider: model.provider, id: model.id },
       };
 
       if (!result || typeof result.content !== 'string' || !result.usage) {
@@ -1301,7 +1304,7 @@ export class CascadeRouter extends EventEmitter {
         if (fallback) {
           // Remember what this tier was displaced FROM, so the next run can put
           // it back once the verdict is cleared.
-          if (doesNotEase && !this.permanentRepoints.has(tier)) this.permanentRepoints.set(tier, model);
+          if (doesNotEase) this.rememberRepoint(tier);
           this.tierModels.set(tier, fallback);
           this.ensureProvider(fallback, this.config.providers);
           this.emit('failover', {
@@ -1806,6 +1809,25 @@ export class CascadeRouter extends EventEmitter {
    * what the key and the bill belong to — see failureScopeOf. Everything else
    * is already one credential per provider.
    */
+  /**
+   * Note the tier's binding before a permanent verdict repoints it.
+   *
+   * Records `tierModels.get(tier)` — the tier's own baseline — and NOT the
+   * model that happened to fail. Those differ whenever the call carried a
+   * per-call override (Cascade Auto picks one per subtask), and saving the
+   * override would have beginRun() install a one-off subtask model as the
+   * tier's baseline, leaving every later default-routed call on a model the
+   * tier was never configured to use.
+   *
+   * Nothing to restore if the tier had no binding, and the first repoint wins
+   * so a second failover in the same run cannot overwrite the true baseline.
+   */
+  private rememberRepoint(tier: TierRole): void {
+    if (this.permanentRepoints.has(tier)) return;
+    const baseline = this.tierModels.get(tier);
+    if (baseline) this.permanentRepoints.set(tier, baseline);
+  }
+
   private scopeFor(model: ModelInfo): string {
     if (model.provider !== 'azure') return failureScopeOf(model);
     const cfg = (this.config?.providers ?? []).find(

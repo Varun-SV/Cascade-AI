@@ -151,6 +151,18 @@ export interface GenerateResult {
   usage: TokenUsage;
   toolCalls?: ToolCall[];
   finishReason: 'stop' | 'length' | 'tool_use';
+  /**
+   * The model that actually produced this result.
+   *
+   * Not always the one that was asked for: the router fails over mid-call on a
+   * rate limit, a dead model id, or an exhausted account, and the caller has
+   * no other way to find out. Callers that REPORT a model — `tier:status`,
+   * which the hosted server persists onto the assistant message and which
+   * `/why` and thumbs feedback then read — must use this rather than the model
+   * they passed in, or the credit goes to a model that never ran and the
+   * performance history learns something untrue about both.
+   */
+  servedBy?: { provider: ProviderType; id: string };
 }
 
 export interface ConversationMessage {

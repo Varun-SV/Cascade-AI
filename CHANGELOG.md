@@ -44,6 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every selection path honours that scope, for ordinary rate limits as well as
   permanent ones.
 
+- **A failed-over answer was credited to the model that never ran.** The fast
+  path reported the model it asked for, but the router fails over mid-call —
+  and the hosted server persists that reported model onto the assistant
+  message, where `/why` and thumbs feedback read it back. So a dead model got
+  the credit (or the blame) for an answer a different model produced, and the
+  model-performance history learned something untrue about both. `generate()`
+  now reports which model actually served, and the fast path uses it.
+
 - **A vision request could be answered by a model that never saw the image.**
   `selectVisionModel()` is the only path a vision-required call resolves
   through, and it checked provider availability directly instead of going

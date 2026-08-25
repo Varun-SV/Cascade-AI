@@ -85,6 +85,26 @@ describe('useChatSession — a provider going out mid-run', () => {
     expect(notice).not.toMatch(/continuing on/i);
   });
 
+  it('clears the banner when the next run starts', () => {
+    // The banner says "out for THIS run", and the router clears its verdicts at
+    // the run boundary — so leaving it up would keep telling the user their
+    // spend is on another account after it has already moved back.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => {
+      fake.fire('provider:exhausted', {
+        provider: 'gemini', modelId: 'gemini-2.5-flash', kind: 'quota_exhausted',
+        message: 'Quota or billing limit reached.', failedOverTo: 'azure:prod-gpt5',
+      });
+    });
+    expect(view.result.current.providerNotice).toBeTruthy();
+
+    act(() => { view.result.current.send({ prompt: 'a new question' }); });
+
+    expect(view.result.current.providerNotice).toBeNull();
+  });
+
   it('unsubscribes on teardown, so a remounted session does not double-report', () => {
     const fake = fakeSocket();
     const view = renderHook(() => useChatSession(fake.socket, [], 'general'));

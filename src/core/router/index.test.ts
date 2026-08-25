@@ -866,6 +866,113 @@ describe('CascadeRouter — exhausted quota is not a rate limit', () => {
     expect(all.find((m) => m.id === replacement?.id)?.isVisionCapable).toBe(true);
   });
 
+  it('reports the model that actually served, not the one that was asked for', async () => {
+    // Review finding: callers that REPORT a model — tier:status, which the
+    // hosted server persists onto the assistant message and which /why and
+    // thumbs feedback then read — had no way to learn about a mid-call
+    // failover, so the credit went to a model that never ran.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('insufficient_quota: your credit balance is too low'));
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'from fallback', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+
+    const asked = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+    const result = await router.generate('T1', {
+      messages: [{ role: 'user', content: 'hi' }], model: asked, maxTokens: 64,
+    });
+
+    expect(result.content).toBe('from fallback');
+    expect(result.servedBy).toBeDefined();
+    expect(result.servedBy!.provider).toBe('anthropic');
+    expect(result.servedBy!.id).not.toBe('gpt-4o');
+
+    vi.restoreAllMocks();
+  });
+
+  it('reports the pinned model when no failover happened', async () => {
+    // The other half: with a per-call pin and no failover, the tier's own
+    // binding is NOT what served, so reading it back off the tier would be
+    // wrong in the ordinary case.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'ok', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai']));
+    await router.init(makeConfig({ providers: [{ type: 'openai', apiKey: 'sk-test' }] }));
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o-mini');
+    const result = await router.generate('T1', {
+      messages: [{ role: 'user', content: 'hi' }], model: pinned, maxTokens: 64,
+    });
+
+    expect(result.servedBy).toEqual({ provider: 'openai', id: 'gpt-4o-mini' });
+    // And it is genuinely different from the tier's own binding.
+    expect(router.getModelForTier('T1')?.id).not.toBe('gpt-4o-mini');
+
+    vi.restoreAllMocks();
+  });
+
+  it('restores the tier BASELINE, not a one-off per-call override', async () => {
+    // Review finding: recording the model that failed meant a Cascade Auto
+    // per-subtask override, once it failed permanently, was installed by
+    // beginRun() as the tier's baseline — leaving every later default-routed
+    // call on a model the tier was never configured to use.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('insufficient_quota: your credit balance is too low'));
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'from fallback', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+
+    // The tier's configured baseline…
+    const baseline = router.getAvailableModels().find((m) => m.provider === 'anthropic')!;
+    (router as unknown as { tierModels: Map<string, unknown> }).tierModels.set('T1', baseline);
+
+    // …and a DIFFERENT, one-off per-call override that is about to die.
+    const oneOff = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o')!;
+    await router.generate('T1', {
+      messages: [{ role: 'user', content: 'x' }], model: oneOff, maxTokens: 64,
+    }).catch(() => undefined);
+
+    router.beginRun();
+
+    // The baseline comes back — not the subtask model that happened to fail.
+    expect(router.getModelForTier('T1')?.id).toBe(baseline.id);
+    expect(router.getModelForTier('T1')?.id).not.toBe('gpt-4o');
+
+    vi.restoreAllMocks();
+  });
+
   it('explains the dead account when no other provider can serve the tier', async () => {
     // The case that matters most, and the one the old code handled worst: with
     // nothing to fail over to it re-threw the raw vendor string, which says
