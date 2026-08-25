@@ -60,6 +60,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in a key that already had it, left the model excluded across later runs and
   process restarts. It now fails over without writing anything durable.
 
+- **A grading call could steal the answer's attribution.** Critics, self-tests
+  and extractors run beside the answer, deliberately on a different model — the
+  critic exists so a model is not marking its own work. They were updating the
+  worker's serving model, so the subtask's output, its terminal status and the
+  feedback history all named the grader rather than the model that wrote the
+  answer.
+
+- **A model under an ordinary backoff was still called directly.** A tier
+  binding or an explicit per-call model resolves without consulting the
+  selector, so the backoff every selection path respected did not apply to
+  them. Such a call now moves to another model when one can serve, and only
+  proceeds if nothing else can.
+
 - **A worker queued behind a rate limiter still called a dead account.** The
   check that refuses a call to an exhausted credential ran when the model was
   resolved — before the tokens-per-minute bucket and the local-inference

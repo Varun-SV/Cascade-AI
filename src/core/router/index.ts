@@ -349,6 +349,25 @@ export function resetCredentialIdentitiesForTest(): void {
   lastIdentitySweep = 0;
 }
 
+/**
+ * A stable, non-reversible fingerprint of a credential, for verdict scoping.
+ *
+ * Deliberately NOT credentialIdentity(): that one rotates to a fresh UUID once
+ * DISCOVERY_TTL_MS has passed since a secret was first seen, which is right for
+ * a discovery cache expiring on the same clock and wrong for a verdict that
+ * promised to hold for the rest of the run. A long run would cross the boundary
+ * and stop finding its own verdict, then go back to the credential it had just
+ * been told was rejected.
+ *
+ * A hash rather than the key itself, so nothing here retains a secret — the
+ * concern credentialIdentity's map exists to address — while staying the same
+ * value for as long as the key is.
+ */
+function credentialFingerprint(secret: string | undefined): string {
+  if (!secret) return '-';
+  return crypto.createHash('sha256').update(secret).digest('hex').slice(0, 16);
+}
+
 function credentialIdentity(secret: string | undefined): string {
   if (!secret) return '-';
   const now = Date.now();
@@ -966,6 +985,29 @@ export class CascadeRouter extends EventEmitter {
     // that met an exhausted quota during complexity classification would go on
     // to call the same dead account for every later tier — the verdict would
     // read correctly and stop nothing.
+    // A tier binding or an explicit pin resolves without consulting the
+    // selector, so the veto never sees it. Checked here for BOTH kinds: a
+    // permanent verdict refuses the call outright, while an active transient
+    // backoff moves it to something else if anything else can serve — that is
+    // what the backoff is for, and a bound model was walking straight through
+    // it while every selector path respected it.
+    if (model && !this.isModelOut(model) && this.scopesFor(model).some((sc) => !this.failover.isProviderAvailable(sc))) {
+      const alt = this.selector.selectForTier(tier);
+      if (alt && alt.id !== model.id) {
+        this.ensureProvider(alt, this.config.providers);
+        this.emit('failover', {
+          tier,
+          from: `${model.provider}:${model.id}`,
+          to: `${alt.provider}:${alt.id}`,
+          reason: 'backing off',
+        });
+        model = alt;
+      }
+      // No alternative: fall through and let the call proceed. A transient
+      // backoff is a preference, not a verdict — failing the run outright when
+      // nothing else can serve would be worse than one throttled request.
+    }
+
     if (model && this.isModelOut(model)) {
       // No requireVision arm here on purpose. A vision call resolves through
       // selectVisionModel(), which now goes through isUsable() and therefore
@@ -1964,7 +2006,7 @@ export class CascadeRouter extends EventEmitter {
     const cfg = (this.config?.providers ?? []).find(
       (c) => c.type === 'azure' && c.deploymentName === model.id,
     );
-    return `${resourceScope}#${credentialIdentity(cfg?.apiKey)}`;
+    return `${resourceScope}#${credentialFingerprint(cfg?.apiKey)}`;
   }
 
   private scopeFor(model: ModelInfo): string {

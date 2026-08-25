@@ -71,6 +71,48 @@ describe('a tier reports the model that actually answered', () => {
     expect(tier.getServingModel()).toBe('openai:gpt-4o');
   });
 
+  it('a grading call does not steal the answer model\'s attribution', async () => {
+    // Graders and critics run beside the answer, deliberately on a different
+    // model — the T2 critic exists so a model is not marking its own work.
+    // Routing those through the tracker let the last grading call overwrite
+    // servingModel, so the subtask output, its terminal status and the
+    // feedback history all named the grader.
+    class AuxTier extends BaseTier {
+      protected router: CascadeRouter;
+      constructor(router: CascadeRouter) { super('T3'); this.router = router; }
+      answer() { return this.generateTracked('T3', { messages: [] } as never); }
+      grade() { return this.generateAuxiliary('T2', { messages: [] } as never); }
+    }
+    let served = { provider: 'openai', id: 'the-answer-model' };
+    const router = {
+      generate: vi.fn().mockImplementation(() => Promise.resolve({
+        content: 'x', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+        servedBy: served,
+      })),
+    } as unknown as CascadeRouter;
+
+    const tier = new AuxTier(router);
+    await tier.answer();
+    expect(tier.getServingModel()).toBe('openai:the-answer-model');
+
+    served = { provider: 'anthropic', id: 'the-critic-model' };
+    await tier.grade();
+
+    expect(tier.getServingModel()).toBe('openai:the-answer-model');
+  });
+
+  it('the graders in t3-worker do not run through the tracker', () => {
+    // Which calls are auxiliary is a judgement about each site, so it is
+    // pinned here: the critic verdict, the self-test and the knowledge
+    // extractor grade or summarise the answer; 853 and the post-critique
+    // rewrite PRODUCE it and must keep attribution.
+    const src = readFileSync(new URL('./t3-worker.ts', import.meta.url), 'utf-8');
+    expect(src).toMatch(/const verdictResult = await this\.generateAuxiliary\(/);
+    expect(src).toMatch(/const testResult = await this\.generateAuxiliary\(/);
+    // …while the answer and its rewrite stay tracked.
+    expect(src).toMatch(/const improved = await this\.generateTracked\(/);
+  });
+
   it('the fast path does not record a failover the router already recorded', () => {
     // The router emits `failover` for the transition and Cascade.init()
     // installs a listener that writes it to the decision trail. runFastAnswer

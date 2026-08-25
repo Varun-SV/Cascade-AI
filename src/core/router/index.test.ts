@@ -1322,6 +1322,84 @@ describe('CascadeRouter — exhausted quota is not a rate limit', () => {
     vi.restoreAllMocks();
   });
 
+  it('keeps an auth verdict findable past the credential-identity TTL', () => {
+    // The auth scope embedded credentialIdentity(), which rotates to a fresh
+    // UUID once DISCOVERY_TTL_MS has passed since a secret was first seen —
+    // right for a discovery cache expiring on the same clock, wrong for a
+    // verdict that promised to hold for the whole run. A long run would cross
+    // that boundary, stop finding its own verdict, and go straight back to the
+    // credential it had just been told was rejected.
+    const router = new CascadeRouter();
+    (router as unknown as { config: unknown }).config = {
+      providers: [
+        { type: 'azure', deploymentName: 'a', apiKey: 'key-one', baseUrl: 'https://r1.openai.azure.com' },
+      ],
+    };
+    const inner = router as unknown as { scopeForFailure(m: unknown, kind: string): string };
+    const model = { provider: 'azure', id: 'a' };
+
+    const before = inner.scopeForFailure(model, 'auth');
+
+    // Push well past the identity TTL. A rotating identity changes here; a
+    // fingerprint of an unchanged key does not.
+    const realNow = Date.now;
+    try {
+      Date.now = () => realNow() + 60 * 60 * 1000;
+      expect(inner.scopeForFailure(model, 'auth')).toBe(before);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  it('does not retain the raw key in the scope it builds', () => {
+    const router = new CascadeRouter();
+    (router as unknown as { config: unknown }).config = {
+      providers: [
+        { type: 'azure', deploymentName: 'a', apiKey: 'super-secret-key', baseUrl: 'https://r1.openai.azure.com' },
+      ],
+    };
+    const inner = router as unknown as { scopeForFailure(m: unknown, kind: string): string };
+    expect(inner.scopeForFailure({ provider: 'azure', id: 'a' }, 'auth')).not.toContain('super-secret-key');
+  });
+
+  it('moves a bound model off a credential that is backing off', () => {
+    // A tier binding and an explicit pin resolve without consulting the
+    // selector, so the veto never sees them — and a bound model walked
+    // straight through a backoff every selector path was respecting.
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    return router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    })).then(async () => {
+      const { OpenAIProvider } = await import('../../providers/openai.js');
+      const { AnthropicProvider } = await import('../../providers/anthropic.js');
+      const openaiStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream').mockResolvedValue({
+        content: 'from the throttled one', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+      } as never);
+      vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+        content: 'from elsewhere', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+      } as never);
+
+      const openaiModel = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+      (router as unknown as { tierModels: Map<string, unknown> }).tierModels.set('T1', openaiModel);
+      (router as unknown as { ensureProvider(m: unknown, c: unknown): void })
+        .ensureProvider(openaiModel, [{ type: 'openai', apiKey: 'sk-test' }]);
+
+      // An ORDINARY rate limit, not a permanent verdict.
+      failoverOf(router).recordFailure('openai', 'rate limit');
+
+      const result = await router.generate('T1', { messages: [{ role: 'user', content: 'x' }], maxTokens: 64 });
+
+      expect(result.content).toBe('from elsewhere');
+      expect(openaiStream).not.toHaveBeenCalled();
+      vi.restoreAllMocks();
+    });
+  });
+
   it('explains the dead account when no other provider can serve the tier', async () => {
     // The case that matters most, and the one the old code handled worst: with
     // nothing to fail over to it re-threw the raw vendor string, which says

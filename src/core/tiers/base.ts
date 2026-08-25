@@ -152,6 +152,22 @@ export abstract class BaseTier extends EventEmitter {
    * Every tier call goes through here rather than `router.generate` directly,
    * so a new call site cannot quietly reintroduce the mis-attribution.
    */
+  /**
+   * Run a generation whose model must NOT become this tier's attribution.
+   *
+   * Graders, critics and extractors run beside the answer, often on a
+   * deliberately different model — the T2 critic exists precisely so a model
+   * is not marking its own work. Routing those through generateTracked() made
+   * the last grading call overwrite servingModel, so the subtask's output, its
+   * terminal status and the feedback history all named the grader rather than
+   * the model that wrote the answer.
+   */
+  protected async generateAuxiliary(
+    ...args: Parameters<CascadeRouter['generate']>
+  ): Promise<Awaited<ReturnType<CascadeRouter['generate']>>> {
+    return this.router.generate(...args);
+  }
+
   protected async generateTracked(
     ...args: Parameters<CascadeRouter['generate']>
   ): Promise<Awaited<ReturnType<CascadeRouter['generate']>>> {
