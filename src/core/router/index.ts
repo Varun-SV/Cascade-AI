@@ -1164,6 +1164,39 @@ export class CascadeRouter extends EventEmitter {
           ?? `Provider ${model.provider} is unavailable for the rest of this run.`,
         );
       }
+      // A TRANSIENT backoff recorded during the same wait deserves the same
+      // treatment. Checking only permanent verdicts here left the ordinary
+      // case wide open: worker A takes a 429 while worker B sits in the
+      // bucket, and B wakes and submits to the very credential that is backing
+      // off. Reroute rather than refuse — the backoff is a preference, and a
+      // request that can be served elsewhere should be.
+      if (this.scopesFor(model).some((sc) => !this.failover.isProviderAvailable(sc))) {
+        const alt = this.selector.selectForTier(tier);
+        if (alt && alt.id !== model.id) {
+          this.tpmLimiter?.refund(model.provider, estimatedTokens);
+          this.tierModels.set(tier, alt);
+          this.ensureProvider(alt, this.config.providers);
+          this.emit('failover', {
+            tier,
+            from: `${model.provider}:${model.id}`,
+            to: `${alt.provider}:${alt.id}`,
+            reason: 'backing off',
+          });
+          // Released BEFORE recursing, exactly as the failover path does:
+          // holding them across the retry would charge the run twice for one
+          // logical call and could starve the very attempt replacing it.
+          releaseLocalSlot?.();
+          releaseLocalSlot = undefined;
+          releaseReservation?.();
+          releaseReservation = undefined;
+          const retryOpts = options.model && options.model.id === model.id
+            ? { ...options, model: undefined }
+            : options;
+          return this.generate(tier, retryOpts, onChunk, requireVision);
+        }
+        // Nothing else can serve it: proceed rather than fail the run over a
+        // condition that clears on its own.
+      }
 
       let result: GenerateResult;
 
@@ -1423,11 +1456,6 @@ export class CascadeRouter extends EventEmitter {
       // which is about this one model and not the credential. Without it the
       // router rethrew instead of dropping the model and trying another.
       if (isModelNotFoundError(errMsg) || classified.kind === 'model_unavailable') {
-        this.selector.removeModel(model.id);
-        // Persist the verdict so the next run doesn't pay to rediscover it.
-        // `record` reports only the FIRST sighting as new — a concurrent T3
-        // wave all hits the same dead id at once, and the user should see one
-        // line, not one per worker.
         // A 403 is this CREDENTIAL's authorization, not a fact about the model
         // id: grant the project access, or swap in a key that already has it,
         // and the model works again. Persisting it to the 7-day DeadModelStore
@@ -1435,6 +1463,16 @@ export class CascadeRouter extends EventEmitter {
         // restarts. Dropped from the selector for this session, which a new
         // key does not survive either — but nothing durable is written.
         const credentialScoped = classified.kind === 'model_unavailable' && classified.status === 403;
+        // A durable 404 is a fact about the id and is worth acting on whoever
+        // found it. A credential-scoped 403 is not: being session-only by
+        // design, a straggler from a finished run would otherwise remove a
+        // model from the CURRENT run — whose credentials may be perfectly
+        // valid. Same generation invariant as the verdict above.
+        if (!credentialScoped || currentRun) this.selector.removeModel(model.id);
+        // Persist the verdict so the next run doesn't pay to rediscover it.
+        // `record` reports only the FIRST sighting as new — a concurrent T3
+        // wave all hits the same dead id at once, and the user should see one
+        // line, not one per worker.
         const firstSighting = credentialScoped
           ? true
           : this.deadModels.record(model.provider, model.id, errMsg);

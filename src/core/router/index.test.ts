@@ -1419,6 +1419,108 @@ describe('CascadeRouter — exhausted quota is not a rate limit', () => {
     });
   });
 
+  it('reroutes a queued call when a TRANSIENT backoff lands during the wait', async () => {
+    // The post-wait check honoured only permanent verdicts, so the ordinary
+    // case stayed open: worker A takes a 429 while worker B sits in the TPM
+    // bucket, and B wakes and submits to the very credential that is backing
+    // off. The verdict lands DURING acquire(), which is the interleaving that
+    // matters.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    const openaiStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'from the throttled one', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'from elsewhere', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+
+    // The sibling's 429 lands while this call is inside acquire().
+    const limiter = (router as unknown as {
+      tpmLimiter: { acquire(p: string, n: number, s?: AbortSignal): Promise<void> };
+    }).tpmLimiter;
+    const realAcquire = limiter.acquire.bind(limiter);
+    let fired = false;
+    limiter.acquire = async (p: string, n: number, sig?: AbortSignal) => {
+      await realAcquire(p, n, sig);
+      if (!fired) {
+        fired = true;
+        failoverOf(router).recordFailure('openai', 'rate limit');
+      }
+    };
+
+    const result = await router.generate('T1', {
+      messages: [{ role: 'user', content: 'hi' }], model: pinned, maxTokens: 64,
+    });
+
+    expect(result.content).toBe('from elsewhere');
+    expect(openaiStream).not.toHaveBeenCalled();
+
+    vi.restoreAllMocks();
+  });
+
+  it('a straggler 403 does not remove a model from the next run', async () => {
+    // The credential-scoped 403 removal is session-only by design, so unlike a
+    // durable 404 it must respect the run generation: run B's credentials may
+    // be perfectly valid, and a late 403 from run A would otherwise take a
+    // usable model away from it.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    let releaseStraggler: ((e: unknown) => void) | undefined;
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockImplementation(() => new Promise((_res, rej) => { releaseStraggler = rej; }) as never);
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'ok', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+
+    const openaiModel = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+    const inFlight = router.generate('T1', {
+      messages: [{ role: 'user', content: 'a' }], model: openaiModel, maxTokens: 64,
+    }).catch(() => undefined);
+
+    for (let i = 0; i < 50 && !releaseStraggler; i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+
+    router.beginRun();
+
+    // Run A's 403 arrives after run B has started.
+    expect(releaseStraggler).toBeDefined();
+    releaseStraggler!(Object.assign(
+      new Error('Project does not have access to model gpt-4o'), { status: 403 },
+    ));
+    await inFlight;
+
+    // Run B can still select it.
+    expect(router.getAvailableModels().some((m) => m.id === 'gpt-4o')).toBe(true);
+    expect(selectorOf(router).getNextFallback('gpt-4o-mini', 'T1')).not.toBeNull();
+
+    vi.restoreAllMocks();
+  });
+
   it('explains the dead account when no other provider can serve the tier', async () => {
     // The case that matters most, and the one the old code handled worst: with
     // nothing to fail over to it re-threw the raw vendor string, which says
