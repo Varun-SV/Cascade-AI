@@ -60,6 +60,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in a key that already had it, left the model excluded across later runs and
   process restarts. It now fails over without writing anything durable.
 
+- **A worker queued behind a rate limiter still called a dead account.** The
+  check that refuses a call to an exhausted credential ran when the model was
+  resolved — before the tokens-per-minute bucket and the local-inference
+  queue, either of which can hold a call for a refill interval or more. In a
+  concurrent wave that is exactly when a sibling discovers the account is
+  dead, so every worker already past the first check went on to submit. The
+  check now also runs immediately before the request leaves, handing back the
+  rate-limit capacity it had reserved.
+
 - **A tool call could fail over to a model that has no tools.** The caller
   picks native-tool or text-tool mode from the original model and shapes the
   request around it, so a tool-less replacement leaves that request

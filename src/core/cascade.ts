@@ -2207,11 +2207,10 @@ ${prompt}`
       this.router.setRunSignal(undefined);
     }
     this.emit('tier:status', { tierId: 'fast', role: tier, status: 'COMPLETED', model: servedLabel(result) });
-    // A failover is invisible in the transcript otherwise: the answer simply
-    // arrives, from a model the user never chose and is now being billed for.
-    if (result?.servedBy && `${result.servedBy.provider}:${result.servedBy.id}` !== `${model.provider}:${model.id}`) {
-      this.recordDecision('failover', `fast answer ${model.provider}:${model.id} → ${servedLabel(result)}`);
-    }
+    // No decision entry here. The ROUTER emits `failover` for this transition
+    // already, and the listener installed in init() records it — adding a
+    // second one gave /why duplicate entries for a single switch and inflated
+    // anything counting the trail.
 
     const stats = this.router.getStats();
     return {

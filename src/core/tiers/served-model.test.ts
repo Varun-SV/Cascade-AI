@@ -71,6 +71,20 @@ describe('a tier reports the model that actually answered', () => {
     expect(tier.getServingModel()).toBe('openai:gpt-4o');
   });
 
+  it('the fast path does not record a failover the router already recorded', () => {
+    // The router emits `failover` for the transition and Cascade.init()
+    // installs a listener that writes it to the decision trail. runFastAnswer
+    // briefly wrote a second entry for the same switch, so /why showed the
+    // transition twice and anything counting trail entries was inflated.
+    //
+    // Structural, and deliberately so: what needs preventing is a future
+    // caller re-adding its own entry beside the listener's, which is a
+    // property of the source rather than of any one run.
+    const src = readFileSync(new URL('../cascade.ts', import.meta.url), 'utf-8');
+    const fastAnswer = src.slice(src.indexOf('private async runFastAnswer'));
+    expect(fastAnswer).not.toMatch(/recordDecision\(\s*'failover'/);
+  });
+
   it('no tier calls router.generate directly, bypassing the attribution', () => {
     // The wrapper only works if everything goes through it. A new call site
     // added straight onto the router would silently reintroduce the bug, so

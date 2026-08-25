@@ -1198,6 +1198,130 @@ describe('CascadeRouter — exhausted quota is not a rate limit', () => {
 
     vi.restoreAllMocks();
   });
+  it('does not submit a call that was queued when the verdict landed', async () => {
+    // The concurrent-wave case the verdict exists for. The check at model
+    // resolution runs BEFORE the TPM bucket and the local queue, either of
+    // which can hold a call for a refill interval — and that is exactly when a
+    // sibling discovers the account is dead. Every worker already past the
+    // first check would otherwise still submit.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+
+    const openaiStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockResolvedValue({
+        content: 'should never be reached', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+      } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai']));
+    await router.init(makeConfig({ providers: [{ type: 'openai', apiKey: 'sk-test' }] }));
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+
+    // Stand in for "a sibling recorded the verdict while this call waited":
+    // the TPM acquire is the wait, and the verdict lands during it.
+    const limiter = (router as unknown as {
+      tpmLimiter: { acquire(p: string, n: number, s?: AbortSignal): Promise<void> };
+    }).tpmLimiter;
+    const realAcquire = limiter.acquire.bind(limiter);
+    limiter.acquire = async (p: string, n: number, sig?: AbortSignal) => {
+      await realAcquire(p, n, sig);
+      failoverOf(router).recordFailure('openai', 'quota exhausted', {
+        permanent: true, detail: 'Quota or billing limit reached. This will not recover on its own.',
+      });
+    };
+
+    await expect(
+      router.generate('T1', { messages: [{ role: 'user', content: 'hi' }], model: pinned, maxTokens: 64 }),
+    ).rejects.toThrow(/will not recover on its own/);
+
+    // The provider was never asked.
+    expect(openaiStream).not.toHaveBeenCalled();
+
+    vi.restoreAllMocks();
+  });
+
+  it('names the model a VISION retry will actually use', async () => {
+    // A vision call's retry re-resolves through selectVisionModel() and ignores
+    // the tier binding, so announcing the ordinary tier fallback named an
+    // account that never receives the work — while telling the user their
+    // spend had moved there.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+
+    // Fail whichever model the vision path ACTUALLY resolves to first, rather
+    // than assuming which provider wins the vision priority list.
+    const selector = (router as unknown as {
+      selector: {
+        selectVisionModel(): { id: string; provider: string } | null;
+        getNextFallback(id: string, t: string): { id: string } | null;
+      };
+    }).selector;
+    const firstVision = selector.selectVisionModel();
+    expect(firstVision).not.toBeNull();
+
+    // Force the ordinary tier fallback and the vision pick APART, and force it
+    // to hold AFTER the verdict — the verdict condemns the failing provider, so
+    // a divergence computed beforehand evaporates once that provider is out.
+    //
+    // The surviving provider's FIRST model loses vision and its LAST keeps it:
+    // getNextFallback then lands on the first (blind) while selectVisionModel
+    // lands on the last. Announcing the former would name a model that never
+    // serves.
+    const all = router.getAvailableModels();
+    const survivors = all.filter((m) => m.provider !== firstVision!.provider);
+    expect(survivors.length, 'fixture needs several models on a second provider')
+      .toBeGreaterThan(1);
+    const backupVision = survivors[survivors.length - 1]!;
+    for (const m of all) {
+      (m as { isVisionCapable: boolean }).isVisionCapable =
+        m.id === firstVision!.id || m.id === backupVision.id;
+    }
+    expect((survivors[0] as { isVisionCapable: boolean }).isVisionCapable).toBe(false);
+
+    const dead = (self: { model?: { id?: string } }) =>
+      self?.model?.id === firstVision!.id
+        ? Promise.reject(new Error('insufficient_quota: your credit balance is too low'))
+        : Promise.resolve({
+            content: 'ok', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+          }) as never;
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockImplementation(function (this: { model?: { id?: string } }) { return dead(this); } as never);
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream')
+      .mockImplementation(function (this: { model?: { id?: string } }) { return dead(this); } as never);
+
+    const seen: Array<Record<string, unknown>> = [];
+    router.on('provider:exhausted', (e: Record<string, unknown>) => seen.push(e));
+
+    const result = await router.generate(
+      'T1',
+      { messages: [{ role: 'user', content: 'what is in this image' }], maxTokens: 64 },
+      undefined,
+      true, // requireVision
+    );
+
+    expect(seen).toHaveLength(1);
+    const announced = String(seen[0]!['failedOverTo']);
+    expect(announced).toBeTruthy();
+    // What was announced is what actually served — and it can see.
+    expect(result.servedBy).toBeDefined();
+    expect(announced).toBe(`${result.servedBy!.provider}:${result.servedBy!.id}`);
+    const served = router.getAvailableModels().find((m) => m.id === result.servedBy!.id);
+    expect(served?.isVisionCapable).toBe(true);
+
+    vi.restoreAllMocks();
+  });
+
   it('explains the dead account when no other provider can serve the tier', async () => {
     // The case that matters most, and the one the old code handled worst: with
     // nothing to fail over to it re-threw the raw vendor string, which says

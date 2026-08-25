@@ -1124,6 +1124,24 @@ export class CascadeRouter extends EventEmitter {
         );
       }
 
+      // Re-check, because the verdict may have been recorded WHILE this call
+      // was queued. The check up at model resolution runs before the TPM bucket
+      // and the local-inference queue, either of which can hold a call for a
+      // refill interval or longer — and in a concurrent wave that is exactly
+      // when a sibling discovers the account is dead. Without this, every
+      // worker already past the first check still submits, which is the burst
+      // the verdict exists to prevent.
+      if (this.isModelOut(model)) {
+        // Hand the rate-limit capacity back; this request is not being sent.
+        // The local slot and the budget reservation are released by the
+        // `finally` below.
+        this.tpmLimiter?.refund(model.provider, estimatedTokens);
+        throw new Error(
+          this.outReason(model)
+          ?? `Provider ${model.provider} is unavailable for the rest of this run.`,
+        );
+      }
+
       let result: GenerateResult;
 
       // Every provider call below is time-boxed with withTimeoutAbort, which
@@ -1301,7 +1319,13 @@ export class CascadeRouter extends EventEmitter {
           // happened, instead of inventing its own vaguer explanation.
           ...(doesNotEase ? { detail: describeProviderError(classified, model.id) } : {}),
         });
-        let fallback = this.failover.getFallbackModel(model, tier);
+        // For a vision call the recursive retry re-resolves through
+        // selectVisionModel() and ignores the tier binding, so announcing the
+        // ordinary tier fallback would name an account that never receives the
+        // work — while the user is told their spend moved there.
+        let fallback = requireVision
+          ? this.selector.selectVisionModel()
+          : this.failover.getFallbackModel(model, tier);
         // The caller already picked native-tool vs text-tool mode from the
         // ORIGINAL model and shaped this request around it. Handing the retry
         // to a tool-less model leaves that request's `tools` unanswerable and
