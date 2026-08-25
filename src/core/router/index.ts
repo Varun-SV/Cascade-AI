@@ -349,25 +349,6 @@ export function resetCredentialIdentitiesForTest(): void {
   lastIdentitySweep = 0;
 }
 
-/**
- * A stable, non-reversible fingerprint of a credential, for verdict scoping.
- *
- * Deliberately NOT credentialIdentity(): that one rotates to a fresh UUID once
- * DISCOVERY_TTL_MS has passed since a secret was first seen, which is right for
- * a discovery cache expiring on the same clock and wrong for a verdict that
- * promised to hold for the rest of the run. A long run would cross the boundary
- * and stop finding its own verdict, then go back to the credential it had just
- * been told was rejected.
- *
- * A hash rather than the key itself, so nothing here retains a secret — the
- * concern credentialIdentity's map exists to address — while staying the same
- * value for as long as the key is.
- */
-function credentialFingerprint(secret: string | undefined): string {
-  if (!secret) return '-';
-  return crypto.createHash('sha256').update(secret).digest('hex').slice(0, 16);
-}
-
 function credentialIdentity(secret: string | undefined): string {
   if (!secret) return '-';
   const now = Date.now();
@@ -2001,12 +1982,28 @@ export class CascadeRouter extends EventEmitter {
     return this.scopeFor(model);
   }
 
-  /** `azure:<resource>#<key fingerprint>`, so two keys on one resource differ. */
+  /**
+   * `azure:<resource>#k<n>`, so two different keys on one resource differ.
+   *
+   * `n` is the position of the FIRST configured Azure entry using this same
+   * key, which makes it stable for the run and identical for every deployment
+   * sharing that credential — the grouping an auth verdict needs, since a 401
+   * on one of them is a fact about all of them.
+   *
+   * Deliberately neither of the two obvious alternatives. credentialIdentity()
+   * rotates to a fresh UUID after DISCOVERY_TTL_MS, so a long run would stop
+   * finding its own verdict and go back to a credential it had just been told
+   * was rejected. And hashing the key — even with a strong digest — is a
+   * password hash by CodeQL's reading and by any reasonable one: there is no
+   * reason to derive anything from a secret when its POSITION already
+   * identifies it uniquely and reveals nothing.
+   */
   private azureKeyScope(model: ModelInfo, resourceScope: string): string {
-    const cfg = (this.config?.providers ?? []).find(
-      (c) => c.type === 'azure' && c.deploymentName === model.id,
-    );
-    return `${resourceScope}#${credentialFingerprint(cfg?.apiKey)}`;
+    const azure = (this.config?.providers ?? []).filter((c) => c.type === 'azure');
+    const cfg = azure.find((c) => c.deploymentName === model.id);
+    if (!cfg?.apiKey) return `${resourceScope}#-`;
+    const group = azure.findIndex((c) => c.apiKey === cfg.apiKey);
+    return `${resourceScope}#k${group}`;
   }
 
   private scopeFor(model: ModelInfo): string {

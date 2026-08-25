@@ -1351,6 +1351,25 @@ describe('CascadeRouter — exhausted quota is not a rate limit', () => {
     }
   });
 
+  it('gives deployments that SHARE a key the same auth scope', () => {
+    // A 401 on one deployment is a fact about the credential, so every
+    // deployment configured with that same key is out too. Scoping them apart
+    // would leave the siblings to rediscover the rejection one call at a time.
+    const router = new CascadeRouter();
+    (router as unknown as { config: unknown }).config = {
+      providers: [
+        { type: 'azure', deploymentName: 'a', apiKey: 'shared', baseUrl: 'https://r1.openai.azure.com' },
+        { type: 'azure', deploymentName: 'b', apiKey: 'shared', baseUrl: 'https://r1.openai.azure.com' },
+        { type: 'azure', deploymentName: 'c', apiKey: 'other', baseUrl: 'https://r1.openai.azure.com' },
+      ],
+    };
+    const inner = router as unknown as { scopeForFailure(m: unknown, kind: string): string };
+    const auth = (id: string) => inner.scopeForFailure({ provider: 'azure', id }, 'auth');
+
+    expect(auth('a')).toBe(auth('b'));
+    expect(auth('a')).not.toBe(auth('c'));
+  });
+
   it('does not retain the raw key in the scope it builds', () => {
     const router = new CascadeRouter();
     (router as unknown as { config: unknown }).config = {
