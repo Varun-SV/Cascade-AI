@@ -973,6 +973,53 @@ describe('CascadeRouter — exhausted quota is not a rate limit', () => {
     vi.restoreAllMocks();
   });
 
+  it('identifies the Azure resource regardless of trailing slashes or case', async () => {
+    // The scope is derived through utils/net.ts normalizeEndpoint rather than a
+    // hand-rolled trim: `replace(/\/+$/, '')` is polynomial and CodeQL flags it
+    // as a ReDoS risk wherever caller-supplied input reaches it, which a
+    // configured baseUrl does. The behaviour that matters is here — two
+    // spellings of one endpoint must be ONE credential, or a verdict recorded
+    // under one spelling silently fails to cover the other.
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['azure']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'azure', deploymentName: 'a', apiKey: 'k', baseUrl: 'https://R1.OpenAI.Azure.com///' },
+        { type: 'azure', deploymentName: 'b', apiKey: 'k', baseUrl: 'https://r1.openai.azure.com' },
+      ],
+    }));
+
+    const scopeFor = (router as unknown as { scopeFor(m: unknown): string }).scopeFor.bind(router);
+    const a = router.getAvailableModels().find((m) => m.id === 'a');
+    const b = router.getAvailableModels().find((m) => m.id === 'b');
+
+    // Same resource, written two ways — one scope.
+    expect(scopeFor(a)).toBe(scopeFor(b));
+    expect(scopeFor(a)).not.toContain('///');
+  });
+
+  it('keeps two tenant routes on one gateway as separate credentials', () => {
+    // The old normalization lowercased the WHOLE url, path included, so
+    // https://gw.example/TenantA and /tenanta collapsed to one scope — meaning
+    // a verdict earned by one tenant's credential silently condemned the
+    // other's. utils/net.ts lowercases scheme and host only, and says why in
+    // as many words. Same over-broadening this PR has been narrowing all
+    // along, one level further down.
+    const router = new CascadeRouter();
+    const scopeFor = (router as unknown as { scopeFor(m: unknown): string }).scopeFor.bind(router);
+    (router as unknown as { config: unknown }).config = {
+      providers: [
+        { type: 'azure', deploymentName: 'a', apiKey: 'k1', baseUrl: 'https://gw.example/TenantA' },
+        { type: 'azure', deploymentName: 'b', apiKey: 'k2', baseUrl: 'https://gw.example/tenanta' },
+      ],
+    };
+
+    const a = scopeFor({ provider: 'azure', id: 'a' });
+    const b = scopeFor({ provider: 'azure', id: 'b' });
+    expect(a).not.toBe(b);
+  });
+
   it('explains the dead account when no other provider can serve the tier', async () => {
     // The case that matters most, and the one the old code handled worst: with
     // nothing to fail over to it re-threw the raw vendor string, which says

@@ -27,6 +27,7 @@ import { ProviderUnreachableError } from '../../providers/base.js';
 import type { BaseProvider } from '../../providers/base.js';
 import { ModelSelector } from './selector.js';
 import { FailoverManager, failureScopeOf } from './failover.js';
+import { normalizeEndpoint } from '../../utils/net.js';
 import { classifyProviderError, describeProviderError, enrichProviderError } from './provider-errors.js';
 import { TpmLimiter } from './tpm-limiter.js';
 import { LocalRequestQueue } from './local-queue.js';
@@ -1833,7 +1834,15 @@ export class CascadeRouter extends EventEmitter {
     const cfg = (this.config?.providers ?? []).find(
       (c) => c.type === 'azure' && c.deploymentName === model.id,
     );
-    const resource = cfg?.baseUrl?.replace(/\/+$/, '').toLowerCase();
+    // normalizeEndpoint, not a hand-rolled trim. `replace(/\/+$/, '')` is
+    // polynomial — the engine retries the anchored repetition from every start
+    // position — and CodeQL flags it as a ReDoS risk wherever caller-supplied
+    // input reaches it, which a configured baseUrl does. utils/net.ts already
+    // carries the linear scan and the endpoint-identity semantics (case rules
+    // that keep two tenant paths on one gateway distinct), and this is at least
+    // the second time that regex has been reintroduced — see the note in
+    // providers/gemini.ts.
+    const resource = normalizeEndpoint(cfg?.baseUrl) || undefined;
     return failureScopeOf(model, resource);
   }
 
