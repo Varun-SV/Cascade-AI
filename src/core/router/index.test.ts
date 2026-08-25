@@ -608,11 +608,14 @@ describe('CascadeRouter — exhausted quota is not a rate limit', () => {
     vi.restoreAllMocks();
   });
 
-  it('a straggler from the previous run cannot condemn the new one', async () => {
-    // A call admitted by run A can still be settling when run B starts. Its
-    // verdict would land after beginRun() cleared the board — disabling the
-    // provider for a run that never saw the failure. The same generation check
-    // already guards the budget counters for exactly this reason.
+  it('a straggler from the previous run cannot steer the new one', async () => {
+    // A call admitted by run A can still be settling when run B starts.
+    // Guarding only the `permanent` bit left everything else: a 30s transient
+    // failover entry, markProviderUnavailable() for a provider-wide scope, and
+    // a repointed tier — all installed on run B from run A's dead result.
+    //
+    // The earlier version of this test asserted only isPermanentlyFailed, which
+    // stayed false throughout and so proved none of that.
     const { OpenAIProvider } = await import('../../providers/openai.js');
     const { AnthropicProvider } = await import('../../providers/anthropic.js');
 
@@ -634,31 +637,38 @@ describe('CascadeRouter — exhausted quota is not a rate limit', () => {
     }));
 
     const openaiModel = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
-    // Run A submits a call that never settles yet.
+    // Run A submits a call that will not settle until we say so.
     const inFlight = router.generate('T1', {
       messages: [{ role: 'user', content: 'a' }], model: openaiModel, maxTokens: 64,
     }).catch(() => undefined);
 
-    // Let the call actually reach the provider before the boundary moves —
-    // otherwise this tests nothing, because there is no straggler yet.
+    // Let it actually reach the provider — otherwise there is no straggler.
     for (let i = 0; i < 50 && !releaseStraggler; i++) {
       await new Promise((r) => setImmediate(r));
     }
 
-    // Run B begins.
+    // Run B begins, and we snapshot everything its routing depends on.
     router.beginRun();
+    const selector = selectorOf(router);
+    const tierBefore = router.getModelForTier('T1')?.id;
+    const pickBefore = selector.selectForTier('T1')?.id;
+    const failover = failoverOf(router);
 
-    // Only NOW does run A's call come back, with the decisive failure.
+    // NOW run A comes back, with a failure that would ordinarily repoint a tier
+    // and pull the provider.
     expect(releaseStraggler).toBeDefined();
     releaseStraggler!(new Error('insufficient_quota: your credit balance is too low'));
     await inFlight;
 
-    // Run B never saw that failure and must not be living with its verdict.
-    expect(failoverOf(router).isPermanentlyFailed('openai')).toBe(false);
+    // Nothing about run B moved: no verdict, no transient backoff, no provider
+    // removed from selection, no tier rebound.
+    expect(failover.isPermanentlyFailed('openai')).toBe(false);
+    expect(failover.isProviderAvailable('openai')).toBe(true);
+    expect(selector.selectForTier('T1')?.id).toBe(pickBefore);
+    expect(router.getModelForTier('T1')?.id).toBe(tierBefore);
 
     vi.restoreAllMocks();
   });
-
   it('does not ask a dead account twice for one streaming call', async () => {
     // Review finding: on a stream rejection the cloud branch fell back to
     // provider.generate(), and the built-in providers implement generate() by

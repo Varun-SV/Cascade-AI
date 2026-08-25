@@ -1266,23 +1266,34 @@ export class CascadeRouter extends EventEmitter {
       // "another provider can serve this" remedy, and the old code failed over
       // on neither — an auth failure fell straight through to `throw`.
       const doesNotEase = classified.kind === 'quota_exhausted' || classified.kind === 'auth';
-      if (doesNotEase || classified.kind === 'rate_limit' || this.isRateLimitError(errMsg)) {
+      /**
+       * Is this failure still about the run that is happening?
+       *
+       * A call admitted by a PREVIOUS run can still be settling when the next
+       * one starts. Everything below mutates state the NEXT run reads —
+       * failover records, the selector's available set, the tier's binding —
+       * so a straggler is not merely recording a stale verdict, it is steering
+       * a run that never saw the failure. Guarding only the `permanent` bit
+       * left the rest: a 30s transient entry, markProviderUnavailable() for a
+       * provider-wide scope, and a repointed tier, all installed on run B from
+       * run A's dead result.
+       *
+       * The straggler's own result is discarded regardless — its run is over —
+       * so there is nothing to fail over TO. It just throws.
+       *
+       * Same generation invariant the budget counters already use.
+       */
+      const currentRun = runGeneration === this.runGeneration;
+      if (currentRun && (doesNotEase || classified.kind === 'rate_limit' || this.isRateLimitError(errMsg))) {
         const reasonLabel = classified.kind === 'quota_exhausted' ? 'quota exhausted'
           : classified.kind === 'auth' ? 'authentication failed'
           : 'rate limit';
         // Checked BEFORE recording, so the notice below fires once per provider
         // per run rather than once per worker in a concurrent T3 wave.
         const scope = this.scopeFor(model);
-        // A call admitted by a PREVIOUS run can still be settling when the next
-        // one starts. Its verdict would land after beginRun() cleared the
-        // board, disabling the provider for a run that never saw the failure
-        // and posting the warning into that run's decision trail. The same
-        // generation check already guards the budget counters for exactly this
-        // reason.
-        const currentRun = runGeneration === this.runGeneration;
-        const firstVerdict = currentRun && doesNotEase && !this.failover.isPermanentlyFailed(scope);
+        const firstVerdict = doesNotEase && !this.failover.isPermanentlyFailed(scope);
         this.failover.recordFailure(model.provider, reasonLabel, {
-          permanent: currentRun && doesNotEase,
+          permanent: doesNotEase,
           scope,
           // Kept so a later call refused on this verdict can say what actually
           // happened, instead of inventing its own vaguer explanation.
@@ -1354,7 +1365,10 @@ export class CascadeRouter extends EventEmitter {
         // Cap the not-found chain: up-front validation should mean this rarely
         // fires, but a stale catalog with many dead ids must not walk them all.
         const depth = ((options as GenerateOptions & { _notFoundDepth?: number })._notFoundDepth ?? 0) + 1;
-        const next = depth <= 3 ? this.selector.selectForTier(tier) : null;
+        // The dead id above is a durable fact and worth keeping whoever found
+        // it. Repointing a tier is not: that is this run's routing state, and
+        // a finished run has no business rewriting it.
+        const next = currentRun && depth <= 3 ? this.selector.selectForTier(tier) : null;
         if (next && next.id !== model.id) {
           this.tierModels.set(tier, next);
           this.ensureProvider(next, this.config.providers);
