@@ -60,6 +60,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   works. A model- or deployment-scoped 403 is now classified as a model
   problem, leaving the provider usable.
 
+- **One streaming call asked a dead account twice.** When a stream rejected,
+  the router fell back to a non-streaming call — and the built-in OpenAI and
+  Anthropic providers implement that by calling the streaming path again. An
+  exhausted quota or a bad key was therefore hit twice per logical call, and
+  doubled again across a concurrent worker wave. A systemic stream failure is
+  now classified and handed straight to the failover path.
+
+- **A model your key cannot use was thrown rather than routed around.** With
+  a model-scoped 403 correctly classified as a model problem, the routing
+  branch still only handled quota, auth and rate limits, so the run failed
+  with a perfectly good alternative model sitting on the same key. It now
+  fails over like any other unusable model.
+
+- **Topping up an account did not win its traffic back.** Clearing the verdict
+  at the run boundary made the provider selectable again, but a tier still
+  bound to the fallback never consults the selector — so later runs kept
+  charging the fallback account. Tiers repointed by a verdict are now restored
+  when it is lifted.
+
+- **A late failure from a finished run could condemn the next one.** A call
+  admitted by one run can still be settling when the next begins; its verdict
+  landed after the boundary reset and disabled the provider for a run that
+  never saw the failure. Verdicts from a superseded run generation are now
+  ignored, the same way the budget counters already ignore them.
+
 - **A concurrent success could erase a newer "provider is out" verdict.** In a
   parallel wave, a call already at the provider can land after a sibling has
   come back with an exhausted quota. It was admitted while the account still

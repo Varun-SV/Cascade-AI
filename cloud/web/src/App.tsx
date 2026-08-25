@@ -314,6 +314,7 @@ export default function App() {
             uiMode={mode}
             approval={chat.approval}
             compactionNotice={chat.compactionNotice}
+            providerNotice={chat.providerNotice}
             knowledgeNotice={chat.knowledgeNotice}
             activity={chat.activity}
           />

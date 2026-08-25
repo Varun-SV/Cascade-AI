@@ -544,6 +544,18 @@ export class CascadeRouter extends EventEmitter {
   private liveData?: LiveDataProvider;
   /** Snapshot of configured/default tier models, taken before Cascade Auto overrides them. */
   private originalTierModels?: Map<TierRole, ModelInfo>;
+  /**
+   * Tiers repointed because their model's credential went out for the run, and
+   * the model each was displaced from.
+   *
+   * Clearing the verdict at the run boundary makes the provider SELECTABLE
+   * again, which is not the same as being used: generate() resolves
+   * `tierModels.get(tier)` before it ever consults the selector, so a tier
+   * still holding the fallback keeps charging the fallback account for every
+   * later default-routed run. Restoring the binding is what actually gives a
+   * topped-up account its traffic back.
+   */
+  private permanentRepoints = new Map<TierRole, ModelInfo>();
   /** The current run's abort signal — injected into every provider call so a cancel aborts in-flight requests. */
   private runSignal?: AbortSignal;
 
@@ -950,6 +962,7 @@ export class CascadeRouter extends EventEmitter {
     if (model && this.failover.isPermanentlyFailed(failureScopeOf(model))) {
       const alt = this.selector.selectForTier(tier);
       if (alt && alt.id !== model.id && !this.failover.isPermanentlyFailed(failureScopeOf(alt))) {
+        if (!this.permanentRepoints.has(tier)) this.permanentRepoints.set(tier, model);
         this.tierModels.set(tier, alt);
         this.ensureProvider(alt, this.config.providers);
         this.emit('failover', {
@@ -1143,6 +1156,14 @@ export class CascadeRouter extends EventEmitter {
           if ((streamErr instanceof Error && streamErr.name === 'AbortError') || runSignal?.aborted || options.signal?.aborted) {
             throw streamErr;
           }
+          // A SYSTEMIC failure is not a stalled stream, and retrying it
+          // non-streaming just asks the same dead account the same question.
+          // The built-in OpenAI and Anthropic providers implement generate()
+          // by calling generateStream() again, so an exhausted quota or a bad
+          // key was being hit twice per logical call — doubled again across a
+          // concurrent worker wave. Hand it to the outer catch, which knows
+          // how to fail over.
+          if (classifyProviderError(streamErr).systemic) throw streamErr;
           // Stream stalled or errored — fall back to a (also time-boxed)
           // non-streaming call rather than letting a hung stream freeze the run.
           // The stalled attempt has been aborted by now, so this is the only
@@ -1237,9 +1258,16 @@ export class CascadeRouter extends EventEmitter {
         // Checked BEFORE recording, so the notice below fires once per provider
         // per run rather than once per worker in a concurrent T3 wave.
         const scope = failureScopeOf(model);
-        const firstVerdict = doesNotEase && !this.failover.isPermanentlyFailed(scope);
+        // A call admitted by a PREVIOUS run can still be settling when the next
+        // one starts. Its verdict would land after beginRun() cleared the
+        // board, disabling the provider for a run that never saw the failure
+        // and posting the warning into that run's decision trail. The same
+        // generation check already guards the budget counters for exactly this
+        // reason.
+        const currentRun = runGeneration === this.runGeneration;
+        const firstVerdict = currentRun && doesNotEase && !this.failover.isPermanentlyFailed(scope);
         this.failover.recordFailure(model.provider, reasonLabel, {
-          permanent: doesNotEase,
+          permanent: currentRun && doesNotEase,
           scope,
           // Kept so a later call refused on this verdict can say what actually
           // happened, instead of inventing its own vaguer explanation.
@@ -1260,6 +1288,9 @@ export class CascadeRouter extends EventEmitter {
           });
         }
         if (fallback) {
+          // Remember what this tier was displaced FROM, so the next run can put
+          // it back once the verdict is cleared.
+          if (doesNotEase && !this.permanentRepoints.has(tier)) this.permanentRepoints.set(tier, model);
           this.tierModels.set(tier, fallback);
           this.ensureProvider(fallback, this.config.providers);
           this.emit('failover', {
@@ -1293,7 +1324,11 @@ export class CascadeRouter extends EventEmitter {
       // Stale / invalid model id (e.g. a retired preview that 404s). Drop it so
       // it is never selected again this session and fail over to the next
       // candidate, instead of surfacing the raw provider error to the user.
-      if (isModelNotFoundError(errMsg)) {
+      // `model_unavailable` covers wording the regex does not — notably a
+      // model-scoped 403 ("Project does not have access to model gpt-5"),
+      // which is about this one model and not the credential. Without it the
+      // router rethrew instead of dropping the model and trying another.
+      if (isModelNotFoundError(errMsg) || classified.kind === 'model_unavailable') {
         this.selector.removeModel(model.id);
         // Persist the verdict so the next run doesn't pay to rediscover it.
         // `record` reports only the FIRST sighting as new — a concurrent T3
@@ -1909,6 +1944,17 @@ export class CascadeRouter extends EventEmitter {
     // The router outlives a run in the REPL and the desktop app, so without
     // this the verdict would quietly last the whole process instead.
     this.failover.clearPermanentVerdicts();
+    // …and put the tiers back on what they were displaced from. Lifting the
+    // verdict alone only makes the provider selectable; a tier still bound to
+    // the fallback never asks the selector, so it would keep charging the
+    // fallback account for every later default-routed run.
+    for (const [tier, model] of this.permanentRepoints) {
+      this.tierModels.set(tier, model);
+      // A tier pinned by Cascade Auto for one task is restored from THIS
+      // snapshot too, so the pre-failover model is what it returns to.
+      this.originalTierModels?.set(tier, model);
+    }
+    this.permanentRepoints.clear();
   }
 
   /**
