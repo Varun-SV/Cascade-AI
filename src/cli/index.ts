@@ -33,6 +33,7 @@ import { telemetryCommand } from './commands/telemetry.js';
 import { statsCommand } from './commands/stats.js';
 import { runSetupWizard } from './setup/index.js';
 import { McpClient } from '../mcp/client.js';
+import { restoreTerminal } from './terminal.js';
 
 dotenv.config();
 
@@ -81,9 +82,17 @@ function leaveAltScreen(): void {
   altScreenActive = false;
 }
 
-// Global cleanup handlers to prevent zombie MCP processes
+// Global cleanup handlers to prevent zombie MCP processes, and to hand the
+// terminal back usable.
+//
+// `exit` is the right hook for both: it fires on a normal return, on an
+// uncaught exception, and on an unhandled rejection, so a crash gets the same
+// cleanup as a clean quit. An `uncaughtException` handler would be the wrong
+// tool — it would have to re-throw or exit explicitly to keep the failure, and
+// this needs no say in whether the process dies, only in what it leaves behind.
 process.on('exit', () => {
   leaveAltScreen();
+  restoreTerminal(process.stdin, process.stdout);
   McpClient.killAllProcesses();
 });
 process.on('SIGINT', () => {
