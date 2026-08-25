@@ -70,7 +70,11 @@ import { CurrentPageTool, type CurrentPageProvider } from '../tools/current-page
 /** One entry in the per-run orchestration decision trail (see /why). */
 export interface DecisionLogEntry {
   at: string;
-  kind: 'complexity' | 'model' | 'failover' | 'escalation' | 'context';
+  // 'provider-exhausted' is deliberately NOT folded into 'failover'. A failover
+  // is a routing choice that worked; this is an account going out of service
+  // for the rest of the run, and in the case that matters most — no other
+  // provider could serve the tier — there was no failover at all to describe.
+  kind: 'complexity' | 'model' | 'failover' | 'escalation' | 'context' | 'provider-exhausted';
   detail: string;
 }
 
@@ -1090,6 +1094,24 @@ export class Cascade extends EventEmitter {
       // Record provider failovers in the per-run decision trail (/why).
       this.router.on('failover', (e: { tier: string; from: string; to: string; reason: string }) => {
         this.recordDecision('failover', `${e.tier} ${e.from} → ${e.to} (${e.reason})`);
+      });
+
+      // A provider is out for the run — quota gone or key dead. Unlike a
+      // failover this is worth surfacing to the user directly and not only in
+      // /why: the run continues on someone else's meter, and the account that
+      // stopped working needs attention that no amount of retrying will supply.
+      this.router.on('provider:exhausted', (e: {
+        provider: string;
+        modelId: string;
+        kind: string;
+        message: string;
+        failedOverTo?: string;
+      }) => {
+        this.recordDecision(
+          'provider-exhausted',
+          `${e.provider}:${e.modelId} ${e.kind}${e.failedOverTo ? ` → ${e.failedOverTo}` : ' (no fallback)'}`,
+        );
+        this.emit('provider:exhausted', e);
       });
 
       // Budget hard-kill: cancel any pending user approvals and notify

@@ -177,6 +177,172 @@ describe('CascadeRouter — rate-limit failover retry', () => {
   });
 });
 
+describe('CascadeRouter — exhausted quota is not a rate limit', () => {
+  async function routerWithTwoProviders() {
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+    return router;
+  }
+
+  /** The FailoverManager the router built for itself. */
+  function failoverOf(router: CascadeRouter) {
+    return (router as unknown as { failover: {
+      isProviderAvailable(p: string): boolean;
+      isPermanentlyFailed(p: string): boolean;
+    } }).failover;
+  }
+
+  it('does not hand an exhausted provider back after the backoff window', async () => {
+    // The regression. `isRateLimitError` matches /quota/, so a spent wallet went
+    // down the rate-limit path and earned a 30s→300s ladder built entirely on
+    // the premise that the condition clears by itself. It does not: the provider
+    // was re-enabled every window, called, and failed, for the rest of the run.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    const openaiStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(Object.assign(
+        new Error('429 You exceeded your current quota, please check your plan and billing details'),
+        { status: 429 },
+      ));
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'from fallback', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = await routerWithTwoProviders();
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+
+    await router.generate('T1', { messages: [{ role: 'user', content: 'hi' }], model: pinned });
+
+    const failover = failoverOf(router);
+    expect(failover.isPermanentlyFailed('openai')).toBe(true);
+
+    // Real timers would need five minutes of wall clock; the verdict is read
+    // through Date.now(), so move that instead and ask again.
+    const realNow = Date.now;
+    try {
+      Date.now = () => realNow() + 10 * 60 * 1000;
+      expect(failover.isProviderAvailable('openai')).toBe(false);
+    } finally {
+      Date.now = realNow;
+    }
+
+    // And the exhausted provider was called exactly once — the point of the
+    // verdict is that nothing goes back to ask it again.
+    expect(openaiStream).toHaveBeenCalledTimes(1);
+    vi.restoreAllMocks();
+  });
+
+  it('still finishes the run on the other provider', async () => {
+    // The chosen policy: a dead wallet on one account must not kill a long run
+    // when another configured provider can serve the tier.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('insufficient_quota: your credit balance is too low'));
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'from fallback', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = await routerWithTwoProviders();
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+
+    const result = await router.generate('T1', { messages: [{ role: 'user', content: 'hi' }], model: pinned });
+
+    expect(result.content).toBe('from fallback');
+    vi.restoreAllMocks();
+  });
+
+  it('announces the dead account once, naming where the work went', async () => {
+    // Continuing moves this user's spend onto a different account. Saying so is
+    // the condition on which continuing is acceptable at all.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('insufficient_quota: your credit balance is too low'));
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'ok', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = await routerWithTwoProviders();
+    const seen: Array<Record<string, unknown>> = [];
+    router.on('provider:exhausted', (e: Record<string, unknown>) => seen.push(e));
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+    // Two calls: a concurrent T3 wave is many workers discovering the same fact.
+    //
+    // maxTokens is set only to keep the TpmLimiter out of the way. Left unset,
+    // the reservation defaults to the model's whole maxOutputTokens (~32k for
+    // opus), so the second call alone overruns anthropic's 40k/min bucket and
+    // genuinely waits a full refill interval before it is allowed to proceed.
+    await router.generate('T1', { messages: [{ role: 'user', content: 'a' }], model: pinned, maxTokens: 64 });
+    await router.generate('T1', { messages: [{ role: 'user', content: 'b' }], model: pinned, maxTokens: 64 });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!['provider']).toBe('openai');
+    expect(seen[0]!['kind']).toBe('quota_exhausted');
+    expect(seen[0]!['failedOverTo']).toMatch(/^anthropic:/);
+    expect(String(seen[0]!['message'])).toMatch(/billing/i);
+    vi.restoreAllMocks();
+  });
+
+  it('a rate limit is still transient — it earns no permanent verdict', async () => {
+    // Guard against over-reach. The ladder must keep working for the failure it
+    // was built for, or this fix trades one bug for a worse one.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(Object.assign(new Error('429 Too Many Requests'), { status: 429 }));
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'ok', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = await routerWithTwoProviders();
+    const seen: unknown[] = [];
+    router.on('provider:exhausted', (e: unknown) => seen.push(e));
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+    await router.generate('T1', { messages: [{ role: 'user', content: 'hi' }], model: pinned });
+
+    expect(failoverOf(router).isPermanentlyFailed('openai')).toBe(false);
+    expect(seen).toHaveLength(0);
+    vi.restoreAllMocks();
+  });
+
+  it('explains the dead account when no other provider can serve the tier', async () => {
+    // The case that matters most, and the one the old code handled worst: with
+    // nothing to fail over to it re-threw the raw vendor string, which says
+    // nothing about which of the user's accounts to go and look at.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('insufficient_quota: your credit balance is too low'));
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai']));
+    await router.init(makeConfig({ providers: [{ type: 'openai', apiKey: 'sk-test' }] }));
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+
+    await expect(
+      router.generate('T1', { messages: [{ role: 'user', content: 'hi' }], model: pinned }),
+    ).rejects.toThrow(/will not recover on its own/);
+
+    vi.restoreAllMocks();
+  });
+});
+
 describe('CascadeRouter — live-discovered provider wiring (openai-compatible)', () => {
   it('synthesizes a seed model and builds a GitHubModelsProvider for it', async () => {
     // openai-compatible has no static MODELS catalog entries (its models are

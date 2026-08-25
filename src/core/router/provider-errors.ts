@@ -129,6 +129,38 @@ export function classifyProviderError(err: unknown): ClassifiedError {
 }
 
 /**
+ * Re-throwable form of `describeProviderError`, for the point where a failure
+ * leaves the router for good and the raw vendor string would be all the user
+ * ever sees.
+ *
+ * Two things are carried over deliberately, because the error is classified
+ * again downstream (RunBreaker does exactly that) and a wrapper that destroyed
+ * its own evidence would be reclassified as `unknown` — turning a systemic
+ * failure back into a per-task one that gets retried, which is the behaviour
+ * this whole path exists to stop:
+ *
+ *   · the HTTP status, so status-based classification still fires. For most
+ *     kinds this is belt-and-braces — describeProviderError's own wording
+ *     carries the keywords that re-trigger the same verdict. Not for
+ *     'model_unavailable': its text says "not enabled for this API key", the
+ *     auth branch matches /api key/ and is tested first, so on the message
+ *     alone a 404 comes back as 'auth' and points the user at a key that is
+ *     perfectly fine. The status is what stops that.
+ *   · the provider's verbatim text, which `describeProviderError` appends —
+ *     so message-based classification still fires too, and anything upstream
+ *     matching on the original wording (isModelNotFoundError) still matches.
+ *
+ * The original is kept as `cause` for anyone who wants the untouched object.
+ */
+export function enrichProviderError(err: unknown, c: ClassifiedError, modelId?: string): Error {
+  const enriched = new Error(describeProviderError(c, modelId), { cause: err });
+  if (typeof c.status === 'number') {
+    (enriched as Error & { status?: number }).status = c.status;
+  }
+  return enriched;
+}
+
+/**
  * Turn a classified failure into something the user can act on.
  *
  * The provider's own words are always included verbatim: a paraphrase can be

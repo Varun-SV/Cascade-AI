@@ -27,6 +27,7 @@ import { ProviderUnreachableError } from '../../providers/base.js';
 import type { BaseProvider } from '../../providers/base.js';
 import { ModelSelector } from './selector.js';
 import { FailoverManager } from './failover.js';
+import { classifyProviderError, describeProviderError, enrichProviderError } from './provider-errors.js';
 import { TpmLimiter } from './tpm-limiter.js';
 import { LocalRequestQueue } from './local-queue.js';
 import type { TaskAnalyzer } from './task-analyzer.js';
@@ -1169,9 +1170,44 @@ export class CascadeRouter extends EventEmitter {
         throw new CascadeCancelledError('Run cancelled');
       }
       const errMsg = err instanceof Error ? err.message : String(err);
-      if (this.isRateLimitError(errMsg)) {
-        this.failover.recordFailure(model.provider, 'rate_limit');
+      // Ask the classifier, not a local regex. `isRateLimitError` matches
+      // /quota/ and so swept a spent wallet into the rate-limit path, where the
+      // 30s→300s backoff would re-enable the provider and call it again, and
+      // again, for the rest of the run. provider-errors.ts has always known the
+      // two apart — 'rate_limit' eases with time, 'quota_exhausted' does not —
+      // and nothing that made a routing decision had ever asked it.
+      //
+      // The regex is kept as an ADDITIONAL trigger for the transient path so
+      // this is a strict superset of what fired before: a message carrying a
+      // bare "429" with no status field and no other keyword classifies as
+      // 'unknown', and would otherwise stop failing over at all.
+      const classified = classifyProviderError(err);
+      // A dead key rides along with the spent wallet: same systemic class, same
+      // "another provider can serve this" remedy, and the old code failed over
+      // on neither — an auth failure fell straight through to `throw`.
+      const doesNotEase = classified.kind === 'quota_exhausted' || classified.kind === 'auth';
+      if (doesNotEase || classified.kind === 'rate_limit' || this.isRateLimitError(errMsg)) {
+        const reasonLabel = classified.kind === 'quota_exhausted' ? 'quota exhausted'
+          : classified.kind === 'auth' ? 'authentication failed'
+          : 'rate limit';
+        // Checked BEFORE recording, so the notice below fires once per provider
+        // per run rather than once per worker in a concurrent T3 wave.
+        const firstVerdict = doesNotEase && !this.failover.isPermanentlyFailed(model.provider);
+        this.failover.recordFailure(model.provider, reasonLabel, { permanent: doesNotEase });
         const fallback = this.failover.getFallbackModel(model, tier);
+        if (firstVerdict) {
+          // Continuing on another provider keeps a long run alive, but it moves
+          // this user's spend onto a different account. That is not something to
+          // do quietly, so it is announced once, with the provider's own words
+          // and where the work went.
+          this.emit('provider:exhausted', {
+            provider: model.provider,
+            modelId: model.id,
+            kind: classified.kind,
+            message: describeProviderError(classified, model.id),
+            ...(fallback ? { failedOverTo: `${fallback.provider}:${fallback.id}` } : {}),
+          });
+        }
         if (fallback) {
           this.tierModels.set(tier, fallback);
           this.ensureProvider(fallback, this.config.providers);
@@ -1179,7 +1215,7 @@ export class CascadeRouter extends EventEmitter {
             tier,
             from: `${model.provider}:${model.id}`,
             to: `${fallback.provider}:${fallback.id}`,
-            reason: 'rate limit',
+            reason: reasonLabel,
           });
           // Release the local slot before the recursive call so the fallback
           // model (which may itself be local) can acquire its own slot.
@@ -1245,6 +1281,13 @@ export class CascadeRouter extends EventEmitter {
           return this.generate(tier, retryOpts, onChunk, requireVision);
         }
       }
+      // Every provider that could serve this tier is out. For a spent wallet or
+      // a dead key the raw vendor string is the least actionable thing we could
+      // hand back — "429 You exceeded your current quota" tells someone nothing
+      // about which of their accounts to go and look at. Scoped to the two kinds
+      // this branch handles: the 404 path above builds a richer verdict of its
+      // own, and a transient failure usually says what it is.
+      if (doesNotEase) throw enrichProviderError(err, classified, model.id);
       throw err;
     } finally {
       releaseLocalSlot?.();

@@ -169,6 +169,110 @@ describe('FailoverManager', () => {
     expect(selector.markProviderAvailable).not.toHaveBeenCalled();
   });
 
+  describe('permanent verdicts (quota exhausted / dead key)', () => {
+    it('never re-enables a permanently failed provider, however long it waits', () => {
+      // The whole point. A spent wallet routed through the ordinary ladder is
+      // re-enabled after 30s, called, fails, backs off 60s, is re-enabled …
+      // for the rest of the run. Advance well past the 300s cap: still out.
+      vi.useFakeTimers();
+
+      mgr.recordFailure('gemini', 'quota exhausted', { permanent: true });
+      expect(mgr.isProviderAvailable('gemini')).toBe(false);
+
+      vi.advanceTimersByTime(30_000);
+      expect(mgr.isProviderAvailable('gemini')).toBe(false);
+
+      vi.advanceTimersByTime(300_000);
+      expect(mgr.isProviderAvailable('gemini')).toBe(false);
+
+      vi.advanceTimersByTime(24 * 60 * 60 * 1000);
+      expect(mgr.isProviderAvailable('gemini')).toBe(false);
+
+      // And it never quietly re-enabled the provider in the selector on the way
+      // past any of those windows — the check above would still read false if
+      // the verdict held here but the selector had been told otherwise.
+      expect(selector.markProviderAvailable).not.toHaveBeenCalled();
+      vi.useRealTimers();
+    });
+
+    it('is sticky — a later ordinary failure does not downgrade it to the retry ladder', () => {
+      vi.useFakeTimers();
+
+      mgr.recordFailure('openai', 'quota exhausted', { permanent: true });
+      // A transient blip on the same provider afterwards (a pinned call that
+      // slipped through, say). Recording it must not hand the provider back to
+      // the clock.
+      mgr.recordFailure('openai', 'rate limit');
+
+      expect(mgr.isPermanentlyFailed('openai')).toBe(true);
+      vi.advanceTimersByTime(600_000);
+      expect(mgr.isProviderAvailable('openai')).toBe(false);
+      vi.useRealTimers();
+    });
+
+    it('succeeding on a DIFFERENT provider leaves the verdict standing', () => {
+      // The failover path itself: Gemini's quota dies, work moves to Azure, and
+      // every subsequent Azure success calls recordSuccess('azure'). If that
+      // cleared Gemini, the run would go straight back to the dead account.
+      mgr.recordFailure('gemini', 'quota exhausted', { permanent: true });
+
+      mgr.recordSuccess('azure');
+      mgr.recordSuccess('azure');
+
+      expect(mgr.isProviderAvailable('gemini')).toBe(false);
+      expect(mgr.isPermanentlyFailed('gemini')).toBe(true);
+    });
+
+    it('succeeding on the provider ITSELF clears the verdict', () => {
+      // A call that actually worked is evidence the quota is not spent — topped
+      // up mid-run, or a separately-billed deployment reached via an explicit
+      // pin. That outranks a verdict whose only claim is "time will not fix
+      // this", and prevents a false lockout lasting the whole run.
+      mgr.recordFailure('gemini', 'quota exhausted', { permanent: true });
+      expect(mgr.isProviderAvailable('gemini')).toBe(false);
+
+      mgr.recordSuccess('gemini');
+
+      expect(mgr.isProviderAvailable('gemini')).toBe(true);
+      expect(mgr.isPermanentlyFailed('gemini')).toBe(false);
+      expect(selector.markProviderAvailable).toHaveBeenCalledWith('gemini');
+    });
+
+    it('clearFailure lifts it too, so the user can act without restarting', () => {
+      mgr.recordFailure('anthropic', 'authentication failed', { permanent: true });
+      expect(mgr.isProviderAvailable('anthropic')).toBe(false);
+
+      mgr.clearFailure('anthropic');
+
+      expect(mgr.isProviderAvailable('anthropic')).toBe(true);
+      expect(mgr.isPermanentlyFailed('anthropic')).toBe(false);
+    });
+
+    it('reports no retry countdown, because there is no retry', () => {
+      mgr.recordFailure('gemini', 'quota exhausted', { permanent: true });
+      const report = mgr.getFailureReport();
+      expect(report['gemini']).toMatch(/Not retrying this run/);
+      expect(report['gemini']).not.toMatch(/Retry in/);
+    });
+
+    it('leaves ordinary failures on the retry ladder', () => {
+      // Guard against the fix over-reaching: a 429 must still recover on its
+      // own, which is the behaviour the ladder exists for.
+      vi.useFakeTimers();
+
+      mgr.recordFailure('openai', 'rate limit');
+      expect(mgr.isPermanentlyFailed('openai')).toBe(false);
+
+      vi.advanceTimersByTime(30_001);
+      expect(mgr.isProviderAvailable('openai')).toBe(true);
+      vi.useRealTimers();
+    });
+
+    it('isPermanentlyFailed is false for a provider that never failed', () => {
+      expect(mgr.isPermanentlyFailed('ollama')).toBe(false);
+    });
+  });
+
   it('getFailureReport includes failure count and retry countdown', () => {
     vi.useFakeTimers();
     mgr.recordFailure('anthropic', 'rate limited');

@@ -19,6 +19,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
 ### Fixed
+- **An exhausted provider quota was retried for the rest of the run.** A spent
+  billing quota and a 429 arrive as the same status, and the router's failover
+  path told them apart with a regex that matched `/quota/` — so a dead wallet
+  was treated as a rate limit and put on the 30s→300s backoff ladder, whose
+  entire premise is that the condition clears by itself. It does not: the
+  provider was re-enabled every window, called, and failed, over and over,
+  never giving up. `provider-errors.ts` had classified the two apart from the
+  start (`rate_limit` "eases with time"; `quota_exhausted` "does NOT ease") and
+  nothing making a routing decision had ever asked it. It does now, and an
+  exhausted quota or a dead key earns a verdict the clock cannot lift — only a
+  call that actually succeeds, or the user clearing it, brings the provider
+  back. A dead key also now fails over at all, where before it fell straight
+  through to a raw error.
+
+  When another configured provider can serve the tier, the run continues on it
+  rather than dying — but that moves spend onto a different account, so it is
+  announced once, naming the provider that stopped working and where the work
+  went. When nothing else can serve it, the failure now carries the actionable
+  message ("check the provider's billing page") instead of the bare vendor
+  string, which said nothing about which account to go and look at.
+
 - **A crashed CLI left the terminal unusable.** Ink puts stdin into raw mode to
   read keystrokes and hides the cursor, and undoes both when it unmounts
   cleanly. On a crash it never runs, and the exit handler restored the
