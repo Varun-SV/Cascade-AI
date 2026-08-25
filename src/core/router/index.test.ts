@@ -389,7 +389,7 @@ describe('CascadeRouter — exhausted quota is not a rate limit', () => {
     vi.restoreAllMocks();
   });
 
-  it('one dead Azure deployment still lets a sibling resource serve the request', async () => {
+  it('one dead Azure resource still lets a separate resource serve the request', async () => {
     // Azure deliberately supports several deployments, each able to carry its
     // own resource, endpoint and key — ensureProvider() binds a config entry
     // per deployment for exactly that reason. Keying the verdict on the
@@ -432,8 +432,8 @@ describe('CascadeRouter — exhausted quota is not a rate limit', () => {
       .catch(() => { /* whether it fails over or throws, the scoping is the subject */ });
 
     // The dead deployment is out; its sibling is untouched and still usable.
-    expect(failover.isPermanentlyFailed('azure:dead-resource')).toBe(true);
-    expect(failover.isPermanentlyFailed('azure:healthy-resource')).toBe(false);
+    expect(failover.isPermanentlyFailed('azure:https://a.openai.azure.com')).toBe(true);
+    expect(failover.isPermanentlyFailed('azure:https://b.openai.azure.com')).toBe(false);
 
     const result = await router.generate('T1', {
       messages: [{ role: 'user', content: 'y' }], model: healthy, maxTokens: 64,
@@ -444,7 +444,7 @@ describe('CascadeRouter — exhausted quota is not a rate limit', () => {
     vi.restoreAllMocks();
   });
 
-  it('a deployment-scoped verdict takes that deployment out of SELECTION', async () => {
+  it('a resource-scoped verdict takes that resource out of SELECTION', async () => {
     // A narrow verdict deliberately never calls markProviderUnavailable — that
     // would take the healthy siblings with it — so nothing in the selector
     // knows the deployment is out unless it is told. Asserted directly on the
@@ -465,14 +465,14 @@ describe('CascadeRouter — exhausted quota is not a rate limit', () => {
     expect(selector.selectForTier('T1')?.id).toBe('dead-resource');
 
     failoverOf(router).recordFailure('azure', 'quota exhausted', {
-      permanent: true, scope: 'azure:dead-resource',
+      permanent: true, scope: 'azure:https://a.openai.azure.com',
     });
 
     expect(selector.selectForTier('T1')?.id).toBe('healthy-resource');
     expect(selector.getNextFallback('dead-resource', 'T1')?.id).toBe('healthy-resource');
   });
 
-  it('selection routes around a dead Azure deployment without an explicit pin', async () => {
+  it('selection routes around a dead Azure resource without an explicit pin', async () => {
     // The case the model veto exists for, and the one the two tests above do
     // NOT reach: a deployment-scoped verdict never calls
     // markProviderUnavailable (that would take out the healthy siblings too),
@@ -508,7 +508,7 @@ describe('CascadeRouter — exhausted quota is not a rate limit', () => {
 
     await router.generate('T1', { messages: [{ role: 'user', content: 'a' }], maxTokens: 64 })
       .catch(() => { /* the first call is what earns the verdict */ });
-    expect(failoverOf(router).isPermanentlyFailed('azure:dead-resource')).toBe(true);
+    expect(failoverOf(router).isPermanentlyFailed('azure:https://a.openai.azure.com')).toBe(true);
 
     // No pin. Selection must skip the dead deployment and find its sibling.
     const result = await router.generate('T1', { messages: [{ role: 'user', content: 'b' }], maxTokens: 64 });
@@ -756,6 +756,114 @@ describe('CascadeRouter — exhausted quota is not a rate limit', () => {
     expect(anthropicStream).not.toHaveBeenCalled();
 
     vi.restoreAllMocks();
+  });
+
+  it('two deployments on ONE resource share the verdict, because they share the key', async () => {
+    // Review finding: Azure keys are resource-scoped —
+    // config/global-credentials spreads one resource key across every
+    // deployment on that endpoint, and has a test saying so. Keying per
+    // deployment let fallback pick the sibling on the same endpoint and issue
+    // a second request that could not possibly work.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+
+    const azureStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('insufficient_quota: your credit balance is too low'));
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['azure']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'azure', deploymentName: 'gpt-4o', apiKey: 'key-r1', baseUrl: 'https://r1.openai.azure.com' },
+        { type: 'azure', deploymentName: 'gpt-4o-mini', apiKey: 'key-r1', baseUrl: 'https://r1.openai.azure.com' },
+      ],
+    }));
+
+    const first = router.getAvailableModels().find((m) => m.id === 'gpt-4o');
+    await router.generate('T1', { messages: [{ role: 'user', content: 'x' }], model: first, maxTokens: 64 })
+      .catch(() => { /* earning the verdict is the point */ });
+
+    // One verdict, covering the whole resource…
+    expect(failoverOf(router).isPermanentlyFailed('azure:https://r1.openai.azure.com')).toBe(true);
+    // …so the sibling deployment is out too, and selection will not offer it.
+    const sibling = router.getAvailableModels().find((m) => m.id === 'gpt-4o-mini')!;
+    expect(selectorOf(router).getNextFallback('gpt-4o', 'T1')).toBeNull();
+
+    const callsBefore = azureStream.mock.calls.length;
+    await router.generate('T1', { messages: [{ role: 'user', content: 'y' }], model: sibling, maxTokens: 64 })
+      .catch(() => { /* refused from the verdict, not by asking */ });
+    expect(azureStream.mock.calls.length).toBe(callsBefore);
+
+    vi.restoreAllMocks();
+  });
+
+  it('a TRANSIENT scoped failure is enforced in selection, then expires', async () => {
+    // A scoped verdict deliberately does not call markProviderUnavailable —
+    // that would take the resource's healthy siblings with it — so a veto that
+    // only looked at permanent verdicts left an Azure rate limit recorded and
+    // then completely ignored.
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['azure']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'azure', deploymentName: 'busy', apiKey: 'k1', baseUrl: 'https://r1.openai.azure.com' },
+        { type: 'azure', deploymentName: 'quiet', apiKey: 'k2', baseUrl: 'https://r2.openai.azure.com' },
+      ],
+    }));
+
+    const selector = selectorOf(router);
+    expect(selector.selectForTier('T1')?.id).toBe('busy');
+
+    vi.useFakeTimers();
+    try {
+      // An ORDINARY rate limit — not permanent.
+      failoverOf(router).recordFailure('azure', 'rate limit', { scope: 'azure:https://r1.openai.azure.com' });
+
+      expect(selector.selectForTier('T1')?.id).toBe('quiet');
+
+      // …and the existing expiry brings it back on its own.
+      vi.advanceTimersByTime(30_001);
+      expect(selector.selectForTier('T1')?.id).toBe('busy');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('never hands an image to a model whose credential is out', async () => {
+    // selectVisionModel() is the SOLE path a vision-required call resolves
+    // through, and it read `availableProviders` directly rather than going via
+    // isUsable() — making it the one selection route that ignored the model
+    // veto. A resource-scoped verdict deliberately does not pull the provider,
+    // so nothing else would have stopped the image going to the dead account.
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['azure']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'azure', deploymentName: 'gpt-4o', apiKey: 'k1', baseUrl: 'https://r1.openai.azure.com' },
+        { type: 'azure', deploymentName: 'backup-gpt-4o', apiKey: 'k2', baseUrl: 'https://r2.openai.azure.com' },
+      ],
+    }));
+
+    const selector = (router as unknown as {
+      selector: { selectVisionModel(): { id: string } | null };
+    }).selector;
+
+    // Both deployments can see, and the dead one is the preferred pick.
+    const all = router.getAvailableModels();
+    expect(all.filter((m) => m.isVisionCapable).map((m) => m.id).sort())
+      .toEqual(['backup-gpt-4o', 'gpt-4o']);
+    expect(selector.selectVisionModel()?.id).toBe('gpt-4o');
+
+    failoverOf(router).recordFailure('azure', 'quota exhausted', {
+      permanent: true, scope: 'azure:https://r1.openai.azure.com',
+    });
+
+    // The replacement must still be able to see — not merely be available.
+    const replacement = selector.selectVisionModel();
+    expect(replacement?.id).toBe('backup-gpt-4o');
+    expect(all.find((m) => m.id === replacement?.id)?.isVisionCapable).toBe(true);
   });
 
   it('explains the dead account when no other provider can serve the tier', async () => {

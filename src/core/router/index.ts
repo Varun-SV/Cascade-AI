@@ -576,7 +576,13 @@ export class CascadeRouter extends EventEmitter {
     this.failover = new FailoverManager(this.selector);
     // Every selection path now honours a credential-scoped verdict, not just
     // the provider-wide ones markProviderUnavailable can express.
-    this.selector.setModelVeto((m) => this.failover.isPermanentlyFailed(failureScopeOf(m)));
+    // Honours TRANSIENT scoped failures too, not just permanent ones. A scoped
+    // verdict deliberately does not call markProviderUnavailable (that would
+    // take the resource's healthy siblings with it), so without this an Azure
+    // rate limit had no effect on selection at all — its backoff was recorded
+    // and then ignored. isProviderAvailable() also expires the entry on read,
+    // so the deployment comes back by itself when the window passes.
+    this.selector.setModelVeto((m) => !this.failover.isProviderAvailable(this.scopeFor(m)));
     this.tpmLimiter = new TpmLimiter(config.rateLimits?.providerTpm ?? {});
 
     this.localQueue = new LocalRequestQueue(config.localConcurrency ?? 1);
@@ -959,9 +965,14 @@ export class CascadeRouter extends EventEmitter {
     // that met an exhausted quota during complexity classification would go on
     // to call the same dead account for every later tier — the verdict would
     // read correctly and stop nothing.
-    if (model && this.failover.isPermanentlyFailed(failureScopeOf(model))) {
+    if (model && this.failover.isPermanentlyFailed(this.scopeFor(model))) {
+      // No requireVision arm here on purpose. A vision call resolves through
+      // selectVisionModel(), which now goes through isUsable() and therefore
+      // never hands back a vetoed model in the first place — so this block is
+      // unreachable for one, and a requireVision branch would be code that
+      // cannot run pretending to be a safeguard.
       const alt = this.selector.selectForTier(tier);
-      if (alt && alt.id !== model.id && !this.failover.isPermanentlyFailed(failureScopeOf(alt))) {
+      if (alt && alt.id !== model.id && !this.failover.isPermanentlyFailed(this.scopeFor(alt))) {
         if (!this.permanentRepoints.has(tier)) this.permanentRepoints.set(tier, model);
         this.tierModels.set(tier, alt);
         this.ensureProvider(alt, this.config.providers);
@@ -969,14 +980,14 @@ export class CascadeRouter extends EventEmitter {
           tier,
           from: `${model.provider}:${model.id}`,
           to: `${alt.provider}:${alt.id}`,
-          reason: this.failover.permanentReason(failureScopeOf(model)) ?? 'provider unavailable',
+          reason: this.failover.permanentReason(this.scopeFor(model)) ?? 'provider unavailable',
         });
         model = alt;
       } else {
         // Nothing else can serve this tier. Fail with the verdict's own words
         // rather than paying another round trip to be told the same thing.
         throw new Error(
-          this.failover.permanentReason(failureScopeOf(model))
+          this.failover.permanentReason(this.scopeFor(model))
           ?? `Provider ${model.provider} is unavailable for the rest of this run.`,
         );
       }
@@ -1220,7 +1231,7 @@ export class CascadeRouter extends EventEmitter {
       // looked fine, so it is not evidence about the account now, and clearing
       // the verdict on it would send the rest of the wave straight back to the
       // dead credential.
-      this.failover.recordSuccess(failureScopeOf(model), admittedAt);
+      this.failover.recordSuccess(this.scopeFor(model), admittedAt);
       return result;
     } catch (err) {
       // A budget abort also cancels the in-flight request, but it is NOT a
@@ -1257,7 +1268,7 @@ export class CascadeRouter extends EventEmitter {
           : 'rate limit';
         // Checked BEFORE recording, so the notice below fires once per provider
         // per run rather than once per worker in a concurrent T3 wave.
-        const scope = failureScopeOf(model);
+        const scope = this.scopeFor(model);
         // A call admitted by a PREVIOUS run can still be settling when the next
         // one starts. Its verdict would land after beginRun() cleared the
         // board, disabling the provider for a run that never saw the failure
@@ -1786,6 +1797,22 @@ export class CascadeRouter extends EventEmitter {
       console.warn('[router] OpenAI-compatible model discovery failed:', err instanceof Error ? err.message : err);
       return false;
     }
+  }
+
+  /**
+   * The credential a failure on this model is actually about.
+   *
+   * Resolves an Azure deployment to its RESOURCE (endpoint), because that is
+   * what the key and the bill belong to — see failureScopeOf. Everything else
+   * is already one credential per provider.
+   */
+  private scopeFor(model: ModelInfo): string {
+    if (model.provider !== 'azure') return failureScopeOf(model);
+    const cfg = (this.config?.providers ?? []).find(
+      (c) => c.type === 'azure' && c.deploymentName === model.id,
+    );
+    const resource = cfg?.baseUrl?.replace(/\/+$/, '').toLowerCase();
+    return failureScopeOf(model, resource);
   }
 
   private ensureProvider(model: ModelInfo, configs: ProviderConfig[]): void {

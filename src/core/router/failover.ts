@@ -15,8 +15,23 @@ import type { ModelSelector } from './selector.js';
  * never touched, and it makes every healthy sibling resource ineligible as a
  * fallback. A verdict is scoped to the credential that actually failed.
  */
-export function failureScopeOf(model: { provider: ProviderType; id: string }): string {
-  return model.provider === 'azure' ? `azure:${model.id}` : model.provider;
+export function failureScopeOf(
+  model: { provider: ProviderType; id: string },
+  /**
+   * The Azure RESOURCE this deployment lives on, when it can be resolved.
+   *
+   * The deployment name alone is too narrow. Azure keys are resource-scoped —
+   * config/global-credentials spreads one resource key across every deployment
+   * on that endpoint, and has a test saying so — so a billing or auth failure
+   * on `gpt-4o` is a fact about the whole resource. Scoping per deployment let
+   * fallback pick `gpt-4o-mini` on the same endpoint and issue a second doomed
+   * request. Falls back to the deployment id when the resource is unknown,
+   * which is still narrower than condemning every Azure account.
+   */
+  azureResource?: string,
+): string {
+  if (model.provider !== 'azure') return model.provider;
+  return `azure:${azureResource ?? model.id}`;
 }
 
 interface FailoverState {

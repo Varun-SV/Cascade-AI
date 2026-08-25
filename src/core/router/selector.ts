@@ -159,9 +159,13 @@ export class ModelSelector {
   }
 
   selectVisionModel(): ModelInfo | null {
+    // isUsable(), not a bare provider check: this path resolves EVERY
+    // vision-required call, and reading only `availableProviders` made it the
+    // one selection route that ignored both the model veto (so a credential
+    // whose quota is gone still got handed the image) and validatedIds.
     for (const key of VISION_MODEL_PRIORITY) {
       const model = this.availableModels.get(key);
-      if (model && this.availableProviders.has(model.provider) && model.isVisionCapable) {
+      if (model && this.isUsable(model) && model.isVisionCapable) {
         return model;
       }
     }
@@ -174,7 +178,7 @@ export class ModelSelector {
     // any explicit tier/vision override is even consulted. Same worst-case
     // widening selectForTier() and getNextFallback() already apply elsewhere.
     for (const model of this.availableModels.values()) {
-      if (this.availableProviders.has(model.provider) && model.isVisionCapable) return model;
+      if (this.isUsable(model) && model.isVisionCapable) return model;
     }
     return null;
   }

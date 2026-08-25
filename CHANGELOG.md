@@ -35,11 +35,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at all, where before it fell straight through to a raw error.
 
 - **One Azure deployment's failure disabled every other Azure deployment.**
-  Verdicts were keyed on the provider enum, but Azure deliberately supports
-  several configured deployments, each able to carry its own resource,
-  endpoint and key. A quota or auth failure on one therefore made every
-  healthy sibling ineligible as a fallback. Verdicts are now scoped to the
-  credential that actually failed, and selection honours that scope.
+  Verdicts were keyed on the provider enum, but Azure supports several
+  configured deployments across separate resources, each with its own endpoint
+  and key. A quota or auth failure on one therefore made every healthy sibling
+  ineligible as a fallback. Verdicts are now scoped to the RESOURCE that
+  actually failed — deployments sharing an endpoint share a key, so they share
+  the verdict, while a genuinely separate Azure account stays usable — and
+  every selection path honours that scope, for ordinary rate limits as well as
+  permanent ones.
+
+- **A vision request could be answered by a model that never saw the image.**
+  `selectVisionModel()` is the only path a vision-required call resolves
+  through, and it checked provider availability directly instead of going
+  through the usual model check — making it the one selection route that
+  ignored a credential-scoped verdict. An image could therefore be sent to an
+  account whose quota was already gone.
 
 - **A provider's rate limit could be mistaken for its billing running out.**
   Google words an ordinary per-minute throttle as `Quota exceeded for quota
