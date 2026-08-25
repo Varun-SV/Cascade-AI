@@ -5,7 +5,23 @@
 import type { ModelInfo, ProviderType, TierRole } from '../../types.js';
 import type { ModelSelector } from './selector.js';
 
+/**
+ * What a verdict is actually ABOUT.
+ *
+ * `ProviderType` is too coarse. Azure deliberately supports several configured
+ * deployments, each able to carry its own resource, endpoint and key — see
+ * ensureProvider(), which binds a config entry per deployment for exactly that
+ * reason. So "azure is out of credit" is a claim about credentials the failure
+ * never touched, and it makes every healthy sibling resource ineligible as a
+ * fallback. A verdict is scoped to the credential that actually failed.
+ */
+export function failureScopeOf(model: { provider: ProviderType; id: string }): string {
+  return model.provider === 'azure' ? `azure:${model.id}` : model.provider;
+}
+
 interface FailoverState {
+  /** The credential this verdict is about — see failureScopeOf. */
+  scope: string;
   provider: ProviderType;
   failedAt: number;
   reason: string;
@@ -37,14 +53,25 @@ interface FailoverState {
    * the provider is out.
    */
   detail?: string;
+  /** Ordering stamp — see FailoverManager.recordSuccess. */
+  seq: number;
 }
 
 export class FailoverManager {
-  private failures: Map<ProviderType, FailoverState> = new Map();
+  // Keyed by SCOPE (see failureScopeOf), not by provider type.
+  private failures: Map<string, FailoverState> = new Map();
   private selector: ModelSelector;
 
   // Exponential backoff: 30s → 60s → 120s → 300s
   private readonly BACKOFF_STEPS = [30_000, 60_000, 120_000, 300_000];
+
+  /** Verdict sequence, for ordering against calls already in flight. */
+  /**
+   * Monotonic stamp for ordering verdicts against calls already in flight.
+   * A counter rather than a timestamp because two events in the same
+   * millisecond must still be ordered.
+   */
+  private seq = 0;
 
   constructor(selector: ModelSelector) {
     this.selector = selector;
@@ -59,16 +86,18 @@ export class FailoverManager {
   recordFailure(
     provider: ProviderType,
     reason: string,
-    opts: { permanent?: boolean; detail?: string } = {},
+    opts: { permanent?: boolean; detail?: string; scope?: string } = {},
   ): void {
-    const existing = this.failures.get(provider);
+    const scope = opts.scope ?? provider;
+    const existing = this.failures.get(scope);
     // Increment failure count and use it as the backoff step index so that
     // repeated failures correctly escalate through the full backoff ladder.
     const failureCount = (existing?.failureCount ?? 0) + 1;
     const step = Math.min(failureCount - 1, this.BACKOFF_STEPS.length - 1);
     const retryAfterMs = this.BACKOFF_STEPS[step] ?? 30_000;
 
-    this.failures.set(provider, {
+    this.failures.set(scope, {
+      scope,
       provider,
       failedAt: Date.now(),
       reason,
@@ -78,19 +107,32 @@ export class FailoverManager {
       // Keep the first explanation. A later, vaguer failure on an already-dead
       // provider must not overwrite the one that actually says what happened.
       detail: existing?.detail ?? opts.detail,
+      seq: ++this.seq,
     });
 
-    this.selector.markProviderUnavailable(provider);
+    // Only pull the WHOLE provider when the verdict is about the whole
+    // provider. A deployment-scoped one must leave its siblings selectable;
+    // the router's model veto is what keeps that single deployment out.
+    if (scope === provider) this.selector.markProviderUnavailable(provider);
   }
 
-  /** True when this provider is out for the run — quota gone, key dead. */
-  isPermanentlyFailed(provider: ProviderType): boolean {
-    return this.failures.get(provider)?.permanent === true;
+  /**
+   * A token for "now", taken before a call is submitted and handed back to
+   * recordSuccess. See recordSuccess for why a success needs to prove when it
+   * started.
+   */
+  admissionToken(): number {
+    return this.seq;
   }
 
-  /** Why this provider is out, in the user-facing wording. */
-  permanentReason(provider: ProviderType): string | null {
-    const f = this.failures.get(provider);
+  /** True when this credential is out for the run — quota gone, key dead. */
+  isPermanentlyFailed(scope: string): boolean {
+    return this.failures.get(scope)?.permanent === true;
+  }
+
+  /** Why this credential is out, in the user-facing wording. */
+  permanentReason(scope: string): string | null {
+    const f = this.failures.get(scope);
     return f?.permanent ? (f.detail ?? f.reason) : null;
   }
 
@@ -109,15 +151,18 @@ export class FailoverManager {
    * send the next run straight back into a provider that is still throttling.
    */
   clearPermanentVerdicts(): void {
-    for (const [provider, state] of [...this.failures]) {
+    for (const [scope, state] of [...this.failures]) {
       if (!state.permanent) continue;
-      this.failures.delete(provider);
-      this.selector.markProviderAvailable(provider);
+      this.failures.delete(scope);
+      // Only hand back what was taken. A deployment-scoped verdict never
+      // removed the provider, so re-adding it here would resurrect a provider
+      // that some OTHER, still-standing verdict had legitimately pulled.
+      if (scope === state.provider) this.selector.markProviderAvailable(state.provider);
     }
   }
 
-  isProviderAvailable(provider: ProviderType): boolean {
-    const failure = this.failures.get(provider);
+  isProviderAvailable(scope: string): boolean {
+    const failure = this.failures.get(scope);
     if (!failure) return true;
 
     // The clock is not evidence. A timer expiring says only that time passed,
@@ -130,8 +175,8 @@ export class FailoverManager {
     if (Date.now() - failure.failedAt >= failure.retryAfterMs) {
       // Retry window passed — re-enable provider in both the failure map and
       // the selector so the model priority chain can route to it again.
-      this.failures.delete(provider);
-      this.selector.markProviderAvailable(provider);
+      this.failures.delete(scope);
+      if (scope === failure.provider) this.selector.markProviderAvailable(failure.provider);
       return true;
     }
     return false;
@@ -157,11 +202,19 @@ export class FailoverManager {
    * exhausted Gemini to Azure calls recordSuccess('azure'), which leaves the
    * Gemini verdict exactly where it is.
    */
-  recordSuccess(provider: ProviderType): void {
-    if (this.failures.has(provider)) {
-      this.failures.delete(provider);
-      this.selector.markProviderAvailable(provider);
-    }
+  recordSuccess(scope: string, admittedAt?: number): void {
+    const failure = this.failures.get(scope);
+    if (!failure) return;
+    // A success is evidence about a verdict only if it STARTED after that
+    // verdict existed. In a concurrent wave, call A can already be at the
+    // provider when call B comes back with insufficient_quota; A completing
+    // afterwards says nothing about the account's balance, because A was
+    // admitted when the account still looked fine. Clearing on it would
+    // resurrect the dead provider and send the whole rest of the wave back to
+    // it. `admittedAt` is the token taken before the call was submitted.
+    if (failure.permanent && admittedAt !== undefined && admittedAt < failure.seq) return;
+    this.failures.delete(scope);
+    if (scope === failure.provider) this.selector.markProviderAvailable(failure.provider);
   }
 
   getFallbackModel(currentModel: ModelInfo, tier: TierRole): ModelInfo | null {
@@ -170,7 +223,8 @@ export class FailoverManager {
 
   getFailureReport(): Record<string, string> {
     const report: Record<string, string> = {};
-    for (const [provider, state] of this.failures) {
+    for (const [scope, state] of this.failures) {
+      const provider = scope;
       if (state.permanent) {
         // No countdown, because there is nothing to count down to. Promising a
         // retry that will never be attempted is worse than saying so.
@@ -184,14 +238,18 @@ export class FailoverManager {
     return report;
   }
 
-  getFailureCount(provider: ProviderType): number {
-    return this.failures.get(provider)?.failureCount ?? 0;
+  getFailureCount(scope: string): number {
+    return this.failures.get(scope)?.failureCount ?? 0;
   }
 
-  clearFailure(provider: ProviderType): void {
-    this.failures.delete(provider);
+  clearFailure(scope: string): void {
+    const failure = this.failures.get(scope);
+    this.failures.delete(scope);
     // Sync the selector so that manually cleared providers can be routed to
-    // immediately without waiting for the backoff window to expire.
-    this.selector.markProviderAvailable(provider);
+    // immediately without waiting for the backoff window to expire. A
+    // deployment-scoped verdict never removed the provider, so there is
+    // nothing to hand back for one.
+    const provider = failure?.provider ?? (scope as ProviderType);
+    if (!failure || scope === failure.provider) this.selector.markProviderAvailable(provider);
   }
 }

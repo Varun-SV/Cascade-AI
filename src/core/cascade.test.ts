@@ -566,3 +566,56 @@ describe('Extended context (compaction integration)', () => {
     expect(generate).not.toHaveBeenCalled();
   });
 });
+
+describe('provider:exhausted reaches consumers', () => {
+  it('forwards the router event to Cascade listeners and records it in /why', async () => {
+    // The policy this PR settled on is "continue on another provider, but say
+    // so". The saying-so half is a chain — router emits, Cascade re-emits, a
+    // client renders — and the middle link was the one nothing tested. A break
+    // here is silent: the run just quietly spends on a different account.
+    const cascade = new Cascade(baseConfig, process.cwd());
+
+    // A stand-in router with the EventEmitter surface init() subscribes to.
+    const { EventEmitter } = await import('node:events');
+    const emitter = new EventEmitter();
+    // Real EventEmitter behaviour for the event surface under test; a harmless
+    // no-op for every other method init() happens to call, so this test does
+    // not have to track the router's whole API to assert one wire.
+    const fakeRouter = new Proxy(emitter, {
+      get(target, prop, receiver) {
+        const existing = Reflect.get(target, prop, receiver);
+        if (typeof existing === 'function') return existing.bind(target);
+        if (existing !== undefined) return existing;
+        // A resolved promise, because init() fires several of these and attaches
+        // .catch() to them; harmless where the result is ignored.
+        return () => Promise.resolve();
+      },
+    });
+    (cascade as any).router = fakeRouter;
+
+    await cascade.init();
+
+    const seen: Array<Record<string, unknown>> = [];
+    cascade.on('provider:exhausted', (e: Record<string, unknown>) => seen.push(e));
+
+    emitter.emit('provider:exhausted', {
+      provider: 'gemini',
+      modelId: 'gemini-2.5-flash',
+      kind: 'quota_exhausted',
+      message: 'Quota or billing limit reached on gemini-2.5-flash.',
+      failedOverTo: 'azure:prod-gpt5',
+    });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!['provider']).toBe('gemini');
+    expect(seen[0]!['failedOverTo']).toBe('azure:prod-gpt5');
+
+    // And it lands in the decision trail under its own kind, not folded into
+    // 'failover' — an account going out of service is not a routing choice.
+    const trail = cascade.getDecisionLog();
+    const entry = trail.find((d) => d.kind === 'provider-exhausted');
+    expect(entry).toBeDefined();
+    expect(entry!.detail).toContain('gemini:gemini-2.5-flash');
+    expect(entry!.detail).toContain('azure:prod-gpt5');
+  });
+});

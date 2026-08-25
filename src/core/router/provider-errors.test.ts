@@ -67,6 +67,42 @@ describe('classifyProviderError — a quota that refills is not a quota that is 
   });
 });
 
+describe('classifyProviderError — retry metadata outranks billing wording', () => {
+  it('reads a Gemini quota message carrying retryDelay as transient', () => {
+    // Google returns OpenAI's billing phrasing for ordinary RPM/TPM and
+    // rolling-spend limits, and attaches a retry interval when it does.
+    // Nothing genuinely out of money tells you when to come back.
+    const c = classifyProviderError(Object.assign(new Error(
+      '[429] You exceeded your current quota, please check your plan and billing details. '
+      + '[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"41s"}]'), { status: 429 }));
+    expect(c.kind).toBe('rate_limit');
+  });
+
+  it('reads a retry hint carried as a FIELD, not in the text', () => {
+    // Some SDKs hang retryDelay off the error rather than flattening it in.
+    const c = classifyProviderError(Object.assign(
+      new Error('You exceeded your current quota, please check your plan and billing details'),
+      { status: 429, retryDelay: '41s' },
+    ));
+    expect(c.kind).toBe('rate_limit');
+  });
+
+  it('reads a Retry-After header the same way', () => {
+    const c = classifyProviderError(Object.assign(
+      new Error('You exceeded your current quota'),
+      { status: 429, headers: { 'Retry-After': '30' } },
+    ));
+    expect(c.kind).toBe('rate_limit');
+  });
+
+  it('still calls it exhausted when no retry interval is offered', () => {
+    // The contrast case: identical wording, no retry metadata anywhere.
+    const c = classifyProviderError(Object.assign(new Error(
+      'You exceeded your current quota, please check your plan and billing details'), { status: 429 }));
+    expect(c.kind).toBe('quota_exhausted');
+  });
+});
+
 describe('classifyProviderError — 403 is two different problems', () => {
   it('reads an Azure deployment-scoped 403 as a model problem, not a dead key', () => {
     // The key works; it just cannot use THIS deployment. Condemning the whole

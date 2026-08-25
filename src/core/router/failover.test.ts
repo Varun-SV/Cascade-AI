@@ -322,6 +322,89 @@ describe('FailoverManager', () => {
       expect(mgr.permanentReason('openai')).toBeNull();
     });
 
+    it('an in-flight success from BEFORE the verdict does not erase it', () => {
+      // The concurrent-wave race. Call A is admitted and still at the provider;
+      // call B comes back with insufficient_quota and the verdict is recorded;
+      // A then lands. A was admitted while the account still looked fine, so it
+      // says nothing about the balance now — clearing on it would send the rest
+      // of the wave straight back to the dead credential.
+      const admittedA = mgr.admissionToken();          // A submitted
+      mgr.recordFailure('openai', 'quota exhausted', { permanent: true }); // B fails
+
+      mgr.recordSuccess('openai', admittedA);          // A lands afterwards
+
+      expect(mgr.isPermanentlyFailed('openai')).toBe(true);
+      expect(mgr.isProviderAvailable('openai')).toBe(false);
+    });
+
+    it('a success admitted AFTER the verdict does clear it', () => {
+      // The other half: a call submitted once the verdict already existed did
+      // reach the credential and did work, which is real evidence.
+      mgr.recordFailure('openai', 'quota exhausted', { permanent: true });
+      const admittedAfter = mgr.admissionToken();
+
+      mgr.recordSuccess('openai', admittedAfter);
+
+      expect(mgr.isPermanentlyFailed('openai')).toBe(false);
+      expect(mgr.isProviderAvailable('openai')).toBe(true);
+    });
+
+    it('an ordinary backoff still clears on any success', () => {
+      // The ordering guard is for permanent verdicts only. Clearing a
+      // transient backoff early costs nothing, and the existing fast-recovery
+      // behaviour is worth keeping.
+      const admittedBefore = mgr.admissionToken();
+      mgr.recordFailure('openai', 'rate limit');
+
+      mgr.recordSuccess('openai', admittedBefore);
+
+      expect(mgr.isProviderAvailable('openai')).toBe(true);
+    });
+  });
+
+  describe('credential scope (multi-resource Azure)', () => {
+    it('one dead Azure deployment leaves its siblings selectable', () => {
+      // Azure supports several configured deployments, each able to carry its
+      // own resource, endpoint and key. "azure is out of credit" is a claim
+      // about credentials the failure never touched.
+      mgr.recordFailure('azure', 'quota exhausted', {
+        permanent: true,
+        scope: 'azure:prod-gpt5',
+      });
+
+      expect(mgr.isPermanentlyFailed('azure:prod-gpt5')).toBe(true);
+      expect(mgr.isPermanentlyFailed('azure:research-gpt5')).toBe(false);
+      // And critically: the provider itself was never pulled, so the sibling
+      // deployment is still eligible as a fallback.
+      expect(selector.markProviderUnavailable).not.toHaveBeenCalled();
+    });
+
+    it('a provider-wide verdict still pulls the whole provider', () => {
+      mgr.recordFailure('openai', 'quota exhausted', { permanent: true });
+      expect(selector.markProviderUnavailable).toHaveBeenCalledWith('openai');
+    });
+
+    it('clearing a deployment verdict does not resurrect the provider', () => {
+      // If some other verdict legitimately pulled the provider, handing it
+      // back here — for a verdict that never took it — would undo that.
+      mgr.recordFailure('azure', 'quota exhausted', { permanent: true, scope: 'azure:prod-gpt5' });
+
+      mgr.clearPermanentVerdicts();
+
+      expect(mgr.isPermanentlyFailed('azure:prod-gpt5')).toBe(false);
+      expect(selector.markProviderAvailable).not.toHaveBeenCalled();
+    });
+
+    it('scopes are independent — two deployments can fail separately', () => {
+      mgr.recordFailure('azure', 'quota exhausted', { permanent: true, scope: 'azure:a' });
+      mgr.recordFailure('azure', 'authentication failed', { permanent: true, scope: 'azure:b' });
+
+      expect(mgr.permanentReason('azure:a')).toBe('quota exhausted');
+      expect(mgr.permanentReason('azure:b')).toBe('authentication failed');
+    });
+  });
+
+  describe('permanent verdicts, continued', () => {
     it('isPermanentlyFailed is false for a provider that never failed', () => {
       expect(mgr.isPermanentlyFailed('ollama')).toBe(false);
     });

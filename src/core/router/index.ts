@@ -26,7 +26,7 @@ import { OpenAIProvider } from '../../providers/openai.js';
 import { ProviderUnreachableError } from '../../providers/base.js';
 import type { BaseProvider } from '../../providers/base.js';
 import { ModelSelector } from './selector.js';
-import { FailoverManager } from './failover.js';
+import { FailoverManager, failureScopeOf } from './failover.js';
 import { classifyProviderError, describeProviderError, enrichProviderError } from './provider-errors.js';
 import { TpmLimiter } from './tpm-limiter.js';
 import { LocalRequestQueue } from './local-queue.js';
@@ -562,6 +562,9 @@ export class CascadeRouter extends EventEmitter {
     const availableProviders = await this.detectAvailableProviders(config.providers);
     this.selector = new ModelSelector(availableProviders);
     this.failover = new FailoverManager(this.selector);
+    // Every selection path now honours a credential-scoped verdict, not just
+    // the provider-wide ones markProviderUnavailable can express.
+    this.selector.setModelVeto((m) => this.failover.isPermanentlyFailed(failureScopeOf(m)));
     this.tpmLimiter = new TpmLimiter(config.rateLimits?.providerTpm ?? {});
 
     this.localQueue = new LocalRequestQueue(config.localConcurrency ?? 1);
@@ -932,6 +935,10 @@ export class CascadeRouter extends EventEmitter {
       ? this.selector.selectVisionModel()
       : (options.model ?? this.tierModels.get(tier) ?? this.selector.selectForTier(tier) ?? undefined);
 
+    // Taken before anything is submitted, so it orders this call against any
+    // verdict recorded while it is in flight. See recordSuccess.
+    const admittedAt = this.failover.admissionToken();
+
     // A permanent verdict has to bind the CALL, not just future selection.
     // markProviderUnavailable() only removes the provider from the selector's
     // pool, and neither of the first two arms above consults the selector: an
@@ -940,23 +947,23 @@ export class CascadeRouter extends EventEmitter {
     // that met an exhausted quota during complexity classification would go on
     // to call the same dead account for every later tier — the verdict would
     // read correctly and stop nothing.
-    if (model && this.failover.isPermanentlyFailed(model.provider)) {
+    if (model && this.failover.isPermanentlyFailed(failureScopeOf(model))) {
       const alt = this.selector.selectForTier(tier);
-      if (alt && alt.id !== model.id && !this.failover.isPermanentlyFailed(alt.provider)) {
+      if (alt && alt.id !== model.id && !this.failover.isPermanentlyFailed(failureScopeOf(alt))) {
         this.tierModels.set(tier, alt);
         this.ensureProvider(alt, this.config.providers);
         this.emit('failover', {
           tier,
           from: `${model.provider}:${model.id}`,
           to: `${alt.provider}:${alt.id}`,
-          reason: this.failover.permanentReason(model.provider) ?? 'provider unavailable',
+          reason: this.failover.permanentReason(failureScopeOf(model)) ?? 'provider unavailable',
         });
         model = alt;
       } else {
         // Nothing else can serve this tier. Fail with the verdict's own words
         // rather than paying another round trip to be told the same thing.
         throw new Error(
-          this.failover.permanentReason(model.provider)
+          this.failover.permanentReason(failureScopeOf(model))
           ?? `Provider ${model.provider} is unavailable for the rest of this run.`,
         );
       }
@@ -1185,7 +1192,14 @@ export class CascadeRouter extends EventEmitter {
       // On success, signal the failover manager so that a provider which
       // previously tripped a rate-limit can be immediately re-enabled rather
       // than waiting the full backoff window to expire.
-      this.failover.recordSuccess(model.provider);
+      //
+      // The admission token says WHEN this call started. In a concurrent wave
+      // a call already at the provider can land after a sibling has come back
+      // with insufficient_quota; it was admitted while the account still
+      // looked fine, so it is not evidence about the account now, and clearing
+      // the verdict on it would send the rest of the wave straight back to the
+      // dead credential.
+      this.failover.recordSuccess(failureScopeOf(model), admittedAt);
       return result;
     } catch (err) {
       // A budget abort also cancels the in-flight request, but it is NOT a
@@ -1222,9 +1236,11 @@ export class CascadeRouter extends EventEmitter {
           : 'rate limit';
         // Checked BEFORE recording, so the notice below fires once per provider
         // per run rather than once per worker in a concurrent T3 wave.
-        const firstVerdict = doesNotEase && !this.failover.isPermanentlyFailed(model.provider);
+        const scope = failureScopeOf(model);
+        const firstVerdict = doesNotEase && !this.failover.isPermanentlyFailed(scope);
         this.failover.recordFailure(model.provider, reasonLabel, {
           permanent: doesNotEase,
+          scope,
           // Kept so a later call refused on this verdict can say what actually
           // happened, instead of inventing its own vaguer explanation.
           ...(doesNotEase ? { detail: describeProviderError(classified, model.id) } : {}),

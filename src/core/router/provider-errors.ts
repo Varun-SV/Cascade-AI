@@ -122,20 +122,58 @@ const BILLING_SHAPED = /billing|\bcredits?\b|balance is too low|insufficient[_\s
 const MODEL_SCOPED = /deployment|does not exist|do(?:es)? not have access to|access to (?:the )?(?:model|deployment)|model .*not (?:enabled|available|supported)/;
 
 /**
+ * The provider told us when to come back.
+ *
+ * This outranks every other signal, including billing wording. Google returns
+ * `You exceeded your current quota` — OpenAI's phrasing for a spent account —
+ * for ordinary RPM/TPM and rolling-spend limits, and attaches a `retryDelay`
+ * when it does. Nothing that is genuinely out of money quotes you a retry
+ * interval, so the presence of one settles the question on its own.
+ */
+const RETRY_HINTED = /retry[\s_-]?(?:delay|after|info)|retrydelay|retryinfo|try again in/;
+
+/**
  * Split a 429 (or a rate-limit-shaped message) into "too fast" and "cannot
  * pay". Ties break toward `rate_limit`, which is this module's stated bias:
  * being wrong that way costs a retry, being wrong the other way strands a
  * provider that was about to start working again.
  */
 function splitRateFromBilling(m: string): ProviderErrorKind {
-  if (RATE_SHAPED.test(m)) return 'rate_limit';
+  if (RETRY_HINTED.test(m) || RATE_SHAPED.test(m)) return 'rate_limit';
   return BILLING_SHAPED.test(m) ? 'quota_exhausted' : 'rate_limit';
+}
+
+/**
+ * Retry metadata carried as a FIELD rather than in the message text.
+ *
+ * The SDKs differ: some flatten `RetryInfo` into the string, others hang
+ * `retryDelay` off the error or return a `Retry-After` header. A retry
+ * interval means the same thing wherever it is written down, so all of them
+ * are worth looking at before deciding an account is spent.
+ */
+function hasRetryField(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as Record<string, unknown>;
+  for (const key of ['retryDelay', 'retryAfter', 'retry_after', 'retryInfo']) {
+    if (e[key] !== undefined && e[key] !== null) return true;
+  }
+  const headers = e['headers'] as Record<string, unknown> | undefined;
+  if (headers && typeof headers === 'object') {
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() === 'retry-after') return true;
+    }
+  }
+  const inner = e['error'] as Record<string, unknown> | undefined;
+  if (inner && typeof inner === 'object') return hasRetryField(inner);
+  return false;
 }
 
 export function classifyProviderError(err: unknown): ClassifiedError {
   const raw = messageOf(err).trim();
   const status = statusOf(err);
-  const m = raw.toLowerCase();
+  // The retry hint is folded into the haystack so one predicate covers both
+  // the text and the field forms.
+  const m = raw.toLowerCase() + (hasRetryField(err) ? ' retry-after' : '');
 
   const kind = ((): ProviderErrorKind => {
     // ── By status ──

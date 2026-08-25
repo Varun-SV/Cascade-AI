@@ -34,6 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bound to that provider, not just future selection. A dead key now fails over
   at all, where before it fell straight through to a raw error.
 
+- **One Azure deployment's failure disabled every other Azure deployment.**
+  Verdicts were keyed on the provider enum, but Azure deliberately supports
+  several configured deployments, each able to carry its own resource,
+  endpoint and key. A quota or auth failure on one therefore made every
+  healthy sibling ineligible as a fallback. Verdicts are now scoped to the
+  credential that actually failed, and selection honours that scope.
+
 - **A provider's rate limit could be mistaken for its billing running out.**
   Google words an ordinary per-minute throttle as `Quota exceeded for quota
   metric 'Generate Content API requests per minute'` — a limit that clears in
@@ -43,6 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   day`, `requests per`, `quota metric`) now reads as a rate limit, and only
   billing wording reaches `quota_exhausted`; an ambiguous "quota" breaks toward
   transient, since being wrong that way costs a retry rather than a provider.
+  Retry metadata — `retryDelay`, a `Retry-After` header — settles it outright:
+  nothing genuinely out of money tells you when to come back.
 
 - **An Azure deployment you lack access to disabled the whole Azure provider.**
   Every HTTP 403 was read as a dead credential, including Azure's `The API
@@ -50,6 +59,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   — where the key is fine and every other deployment on the resource still
   works. A model- or deployment-scoped 403 is now classified as a model
   problem, leaving the provider usable.
+
+- **A concurrent success could erase a newer "provider is out" verdict.** In a
+  parallel wave, a call already at the provider can land after a sibling has
+  come back with an exhausted quota. It was admitted while the account still
+  looked fine, so it says nothing about the balance now — but it cleared the
+  verdict anyway and sent the rest of the wave back to the dead credential. A
+  success now clears a verdict only if the call started after that verdict
+  existed.
 
 - **Anthropic running out of credit was not detected at all.** The classifier
   matched `insufficient credit`, but Anthropic says `Your credit balance is too
