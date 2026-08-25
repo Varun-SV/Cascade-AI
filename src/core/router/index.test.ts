@@ -1521,6 +1521,69 @@ describe('CascadeRouter — exhausted quota is not a rate limit', () => {
     vi.restoreAllMocks();
   });
 
+  it('a transient reroute does not rebind the tier past the backoff', async () => {
+    // The post-wait reroute wrote the fallback into tierModels. A backoff lasts
+    // 30-300 seconds; a tier binding lasts until something rewrites it — and
+    // only PERMANENT repoints are recorded in permanentRepoints and restored at
+    // the run boundary. So one throttled worker moved the tier's traffic, and
+    // its billing, to the fallback indefinitely after the limit had cleared.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    const openaiStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'from the original', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'from the fallback', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+
+    const openaiModel = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o')!;
+    (router as unknown as { tierModels: Map<string, unknown> }).tierModels.set('T1', openaiModel);
+    (router as unknown as { ensureProvider(m: unknown, c: unknown): void })
+      .ensureProvider(openaiModel, [{ type: 'openai', apiKey: 'sk-test' }]);
+
+    // A sibling's 429 lands while this call is inside acquire().
+    const limiter = (router as unknown as {
+      tpmLimiter: { acquire(p: string, n: number, s?: AbortSignal): Promise<void> };
+    }).tpmLimiter;
+    const realAcquire = limiter.acquire.bind(limiter);
+    let fired = false;
+    limiter.acquire = async (p: string, n: number, sig?: AbortSignal) => {
+      await realAcquire(p, n, sig);
+      if (!fired) { fired = true; failoverOf(router).recordFailure('openai', 'rate limit'); }
+    };
+
+    const rerouted = await router.generate('T1', { messages: [{ role: 'user', content: 'a' }], maxTokens: 64 });
+    expect(rerouted.content).toBe('from the fallback');
+
+    // The TIER is untouched: only that one call moved.
+    expect(router.getModelForTier('T1')?.id).toBe(openaiModel.id);
+
+    // And once the backoff expires the tier goes back to serving on it.
+    limiter.acquire = realAcquire;
+    const realNow = Date.now;
+    try {
+      Date.now = () => realNow() + 31_000; // past the first 30s step
+      const after = await router.generate('T1', { messages: [{ role: 'user', content: 'b' }], maxTokens: 64 });
+      expect(after.content).toBe('from the original');
+    } finally {
+      Date.now = realNow;
+    }
+    expect(openaiStream).toHaveBeenCalledTimes(1);
+
+    vi.restoreAllMocks();
+  });
+
   it('explains the dead account when no other provider can serve the tier', async () => {
     // The case that matters most, and the one the old code handled worst: with
     // nothing to fail over to it re-threw the raw vendor string, which says

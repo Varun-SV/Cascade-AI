@@ -1174,7 +1174,6 @@ export class CascadeRouter extends EventEmitter {
         const alt = this.selector.selectForTier(tier);
         if (alt && alt.id !== model.id) {
           this.tpmLimiter?.refund(model.provider, estimatedTokens);
-          this.tierModels.set(tier, alt);
           this.ensureProvider(alt, this.config.providers);
           this.emit('failover', {
             tier,
@@ -1189,10 +1188,14 @@ export class CascadeRouter extends EventEmitter {
           releaseLocalSlot = undefined;
           releaseReservation?.();
           releaseReservation = undefined;
-          const retryOpts = options.model && options.model.id === model.id
-            ? { ...options, model: undefined }
-            : options;
-          return this.generate(tier, retryOpts, onChunk, requireVision);
+          // The fallback is handed to THIS CALL only, never written into
+          // tierModels. A backoff lasts 30–300 seconds; a tier binding lasts
+          // until something rewrites it. Only permanent repoints are recorded
+          // in permanentRepoints and restored at the run boundary, so a
+          // transient rebinding here would never be undone — one throttled
+          // worker would move the tier's traffic, and its billing, to the
+          // fallback indefinitely after the limit had cleared.
+          return this.generate(tier, { ...options, model: alt }, onChunk, requireVision);
         }
         // Nothing else can serve it: proceed rather than fail the run over a
         // condition that clears on its own.
