@@ -44,13 +44,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every selection path honours that scope, for ordinary rate limits as well as
   permanent ones.
 
-- **A failed-over answer was credited to the model that never ran.** The fast
-  path reported the model it asked for, but the router fails over mid-call —
-  and the hosted server persists that reported model onto the assistant
-  message, where `/why` and thumbs feedback read it back. So a dead model got
-  the credit (or the blame) for an answer a different model produced, and the
+- **A failed-over answer was credited to the model that never ran.** Callers
+  reported the model they asked for, but the router fails over mid-call — and
+  the hosted server persists that reported model onto the assistant message,
+  where `/why` and thumbs feedback read it back. So a dead model got the credit
+  (or the blame) for an answer a different model produced, and the
   model-performance history learned something untrue about both. `generate()`
-  now reports which model actually served, and the fast path uses it.
+  now reports which model actually served, and every tier call goes through a
+  wrapper that adopts it, so a new call site cannot quietly reintroduce the
+  mis-attribution.
+
+- **A model your key merely lacks access to was retired for a week.** A
+  model-scoped 403 was recorded in the durable dead-model store, which is meant
+  for ids that genuinely do not exist. Granting the project access, or swapping
+  in a key that already had it, left the model excluded across later runs and
+  process restarts. It now fails over without writing anything durable.
+
+- **A tool call could fail over to a model that has no tools.** The caller
+  picks native-tool or text-tool mode from the original model and shapes the
+  request around it, so a tool-less replacement leaves that request
+  unanswerable — and the worker free to reply without doing the work. Failover
+  now prefers a tool-capable model whenever the call carries tools.
 
 - **A vision request could be answered by a model that never saw the image.**
   `selectVisionModel()` is the only path a vision-required call resolves

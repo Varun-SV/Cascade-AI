@@ -62,7 +62,7 @@ export function buildT2SystemPrompt(has: (toolName: string) => boolean): string 
 }
 
 export class T2Manager extends BaseTier {
-  private router: CascadeRouter;
+  protected router: CascadeRouter;
   private toolRegistry: ToolRegistry;
   private assignment?: T1ToT2Assignment;
   private sectionModel?: ModelInfo;
@@ -485,7 +485,7 @@ ${typedFieldRules(spec)}
 Return ONLY the JSON array.`;
 
     const messages: ConversationMessage[] = [{ role: 'user', content: prompt }];
-    const result = await this.router.generate('T2', {
+    const result = await this.generateTracked('T2', {
       messages,
       systemPrompt: this.systemPromptOverride + buildT2SystemPrompt((name) => this.toolRegistry.hasTool(name)) + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
       maxTokens: 2000,
@@ -1041,7 +1041,7 @@ Return ONLY the JSON array.`;
         const streamFinal = isLastChunk && this.isPresenter
           ? (chunk: { text: string }) => this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: true })
           : undefined;
-        const result = await this.router.generate('T2', {
+        const result = await this.generateTracked('T2', {
           messages,
           systemPrompt: this.systemPromptOverride + 'You are a T2 Manager. Summarize the work of your T3 workers succinctly.' + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
           maxTokens: 500,
@@ -1095,7 +1095,7 @@ Is this consistent with the section goal and safe to allow?
 Reply with exactly one word: YES, NO, or UNSURE.`;
 
     try {
-      const result = await this.router.generate('T2', {
+      const result = await this.generateTracked('T2', {
         messages: [{ role: 'user', content: prompt }],
         systemPrompt: this.systemPromptOverride + 'You are a T2 Manager evaluating permissions.' + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
         maxTokens: 10,

@@ -85,6 +85,25 @@ describe('useChatSession — a provider going out mid-run', () => {
     expect(notice).not.toMatch(/continuing on/i);
   });
 
+  it('ignores an exhaustion belonging to a different conversation', () => {
+    // One socket can carry several conversations on plans that allow
+    // concurrent runs, so a background conversation's exhaustion would
+    // otherwise post an account-switch and billing warning into whichever
+    // chat happens to be open.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => {
+      fake.fire('provider:exhausted', {
+        conversationId: 'some-other-conversation',
+        provider: 'gemini', modelId: 'gemini-2.5-flash', kind: 'quota_exhausted',
+        message: 'Quota or billing limit reached.', failedOverTo: 'azure:prod-gpt5',
+      });
+    });
+
+    expect(view.result.current.providerNotice).toBeNull();
+  });
+
   it('clears the banner when the next run starts', () => {
     // The banner says "out for THIS run", and the router clears its verdicts at
     // the run boundary — so leaving it up would keep telling the user their

@@ -95,6 +95,18 @@ describe('classifyProviderError — retry metadata outranks billing wording', ()
     expect(c.kind).toBe('rate_limit');
   });
 
+  it('reads Retry-After from a WHATWG Headers object, as the SDKs return it', () => {
+    // Object.keys() on a Headers instance is [], so a plain-object scan sees
+    // nothing — which meant this check failed on exactly the errors the real
+    // OpenAI and Anthropic SDKs produce, and a 429 with billing-shaped wording
+    // but a stated recovery interval was read as a spent account.
+    const c = classifyProviderError(Object.assign(
+      new Error('You exceeded your current quota'),
+      { status: 429, headers: new Headers({ 'Retry-After': '30' }) },
+    ));
+    expect(c.kind).toBe('rate_limit');
+  });
+
   it('still calls it exhausted when no retry interval is offered', () => {
     // The contrast case: identical wording, no retry metadata anywhere.
     const c = classifyProviderError(Object.assign(new Error(

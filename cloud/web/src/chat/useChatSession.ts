@@ -362,8 +362,13 @@ export function useChatSession(
       }
     };
     const onProviderExhausted = (e: {
-      provider?: string; kind?: string; message?: string; failedOverTo?: string;
+      conversationId?: string; provider?: string; kind?: string; message?: string; failedOverTo?: string;
     }) => {
+      // One socket can carry several conversations on plans that allow
+      // concurrent runs, so an exhaustion in a background conversation would
+      // otherwise post an account-switch and billing warning into whichever
+      // chat happens to be open.
+      if (e.conversationId && e.conversationId !== conversationIdRef.current) return;
       const who = e.provider ?? 'A provider';
       setProviderNotice(e.failedOverTo
         ? `${who} is out for this run — ${e.message ?? ''} Continuing on ${e.failedOverTo}; the rest of this run is billed to that account.`

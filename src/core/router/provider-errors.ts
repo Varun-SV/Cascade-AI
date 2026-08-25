@@ -157,9 +157,19 @@ function hasRetryField(err: unknown): boolean {
   for (const key of ['retryDelay', 'retryAfter', 'retry_after', 'retryInfo']) {
     if (e[key] !== undefined && e[key] !== null) return true;
   }
-  const headers = e['headers'] as Record<string, unknown> | undefined;
+  const headers = e['headers'];
   if (headers && typeof headers === 'object') {
-    for (const key of Object.keys(headers)) {
+    // A WHATWG `Headers` — which is what the OpenAI and Anthropic SDKs hand
+    // back — keeps its entries off the object itself, so Object.keys() returns
+    // [] and a plain-object scan silently sees nothing. That made this check
+    // fail on precisely the errors it was written for.
+    const get = (headers as { get?: (name: string) => string | null }).get;
+    if (typeof get === 'function') {
+      try {
+        if (get.call(headers, 'retry-after') != null) return true;
+      } catch { /* not a Headers after all — fall through to the plain scan */ }
+    }
+    for (const key of Object.keys(headers as Record<string, unknown>)) {
       if (key.toLowerCase() === 'retry-after') return true;
     }
   }

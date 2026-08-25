@@ -583,7 +583,7 @@ export class CascadeRouter extends EventEmitter {
     // rate limit had no effect on selection at all — its backoff was recorded
     // and then ignored. isProviderAvailable() also expires the entry on read,
     // so the deployment comes back by itself when the window passes.
-    this.selector.setModelVeto((m) => !this.failover.isProviderAvailable(this.scopeFor(m)));
+    this.selector.setModelVeto((m) => this.scopesFor(m).some((sc) => !this.failover.isProviderAvailable(sc)));
     this.tpmLimiter = new TpmLimiter(config.rateLimits?.providerTpm ?? {});
 
     this.localQueue = new LocalRequestQueue(config.localConcurrency ?? 1);
@@ -966,14 +966,14 @@ export class CascadeRouter extends EventEmitter {
     // that met an exhausted quota during complexity classification would go on
     // to call the same dead account for every later tier — the verdict would
     // read correctly and stop nothing.
-    if (model && this.failover.isPermanentlyFailed(this.scopeFor(model))) {
+    if (model && this.isModelOut(model)) {
       // No requireVision arm here on purpose. A vision call resolves through
       // selectVisionModel(), which now goes through isUsable() and therefore
       // never hands back a vetoed model in the first place — so this block is
       // unreachable for one, and a requireVision branch would be code that
       // cannot run pretending to be a safeguard.
       const alt = this.selector.selectForTier(tier);
-      if (alt && alt.id !== model.id && !this.failover.isPermanentlyFailed(this.scopeFor(alt))) {
+      if (alt && alt.id !== model.id && !this.isModelOut(alt)) {
         this.rememberRepoint(tier);
         this.tierModels.set(tier, alt);
         this.ensureProvider(alt, this.config.providers);
@@ -981,14 +981,14 @@ export class CascadeRouter extends EventEmitter {
           tier,
           from: `${model.provider}:${model.id}`,
           to: `${alt.provider}:${alt.id}`,
-          reason: this.failover.permanentReason(this.scopeFor(model)) ?? 'provider unavailable',
+          reason: this.outReason(model) ?? 'provider unavailable',
         });
         model = alt;
       } else {
         // Nothing else can serve this tier. Fail with the verdict's own words
         // rather than paying another round trip to be told the same thing.
         throw new Error(
-          this.failover.permanentReason(this.scopeFor(model))
+          this.outReason(model)
           ?? `Provider ${model.provider} is unavailable for the rest of this run.`,
         );
       }
@@ -1235,7 +1235,9 @@ export class CascadeRouter extends EventEmitter {
       // looked fine, so it is not evidence about the account now, and clearing
       // the verdict on it would send the rest of the wave straight back to the
       // dead credential.
-      this.failover.recordSuccess(this.scopeFor(model), admittedAt);
+      // Clear every scope this model belongs to: a success proves the
+      // resource is paying AND the key is accepted.
+      for (const sc of this.scopesFor(model)) this.failover.recordSuccess(sc, admittedAt);
       return result;
     } catch (err) {
       // A budget abort also cancels the in-flight request, but it is NOT a
@@ -1290,8 +1292,8 @@ export class CascadeRouter extends EventEmitter {
           : 'rate limit';
         // Checked BEFORE recording, so the notice below fires once per provider
         // per run rather than once per worker in a concurrent T3 wave.
-        const scope = this.scopeFor(model);
-        const firstVerdict = doesNotEase && !this.failover.isPermanentlyFailed(scope);
+        const scope = this.scopeForFailure(model, classified.kind);
+        const firstVerdict = doesNotEase && !this.isModelOut(model);
         this.failover.recordFailure(model.provider, reasonLabel, {
           permanent: doesNotEase,
           scope,
@@ -1299,7 +1301,26 @@ export class CascadeRouter extends EventEmitter {
           // happened, instead of inventing its own vaguer explanation.
           ...(doesNotEase ? { detail: describeProviderError(classified, model.id) } : {}),
         });
-        const fallback = this.failover.getFallbackModel(model, tier);
+        let fallback = this.failover.getFallbackModel(model, tier);
+        // The caller already picked native-tool vs text-tool mode from the
+        // ORIGINAL model and shaped this request around it. Handing the retry
+        // to a tool-less model leaves that request's `tools` unanswerable and
+        // the worker free to reply without doing the work. Prefer a capable
+        // one; only fall back to a tool-less model if nothing else can serve.
+        if (fallback && options.tools?.length && fallback.supportsToolUse === false) {
+          // Tier candidates first, then ANY usable model — the same widening
+          // getNextFallback() already does. A tier whose whole priority chain
+          // is tool-less should still reach a capable model elsewhere rather
+          // than accept one that cannot answer the request it was handed.
+          const usable = (m: ModelInfo) =>
+            m.id !== model.id && m.supportsToolUse !== false && !this.isModelOut(m);
+          const capable = this.selector.getCandidatesForTier(tier).find(usable)
+            ?? this.selector.getAllAvailableModels().find(usable);
+          if (capable) {
+            this.ensureProvider(capable, this.config.providers);
+            fallback = capable;
+          }
+        }
         if (firstVerdict) {
           // Continuing on another provider keeps a long run alive, but it moves
           // this user's spend onto a different account. That is not something to
@@ -1360,8 +1381,19 @@ export class CascadeRouter extends EventEmitter {
         // `record` reports only the FIRST sighting as new — a concurrent T3
         // wave all hits the same dead id at once, and the user should see one
         // line, not one per worker.
-        const firstSighting = this.deadModels.record(model.provider, model.id, errMsg);
-        if (firstSighting) this.emit('model:dead', { provider: model.provider, modelId: model.id, reason: errMsg });
+        // A 403 is this CREDENTIAL's authorization, not a fact about the model
+        // id: grant the project access, or swap in a key that already has it,
+        // and the model works again. Persisting it to the 7-day DeadModelStore
+        // would keep removing a usable model across later runs and process
+        // restarts. Dropped from the selector for this session, which a new
+        // key does not survive either — but nothing durable is written.
+        const credentialScoped = classified.kind === 'model_unavailable' && classified.status === 403;
+        const firstSighting = credentialScoped
+          ? true
+          : this.deadModels.record(model.provider, model.id, errMsg);
+        if (firstSighting && !credentialScoped) {
+          this.emit('model:dead', { provider: model.provider, modelId: model.id, reason: errMsg });
+        }
         // Cap the not-found chain: up-front validation should mean this rarely
         // fires, but a stale catalog with many dead ids must not walk them all.
         const depth = ((options as GenerateOptions & { _notFoundDepth?: number })._notFoundDepth ?? 0) + 1;
@@ -1839,8 +1871,76 @@ export class CascadeRouter extends EventEmitter {
    */
   private rememberRepoint(tier: TierRole): void {
     if (this.permanentRepoints.has(tier)) return;
-    const baseline = this.tierModels.get(tier);
+    // originalTierModels FIRST. Cascade Auto calls overrideTierModel() per
+    // task, which stashes the configured baseline there and overwrites
+    // tierModels with a one-off pick — so reading tierModels here would record
+    // that pick, and beginRun() would then install a model chosen for the
+    // PREVIOUS task as the tier's baseline, before the next task has even been
+    // classified. Falls back to tierModels when Auto is not in play.
+    const baseline = this.originalTierModels?.get(tier) ?? this.tierModels.get(tier);
     if (baseline) this.permanentRepoints.set(tier, baseline);
+  }
+
+  /**
+   * Both scopes a failure on this model could belong to, widest first.
+   *
+   * Azure needs two, because the two systemic failures have different blast
+   * radii on the same deployment:
+   *
+   *   · billing quota belongs to the RESOURCE — deployments on one endpoint
+   *     draw on the same subscription, so a spent quota covers all of them
+   *     even when they carry different keys;
+   *   · a rejected credential belongs to the KEY — two deployments on one
+   *     endpoint can be configured with separate keys, and a 401 on a rotated
+   *     one says nothing about the other.
+   *
+   * Recording uses whichever matches the failure (scopeForFailure); anything
+   * asking "is this model out?" has to consult both, or a verdict filed under
+   * one would be invisible to the other.
+   */
+  private scopesFor(model: ModelInfo): string[] {
+    const resource = this.azureScope(model);
+    if (!resource) return [failureScopeOf(model)];
+    const key = this.azureKeyScope(model, resource);
+    return key === resource ? [resource] : [resource, key];
+  }
+
+  /** True when ANY scope this model belongs to is out for the run. */
+  private isModelOut(model: ModelInfo): boolean {
+    return this.scopesFor(model).some((sc) => this.failover.isPermanentlyFailed(sc));
+  }
+
+  /** The first explanation among this model's scopes, for a refusal message. */
+  private outReason(model: ModelInfo): string | null {
+    for (const sc of this.scopesFor(model)) {
+      const why = this.failover.permanentReason(sc);
+      if (why) return why;
+    }
+    return null;
+  }
+
+  /**
+   * The scope a failure of this KIND should be filed under. A credential
+   * rejection is about the key; everything else about the resource.
+   */
+  private scopeForFailure(model: ModelInfo, kind: string): string {
+    const resource = this.azureScope(model);
+    if (!resource) return failureScopeOf(model);
+    return kind === 'auth' ? this.azureKeyScope(model, resource) : resource;
+  }
+
+  /** `azure:<resource>` for an Azure model, or undefined for anything else. */
+  private azureScope(model: ModelInfo): string | undefined {
+    if (model.provider !== 'azure') return undefined;
+    return this.scopeFor(model);
+  }
+
+  /** `azure:<resource>#<key fingerprint>`, so two keys on one resource differ. */
+  private azureKeyScope(model: ModelInfo, resourceScope: string): string {
+    const cfg = (this.config?.providers ?? []).find(
+      (c) => c.type === 'azure' && c.deploymentName === model.id,
+    );
+    return `${resourceScope}#${credentialIdentity(cfg?.apiKey)}`;
   }
 
   private scopeFor(model: ModelInfo): string {
