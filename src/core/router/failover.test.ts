@@ -268,6 +268,60 @@ describe('FailoverManager', () => {
       vi.useRealTimers();
     });
 
+    it('clearPermanentVerdicts hands the provider back at a run boundary', () => {
+      // "Run-scoped" has to be enforced by something. The router and this
+      // manager outlive one run() in the REPL and the desktop app, so without
+      // a clear at the boundary a verdict lasts the whole PROCESS — and a user
+      // who tops up their account stays routed around the provider until they
+      // restart, which is the exact failure a persisted TTL was rejected for.
+      mgr.recordFailure('gemini', 'quota exhausted', { permanent: true });
+      expect(mgr.isProviderAvailable('gemini')).toBe(false);
+
+      mgr.clearPermanentVerdicts();
+
+      expect(mgr.isProviderAvailable('gemini')).toBe(true);
+      expect(mgr.isPermanentlyFailed('gemini')).toBe(false);
+      expect(selector.markProviderAvailable).toHaveBeenCalledWith('gemini');
+    });
+
+    it('a run boundary leaves the transient backoff ladder alone', () => {
+      // The ladder is keyed to wall-clock time and stays correct across runs.
+      // Clearing it here would send the next run straight back into a provider
+      // that is still throttling.
+      vi.useFakeTimers();
+      mgr.recordFailure('openai', 'rate limit');
+
+      mgr.clearPermanentVerdicts();
+
+      expect(mgr.isProviderAvailable('openai')).toBe(false);
+      vi.advanceTimersByTime(30_001);
+      expect(mgr.isProviderAvailable('openai')).toBe(true);
+      vi.useRealTimers();
+    });
+
+    it('carries the full explanation, so a refused call can say what happened', () => {
+      mgr.recordFailure('gemini', 'quota exhausted', {
+        permanent: true,
+        detail: 'Quota or billing limit reached on gemini-2.5-flash. This will not recover on its own.',
+      });
+
+      expect(mgr.permanentReason('gemini')).toMatch(/will not recover on its own/);
+      // The short label is what the failure report shows, not the long text.
+      expect(mgr.getFailureReport()['gemini']).toMatch(/quota exhausted/);
+    });
+
+    it('keeps the FIRST explanation when a vaguer failure follows', () => {
+      mgr.recordFailure('gemini', 'quota exhausted', { permanent: true, detail: 'the useful one' });
+      mgr.recordFailure('gemini', 'rate limit');
+
+      expect(mgr.permanentReason('gemini')).toBe('the useful one');
+    });
+
+    it('permanentReason is null for a provider on the ordinary ladder', () => {
+      mgr.recordFailure('openai', 'rate limit');
+      expect(mgr.permanentReason('openai')).toBeNull();
+    });
+
     it('isPermanentlyFailed is false for a provider that never failed', () => {
       expect(mgr.isPermanentlyFailed('ollama')).toBe(false);
     });

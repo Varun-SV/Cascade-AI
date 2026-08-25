@@ -319,6 +319,68 @@ describe('CascadeRouter — exhausted quota is not a rate limit', () => {
     vi.restoreAllMocks();
   });
 
+  it('refuses a LATER call on the dead provider without paying for it again', async () => {
+    // Review finding, confirmed: `generate()` resolves
+    // `options.model ?? this.tierModels.get(tier)` and neither arm consults the
+    // selector, so marking the provider unavailable stopped future SELECTION
+    // and nothing else. A single-provider run that met the quota during
+    // complexity classification went straight on to call the same dead account
+    // for every later tier — the verdict read correctly and stopped nothing.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+
+    const openaiStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('insufficient_quota: your credit balance is too low'));
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai']));
+    await router.init(makeConfig({ providers: [{ type: 'openai', apiKey: 'sk-test' }] }));
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+    const call = () => router.generate('T1', { messages: [{ role: 'user', content: 'x' }], model: pinned, maxTokens: 64 });
+
+    await expect(call()).rejects.toThrow(/will not recover on its own/);
+    expect(openaiStream).toHaveBeenCalledTimes(1);
+
+    // The second call must be refused from the verdict, not by asking again.
+    await expect(call()).rejects.toThrow(/will not recover on its own/);
+    expect(openaiStream).toHaveBeenCalledTimes(1);
+
+    vi.restoreAllMocks();
+  });
+
+  it('hands the provider back at the next run boundary', async () => {
+    // The verdict is RUN-scoped, and the router outlives a run in the REPL and
+    // the desktop app. Without a clear at the boundary it would last the whole
+    // process, so topping up an account would change nothing until restart.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+
+    const openaiStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('insufficient_quota: your credit balance is too low'));
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai']));
+    await router.init(makeConfig({ providers: [{ type: 'openai', apiKey: 'sk-test' }] }));
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+    const call = () => router.generate('T1', { messages: [{ role: 'user', content: 'x' }], model: pinned, maxTokens: 64 });
+
+    await expect(call()).rejects.toThrow();
+    expect(openaiStream).toHaveBeenCalledTimes(1);
+
+    // The account is topped up; the next run must actually try it again.
+    openaiStream.mockResolvedValue({
+      content: 'topped up', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+    router.beginRun();
+
+    await expect(call()).resolves.toMatchObject({ content: 'topped up' });
+    expect(openaiStream).toHaveBeenCalledTimes(2);
+
+    vi.restoreAllMocks();
+  });
+
   it('explains the dead account when no other provider can serve the tier', async () => {
     // The case that matters most, and the one the old code handled worst: with
     // nothing to fail over to it re-threw the raw vendor string, which says

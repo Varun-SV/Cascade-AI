@@ -29,9 +29,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   start (`rate_limit` "eases with time"; `quota_exhausted` "does NOT ease") and
   nothing making a routing decision had ever asked it. It does now, and an
   exhausted quota or a dead key earns a verdict the clock cannot lift — only a
-  call that actually succeeds, or the user clearing it, brings the provider
-  back. A dead key also now fails over at all, where before it fell straight
-  through to a raw error.
+  call that actually succeeds, the next run starting, or the user clearing it,
+  brings the provider back. The verdict also binds calls that were already
+  bound to that provider, not just future selection. A dead key now fails over
+  at all, where before it fell straight through to a raw error.
+
+- **A provider's rate limit could be mistaken for its billing running out.**
+  Google words an ordinary per-minute throttle as `Quota exceeded for quota
+  metric 'Generate Content API requests per minute'` — a limit that clears in
+  under a minute, described entirely in the vocabulary of a spent account. Any
+  classification keyed on the word "quota" therefore wrote off a provider that
+  was about to start working again. Rate-shaped wording (`per minute`, `per
+  day`, `requests per`, `quota metric`) now reads as a rate limit, and only
+  billing wording reaches `quota_exhausted`; an ambiguous "quota" breaks toward
+  transient, since being wrong that way costs a retry rather than a provider.
+
+- **An Azure deployment you lack access to disabled the whole Azure provider.**
+  Every HTTP 403 was read as a dead credential, including Azure's `The API
+  deployment for this resource does not exist or you do not have access to it`
+  — where the key is fine and every other deployment on the resource still
+  works. A model- or deployment-scoped 403 is now classified as a model
+  problem, leaving the provider usable.
+
+- **Anthropic running out of credit was not detected at all.** The classifier
+  matched `insufficient credit`, but Anthropic says `Your credit balance is too
+  low`, so the one message that genuinely means "this account cannot pay" fell
+  through as `unknown` — non-systemic, and therefore retried per subtask.
 
   When another configured provider can serve the tier, the run continues on it
   rather than dying — but that moves spend onto a different account, so it is

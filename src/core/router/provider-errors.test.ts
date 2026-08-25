@@ -26,6 +26,70 @@ describe('classifyProviderError — 429 is two different problems', () => {
   });
 });
 
+describe('classifyProviderError — a quota that refills is not a quota that is gone', () => {
+  // The finding that mattered most in review: Google words an ordinary
+  // per-minute throttle in the vocabulary of a spent account, so keying on the
+  // word "quota" would write off a provider that is fine in sixty seconds.
+  it('reads a Gemini per-minute limit as a rate limit, not an exhausted account', () => {
+    const c = classifyProviderError(Object.assign(new Error(
+      "429 RESOURCE_EXHAUSTED. Quota exceeded for quota metric 'Generate Content API requests per minute' "
+      + "and limit 'GenerateContent request limit per minute for a region' of service "
+      + "'generativelanguage.googleapis.com'."), { status: 429 }));
+    expect(c.kind).toBe('rate_limit');
+  });
+
+  it('reads a Gemini per-day limit as a rate limit too', () => {
+    // Longer to clear than a minute, but it still clears, and being wrong
+    // toward transient costs a retry rather than a provider.
+    const c = classifyProviderError(Object.assign(new Error(
+      "Quota exceeded for quota metric 'Generate Content API requests per day'"), { status: 429 }));
+    expect(c.kind).toBe('rate_limit');
+  });
+
+  it('still reads OpenAI billing exhaustion as exhausted', () => {
+    const c = classifyProviderError(Object.assign(new Error(
+      'You exceeded your current quota, please check your plan and billing details.'), { status: 429 }));
+    expect(c.kind).toBe('quota_exhausted');
+  });
+
+  it("catches Anthropic's wording, which said 'credit balance' and matched nothing", () => {
+    // Previously classified 'unknown' — non-systemic, so retried per task. The
+    // one message that genuinely means "this account cannot pay" was the one
+    // the classifier did not recognise.
+    const c = classifyProviderError(new Error('Your credit balance is too low to access the Anthropic API'));
+    expect(c.kind).toBe('quota_exhausted');
+  });
+
+  it('treats a bare unexplained "quota" as transient, not as a dead account', () => {
+    const c = classifyProviderError(new Error('Quota exceeded.'));
+    expect(c.kind).toBe('rate_limit');
+    expect(c.systemic).toBe(true);
+  });
+});
+
+describe('classifyProviderError — 403 is two different problems', () => {
+  it('reads an Azure deployment-scoped 403 as a model problem, not a dead key', () => {
+    // The key works; it just cannot use THIS deployment. Condemning the whole
+    // provider would exclude every other deployment on the same resource.
+    const c = classifyProviderError(Object.assign(new Error(
+      'The API deployment for this resource does not exist or you do not have access to it'), { status: 403 }));
+    expect(c.kind).toBe('model_unavailable');
+  });
+
+  it('reads a model-access 403 the same way', () => {
+    const c = classifyProviderError(Object.assign(new Error(
+      'Project does not have access to model gpt-5'), { status: 403 }));
+    expect(c.kind).toBe('model_unavailable');
+  });
+
+  it('still reads a genuinely rejected credential as auth', () => {
+    expect(classifyProviderError(Object.assign(new Error('Incorrect API key provided'), { status: 401 })).kind)
+      .toBe('auth');
+    expect(classifyProviderError(Object.assign(new Error('Permission denied'), { status: 403 })).kind)
+      .toBe('auth');
+  });
+});
+
 describe('enrichProviderError', () => {
   it('keeps the failure classifiable as the SAME kind after wrapping', () => {
     // Load-bearing: RunBreaker re-classifies whatever it is handed. A wrapper

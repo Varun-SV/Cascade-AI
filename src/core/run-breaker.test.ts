@@ -85,10 +85,18 @@ describe('run breaker', () => {
   });
 
   it('opens on a streak of the same systemic failure against one model', () => {
+    // The message is a real billing exhaustion rather than a bare "quota
+    // exceeded". Those are no longer the same thing: Google words an ordinary
+    // per-minute throttle as "Quota exceeded for quota metric …", so the word
+    // alone now reads as 'rate_limit' and only billing wording reaches
+    // 'quota_exhausted' (see router/provider-errors.ts). Both are systemic, so
+    // the streak this test is actually about behaves identically either way —
+    // but asserting a KIND means the input has to be unambiguous about it.
+    const billingExhausted = 'You exceeded your current quota, please check your plan and billing details';
     const b = new RunBreaker(3);
-    expect(b.record(httpError(429, 'quota exceeded'), 'gemini-2.0-flash')).toBeNull();
-    expect(b.record(httpError(429, 'quota exceeded'), 'gemini-2.0-flash')).toBeNull();
-    const trip = b.record(httpError(429, 'quota exceeded'), 'gemini-2.0-flash');
+    expect(b.record(httpError(429, billingExhausted), 'gemini-2.0-flash')).toBeNull();
+    expect(b.record(httpError(429, billingExhausted), 'gemini-2.0-flash')).toBeNull();
+    const trip = b.record(httpError(429, billingExhausted), 'gemini-2.0-flash');
     expect(trip).not.toBeNull();
     expect(trip!.kind).toBe('quota_exhausted');
     expect(trip!.modelId).toBe('gemini-2.0-flash');

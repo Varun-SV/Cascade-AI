@@ -92,6 +92,46 @@ function messageOf(err: unknown): string {
  * words the vendor wraps it in, and every vendor words it differently. Text
  * matching is the fallback for SDKs that flatten the status away.
  */
+/**
+ * Wording for a quota that refills on a clock rather than from a card.
+ *
+ * "Quota" alone cannot separate the two, and reading it as billing is the
+ * expensive mistake. Google words an ordinary per-minute throttle as
+ * `Quota exceeded for quota metric 'Generate Content API requests per minute'`
+ * — a limit that clears within sixty seconds, described entirely in the
+ * vocabulary of a spent account.
+ */
+const RATE_SHAPED = /per[\s-]+(?:second|minute|hour|day)|requests?[\s-]+per|tokens?[\s-]+per|quota metric|rate[\s-]?limit|too many requests/;
+
+/**
+ * Wording that means money, not time: the account cannot pay, and waiting
+ * changes nothing. Anthropic says "credit balance is too low", OpenAI
+ * "exceeded your current quota, please check your plan and billing details",
+ * and neither of those was previously matched by `insufficient credit`.
+ */
+const BILLING_SHAPED = /billing|\bcredits?\b|balance is too low|insufficient[_\s]?quota|insufficient funds|payment required|out of credits?|exceeded your current quota/;
+
+/**
+ * A 403 that is about THIS model rather than the credential.
+ *
+ * Azure returns `The API deployment for this resource does not exist or you do
+ * not have access to it` for a deployment name the key cannot use — the key
+ * itself is fine, and other deployments on the same resource still work.
+ * Reading that as a dead credential condemns a whole working provider.
+ */
+const MODEL_SCOPED = /deployment|does not exist|do(?:es)? not have access to|access to (?:the )?(?:model|deployment)|model .*not (?:enabled|available|supported)/;
+
+/**
+ * Split a 429 (or a rate-limit-shaped message) into "too fast" and "cannot
+ * pay". Ties break toward `rate_limit`, which is this module's stated bias:
+ * being wrong that way costs a retry, being wrong the other way strands a
+ * provider that was about to start working again.
+ */
+function splitRateFromBilling(m: string): ProviderErrorKind {
+  if (RATE_SHAPED.test(m)) return 'rate_limit';
+  return BILLING_SHAPED.test(m) ? 'quota_exhausted' : 'rate_limit';
+}
+
 export function classifyProviderError(err: unknown): ClassifiedError {
   const raw = messageOf(err).trim();
   const status = statusOf(err);
@@ -99,21 +139,23 @@ export function classifyProviderError(err: unknown): ClassifiedError {
 
   const kind = ((): ProviderErrorKind => {
     // ── By status ──
-    if (status === 429) {
-      // 429 covers both "too fast" and "you have no credit left". They need
-      // opposite responses from the user, so split them on the message.
-      return /quota|billing|credit|exceeded your current quota|insufficient/.test(m)
-        ? 'quota_exhausted'
-        : 'rate_limit';
-    }
-    if (status === 401 || status === 403) return 'auth';
+    // 429 covers both "too fast" and "you have no credit left". They need
+    // opposite responses from the user, so split them on the message — and
+    // the word "quota" is not the thing that splits them (see RATE_SHAPED).
+    if (status === 429) return splitRateFromBilling(m);
+    if (status === 401) return 'auth';
+    // 403 is the ambiguous one: a rejected credential and a credential that
+    // simply lacks this one model arrive identically.
+    if (status === 403) return MODEL_SCOPED.test(m) ? 'model_unavailable' : 'auth';
     if (status === 404) return 'model_unavailable';
 
     // ── By message ──
-    if (/rate limit|too many requests|resource_exhausted/.test(m)) {
-      return /quota|billing|credit|insufficient/.test(m) ? 'quota_exhausted' : 'rate_limit';
-    }
-    if (/quota|billing|insufficient_quota|insufficient credit|payment required/.test(m)) return 'quota_exhausted';
+    if (/rate limit|too many requests|resource_exhausted/.test(m)) return splitRateFromBilling(m);
+    if (BILLING_SHAPED.test(m)) return 'quota_exhausted';
+    // A bare "quota" with no billing wording and no status. Still systemic —
+    // every worker on this model will meet it — but transient, so the run
+    // backs off rather than writing the provider off.
+    if (/\bquota\b/.test(m)) return 'rate_limit';
     if (/api key|unauthorized|authentication|permission denied|invalid[_ ]api/.test(m)) return 'auth';
     if (/model .*(not found|does not exist|unavailable)|no such model|unknown model|not supported for/.test(m)) {
       return 'model_unavailable';

@@ -30,6 +30,13 @@ interface FailoverState {
    * asked it.
    */
   permanent: boolean;
+  /**
+   * The full user-facing explanation, when there is one — the provider's own
+   * words plus what to do about them. `reason` stays a short label for the
+   * failure report; this is what gets raised when a call is refused because
+   * the provider is out.
+   */
+  detail?: string;
 }
 
 export class FailoverManager {
@@ -49,7 +56,11 @@ export class FailoverManager {
    *        permanent verdict, a later ordinary failure must not downgrade it
    *        back onto the retry ladder.
    */
-  recordFailure(provider: ProviderType, reason: string, opts: { permanent?: boolean } = {}): void {
+  recordFailure(
+    provider: ProviderType,
+    reason: string,
+    opts: { permanent?: boolean; detail?: string } = {},
+  ): void {
     const existing = this.failures.get(provider);
     // Increment failure count and use it as the backoff step index so that
     // repeated failures correctly escalate through the full backoff ladder.
@@ -64,6 +75,9 @@ export class FailoverManager {
       retryAfterMs,
       failureCount,
       permanent: opts.permanent === true || existing?.permanent === true,
+      // Keep the first explanation. A later, vaguer failure on an already-dead
+      // provider must not overwrite the one that actually says what happened.
+      detail: existing?.detail ?? opts.detail,
     });
 
     this.selector.markProviderUnavailable(provider);
@@ -72,6 +86,34 @@ export class FailoverManager {
   /** True when this provider is out for the run — quota gone, key dead. */
   isPermanentlyFailed(provider: ProviderType): boolean {
     return this.failures.get(provider)?.permanent === true;
+  }
+
+  /** Why this provider is out, in the user-facing wording. */
+  permanentReason(provider: ProviderType): string | null {
+    const f = this.failures.get(provider);
+    return f?.permanent ? (f.detail ?? f.reason) : null;
+  }
+
+  /**
+   * Drop every permanent verdict and hand its provider back to the selector.
+   *
+   * Called at each run boundary, because "run-scoped" has to be enforced by
+   * something. The router and this manager outlive a single `run()` in the
+   * REPL and the desktop app, so without this a verdict recorded once lasts
+   * the whole PROCESS: a user who tops up their account, or pastes a working
+   * key, would keep getting routed around the provider until they restarted.
+   * That is precisely the failure a persisted TTL was rejected for.
+   *
+   * The transient backoff ladder is deliberately left alone. It is keyed to
+   * wall-clock time and stays correct across a run boundary; clearing it would
+   * send the next run straight back into a provider that is still throttling.
+   */
+  clearPermanentVerdicts(): void {
+    for (const [provider, state] of [...this.failures]) {
+      if (!state.permanent) continue;
+      this.failures.delete(provider);
+      this.selector.markProviderAvailable(provider);
+    }
   }
 
   isProviderAvailable(provider: ProviderType): boolean {

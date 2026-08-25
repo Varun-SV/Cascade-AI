@@ -932,6 +932,36 @@ export class CascadeRouter extends EventEmitter {
       ? this.selector.selectVisionModel()
       : (options.model ?? this.tierModels.get(tier) ?? this.selector.selectForTier(tier) ?? undefined);
 
+    // A permanent verdict has to bind the CALL, not just future selection.
+    // markProviderUnavailable() only removes the provider from the selector's
+    // pool, and neither of the first two arms above consults the selector: an
+    // explicit `options.model` pin, and a tier bound to the dead provider
+    // before it died, both resolve straight past it. So a single-provider run
+    // that met an exhausted quota during complexity classification would go on
+    // to call the same dead account for every later tier — the verdict would
+    // read correctly and stop nothing.
+    if (model && this.failover.isPermanentlyFailed(model.provider)) {
+      const alt = this.selector.selectForTier(tier);
+      if (alt && alt.id !== model.id && !this.failover.isPermanentlyFailed(alt.provider)) {
+        this.tierModels.set(tier, alt);
+        this.ensureProvider(alt, this.config.providers);
+        this.emit('failover', {
+          tier,
+          from: `${model.provider}:${model.id}`,
+          to: `${alt.provider}:${alt.id}`,
+          reason: this.failover.permanentReason(model.provider) ?? 'provider unavailable',
+        });
+        model = alt;
+      } else {
+        // Nothing else can serve this tier. Fail with the verdict's own words
+        // rather than paying another round trip to be told the same thing.
+        throw new Error(
+          this.failover.permanentReason(model.provider)
+          ?? `Provider ${model.provider} is unavailable for the rest of this run.`,
+        );
+      }
+    }
+
     // A vision-required call can resolve to a live-discovered model (e.g. an
     // openai-compatible endpoint's /models entry) that was never bound to a BaseProvider
     // instance anywhere else — unlike the options.model override above
@@ -1193,7 +1223,12 @@ export class CascadeRouter extends EventEmitter {
         // Checked BEFORE recording, so the notice below fires once per provider
         // per run rather than once per worker in a concurrent T3 wave.
         const firstVerdict = doesNotEase && !this.failover.isPermanentlyFailed(model.provider);
-        this.failover.recordFailure(model.provider, reasonLabel, { permanent: doesNotEase });
+        this.failover.recordFailure(model.provider, reasonLabel, {
+          permanent: doesNotEase,
+          // Kept so a later call refused on this verdict can say what actually
+          // happened, instead of inventing its own vaguer explanation.
+          ...(doesNotEase ? { detail: describeProviderError(classified, model.id) } : {}),
+        });
         const fallback = this.failover.getFallbackModel(model, tier);
         if (firstVerdict) {
           // Continuing on another provider keeps a long run alive, but it moves
@@ -1853,6 +1888,11 @@ export class CascadeRouter extends EventEmitter {
     this.runGeneration++;
     this.runBudgetExceeded = false;
     this.runBudgetExceededReason = undefined;
+    // Quota/auth verdicts are RUN-scoped by design — a user who tops up their
+    // account gets the provider back on the next run rather than after a TTL.
+    // The router outlives a run in the REPL and the desktop app, so without
+    // this the verdict would quietly last the whole process instead.
+    this.failover.clearPermanentVerdicts();
   }
 
   /**

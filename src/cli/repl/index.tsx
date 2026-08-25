@@ -962,6 +962,24 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         },
       });
     });
+    // A provider's account went out of service mid-run. Worth a visible line
+    // rather than only a /why entry: the run carries on spending, just on a
+    // different account, and nobody would think to go looking for that.
+    cascade.on('provider:exhausted', (payload: {
+      provider: string; modelId: string; kind: string; message: string; failedOverTo?: string;
+    }) => {
+      dispatch({
+        type: 'ADD_MESSAGE',
+        message: {
+          id: randomUUID(),
+          role: 'system',
+          content: payload.failedOverTo
+            ? `⚠ ${payload.provider} is out for this run — ${payload.message} Continuing on ${payload.failedOverTo}; this run's remaining spend goes to that account.`
+            : `⚠ ${payload.provider} is out for this run — ${payload.message}`,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    });
     cascade.on('budget:exceeded', (payload: { reason: string }) => {
       dispatch({
         type: 'ADD_MESSAGE',
