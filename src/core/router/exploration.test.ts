@@ -47,6 +47,15 @@ function seeded(seed: number): Rng {
   };
 }
 
+/** A selector whose candidates DIFFER per tier, so notes are distinguishable. */
+function selectorPerTier(byTier: Record<string, ModelInfo[]>): ModelSelector {
+  return {
+    getCandidatesForTier: (tier: string) => byTier[tier] ?? [],
+    selectForTier: (tier: string) => byTier[tier]?.[0] ?? null,
+    selectVisionModel: () => null,
+  } as unknown as ModelSelector;
+}
+
 /**
  * A prompt the heuristic analyser types as `code`, so the history recorded
  * under 'code' below is the history the selection actually reads.
@@ -157,8 +166,7 @@ describe('an exploratory pick explains itself', () => {
     let note: string | null = null;
     for (let i = 0; i < 200 && !note; i++) {
       TaskAnalyzer.clearCache();
-      await analyzer.selectModel(codePrompt(i), 'T3', selector);
-      note = analyzer.takeExplorationNote();
+      note = (await analyzer.select(codePrompt(i), 'T3', selector)).note;
     }
 
     expect(note, 'an untried model should be explored within 200 selections').toBeTruthy();
@@ -172,55 +180,69 @@ describe('an exploratory pick explains itself', () => {
     analyzer.setRng(seeded(7));
 
     TaskAnalyzer.clearCache();
-    await analyzer.selectModel(codePrompt(0), 'T3', selectorOver([model('only')]));
+    const only = await analyzer.select(codePrompt(0), 'T3', selectorOver([model('only')]));
 
-    expect(analyzer.takeExplorationNote()).toBeNull();
+    expect(only.note).toBeNull();
   });
 
-  it('clears the note when the next selection did not explore', async () => {
-    // Consuming is not enough. The root tier selects through selectModel
-    // directly while subtasks select through the router, so an exploratory
-    // root pick can go unread — and then the next selection, exploratory or
-    // not, hands it to /why under ITS tier and ITS model. The note has to be
-    // cleared by every selection, not only written by exploratory ones.
+  it('gives each concurrent selection its own note', async () => {
+    // Cascade.run selects every tier in play CONCURRENTLY — Promise.all over
+    // the tiers, all against one analyzer. While the note lived on the
+    // instance, three interleaved calls wrote one field and three
+    // continuations read it in an order nothing established: /why could
+    // attribute one tier's exploration to another and drop the rest. Clearing
+    // the field per call did not fix that, it only fixed the sequential case.
+    //
+    // The candidate sets differ PER TIER deliberately. With one shared set,
+    // every tier's note is the same string, so a note delivered to the wrong
+    // tier is indistinguishable from the right one and this test passes
+    // against the very bug it is supposed to catch — which is exactly what the
+    // first draft of it did.
     const tracker = mem();
-    for (let i = 0; i < 5; i++) tracker.record('incumbent', 'code', 'success');
+    for (const t of ['1', '2', '3']) {
+      for (let i = 0; i < 5; i++) tracker.record(`incumbent${t}`, 'code', 'success');
+    }
     const analyzer = new TaskAnalyzer(tracker);
     analyzer.setRng(seeded(2718));
-    const explorable = selectorOver([model('untried'), model('incumbent')]);
+    const selector = selectorPerTier({
+      T1: [model('untried1'), model('incumbent1')],
+      T2: [model('untried2'), model('incumbent2')],
+      T3: [model('untried3'), model('incumbent3')],
+    });
 
-    let explored = false;
-    for (let i = 0; i < 200 && !explored; i++) {
+    let explored = 0;
+    for (let i = 0; i < 300; i++) {
       TaskAnalyzer.clearCache();
-      await analyzer.selectModel(codePrompt(i), 'T3', explorable);
-      // Deliberately NOT consumed — that is the situation being tested.
-      explored = (analyzer as unknown as { explorationNote: string | null }).explorationNote !== null;
+      const batch = await Promise.all((['T1', 'T2', 'T3'] as const).map(async (tier) => {
+        const sel = await analyzer.select(codePrompt(i), tier, selector);
+        return { tier, id: sel.model?.id, note: sel.note };
+      }));
+      for (const b of batch) {
+        // A note must name the model ITS OWN call chose. A note naming another
+        // tier's model is the shared-field bug, and a note where the call did
+        // not explore is the same bug wearing the other face.
+        if (b.note) {
+          explored++;
+          expect(b.note, `${b.tier} got a note for ${b.id}`).toContain(b.id!);
+          expect(b.note).toContain(b.tier.slice(1)); // tier-suffixed model ids
+        }
+      }
     }
-    expect(explored, 'needed an unread exploratory note to leave behind').toBe(true);
-
-    // A selection with nothing to explore: one candidate, so the draw and the
-    // belief cannot disagree.
-    TaskAnalyzer.clearCache();
-    await analyzer.selectModel(codePrompt(999), 'T3', selectorOver([model('only')]));
-
-    expect(analyzer.takeExplorationNote()).toBeNull();
+    expect(explored, 'needed at least one exploratory pick to check attribution').toBeGreaterThan(0);
   });
 
-  it('consumes the note, so it cannot be blamed on a later selection', async () => {
+  it('says nothing about a selection that did not explore', async () => {
     const tracker = mem();
-    for (let i = 0; i < 5; i++) tracker.record('incumbent', 'code', 'success');
+    for (let i = 0; i < 300; i++) tracker.record('incumbent', 'code', 'success');
     const analyzer = new TaskAnalyzer(tracker);
     analyzer.setRng(seeded(2718));
     const selector = selectorOver([model('untried'), model('incumbent')]);
 
-    let seen: string | null = null;
-    for (let i = 0; i < 200 && !seen; i++) {
+    for (let i = 0; i < 50; i++) {
       TaskAnalyzer.clearCache();
-      await analyzer.selectModel(codePrompt(i), 'T3', selector);
-      seen = analyzer.takeExplorationNote();
+      const sel = await analyzer.select(codePrompt(i), 'T3', selector);
+      if (sel.model?.id === 'incumbent') expect(sel.note).toBeNull();
     }
-    expect(seen).toBeTruthy();
-    expect(analyzer.takeExplorationNote()).toBeNull();
   });
 });
 
@@ -243,5 +265,64 @@ describe('exploration does not launder a model past its costs', () => {
     };
 
     expect(drawn(retried)).toBeLessThan(drawn(clean));
+  });
+});
+
+describe('an explored model learns from having been tried', () => {
+  it('records the outcome for every model a tier used, not just the last', async () => {
+    // Without this, exploration is a one-way door. `currentRunSelections` was
+    // keyed Map<tier, model> and overwritten per selection — harmless while
+    // argmax made every subtask in a tier pick the same model, and silently
+    // wrong the moment selection started sampling. The explored model ran, and
+    // then recorded nothing: no evidence, so its posterior never narrows, so it
+    // is explored again forever and its trial never taught anyone anything.
+    const tracker = mem();
+    const analyzer = new TaskAnalyzer(tracker);
+    const selector = selectorOver([model('alpha')]);
+    const other = selectorOver([model('beta')]);
+
+    // Two subtasks in ONE tier landing on different models — exactly what a
+    // sampled selection produces.
+    TaskAnalyzer.clearCache();
+    await analyzer.select(codePrompt(1), 'T3', selector);
+    TaskAnalyzer.clearCache();
+    await analyzer.select(codePrompt(2), 'T3', other);
+
+    analyzer.recordRunOutcome('success', { T3: 0.09 });
+
+    expect(tracker.sampleCountFor('alpha', 'code'), 'the earlier model must not be forgotten').toBe(1);
+    expect(tracker.sampleCountFor('beta', 'code')).toBe(1);
+  });
+
+  it('splits a tier’s cost across the models that served it', async () => {
+    // Charging each model the whole tier cost would multiply recorded spend by
+    // the number of models used and make an explored model look ruinous purely
+    // for having been tried.
+    const tracker = mem();
+    const analyzer = new TaskAnalyzer(tracker);
+
+    TaskAnalyzer.clearCache();
+    await analyzer.select(codePrompt(1), 'T3', selectorOver([model('alpha')]));
+    TaskAnalyzer.clearCache();
+    await analyzer.select(codePrompt(2), 'T3', selectorOver([model('beta')]));
+
+    analyzer.recordRunOutcome('success', { T3: 0.10 });
+
+    const spend = (id: string) => tracker.getAll().get(`${id}:code`)?.totalCostUsd ?? 0;
+    expect(spend('alpha') + spend('beta')).toBeCloseTo(0.10, 6);
+  });
+
+  it('does not double-count a model a tier used twice', async () => {
+    const tracker = mem();
+    const analyzer = new TaskAnalyzer(tracker);
+    const selector = selectorOver([model('alpha')]);
+
+    TaskAnalyzer.clearCache();
+    await analyzer.select(codePrompt(1), 'T3', selector);
+    TaskAnalyzer.clearCache();
+    await analyzer.select(codePrompt(2), 'T3', selector);
+
+    analyzer.recordRunOutcome('success', { T3: 0.04 });
+    expect(tracker.sampleCountFor('alpha', 'code')).toBe(1);
   });
 });

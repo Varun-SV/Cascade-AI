@@ -274,6 +274,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the observation count, so a rated model can no longer display — and sort
   by — a rate above 100%.
 
+- **Every model a tier used now records the run's outcome, not just the last
+  one.** Selections were stored one-per-tier and overwritten, which was
+  harmless while routing was deterministic — every subtask in a tier picked the
+  same model, so the overwrite replaced a model with itself. Sampled selection
+  breaks that: two subtasks in one tier can legitimately pick different models,
+  and the whole tier's outcome went to whichever was chosen last. The explored
+  model — the entire point of trying it — recorded nothing, so its estimate
+  never moved and its trial taught the router nothing. A tier's cost is split
+  evenly across the models that served it rather than charged to each in full.
+
 ## 0.75.0 - 2026-08-14
 
 ### Fixed

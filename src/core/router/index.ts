@@ -1689,12 +1689,12 @@ export class CascadeRouter extends EventEmitter {
     if (this.explicitTierModels.has(tier)) return this.tierModels.get(tier) ?? null;
     if (!this.config?.cascadeAuto || !this.taskAnalyzer || !text.trim()) return null;
     try {
-      const chosen = await this.taskAnalyzer.selectModel(text, tier, this.selector, opts);
       // An exploratory pick is one the evidence alone would not have made. It
       // looks like a bad routing decision to anyone who cannot see the
       // posterior behind it, so it is announced rather than left to be
-      // discovered in a bill.
-      const note = this.taskAnalyzer.takeExplorationNote();
+      // discovered in a bill. The note arrives with the selection, so two
+      // subtasks selecting at once cannot be attributed to each other.
+      const { model: chosen, note } = await this.taskAnalyzer.select(text, tier, this.selector, opts);
       if (note) this.emit('routing:exploring', { tier, note });
       return chosen;
     } catch {

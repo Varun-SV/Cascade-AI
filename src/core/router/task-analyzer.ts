@@ -19,6 +19,17 @@ export type TaskType = 'code' | 'analysis' | 'creative' | 'data' | 'mixed';
 /** Cascade Auto cost/quality trade-off bias. See CascadeConfig.autoBias. */
 export type AutoBias = 'balanced' | 'quality' | 'cost';
 
+/** A routing choice, plus why it might not be the obvious one. */
+export interface Selection {
+  model: ModelInfo | null;
+  /**
+   * Set only when the draw beat the belief — i.e. this is an experiment, not
+   * the evidence's own answer. Null on an ordinary pick, so a caller can print
+   * it unconditionally.
+   */
+  note: string | null;
+}
+
 export interface TaskProfile {
   type: TaskType;
   /** 1 = trivial, 5 = research-grade */
@@ -152,7 +163,15 @@ export class TaskAnalyzer {
   private bias: AutoBias;
   private lastProfile: TaskProfile | null = null;
   /** Models chosen by the run currently in flight. Cleared when it completes. */
-  private currentRunSelections = new Map<TierRole, ModelInfo>();
+  /**
+   * Models used per tier this run — a LIST, not one model.
+   *
+   * A tier can legitimately run several models now that selection samples:
+   * two T3 subtasks in the same run may draw differently. Every one of them
+   * has to receive the run's outcome, or the explored model records nothing
+   * and exploration cannot learn from its own experiment.
+   */
+  private currentRunSelections = new Map<TierRole, ModelInfo[]>();
   /**
    * Immutable snapshot of the last COMPLETED run: its selections AND the task
    * type they were chosen for.
@@ -168,7 +187,7 @@ export class TaskAnalyzer {
    * every explicit rating iterated an empty map, recorded nothing, and returned
    * false: the 3x-weighted user signal never reached the tracker at all.
    */
-  private lastCompletedRun?: { selections: Map<TierRole, ModelInfo>; taskType: TaskType };
+  private lastCompletedRun?: { selections: Map<TierRole, ModelInfo[]>; taskType: TaskType };
 
   /**
    * Uniform source for Thompson draws. Injectable so a test can pin the
@@ -176,14 +195,6 @@ export class TaskAnalyzer {
    */
   private rng: Rng = Math.random;
 
-  /**
-   * Why the most recent selection went the way it did, when that is worth
-   * saying: an exploratory pick looks like a bad routing decision to anyone
-   * who cannot see the posterior it came from. Read once and cleared by
-   * takeExplorationNote(), so a stale note cannot be attributed to a later
-   * selection that was not exploratory at all.
-   */
-  private explorationNote: string | null = null;
 
   constructor(tracker?: ModelPerformanceTracker, bias: AutoBias = 'balanced') {
     this.tracker = tracker;
@@ -193,18 +204,6 @@ export class TaskAnalyzer {
   /** Replace the RNG behind exploration (tests). */
   setRng(rng: Rng): void {
     this.rng = rng;
-  }
-
-  /**
-   * The exploration note for the last selection, consumed.
-   *
-   * Consumed rather than read, because /why is assembled per run and a note
-   * left behind would be reported against whichever selection came next.
-   */
-  takeExplorationNote(): string | null {
-    const note = this.explorationNote;
-    this.explorationNote = null;
-    return note;
   }
 
   /**
@@ -266,25 +265,51 @@ export class TaskAnalyzer {
     selector: ModelSelector,
     opts?: { requiresToolUse?: boolean },
   ): Promise<ModelInfo | null> {
-    // Cleared per selection, not only written per exploratory selection. A
-    // note left standing belongs to a decision that has already happened: the
-    // root tier selects through this method directly (cascade.ts) while
-    // subtasks select through the router, so an exploratory root pick could sit
-    // here unread and then be consumed by the next subtask selection — which
-    // may not have explored at all — and /why would blame the wrong tier for
-    // the wrong model. Every exit below leaves this null unless THIS call
-    // explored.
-    this.explorationNote = null;
+    return (await this.select(prompt, tier, selector, opts)).model;
+  }
 
+  /**
+   * Select a model AND say whether the choice was exploratory.
+   *
+   * The note is returned rather than left on the instance for the caller to
+   * collect afterwards. That looks like an over-careful API for one string,
+   * and it is not: `Cascade.run` selects every tier CONCURRENTLY
+   * (`Promise.all` over the tiers in play, cascade.ts), all against this one
+   * analyzer. A field would be written by three interleaved calls and read by
+   * three continuations in an order nothing establishes — /why would attribute
+   * one tier's exploration to another, and lose the rest. Clearing the field
+   * per call does not fix that; it only removes the staleness across
+   * SEQUENTIAL calls. Ownership is what is actually needed, and a return value
+   * is what ownership looks like.
+   */
+  async select(
+    prompt: string,
+    tier: TierRole,
+    selector: ModelSelector,
+    opts?: { requiresToolUse?: boolean },
+  ): Promise<Selection> {
     const profile = await this.analyze(prompt);
 
     // EVERY exit from this method must record, or the run is only partially
     // represented in the rating snapshot: a vision-routed run had nothing to
     // rate at all, and a fallback selection was silently omitted from the
     // feedback that is supposed to teach the router which models work.
-    const recordSelection = (model: ModelInfo | null): ModelInfo | null => {
-      if (model) this.currentRunSelections.set(tier, model);
-      return model;
+    const recordSelection = (model: ModelInfo | null, note: string | null = null): Selection => {
+      if (model) {
+        const used = this.currentRunSelections.get(tier) ?? [];
+        // ACCUMULATE. This was `set(tier, model)`, which was harmless while
+        // selection was a deterministic argmax — every subtask in a tier picked
+        // the same model, so the overwrite replaced a model with itself. A
+        // sampled selection breaks that: two T3 subtasks can legitimately pick
+        // different models, and the overwrite then hands the whole tier's
+        // outcome to whichever one happened to be chosen last. The explored
+        // model — the entire reason the draw exists — would record no evidence
+        // at all, so exploration could never learn from what it tried and could
+        // never stop trying it.
+        if (!used.some((m) => m.id === model.id)) used.push(model);
+        this.currentRunSelections.set(tier, used);
+      }
+      return { model, note };
     };
 
     // Vision tasks: always route to a vision-capable model
@@ -325,11 +350,11 @@ export class TaskAnalyzer {
     // An exploratory pick is one the evidence alone would not have made. It
     // has to be explainable, or it reads as the router malfunctioning.
     const byBelief = [...scored].sort((a, b) => b.belief - a.belief)[0];
-    if (chosen && byBelief && chosen.model.id !== byBelief.model.id) {
-      this.explorationNote = this.describeExploration(chosen.model, byBelief.model, profile);
-    }
+    const note = chosen && byBelief && chosen.model.id !== byBelief.model.id
+      ? this.describeExploration(chosen.model, byBelief.model, profile)
+      : null;
 
-    return recordSelection(chosen?.model ?? selector.selectForTier(tier));
+    return recordSelection(chosen?.model ?? selector.selectForTier(tier), note);
   }
 
   /**
@@ -339,9 +364,18 @@ export class TaskAnalyzer {
   recordRunOutcome(outcome: 'success' | 'failure', costByTier: Record<string, number>, contextTokens = 0): void {
     if (!this.tracker || !this.lastProfile) return;
     const taskType = this.lastProfile.type;
-    for (const [tier, model] of this.currentRunSelections) {
-      const cost = costByTier[tier] ?? 0;
-      this.tracker.record(model.id, taskType, outcome, 0, cost, contextTokens);
+    for (const [tier, models] of this.currentRunSelections) {
+      if (models.length === 0) continue;
+      // The caller only knows what a TIER cost, not what each model in it cost,
+      // so a tier served by several models splits its cost evenly across them.
+      // An approximation, and a deliberate one: charging every model the whole
+      // tier's cost would multiply the recorded spend by the number of models
+      // and make an explored model look ruinous purely for having been tried.
+      // The tier total stays right, which is what the cost column reports.
+      const cost = (costByTier[tier] ?? 0) / models.length;
+      for (const model of models) {
+        this.tracker.record(model.id, taskType, outcome, 0, cost, contextTokens);
+      }
     }
     // Hand the selections to the completed-run snapshot rather than dropping
     // them, so a rating that arrives after this point still knows what to rate —
@@ -374,10 +408,12 @@ export class TaskAnalyzer {
     // up became nine samples, and the models a user happens to run on every
     // tier drifted fastest purely from that.
     const ratedModels = new Set<string>();
-    for (const [, model] of snapshot.selections) {
-      if (ratedModels.has(model.id)) continue;
-      ratedModels.add(model.id);
-      this.tracker.recordExplicit(model.id, snapshot.taskType, rating, 0);
+    for (const [, models] of snapshot.selections) {
+      for (const model of models) {
+        if (ratedModels.has(model.id)) continue;
+        ratedModels.add(model.id);
+        this.tracker.recordExplicit(model.id, snapshot.taskType, rating, 0);
+      }
     }
     this.lastCompletedRun = undefined;
     return true;

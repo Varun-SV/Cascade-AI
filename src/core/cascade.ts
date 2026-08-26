@@ -1663,13 +1663,12 @@ ${prompt}`
         try {
           // Analyze the user's actual request, not the host-augmented prompt —
           // delivery guidance/memories would poison the task-type profile.
-          const model = await this.taskAnalyzer!.selectModel(routingPrompt, tier, this.router.getSelector());
           // The root tier selects here rather than through the router, so the
-          // router's `routing:exploring` wiring never sees this pick. Read the
-          // note on this path too, or an exploratory root choice is the one
-          // routing decision /why cannot explain.
-          const exploration = this.taskAnalyzer!.takeExplorationNote();
-          if (exploration) this.recordDecision('model', `${tier} ${exploration}`);
+          // router's `routing:exploring` wiring never sees this pick. The note
+          // comes back WITH the selection because these tier selections run
+          // concurrently — see TaskAnalyzer.select().
+          const { model, note } = await this.taskAnalyzer!.select(routingPrompt, tier, this.router.getSelector());
+          if (note) this.recordDecision('model', `${tier} ${note}`);
           if (model) {
             this.router.overrideTierModel(tier, model);
             const taskType = this.taskAnalyzer!.getLastProfile()?.type ?? 'mixed';
@@ -1678,9 +1677,17 @@ ${prompt}`
               ? 'free'
               : `$${model.outputCostPer1kTokens.toFixed(4)}/1K out`;
             const dataSrc = this.router.getLiveData()?.getDataSource() ?? 'bundled';
+            // "best value" is a claim about the BELIEF ranking, and an
+            // exploratory pick is by definition not the model that won it.
+            // Printing both lines unchanged gave /why two contradictory
+            // explanations for the same choice, which reads as a bug rather
+            // than as the deliberate experiment it is.
+            const rationale = note
+              ? `Cascade Auto: trying an alternative for ${taskType}`
+              : `Cascade Auto: best value for ${taskType}`;
             this.recordDecision(
               'model',
-              `${tier} → ${model.provider}:${model.id} — Cascade Auto: best value for ${taskType} ` +
+              `${tier} → ${model.provider}:${model.id} — ${rationale} ` +
               `(bench ${bench}/100, ${price}, data: ${dataSrc})`,
             );
           }
