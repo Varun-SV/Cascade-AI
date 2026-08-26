@@ -204,13 +204,34 @@ export function isTableRow(line: string): boolean {
  * `|---|---|` as literal text where Word had shown a real table from the same
  * Markdown.
  */
+/**
+ * Is this the `|---|:--:|` rule under a table header?
+ *
+ * A character scan rather than the obvious `/^\|[\s:|-]+\|?\s*$/`, which is a
+ * polynomial-backtracking regex and was flagged as such: `[\s:|-]+` and `\s*`
+ * sit next to each other and BOTH match whitespace, so a line of `|` followed
+ * by many tabs makes the engine try every split between them. Document text is
+ * model-authored and can be arbitrarily long, which is exactly the input class
+ * that turns quadratic matching into a hang.
+ *
+ * Each per-character test has no quantifier and cannot backtrack, so the whole
+ * scan is linear in the row's length.
+ */
+function isAlignmentRule(row: string): boolean {
+  if (row.length < 2 || !row.startsWith('|')) return false;
+  for (let i = 1; i < row.length; i++) {
+    if (!/[\s:|-]/.test(row[i]!)) return false;
+  }
+  return true;
+}
+
 export function scanTable(lines: string[], start: number): { rows: string[][]; next: number } {
   const rows: string[][] = [];
   let i = start;
   while (i < lines.length && isTableRow(lines[i] ?? '')) {
     const raw = (lines[i] ?? '').trim();
     // Skip the |---|:--:| alignment rule; it is punctuation, not data.
-    if (!/^\|[\s:|-]+\|?\s*$/.test(raw)) {
+    if (!isAlignmentRule(raw)) {
       rows.push(raw.replace(/^\||\|\s*$/g, '').split('|').map((c) => stripInline(c.trim())));
     }
     i++;

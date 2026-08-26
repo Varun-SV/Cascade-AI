@@ -47,6 +47,25 @@ describe('a Markdown table becomes a real PowerPoint table', () => {
     expect(parseSlide(deck).tables[0]!.some((r) => r.join('').includes('---'))).toBe(false);
   });
 
+  it('does not backtrack itself to death on a pathological row', () => {
+    // CodeQL, high severity: the obvious alignment-rule regex
+    // /^\|[\s:|-]+\|?\s*$/ puts two whitespace-matching quantifiers next to
+    // each other, so `|` plus a long run of tabs makes the engine try every
+    // split between them. Document text is model-authored and can be
+    // arbitrarily long — precisely the input class where quadratic matching
+    // stops being academic. Measured on the old pattern: 2k tabs 4ms, 4k 17ms,
+    // 8k 64ms — doubling the input quadruples the time, so 60k runs seconds.
+    //
+    // The row must END in a pipe, or isTableRow rejects it before the
+    // alignment check ever runs and the test passes against the bug. It did.
+    const evil = `|${'\t'.repeat(60_000)}x|`;
+    const started = Date.now();
+    const slide = parseSlide(`# T\n\n${evil}`);
+    expect(Date.now() - started, 'linear scan, not polynomial backtracking').toBeLessThan(1_000);
+    // …and it is still read as a data row, since it is not an alignment rule.
+    expect(slide.tables.length + slide.body.length).toBeGreaterThan(0);
+  });
+
   it('keeps a slide that is nothing but a table', () => {
     const slides = splitSlides('| a | b |\n|---|---|\n| 1 | 2 |');
     expect(slides).toHaveLength(1);
