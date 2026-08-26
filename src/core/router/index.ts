@@ -26,7 +26,9 @@ import { OpenAIProvider } from '../../providers/openai.js';
 import { ProviderUnreachableError } from '../../providers/base.js';
 import type { BaseProvider } from '../../providers/base.js';
 import { ModelSelector } from './selector.js';
-import { FailoverManager } from './failover.js';
+import { FailoverManager, failureScopeOf } from './failover.js';
+import { normalizeEndpoint } from '../../utils/net.js';
+import { classifyProviderError, describeProviderError, enrichProviderError } from './provider-errors.js';
 import { TpmLimiter } from './tpm-limiter.js';
 import { LocalRequestQueue } from './local-queue.js';
 import type { TaskAnalyzer } from './task-analyzer.js';
@@ -543,6 +545,18 @@ export class CascadeRouter extends EventEmitter {
   private liveData?: LiveDataProvider;
   /** Snapshot of configured/default tier models, taken before Cascade Auto overrides them. */
   private originalTierModels?: Map<TierRole, ModelInfo>;
+  /**
+   * Tiers repointed because their model's credential went out for the run, and
+   * the model each was displaced from.
+   *
+   * Clearing the verdict at the run boundary makes the provider SELECTABLE
+   * again, which is not the same as being used: generate() resolves
+   * `tierModels.get(tier)` before it ever consults the selector, so a tier
+   * still holding the fallback keeps charging the fallback account for every
+   * later default-routed run. Restoring the binding is what actually gives a
+   * topped-up account its traffic back.
+   */
+  private permanentRepoints = new Map<TierRole, ModelInfo>();
   /** The current run's abort signal — injected into every provider call so a cancel aborts in-flight requests. */
   private runSignal?: AbortSignal;
 
@@ -561,6 +575,15 @@ export class CascadeRouter extends EventEmitter {
     const availableProviders = await this.detectAvailableProviders(config.providers);
     this.selector = new ModelSelector(availableProviders);
     this.failover = new FailoverManager(this.selector);
+    // Every selection path now honours a credential-scoped verdict, not just
+    // the provider-wide ones markProviderUnavailable can express.
+    // Honours TRANSIENT scoped failures too, not just permanent ones. A scoped
+    // verdict deliberately does not call markProviderUnavailable (that would
+    // take the resource's healthy siblings with it), so without this an Azure
+    // rate limit had no effect on selection at all — its backoff was recorded
+    // and then ignored. isProviderAvailable() also expires the entry on read,
+    // so the deployment comes back by itself when the window passes.
+    this.selector.setModelVeto((m) => this.scopesFor(m).some((sc) => !this.failover.isProviderAvailable(sc)));
     this.tpmLimiter = new TpmLimiter(config.rateLimits?.providerTpm ?? {});
 
     this.localQueue = new LocalRequestQueue(config.localConcurrency ?? 1);
@@ -931,6 +954,69 @@ export class CascadeRouter extends EventEmitter {
       ? this.selector.selectVisionModel()
       : (options.model ?? this.tierModels.get(tier) ?? this.selector.selectForTier(tier) ?? undefined);
 
+    // Taken before anything is submitted, so it orders this call against any
+    // verdict recorded while it is in flight. See recordSuccess.
+    const admittedAt = this.failover.admissionToken();
+
+    // A permanent verdict has to bind the CALL, not just future selection.
+    // markProviderUnavailable() only removes the provider from the selector's
+    // pool, and neither of the first two arms above consults the selector: an
+    // explicit `options.model` pin, and a tier bound to the dead provider
+    // before it died, both resolve straight past it. So a single-provider run
+    // that met an exhausted quota during complexity classification would go on
+    // to call the same dead account for every later tier — the verdict would
+    // read correctly and stop nothing.
+    // A tier binding or an explicit pin resolves without consulting the
+    // selector, so the veto never sees it. Checked here for BOTH kinds: a
+    // permanent verdict refuses the call outright, while an active transient
+    // backoff moves it to something else if anything else can serve — that is
+    // what the backoff is for, and a bound model was walking straight through
+    // it while every selector path respected it.
+    if (model && !this.isModelOut(model) && this.scopesFor(model).some((sc) => !this.failover.isProviderAvailable(sc))) {
+      const alt = this.selector.selectForTier(tier);
+      if (alt && alt.id !== model.id) {
+        this.ensureProvider(alt, this.config.providers);
+        this.emit('failover', {
+          tier,
+          from: `${model.provider}:${model.id}`,
+          to: `${alt.provider}:${alt.id}`,
+          reason: 'backing off',
+        });
+        model = alt;
+      }
+      // No alternative: fall through and let the call proceed. A transient
+      // backoff is a preference, not a verdict — failing the run outright when
+      // nothing else can serve would be worse than one throttled request.
+    }
+
+    if (model && this.isModelOut(model)) {
+      // No requireVision arm here on purpose. A vision call resolves through
+      // selectVisionModel(), which now goes through isUsable() and therefore
+      // never hands back a vetoed model in the first place — so this block is
+      // unreachable for one, and a requireVision branch would be code that
+      // cannot run pretending to be a safeguard.
+      const alt = this.selector.selectForTier(tier);
+      if (alt && alt.id !== model.id && !this.isModelOut(alt)) {
+        this.rememberRepoint(tier);
+        this.tierModels.set(tier, alt);
+        this.ensureProvider(alt, this.config.providers);
+        this.emit('failover', {
+          tier,
+          from: `${model.provider}:${model.id}`,
+          to: `${alt.provider}:${alt.id}`,
+          reason: this.outReason(model) ?? 'provider unavailable',
+        });
+        model = alt;
+      } else {
+        // Nothing else can serve this tier. Fail with the verdict's own words
+        // rather than paying another round trip to be told the same thing.
+        throw new Error(
+          this.outReason(model)
+          ?? `Provider ${model.provider} is unavailable for the rest of this run.`,
+        );
+      }
+    }
+
     // A vision-required call can resolve to a live-discovered model (e.g. an
     // openai-compatible endpoint's /models entry) that was never bound to a BaseProvider
     // instance anywhere else — unlike the options.model override above
@@ -1061,6 +1147,60 @@ export class CascadeRouter extends EventEmitter {
         );
       }
 
+      // Re-check, because the verdict may have been recorded WHILE this call
+      // was queued. The check up at model resolution runs before the TPM bucket
+      // and the local-inference queue, either of which can hold a call for a
+      // refill interval or longer — and in a concurrent wave that is exactly
+      // when a sibling discovers the account is dead. Without this, every
+      // worker already past the first check still submits, which is the burst
+      // the verdict exists to prevent.
+      if (this.isModelOut(model)) {
+        // Hand the rate-limit capacity back; this request is not being sent.
+        // The local slot and the budget reservation are released by the
+        // `finally` below.
+        this.tpmLimiter?.refund(model.provider, estimatedTokens);
+        throw new Error(
+          this.outReason(model)
+          ?? `Provider ${model.provider} is unavailable for the rest of this run.`,
+        );
+      }
+      // A TRANSIENT backoff recorded during the same wait deserves the same
+      // treatment. Checking only permanent verdicts here left the ordinary
+      // case wide open: worker A takes a 429 while worker B sits in the
+      // bucket, and B wakes and submits to the very credential that is backing
+      // off. Reroute rather than refuse — the backoff is a preference, and a
+      // request that can be served elsewhere should be.
+      if (this.scopesFor(model).some((sc) => !this.failover.isProviderAvailable(sc))) {
+        const alt = this.selector.selectForTier(tier);
+        if (alt && alt.id !== model.id) {
+          this.tpmLimiter?.refund(model.provider, estimatedTokens);
+          this.ensureProvider(alt, this.config.providers);
+          this.emit('failover', {
+            tier,
+            from: `${model.provider}:${model.id}`,
+            to: `${alt.provider}:${alt.id}`,
+            reason: 'backing off',
+          });
+          // Released BEFORE recursing, exactly as the failover path does:
+          // holding them across the retry would charge the run twice for one
+          // logical call and could starve the very attempt replacing it.
+          releaseLocalSlot?.();
+          releaseLocalSlot = undefined;
+          releaseReservation?.();
+          releaseReservation = undefined;
+          // The fallback is handed to THIS CALL only, never written into
+          // tierModels. A backoff lasts 30–300 seconds; a tier binding lasts
+          // until something rewrites it. Only permanent repoints are recorded
+          // in permanentRepoints and restored at the run boundary, so a
+          // transient rebinding here would never be undone — one throttled
+          // worker would move the tier's traffic, and its billing, to the
+          // fallback indefinitely after the limit had cleared.
+          return this.generate(tier, { ...options, model: alt }, onChunk, requireVision);
+        }
+        // Nothing else can serve it: proceed rather than fail the run over a
+        // condition that clears on its own.
+      }
+
       let result: GenerateResult;
 
       // Every provider call below is time-boxed with withTimeoutAbort, which
@@ -1105,6 +1245,14 @@ export class CascadeRouter extends EventEmitter {
           if ((streamErr instanceof Error && streamErr.name === 'AbortError') || runSignal?.aborted || options.signal?.aborted) {
             throw streamErr;
           }
+          // A SYSTEMIC failure is not a stalled stream, and retrying it
+          // non-streaming just asks the same dead account the same question.
+          // The built-in OpenAI and Anthropic providers implement generate()
+          // by calling generateStream() again, so an exhausted quota or a bad
+          // key was being hit twice per logical call — doubled again across a
+          // concurrent worker wave. Hand it to the outer catch, which knows
+          // how to fail over.
+          if (classifyProviderError(streamErr).systemic) throw streamErr;
           // Stream stalled or errored — fall back to a (also time-boxed)
           // non-streaming call rather than letting a hung stream freeze the run.
           // The stalled attempt has been aborted by now, so this is the only
@@ -1143,6 +1291,9 @@ export class CascadeRouter extends EventEmitter {
           estimatedCostUsd: corrected.estimatedCostUsd,
           ...(corrected.costUnknown ? { costUnknown: true } : { costUnknown: undefined }),
         },
+        // Which model ACTUALLY answered. A failover recursion returns its own
+        // result from the inner call, so this is always the one that ran.
+        servedBy: { provider: model.provider, id: model.id },
       };
 
       if (!result || typeof result.content !== 'string' || !result.usage) {
@@ -1154,7 +1305,16 @@ export class CascadeRouter extends EventEmitter {
       // On success, signal the failover manager so that a provider which
       // previously tripped a rate-limit can be immediately re-enabled rather
       // than waiting the full backoff window to expire.
-      this.failover.recordSuccess(model.provider);
+      //
+      // The admission token says WHEN this call started. In a concurrent wave
+      // a call already at the provider can land after a sibling has come back
+      // with insufficient_quota; it was admitted while the account still
+      // looked fine, so it is not evidence about the account now, and clearing
+      // the verdict on it would send the rest of the wave straight back to the
+      // dead credential.
+      // Clear every scope this model belongs to: a success proves the
+      // resource is paying AND the key is accepted.
+      for (const sc of this.scopesFor(model)) this.failover.recordSuccess(sc, admittedAt);
       return result;
     } catch (err) {
       // A budget abort also cancels the in-flight request, but it is NOT a
@@ -1169,17 +1329,105 @@ export class CascadeRouter extends EventEmitter {
         throw new CascadeCancelledError('Run cancelled');
       }
       const errMsg = err instanceof Error ? err.message : String(err);
-      if (this.isRateLimitError(errMsg)) {
-        this.failover.recordFailure(model.provider, 'rate_limit');
-        const fallback = this.failover.getFallbackModel(model, tier);
+      // Ask the classifier, not a local regex. `isRateLimitError` matches
+      // /quota/ and so swept a spent wallet into the rate-limit path, where the
+      // 30s→300s backoff would re-enable the provider and call it again, and
+      // again, for the rest of the run. provider-errors.ts has always known the
+      // two apart — 'rate_limit' eases with time, 'quota_exhausted' does not —
+      // and nothing that made a routing decision had ever asked it.
+      //
+      // The regex is kept as an ADDITIONAL trigger for the transient path so
+      // this is a strict superset of what fired before: a message carrying a
+      // bare "429" with no status field and no other keyword classifies as
+      // 'unknown', and would otherwise stop failing over at all.
+      const classified = classifyProviderError(err);
+      // A dead key rides along with the spent wallet: same systemic class, same
+      // "another provider can serve this" remedy, and the old code failed over
+      // on neither — an auth failure fell straight through to `throw`.
+      const doesNotEase = classified.kind === 'quota_exhausted' || classified.kind === 'auth';
+      /**
+       * Is this failure still about the run that is happening?
+       *
+       * A call admitted by a PREVIOUS run can still be settling when the next
+       * one starts. Everything below mutates state the NEXT run reads —
+       * failover records, the selector's available set, the tier's binding —
+       * so a straggler is not merely recording a stale verdict, it is steering
+       * a run that never saw the failure. Guarding only the `permanent` bit
+       * left the rest: a 30s transient entry, markProviderUnavailable() for a
+       * provider-wide scope, and a repointed tier, all installed on run B from
+       * run A's dead result.
+       *
+       * The straggler's own result is discarded regardless — its run is over —
+       * so there is nothing to fail over TO. It just throws.
+       *
+       * Same generation invariant the budget counters already use.
+       */
+      const currentRun = runGeneration === this.runGeneration;
+      if (currentRun && (doesNotEase || classified.kind === 'rate_limit' || this.isRateLimitError(errMsg))) {
+        const reasonLabel = classified.kind === 'quota_exhausted' ? 'quota exhausted'
+          : classified.kind === 'auth' ? 'authentication failed'
+          : 'rate limit';
+        // Checked BEFORE recording, so the notice below fires once per provider
+        // per run rather than once per worker in a concurrent T3 wave.
+        const scope = this.scopeForFailure(model, classified.kind);
+        const firstVerdict = doesNotEase && !this.isModelOut(model);
+        this.failover.recordFailure(model.provider, reasonLabel, {
+          permanent: doesNotEase,
+          scope,
+          // Kept so a later call refused on this verdict can say what actually
+          // happened, instead of inventing its own vaguer explanation.
+          ...(doesNotEase ? { detail: describeProviderError(classified, model.id) } : {}),
+        });
+        // For a vision call the recursive retry re-resolves through
+        // selectVisionModel() and ignores the tier binding, so announcing the
+        // ordinary tier fallback would name an account that never receives the
+        // work — while the user is told their spend moved there.
+        let fallback = requireVision
+          ? this.selector.selectVisionModel()
+          : this.failover.getFallbackModel(model, tier);
+        // The caller already picked native-tool vs text-tool mode from the
+        // ORIGINAL model and shaped this request around it. Handing the retry
+        // to a tool-less model leaves that request's `tools` unanswerable and
+        // the worker free to reply without doing the work. Prefer a capable
+        // one; only fall back to a tool-less model if nothing else can serve.
+        if (fallback && options.tools?.length && fallback.supportsToolUse === false) {
+          // Tier candidates first, then ANY usable model — the same widening
+          // getNextFallback() already does. A tier whose whole priority chain
+          // is tool-less should still reach a capable model elsewhere rather
+          // than accept one that cannot answer the request it was handed.
+          const usable = (m: ModelInfo) =>
+            m.id !== model.id && m.supportsToolUse !== false && !this.isModelOut(m);
+          const capable = this.selector.getCandidatesForTier(tier).find(usable)
+            ?? this.selector.getAllAvailableModels().find(usable);
+          if (capable) {
+            this.ensureProvider(capable, this.config.providers);
+            fallback = capable;
+          }
+        }
+        if (firstVerdict) {
+          // Continuing on another provider keeps a long run alive, but it moves
+          // this user's spend onto a different account. That is not something to
+          // do quietly, so it is announced once, with the provider's own words
+          // and where the work went.
+          this.emit('provider:exhausted', {
+            provider: model.provider,
+            modelId: model.id,
+            kind: classified.kind,
+            message: describeProviderError(classified, model.id),
+            ...(fallback ? { failedOverTo: `${fallback.provider}:${fallback.id}` } : {}),
+          });
+        }
         if (fallback) {
+          // Remember what this tier was displaced FROM, so the next run can put
+          // it back once the verdict is cleared.
+          if (doesNotEase) this.rememberRepoint(tier);
           this.tierModels.set(tier, fallback);
           this.ensureProvider(fallback, this.config.providers);
           this.emit('failover', {
             tier,
             from: `${model.provider}:${model.id}`,
             to: `${fallback.provider}:${fallback.id}`,
-            reason: 'rate limit',
+            reason: reasonLabel,
           });
           // Release the local slot before the recursive call so the fallback
           // model (which may itself be local) can acquire its own slot.
@@ -1206,18 +1454,41 @@ export class CascadeRouter extends EventEmitter {
       // Stale / invalid model id (e.g. a retired preview that 404s). Drop it so
       // it is never selected again this session and fail over to the next
       // candidate, instead of surfacing the raw provider error to the user.
-      if (isModelNotFoundError(errMsg)) {
-        this.selector.removeModel(model.id);
+      // `model_unavailable` covers wording the regex does not — notably a
+      // model-scoped 403 ("Project does not have access to model gpt-5"),
+      // which is about this one model and not the credential. Without it the
+      // router rethrew instead of dropping the model and trying another.
+      if (isModelNotFoundError(errMsg) || classified.kind === 'model_unavailable') {
+        // A 403 is this CREDENTIAL's authorization, not a fact about the model
+        // id: grant the project access, or swap in a key that already has it,
+        // and the model works again. Persisting it to the 7-day DeadModelStore
+        // would keep removing a usable model across later runs and process
+        // restarts. Dropped from the selector for this session, which a new
+        // key does not survive either — but nothing durable is written.
+        const credentialScoped = classified.kind === 'model_unavailable' && classified.status === 403;
+        // A durable 404 is a fact about the id and is worth acting on whoever
+        // found it. A credential-scoped 403 is not: being session-only by
+        // design, a straggler from a finished run would otherwise remove a
+        // model from the CURRENT run — whose credentials may be perfectly
+        // valid. Same generation invariant as the verdict above.
+        if (!credentialScoped || currentRun) this.selector.removeModel(model.id);
         // Persist the verdict so the next run doesn't pay to rediscover it.
         // `record` reports only the FIRST sighting as new — a concurrent T3
         // wave all hits the same dead id at once, and the user should see one
         // line, not one per worker.
-        const firstSighting = this.deadModels.record(model.provider, model.id, errMsg);
-        if (firstSighting) this.emit('model:dead', { provider: model.provider, modelId: model.id, reason: errMsg });
+        const firstSighting = credentialScoped
+          ? true
+          : this.deadModels.record(model.provider, model.id, errMsg);
+        if (firstSighting && !credentialScoped) {
+          this.emit('model:dead', { provider: model.provider, modelId: model.id, reason: errMsg });
+        }
         // Cap the not-found chain: up-front validation should mean this rarely
         // fires, but a stale catalog with many dead ids must not walk them all.
         const depth = ((options as GenerateOptions & { _notFoundDepth?: number })._notFoundDepth ?? 0) + 1;
-        const next = depth <= 3 ? this.selector.selectForTier(tier) : null;
+        // The dead id above is a durable fact and worth keeping whoever found
+        // it. Repointing a tier is not: that is this run's routing state, and
+        // a finished run has no business rewriting it.
+        const next = currentRun && depth <= 3 ? this.selector.selectForTier(tier) : null;
         if (next && next.id !== model.id) {
           this.tierModels.set(tier, next);
           this.ensureProvider(next, this.config.providers);
@@ -1245,6 +1516,13 @@ export class CascadeRouter extends EventEmitter {
           return this.generate(tier, retryOpts, onChunk, requireVision);
         }
       }
+      // Every provider that could serve this tier is out. For a spent wallet or
+      // a dead key the raw vendor string is the least actionable thing we could
+      // hand back — "429 You exceeded your current quota" tells someone nothing
+      // about which of their accounts to go and look at. Scoped to the two kinds
+      // this branch handles: the 404 path above builds a richer verdict of its
+      // own, and a transient failure usually says what it is.
+      if (doesNotEase) throw enrichProviderError(err, classified, model.id);
       throw err;
     } finally {
       releaseLocalSlot?.();
@@ -1659,6 +1937,133 @@ export class CascadeRouter extends EventEmitter {
     }
   }
 
+  /**
+   * The credential a failure on this model is actually about.
+   *
+   * Resolves an Azure deployment to its RESOURCE (endpoint), because that is
+   * what the key and the bill belong to — see failureScopeOf. Everything else
+   * is already one credential per provider.
+   */
+  /**
+   * Note the tier's binding before a permanent verdict repoints it.
+   *
+   * Records `tierModels.get(tier)` — the tier's own baseline — and NOT the
+   * model that happened to fail. Those differ whenever the call carried a
+   * per-call override (Cascade Auto picks one per subtask), and saving the
+   * override would have beginRun() install a one-off subtask model as the
+   * tier's baseline, leaving every later default-routed call on a model the
+   * tier was never configured to use.
+   *
+   * Nothing to restore if the tier had no binding, and the first repoint wins
+   * so a second failover in the same run cannot overwrite the true baseline.
+   */
+  private rememberRepoint(tier: TierRole): void {
+    if (this.permanentRepoints.has(tier)) return;
+    // originalTierModels FIRST. Cascade Auto calls overrideTierModel() per
+    // task, which stashes the configured baseline there and overwrites
+    // tierModels with a one-off pick — so reading tierModels here would record
+    // that pick, and beginRun() would then install a model chosen for the
+    // PREVIOUS task as the tier's baseline, before the next task has even been
+    // classified. Falls back to tierModels when Auto is not in play.
+    const baseline = this.originalTierModels?.get(tier) ?? this.tierModels.get(tier);
+    if (baseline) this.permanentRepoints.set(tier, baseline);
+  }
+
+  /**
+   * Both scopes a failure on this model could belong to, widest first.
+   *
+   * Azure needs two, because the two systemic failures have different blast
+   * radii on the same deployment:
+   *
+   *   · billing quota belongs to the RESOURCE — deployments on one endpoint
+   *     draw on the same subscription, so a spent quota covers all of them
+   *     even when they carry different keys;
+   *   · a rejected credential belongs to the KEY — two deployments on one
+   *     endpoint can be configured with separate keys, and a 401 on a rotated
+   *     one says nothing about the other.
+   *
+   * Recording uses whichever matches the failure (scopeForFailure); anything
+   * asking "is this model out?" has to consult both, or a verdict filed under
+   * one would be invisible to the other.
+   */
+  private scopesFor(model: ModelInfo): string[] {
+    const resource = this.azureScope(model);
+    if (!resource) return [failureScopeOf(model)];
+    const key = this.azureKeyScope(model, resource);
+    return key === resource ? [resource] : [resource, key];
+  }
+
+  /** True when ANY scope this model belongs to is out for the run. */
+  private isModelOut(model: ModelInfo): boolean {
+    return this.scopesFor(model).some((sc) => this.failover.isPermanentlyFailed(sc));
+  }
+
+  /** The first explanation among this model's scopes, for a refusal message. */
+  private outReason(model: ModelInfo): string | null {
+    for (const sc of this.scopesFor(model)) {
+      const why = this.failover.permanentReason(sc);
+      if (why) return why;
+    }
+    return null;
+  }
+
+  /**
+   * The scope a failure of this KIND should be filed under. A credential
+   * rejection is about the key; everything else about the resource.
+   */
+  private scopeForFailure(model: ModelInfo, kind: string): string {
+    const resource = this.azureScope(model);
+    if (!resource) return failureScopeOf(model);
+    return kind === 'auth' ? this.azureKeyScope(model, resource) : resource;
+  }
+
+  /** `azure:<resource>` for an Azure model, or undefined for anything else. */
+  private azureScope(model: ModelInfo): string | undefined {
+    if (model.provider !== 'azure') return undefined;
+    return this.scopeFor(model);
+  }
+
+  /**
+   * `azure:<resource>#k<n>`, so two different keys on one resource differ.
+   *
+   * `n` is the position of the FIRST configured Azure entry using this same
+   * key, which makes it stable for the run and identical for every deployment
+   * sharing that credential — the grouping an auth verdict needs, since a 401
+   * on one of them is a fact about all of them.
+   *
+   * Deliberately neither of the two obvious alternatives. credentialIdentity()
+   * rotates to a fresh UUID after DISCOVERY_TTL_MS, so a long run would stop
+   * finding its own verdict and go back to a credential it had just been told
+   * was rejected. And hashing the key — even with a strong digest — is a
+   * password hash by CodeQL's reading and by any reasonable one: there is no
+   * reason to derive anything from a secret when its POSITION already
+   * identifies it uniquely and reveals nothing.
+   */
+  private azureKeyScope(model: ModelInfo, resourceScope: string): string {
+    const azure = (this.config?.providers ?? []).filter((c) => c.type === 'azure');
+    const cfg = azure.find((c) => c.deploymentName === model.id);
+    if (!cfg?.apiKey) return `${resourceScope}#-`;
+    const group = azure.findIndex((c) => c.apiKey === cfg.apiKey);
+    return `${resourceScope}#k${group}`;
+  }
+
+  private scopeFor(model: ModelInfo): string {
+    if (model.provider !== 'azure') return failureScopeOf(model);
+    const cfg = (this.config?.providers ?? []).find(
+      (c) => c.type === 'azure' && c.deploymentName === model.id,
+    );
+    // normalizeEndpoint, not a hand-rolled trim. `replace(/\/+$/, '')` is
+    // polynomial — the engine retries the anchored repetition from every start
+    // position — and CodeQL flags it as a ReDoS risk wherever caller-supplied
+    // input reaches it, which a configured baseUrl does. utils/net.ts already
+    // carries the linear scan and the endpoint-identity semantics (case rules
+    // that keep two tenant paths on one gateway distinct), and this is at least
+    // the second time that regex has been reintroduced — see the note in
+    // providers/gemini.ts.
+    const resource = normalizeEndpoint(cfg?.baseUrl) || undefined;
+    return failureScopeOf(model, resource);
+  }
+
   private ensureProvider(model: ModelInfo, configs: ProviderConfig[]): void {
     const key = `${model.provider}:${model.id}`;
     if (this.providers.has(key)) return;
@@ -1810,6 +2215,22 @@ export class CascadeRouter extends EventEmitter {
     this.runGeneration++;
     this.runBudgetExceeded = false;
     this.runBudgetExceededReason = undefined;
+    // Quota/auth verdicts are RUN-scoped by design — a user who tops up their
+    // account gets the provider back on the next run rather than after a TTL.
+    // The router outlives a run in the REPL and the desktop app, so without
+    // this the verdict would quietly last the whole process instead.
+    this.failover.clearPermanentVerdicts();
+    // …and put the tiers back on what they were displaced from. Lifting the
+    // verdict alone only makes the provider selectable; a tier still bound to
+    // the fallback never asks the selector, so it would keep charging the
+    // fallback account for every later default-routed run.
+    for (const [tier, model] of this.permanentRepoints) {
+      this.tierModels.set(tier, model);
+      // A tier pinned by Cascade Auto for one task is restored from THIS
+      // snapshot too, so the pre-failover model is what it returns to.
+      this.originalTierModels?.set(tier, model);
+    }
+    this.permanentRepoints.clear();
   }
 
   /**

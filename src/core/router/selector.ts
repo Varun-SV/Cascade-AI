@@ -77,7 +77,25 @@ export class ModelSelector {
    * A model is usable for AUTO selection when its provider is available AND —
    * if that provider was validated — the id is one the provider confirmed.
    */
+  /**
+   * Per-MODEL exclusion, for verdicts finer-grained than a provider.
+   *
+   * `availableProviders` can only say "all of Azure is out", which is wrong
+   * when each Azure deployment carries its own resource and key. The router
+   * sets this to the failover manager's permanent-verdict check, so a
+   * deployment that ran out of credit stops being selected while its healthy
+   * siblings stay eligible. Routed through isUsable() so every selection path
+   * — selectForTier, getNextFallback, the widening fallbacks — honours it,
+   * rather than each having to remember.
+   */
+  private modelVeto?: (model: ModelInfo) => boolean;
+
+  setModelVeto(veto: (model: ModelInfo) => boolean): void {
+    this.modelVeto = veto;
+  }
+
   private isUsable(model: ModelInfo): boolean {
+    if (this.modelVeto?.(model)) return false;
     if (!this.availableProviders.has(model.provider)) return false;
     const valid = this.validatedIds.get(model.provider);
     return !valid || valid.has(normalizeModelId(model.id));
@@ -141,9 +159,13 @@ export class ModelSelector {
   }
 
   selectVisionModel(): ModelInfo | null {
+    // isUsable(), not a bare provider check: this path resolves EVERY
+    // vision-required call, and reading only `availableProviders` made it the
+    // one selection route that ignored both the model veto (so a credential
+    // whose quota is gone still got handed the image) and validatedIds.
     for (const key of VISION_MODEL_PRIORITY) {
       const model = this.availableModels.get(key);
-      if (model && this.availableProviders.has(model.provider) && model.isVisionCapable) {
+      if (model && this.isUsable(model) && model.isVisionCapable) {
         return model;
       }
     }
@@ -156,7 +178,7 @@ export class ModelSelector {
     // any explicit tier/vision override is even consulted. Same worst-case
     // widening selectForTier() and getNextFallback() already apply elsewhere.
     for (const model of this.availableModels.values()) {
-      if (this.availableProviders.has(model.provider) && model.isVisionCapable) return model;
+      if (this.isUsable(model) && model.isVisionCapable) return model;
     }
     return null;
   }

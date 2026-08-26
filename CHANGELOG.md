@@ -19,6 +19,146 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
 ### Fixed
+- **An exhausted provider quota was retried for the rest of the run.** A spent
+  billing quota and a 429 arrive as the same status, and the router's failover
+  path told them apart with a regex that matched `/quota/` — so a dead wallet
+  was treated as a rate limit and put on the 30s→300s backoff ladder, whose
+  entire premise is that the condition clears by itself. It does not: the
+  provider was re-enabled every window, called, and failed, over and over,
+  never giving up. `provider-errors.ts` had classified the two apart from the
+  start (`rate_limit` "eases with time"; `quota_exhausted` "does NOT ease") and
+  nothing making a routing decision had ever asked it. It does now, and an
+  exhausted quota or a dead key earns a verdict the clock cannot lift — only a
+  call that actually succeeds, the next run starting, or the user clearing it,
+  brings the provider back. The verdict also binds calls that were already
+  bound to that provider, not just future selection. A dead key now fails over
+  at all, where before it fell straight through to a raw error.
+
+- **One Azure deployment's failure disabled every other Azure deployment.**
+  Verdicts were keyed on the provider enum, but Azure supports several
+  configured deployments across separate resources, each with its own endpoint
+  and key. A quota or auth failure on one therefore made every healthy sibling
+  ineligible as a fallback. Verdicts are now scoped to the RESOURCE that
+  actually failed — deployments sharing an endpoint share a key, so they share
+  the verdict, while a genuinely separate Azure account stays usable — and
+  every selection path honours that scope, for ordinary rate limits as well as
+  permanent ones.
+
+- **A failed-over answer was credited to the model that never ran.** Callers
+  reported the model they asked for, but the router fails over mid-call — and
+  the hosted server persists that reported model onto the assistant message,
+  where `/why` and thumbs feedback read it back. So a dead model got the credit
+  (or the blame) for an answer a different model produced, and the
+  model-performance history learned something untrue about both. `generate()`
+  now reports which model actually served, and every tier call goes through a
+  wrapper that adopts it, so a new call site cannot quietly reintroduce the
+  mis-attribution.
+
+- **A model your key merely lacks access to was retired for a week.** A
+  model-scoped 403 was recorded in the durable dead-model store, which is meant
+  for ids that genuinely do not exist. Granting the project access, or swapping
+  in a key that already had it, left the model excluded across later runs and
+  process restarts. It now fails over without writing anything durable.
+
+- **A grading call could steal the answer's attribution.** Critics, self-tests
+  and extractors run beside the answer, deliberately on a different model — the
+  critic exists so a model is not marking its own work. They were updating the
+  worker's serving model, so the subtask's output, its terminal status and the
+  feedback history all named the grader rather than the model that wrote the
+  answer.
+
+- **A model under an ordinary backoff was still called directly.** A tier
+  binding or an explicit per-call model resolves without consulting the
+  selector, so the backoff every selection path respected did not apply to
+  them. Such a call now moves to another model when one can serve, and only
+  proceeds if nothing else can.
+
+- **A worker queued behind a rate limiter still called a dead account.** The
+  check that refuses a call to an exhausted credential ran when the model was
+  resolved — before the tokens-per-minute bucket and the local-inference
+  queue, either of which can hold a call for a refill interval or more. In a
+  concurrent wave that is exactly when a sibling discovers the account is
+  dead, so every worker already past the first check went on to submit. The
+  check now also runs immediately before the request leaves, handing back the
+  rate-limit capacity it had reserved.
+
+- **A tool call could fail over to a model that has no tools.** The caller
+  picks native-tool or text-tool mode from the original model and shapes the
+  request around it, so a tool-less replacement leaves that request
+  unanswerable — and the worker free to reply without doing the work. Failover
+  now prefers a tool-capable model whenever the call carries tools.
+
+- **A vision request could be answered by a model that never saw the image.**
+  `selectVisionModel()` is the only path a vision-required call resolves
+  through, and it checked provider availability directly instead of going
+  through the usual model check — making it the one selection route that
+  ignored a credential-scoped verdict. An image could therefore be sent to an
+  account whose quota was already gone.
+
+- **A provider's rate limit could be mistaken for its billing running out.**
+  Google words an ordinary per-minute throttle as `Quota exceeded for quota
+  metric 'Generate Content API requests per minute'` — a limit that clears in
+  under a minute, described entirely in the vocabulary of a spent account. Any
+  classification keyed on the word "quota" therefore wrote off a provider that
+  was about to start working again. Rate-shaped wording (`per minute`, `per
+  day`, `requests per`, `quota metric`) now reads as a rate limit, and only
+  billing wording reaches `quota_exhausted`; an ambiguous "quota" breaks toward
+  transient, since being wrong that way costs a retry rather than a provider.
+  Retry metadata — `retryDelay`, a `Retry-After` header — settles it outright:
+  nothing genuinely out of money tells you when to come back.
+
+- **An Azure deployment you lack access to disabled the whole Azure provider.**
+  Every HTTP 403 was read as a dead credential, including Azure's `The API
+  deployment for this resource does not exist or you do not have access to it`
+  — where the key is fine and every other deployment on the resource still
+  works. A model- or deployment-scoped 403 is now classified as a model
+  problem, leaving the provider usable.
+
+- **One streaming call asked a dead account twice.** When a stream rejected,
+  the router fell back to a non-streaming call — and the built-in OpenAI and
+  Anthropic providers implement that by calling the streaming path again. An
+  exhausted quota or a bad key was therefore hit twice per logical call, and
+  doubled again across a concurrent worker wave. A systemic stream failure is
+  now classified and handed straight to the failover path.
+
+- **A model your key cannot use was thrown rather than routed around.** With
+  a model-scoped 403 correctly classified as a model problem, the routing
+  branch still only handled quota, auth and rate limits, so the run failed
+  with a perfectly good alternative model sitting on the same key. It now
+  fails over like any other unusable model.
+
+- **Topping up an account did not win its traffic back.** Clearing the verdict
+  at the run boundary made the provider selectable again, but a tier still
+  bound to the fallback never consults the selector — so later runs kept
+  charging the fallback account. Tiers repointed by a verdict are now restored
+  when it is lifted.
+
+- **A late failure from a finished run could condemn the next one.** A call
+  admitted by one run can still be settling when the next begins; its verdict
+  landed after the boundary reset and disabled the provider for a run that
+  never saw the failure. Verdicts from a superseded run generation are now
+  ignored, the same way the budget counters already ignore them.
+
+- **A concurrent success could erase a newer "provider is out" verdict.** In a
+  parallel wave, a call already at the provider can land after a sibling has
+  come back with an exhausted quota. It was admitted while the account still
+  looked fine, so it says nothing about the balance now — but it cleared the
+  verdict anyway and sent the rest of the wave back to the dead credential. A
+  success now clears a verdict only if the call started after that verdict
+  existed.
+
+- **Anthropic running out of credit was not detected at all.** The classifier
+  matched `insufficient credit`, but Anthropic says `Your credit balance is too
+  low`, so the one message that genuinely means "this account cannot pay" fell
+  through as `unknown` — non-systemic, and therefore retried per subtask.
+
+  When another configured provider can serve the tier, the run continues on it
+  rather than dying — but that moves spend onto a different account, so it is
+  announced once, naming the provider that stopped working and where the work
+  went. When nothing else can serve it, the failure now carries the actionable
+  message ("check the provider's billing page") instead of the bare vendor
+  string, which said nothing about which account to go and look at.
+
 - **A crashed CLI left the terminal unusable.** Ink puts stdin into raw mode to
   read keystrokes and hides the cursor, and undoes both when it unmounts
   cleanly. On a crash it never runs, and the exit handler restored the

@@ -345,7 +345,7 @@ export function missingVisualEvidence(
 }
 
 export class T3Worker extends BaseTier {
-  private router: CascadeRouter;
+  protected router: CascadeRouter;
   private toolRegistry: ToolRegistry;
   private context: ContextManager;
   private assignment?: T2ToT3Assignment;
@@ -850,7 +850,7 @@ export class T3Worker extends BaseTier {
         ...(this.localOnlyMatch ? { forceLocal: true } : {}),
       };
 
-      const result = await this.router.generate(
+      const result = await this.generateTracked(
         'T3',
         options,
         (chunk) => {
@@ -1436,7 +1436,7 @@ ${assignment.expectedOutput}`;
         // manager decomposes the critique into its own T3 subtasks (costing
         // more than the work under review), and those critic-spawned workers
         // would hit this very reflection step again — unbounded recursion.
-        const verdictResult = await this.router.generate('T2', {
+        const verdictResult = await this.generateAuxiliary('T2', {
           messages: [{
             role: 'user',
             content: `You are an independent critic reviewing another worker's output against its assignment.
@@ -1466,7 +1466,7 @@ Is this output sufficient and correct? Respond with ONLY a JSON object:
 
         this.log(`T2-Critic rejected output: ${parsed.notes}`);
         
-        const improved = await this.router.generate('T3', {
+        const improved = await this.generateTracked('T3', {
           messages: [{
             role: 'user',
             content: `Improve the following so it fully achieves the goal. Address specifically: ${parsed.notes ?? 'gaps vs the goal'}.
@@ -1552,7 +1552,7 @@ ${output}
 Reply with JSON: { "completeness": "pass"|"fail", "correctness": "pass"|"fail", "compliance": "pass"|"fail", "notes": "string" }`;
 
     const testMessages: ConversationMessage[] = [{ role: 'user', content: prompt }];
-    const testResult = await this.router.generate('T3', {
+    const testResult = await this.generateAuxiliary('T3', {
       messages: testMessages,
       maxTokens: 500,
       systemPrompt: this.systemPromptOverride + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
@@ -1609,7 +1609,7 @@ Ignore transient step-by-step details. At most 6 triples. If nothing durable, re
 Subtask: ${assignment.subtaskTitle}
 Output:
 ${output.slice(0, 4000)}`;
-      const result = await this.router.generate('T3', {
+      const result = await this.generateAuxiliary('T3', {
         messages: [{ role: 'user', content: prompt }],
         maxTokens: 300,
         temperature: 0,

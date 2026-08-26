@@ -177,6 +177,1437 @@ describe('CascadeRouter — rate-limit failover retry', () => {
   });
 });
 
+describe('CascadeRouter — exhausted quota is not a rate limit', () => {
+  async function routerWithTwoProviders() {
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+    return router;
+  }
+
+  /** The FailoverManager the router built for itself. */
+  function failoverOf(router: CascadeRouter) {
+    return (router as unknown as { failover: {
+      isProviderAvailable(p: string): boolean;
+      isPermanentlyFailed(p: string): boolean;
+      recordFailure(p: string, reason: string, opts?: Record<string, unknown>): void;
+    } }).failover;
+  }
+
+  function selectorOf(router: CascadeRouter) {
+    return (router as unknown as { selector: {
+      selectForTier(t: string): { id: string } | null;
+      getNextFallback(id: string, t: string): { id: string } | null;
+    } }).selector;
+  }
+
+  it('does not hand an exhausted provider back after the backoff window', async () => {
+    // The regression. `isRateLimitError` matches /quota/, so a spent wallet went
+    // down the rate-limit path and earned a 30s→300s ladder built entirely on
+    // the premise that the condition clears by itself. It does not: the provider
+    // was re-enabled every window, called, and failed, for the rest of the run.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    const openaiStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(Object.assign(
+        new Error('429 You exceeded your current quota, please check your plan and billing details'),
+        { status: 429 },
+      ));
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'from fallback', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = await routerWithTwoProviders();
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+
+    await router.generate('T1', { messages: [{ role: 'user', content: 'hi' }], model: pinned });
+
+    const failover = failoverOf(router);
+    expect(failover.isPermanentlyFailed('openai')).toBe(true);
+
+    // Real timers would need five minutes of wall clock; the verdict is read
+    // through Date.now(), so move that instead and ask again.
+    const realNow = Date.now;
+    try {
+      Date.now = () => realNow() + 10 * 60 * 1000;
+      expect(failover.isProviderAvailable('openai')).toBe(false);
+    } finally {
+      Date.now = realNow;
+    }
+
+    // And the exhausted provider was called exactly once — the point of the
+    // verdict is that nothing goes back to ask it again.
+    expect(openaiStream).toHaveBeenCalledTimes(1);
+    vi.restoreAllMocks();
+  });
+
+  it('still finishes the run on the other provider', async () => {
+    // The chosen policy: a dead wallet on one account must not kill a long run
+    // when another configured provider can serve the tier.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('insufficient_quota: your credit balance is too low'));
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'from fallback', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = await routerWithTwoProviders();
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+
+    const result = await router.generate('T1', { messages: [{ role: 'user', content: 'hi' }], model: pinned });
+
+    expect(result.content).toBe('from fallback');
+    vi.restoreAllMocks();
+  });
+
+  it('announces the dead account once, naming where the work went', async () => {
+    // Continuing moves this user's spend onto a different account. Saying so is
+    // the condition on which continuing is acceptable at all.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('insufficient_quota: your credit balance is too low'));
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'ok', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = await routerWithTwoProviders();
+    const seen: Array<Record<string, unknown>> = [];
+    router.on('provider:exhausted', (e: Record<string, unknown>) => seen.push(e));
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+    // Two calls: a concurrent T3 wave is many workers discovering the same fact.
+    //
+    // maxTokens is set only to keep the TpmLimiter out of the way. Left unset,
+    // the reservation defaults to the model's whole maxOutputTokens (~32k for
+    // opus), so the second call alone overruns anthropic's 40k/min bucket and
+    // genuinely waits a full refill interval before it is allowed to proceed.
+    await router.generate('T1', { messages: [{ role: 'user', content: 'a' }], model: pinned, maxTokens: 64 });
+    await router.generate('T1', { messages: [{ role: 'user', content: 'b' }], model: pinned, maxTokens: 64 });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!['provider']).toBe('openai');
+    expect(seen[0]!['kind']).toBe('quota_exhausted');
+    expect(seen[0]!['failedOverTo']).toMatch(/^anthropic:/);
+    expect(String(seen[0]!['message'])).toMatch(/billing/i);
+    vi.restoreAllMocks();
+  });
+
+  it('a rate limit is still transient — it earns no permanent verdict', async () => {
+    // Guard against over-reach. The ladder must keep working for the failure it
+    // was built for, or this fix trades one bug for a worse one.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(Object.assign(new Error('429 Too Many Requests'), { status: 429 }));
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'ok', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = await routerWithTwoProviders();
+    const seen: unknown[] = [];
+    router.on('provider:exhausted', (e: unknown) => seen.push(e));
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+    await router.generate('T1', { messages: [{ role: 'user', content: 'hi' }], model: pinned });
+
+    expect(failoverOf(router).isPermanentlyFailed('openai')).toBe(false);
+    expect(seen).toHaveLength(0);
+    vi.restoreAllMocks();
+  });
+
+  it('refuses a LATER call on the dead provider without paying for it again', async () => {
+    // Review finding, confirmed: `generate()` resolves
+    // `options.model ?? this.tierModels.get(tier)` and neither arm consults the
+    // selector, so marking the provider unavailable stopped future SELECTION
+    // and nothing else. A single-provider run that met the quota during
+    // complexity classification went straight on to call the same dead account
+    // for every later tier — the verdict read correctly and stopped nothing.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+
+    const openaiStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('insufficient_quota: your credit balance is too low'));
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai']));
+    await router.init(makeConfig({ providers: [{ type: 'openai', apiKey: 'sk-test' }] }));
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+    const call = () => router.generate('T1', { messages: [{ role: 'user', content: 'x' }], model: pinned, maxTokens: 64 });
+
+    await expect(call()).rejects.toThrow(/will not recover on its own/);
+    expect(openaiStream).toHaveBeenCalledTimes(1);
+
+    // The second call must be refused from the verdict, not by asking again.
+    await expect(call()).rejects.toThrow(/will not recover on its own/);
+    expect(openaiStream).toHaveBeenCalledTimes(1);
+
+    vi.restoreAllMocks();
+  });
+
+  it('hands the provider back at the next run boundary', async () => {
+    // The verdict is RUN-scoped, and the router outlives a run in the REPL and
+    // the desktop app. Without a clear at the boundary it would last the whole
+    // process, so topping up an account would change nothing until restart.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+
+    const openaiStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('insufficient_quota: your credit balance is too low'));
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai']));
+    await router.init(makeConfig({ providers: [{ type: 'openai', apiKey: 'sk-test' }] }));
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+    const call = () => router.generate('T1', { messages: [{ role: 'user', content: 'x' }], model: pinned, maxTokens: 64 });
+
+    await expect(call()).rejects.toThrow();
+    expect(openaiStream).toHaveBeenCalledTimes(1);
+
+    // The account is topped up; the next run must actually try it again.
+    openaiStream.mockResolvedValue({
+      content: 'topped up', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+    router.beginRun();
+
+    await expect(call()).resolves.toMatchObject({ content: 'topped up' });
+    expect(openaiStream).toHaveBeenCalledTimes(2);
+
+    vi.restoreAllMocks();
+  });
+
+  it('one dead Azure resource still lets a separate resource serve the request', async () => {
+    // Azure deliberately supports several deployments, each able to carry its
+    // own resource, endpoint and key — ensureProvider() binds a config entry
+    // per deployment for exactly that reason. Keying the verdict on the
+    // provider enum made a quota failure on one resource disqualify every
+    // healthy sibling as a fallback.
+    // AzureOpenAIProvider inherits generateStream from OpenAIProvider, and each
+    // deployment gets its own instance bound to its own model — so `this.model.id`
+    // is the deployment, which is exactly the identity the verdict must key on.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+
+    const azureStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockImplementation(function (this: { model?: { id?: string } }) {
+        if (this?.model?.id === 'dead-resource') {
+          return Promise.reject(new Error('insufficient_quota: your credit balance is too low'));
+        }
+        return Promise.resolve({
+          content: 'from the healthy resource',
+          usage: { inputTokens: 1, outputTokens: 1 },
+          finishReason: 'stop',
+        }) as never;
+      } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['azure']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'azure', deploymentName: 'dead-resource', apiKey: 'k1', baseUrl: 'https://a.openai.azure.com' },
+        { type: 'azure', deploymentName: 'healthy-resource', apiKey: 'k2', baseUrl: 'https://b.openai.azure.com' },
+      ],
+    }));
+
+    const dead = router.getAvailableModels().find((m) => m.id === 'dead-resource');
+    const healthy = router.getAvailableModels().find((m) => m.id === 'healthy-resource');
+    expect(dead).toBeDefined();
+    expect(healthy).toBeDefined();
+
+    const failover = failoverOf(router);
+    await router.generate('T1', { messages: [{ role: 'user', content: 'x' }], model: dead, maxTokens: 64 })
+      .catch(() => { /* whether it fails over or throws, the scoping is the subject */ });
+
+    // The dead deployment is out; its sibling is untouched and still usable.
+    expect(failover.isPermanentlyFailed('azure:https://a.openai.azure.com')).toBe(true);
+    expect(failover.isPermanentlyFailed('azure:https://b.openai.azure.com')).toBe(false);
+
+    const result = await router.generate('T1', {
+      messages: [{ role: 'user', content: 'y' }], model: healthy, maxTokens: 64,
+    });
+    expect(result.content).toBe('from the healthy resource');
+
+    azureStream.mockRestore();
+    vi.restoreAllMocks();
+  });
+
+  it('a resource-scoped verdict takes that resource out of SELECTION', async () => {
+    // A narrow verdict deliberately never calls markProviderUnavailable — that
+    // would take the healthy siblings with it — so nothing in the selector
+    // knows the deployment is out unless it is told. Asserted directly on the
+    // selector, because going through generate() would repoint the tier via
+    // the ordinary failover path and never exercise this.
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['azure']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'azure', deploymentName: 'dead-resource', apiKey: 'k1', baseUrl: 'https://a.openai.azure.com' },
+        { type: 'azure', deploymentName: 'healthy-resource', apiKey: 'k2', baseUrl: 'https://b.openai.azure.com' },
+      ],
+    }));
+
+    const selector = selectorOf(router);
+    // It is the tier's default pick to begin with — otherwise this proves nothing.
+    expect(selector.selectForTier('T1')?.id).toBe('dead-resource');
+
+    failoverOf(router).recordFailure('azure', 'quota exhausted', {
+      permanent: true, scope: 'azure:https://a.openai.azure.com',
+    });
+
+    expect(selector.selectForTier('T1')?.id).toBe('healthy-resource');
+    expect(selector.getNextFallback('dead-resource', 'T1')?.id).toBe('healthy-resource');
+  });
+
+  it('selection routes around a dead Azure resource without an explicit pin', async () => {
+    // The case the model veto exists for, and the one the two tests above do
+    // NOT reach: a deployment-scoped verdict never calls
+    // markProviderUnavailable (that would take out the healthy siblings too),
+    // so nothing in the selector knows the deployment is out unless the veto
+    // tells it. Without one, selection hands the dead deployment straight back.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+
+    const azureStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockImplementation(function (this: { model?: { id?: string } }) {
+        if (this?.model?.id === 'dead-resource') {
+          return Promise.reject(new Error('insufficient_quota: your credit balance is too low'));
+        }
+        return Promise.resolve({
+          content: 'from the healthy resource',
+          usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+        }) as never;
+      } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['azure']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'azure', deploymentName: 'dead-resource', apiKey: 'k1', baseUrl: 'https://a.openai.azure.com' },
+        { type: 'azure', deploymentName: 'healthy-resource', apiKey: 'k2', baseUrl: 'https://b.openai.azure.com' },
+      ],
+    }));
+
+    const dead = router.getAvailableModels().find((m) => m.id === 'dead-resource');
+    // Bind the tier to the deployment that is about to die, the way init's
+    // Azure tier-fill does — then let the tier resolve on its own from here.
+    (router as unknown as { tierModels: Map<string, unknown> }).tierModels.set('T1', dead);
+
+    await router.generate('T1', { messages: [{ role: 'user', content: 'a' }], maxTokens: 64 })
+      .catch(() => { /* the first call is what earns the verdict */ });
+    expect(failoverOf(router).isPermanentlyFailed('azure:https://a.openai.azure.com')).toBe(true);
+
+    // No pin. Selection must skip the dead deployment and find its sibling.
+    const result = await router.generate('T1', { messages: [{ role: 'user', content: 'b' }], maxTokens: 64 });
+    expect(result.content).toBe('from the healthy resource');
+
+    azureStream.mockRestore();
+    vi.restoreAllMocks();
+  });
+
+  it('a sibling tier still bound to the dead provider does not call it', async () => {
+    // markProviderUnavailable only affects selector-based picks, so cached
+    // T1/T2 entries pointing at the provider T3 just killed would each go and
+    // rediscover the same dead account.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    const openaiStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('insufficient_quota: your credit balance is too low'));
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'served elsewhere', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+
+    const openaiModel = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+    // Bind a SECOND tier to the same provider, the way init's tier-fill would.
+    (router as unknown as { tierModels: Map<string, unknown> }).tierModels.set('T2', openaiModel);
+
+    // T3 discovers the dead account.
+    await router.generate('T3', { messages: [{ role: 'user', content: 'a' }], model: openaiModel, maxTokens: 64 });
+    expect(openaiStream).toHaveBeenCalledTimes(1);
+
+    // T2 is still bound to it. It must not go and find out for itself.
+    const t2 = await router.generate('T2', { messages: [{ role: 'user', content: 'b' }], maxTokens: 64 });
+    expect(t2.content).toBe('served elsewhere');
+    expect(openaiStream).toHaveBeenCalledTimes(1);
+
+    vi.restoreAllMocks();
+  });
+
+  it('puts the tier back on the restored provider at the next run, with no pin', async () => {
+    // Review finding: clearing the verdict only makes the provider SELECTABLE.
+    // generate() resolves tierModels.get(tier) before it ever asks the
+    // selector, so a tier still holding the fallback keeps charging the
+    // fallback account for every later default-routed run. Deliberately
+    // UNPINNED — the earlier boundary test pinned the original model, which
+    // masked exactly this.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    const openaiStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('insufficient_quota: your credit balance is too low'));
+    const anthropicStream = vi.spyOn(AnthropicProvider.prototype, 'generateStream')
+      .mockResolvedValue({
+        content: 'from the fallback', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+      } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+
+    const openaiModel = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+    // Bind the tier the way init's tier-fill does — model AND provider instance.
+    (router as unknown as { tierModels: Map<string, unknown> }).tierModels.set('T1', openaiModel);
+    (router as unknown as { ensureProvider(m: unknown, c: unknown): void })
+      .ensureProvider(openaiModel, [{ type: 'openai', apiKey: 'sk-test' }]);
+
+    // Run 1: the account dies and the tier is repointed at anthropic.
+    const first = await router.generate('T1', { messages: [{ role: 'user', content: 'a' }], maxTokens: 64 });
+    expect(first.content).toBe('from the fallback');
+
+    // The account is topped up between runs.
+    openaiStream.mockResolvedValue({
+      content: 'from the restored account', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+    router.beginRun();
+
+    // Run 2, default-routed: the traffic must go back, not stay on the fallback.
+    const second = await router.generate('T1', { messages: [{ role: 'user', content: 'b' }], maxTokens: 64 });
+    expect(second.content).toBe('from the restored account');
+    expect(anthropicStream).toHaveBeenCalledTimes(1);
+
+    vi.restoreAllMocks();
+  });
+
+  it('a straggler from the previous run cannot steer the new one', async () => {
+    // A call admitted by run A can still be settling when run B starts.
+    // Guarding only the `permanent` bit left everything else: a 30s transient
+    // failover entry, markProviderUnavailable() for a provider-wide scope, and
+    // a repointed tier — all installed on run B from run A's dead result.
+    //
+    // The earlier version of this test asserted only isPermanentlyFailed, which
+    // stayed false throughout and so proved none of that.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    let releaseStraggler: ((e: unknown) => void) | undefined;
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockImplementation(() => new Promise((_res, rej) => { releaseStraggler = rej; }) as never);
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'ok', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+
+    const openaiModel = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+    // Run A submits a call that will not settle until we say so.
+    const inFlight = router.generate('T1', {
+      messages: [{ role: 'user', content: 'a' }], model: openaiModel, maxTokens: 64,
+    }).catch(() => undefined);
+
+    // Let it actually reach the provider — otherwise there is no straggler.
+    for (let i = 0; i < 50 && !releaseStraggler; i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+
+    // Run B begins, and we snapshot everything its routing depends on.
+    router.beginRun();
+    const selector = selectorOf(router);
+    const tierBefore = router.getModelForTier('T1')?.id;
+    const pickBefore = selector.selectForTier('T1')?.id;
+    const failover = failoverOf(router);
+
+    // NOW run A comes back, with a failure that would ordinarily repoint a tier
+    // and pull the provider.
+    expect(releaseStraggler).toBeDefined();
+    releaseStraggler!(new Error('insufficient_quota: your credit balance is too low'));
+    await inFlight;
+
+    // Nothing about run B moved: no verdict, no transient backoff, no provider
+    // removed from selection, no tier rebound.
+    expect(failover.isPermanentlyFailed('openai')).toBe(false);
+    expect(failover.isProviderAvailable('openai')).toBe(true);
+    expect(selector.selectForTier('T1')?.id).toBe(pickBefore);
+    expect(router.getModelForTier('T1')?.id).toBe(tierBefore);
+
+    vi.restoreAllMocks();
+  });
+  it('does not ask a dead account twice for one streaming call', async () => {
+    // Review finding: on a stream rejection the cloud branch fell back to
+    // provider.generate(), and the built-in providers implement generate() by
+    // calling generateStream() again — so one logical call hit the exhausted
+    // account twice, doubled again across a concurrent wave.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    const openaiStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('insufficient_quota: your credit balance is too low'));
+    // generate() delegating to generateStream is what makes the double-call
+    // real, so model that faithfully rather than stubbing it away.
+    const openaiGenerate = vi.spyOn(OpenAIProvider.prototype, 'generate')
+      .mockImplementation(function (this: OpenAIProvider, ...args: unknown[]) {
+        return (this.generateStream as unknown as (...a: unknown[]) => Promise<never>)(args[0], () => undefined);
+      } as never);
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'from fallback', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+    // onChunk present ⇒ the streaming path, which is what the CLI and the
+    // hosted client both use.
+    const result = await router.generate(
+      'T1',
+      { messages: [{ role: 'user', content: 'hi' }], model: pinned, maxTokens: 64 },
+      () => undefined,
+    );
+
+    expect(result.content).toBe('from fallback');
+    // Exactly one request to the dead account, not two.
+    expect(openaiStream).toHaveBeenCalledTimes(1);
+    expect(openaiGenerate).not.toHaveBeenCalled();
+
+    vi.restoreAllMocks();
+  });
+
+  it('fails over on a model-scoped 403 instead of rethrowing', async () => {
+    // Classifying "Project does not have access to model gpt-5" as
+    // model_unavailable stopped it killing the whole provider — but the
+    // routing branch only handled quota/auth/rate limits and
+    // isModelNotFoundError's regex does not match that wording, so it was
+    // rethrown with a healthy fallback sitting right there.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    // Only THIS model is refused. That is what "model-scoped" means: the
+    // credential is fine, so the right move is another model on the same
+    // provider — not condemning the account and moving the spend elsewhere.
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockImplementation(function (this: { model?: { id?: string } }) {
+        if (this?.model?.id === 'gpt-4o') {
+          return Promise.reject(Object.assign(
+            new Error('Project does not have access to model gpt-4o'), { status: 403 },
+          ));
+        }
+        return Promise.resolve({
+          content: 'from another model on the same key',
+          usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+        }) as never;
+      } as never);
+    const anthropicStream = vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'from a different provider', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+    const result = await router.generate('T1', {
+      messages: [{ role: 'user', content: 'hi' }], model: pinned, maxTokens: 64,
+    });
+
+    expect(result.content).toBe('from another model on the same key');
+    // The credential is NOT condemned — only this model was — so the spend
+    // never had to move to a different account at all.
+    expect(failoverOf(router).isPermanentlyFailed('openai')).toBe(false);
+    expect(anthropicStream).not.toHaveBeenCalled();
+
+    vi.restoreAllMocks();
+  });
+
+  it('two deployments on ONE resource share the verdict, because they share the key', async () => {
+    // Review finding: Azure keys are resource-scoped —
+    // config/global-credentials spreads one resource key across every
+    // deployment on that endpoint, and has a test saying so. Keying per
+    // deployment let fallback pick the sibling on the same endpoint and issue
+    // a second request that could not possibly work.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+
+    const azureStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('insufficient_quota: your credit balance is too low'));
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['azure']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'azure', deploymentName: 'gpt-4o', apiKey: 'key-r1', baseUrl: 'https://r1.openai.azure.com' },
+        { type: 'azure', deploymentName: 'gpt-4o-mini', apiKey: 'key-r1', baseUrl: 'https://r1.openai.azure.com' },
+      ],
+    }));
+
+    const first = router.getAvailableModels().find((m) => m.id === 'gpt-4o');
+    await router.generate('T1', { messages: [{ role: 'user', content: 'x' }], model: first, maxTokens: 64 })
+      .catch(() => { /* earning the verdict is the point */ });
+
+    // One verdict, covering the whole resource…
+    expect(failoverOf(router).isPermanentlyFailed('azure:https://r1.openai.azure.com')).toBe(true);
+    // …so the sibling deployment is out too, and selection will not offer it.
+    const sibling = router.getAvailableModels().find((m) => m.id === 'gpt-4o-mini')!;
+    expect(selectorOf(router).getNextFallback('gpt-4o', 'T1')).toBeNull();
+
+    const callsBefore = azureStream.mock.calls.length;
+    await router.generate('T1', { messages: [{ role: 'user', content: 'y' }], model: sibling, maxTokens: 64 })
+      .catch(() => { /* refused from the verdict, not by asking */ });
+    expect(azureStream.mock.calls.length).toBe(callsBefore);
+
+    vi.restoreAllMocks();
+  });
+
+  it('a TRANSIENT scoped failure is enforced in selection, then expires', async () => {
+    // A scoped verdict deliberately does not call markProviderUnavailable —
+    // that would take the resource's healthy siblings with it — so a veto that
+    // only looked at permanent verdicts left an Azure rate limit recorded and
+    // then completely ignored.
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['azure']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'azure', deploymentName: 'busy', apiKey: 'k1', baseUrl: 'https://r1.openai.azure.com' },
+        { type: 'azure', deploymentName: 'quiet', apiKey: 'k2', baseUrl: 'https://r2.openai.azure.com' },
+      ],
+    }));
+
+    const selector = selectorOf(router);
+    expect(selector.selectForTier('T1')?.id).toBe('busy');
+
+    vi.useFakeTimers();
+    try {
+      // An ORDINARY rate limit — not permanent.
+      failoverOf(router).recordFailure('azure', 'rate limit', { scope: 'azure:https://r1.openai.azure.com' });
+
+      expect(selector.selectForTier('T1')?.id).toBe('quiet');
+
+      // …and the existing expiry brings it back on its own.
+      vi.advanceTimersByTime(30_001);
+      expect(selector.selectForTier('T1')?.id).toBe('busy');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('never hands an image to a model whose credential is out', async () => {
+    // selectVisionModel() is the SOLE path a vision-required call resolves
+    // through, and it read `availableProviders` directly rather than going via
+    // isUsable() — making it the one selection route that ignored the model
+    // veto. A resource-scoped verdict deliberately does not pull the provider,
+    // so nothing else would have stopped the image going to the dead account.
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['azure']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'azure', deploymentName: 'gpt-4o', apiKey: 'k1', baseUrl: 'https://r1.openai.azure.com' },
+        { type: 'azure', deploymentName: 'backup-gpt-4o', apiKey: 'k2', baseUrl: 'https://r2.openai.azure.com' },
+      ],
+    }));
+
+    const selector = (router as unknown as {
+      selector: { selectVisionModel(): { id: string } | null };
+    }).selector;
+
+    // Both deployments can see, and the dead one is the preferred pick.
+    const all = router.getAvailableModels();
+    expect(all.filter((m) => m.isVisionCapable).map((m) => m.id).sort())
+      .toEqual(['backup-gpt-4o', 'gpt-4o']);
+    expect(selector.selectVisionModel()?.id).toBe('gpt-4o');
+
+    failoverOf(router).recordFailure('azure', 'quota exhausted', {
+      permanent: true, scope: 'azure:https://r1.openai.azure.com',
+    });
+
+    // The replacement must still be able to see — not merely be available.
+    const replacement = selector.selectVisionModel();
+    expect(replacement?.id).toBe('backup-gpt-4o');
+    expect(all.find((m) => m.id === replacement?.id)?.isVisionCapable).toBe(true);
+  });
+
+  it('reports the model that actually served, not the one that was asked for', async () => {
+    // Review finding: callers that REPORT a model — tier:status, which the
+    // hosted server persists onto the assistant message and which /why and
+    // thumbs feedback then read — had no way to learn about a mid-call
+    // failover, so the credit went to a model that never ran.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('insufficient_quota: your credit balance is too low'));
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'from fallback', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+
+    const asked = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+    const result = await router.generate('T1', {
+      messages: [{ role: 'user', content: 'hi' }], model: asked, maxTokens: 64,
+    });
+
+    expect(result.content).toBe('from fallback');
+    expect(result.servedBy).toBeDefined();
+    expect(result.servedBy!.provider).toBe('anthropic');
+    expect(result.servedBy!.id).not.toBe('gpt-4o');
+
+    vi.restoreAllMocks();
+  });
+
+  it('reports the pinned model when no failover happened', async () => {
+    // The other half: with a per-call pin and no failover, the tier's own
+    // binding is NOT what served, so reading it back off the tier would be
+    // wrong in the ordinary case.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'ok', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai']));
+    await router.init(makeConfig({ providers: [{ type: 'openai', apiKey: 'sk-test' }] }));
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o-mini');
+    const result = await router.generate('T1', {
+      messages: [{ role: 'user', content: 'hi' }], model: pinned, maxTokens: 64,
+    });
+
+    expect(result.servedBy).toEqual({ provider: 'openai', id: 'gpt-4o-mini' });
+    // And it is genuinely different from the tier's own binding.
+    expect(router.getModelForTier('T1')?.id).not.toBe('gpt-4o-mini');
+
+    vi.restoreAllMocks();
+  });
+
+  it('restores the tier BASELINE, not a one-off per-call override', async () => {
+    // Review finding: recording the model that failed meant a Cascade Auto
+    // per-subtask override, once it failed permanently, was installed by
+    // beginRun() as the tier's baseline — leaving every later default-routed
+    // call on a model the tier was never configured to use.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('insufficient_quota: your credit balance is too low'));
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'from fallback', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+
+    // The tier's configured baseline…
+    const baseline = router.getAvailableModels().find((m) => m.provider === 'anthropic')!;
+    (router as unknown as { tierModels: Map<string, unknown> }).tierModels.set('T1', baseline);
+
+    // …and a DIFFERENT, one-off per-call override that is about to die.
+    const oneOff = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o')!;
+    await router.generate('T1', {
+      messages: [{ role: 'user', content: 'x' }], model: oneOff, maxTokens: 64,
+    }).catch(() => undefined);
+
+    router.beginRun();
+
+    // The baseline comes back — not the subtask model that happened to fail.
+    expect(router.getModelForTier('T1')?.id).toBe(baseline.id);
+    expect(router.getModelForTier('T1')?.id).not.toBe('gpt-4o');
+
+    vi.restoreAllMocks();
+  });
+
+  it('identifies the Azure resource regardless of trailing slashes or case', async () => {
+    // The scope is derived through utils/net.ts normalizeEndpoint rather than a
+    // hand-rolled trim: `replace(/\/+$/, '')` is polynomial and CodeQL flags it
+    // as a ReDoS risk wherever caller-supplied input reaches it, which a
+    // configured baseUrl does. The behaviour that matters is here — two
+    // spellings of one endpoint must be ONE credential, or a verdict recorded
+    // under one spelling silently fails to cover the other.
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['azure']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'azure', deploymentName: 'a', apiKey: 'k', baseUrl: 'https://R1.OpenAI.Azure.com///' },
+        { type: 'azure', deploymentName: 'b', apiKey: 'k', baseUrl: 'https://r1.openai.azure.com' },
+      ],
+    }));
+
+    const scopeFor = (router as unknown as { scopeFor(m: unknown): string }).scopeFor.bind(router);
+    const a = router.getAvailableModels().find((m) => m.id === 'a');
+    const b = router.getAvailableModels().find((m) => m.id === 'b');
+
+    // Same resource, written two ways — one scope.
+    expect(scopeFor(a)).toBe(scopeFor(b));
+    expect(scopeFor(a)).not.toContain('///');
+  });
+
+  it('keeps two tenant routes on one gateway as separate credentials', () => {
+    // The old normalization lowercased the WHOLE url, path included, so
+    // https://gw.example/TenantA and /tenanta collapsed to one scope — meaning
+    // a verdict earned by one tenant's credential silently condemned the
+    // other's. utils/net.ts lowercases scheme and host only, and says why in
+    // as many words. Same over-broadening this PR has been narrowing all
+    // along, one level further down.
+    const router = new CascadeRouter();
+    const scopeFor = (router as unknown as { scopeFor(m: unknown): string }).scopeFor.bind(router);
+    (router as unknown as { config: unknown }).config = {
+      providers: [
+        { type: 'azure', deploymentName: 'a', apiKey: 'k1', baseUrl: 'https://gw.example/TenantA' },
+        { type: 'azure', deploymentName: 'b', apiKey: 'k2', baseUrl: 'https://gw.example/tenanta' },
+      ],
+    };
+
+    const a = scopeFor({ provider: 'azure', id: 'a' });
+    const b = scopeFor({ provider: 'azure', id: 'b' });
+    expect(a).not.toBe(b);
+  });
+
+  it('scopes a rejected KEY to that key, and a spent quota to the resource', async () => {
+    // The two systemic failures have different blast radii on one endpoint.
+    // Billing belongs to the resource — deployments there draw on the same
+    // subscription even with separate keys. A rejected credential belongs to
+    // the key: a 401 on a rotated one says nothing about its neighbour.
+    const router = new CascadeRouter();
+    (router as unknown as { config: unknown }).config = {
+      providers: [
+        { type: 'azure', deploymentName: 'a', apiKey: 'key-one', baseUrl: 'https://r1.openai.azure.com' },
+        { type: 'azure', deploymentName: 'b', apiKey: 'key-two', baseUrl: 'https://r1.openai.azure.com' },
+      ],
+    };
+    const inner = router as unknown as {
+      scopeForFailure(m: unknown, kind: string): string;
+      scopesFor(m: unknown): string[];
+    };
+    const a = { provider: 'azure', id: 'a' };
+    const b = { provider: 'azure', id: 'b' };
+
+    // Same resource, different keys.
+    expect(inner.scopeForFailure(a, 'quota_exhausted')).toBe(inner.scopeForFailure(b, 'quota_exhausted'));
+    expect(inner.scopeForFailure(a, 'auth')).not.toBe(inner.scopeForFailure(b, 'auth'));
+
+    // And "is this model out?" consults both, or a verdict filed under one
+    // would be invisible to the other.
+    expect(inner.scopesFor(a)).toContain(inner.scopeForFailure(a, 'quota_exhausted'));
+    expect(inner.scopesFor(a)).toContain(inner.scopeForFailure(a, 'auth'));
+  });
+
+  it('does not durably retire a model the key merely lacks access to', async () => {
+    // A 403 is this credential's authorization, not a fact about the model id.
+    // Persisting it to the 7-day DeadModelStore kept removing a usable model
+    // across later runs and process restarts, even after the user granted the
+    // project access or swapped in a key that already had it.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockImplementation(function (this: { model?: { id?: string } }) {
+        if (this?.model?.id === 'gpt-4o') {
+          return Promise.reject(Object.assign(
+            new Error('Project does not have access to model gpt-4o'), { status: 403 },
+          ));
+        }
+        return Promise.resolve({
+          content: 'ok', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+        }) as never;
+      } as never);
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'ok', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+
+    const deadModels = (router as unknown as { deadModels: { isDead(p: string, id: string): boolean } }).deadModels;
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+
+    await router.generate('T1', { messages: [{ role: 'user', content: 'hi' }], model: pinned, maxTokens: 64 });
+
+    // It failed over for this request…
+    expect(deadModels.isDead('openai', 'gpt-4o')).toBe(false);
+
+    vi.restoreAllMocks();
+  });
+
+  it('keeps a tool-capable model when a tool call fails over', async () => {
+    // The caller picked native-tool vs text-tool mode from the ORIGINAL model
+    // and shaped the request around it. A tool-less replacement leaves that
+    // request's `tools` unanswerable and the worker free to reply without
+    // doing the work. servedBy is what makes this observable.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('insufficient_quota: your credit balance is too low'));
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'ok', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+
+    // Make the model the ordinary fallback would reach FIRST tool-less, and
+    // leave exactly one capable alternative behind it.
+    const anthropicModels = router.getAvailableModels().filter((m) => m.provider === 'anthropic');
+    expect(anthropicModels.length).toBeGreaterThan(1);
+    for (const m of anthropicModels) (m as { supportsToolUse?: boolean }).supportsToolUse = false;
+    const capable = anthropicModels[anthropicModels.length - 1]!;
+    (capable as { supportsToolUse?: boolean }).supportsToolUse = true;
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+    const result = await router.generate('T1', {
+      messages: [{ role: 'user', content: 'hi' }],
+      model: pinned,
+      maxTokens: 64,
+      tools: [{ name: 'read_file', description: 'x', inputSchema: { type: 'object' } }],
+    } as never);
+
+    expect(result.servedBy).toBeDefined();
+    const served = router.getAvailableModels().find((m) => m.id === result.servedBy!.id);
+    expect(served, `served ${result.servedBy!.id}`).toBeDefined();
+    expect(served!.supportsToolUse).not.toBe(false);
+
+    vi.restoreAllMocks();
+  });
+
+  it('restores the CONFIGURED baseline after a Cascade Auto override fails', async () => {
+    // overrideTierModel() stashes the configured baseline in originalTierModels
+    // and overwrites tierModels with a per-task pick. Reading tierModels when
+    // recording the repoint captured that pick, so beginRun() installed a model
+    // chosen for the PREVIOUS task as the tier's baseline — before the next
+    // task had even been classified.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('insufficient_quota: your credit balance is too low'));
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'ok', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+
+    // The tier's CONFIGURED baseline.
+    const baseline = router.getAvailableModels().find((m) => m.provider === 'anthropic')!;
+    (router as unknown as { tierModels: Map<string, unknown> }).tierModels.set('T1', baseline);
+
+    // Cascade Auto picks something else for this one task, the proper way.
+    const autoPick = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o')!;
+    router.overrideTierModel('T1', autoPick);
+    expect(router.getModelForTier('T1')?.id).toBe(autoPick.id);
+
+    // That per-task pick is the one that dies.
+    await router.generate('T1', { messages: [{ role: 'user', content: 'x' }], maxTokens: 64 })
+      .catch(() => undefined);
+
+    router.beginRun();
+
+    // The CONFIGURED baseline comes back — not the model Auto chose for a task
+    // that is already over.
+    expect(router.getModelForTier('T1')?.id).toBe(baseline.id);
+    expect(router.getModelForTier('T1')?.id).not.toBe(autoPick.id);
+
+    vi.restoreAllMocks();
+  });
+  it('does not submit a call that was queued when the verdict landed', async () => {
+    // The concurrent-wave case the verdict exists for. The check at model
+    // resolution runs BEFORE the TPM bucket and the local queue, either of
+    // which can hold a call for a refill interval — and that is exactly when a
+    // sibling discovers the account is dead. Every worker already past the
+    // first check would otherwise still submit.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+
+    const openaiStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockResolvedValue({
+        content: 'should never be reached', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+      } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai']));
+    await router.init(makeConfig({ providers: [{ type: 'openai', apiKey: 'sk-test' }] }));
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+
+    // Stand in for "a sibling recorded the verdict while this call waited":
+    // the TPM acquire is the wait, and the verdict lands during it.
+    const limiter = (router as unknown as {
+      tpmLimiter: { acquire(p: string, n: number, s?: AbortSignal): Promise<void> };
+    }).tpmLimiter;
+    const realAcquire = limiter.acquire.bind(limiter);
+    limiter.acquire = async (p: string, n: number, sig?: AbortSignal) => {
+      await realAcquire(p, n, sig);
+      failoverOf(router).recordFailure('openai', 'quota exhausted', {
+        permanent: true, detail: 'Quota or billing limit reached. This will not recover on its own.',
+      });
+    };
+
+    await expect(
+      router.generate('T1', { messages: [{ role: 'user', content: 'hi' }], model: pinned, maxTokens: 64 }),
+    ).rejects.toThrow(/will not recover on its own/);
+
+    // The provider was never asked.
+    expect(openaiStream).not.toHaveBeenCalled();
+
+    vi.restoreAllMocks();
+  });
+
+  it('names the model a VISION retry will actually use', async () => {
+    // A vision call's retry re-resolves through selectVisionModel() and ignores
+    // the tier binding, so announcing the ordinary tier fallback named an
+    // account that never receives the work — while telling the user their
+    // spend had moved there.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+
+    // Fail whichever model the vision path ACTUALLY resolves to first, rather
+    // than assuming which provider wins the vision priority list.
+    const selector = (router as unknown as {
+      selector: {
+        selectVisionModel(): { id: string; provider: string } | null;
+        getNextFallback(id: string, t: string): { id: string } | null;
+      };
+    }).selector;
+    const firstVision = selector.selectVisionModel();
+    expect(firstVision).not.toBeNull();
+
+    // Force the ordinary tier fallback and the vision pick APART, and force it
+    // to hold AFTER the verdict — the verdict condemns the failing provider, so
+    // a divergence computed beforehand evaporates once that provider is out.
+    //
+    // The surviving provider's FIRST model loses vision and its LAST keeps it:
+    // getNextFallback then lands on the first (blind) while selectVisionModel
+    // lands on the last. Announcing the former would name a model that never
+    // serves.
+    const all = router.getAvailableModels();
+    const survivors = all.filter((m) => m.provider !== firstVision!.provider);
+    expect(survivors.length, 'fixture needs several models on a second provider')
+      .toBeGreaterThan(1);
+    const backupVision = survivors[survivors.length - 1]!;
+    for (const m of all) {
+      (m as { isVisionCapable: boolean }).isVisionCapable =
+        m.id === firstVision!.id || m.id === backupVision.id;
+    }
+    expect((survivors[0] as { isVisionCapable: boolean }).isVisionCapable).toBe(false);
+
+    const dead = (self: { model?: { id?: string } }) =>
+      self?.model?.id === firstVision!.id
+        ? Promise.reject(new Error('insufficient_quota: your credit balance is too low'))
+        : Promise.resolve({
+            content: 'ok', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+          }) as never;
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockImplementation(function (this: { model?: { id?: string } }) { return dead(this); } as never);
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream')
+      .mockImplementation(function (this: { model?: { id?: string } }) { return dead(this); } as never);
+
+    const seen: Array<Record<string, unknown>> = [];
+    router.on('provider:exhausted', (e: Record<string, unknown>) => seen.push(e));
+
+    const result = await router.generate(
+      'T1',
+      { messages: [{ role: 'user', content: 'what is in this image' }], maxTokens: 64 },
+      undefined,
+      true, // requireVision
+    );
+
+    expect(seen).toHaveLength(1);
+    const announced = String(seen[0]!['failedOverTo']);
+    expect(announced).toBeTruthy();
+    // What was announced is what actually served — and it can see.
+    expect(result.servedBy).toBeDefined();
+    expect(announced).toBe(`${result.servedBy!.provider}:${result.servedBy!.id}`);
+    const served = router.getAvailableModels().find((m) => m.id === result.servedBy!.id);
+    expect(served?.isVisionCapable).toBe(true);
+
+    vi.restoreAllMocks();
+  });
+
+  it('keeps an auth verdict findable past the credential-identity TTL', () => {
+    // The auth scope embedded credentialIdentity(), which rotates to a fresh
+    // UUID once DISCOVERY_TTL_MS has passed since a secret was first seen —
+    // right for a discovery cache expiring on the same clock, wrong for a
+    // verdict that promised to hold for the whole run. A long run would cross
+    // that boundary, stop finding its own verdict, and go straight back to the
+    // credential it had just been told was rejected.
+    const router = new CascadeRouter();
+    (router as unknown as { config: unknown }).config = {
+      providers: [
+        { type: 'azure', deploymentName: 'a', apiKey: 'key-one', baseUrl: 'https://r1.openai.azure.com' },
+      ],
+    };
+    const inner = router as unknown as { scopeForFailure(m: unknown, kind: string): string };
+    const model = { provider: 'azure', id: 'a' };
+
+    const before = inner.scopeForFailure(model, 'auth');
+
+    // Push well past the identity TTL. A rotating identity changes here; a
+    // fingerprint of an unchanged key does not.
+    const realNow = Date.now;
+    try {
+      Date.now = () => realNow() + 60 * 60 * 1000;
+      expect(inner.scopeForFailure(model, 'auth')).toBe(before);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  it('gives deployments that SHARE a key the same auth scope', () => {
+    // A 401 on one deployment is a fact about the credential, so every
+    // deployment configured with that same key is out too. Scoping them apart
+    // would leave the siblings to rediscover the rejection one call at a time.
+    const router = new CascadeRouter();
+    (router as unknown as { config: unknown }).config = {
+      providers: [
+        { type: 'azure', deploymentName: 'a', apiKey: 'shared', baseUrl: 'https://r1.openai.azure.com' },
+        { type: 'azure', deploymentName: 'b', apiKey: 'shared', baseUrl: 'https://r1.openai.azure.com' },
+        { type: 'azure', deploymentName: 'c', apiKey: 'other', baseUrl: 'https://r1.openai.azure.com' },
+      ],
+    };
+    const inner = router as unknown as { scopeForFailure(m: unknown, kind: string): string };
+    const auth = (id: string) => inner.scopeForFailure({ provider: 'azure', id }, 'auth');
+
+    expect(auth('a')).toBe(auth('b'));
+    expect(auth('a')).not.toBe(auth('c'));
+  });
+
+  it('does not retain the raw key in the scope it builds', () => {
+    const router = new CascadeRouter();
+    (router as unknown as { config: unknown }).config = {
+      providers: [
+        { type: 'azure', deploymentName: 'a', apiKey: 'super-secret-key', baseUrl: 'https://r1.openai.azure.com' },
+      ],
+    };
+    const inner = router as unknown as { scopeForFailure(m: unknown, kind: string): string };
+    expect(inner.scopeForFailure({ provider: 'azure', id: 'a' }, 'auth')).not.toContain('super-secret-key');
+  });
+
+  it('moves a bound model off a credential that is backing off', () => {
+    // A tier binding and an explicit pin resolve without consulting the
+    // selector, so the veto never sees them — and a bound model walked
+    // straight through a backoff every selector path was respecting.
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    return router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    })).then(async () => {
+      const { OpenAIProvider } = await import('../../providers/openai.js');
+      const { AnthropicProvider } = await import('../../providers/anthropic.js');
+      const openaiStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream').mockResolvedValue({
+        content: 'from the throttled one', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+      } as never);
+      vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+        content: 'from elsewhere', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+      } as never);
+
+      const openaiModel = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+      (router as unknown as { tierModels: Map<string, unknown> }).tierModels.set('T1', openaiModel);
+      (router as unknown as { ensureProvider(m: unknown, c: unknown): void })
+        .ensureProvider(openaiModel, [{ type: 'openai', apiKey: 'sk-test' }]);
+
+      // An ORDINARY rate limit, not a permanent verdict.
+      failoverOf(router).recordFailure('openai', 'rate limit');
+
+      const result = await router.generate('T1', { messages: [{ role: 'user', content: 'x' }], maxTokens: 64 });
+
+      expect(result.content).toBe('from elsewhere');
+      expect(openaiStream).not.toHaveBeenCalled();
+      vi.restoreAllMocks();
+    });
+  });
+
+  it('reroutes a queued call when a TRANSIENT backoff lands during the wait', async () => {
+    // The post-wait check honoured only permanent verdicts, so the ordinary
+    // case stayed open: worker A takes a 429 while worker B sits in the TPM
+    // bucket, and B wakes and submits to the very credential that is backing
+    // off. The verdict lands DURING acquire(), which is the interleaving that
+    // matters.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    const openaiStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'from the throttled one', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'from elsewhere', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+
+    // The sibling's 429 lands while this call is inside acquire().
+    const limiter = (router as unknown as {
+      tpmLimiter: { acquire(p: string, n: number, s?: AbortSignal): Promise<void> };
+    }).tpmLimiter;
+    const realAcquire = limiter.acquire.bind(limiter);
+    let fired = false;
+    limiter.acquire = async (p: string, n: number, sig?: AbortSignal) => {
+      await realAcquire(p, n, sig);
+      if (!fired) {
+        fired = true;
+        failoverOf(router).recordFailure('openai', 'rate limit');
+      }
+    };
+
+    const result = await router.generate('T1', {
+      messages: [{ role: 'user', content: 'hi' }], model: pinned, maxTokens: 64,
+    });
+
+    expect(result.content).toBe('from elsewhere');
+    expect(openaiStream).not.toHaveBeenCalled();
+
+    vi.restoreAllMocks();
+  });
+
+  it('a straggler 403 does not remove a model from the next run', async () => {
+    // The credential-scoped 403 removal is session-only by design, so unlike a
+    // durable 404 it must respect the run generation: run B's credentials may
+    // be perfectly valid, and a late 403 from run A would otherwise take a
+    // usable model away from it.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    let releaseStraggler: ((e: unknown) => void) | undefined;
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockImplementation(() => new Promise((_res, rej) => { releaseStraggler = rej; }) as never);
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'ok', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+
+    const openaiModel = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+    const inFlight = router.generate('T1', {
+      messages: [{ role: 'user', content: 'a' }], model: openaiModel, maxTokens: 64,
+    }).catch(() => undefined);
+
+    for (let i = 0; i < 50 && !releaseStraggler; i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+
+    router.beginRun();
+
+    // Run A's 403 arrives after run B has started.
+    expect(releaseStraggler).toBeDefined();
+    releaseStraggler!(Object.assign(
+      new Error('Project does not have access to model gpt-4o'), { status: 403 },
+    ));
+    await inFlight;
+
+    // Run B can still select it.
+    expect(router.getAvailableModels().some((m) => m.id === 'gpt-4o')).toBe(true);
+    expect(selectorOf(router).getNextFallback('gpt-4o-mini', 'T1')).not.toBeNull();
+
+    vi.restoreAllMocks();
+  });
+
+  it('a transient reroute does not rebind the tier past the backoff', async () => {
+    // The post-wait reroute wrote the fallback into tierModels. A backoff lasts
+    // 30-300 seconds; a tier binding lasts until something rewrites it — and
+    // only PERMANENT repoints are recorded in permanentRepoints and restored at
+    // the run boundary. So one throttled worker moved the tier's traffic, and
+    // its billing, to the fallback indefinitely after the limit had cleared.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+
+    const openaiStream = vi.spyOn(OpenAIProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'from the original', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'from the fallback', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai', 'anthropic']));
+    await router.init(makeConfig({
+      providers: [
+        { type: 'openai', apiKey: 'sk-test' },
+        { type: 'anthropic', apiKey: 'sk-ant-test' },
+      ],
+    }));
+
+    const openaiModel = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o')!;
+    (router as unknown as { tierModels: Map<string, unknown> }).tierModels.set('T1', openaiModel);
+    (router as unknown as { ensureProvider(m: unknown, c: unknown): void })
+      .ensureProvider(openaiModel, [{ type: 'openai', apiKey: 'sk-test' }]);
+
+    // A sibling's 429 lands while this call is inside acquire().
+    const limiter = (router as unknown as {
+      tpmLimiter: { acquire(p: string, n: number, s?: AbortSignal): Promise<void> };
+    }).tpmLimiter;
+    const realAcquire = limiter.acquire.bind(limiter);
+    let fired = false;
+    limiter.acquire = async (p: string, n: number, sig?: AbortSignal) => {
+      await realAcquire(p, n, sig);
+      if (!fired) { fired = true; failoverOf(router).recordFailure('openai', 'rate limit'); }
+    };
+
+    const rerouted = await router.generate('T1', { messages: [{ role: 'user', content: 'a' }], maxTokens: 64 });
+    expect(rerouted.content).toBe('from the fallback');
+
+    // The TIER is untouched: only that one call moved.
+    expect(router.getModelForTier('T1')?.id).toBe(openaiModel.id);
+
+    // And once the backoff expires the tier goes back to serving on it.
+    limiter.acquire = realAcquire;
+    const realNow = Date.now;
+    try {
+      Date.now = () => realNow() + 31_000; // past the first 30s step
+      const after = await router.generate('T1', { messages: [{ role: 'user', content: 'b' }], maxTokens: 64 });
+      expect(after.content).toBe('from the original');
+    } finally {
+      Date.now = realNow;
+    }
+    expect(openaiStream).toHaveBeenCalledTimes(1);
+
+    vi.restoreAllMocks();
+  });
+
+  it('explains the dead account when no other provider can serve the tier', async () => {
+    // The case that matters most, and the one the old code handled worst: with
+    // nothing to fail over to it re-threw the raw vendor string, which says
+    // nothing about which of the user's accounts to go and look at.
+    const { OpenAIProvider } = await import('../../providers/openai.js');
+
+    vi.spyOn(OpenAIProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('insufficient_quota: your credit balance is too low'));
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['openai']));
+    await router.init(makeConfig({ providers: [{ type: 'openai', apiKey: 'sk-test' }] }));
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'openai' && m.id === 'gpt-4o');
+
+    await expect(
+      router.generate('T1', { messages: [{ role: 'user', content: 'hi' }], model: pinned }),
+    ).rejects.toThrow(/will not recover on its own/);
+
+    vi.restoreAllMocks();
+  });
+});
+
 describe('CascadeRouter — live-discovered provider wiring (openai-compatible)', () => {
   it('synthesizes a seed model and builds a GitHubModelsProvider for it', async () => {
     // openai-compatible has no static MODELS catalog entries (its models are

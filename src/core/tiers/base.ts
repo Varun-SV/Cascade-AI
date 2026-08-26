@@ -11,8 +11,16 @@ import type {
   TierStatus,
 } from '../../types.js';
 import { CascadeCancelledError } from '../../utils/retry.js';
+// Type-only: the router imports tiers, so a value import here would close a
+// cycle. Nothing at runtime depends on it.
+import type { CascadeRouter } from '../router/index.js';
 
 export abstract class BaseTier extends EventEmitter {
+  /**
+   * Declared here so generateTracked() can reach it. Each tier owns its own
+   * instance; this only states that one exists.
+   */
+  protected abstract router: CascadeRouter;
   readonly id: string;
   readonly role: TierRole;
   protected status: TierStatus = 'IDLE';
@@ -128,6 +136,46 @@ export abstract class BaseTier extends EventEmitter {
 
   protected setServingModel(model: string | undefined): void {
     this.servingModel = model || undefined;
+  }
+
+  /**
+   * Run a generation and record which model actually answered it.
+   *
+   * Tiers set servingModel from the model they SELECTED, before the call. The
+   * router can fail over mid-call — a rate limit, a dead id, an exhausted
+   * account — and then the tier's terminal status names a model that never
+   * ran. cloud/server persists that value onto the assistant message, and
+   * `/why` and thumbs feedback read it back, so the credit (or the blame) goes
+   * to the wrong model and the performance history learns something untrue
+   * about two models at once.
+   *
+   * Every tier call goes through here rather than `router.generate` directly,
+   * so a new call site cannot quietly reintroduce the mis-attribution.
+   */
+  /**
+   * Run a generation whose model must NOT become this tier's attribution.
+   *
+   * Graders, critics and extractors run beside the answer, often on a
+   * deliberately different model — the T2 critic exists precisely so a model
+   * is not marking its own work. Routing those through generateTracked() made
+   * the last grading call overwrite servingModel, so the subtask's output, its
+   * terminal status and the feedback history all named the grader rather than
+   * the model that wrote the answer.
+   */
+  protected async generateAuxiliary(
+    ...args: Parameters<CascadeRouter['generate']>
+  ): Promise<Awaited<ReturnType<CascadeRouter['generate']>>> {
+    return this.router.generate(...args);
+  }
+
+  protected async generateTracked(
+    ...args: Parameters<CascadeRouter['generate']>
+  ): Promise<Awaited<ReturnType<CascadeRouter['generate']>>> {
+    const result = await this.router.generate(...args);
+    if (result?.servedBy) {
+      this.setServingModel(`${result.servedBy.provider}:${result.servedBy.id}`);
+    }
+    return result;
   }
 
   protected setLabel(label: string): void {

@@ -169,6 +169,247 @@ describe('FailoverManager', () => {
     expect(selector.markProviderAvailable).not.toHaveBeenCalled();
   });
 
+  describe('permanent verdicts (quota exhausted / dead key)', () => {
+    it('never re-enables a permanently failed provider, however long it waits', () => {
+      // The whole point. A spent wallet routed through the ordinary ladder is
+      // re-enabled after 30s, called, fails, backs off 60s, is re-enabled …
+      // for the rest of the run. Advance well past the 300s cap: still out.
+      vi.useFakeTimers();
+
+      mgr.recordFailure('gemini', 'quota exhausted', { permanent: true });
+      expect(mgr.isProviderAvailable('gemini')).toBe(false);
+
+      vi.advanceTimersByTime(30_000);
+      expect(mgr.isProviderAvailable('gemini')).toBe(false);
+
+      vi.advanceTimersByTime(300_000);
+      expect(mgr.isProviderAvailable('gemini')).toBe(false);
+
+      vi.advanceTimersByTime(24 * 60 * 60 * 1000);
+      expect(mgr.isProviderAvailable('gemini')).toBe(false);
+
+      // And it never quietly re-enabled the provider in the selector on the way
+      // past any of those windows — the check above would still read false if
+      // the verdict held here but the selector had been told otherwise.
+      expect(selector.markProviderAvailable).not.toHaveBeenCalled();
+      vi.useRealTimers();
+    });
+
+    it('is sticky — a later ordinary failure does not downgrade it to the retry ladder', () => {
+      vi.useFakeTimers();
+
+      mgr.recordFailure('openai', 'quota exhausted', { permanent: true });
+      // A transient blip on the same provider afterwards (a pinned call that
+      // slipped through, say). Recording it must not hand the provider back to
+      // the clock.
+      mgr.recordFailure('openai', 'rate limit');
+
+      expect(mgr.isPermanentlyFailed('openai')).toBe(true);
+      vi.advanceTimersByTime(600_000);
+      expect(mgr.isProviderAvailable('openai')).toBe(false);
+      vi.useRealTimers();
+    });
+
+    it('succeeding on a DIFFERENT provider leaves the verdict standing', () => {
+      // The failover path itself: Gemini's quota dies, work moves to Azure, and
+      // every subsequent Azure success calls recordSuccess('azure'). If that
+      // cleared Gemini, the run would go straight back to the dead account.
+      mgr.recordFailure('gemini', 'quota exhausted', { permanent: true });
+
+      mgr.recordSuccess('azure');
+      mgr.recordSuccess('azure');
+
+      expect(mgr.isProviderAvailable('gemini')).toBe(false);
+      expect(mgr.isPermanentlyFailed('gemini')).toBe(true);
+    });
+
+    it('succeeding on the provider ITSELF clears the verdict', () => {
+      // A call that actually worked is evidence the quota is not spent — topped
+      // up mid-run, or a separately-billed deployment reached via an explicit
+      // pin. That outranks a verdict whose only claim is "time will not fix
+      // this", and prevents a false lockout lasting the whole run.
+      mgr.recordFailure('gemini', 'quota exhausted', { permanent: true });
+      expect(mgr.isProviderAvailable('gemini')).toBe(false);
+
+      mgr.recordSuccess('gemini');
+
+      expect(mgr.isProviderAvailable('gemini')).toBe(true);
+      expect(mgr.isPermanentlyFailed('gemini')).toBe(false);
+      expect(selector.markProviderAvailable).toHaveBeenCalledWith('gemini');
+    });
+
+    it('clearFailure lifts it too, so the user can act without restarting', () => {
+      mgr.recordFailure('anthropic', 'authentication failed', { permanent: true });
+      expect(mgr.isProviderAvailable('anthropic')).toBe(false);
+
+      mgr.clearFailure('anthropic');
+
+      expect(mgr.isProviderAvailable('anthropic')).toBe(true);
+      expect(mgr.isPermanentlyFailed('anthropic')).toBe(false);
+    });
+
+    it('reports no retry countdown, because there is no retry', () => {
+      mgr.recordFailure('gemini', 'quota exhausted', { permanent: true });
+      const report = mgr.getFailureReport();
+      expect(report['gemini']).toMatch(/Not retrying this run/);
+      expect(report['gemini']).not.toMatch(/Retry in/);
+    });
+
+    it('leaves ordinary failures on the retry ladder', () => {
+      // Guard against the fix over-reaching: a 429 must still recover on its
+      // own, which is the behaviour the ladder exists for.
+      vi.useFakeTimers();
+
+      mgr.recordFailure('openai', 'rate limit');
+      expect(mgr.isPermanentlyFailed('openai')).toBe(false);
+
+      vi.advanceTimersByTime(30_001);
+      expect(mgr.isProviderAvailable('openai')).toBe(true);
+      vi.useRealTimers();
+    });
+
+    it('clearPermanentVerdicts hands the provider back at a run boundary', () => {
+      // "Run-scoped" has to be enforced by something. The router and this
+      // manager outlive one run() in the REPL and the desktop app, so without
+      // a clear at the boundary a verdict lasts the whole PROCESS — and a user
+      // who tops up their account stays routed around the provider until they
+      // restart, which is the exact failure a persisted TTL was rejected for.
+      mgr.recordFailure('gemini', 'quota exhausted', { permanent: true });
+      expect(mgr.isProviderAvailable('gemini')).toBe(false);
+
+      mgr.clearPermanentVerdicts();
+
+      expect(mgr.isProviderAvailable('gemini')).toBe(true);
+      expect(mgr.isPermanentlyFailed('gemini')).toBe(false);
+      expect(selector.markProviderAvailable).toHaveBeenCalledWith('gemini');
+    });
+
+    it('a run boundary leaves the transient backoff ladder alone', () => {
+      // The ladder is keyed to wall-clock time and stays correct across runs.
+      // Clearing it here would send the next run straight back into a provider
+      // that is still throttling.
+      vi.useFakeTimers();
+      mgr.recordFailure('openai', 'rate limit');
+
+      mgr.clearPermanentVerdicts();
+
+      expect(mgr.isProviderAvailable('openai')).toBe(false);
+      vi.advanceTimersByTime(30_001);
+      expect(mgr.isProviderAvailable('openai')).toBe(true);
+      vi.useRealTimers();
+    });
+
+    it('carries the full explanation, so a refused call can say what happened', () => {
+      mgr.recordFailure('gemini', 'quota exhausted', {
+        permanent: true,
+        detail: 'Quota or billing limit reached on gemini-2.5-flash. This will not recover on its own.',
+      });
+
+      expect(mgr.permanentReason('gemini')).toMatch(/will not recover on its own/);
+      // The short label is what the failure report shows, not the long text.
+      expect(mgr.getFailureReport()['gemini']).toMatch(/quota exhausted/);
+    });
+
+    it('keeps the FIRST explanation when a vaguer failure follows', () => {
+      mgr.recordFailure('gemini', 'quota exhausted', { permanent: true, detail: 'the useful one' });
+      mgr.recordFailure('gemini', 'rate limit');
+
+      expect(mgr.permanentReason('gemini')).toBe('the useful one');
+    });
+
+    it('permanentReason is null for a provider on the ordinary ladder', () => {
+      mgr.recordFailure('openai', 'rate limit');
+      expect(mgr.permanentReason('openai')).toBeNull();
+    });
+
+    it('an in-flight success from BEFORE the verdict does not erase it', () => {
+      // The concurrent-wave race. Call A is admitted and still at the provider;
+      // call B comes back with insufficient_quota and the verdict is recorded;
+      // A then lands. A was admitted while the account still looked fine, so it
+      // says nothing about the balance now — clearing on it would send the rest
+      // of the wave straight back to the dead credential.
+      const admittedA = mgr.admissionToken();          // A submitted
+      mgr.recordFailure('openai', 'quota exhausted', { permanent: true }); // B fails
+
+      mgr.recordSuccess('openai', admittedA);          // A lands afterwards
+
+      expect(mgr.isPermanentlyFailed('openai')).toBe(true);
+      expect(mgr.isProviderAvailable('openai')).toBe(false);
+    });
+
+    it('a success admitted AFTER the verdict does clear it', () => {
+      // The other half: a call submitted once the verdict already existed did
+      // reach the credential and did work, which is real evidence.
+      mgr.recordFailure('openai', 'quota exhausted', { permanent: true });
+      const admittedAfter = mgr.admissionToken();
+
+      mgr.recordSuccess('openai', admittedAfter);
+
+      expect(mgr.isPermanentlyFailed('openai')).toBe(false);
+      expect(mgr.isProviderAvailable('openai')).toBe(true);
+    });
+
+    it('an ordinary backoff still clears on any success', () => {
+      // The ordering guard is for permanent verdicts only. Clearing a
+      // transient backoff early costs nothing, and the existing fast-recovery
+      // behaviour is worth keeping.
+      const admittedBefore = mgr.admissionToken();
+      mgr.recordFailure('openai', 'rate limit');
+
+      mgr.recordSuccess('openai', admittedBefore);
+
+      expect(mgr.isProviderAvailable('openai')).toBe(true);
+    });
+  });
+
+  describe('credential scope (multi-resource Azure)', () => {
+    it('one dead Azure deployment leaves its siblings selectable', () => {
+      // Azure supports several configured deployments, each able to carry its
+      // own resource, endpoint and key. "azure is out of credit" is a claim
+      // about credentials the failure never touched.
+      mgr.recordFailure('azure', 'quota exhausted', {
+        permanent: true,
+        scope: 'azure:prod-gpt5',
+      });
+
+      expect(mgr.isPermanentlyFailed('azure:prod-gpt5')).toBe(true);
+      expect(mgr.isPermanentlyFailed('azure:research-gpt5')).toBe(false);
+      // And critically: the provider itself was never pulled, so the sibling
+      // deployment is still eligible as a fallback.
+      expect(selector.markProviderUnavailable).not.toHaveBeenCalled();
+    });
+
+    it('a provider-wide verdict still pulls the whole provider', () => {
+      mgr.recordFailure('openai', 'quota exhausted', { permanent: true });
+      expect(selector.markProviderUnavailable).toHaveBeenCalledWith('openai');
+    });
+
+    it('clearing a deployment verdict does not resurrect the provider', () => {
+      // If some other verdict legitimately pulled the provider, handing it
+      // back here — for a verdict that never took it — would undo that.
+      mgr.recordFailure('azure', 'quota exhausted', { permanent: true, scope: 'azure:prod-gpt5' });
+
+      mgr.clearPermanentVerdicts();
+
+      expect(mgr.isPermanentlyFailed('azure:prod-gpt5')).toBe(false);
+      expect(selector.markProviderAvailable).not.toHaveBeenCalled();
+    });
+
+    it('scopes are independent — two deployments can fail separately', () => {
+      mgr.recordFailure('azure', 'quota exhausted', { permanent: true, scope: 'azure:a' });
+      mgr.recordFailure('azure', 'authentication failed', { permanent: true, scope: 'azure:b' });
+
+      expect(mgr.permanentReason('azure:a')).toBe('quota exhausted');
+      expect(mgr.permanentReason('azure:b')).toBe('authentication failed');
+    });
+  });
+
+  describe('permanent verdicts, continued', () => {
+    it('isPermanentlyFailed is false for a provider that never failed', () => {
+      expect(mgr.isPermanentlyFailed('ollama')).toBe(false);
+    });
+  });
+
   it('getFailureReport includes failure count and retry countdown', () => {
     vi.useFakeTimers();
     mgr.recordFailure('anthropic', 'rate limited');

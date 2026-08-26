@@ -277,6 +277,12 @@ export function useChatSession(
   // transient notice once a compaction actually happened.
   const [contextApproval, setContextApproval] = useState<ContextApprovalInfo | null>(null);
   const [compactionNotice, setCompactionNotice] = useState<string | null>(null);
+  /**
+   * A provider's account went out of service mid-run and the work moved
+   * elsewhere. Hosted users need this MORE than CLI users, not less: nobody is
+   * watching a terminal, and the run quietly keeps spending on another account.
+   */
+  const [providerNotice, setProviderNotice] = useState<string | null>(null);
   // Document RAG: a transient note when a large attached doc was searched for
   // the most relevant passages (vs. read in full), so grounding is visible.
   const [knowledgeNotice, setKnowledgeNotice] = useState<string | null>(null);
@@ -355,6 +361,19 @@ export function useChatSession(
         setCompactionNotice(`Folded ${e.foldedTurns ?? 'earlier'} turns into a summary to fit the context window.`);
       }
     };
+    const onProviderExhausted = (e: {
+      conversationId?: string; provider?: string; kind?: string; message?: string; failedOverTo?: string;
+    }) => {
+      // One socket can carry several conversations on plans that allow
+      // concurrent runs, so an exhaustion in a background conversation would
+      // otherwise post an account-switch and billing warning into whichever
+      // chat happens to be open.
+      if (e.conversationId && e.conversationId !== conversationIdRef.current) return;
+      const who = e.provider ?? 'A provider';
+      setProviderNotice(e.failedOverTo
+        ? `${who} is out for this run — ${e.message ?? ''} Continuing on ${e.failedOverTo}; the rest of this run is billed to that account.`
+        : `${who} is out for this run — ${e.message ?? ''}`);
+    };
     const onKnowledge = (e: { mode?: string; docCount?: number; passages?: number; reranked?: boolean }) => {
       if (e.mode === 'searched') {
         const docs = e.docCount === 1 ? 'the document' : `${e.docCount} documents`;
@@ -390,6 +409,7 @@ export function useChatSession(
     socket.on('disconnect', onDisconnect);
     socket.on('context:approval-required', onContextApproval);
     socket.on('context:compacted', onCompacted);
+    socket.on('provider:exhausted', onProviderExhausted);
     socket.on('knowledge:retrieved', onKnowledge);
     socket.on('file:created', onFileCreated);
     return () => {
@@ -402,6 +422,7 @@ export function useChatSession(
       socket.off('disconnect', onDisconnect);
       socket.off('context:approval-required', onContextApproval);
       socket.off('context:compacted', onCompacted);
+      socket.off('provider:exhausted', onProviderExhausted);
       socket.off('knowledge:retrieved', onKnowledge);
       socket.off('file:created', onFileCreated);
     };
@@ -581,6 +602,10 @@ export function useChatSession(
       setContextApproval(null);
       setCompactionNotice(null);
       setKnowledgeNotice(null);
+      // The banner says "out for THIS run". Verdicts are cleared at the router's
+      // run boundary, so carrying it into the next run would keep telling the
+      // user their spend is on a different account after it has moved back.
+      setProviderNotice(null);
       setActivity([]);
       streamingRef.current = '';
       // Id kept so the rejection path below can take this turn back out. It is
@@ -860,6 +885,6 @@ export function useChatSession(
     contextTokens, contextWindow,
     routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, approval,
     escalation, escalationQueued: escalations.length, resolveEscalation, clearEscalation,
-    contextApproval, resolveContextApproval, compactionNotice, knowledgeNotice, activity,
+    contextApproval, resolveContextApproval, compactionNotice, providerNotice, knowledgeNotice, activity,
   };
 }

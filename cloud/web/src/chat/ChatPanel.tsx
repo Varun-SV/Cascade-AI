@@ -37,6 +37,7 @@ interface Props {
   uiMode: UiMode;
   approval: PlanApproval | null;
   compactionNotice: string | null;
+  providerNotice: string | null;
   knowledgeNotice: string | null;
   activity: ActivityNode[];
 }
@@ -45,7 +46,7 @@ export default function ChatPanel({
   messages, busy, error, status, hasProviders, skills, skillId, onSkillChange, onSend, onStop, onRegenerate,
   onEditMessage, onDeleteMessage, onSelectSibling,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange, uiMode, approval,
-  compactionNotice, knowledgeNotice, activity,
+  compactionNotice, providerNotice, knowledgeNotice, activity,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [activityOpen, setActivityOpen] = useState(false);
@@ -107,6 +108,16 @@ export default function ChatPanel({
             >
               <Layers size={13} className="text-accent-300" />
               <span>{compactionNotice}</span>
+            </motion.div>
+          )}
+          {providerNotice && (
+            <motion.div
+              className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/[0.08] px-3 py-2 text-xs text-ink-200"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+            >
+              <AlertTriangle size={13} className="text-amber-300" />
+              <span>{providerNotice}</span>
             </motion.div>
           )}
           {knowledgeNotice && (

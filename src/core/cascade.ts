@@ -70,7 +70,11 @@ import { CurrentPageTool, type CurrentPageProvider } from '../tools/current-page
 /** One entry in the per-run orchestration decision trail (see /why). */
 export interface DecisionLogEntry {
   at: string;
-  kind: 'complexity' | 'model' | 'failover' | 'escalation' | 'context';
+  // 'provider-exhausted' is deliberately NOT folded into 'failover'. A failover
+  // is a routing choice that worked; this is an account going out of service
+  // for the rest of the run, and in the case that matters most — no other
+  // provider could serve the tier — there was no failover at all to describe.
+  kind: 'complexity' | 'model' | 'failover' | 'escalation' | 'context' | 'provider-exhausted';
   detail: string;
 }
 
@@ -1092,6 +1096,24 @@ export class Cascade extends EventEmitter {
         this.recordDecision('failover', `${e.tier} ${e.from} → ${e.to} (${e.reason})`);
       });
 
+      // A provider is out for the run — quota gone or key dead. Unlike a
+      // failover this is worth surfacing to the user directly and not only in
+      // /why: the run continues on someone else's meter, and the account that
+      // stopped working needs attention that no amount of retrying will supply.
+      this.router.on('provider:exhausted', (e: {
+        provider: string;
+        modelId: string;
+        kind: string;
+        message: string;
+        failedOverTo?: string;
+      }) => {
+        this.recordDecision(
+          'provider-exhausted',
+          `${e.provider}:${e.modelId} ${e.kind}${e.failedOverTo ? ` → ${e.failedOverTo}` : ' (no fallback)'}`,
+        );
+        this.emit('provider:exhausted', e);
+      });
+
       // Budget hard-kill: cancel any pending user approvals and notify
       // consumers so the REPL/dashboard can tear down gracefully instead
       // of waiting for an approval that will never resolve.
@@ -2099,6 +2121,20 @@ ${prompt}`
       `Fast answer${auto ? ' (auto)' : ''} → ${model.provider}:${model.id} — direct single-model reply (no orchestration)`,
     );
     this.emit('tier:status', { tierId: 'fast', role: tier, status: 'ACTIVE', model: `${model.provider}:${model.id}` });
+    /**
+     * The model to REPORT once the call is done.
+     *
+     * The router fails over mid-call — a rate limit, a dead id, an exhausted
+     * account — and the model resolved above is only the one we asked for. The
+     * hosted server persists this onto the assistant message, and `/why` and
+     * thumbs feedback read it back, so reporting the requested model would
+     * credit one that never ran and teach the performance history something
+     * untrue about both it and the model that actually answered.
+     */
+    const servedLabel = (r?: { servedBy?: { provider: string; id: string } }): string => {
+      const s = r?.servedBy;
+      return s ? `${s.provider}:${s.id}` : `${model.provider}:${model.id}`;
+    };
 
     // Persona parity with the worker path: an active identity speaks here too.
     let identityPrompt = '';
@@ -2143,7 +2179,7 @@ ${prompt}`
       // rather than rejecting, so the host can flag the turn cancelled.
       if (err instanceof CascadeCancelledError || options.signal?.aborted) {
         this.emit('run:cancelled', { taskId, reason: err instanceof Error ? err.message : 'Task cancelled' });
-        this.emit('tier:status', { tierId: 'fast', role: tier, status: 'COMPLETED', model: `${model.provider}:${model.id}` });
+        this.emit('tier:status', { tierId: 'fast', role: tier, status: 'COMPLETED', model: servedLabel(result) });
         const stats = this.router.getStats();
         return {
           output: streamed,
@@ -2170,7 +2206,11 @@ ${prompt}`
       // path returns early, so detach it here or the next run leaks listeners.
       this.router.setRunSignal(undefined);
     }
-    this.emit('tier:status', { tierId: 'fast', role: tier, status: 'COMPLETED', model: `${model.provider}:${model.id}` });
+    this.emit('tier:status', { tierId: 'fast', role: tier, status: 'COMPLETED', model: servedLabel(result) });
+    // No decision entry here. The ROUTER emits `failover` for this transition
+    // already, and the listener installed in init() records it — adding a
+    // second one gave /why duplicate entries for a single switch and inflated
+    // anything counting the trail.
 
     const stats = this.router.getStats();
     return {

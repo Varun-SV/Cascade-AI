@@ -92,28 +92,118 @@ function messageOf(err: unknown): string {
  * words the vendor wraps it in, and every vendor words it differently. Text
  * matching is the fallback for SDKs that flatten the status away.
  */
+/**
+ * Wording for a quota that refills on a clock rather than from a card.
+ *
+ * "Quota" alone cannot separate the two, and reading it as billing is the
+ * expensive mistake. Google words an ordinary per-minute throttle as
+ * `Quota exceeded for quota metric 'Generate Content API requests per minute'`
+ * — a limit that clears within sixty seconds, described entirely in the
+ * vocabulary of a spent account.
+ */
+const RATE_SHAPED = /per[\s-]+(?:second|minute|hour|day)|requests?[\s-]+per|tokens?[\s-]+per|quota metric|rate[\s-]?limit|too many requests/;
+
+/**
+ * Wording that means money, not time: the account cannot pay, and waiting
+ * changes nothing. Anthropic says "credit balance is too low", OpenAI
+ * "exceeded your current quota, please check your plan and billing details",
+ * and neither of those was previously matched by `insufficient credit`.
+ */
+const BILLING_SHAPED = /billing|\bcredits?\b|balance is too low|insufficient[_\s]?quota|insufficient funds|payment required|out of credits?|exceeded your current quota/;
+
+/**
+ * A 403 that is about THIS model rather than the credential.
+ *
+ * Azure returns `The API deployment for this resource does not exist or you do
+ * not have access to it` for a deployment name the key cannot use — the key
+ * itself is fine, and other deployments on the same resource still work.
+ * Reading that as a dead credential condemns a whole working provider.
+ */
+const MODEL_SCOPED = /deployment|does not exist|do(?:es)? not have access to|access to (?:the )?(?:model|deployment)|model .*not (?:enabled|available|supported)/;
+
+/**
+ * The provider told us when to come back.
+ *
+ * This outranks every other signal, including billing wording. Google returns
+ * `You exceeded your current quota` — OpenAI's phrasing for a spent account —
+ * for ordinary RPM/TPM and rolling-spend limits, and attaches a `retryDelay`
+ * when it does. Nothing that is genuinely out of money quotes you a retry
+ * interval, so the presence of one settles the question on its own.
+ */
+const RETRY_HINTED = /retry[\s_-]?(?:delay|after|info)|retrydelay|retryinfo|try again in/;
+
+/**
+ * Split a 429 (or a rate-limit-shaped message) into "too fast" and "cannot
+ * pay". Ties break toward `rate_limit`, which is this module's stated bias:
+ * being wrong that way costs a retry, being wrong the other way strands a
+ * provider that was about to start working again.
+ */
+function splitRateFromBilling(m: string): ProviderErrorKind {
+  if (RETRY_HINTED.test(m) || RATE_SHAPED.test(m)) return 'rate_limit';
+  return BILLING_SHAPED.test(m) ? 'quota_exhausted' : 'rate_limit';
+}
+
+/**
+ * Retry metadata carried as a FIELD rather than in the message text.
+ *
+ * The SDKs differ: some flatten `RetryInfo` into the string, others hang
+ * `retryDelay` off the error or return a `Retry-After` header. A retry
+ * interval means the same thing wherever it is written down, so all of them
+ * are worth looking at before deciding an account is spent.
+ */
+function hasRetryField(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as Record<string, unknown>;
+  for (const key of ['retryDelay', 'retryAfter', 'retry_after', 'retryInfo']) {
+    if (e[key] !== undefined && e[key] !== null) return true;
+  }
+  const headers = e['headers'];
+  if (headers && typeof headers === 'object') {
+    // A WHATWG `Headers` — which is what the OpenAI and Anthropic SDKs hand
+    // back — keeps its entries off the object itself, so Object.keys() returns
+    // [] and a plain-object scan silently sees nothing. That made this check
+    // fail on precisely the errors it was written for.
+    const get = (headers as { get?: (name: string) => string | null }).get;
+    if (typeof get === 'function') {
+      try {
+        if (get.call(headers, 'retry-after') != null) return true;
+      } catch { /* not a Headers after all — fall through to the plain scan */ }
+    }
+    for (const key of Object.keys(headers as Record<string, unknown>)) {
+      if (key.toLowerCase() === 'retry-after') return true;
+    }
+  }
+  const inner = e['error'] as Record<string, unknown> | undefined;
+  if (inner && typeof inner === 'object') return hasRetryField(inner);
+  return false;
+}
+
 export function classifyProviderError(err: unknown): ClassifiedError {
   const raw = messageOf(err).trim();
   const status = statusOf(err);
-  const m = raw.toLowerCase();
+  // The retry hint is folded into the haystack so one predicate covers both
+  // the text and the field forms.
+  const m = raw.toLowerCase() + (hasRetryField(err) ? ' retry-after' : '');
 
   const kind = ((): ProviderErrorKind => {
     // ── By status ──
-    if (status === 429) {
-      // 429 covers both "too fast" and "you have no credit left". They need
-      // opposite responses from the user, so split them on the message.
-      return /quota|billing|credit|exceeded your current quota|insufficient/.test(m)
-        ? 'quota_exhausted'
-        : 'rate_limit';
-    }
-    if (status === 401 || status === 403) return 'auth';
+    // 429 covers both "too fast" and "you have no credit left". They need
+    // opposite responses from the user, so split them on the message — and
+    // the word "quota" is not the thing that splits them (see RATE_SHAPED).
+    if (status === 429) return splitRateFromBilling(m);
+    if (status === 401) return 'auth';
+    // 403 is the ambiguous one: a rejected credential and a credential that
+    // simply lacks this one model arrive identically.
+    if (status === 403) return MODEL_SCOPED.test(m) ? 'model_unavailable' : 'auth';
     if (status === 404) return 'model_unavailable';
 
     // ── By message ──
-    if (/rate limit|too many requests|resource_exhausted/.test(m)) {
-      return /quota|billing|credit|insufficient/.test(m) ? 'quota_exhausted' : 'rate_limit';
-    }
-    if (/quota|billing|insufficient_quota|insufficient credit|payment required/.test(m)) return 'quota_exhausted';
+    if (/rate limit|too many requests|resource_exhausted/.test(m)) return splitRateFromBilling(m);
+    if (BILLING_SHAPED.test(m)) return 'quota_exhausted';
+    // A bare "quota" with no billing wording and no status. Still systemic —
+    // every worker on this model will meet it — but transient, so the run
+    // backs off rather than writing the provider off.
+    if (/\bquota\b/.test(m)) return 'rate_limit';
     if (/api key|unauthorized|authentication|permission denied|invalid[_ ]api/.test(m)) return 'auth';
     if (/model .*(not found|does not exist|unavailable)|no such model|unknown model|not supported for/.test(m)) {
       return 'model_unavailable';
@@ -126,6 +216,38 @@ export function classifyProviderError(err: unknown): ClassifiedError {
   })();
 
   return { kind, systemic: isSystemicKind(kind), status, raw };
+}
+
+/**
+ * Re-throwable form of `describeProviderError`, for the point where a failure
+ * leaves the router for good and the raw vendor string would be all the user
+ * ever sees.
+ *
+ * Two things are carried over deliberately, because the error is classified
+ * again downstream (RunBreaker does exactly that) and a wrapper that destroyed
+ * its own evidence would be reclassified as `unknown` — turning a systemic
+ * failure back into a per-task one that gets retried, which is the behaviour
+ * this whole path exists to stop:
+ *
+ *   · the HTTP status, so status-based classification still fires. For most
+ *     kinds this is belt-and-braces — describeProviderError's own wording
+ *     carries the keywords that re-trigger the same verdict. Not for
+ *     'model_unavailable': its text says "not enabled for this API key", the
+ *     auth branch matches /api key/ and is tested first, so on the message
+ *     alone a 404 comes back as 'auth' and points the user at a key that is
+ *     perfectly fine. The status is what stops that.
+ *   · the provider's verbatim text, which `describeProviderError` appends —
+ *     so message-based classification still fires too, and anything upstream
+ *     matching on the original wording (isModelNotFoundError) still matches.
+ *
+ * The original is kept as `cause` for anyone who wants the untouched object.
+ */
+export function enrichProviderError(err: unknown, c: ClassifiedError, modelId?: string): Error {
+  const enriched = new Error(describeProviderError(c, modelId), { cause: err });
+  if (typeof c.status === 'number') {
+    (enriched as Error & { status?: number }).status = c.status;
+  }
+  return enriched;
 }
 
 /**

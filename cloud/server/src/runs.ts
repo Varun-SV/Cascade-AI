@@ -1028,6 +1028,11 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   };
   // Surface the SDK's own diagnostics (failed classifier, provider warnings) in
   // the server log — otherwise they vanished and a run just read "Task failed".
+  // A provider's account went out of service mid-run. The hosted client needs
+  // this as much as the CLI does — more so, since the run continues on another
+  // account and nobody is watching a terminal to notice.
+  const onProviderExhausted = (e: unknown) =>
+    socket.emit('provider:exhausted', { conversationId: conversation.id, ...(e as object) });
   const onLog = (e: unknown) => {
     const ev = e as { level?: string; message?: string };
     console.warn(`[run ${conversation.id}] ${ev.level ?? 'info'}: ${ev.message ?? ''}`);
@@ -1085,6 +1090,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // the plan TO, and "no listener" already means proceed. Skipping it keeps the
   // rule uniform: unattended runs attach no gate listeners at all.
   if (interactive) cascade.on('plan:approval-required', onPlan);
+  cascade.on('provider:exhausted', onProviderExhausted);
   cascade.on('log', onLog);
 
   try {
@@ -1191,6 +1197,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     socket.emit('session:error', { conversationId: conversation.id, error: message });
     throw err;
   } finally {
+    cascade.off('provider:exhausted', onProviderExhausted);
     cascade.off('log', onLog);
     cascade.off('stream:token', onToken);
     cascade.off('tier:status', onStatus);

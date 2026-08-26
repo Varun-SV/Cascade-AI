@@ -140,7 +140,7 @@ function producedOutput(result: T2Result): boolean {
 }
 
 export class T1Administrator extends BaseTier {
-  private router: CascadeRouter;
+  protected router: CascadeRouter;
   private toolRegistry: ToolRegistry;
   private config: CascadeConfig;
   private t2Managers: Map<string, T2Manager> = new Map();
@@ -436,7 +436,7 @@ If yes, reply with exactly: "APPROVED".
 If no, reply with "REJECTED: [Detailed reason explaining exactly what is missing or incorrect]".`;
 
     try {
-      const result = await this.router.generate('T1', {
+      const result = await this.generateTracked('T1', {
         messages: [{ role: 'user', content: prompt }],
         systemPrompt: this.systemPromptOverride + 'You are a QA Reviewer.',
         maxTokens: 500,
@@ -465,7 +465,7 @@ If no, reply with "REJECTED: [Detailed reason explaining exactly what is missing
       ],
     }];
 
-    const result = await this.router.generate('T1', { messages, maxTokens: 1000 }, undefined, true);
+    const result = await this.generateTracked('T1', { messages, maxTokens: 1000 }, undefined, true);
     return `${prompt}\n\n[Image context: ${result.content}]`;
   }
 
@@ -488,7 +488,7 @@ PLAN (${plan.complexity}, ${plan.sections.length} sections):
 ${sections}
 
 In 3-5 terse bullets, flag the most important RISKS, GAPS, or over-/under-decomposition the operator should weigh before approving. If the plan is sound, say so in one line. Output plain-text bullets only - no preamble.`;
-      const result = await this.router.generate('T1', {
+      const result = await this.generateTracked('T1', {
         messages: [{ role: 'user', content: prompt }],
         systemPrompt: 'You are a concise, critical plan reviewer. Be specific and brief.',
         maxTokens: 400,
@@ -584,7 +584,7 @@ ${quotedFieldRules(spec)}
 - RIGHT-SIZE the plan: use the FEWEST sections and workers that fully cover the task. One section with 1-2 subtasks is the CORRECT plan for a small task; padding a plan with filler sections wastes the user's money.`;
 
     const messages: ConversationMessage[] = [{ role: 'user', content: decompositionPrompt }];
-    const result = await this.router.generate('T1', {
+    const result = await this.generateTracked('T1', {
       messages,
       systemPrompt: this.systemPromptOverride + buildT1SystemPrompt((name) => available.has(name)),
       maxTokens: 4000,
@@ -1070,7 +1070,7 @@ Instructions:
 - Do NOT expose JSON or tier internals`;
 
     const messages: ConversationMessage[] = [{ role: 'user', content: compilePrompt }];
-    const result = await this.router.generate('T1', {
+    const result = await this.generateTracked('T1', {
       messages,
       systemPrompt: this.systemPromptOverride + 'You are a final output compiler. Summarize and format the task results clearly.',
       maxTokens: 8000
@@ -1100,7 +1100,7 @@ Reply with exactly one word: YES, NO, or UNSURE.
 (UNSURE = escalate to the human user for a final decision.)`;
 
     try {
-      const result = await this.router.generate('T1', {
+      const result = await this.generateTracked('T1', {
         messages: [{ role: 'user', content: prompt }],
         systemPrompt: this.systemPromptOverride + 'You are a T1 Administrator evaluating permissions.',
         maxTokens: 10,
