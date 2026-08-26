@@ -6,7 +6,7 @@
 //  Pure heuristic scoring — no AI calls for model selection.
 //  Adapts over time via ModelPerformanceTracker (session + persistent stats).
 
-import type { TierRole, ModelInfo } from '../../types.js';
+import type { TierRole, ModelInfo, TaskType } from '../../types.js';
 import type { ModelSelector } from './selector.js';
 import type { ModelPerformanceTracker } from './model-performance-tracker.js';
 import { benchmarkScore01 } from './benchmarks.js';
@@ -14,7 +14,7 @@ import { applyFeedback, type FeedbackSource } from './feedback-prior.js';
 import { posteriorMean, sampleBeta, posteriorStdDev, type Rng } from './bayes.js';
 import { BLENDED_COST_CEILING, blendedCostPer1k } from './pricing.js';
 
-export type TaskType = 'code' | 'analysis' | 'creative' | 'data' | 'mixed';
+export type { TaskType };
 
 /** Cascade Auto cost/quality trade-off bias. See CascadeConfig.autoBias. */
 export type AutoBias = 'balanced' | 'quality' | 'cost';
@@ -58,6 +58,12 @@ export interface RunSelection {
 /** A routing choice, plus why it might not be the obvious one. */
 export interface Selection {
   model: ModelInfo | null;
+  /**
+   * The task type this choice was made under — the other half of the
+   * selection's identity, since one tier can select the same model for two
+   * different kinds of work in one run and only one of them may run.
+   */
+  taskType: TaskType;
   /**
    * Set only when the draw beat the belief — i.e. this is an experiment, not
    * the evidence's own answer. Null on an ordinary pick, so a caller can print
@@ -353,7 +359,7 @@ export class TaskAnalyzer {
         }
         this.currentRunSelections.set(tier, used);
       }
-      return { model, note };
+      return { model, note, taskType: profile.type };
     };
 
     // Vision tasks: always route to a vision-capable model
@@ -417,11 +423,18 @@ export class TaskAnalyzer {
    * tier, a failover replacement — has no entry and is ignored, which matches
    * the existing contract that this analyzer rates only its own choices.
    */
-  noteAttempted(tier: TierRole, modelId: string): void {
+  noteAttempted(tier: TierRole, modelId: string, taskType?: TaskType): void {
     const used = this.currentRunSelections.get(tier);
     if (!used) return;
     for (const sel of used) {
-      if (sel.model.id === modelId) sel.attempted = true;
+      if (sel.model.id !== modelId) continue;
+      // (tier, model, taskType) is a RunSelection's whole identity — entries
+      // are deduped on exactly that — so naming the task type marks the one
+      // invocation that ran. Without it, a tier that selected the same model
+      // for a coding subtask and a creative one credits BOTH when only the
+      // coding call reached a provider and the other was cancelled.
+      if (taskType !== undefined && sel.taskType !== taskType) continue;
+      sel.attempted = true;
     }
   }
 

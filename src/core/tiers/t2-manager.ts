@@ -25,7 +25,7 @@ import { PeerBus } from '../peer/bus.js';
 import type { PermissionEscalator } from '../permissions/escalator.js';
 import type { ToolCreator } from '../../tools/tool-creator.js';
 import { RunBreaker } from '../run-breaker.js';
-import type { EscalationDecision } from '../../types.js';
+import type { EscalationDecision, TaskType } from '../../types.js';
 import { RedactionLayer } from '../audit/redaction.js';
 import { sectionNeedsDecision, settledEscalationStatus } from './escalation-policy.js';
 import { describeGenerationForPlanner } from '../multimodal/registry.js';
@@ -66,6 +66,13 @@ export class T2Manager extends BaseTier {
   private toolRegistry: ToolRegistry;
   private assignment?: T1ToT2Assignment;
   private sectionModel?: ModelInfo;
+  /**
+   * The task type `sectionModel` was selected under. Carried into every call
+   * that uses it so routing evidence lands on this exact selection — one tier
+   * can select the same model for two kinds of work in a run, and only the one
+   * that reaches a provider should be credited.
+   */
+  private sectionTaskType?: TaskType;
   private t3Workers: Map<string, T3Worker> = new Map();
   private escalations: EscalationPayload[] = [];
   private peerSyncBuffer: Array<{ fromId: string; content: unknown; timestamp: string }> = [];
@@ -237,9 +244,12 @@ export class T2Manager extends BaseTier {
 
     // Cascade Auto: route this section to the benchmark-best model for its type
     this.sectionModel = undefined;
+    this.sectionTaskType = undefined;
     try {
       const sectionText = `${assignment.sectionTitle} ${assignment.description} ${assignment.expectedOutput}`;
-      this.sectionModel = (await this.router.selectModelForSubtask('T2', sectionText)) ?? undefined;
+      const picked = await this.router.selectModelForSubtask('T2', sectionText);
+      this.sectionModel = picked?.model;
+      this.sectionTaskType = picked?.taskType;
       if (this.sectionModel) {
         this.log(`Cascade Auto: routing this section to ${this.sectionModel.provider}:${this.sectionModel.id}`);
       }
@@ -489,7 +499,9 @@ Return ONLY the JSON array.`;
       messages,
       systemPrompt: this.systemPromptOverride + buildT2SystemPrompt((name) => this.toolRegistry.hasTool(name)) + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
       maxTokens: 2000,
-      ...(this.sectionModel ? { model: this.sectionModel } : {}),
+      ...(this.sectionModel
+          ? { model: this.sectionModel, selectionTaskType: this.sectionTaskType }
+          : {}),
     });
 
     try {
@@ -1045,7 +1057,9 @@ Return ONLY the JSON array.`;
           messages,
           systemPrompt: this.systemPromptOverride + 'You are a T2 Manager. Summarize the work of your T3 workers succinctly.' + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
           maxTokens: 500,
-          ...(this.sectionModel ? { model: this.sectionModel } : {}),
+          ...(this.sectionModel
+          ? { model: this.sectionModel, selectionTaskType: this.sectionTaskType }
+          : {}),
         }, streamFinal);
         currentSummary = result.content;
       } catch (err) {
@@ -1100,7 +1114,9 @@ Reply with exactly one word: YES, NO, or UNSURE.`;
         systemPrompt: this.systemPromptOverride + 'You are a T2 Manager evaluating permissions.' + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : ''),
         maxTokens: 10,
         temperature: 0,
-        ...(this.sectionModel ? { model: this.sectionModel } : {}),
+        ...(this.sectionModel
+          ? { model: this.sectionModel, selectionTaskType: this.sectionTaskType }
+          : {}),
       });
       const answer = result.content.trim().toUpperCase();
       // Dangerous tools are NEVER final-approved by a tier — a small local

@@ -122,8 +122,11 @@ describe('CascadeRouter — explicit per-tier pin overrides Cascade Auto', () =>
     internals['explicitTierModels'] = new Set(['T3']);
 
     const chosen = await router.selectModelForSubtask('T3', 'Design and implement a new image format');
-    expect(chosen?.id).toBe(pinned.id);
-    expect(chosen?.provider).toBe('openai-compatible');
+    expect(chosen?.model.id).toBe(pinned.id);
+    expect(chosen?.model.provider).toBe('openai-compatible');
+    // …and no task type: an explicit pin is not a Cascade Auto selection, so
+    // there is nothing of ours for its calls to be credited against.
+    expect(chosen?.taskType).toBeUndefined();
   });
 });
 

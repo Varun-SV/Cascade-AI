@@ -483,3 +483,48 @@ describe('only a model that actually ran is rated', () => {
     expect(tracker.sampleCountFor('some-failover-model', 'code')).toBe(0);
   });
 });
+
+describe('a selection is identified by more than its model', () => {
+  it('credits only the invocation that ran when one model serves two task types', async () => {
+    // The tier executors select BEFORE their cancellation and approval
+    // checkpoints, so a selection that loses its race is a real possibility.
+    // Matching on model id alone marked every entry for that model, so a
+    // cancelled creative subtask was credited because a coding one had run
+    // with the same model. (tier, model, taskType) is a RunSelection's whole
+    // identity — entries dedupe on exactly that — so naming the task type
+    // marks the one invocation that happened.
+    const tracker = mem();
+    const analyzer = new TaskAnalyzer(tracker);
+    const selector = selectorOver([model('generalist')]);
+
+    TaskAnalyzer.clearCache();
+    const coding = await analyzer.select('refactor the parser function', 'T3', selector);
+    expect(coding.taskType).toBe('code');
+    TaskAnalyzer.clearCache();
+    const prose = await analyzer.select('write a short poem about the sea', 'T3', selector);
+    expect(prose.taskType).toBe('creative');
+
+    // Only the coding call reached a provider; the creative subtask was cancelled.
+    analyzer.noteAttempted('T3', 'generalist', coding.taskType);
+    analyzer.recordRunOutcome('success', { T3: 0.05 });
+
+    expect(tracker.sampleCountFor('generalist', 'code')).toBe(1);
+    expect(tracker.sampleCountFor('generalist', 'creative'), 'cancelled work earns nothing').toBe(0);
+  });
+
+  it('falls back to marking every match when no task type is named', async () => {
+    // A caller with no selection identity — an explicitly pinned tier — has no
+    // entry of ours at all, so this path must not throw or guess wildly. It
+    // marks by model, which is the old behaviour and is only reachable when
+    // there is nothing finer to go on.
+    const tracker = mem();
+    const analyzer = new TaskAnalyzer(tracker);
+
+    TaskAnalyzer.clearCache();
+    await analyzer.select('refactor the parser function', 'T3', selectorOver([model('m')]));
+    analyzer.noteAttempted('T3', 'm');
+    analyzer.recordRunOutcome('success', { T3: 0.01 });
+
+    expect(tracker.sampleCountFor('m', 'code')).toBe(1);
+  });
+});

@@ -1667,7 +1667,7 @@ ${prompt}`
           // router's `routing:exploring` wiring never sees this pick. The note
           // comes back WITH the selection because these tier selections run
           // concurrently — see TaskAnalyzer.select().
-          const { model, note } = await this.taskAnalyzer!.select(
+          const { model, note, taskType } = await this.taskAnalyzer!.select(
             routingPrompt, tier, this.router.getSelector(),
           );
           // T2Manager and T3Worker select AGAIN, per section and per subtask,
@@ -1680,12 +1680,15 @@ ${prompt}`
           // selection is ever added to T1, this must move with it.
           //
           // This governs only what /why SAYS. What gets rated is decided by
-          // whether a model actually served a call — see noteServed().
+          // whether a model actually ran — see noteAttempted().
           const willReselect = tier !== 'T1';
           if (note && !willReselect) this.recordDecision('model', `${tier} ${note}`);
           if (model) {
-            this.router.overrideTierModel(tier, model);
-            const taskType = this.taskAnalyzer!.getLastProfile()?.type ?? 'mixed';
+            this.router.overrideTierModel(tier, model, taskType);
+            // taskType comes from the selection itself, not getLastProfile():
+            // these tier selections run concurrently against one analyzer, so
+            // the shared "last profile" can belong to another tier by the time
+            // this line reads it — the same hazard the exploration note had.
             const bench = Math.round(benchmarkScore01(model, taskType) * 100);
             const price = model.inputCostPer1kTokens === 0 && model.outputCostPer1kTokens === 0
               ? 'free'

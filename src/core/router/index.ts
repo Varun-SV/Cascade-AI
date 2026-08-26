@@ -16,6 +16,7 @@ import type {
   TierLimits,
   TierRole,
   TokenUsage,
+  TaskType,
 } from '../../types.js';
 import { AnthropicProvider } from '../../providers/anthropic.js';
 import { AzureOpenAIProvider, azureModelForDeployment } from '../../providers/azure.js';
@@ -1216,7 +1217,13 @@ export class CascadeRouter extends EventEmitter {
       // looks tidier and throws away every failure: a run that died recorded
       // nothing about the model that killed it, so its posterior never moved
       // and sampling kept choosing it. See TaskAnalyzer.noteAttempted.
-      this.taskAnalyzer?.noteAttempted(tier, model.id);
+      // The task type is the other half of the selection's identity. A per-call
+      // model carries its own; a tier default carries the one the root
+      // selection recorded. Without it, a tier that chose the same model for a
+      // coding subtask and a creative one credits both when only one ran.
+      this.taskAnalyzer?.noteAttempted(
+        tier, model.id, options.selectionTaskType ?? this.tierSelectionTaskTypes.get(tier),
+      );
 
       if (model.isLocal) {
         // Apply a hard timeout to local inference calls so a slow/overloaded
@@ -1578,7 +1585,9 @@ export class CascadeRouter extends EventEmitter {
    * Used by TaskAnalyzer to inject task-optimal models before execution.
    * The override is valid for the current task only — restored by restoreTierModels().
    */
-  overrideTierModel(tier: TierRole, model: ModelInfo): void {
+  overrideTierModel(tier: TierRole, model: ModelInfo, taskType?: TaskType): void {
+    if (taskType === undefined) this.tierSelectionTaskTypes.delete(tier);
+    else this.tierSelectionTaskTypes.set(tier, taskType);
     // Snapshot the configured/default tier models once so they can be restored
     // after the run — Cascade Auto's per-task picks must not leak across runs.
     if (!this.originalTierModels) {
@@ -1690,10 +1699,20 @@ export class CascadeRouter extends EventEmitter {
    * null when Cascade Auto is off (callers then use the shared tier model).
    * Pure heuristic — no extra LLM call.
    */
-  async selectModelForSubtask(tier: TierRole, text: string, opts?: { requiresToolUse?: boolean }): Promise<ModelInfo | null> {
+  async selectModelForSubtask(
+    tier: TierRole,
+    text: string,
+    opts?: { requiresToolUse?: boolean },
+  ): Promise<{ model: ModelInfo; taskType?: TaskType } | null> {
     // An explicit per-tier pin always wins over Cascade Auto — the user chose
     // that exact model for this tier, so never re-select it per subtask.
-    if (this.explicitTierModels.has(tier)) return this.tierModels.get(tier) ?? null;
+    // An explicit pin is not a Cascade Auto selection: the same model is
+    // returned as before, but with no task type, because there is no selection
+    // of ours to credit it against.
+    if (this.explicitTierModels.has(tier)) {
+      const pinned = this.tierModels.get(tier);
+      return pinned ? { model: pinned } : null;
+    }
     if (!this.config?.cascadeAuto || !this.taskAnalyzer || !text.trim()) return null;
     try {
       // An exploratory pick is one the evidence alone would not have made. It
@@ -1701,9 +1720,9 @@ export class CascadeRouter extends EventEmitter {
       // posterior behind it, so it is announced rather than left to be
       // discovered in a bill. The note arrives with the selection, so two
       // subtasks selecting at once cannot be attributed to each other.
-      const { model: chosen, note } = await this.taskAnalyzer.select(text, tier, this.selector, opts);
+      const { model: chosen, note, taskType } = await this.taskAnalyzer.select(text, tier, this.selector, opts);
       if (note) this.emit('routing:exploring', { tier, note });
-      return chosen;
+      return chosen ? { model: chosen, taskType } : null;
     } catch {
       return null;
     }
@@ -2216,7 +2235,19 @@ export class CascadeRouter extends EventEmitter {
    * totals and a session-wide budget halt are deliberately preserved; only the
    * per-task ceiling is cleared so the next task starts with a fresh allowance.
    */
+  /**
+   * The task type each tier's Cascade Auto default was selected under.
+   *
+   * A call that does not carry its own `selectionTaskType` is using the tier
+   * default, and its evidence belongs to the selection that established that
+   * default rather than to any other selection of the same model.
+   */
+  private tierSelectionTaskTypes = new Map<TierRole, TaskType>();
+
   beginRun(): void {
+    // Per-run, like everything else here: a stale mapping would credit this
+    // run's calls to the task type a previous run happened to select under.
+    this.tierSelectionTaskTypes.clear();
     this.runTokens = 0;
     this.runCostUsd = 0;
     // A run that ended mid-flight (cancelled, crashed) can leave a reservation

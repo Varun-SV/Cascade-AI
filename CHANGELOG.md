@@ -304,7 +304,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports a model at the provider-call boundary — the only place that knows a
   request was really made and which model made it — and reports it *before*
   awaiting the response, so a run that fails still records failure evidence
-  against the model that broke it.
+  against the model that broke it. The report names the task type the model was
+  selected under as well as the model, so a tier that chose one model for two
+  kinds of work credits only the call that actually happened.
 
 - **A model is credited under the task type it actually served.** Outcomes for
   a whole run were recorded under the task type of the LAST thing analysed, so
