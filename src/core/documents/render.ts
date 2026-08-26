@@ -35,7 +35,9 @@ import {
   sniffImage,
   splitSlides,
   stripInline,
+  parseAnimationDirective,
 } from './blocks.js';
+import { animatePptx, DEFAULT_ANIMATION, type AnimationScheme } from './animate.js';
 
 /** Office formats we can render into a real binary. */
 export type DocumentFormat = 'docx' | 'pptx' | 'xlsx';
@@ -62,6 +64,12 @@ export interface RenderOptions {
   loadImageBytes?: ImageByteLoader;
   /** Target file name — only used to pick the CSV vs TSV delimiter for xlsx. */
   name?: string;
+  /**
+   * Host-level animation defaults for `.pptx`. A deck's own `animation:`
+   * directive overrides these, because it lives in the document the user is
+   * looking at.
+   */
+  animation?: Partial<AnimationScheme>;
 }
 
 /** Fetch + measure a referenced image, or null if either step fails. */
@@ -254,6 +262,10 @@ interface PptxSlide {
   addText(text: string | Array<{ text: string; options?: Record<string, unknown> }>, options?: Record<string, unknown>): unknown;
   addImage(options: Record<string, unknown>): unknown;
   addChart(type: string, data: PptxChartSeries[], options?: Record<string, unknown>): unknown;
+  addTable(
+    rows: Array<Array<{ text: string; options?: Record<string, unknown> }>>,
+    options?: Record<string, unknown>,
+  ): unknown;
 }
 interface PptxPresentation {
   layout: string;
@@ -285,7 +297,8 @@ const CONTENT_BOTTOM = 0.4;
 /** A slide's visuals share one horizontal band; charts and pictures alike. */
 type Visual =
   | { kind: 'image'; img: LoadedImage }
-  | { kind: 'chart'; spec: ChartSpec };
+  | { kind: 'chart'; spec: ChartSpec }
+  | { kind: 'table'; rows: string[][] };
 
 /**
  * Markdown slides → a real `.pptx`.
@@ -297,6 +310,12 @@ type Visual =
  * an accurate axis, and a Markdown table isn't a chart.
  */
 export async function renderPptx(md: string, opts: RenderOptions = {}): Promise<Uint8Array> {
+  // A deck-level directive can tune or switch off the animation; everything
+  // else gets the default scheme without having to ask for it. See
+  // parseAnimationDirective for why the vocabulary is not per element.
+  const { rest, directive } = parseAnimationDirective(md);
+  md = rest;
+  const scheme = resolveAnimation(directive, opts.animation);
   const PptxGen = pptxConstructor(await import('pptxgenjs'));
   const pptx = new PptxGen();
   pptx.layout = 'LAYOUT_WIDE'; // 13.33 × 7.5 in
@@ -311,7 +330,7 @@ export async function renderPptx(md: string, opts: RenderOptions = {}): Promise<
   };
 
   const slides = splitSlides(md);
-  const blank: Slide = { title: '', body: [''], images: [], charts: [] };
+  const blank: Slide = { title: '', body: [''], images: [], charts: [], tables: [] };
   for (const s of slides.length ? slides : [blank]) {
     const slide = pptx.addSlide();
     if (s.title) slide.addText(s.title, { x: 0.5, y: 0.35, w: 12.3, h: 0.9, fontSize: 28, bold: true, color: '1F2937' });
@@ -325,6 +344,7 @@ export async function renderPptx(md: string, opts: RenderOptions = {}): Promise<
       .filter((p): p is LoadedImage => p !== null);
     const visuals: Visual[] = [
       ...s.charts.map((spec): Visual => ({ kind: 'chart', spec })),
+      ...s.tables.map((rows): Visual => ({ kind: 'table', rows })),
       ...pics.map((img): Visual => ({ kind: 'image', img })),
     ];
     const bodyH = visuals.length ? 2.2 : 5.4;
@@ -351,6 +371,27 @@ export async function renderPptx(md: string, opts: RenderOptions = {}): Promise<
             sizing: { type: 'contain', w, h },
             ...(v.img.alt ? { altText: v.img.alt } : {}),
           });
+        } else if (v.kind === 'table') {
+          // A REAL table shape, not four bullets of pipe characters. The header
+          // row is styled so the grid reads as a table at a glance; column
+          // widths are even because Markdown carries no width information and
+          // guessing from content length looks worse than a regular grid.
+          const cols = Math.max(1, ...v.rows.map((r) => r.length));
+          slide.addTable(
+            v.rows.map((row, r) => padRow(row, cols).map((cell) => ({
+              text: cell,
+              options: r === 0
+                ? { bold: true, color: 'FFFFFF', fill: { color: '1F2937' } }
+                : { color: '374151' },
+            }))),
+            {
+              x, y, w,
+              colW: Array.from({ length: cols }, () => w / cols),
+              fontSize: 12,
+              border: { type: 'solid', pt: 1, color: 'D1D5DB' },
+              valign: 'middle',
+            },
+          );
         } else {
           slide.addChart(CHART_TYPES[v.spec.kind], chartData(v.spec), {
             x, y, w, h,
@@ -367,7 +408,52 @@ export async function renderPptx(md: string, opts: RenderOptions = {}): Promise<
   // 'arraybuffer' output avoids relying on a DOM Blob or a Node Buffer inside
   // the zip step, so it works identically in the browser, under jsdom, and in
   // plain Node.
-  return new Uint8Array(await pptx.write({ outputType: 'arraybuffer' }) as ArrayBuffer);
+  const bytes = new Uint8Array(await pptx.write({ outputType: 'arraybuffer' }) as ArrayBuffer);
+  // pptxgenjs has no timeline of its own, so the animation is added to the
+  // finished package. See animate.ts.
+  return animatePptx(bytes, scheme);
+}
+
+/**
+ * Resolve the animation scheme from the deck directive and the caller's option.
+ *
+ * Precedence is directive > caller > default: the directive is in the document
+ * the user is looking at, so it should win over a host-wide setting.
+ */
+function resolveAnimation(
+  directive: Record<string, string> | null,
+  fromOpts: Partial<AnimationScheme> | undefined,
+): AnimationScheme {
+  const merged: AnimationScheme = { ...DEFAULT_ANIMATION, ...(fromOpts ?? {}) };
+  if (!directive) return merged;
+  const pick = <K extends keyof AnimationScheme>(key: K, allowed: readonly string[]): void => {
+    const raw = directive[key === 'durationMs' ? 'duration' : key];
+    if (raw === undefined) return;
+    if (key === 'durationMs') {
+      const n = Number(raw);
+      // A bad number is ignored rather than allowed to produce dur="NaN",
+      // which PowerPoint reads as a corrupt file rather than a slow fade.
+      if (Number.isFinite(n) && n > 0) merged.durationMs = Math.min(10_000, n);
+      return;
+    }
+    if (allowed.includes(raw)) (merged[key] as string) = raw;
+  };
+  pick('transition', ['none', 'fade', 'push', 'wipe', 'split']);
+  pick('entrance', ['none', 'fade', 'appear', 'fly']);
+  pick('advance', ['click', 'auto']);
+  pick('durationMs', []);
+  return merged;
+}
+
+/**
+ * Pad a table row out to the widest row's column count.
+ *
+ * A ragged Markdown table is ordinary — a trailing pipe left off one line is
+ * enough — and pptxgenjs draws whatever cell count each row carries, so short
+ * rows come out visibly misaligned rather than merely narrow.
+ */
+function padRow(row: string[], cols: number): string[] {
+  return row.length >= cols ? row.slice(0, cols) : [...row, ...Array(cols - row.length).fill('')];
 }
 
 /** ChartSpec → pptxgenjs's series shape. */

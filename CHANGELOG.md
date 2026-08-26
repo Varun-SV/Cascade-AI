@@ -18,6 +18,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+### Added
+- **PowerPoint decks animate.** `pptxgenjs` has no timeline at all — no
+  `p:timing`, no `p:transition` anywhere in its output — so every generated
+  deck appeared flat, all at once, on every slide. The rendered package now
+  gets a real OOXML timeline written into it: a slide transition, and each
+  slide's elements entering in reading order. Decks animate by default; a first
+  line of `animation: none`, or e.g.
+  `animation: transition=push entrance=fly advance=auto duration=300`, tunes or
+  disables it. Unknown values and malformed durations are ignored rather than
+  written into the XML, because PowerPoint treats a bad timing tree as a
+  corrupt file rather than a bad animation.
+
+### Fixed
+- **A table in a slide came out as literal `|---|---|` text.** `parseSlide` had
+  branches for headings, images, list items, quotes and chart fences, and none
+  for a table row — so every row fell through to the bullet path. The same
+  Markdown already produced a real table in `.docx`, because the block parser
+  used by Word documents has always handled it. Slides now render a genuine
+  PowerPoint table object, and both parsers share one scanner so they cannot
+  drift apart again.
+
 ### Fixed
 - **An exhausted provider quota was retried for the rest of the run.** A spent
   billing quota and a 429 arrive as the same status, and the router's failover

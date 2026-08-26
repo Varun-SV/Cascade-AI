@@ -190,6 +190,34 @@ export function chartToTableRows(spec: ChartSpec): string[][] {
 // ── Block model ──────────────────────────────────────────────────
 // A tiny subset of Markdown, parsed once into blocks that each renderer
 // (PDF, Word, Excel) lays out in its own way.
+/** True for a line that looks like a Markdown table row. */
+export function isTableRow(line: string): boolean {
+  return /^\|.*\|/.test(line.trim());
+}
+
+/**
+ * Consume a run of Markdown table lines starting at `start`.
+ *
+ * Shared by the block parser (docx/pdf) and the slide parser (pptx) so the two
+ * cannot disagree about what a table is. They did: slides had no table branch
+ * at all, so every row fell through to the bullet path and a deck showed
+ * `|---|---|` as literal text where Word had shown a real table from the same
+ * Markdown.
+ */
+export function scanTable(lines: string[], start: number): { rows: string[][]; next: number } {
+  const rows: string[][] = [];
+  let i = start;
+  while (i < lines.length && isTableRow(lines[i] ?? '')) {
+    const raw = (lines[i] ?? '').trim();
+    // Skip the |---|:--:| alignment rule; it is punctuation, not data.
+    if (!/^\|[\s:|-]+\|?\s*$/.test(raw)) {
+      rows.push(raw.replace(/^\||\|\s*$/g, '').split('|').map((c) => stripInline(c.trim())));
+    }
+    i++;
+  }
+  return { rows, next: i };
+}
+
 export type Block =
   | { t: 'heading'; level: number; text: string }
   | { t: 'para'; text: string }
@@ -242,13 +270,9 @@ export function parseBlocks(md: string): Block[] {
     }
     if (/^>\s?/.test(line)) { out.push({ t: 'quote', text: line.replace(/^>\s?/, '') }); i++; reset(); continue; }
 
-    if (/^\|.*\|/.test(line)) { // markdown table
-      const rows: string[][] = [];
-      while (i < lines.length && /^\|.*\|/.test(lines[i] ?? '')) {
-        const r = lines[i]!;
-        if (!/^\|[\s:|-]+\|?\s*$/.test(r)) rows.push(r.replace(/^\||\|\s*$/g, '').split('|').map((c) => c.trim()));
-        i++;
-      }
+    if (isTableRow(line)) {
+      const { rows, next } = scanTable(lines, i);
+      i = next;
       out.push({ t: 'table', rows });
       reset();
       continue;
@@ -401,11 +425,52 @@ export function inlineRuns(text: string): InlineRun[] {
 
 // ── Slides ───────────────────────────────────────────────────────
 
+/**
+ * A deck-level `animation:` directive, if the source opens with one.
+ *
+ * The vocabulary is deliberately deck-wide rather than per element. A model
+ * writing Markdown will not reliably annotate thirty shapes, and a deck where
+ * half the slides animate and half do not looks broken rather than designed.
+ * Every deck gets a sane scheme for free; a directive tunes or disables it.
+ *
+ *   animation: none
+ *   animation: transition=push entrance=fly advance=auto duration=300
+ */
+export function parseAnimationDirective(md: string): { rest: string; directive: Record<string, string> | null } {
+  const lines = md.replace(/\r\n/g, '\n').split('\n');
+  let i = 0;
+  while (i < lines.length && !lines[i]!.trim()) i++;
+  const m = lines[i]?.match(/^[ \t]*animation[ \t]*:[ \t]*(.*)$/i);
+  if (!m) return { rest: md, directive: null };
+  const body = m[1]!.trim();
+  const directive: Record<string, string> = {};
+  if (/^none$/i.test(body)) {
+    directive['transition'] = 'none';
+    directive['entrance'] = 'none';
+  } else {
+    for (const pair of body.split(/[\s,]+/).filter(Boolean)) {
+      const [k, v] = pair.split('=');
+      if (k && v) directive[k.toLowerCase()] = v.toLowerCase();
+    }
+  }
+  return { rest: lines.slice(i + 1).join('\n'), directive };
+}
+
 export interface Slide {
   title: string;
   body: string[];
   images: ImageRef[];
   charts: ChartSpec[];
+  /**
+   * Real tables, laid out as a grid on the slide.
+   *
+   * PowerPoint holds a genuine table shape, so a Markdown table has somewhere
+   * to go. Before this existed, `parseSlide` had no branch for a `|…|` line
+   * and every row fell through to the bullet path — a deck rendered
+   * `|---|---|` as literal text where Word, from the same Markdown, showed a
+   * proper table.
+   */
+  tables: string[][][];
 }
 
 /** Split a Markdown deck into slides: on `---` rules, else on top-level headings. */
@@ -423,7 +488,8 @@ export function splitSlides(md: string): Slide[] {
     if (cur.length) sections.push(cur.join('\n'));
     if (sections.length > 1) chunks = sections;
   }
-  return chunks.map(parseSlide).filter((s) => s.title || s.body.length || s.images.length || s.charts.length);
+  return chunks.map(parseSlide)
+    .filter((s) => s.title || s.body.length || s.images.length || s.charts.length || s.tables.length);
 }
 
 export function parseSlide(chunk: string): Slide {
@@ -431,6 +497,7 @@ export function parseSlide(chunk: string): Slide {
   const body: string[] = [];
   const images: ImageRef[] = [];
   const charts: ChartSpec[] = [];
+  const tables: string[][][] = [];
   const lines = chunk.split('\n');
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i] ?? '';
@@ -450,6 +517,14 @@ export function parseSlide(chunk: string): Slide {
     }
     const line = raw.trim();
     if (!line) continue;
+    // A table, not four bullets of pipe characters. Checked before the list and
+    // paragraph branches, both of which would happily swallow `| a | b |`.
+    if (isTableRow(line)) {
+      const { rows, next } = scanTable(lines, i);
+      if (rows.length) tables.push(rows);
+      i = next - 1; // the for-loop's i++ takes us to `next`
+      continue;
+    }
     const h = line.match(/^#{1,6}[ \t]+(.*)/);
     if (h) { if (!title) title = stripInline(h[1]!); else body.push(stripInline(h[1]!)); continue; }
     // A picture, not a bullet. Kept out of `body` entirely — stripInline would
@@ -467,7 +542,7 @@ export function parseSlide(chunk: string): Slide {
     if (/^>\s?/.test(line)) { body.push(stripInline(line.replace(/^>\s?/, ''))); continue; }
     body.push(stripInline(line));
   }
-  return { title, body, images, charts };
+  return { title, body, images, charts, tables };
 }
 
 /**

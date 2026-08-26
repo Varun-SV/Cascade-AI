@@ -48,7 +48,7 @@ const HINT: Record<string, string> = {
   pdf: 'from Markdown',
   xlsx: 'from CSV',
   docx: 'from Markdown',
-  pptx: 'from Markdown slides',
+  pptx: 'from Markdown slides — real tables, animated',
 };
 /** What the model should write for a given target format, shown as a hint. */
 export function sourceHint(ext: string): string {
