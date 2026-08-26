@@ -50,7 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Markdown already produced a real table in `.docx`, because the block parser
   used by Word documents has always handled it. Slides now render a genuine
   PowerPoint table object, and both parsers share one scanner so they cannot
-  drift apart again.
+  drift apart again. Tables written without outer pipes (`Name | Score` over
+  `--- | ---`) are recognised too, and a table too long for its slide is cut to
+  fit with a count of the rows that did not make it, rather than running off
+  the bottom edge where nothing showed they were missing. Cells keep their
+  inline markup, so `**Total**` is still bold in a Word table.
 
 ### Fixed
 - **An exhausted provider quota was retried for the rest of the run.** A spent
