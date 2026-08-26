@@ -1091,6 +1091,14 @@ export class Cascade extends EventEmitter {
         this.emit('budget:warning', payload);
       });
 
+      // Exploration picks go in the decision trail. Routing occasionally tries
+      // a model the current evidence would not have chosen — that is how a
+      // model that failed once ever gets tried again — and a user looking at
+      // /why deserves to see that it was deliberate rather than a misroute.
+      this.router.on('routing:exploring', (e: { tier: string; note: string }) => {
+        this.recordDecision('model', `${e.tier} ${e.note}`);
+      });
+
       // Record provider failovers in the per-run decision trail (/why).
       this.router.on('failover', (e: { tier: string; from: string; to: string; reason: string }) => {
         this.recordDecision('failover', `${e.tier} ${e.from} → ${e.to} (${e.reason})`);

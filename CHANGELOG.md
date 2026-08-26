@@ -233,6 +233,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the status line. Execution is unchanged — it still falls through to the
   adaptive fallback that substitutes or synthesizes a real tool.
 
+### Changed
+- **Routing no longer writes a model off for one bad moment.** The performance
+  term was a raw `successCount / sampleCount` floored at 0.05, so a single
+  failure scored a model at 0.05 against a benchmark range spanning about 1.5x
+  — one flaky network call outweighed every measured quality difference in the
+  catalogue. Worse, selection was a pure argmax, so nothing ever routed to that
+  model again to find out whether the failure meant anything: the penalty was
+  an absorbing state that persisted for the life of the stats file. The score
+  is now the mean of a Beta posterior with a weak 50/50 prior, so one failure
+  reads as 0.40 and one success as 0.60, and the number moves as evidence
+  accumulates rather than lurching on the first observation. The retry penalty
+  is unchanged.
+
+- **Routing occasionally tries a plausible alternative instead of only ever
+  picking the current best.** Selection now scores each candidate twice — on
+  what we believe (the posterior mean) and on a draw from the same posterior —
+  and picks on the draw. A model we have barely tried has a wide posterior and
+  will sometimes draw high enough to earn a turn; a model we have measured a
+  hundred times draws its own mean every time and stops being explored. There
+  is no exploration rate to configure and no bonus to decay, because the decay
+  is the posterior narrowing: measured against an incumbent, a once-failed
+  model is tried about 18% of the time after 2 incumbent successes, 7% after 5,
+  2% after 10, and effectively never after 300. A draw carries the same retry
+  penalty as the mean, so exploring cannot smuggle a model past a cost it has
+  been shown to carry. When a pick is one the evidence alone would not have
+  made, it is labelled as such in `/why`, naming both models and how little is
+  known about the one that won.
+
+- **An explicit thumbs-up no longer makes the router three times as confident
+  as the evidence warrants.** A rating was worth three automatic outcomes and
+  was implemented by recording the same observation three times, which also
+  tripled `sampleCount` — the count everything else reads as *confidence*. The
+  weight is now carried on one observation: belief moves as much as before, the
+  observation count moves by one.
+
 ## 0.75.0 - 2026-08-14
 
 ### Fixed

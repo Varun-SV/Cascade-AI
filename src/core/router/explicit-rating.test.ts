@@ -18,6 +18,12 @@ function makeTracker() {
     save: async () => {},
     getStats: () => undefined,
     performanceScore: () => 0.5,
+    // Selection now scores twice — on the posterior mean and on a draw from
+    // it — so a stand-in tracker has to answer both questions. A flat
+    // Beta(2,2) is the no-evidence posterior, which keeps these tests about
+    // rating bookkeeping rather than about which model wins.
+    posteriorFor: () => ({ alpha: 2, beta: 2 }),
+    sampleCountFor: () => 0,
     costEfficiencyScore: () => 0.5,
   };
 }

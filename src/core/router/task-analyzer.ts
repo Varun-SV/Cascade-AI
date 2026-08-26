@@ -11,6 +11,7 @@ import type { ModelSelector } from './selector.js';
 import type { ModelPerformanceTracker } from './model-performance-tracker.js';
 import { benchmarkScore01 } from './benchmarks.js';
 import { applyFeedback, type FeedbackSource } from './feedback-prior.js';
+import { posteriorMean, sampleBeta, posteriorStdDev, type Rng } from './bayes.js';
 import { BLENDED_COST_CEILING, blendedCostPer1k } from './pricing.js';
 
 export type TaskType = 'code' | 'analysis' | 'creative' | 'data' | 'mixed';
@@ -169,9 +170,41 @@ export class TaskAnalyzer {
    */
   private lastCompletedRun?: { selections: Map<TierRole, ModelInfo>; taskType: TaskType };
 
+  /**
+   * Uniform source for Thompson draws. Injectable so a test can pin the
+   * exploration decision instead of asserting on chance.
+   */
+  private rng: Rng = Math.random;
+
+  /**
+   * Why the most recent selection went the way it did, when that is worth
+   * saying: an exploratory pick looks like a bad routing decision to anyone
+   * who cannot see the posterior it came from. Read once and cleared by
+   * takeExplorationNote(), so a stale note cannot be attributed to a later
+   * selection that was not exploratory at all.
+   */
+  private explorationNote: string | null = null;
+
   constructor(tracker?: ModelPerformanceTracker, bias: AutoBias = 'balanced') {
     this.tracker = tracker;
     this.bias = bias;
+  }
+
+  /** Replace the RNG behind exploration (tests). */
+  setRng(rng: Rng): void {
+    this.rng = rng;
+  }
+
+  /**
+   * The exploration note for the last selection, consumed.
+   *
+   * Consumed rather than read, because /why is assembled per run and a note
+   * left behind would be reported against whichever selection came next.
+   */
+  takeExplorationNote(): string | null {
+    const note = this.explorationNote;
+    this.explorationNote = null;
+    return note;
   }
 
   /**
@@ -260,13 +293,33 @@ export class TaskAnalyzer {
       if (toolCapable.length > 0) candidates = toolCapable;
     }
 
+    // Scored twice: once on what we BELIEVE (the posterior mean) and once on a
+    // DRAW from the same posterior. The draw is what gets picked.
+    //
+    // Thompson sampling, and the reason it is the right shape here: a model we
+    // have barely tried has a wide posterior and will occasionally draw high
+    // enough to earn a turn, while a model we have measured a hundred times
+    // draws its own mean every time and stops being explored. There is no rate
+    // to tune and no bonus to decay — the decay IS the posterior narrowing as
+    // evidence arrives. Without it, `perf` was an absorbing state: a model that
+    // failed once was ranked below everything and so never ran again to prove
+    // otherwise.
     const scored = candidates.map(m => ({
       model: m,
-      score: this.scoreModel(m, profile),
+      belief: this.scoreModel(m, profile, 'mean'),
+      score: this.scoreModel(m, profile, 'sample'),
     }));
     scored.sort((a, b) => b.score - a.score);
 
-    return recordSelection(scored[0]?.model ?? selector.selectForTier(tier));
+    const chosen = scored[0];
+    // An exploratory pick is one the evidence alone would not have made. It
+    // has to be explainable, or it reads as the router malfunctioning.
+    const byBelief = [...scored].sort((a, b) => b.belief - a.belief)[0];
+    if (chosen && byBelief && chosen.model.id !== byBelief.model.id) {
+      this.explorationNote = this.describeExploration(chosen.model, byBelief.model, profile);
+    }
+
+    return recordSelection(chosen?.model ?? selector.selectForTier(tier));
   }
 
   /**
@@ -320,8 +373,14 @@ export class TaskAnalyzer {
     return true;
   }
 
-  private scoreModel(model: ModelInfo, profile: TaskProfile): number {
-    const perf = this.tracker?.performanceScore(model.id, profile.type) ?? 0.5;
+  /**
+   * @param perfMode `mean` scores on what we believe; `sample` draws from the
+   *        posterior. Everything else in the score is a deterministic lookup —
+   *        the benchmark, the price, the specialization match — so this is the
+   *        only term where exploration could live.
+   */
+  private scoreModel(model: ModelInfo, profile: TaskProfile, perfMode: 'mean' | 'sample' = 'mean'): number {
+    const perf = this.perfFor(model, profile, perfMode);
     const costEff = this.costEfficiency(model, profile.complexity);
     const match = this.taskMatchScore(model, profile);
     // Public-benchmark strength for this task type dominates the choice (so a
@@ -352,6 +411,38 @@ export class TaskAnalyzer {
       default:
         return perf * costEff * match * benchmark;
     }
+  }
+
+  /**
+   * The one stochastic term in the score.
+   *
+   * The retry penalty is applied to a DRAW the same way performanceScore()
+   * applies it to the mean, so exploring cannot smuggle a model past a cost it
+   * has actually been shown to carry.
+   */
+  private perfFor(model: ModelInfo, profile: TaskProfile, mode: 'mean' | 'sample'): number {
+    if (!this.tracker) return 0.5;
+    if (mode === 'mean') return this.tracker.performanceScore(model.id, profile.type);
+    const posterior = this.tracker.posteriorFor(model.id, profile.type);
+    const drawn = sampleBeta(posterior, this.rng);
+    const mean = posteriorMean(posterior);
+    const believed = this.tracker.performanceScore(model.id, profile.type);
+    // performanceScore is the mean with the retry penalty already folded in;
+    // carry that same ratio onto the draw rather than recomputing it.
+    const retryFactor = mean > 0 ? believed / mean : 1;
+    return Math.max(0.05, drawn * retryFactor);
+  }
+
+  /** One line for /why, naming what was tried and how little is known about it. */
+  private describeExploration(chosen: ModelInfo, byBelief: ModelInfo, profile: TaskProfile): string {
+    const n = this.tracker?.sampleCountFor(chosen.id, profile.type) ?? 0;
+    const spread = this.tracker
+      ? posteriorStdDev(this.tracker.posteriorFor(chosen.id, profile.type))
+      : 0;
+    const seen = n === 0 ? 'never used it for this' : `${n} ${n === 1 ? 'run' : 'runs'} of history`;
+    return `exploring ${chosen.provider}:${chosen.id} over ${byBelief.provider}:${byBelief.id} `
+      + `— ${seen}, so its success rate is still uncertain (±${spread.toFixed(2)}). `
+      + `Routing tries a plausible alternative occasionally rather than only ever picking the current best.`;
   }
 
   private costEfficiency(model: ModelInfo, complexity: 1 | 2 | 3 | 4 | 5): number {
