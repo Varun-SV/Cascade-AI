@@ -31,6 +31,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   corrupt file rather than a bad animation.
 
 ### Fixed
+- **A failed review printed a wall of text instead of saying what was wrong.**
+  The reviewer answered in prose and that prose went into `currentAction`, a
+  one-line status field. Most surfaces truncate it — the CLI at 38 to 80
+  characters, the run drawer with a CSS clamp — but the web chat's status
+  button renders its label unclamped, so a 780-character verdict appeared as a
+  paragraph beside a chevron sized for a sentence. Clamping it there would only
+  have hidden the one explanation of why the run was repeating itself. The
+  reviewer now returns a verdict: a short summary for the status line and the
+  gaps as data, each naming the sections it applies to. The web chat shows them
+  as a card; the correction pass still receives the full detail. A reviewer that
+  ignores the format and answers in prose degrades to a first-sentence summary
+  plus one gap, rather than back to a paragraph on the status line.
+
 - **A table in a slide came out as literal `|---|---|` text.** `parseSlide` had
   branches for headings, images, list items, quotes and chart fences, and none
   for a table row — so every row fell through to the bullet path. The same

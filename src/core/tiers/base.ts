@@ -204,6 +204,9 @@ export abstract class BaseTier extends EventEmitter {
       progressPct: update.progressPct,
       timestamp,
       output: update.output,
+      // Only present on a review update. Explicit rather than spread because
+      // this emit names every field it forwards.
+      ...(update.review ? { review: update.review } : {}),
       model: this.servingModel,
       ...this.graphFields(),
     });
