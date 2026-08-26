@@ -298,6 +298,17 @@ describe('host animation options', () => {
     expect(xml).toContain('<p:fade/>');
   });
 
+  it('clamps a huge duration instead of writing scientific notation', async () => {
+    // OOXML wants an unsigned integer; String(1e21) is "1e+21", which
+    // PowerPoint rejects or repairs. Finite is not the same as usable.
+    const zip = await JSZip.loadAsync(await renderPptx('# One\n\n- a', {
+      animation: { durationMs: 1e21 },
+    }));
+    const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
+    expect(xml).not.toContain('e+');
+    expect(xml).toContain('dur="10000"');
+  });
+
   it('rejects an out-of-range host value the same way it rejects a bad directive', async () => {
     const zip = await JSZip.loadAsync(await renderPptx('# One\n\n- a', {
       animation: { transition: 'explode' as never, durationMs: -5 },

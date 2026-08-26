@@ -457,7 +457,13 @@ function resolveAnimation(
   if (!ANIMATION_VALUES.transition.includes(merged.transition)) merged.transition = DEFAULT_ANIMATION.transition;
   if (!ANIMATION_VALUES.entrance.includes(merged.entrance)) merged.entrance = DEFAULT_ANIMATION.entrance;
   if (!ANIMATION_VALUES.advance.includes(merged.advance)) merged.advance = DEFAULT_ANIMATION.advance;
-  if (!Number.isFinite(merged.durationMs) || merged.durationMs <= 0) merged.durationMs = DEFAULT_ANIMATION.durationMs;
+  // Clamped and rounded, not merely checked for finiteness. OOXML wants an
+  // unsigned integer here, and a large finite value serialises in scientific
+  // notation — dur="1e+21" — which PowerPoint rejects or repairs. The
+  // directive path has capped this all along; a host value is no different.
+  merged.durationMs = Number.isFinite(merged.durationMs) && merged.durationMs > 0
+    ? Math.round(Math.min(MAX_ANIMATION_MS, merged.durationMs))
+    : DEFAULT_ANIMATION.durationMs;
   if (!directive) return merged;
   const pick = <K extends keyof AnimationScheme>(key: K, allowed: readonly string[]): void => {
     const raw = directive[key === 'durationMs' ? 'duration' : key];
@@ -466,7 +472,7 @@ function resolveAnimation(
       const n = Number(raw);
       // A bad number is ignored rather than allowed to produce dur="NaN",
       // which PowerPoint reads as a corrupt file rather than a slow fade.
-      if (Number.isFinite(n) && n > 0) merged.durationMs = Math.min(10_000, n);
+      if (Number.isFinite(n) && n > 0) merged.durationMs = Math.round(Math.min(MAX_ANIMATION_MS, n));
       return;
     }
     if (allowed.includes(raw)) (merged[key] as string) = raw;
@@ -477,6 +483,9 @@ function resolveAnimation(
   pick('durationMs', []);
   return merged;
 }
+
+/** Upper bound on an entrance duration, milliseconds. */
+const MAX_ANIMATION_MS = 10_000;
 
 /** The accepted values for each animation field, shared by both sources. */
 const ANIMATION_VALUES = {

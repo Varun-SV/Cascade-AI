@@ -123,10 +123,19 @@ export function parseReviewResponse(raw: string): ReviewVerdict {
     if (rest) gaps.push({ title: rest.length > 400 ? tidy(rest, 400) : rest });
   }
 
+  // A rejection with nothing in it — an empty or truncated response that got as
+  // far as "REJECTED". Left alone this produced `approved: false` with zero
+  // gaps and the summary "0 things are missing": the orchestrator spent a
+  // corrective pass on a reason that said nothing, while the client read zero
+  // gaps as an approval and cleared the card. A generic gap keeps the two in
+  // agreement, and a wasted pass (capped at maxReplanPasses) is a safer
+  // failure than approving output the reviewer meant to reject.
+  if (gaps.length === 0) {
+    gaps.push({ title: 'The reviewer rejected the output without saying what was wrong.' });
+  }
+
   if (!summary) {
-    summary = gaps.length === 1
-      ? tidy(gaps[0]!.title, SUMMARY_MAX)
-      : `${gaps.length} things are missing`;
+    summary = tidy(gaps[0]!.title, SUMMARY_MAX);
   }
 
   return { approved: false, summary, gaps, reason: verdictToProse(summary, gaps) };

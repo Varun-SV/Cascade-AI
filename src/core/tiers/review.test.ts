@@ -83,6 +83,28 @@ describe('when the reviewer answers in prose anyway', () => {
   });
 });
 
+describe('a rejection with nothing in it', () => {
+  // An empty or truncated response that got as far as REJECTED. This used to
+  // produce approved:false with zero gaps and the summary "0 things are
+  // missing" — the orchestrator spent a corrective pass on a reason that said
+  // nothing, while the client read zero gaps as an approval and cleared the
+  // card. Whatever it does, the two have to agree.
+  it('is still a rejection, and still has something to show', () => {
+    for (const raw of ['REJECTED', 'REJECTED:', 'REJECTED\n\n', 'REJECTED: \n']) {
+      const v = parseReviewResponse(raw);
+      expect(v.approved, raw).toBe(false);
+      expect(v.gaps.length, raw).toBe(1);
+      expect(v.summary, raw).toBeTruthy();
+      expect(v.summary, raw).not.toContain('0 things');
+    }
+  });
+
+  it('never reports a count it does not have', () => {
+    expect(reviewStatusLine(parseReviewResponse('REJECTED'), 1, 2))
+      .toBe('Review found 1 gap — replanning, pass 1 of 2');
+  });
+});
+
 describe('the status line', () => {
   it('fits the tightest budget any surface imposes', () => {
     // The CLI truncates currentAction at 38 characters in the agent tree. This

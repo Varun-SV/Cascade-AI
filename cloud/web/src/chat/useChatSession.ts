@@ -379,10 +379,22 @@ export function useChatSession(
     const onStatus = (e: Record<string, unknown>) => {
       // One socket can carry several conversations, so a background run's
       // tiers would otherwise post their status — and now a whole review
-      // rejection — into whichever chat happens to be open. The provider
-      // exhaustion handler below has filtered for this reason all along.
+      // rejection — into whichever chat happens to be open.
+      //
+      // Only filter once this chat KNOWS its id. On the first turn of a new
+      // conversation the server tags events with an id it just created, while
+      // this side does not learn that id until the run's closing ack — so
+      // comparing against `undefined` discards the entire first run, which is
+      // the most common case there is.
+      //
+      // The exhaustion handler below deliberately does NOT do this, and its
+      // test says why: a stray billing warning in the wrong chat is worse than
+      // a missed one. Losing every tier event is not a comparable trade, so
+      // the two differ on purpose. Adopting the server's id from the first
+      // event would fix both properly and is a larger change than this.
       const convo = e['conversationId'];
-      if (typeof convo === 'string' && convo !== conversationIdRef.current) return;
+      const current = conversationIdRef.current;
+      if (current && typeof convo === 'string' && convo !== current) return;
       setStatus(statusLabel(e));
       setActivity((prev) => mergeActivity(prev, e));
     };
