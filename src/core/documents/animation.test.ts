@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from 'vitest';
 import JSZip from 'jszip';
-import { parseSlide, splitSlides, parseAnimationDirective } from './blocks.js';
+import { parseSlide, splitSlides, parseAnimationDirective, parseBlocks } from './blocks.js';
 import { renderPptx } from './render.js';
 import {
   animateSlideXml,
@@ -47,6 +47,37 @@ describe('a Markdown table becomes a real PowerPoint table', () => {
     expect(parseSlide(deck).tables[0]!.some((r) => r.join('').includes('---'))).toBe(false);
   });
 
+  it('keeps inline markup in cells for the renderer that can style it', () => {
+    // The Word renderer puts every cell through inlineRuns, so **Total** is
+    // bold in a docx table. Stripping markup in the shared scanner — which the
+    // first version of it did — silently flattened every one of them.
+    const blocks = parseBlocks('| Item | Cost |\n|---|---|\n| **Total** | `42` |');
+    const table = blocks.find((b) => b.t === 'table');
+    expect(table && table.t === 'table' && table.rows[1]).toEqual(['**Total**', '`42`']);
+  });
+
+  it('strips that markup on the way into a slide, where it cannot be styled', async () => {
+    const zip = await JSZip.loadAsync(await renderPptx('# T\n\n| Item | Cost |\n|---|---|\n| **Total** | 42 |'));
+    const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
+    expect(xml).toContain('Total');
+    expect(xml).not.toContain('**Total**');
+  });
+
+  it('reads a table written without outer pipes', () => {
+    // Ordinary Markdown. Requiring the leading pipe left this common form as
+    // bullet text while the tool description advertised plain Markdown tables.
+    const slide = parseSlide('# T\n\nName | Score\n--- | ---\nAda | 99');
+    expect(slide.tables[0]).toEqual([['Name', 'Score'], ['Ada', '99']]);
+  });
+
+  it('does not turn prose containing a pipe into a table', () => {
+    // The other half of that change: a bare pipe is ordinary punctuation, so a
+    // line only opens a table when the next line is the alignment rule.
+    const slide = parseSlide('# T\n\nRun `ls | wc -l` to count them.\n\nThen read the output.');
+    expect(slide.tables).toHaveLength(0);
+    expect(slide.body.join(' ')).toContain('wc -l');
+  });
+
   it('does not backtrack itself to death on a pathological row', () => {
     // CodeQL, high severity: the obvious alignment-rule regex
     // /^\|[\s:|-]+\|?\s*$/ puts two whitespace-matching quantifiers next to
@@ -79,6 +110,26 @@ describe('a Markdown table becomes a real PowerPoint table', () => {
     // text box that happens to contain pipes.
     expect(xml).toContain('<a:tbl>');
     expect(xml).toContain('EMEA');
+  });
+});
+
+describe('a long table stays on the slide', () => {
+  it('cuts a table that cannot fit and says how much was dropped', async () => {
+    // pptxgenjs draws every row it is given and autoPage defaults off, so a
+    // long table ran past the bottom edge and those rows were simply not in
+    // the deck — no warning, no indication anything was missing.
+    const rows = Array.from({ length: 60 }, (_, i) => `| row ${i} | ${i} |`).join('\n');
+    const zip = await JSZip.loadAsync(await renderPptx(`# Big\n\n| a | b |\n|---|---|\n${rows}`));
+    const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
+    expect(xml).toMatch(/\+\d+ more rows/);
+    expect(xml).not.toContain('row 59');
+  });
+
+  it('leaves a table that fits alone', async () => {
+    const zip = await JSZip.loadAsync(await renderPptx('# Small\n\n| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |'));
+    const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
+    expect(xml).not.toMatch(/more rows/);
+    expect(xml).toContain('3');
   });
 });
 
@@ -115,11 +166,14 @@ describe('the timing tree', () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
-  it('waits for a click on the first step and follows on after that', () => {
-    const xml = timingXml([3, 4], { ...DEFAULT_ANIMATION, advance: 'click' });
-    expect(xml).toContain('delay="indefinite"');
-    expect(xml.match(/delay="indefinite"/g)).toHaveLength(1);
-    expect(xml).toContain('nodeType="clickEffect"');
+  it('makes every shape wait for its own click', () => {
+    // "On click" means the presenter advances each build. Gating only the
+    // first step made one click reveal the whole slide — which is `auto` with
+    // an extra keypress, not a build.
+    const xml = timingXml([3, 4, 5], { ...DEFAULT_ANIMATION, advance: 'click' });
+    expect(xml.match(/delay="indefinite"/g)).toHaveLength(3);
+    expect(xml.match(/nodeType="clickEffect"/g)).toHaveLength(3);
+    expect(xml).not.toContain('afterEffect');
   });
 
   it('never waits when the deck advances on its own', () => {
@@ -185,11 +239,21 @@ describe('animation reaches the rendered deck', () => {
     }
   });
 
-  it('returns the bytes untouched when there is nothing to add', async () => {
+  it('hands back the original deck rather than throwing on unreadable bytes', async () => {
+    // Failing here costs the animation; throwing costs the whole export, and
+    // the deck was fine before this step opened it.
     const bytes = new Uint8Array([1, 2, 3]);
-    const off = { ...DEFAULT_ANIMATION, transition: 'none' as const, entrance: 'none' as const };
-    // Not a valid zip — the point is that it is never opened.
-    expect(await animatePptx(bytes, off)).toBe(bytes);
+    expect(await animatePptx(bytes, DEFAULT_ANIMATION)).toBe(bytes);
+  });
+
+  it('still fixes duplicate shape ids when animation is switched off', async () => {
+    // The ids are invalid OOXML on their own account — every reference to a
+    // shape resolves through them. Animation is only what made it visible.
+    const zip = await JSZip.loadAsync(await renderPptx('animation: none\n\n# One\n\n- a\n\n| x | y |\n|---|---|\n| 1 | 2 |'));
+    const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
+    const ids = [...xml.matchAll(/<p:cNvPr id="(\d+)"/g)].map((m) => m[1]);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(xml).not.toContain('<p:timing');
   });
 });
 

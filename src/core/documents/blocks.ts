@@ -190,9 +190,26 @@ export function chartToTableRows(spec: ChartSpec): string[][] {
 // ── Block model ──────────────────────────────────────────────────
 // A tiny subset of Markdown, parsed once into blocks that each renderer
 // (PDF, Word, Excel) lays out in its own way.
-/** True for a line that looks like a Markdown table row. */
+/** True for a line that could be a row of a table already in progress. */
 export function isTableRow(line: string): boolean {
-  return /^\|.*\|/.test(line.trim());
+  return line.includes('|');
+}
+
+/**
+ * True when a table STARTS at `lines[i]`.
+ *
+ * Outer pipes are optional in Markdown — `Name | Score` over `--- | ---` is an
+ * ordinary table — but a bare pipe is also ordinary prose punctuation, so a
+ * line without the leading pipe only opens a table when the NEXT line is the
+ * alignment rule. Requiring the leading pipe (as this did) silently left the
+ * pipe-less form as bullet text; accepting any line with a pipe would turn
+ * half of prose into tables.
+ */
+export function isTableStart(lines: string[], i: number): boolean {
+  const line = (lines[i] ?? '').trim();
+  if (!line.includes('|')) return false;
+  if (line.startsWith('|')) return true;
+  return isAlignmentRule((lines[i + 1] ?? '').trim());
 }
 
 /**
@@ -218,11 +235,18 @@ export function isTableRow(line: string): boolean {
  * scan is linear in the row's length.
  */
 function isAlignmentRule(row: string): boolean {
-  if (row.length < 2 || !row.startsWith('|')) return false;
-  for (let i = 1; i < row.length; i++) {
-    if (!/[\s:|-]/.test(row[i]!)) return false;
+  if (row.length < 2) return false;
+  let sawDash = false;
+  let sawPipe = false;
+  for (let i = 0; i < row.length; i++) {
+    const ch = row[i]!;
+    if (ch === '-') sawDash = true;
+    else if (ch === '|') sawPipe = true;
+    else if (ch !== ':' && !/\s/.test(ch)) return false;
   }
-  return true;
+  // A dash is what makes it a RULE rather than a row of empty cells; the pipe
+  // is what makes it a table rather than a horizontal rule.
+  return sawDash && sawPipe;
 }
 
 export function scanTable(lines: string[], start: number): { rows: string[][]; next: number } {
@@ -232,7 +256,11 @@ export function scanTable(lines: string[], start: number): { rows: string[][]; n
     const raw = (lines[i] ?? '').trim();
     // Skip the |---|:--:| alignment rule; it is punctuation, not data.
     if (!isAlignmentRule(raw)) {
-      rows.push(raw.replace(/^\||\|\s*$/g, '').split('|').map((c) => stripInline(c.trim())));
+      // Cells keep their inline markup. The Word renderer runs them through
+      // inlineRuns, so stripping here silently flattened **bold** in every
+      // docx table; a renderer that needs plain text (PowerPoint's addTable)
+      // strips it itself.
+      rows.push(raw.replace(/^\||\|\s*$/g, '').split('|').map((c) => c.trim()));
     }
     i++;
   }
@@ -291,7 +319,7 @@ export function parseBlocks(md: string): Block[] {
     }
     if (/^>\s?/.test(line)) { out.push({ t: 'quote', text: line.replace(/^>\s?/, '') }); i++; reset(); continue; }
 
-    if (isTableRow(line)) {
+    if (isTableStart(lines, i)) {
       const { rows, next } = scanTable(lines, i);
       i = next;
       out.push({ t: 'table', rows });
@@ -540,7 +568,7 @@ export function parseSlide(chunk: string): Slide {
     if (!line) continue;
     // A table, not four bullets of pipe characters. Checked before the list and
     // paragraph branches, both of which would happily swallow `| a | b |`.
-    if (isTableRow(line)) {
+    if (isTableStart(lines, i)) {
       const { rows, next } = scanTable(lines, i);
       if (rows.length) tables.push(rows);
       i = next - 1; // the for-loop's i++ takes us to `next`

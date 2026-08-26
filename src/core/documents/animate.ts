@@ -98,13 +98,13 @@ function entranceStep(
   nextId: () => number,
 ): string {
   const { presetId, filter } = ENTRANCE[scheme.entrance as Exclude<AnimationScheme['entrance'], 'none'>];
-  // The FIRST step of a click sequence waits indefinitely — that is what makes
-  // it wait for the click. Later steps follow it automatically, so one click
-  // advances one build rather than one shape.
-  const waitsForClick = scheme.advance === 'click' && index === 0;
-  const nodeType = index === 0
-    ? (scheme.advance === 'click' ? 'clickEffect' : 'afterEffect')
-    : 'afterEffect';
+  // EVERY step waits when the deck advances on click — that is what "on click"
+  // means to a presenter and what PowerPoint's own builds do. Gating only the
+  // first step made one click reveal the whole slide, which is `auto` with an
+  // extra keypress rather than a build.
+  const waitsForClick = scheme.advance === 'click';
+  const nodeType = waitsForClick ? 'clickEffect' : 'afterEffect';
+  void index;
   const stepId = nextId();
   const setId = nextId();
   const effectId = nextId();
@@ -169,6 +169,11 @@ export function transitionXml(scheme: AnimationScheme): string {
  */
 export function animateSlideXml(slideXml: string, scheme: AnimationScheme): string {
   if (slideXml.includes('<p:timing') || !slideXml.includes('</p:sld>')) return slideXml;
+  // Renumbering happens even with no animation to add. Duplicate cNvPr ids are
+  // invalid OOXML in their own right — pptxgenjs numbers per shape KIND, so a
+  // slide with a text box and a table emits id=2 twice — and every reference to
+  // a shape (selection, comments, a later edit) resolves through that id. It
+  // was only ever done here because animation is what made it visible.
   const { xml, shapeIds } = renumberShapes(slideXml);
   const addition = transitionXml(scheme) + timingXml(shapeIds, scheme);
   if (!addition) return xml;
@@ -183,15 +188,23 @@ export function animateSlideXml(slideXml: string, scheme: AnimationScheme): stri
  * API for reaching them.
  */
 export async function animatePptx(bytes: Uint8Array, scheme: AnimationScheme): Promise<Uint8Array> {
-  if (scheme.transition === 'none' && scheme.entrance === 'none') return bytes;
-  const zip = await JSZip.loadAsync(bytes);
-  const slidePaths = Object.keys(zip.files).filter((n) => /^ppt\/slides\/slide\d+\.xml$/.test(n));
-  if (slidePaths.length === 0) return bytes;
-  for (const path of slidePaths) {
-    const xml = await zip.file(path)!.async('string');
-    zip.file(path, animateSlideXml(xml, scheme));
+  // No early return for `animation: none`: the shape-id fix above applies to
+  // every deck, animated or not.
+  try {
+    const zip = await JSZip.loadAsync(bytes);
+    const slidePaths = Object.keys(zip.files).filter((n) => /^ppt\/slides\/slide\d+\.xml$/.test(n));
+    if (slidePaths.length === 0) return bytes;
+    for (const path of slidePaths) {
+      const xml = await zip.file(path)!.async('string');
+      zip.file(path, animateSlideXml(xml, scheme));
+    }
+    // Same deflate the renderers use, and uint8array so this behaves identically
+    // in the browser, under jsdom and in plain Node.
+    return await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+  } catch {
+    // Anything unreadable here is the ANIMATION step failing, not the deck.
+    // Handing back the original bytes costs the animation; throwing would cost
+    // the whole export — and the deck itself was fine before we opened it.
+    return bytes;
   }
-  // Same deflate the renderers use, and uint8array so this behaves identically
-  // in the browser, under jsdom and in plain Node.
-  return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
 }

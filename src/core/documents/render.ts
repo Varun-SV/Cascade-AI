@@ -377,9 +377,23 @@ export async function renderPptx(md: string, opts: RenderOptions = {}): Promise<
           // widths are even because Markdown carries no width information and
           // guessing from content length looks worse than a regular grid.
           const cols = Math.max(1, ...v.rows.map((r) => r.length));
+          // pptxgenjs draws every row it is given and does not stop at the
+          // slide edge — autoPage defaults off, so a long table simply runs
+          // past the bottom and the rows below it are not in the deck at all.
+          // Rows shrink to fit, and past the point where they would stop being
+          // legible the table is cut with a count of what was dropped.
+          const maxRows = Math.max(2, Math.floor(h / MIN_TABLE_ROW_H));
+          const overflow = Math.max(0, v.rows.length - maxRows);
+          const body = overflow > 0
+            ? [...v.rows.slice(0, maxRows - 1), [`+${overflow} more rows`, ...Array(cols - 1).fill('')]]
+            : v.rows;
+          const rowH = Math.max(MIN_TABLE_ROW_H, Math.min(NATURAL_TABLE_ROW_H, h / body.length));
           slide.addTable(
-            v.rows.map((row, r) => padRow(row, cols).map((cell) => ({
-              text: cell,
+            body.map((row, r) => padRow(row, cols).map((cell) => ({
+              // addTable takes plain text, so inline markup is stripped HERE
+              // rather than in the shared scanner — the Word renderer needs the
+              // markers to style its cells.
+              text: stripInline(cell),
               options: r === 0
                 ? { bold: true, color: 'FFFFFF', fill: { color: '1F2937' } }
                 : { color: '374151' },
@@ -387,6 +401,10 @@ export async function renderPptx(md: string, opts: RenderOptions = {}): Promise<
             {
               x, y, w,
               colW: Array.from({ length: cols }, () => w / cols),
+              rowH,
+              // Explicit rather than relying on the default: a future flip
+              // would silently start appending slides mid-deck.
+              autoPage: false,
               fontSize: 12,
               border: { type: 'solid', pt: 1, color: 'D1D5DB' },
               valign: 'middle',
@@ -444,6 +462,11 @@ function resolveAnimation(
   pick('durationMs', []);
   return merged;
 }
+
+/** Inches. Below this a 12pt row clips its own text. */
+const MIN_TABLE_ROW_H = 0.28;
+/** Inches. What a row gets when the slide has room for it. */
+const NATURAL_TABLE_ROW_H = 0.4;
 
 /**
  * Pad a table row out to the widest row's column count.
