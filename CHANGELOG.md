@@ -296,12 +296,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   factor is now asked for directly rather than reverse-engineered from two
   outputs.
 
-- **A tier that never made a call no longer records an outcome.** A rejected
-  plan, or a planner that fails before dispatching, leaves later tiers with a
-  chosen default that served nothing; those defaults were being given the run's
-  success or failure, and an explicit rating along with it. Per-tier cost is
-  recorded per actual provider call, so a tier absent from it made none, and
-  its unused default is now dropped.
+- **Only a model that actually ran is rated.** Routing evidence was recorded
+  when a model was *chosen*, and choosing is not running: a rejected plan, a
+  cancelled subtask, or a tier default that per-section routing replaced all
+  left behind a selection that never reached a provider, and each was given the
+  run's success or failure and an explicit rating along with it. The router now
+  reports a model as served from the provider-call boundary — the only place
+  that knows a request was really made and which model made it.
 
 - **A model is credited under the task type it actually served.** Outcomes for
   a whole run were recorded under the task type of the LAST thing analysed, so

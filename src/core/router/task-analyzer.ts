@@ -22,29 +22,31 @@ export type AutoBias = 'balanced' | 'quality' | 'cost';
 /** Options shared by both selection entry points. */
 export interface SelectOptions {
   requiresToolUse?: boolean;
-  /**
-   * This selection only establishes the tier's default; a later per-work
-   * selection for the same tier replaces it. See RunSelection.provisional.
-   */
-  provisional?: boolean;
 }
 
 /**
- * One model this run used, and what it was used FOR.
+ * One model this run selected, what it was selected FOR, and whether it ever
+ * actually ran.
  *
- * `provisional` marks a selection that only establishes a tier's default. The
- * root selection in Cascade.run picks a model per tier before any work exists,
- * and T2Manager/T3Worker then select again per section and per subtask and use
- * THAT model for the actual call. When they do, the root choice never served
- * anything — so it must not receive the run's outcome or a share of its cost.
- * A non-provisional selection for the same tier supersedes it; if none arrives
- * (Cascade Auto off for subtasks, or a tier that runs once), the provisional
- * choice is the model that served and it stands.
+ * `served` is set by noteServed() from the provider-call boundary. It is a
+ * FACT, and it replaces three successive attempts to infer the same thing:
+ *
+ *   1. "the last model selected for a tier is the one that ran" — false as soon
+ *      as selection samples, because two subtasks can draw differently;
+ *   2. "a tier default that a per-work selection replaced did not run" — true,
+ *      but it only covers one of the ways a default fails to serve;
+ *   3. "a tier absent from costByTier made no call" — false, because
+ *      costByTier is session-cumulative and beginRun() never clears it, so
+ *      after a tier runs once every later run looks like it ran too.
+ *
+ * Each inference was reasonable and each was wrong in a way the next one
+ * exposed. Selecting a model is not running it, and no amount of reasoning
+ * about selections recovers what only the call site knows.
  */
 export interface RunSelection {
   model: ModelInfo;
   taskType: TaskType;
-  provisional: boolean;
+  served: boolean;
 }
 
 /** A routing choice, plus why it might not be the obvious one. */
@@ -326,10 +328,9 @@ export class TaskAnalyzer {
     // represented in the rating snapshot: a vision-routed run had nothing to
     // rate at all, and a fallback selection was silently omitted from the
     // feedback that is supposed to teach the router which models work.
-    const provisional = opts?.provisional === true;
     const recordSelection = (model: ModelInfo | null, note: string | null = null): Selection => {
       if (model) {
-        let used = this.currentRunSelections.get(tier) ?? [];
+        const used = this.currentRunSelections.get(tier) ?? [];
         // ACCUMULATE. This was `set(tier, model)`, harmless while selection was
         // a deterministic argmax — every subtask in a tier picked the same
         // model, so the overwrite replaced a model with itself. A sampled
@@ -339,13 +340,11 @@ export class TaskAnalyzer {
         // draw exists — would record no evidence at all, so exploration could
         // never learn from what it tried, nor stop trying it.
         //
-        // …but accumulating everything is wrong in the other direction: a
-        // real selection for this tier means the tier DEFAULT never ran, so
-        // drop it rather than paying it for work it did not do.
-        if (!provisional) used = used.filter((sel) => !sel.provisional);
-        const already = used.find((sel) => sel.model.id === model.id && sel.taskType === profile.type);
-        if (already) already.provisional = already.provisional && provisional;
-        else used.push({ model, taskType: profile.type, provisional });
+        // Selecting is not running, so these arrive unserved; noteServed()
+        // marks the ones that reach a provider.
+        if (!used.some((sel) => sel.model.id === model.id && sel.taskType === profile.type)) {
+          used.push({ model, taskType: profile.type, served: false });
+        }
         this.currentRunSelections.set(tier, used);
       }
       return { model, note };
@@ -397,23 +396,41 @@ export class TaskAnalyzer {
   }
 
   /**
+   * Mark a selected model as having actually served a call on this tier.
+   *
+   * Called from the provider-call boundary (RouterCore.recordStats), which is
+   * the only place that knows a request was really made and which model made
+   * it. Everything upstream of that knows only what was CHOSEN.
+   *
+   * A model that serves without having been selected here — an explicitly
+   * pinned tier, a failover replacement — has no entry and is ignored, which
+   * matches the existing contract that this analyzer only rates its own
+   * choices.
+   */
+  noteServed(tier: TierRole, modelId: string): void {
+    const used = this.currentRunSelections.get(tier);
+    if (!used) return;
+    for (const sel of used) {
+      if (sel.model.id === modelId) sel.served = true;
+    }
+  }
+
+  /**
    * Record the outcome of a completed run across all tiers that were selected
    * during this session and persist stats to disk.
    */
   recordRunOutcome(outcome: 'success' | 'failure', costByTier: Record<string, number>, contextTokens = 0): void {
     if (!this.tracker) return;
-    const served = new Map<TierRole, RunSelection[]>();
+    const servedByTier = new Map<TierRole, RunSelection[]>();
     for (const [tier, all] of this.currentRunSelections) {
-      // A provisional entry is the tier's DEFAULT, and "nothing superseded it"
-      // is not the same as "it ran". A rejected plan, or a T1 that fails before
-      // dispatching managers, leaves T2/T3 defaults sitting here having served
-      // zero calls. `costByTier` is incremented per actual provider call, so a
-      // tier with no key never made one — the only real execution evidence
-      // reaching this method.
-      const tierRan = Object.prototype.hasOwnProperty.call(costByTier, tier);
-      const used = tierRan ? all : all.filter((sel) => !sel.provisional);
+      // Only models that actually reached a provider. A selection is a plan,
+      // not an observation: a rejected plan, a cancelled subtask, or a tier
+      // default that per-work routing replaced all leave selections behind
+      // that never ran, and paying them the run's outcome teaches the router
+      // about work that did not happen.
+      const used = all.filter((sel) => sel.served);
       if (used.length === 0) continue;
-      served.set(tier, used);
+      servedByTier.set(tier, used);
       // The caller only knows what a TIER cost, not what each model in it cost,
       // so a tier served by several models splits its cost evenly across them.
       // An approximation, and a deliberate one: charging every model the whole
@@ -435,7 +452,7 @@ export class TaskAnalyzer {
     // The SAME set that received the outcome — a tier that never ran must not
     // collect an explicit rating either, or the thumb credits a model the run
     // never used.
-    this.lastCompletedRun = { selections: new Map(served) };
+    this.lastCompletedRun = { selections: new Map(servedByTier) };
     this.currentRunSelections.clear();
     void this.tracker.save();
   }

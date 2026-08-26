@@ -1667,21 +1667,22 @@ ${prompt}`
           // router's `routing:exploring` wiring never sees this pick. The note
           // comes back WITH the selection because these tier selections run
           // concurrently — see TaskAnalyzer.select().
-          // T2Manager and T3Worker select AGAIN, per section and per subtask,
-          // and call that model — so for those tiers this choice only
-          // establishes a default and may serve nothing. T1 has no per-work
-          // re-selection, so its root pick is the model that runs. If a per-work
-          // selection is ever added to T1, this must move with it.
-          const provisional = tier !== 'T1';
           const { model, note } = await this.taskAnalyzer!.select(
-            routingPrompt, tier, this.router.getSelector(), { provisional },
+            routingPrompt, tier, this.router.getSelector(),
           );
-          // Announced only when this pick is the one that will serve. A
-          // provisional exploratory draw is normally replaced before any
-          // provider call, and /why claiming the run "tried an alternative"
-          // that never ran is worse than saying nothing — the per-work
-          // selection emits its own note for the model that actually runs.
-          if (note && !provisional) this.recordDecision('model', `${tier} ${note}`);
+          // T2Manager and T3Worker select AGAIN, per section and per subtask,
+          // and call that model — so for those tiers this pick only establishes
+          // a default and is normally replaced before any provider call. /why
+          // claiming the run "tried an alternative" that never ran is worse
+          // than saying nothing, and the per-work selection emits its own note
+          // for the model that actually runs. T1 has no per-work re-selection,
+          // so its pick is the one that serves and is announced. If per-work
+          // selection is ever added to T1, this must move with it.
+          //
+          // This governs only what /why SAYS. What gets rated is decided by
+          // whether a model actually served a call — see noteServed().
+          const willReselect = tier !== 'T1';
+          if (note && !willReselect) this.recordDecision('model', `${tier} ${note}`);
           if (model) {
             this.router.overrideTierModel(tier, model);
             const taskType = this.taskAnalyzer!.getLastProfile()?.type ?? 'mixed';
@@ -1695,7 +1696,7 @@ ${prompt}`
             // Printing both lines unchanged gave /why two contradictory
             // explanations for the same choice, which reads as a bug rather
             // than as the deliberate experiment it is.
-            const rationale = note && !provisional
+            const rationale = note && !willReselect
               ? `Cascade Auto: trying an alternative for ${taskType}`
               : `Cascade Auto: best value for ${taskType}`;
             this.recordDecision(

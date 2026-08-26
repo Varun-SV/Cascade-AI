@@ -278,15 +278,15 @@ describe('an explored model learns from having been tried', () => {
     // is explored again forever and its trial never taught anyone anything.
     const tracker = mem();
     const analyzer = new TaskAnalyzer(tracker);
-    const selector = selectorOver([model('alpha')]);
-    const other = selectorOver([model('beta')]);
 
-    // Two subtasks in ONE tier landing on different models — exactly what a
-    // sampled selection produces.
+    // Two subtasks in ONE tier landing on different models, both of which ran —
+    // exactly what a sampled selection produces.
     TaskAnalyzer.clearCache();
-    await analyzer.select(codePrompt(1), 'T3', selector);
+    await analyzer.select(codePrompt(1), 'T3', selectorOver([model('alpha')]));
+    analyzer.noteServed('T3', 'alpha');
     TaskAnalyzer.clearCache();
-    await analyzer.select(codePrompt(2), 'T3', other);
+    await analyzer.select(codePrompt(2), 'T3', selectorOver([model('beta')]));
+    analyzer.noteServed('T3', 'beta');
 
     analyzer.recordRunOutcome('success', { T3: 0.09 });
 
@@ -303,8 +303,10 @@ describe('an explored model learns from having been tried', () => {
 
     TaskAnalyzer.clearCache();
     await analyzer.select(codePrompt(1), 'T3', selectorOver([model('alpha')]));
+    analyzer.noteServed('T3', 'alpha');
     TaskAnalyzer.clearCache();
     await analyzer.select(codePrompt(2), 'T3', selectorOver([model('beta')]));
+    analyzer.noteServed('T3', 'beta');
 
     analyzer.recordRunOutcome('success', { T3: 0.10 });
 
@@ -319,50 +321,13 @@ describe('an explored model learns from having been tried', () => {
 
     TaskAnalyzer.clearCache();
     await analyzer.select(codePrompt(1), 'T3', selector);
+    analyzer.noteServed('T3', 'alpha');
     TaskAnalyzer.clearCache();
     await analyzer.select(codePrompt(2), 'T3', selector);
+    analyzer.noteServed('T3', 'alpha');
 
     analyzer.recordRunOutcome('success', { T3: 0.04 });
     expect(tracker.sampleCountFor('alpha', 'code')).toBe(1);
-  });
-});
-
-describe('evidence goes to the model that actually served', () => {
-  it('does not pay a tier default that a per-work selection superseded', async () => {
-    // Cascade.run picks a model per tier before any work exists, then
-    // T2Manager/T3Worker select again per section and per subtask and call
-    // THAT model. The root choice served nothing. Accumulating it anyway —
-    // which is what fixing the per-tier overwrite did on its own — hands
-    // success/failure evidence and a share of the cost to a model that never
-    // ran, and a sampled root choice differs from the per-work one often
-    // enough for that to matter.
-    const tracker = mem();
-    const analyzer = new TaskAnalyzer(tracker);
-
-    TaskAnalyzer.clearCache();
-    await analyzer.select(codePrompt(1), 'T3', selectorOver([model('tier-default')]), { provisional: true });
-    TaskAnalyzer.clearCache();
-    await analyzer.select(codePrompt(2), 'T3', selectorOver([model('actually-ran')]));
-
-    analyzer.recordRunOutcome('success', { T3: 0.08 });
-
-    expect(tracker.sampleCountFor('tier-default', 'code'), 'never served a call').toBe(0);
-    expect(tracker.sampleCountFor('actually-ran', 'code')).toBe(1);
-    const spend = tracker.getAll().get('actually-ran:code')?.totalCostUsd ?? 0;
-    expect(spend, 'the whole tier cost belongs to the model that ran').toBeCloseTo(0.08, 6);
-  });
-
-  it('keeps the tier default when nothing supersedes it', async () => {
-    // Cascade Auto off for subtasks, or a tier that runs once: the root choice
-    // IS the model that serves, and dropping it would lose the run entirely.
-    const tracker = mem();
-    const analyzer = new TaskAnalyzer(tracker);
-
-    TaskAnalyzer.clearCache();
-    await analyzer.select(codePrompt(1), 'T1', selectorOver([model('planner')]), { provisional: true });
-    analyzer.recordRunOutcome('success', { T1: 0.02 });
-
-    expect(tracker.sampleCountFor('planner', 'code')).toBe(1);
   });
 });
 
@@ -377,8 +342,10 @@ describe('a model is credited for the work it actually did', () => {
 
     TaskAnalyzer.clearCache();
     await analyzer.select('refactor the parser function', 'T3', selectorOver([model('coder')]));
+    analyzer.noteServed('T3', 'coder');
     TaskAnalyzer.clearCache();
     await analyzer.select('write a short poem about the sea', 'T3', selectorOver([model('writer')]));
+    analyzer.noteServed('T3', 'writer');
 
     analyzer.recordRunOutcome('success', { T3: 0.06 });
 
@@ -393,8 +360,10 @@ describe('a model is credited for the work it actually did', () => {
 
     TaskAnalyzer.clearCache();
     await analyzer.select('refactor the parser function', 'T3', selectorOver([model('coder')]));
+    analyzer.noteServed('T3', 'coder');
     TaskAnalyzer.clearCache();
     await analyzer.select('write a short poem about the sea', 'T3', selectorOver([model('writer')]));
+    analyzer.noteServed('T3', 'writer');
     analyzer.recordRunOutcome('success', { T3: 0 });
 
     expect(analyzer.recordExplicitRating('good')).toBe(true);
@@ -442,49 +411,75 @@ describe('the score floor does not become a bonus', () => {
   });
 });
 
-describe('a tier that never ran earns nothing', () => {
-  it('drops a tier default when the tier made no call', async () => {
-    // A rejected plan, or a T1 that fails before dispatching managers, leaves
-    // T2/T3 defaults selected but never used. "Nothing superseded it" is not
-    // "it ran" — costByTier is incremented per actual provider call, so a tier
-    // with no key made none.
+describe('only a model that actually ran is rated', () => {
+  it('ignores a selection that never reached a provider', async () => {
+    // A rejected plan, a cancelled subtask, or a tier default that per-work
+    // routing replaced: all leave a selection behind that never ran. Three
+    // successive attempts to infer this from the selections themselves were
+    // each wrong in a way the next exposed — the last of them read
+    // `costByTier`, which beginRun() never clears, so after a tier ran once
+    // every later run looked like it ran too.
     const tracker = mem();
     const analyzer = new TaskAnalyzer(tracker);
 
     TaskAnalyzer.clearCache();
     await analyzer.select(codePrompt(1), 'T1', selectorOver([model('planner')]));
+    analyzer.noteServed('T1', 'planner');
     TaskAnalyzer.clearCache();
-    await analyzer.select(codePrompt(2), 'T3', selectorOver([model('never-ran')]), { provisional: true });
+    await analyzer.select(codePrompt(2), 'T3', selectorOver([model('never-ran')]));
 
-    // Only T1 made a call — the plan was rejected before any T3 work.
-    analyzer.recordRunOutcome('failure', { T1: 0.01 });
+    // A cost key for T3 is NOT evidence that T3 ran — it survives from earlier
+    // runs in the same session. Only noteServed() is.
+    analyzer.recordRunOutcome('failure', { T1: 0.01, T3: 0.02 });
 
     expect(tracker.sampleCountFor('planner', 'code')).toBe(1);
     expect(tracker.sampleCountFor('never-ran', 'code'), 'served zero calls').toBe(0);
   });
 
-  it('does not let a rating credit a tier that never ran either', async () => {
+  it('does not let a rating credit a model that never ran either', async () => {
     const tracker = mem();
     const analyzer = new TaskAnalyzer(tracker);
 
     TaskAnalyzer.clearCache();
     await analyzer.select(codePrompt(1), 'T1', selectorOver([model('planner')]));
+    analyzer.noteServed('T1', 'planner');
     TaskAnalyzer.clearCache();
-    await analyzer.select(codePrompt(2), 'T3', selectorOver([model('never-ran')]), { provisional: true });
-    analyzer.recordRunOutcome('failure', { T1: 0 });
+    await analyzer.select(codePrompt(2), 'T3', selectorOver([model('never-ran')]));
+    analyzer.recordRunOutcome('failure', { T1: 0, T3: 0 });
 
     expect(analyzer.recordExplicitRating('good')).toBe(true);
     expect(tracker.sampleCountFor('never-ran', 'code')).toBe(0);
   });
 
-  it('keeps a tier default that did make a call', async () => {
+  it('rates a tier default that did serve the call', async () => {
+    // The other direction, which matters just as much: when no per-work
+    // selection replaces it, the root pick IS the model that runs and dropping
+    // it would lose the run entirely.
     const tracker = mem();
     const analyzer = new TaskAnalyzer(tracker);
 
     TaskAnalyzer.clearCache();
-    await analyzer.select(codePrompt(1), 'T3', selectorOver([model('served')]), { provisional: true });
+    await analyzer.select(codePrompt(1), 'T3', selectorOver([model('served')]));
+    analyzer.noteServed('T3', 'served');
     analyzer.recordRunOutcome('success', { T3: 0.03 });
 
     expect(tracker.sampleCountFor('served', 'code')).toBe(1);
+  });
+
+  it('ignores a served model it never selected', async () => {
+    // A pinned tier or a failover replacement reaches a provider without this
+    // analyzer having chosen it. Rating it would be an opinion about a decision
+    // the router did not make.
+    const tracker = mem();
+    const analyzer = new TaskAnalyzer(tracker);
+
+    TaskAnalyzer.clearCache();
+    await analyzer.select(codePrompt(1), 'T3', selectorOver([model('chosen')]));
+    analyzer.noteServed('T3', 'chosen');
+    analyzer.noteServed('T3', 'some-failover-model');
+    analyzer.recordRunOutcome('success', { T3: 0.01 });
+
+    expect(tracker.sampleCountFor('chosen', 'code')).toBe(1);
+    expect(tracker.sampleCountFor('some-failover-model', 'code')).toBe(0);
   });
 });

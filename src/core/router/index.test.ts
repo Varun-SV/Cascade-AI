@@ -2182,3 +2182,39 @@ describe('credential identity retention is capped, not slid', () => {
     expect(discoveryCacheKey('anthropic', cfg)).toBe(first);
   });
 });
+
+describe('CascadeRouter — routing evidence reaches the model that ran', () => {
+  function makeConfigLocal(overrides: Partial<CascadeConfig> = {}): CascadeConfig {
+    return { providers: [], models: {}, tools: { allowedTools: [] }, ...overrides } as unknown as CascadeConfig;
+  }
+
+  it('tells the analyzer a model served, from the provider-call boundary', async () => {
+    // The wiring this depends on is one line in recordStats(), and every unit
+    // test of the analyzer calls noteServed() directly — so without this test
+    // the line could be deleted and nothing would fail while production
+    // silently stopped recording any routing evidence at all. That is worse
+    // than the bug it replaced: no evidence rather than wrong evidence.
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'ok', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['anthropic']));
+    await router.init(makeConfigLocal({ providers: [{ type: 'anthropic', apiKey: 'sk-ant-test' }] }));
+
+    const served: Array<{ tier: string; modelId: string }> = [];
+    router.setTaskAnalyzer({
+      noteServed: (tier: string, modelId: string) => { served.push({ tier, modelId }); },
+      setFeedbackSource: () => {},
+    } as never);
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'anthropic');
+    expect(pinned, 'need an anthropic model to pin').toBeTruthy();
+    await router.generate('T2', { messages: [{ role: 'user', content: 'hi' }], model: pinned });
+
+    expect(served).toEqual([{ tier: 'T2', modelId: pinned!.id }]);
+    vi.restoreAllMocks();
+  });
+});

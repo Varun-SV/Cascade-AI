@@ -2146,6 +2146,12 @@ export class CascadeRouter extends EventEmitter {
     this.stats.callsByProvider[model.provider] = (this.stats.callsByProvider[model.provider] ?? 0) + 1;
     this.stats.callsByTier[tier] = (this.stats.callsByTier[tier] ?? 0) + 1;
 
+    // The one place that knows a model actually RAN rather than being chosen.
+    // Routing evidence is only defensible if it reaches the model that did the
+    // work, and every attempt to infer that from the selections themselves was
+    // wrong in a different way — see RunSelection.
+    this.taskAnalyzer?.noteServed(tier, model.id);
+
     // ── Per-tier cost & token breakdown ──────────
     this.stats.costByTier[tier] = (this.stats.costByTier[tier] ?? 0) + usage.estimatedCostUsd;
     this.stats.tokensByTier[tier] = (this.stats.tokensByTier[tier] ?? 0) + usage.totalTokens;

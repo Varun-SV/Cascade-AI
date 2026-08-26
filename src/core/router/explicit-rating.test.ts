@@ -46,6 +46,7 @@ describe('explicit ratings after a completed run', () => {
       getCandidatesForTier: () => [model],
     } as never;
     await analyzer.selectModel('Refactor the auth module and add tests', 'T3', selector);
+    analyzer.noteServed('T3', 'model-a');
 
     analyzer.recordRunOutcome('success', { T3: 0.01 });
     expect(tracker.auto.length).toBeGreaterThan(0);
@@ -69,6 +70,7 @@ describe('explicit ratings after a completed run', () => {
     } as never;
 
     await analyzer.selectModel('Describe this screenshot image in detail', 'T3', selector);
+    analyzer.noteServed('T3', 'vision-model');
     analyzer.recordRunOutcome('success', { T3: 0 });
 
     expect(analyzer.recordExplicitRating('good')).toBe(true);
@@ -86,6 +88,7 @@ describe('explicit ratings after a completed run', () => {
     } as never;
 
     await analyzer.selectModel('Refactor the auth module', 'T3', selector);
+    analyzer.noteServed('T3', 'fallback-model');
     analyzer.recordRunOutcome('success', { T3: 0 });
 
     expect(analyzer.recordExplicitRating('good')).toBe(true);
@@ -104,6 +107,7 @@ describe('explicit ratings after a completed run', () => {
       getCandidatesForTier: () => [model],
     } as never;
     await analyzer.selectModel('Refactor the auth module', 'T3', selector);
+    analyzer.noteServed('T3', 'model-a');
     analyzer.recordRunOutcome('success', { T3: 0 });
 
     expect(analyzer.recordExplicitRating('good')).toBe(true);
@@ -128,6 +132,7 @@ describe('explicit ratings after a completed run', () => {
 
     // Run A: a code task, completed.
     await analyzer.selectModel('Refactor the auth module, fix the failing test, and export the class', 'T3', selector);
+    analyzer.noteServed('T3', 'code-model');
     const codeType = analyzer.getLastProfile()?.type;
     expect(codeType).toBe('code');
     analyzer.recordRunOutcome('success', { T3: 0 });
@@ -157,6 +162,7 @@ describe('explicit ratings after a completed run', () => {
 
     for (const tier of ['T1', 'T2', 'T3'] as const) {
       await analyzer.selectModel('Refactor the auth module', tier, selector);
+      analyzer.noteServed(tier, 'solo-model');
     }
     analyzer.recordRunOutcome('success', { T1: 0, T2: 0, T3: 0 });
 
