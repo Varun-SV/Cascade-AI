@@ -246,6 +246,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accumulates rather than lurching on the first observation. The retry penalty
   is unchanged.
 
+- **Exploration is off when there is nothing to learn from.** With
+  `routing.learnFromOutcomes` disabled the tracker reads the shared scores but
+  drops every observation, so a sampled posterior could never narrow: uncertain
+  models would stay uncertain forever and routing would keep spending on
+  experiments whose results it throws away. Selection ranks on belief in that
+  configuration. An exploratory pick is also announced only when its call
+  actually goes out, so `/why` no longer reports an alternative for a subtask
+  that was cancelled before reaching a provider.
+
 - **Routing occasionally tries a plausible alternative instead of only ever
   picking the current best.** Selection now scores each candidate twice — on
   what we believe (the posterior mean) and on a draw from the same posterior —

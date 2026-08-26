@@ -2248,4 +2248,32 @@ describe('CascadeRouter — routing evidence reaches the model that ran', () => 
     expect(attempted).toContainEqual({ tier: 'T3', modelId: pinned!.id });
     vi.restoreAllMocks();
   });
+
+  it('announces an exploratory pick only when its call goes out', async () => {
+    // A selection is not a call. T3Worker selects before its cancellation
+    // checkpoint, so a subtask that loses a wave race throws without reaching
+    // a provider — and /why claimed the run "tried an alternative" that never
+    // ran.
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['anthropic']));
+    await router.init(makeConfigLocal({
+      providers: [{ type: 'anthropic', apiKey: 'sk-ant-test' }],
+      cascadeAuto: true,
+    } as Partial<CascadeConfig>));
+
+    const chosen = router.getAvailableModels().find((m) => m.provider === 'anthropic')!;
+    router.setTaskAnalyzer({
+      select: async () => ({ model: chosen, note: 'exploring something', taskType: 'code' }),
+      noteAttempted: () => {},
+      setFeedbackSource: () => {},
+    } as never);
+
+    const announced: string[] = [];
+    router.on('routing:exploring', (e: { note: string }) => announced.push(e.note));
+
+    await router.selectModelForSubtask('T3', 'refactor the parser function');
+    expect(announced, 'selecting is not running').toEqual([]);
+    vi.restoreAllMocks();
+  });
 });

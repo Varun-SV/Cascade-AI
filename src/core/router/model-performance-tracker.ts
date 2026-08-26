@@ -186,6 +186,19 @@ export class ModelPerformanceTracker {
   }
 
   /**
+   * Whether outcomes recorded here go anywhere.
+   *
+   * A read-only tracker (routing.learnFromOutcomes = false) reads the shared
+   * scores but drops every observation — not just the write to disk, the
+   * in-memory update too. Anything whose correctness depends on evidence
+   * accumulating has to know that: see TaskAnalyzer.perfFor, where sampling a
+   * posterior that can never narrow means exploring forever.
+   */
+  learnsFromOutcomes(): boolean {
+    return !this.readOnly;
+  }
+
+  /**
    * The Beta posterior over this model's success rate for this task type.
    *
    * Exposed as the posterior rather than a number so callers can ask the two

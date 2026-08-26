@@ -528,3 +528,56 @@ describe('a selection is identified by more than its model', () => {
     expect(tracker.sampleCountFor('m', 'code')).toBe(1);
   });
 });
+
+describe('exploration needs somewhere for the evidence to go', () => {
+  it('ranks on belief when outcomes are never recorded', async () => {
+    // routing.learnFromOutcomes=false builds a read-only tracker whose record()
+    // returns before touching even in-memory state. Sampling a posterior that
+    // can never narrow is not exploration — it is a permanent dice roll on the
+    // user's bill, since the evidence that would make the experiment
+    // self-limiting is thrown away every time.
+    // A read-only tracker that HAS beliefs — the real situation: it loaded the
+    // shared stats file and simply never writes back. Building one by recording
+    // into it is impossible by definition, and a tracker with no data at all
+    // cannot explore in either mode, so that fixture would pass against the
+    // bug. (It did, on the first attempt.)
+    const learned = mem();
+    for (let i = 0; i < 5; i++) learned.record('incumbent', 'code', 'success');
+    const readOnly = new ModelPerformanceTracker('/nonexistent/model-perf.json', { readOnly: true });
+    (readOnly as unknown as { stats: Map<string, unknown> }).stats =
+      (learned as unknown as { stats: Map<string, unknown> }).stats;
+    expect(readOnly.learnsFromOutcomes()).toBe(false);
+
+    const analyzer = new TaskAnalyzer(readOnly);
+    analyzer.setRng(seeded(2718));
+    const selector = selectorOver([model('untried'), model('incumbent')]);
+
+    // With learning on, this pairing explores; with it off it must not, ever.
+    let explored = 0;
+    for (let i = 0; i < 300; i++) {
+      TaskAnalyzer.clearCache();
+      const sel = await analyzer.select(codePrompt(i), 'T3', selector);
+      if (sel.note) explored++;
+    }
+    expect(explored, 'nothing can be learned, so nothing should be risked').toBe(0);
+  });
+
+  it('still explores when outcomes are recorded', async () => {
+    // The control: same fixture, a tracker that learns.
+    const learning = mem();
+    expect(learning.learnsFromOutcomes()).toBe(true);
+    for (let i = 0; i < 5; i++) learning.record('incumbent', 'code', 'success');
+
+    const analyzer = new TaskAnalyzer(learning);
+    analyzer.setRng(seeded(2718));
+    const selector = selectorOver([model('untried'), model('incumbent')]);
+
+    let explored = 0;
+    for (let i = 0; i < 300; i++) {
+      TaskAnalyzer.clearCache();
+      const sel = await analyzer.select(codePrompt(i), 'T3', selector);
+      if (sel.note) explored++;
+    }
+    expect(explored).toBeGreaterThan(0);
+  });
+});

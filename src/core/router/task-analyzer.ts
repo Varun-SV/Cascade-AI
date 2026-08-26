@@ -569,6 +569,15 @@ export class TaskAnalyzer {
   private perfFor(model: ModelInfo, profile: TaskProfile, mode: 'mean' | 'sample'): number {
     if (!this.tracker) return 0.5;
     if (mode === 'mean') return this.tracker.performanceScore(model.id, profile.type);
+    // Exploration is only defensible because it is self-limiting, and it is
+    // self-limiting only because the posterior narrows as outcomes arrive. With
+    // learnFromOutcomes off, nothing is ever recorded — not even in memory — so
+    // an uncertain model stays exactly as uncertain forever and the draw keeps
+    // preferring it. That is not exploration, it is a permanent dice roll on
+    // the user's bill. Rank on belief instead.
+    if (this.tracker.learnsFromOutcomes?.() === false) {
+      return this.tracker.performanceScore(model.id, profile.type);
+    }
     const posterior = this.tracker.posteriorFor(model.id, profile.type);
     const drawn = sampleBeta(posterior, this.rng);
     // Asked for directly, NOT recovered as performanceScore / posteriorMean.
