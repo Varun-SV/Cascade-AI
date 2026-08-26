@@ -12,7 +12,7 @@ import os from 'node:os';
 import type { ModelInfo } from '../../types.js';
 import type { TaskType } from './task-analyzer.js';
 import { BLENDED_COST_CEILING, blendedCostPer1k } from './pricing.js';
-import { betaPosterior, posteriorMean, type BetaPosterior } from './bayes.js';
+import { posteriorMean, weightedPosterior, type BetaPosterior } from './bayes.js';
 
 interface ModelStat {
   /**
@@ -161,10 +161,15 @@ export class ModelPerformanceTracker {
    * automatic outcomes.
    *
    * ONE observation carrying that weight, not three observations. Recording it
-   * three times also tripled `sampleCount`, and sample count is how confident
-   * the router is allowed to be — so a single thumb made it three times as
-   * sure as the evidence warranted, and every count derived from it (the
-   * lifecycle states this feeds next) inherited the error.
+   * three times also tripled `sampleCount` — the count of how many times this
+   * model was actually run, which the exploration note reports and the
+   * lifecycle states will read. One click claimed three runs' worth of
+   * history that never happened.
+   *
+   * The weight is spent on belief, relative to the evidence it competes with;
+   * it does not buy confidence. A lone thumbs-up moves the score exactly as
+   * far as a lone successful run (0.5 → 0.6) — what it buys is winning the
+   * argument against automatic outcomes that disagree with it.
    */
   recordExplicit(modelId: string, taskType: TaskType, rating: 'good' | 'bad', costUsd = 0): void {
     const outcome = rating === 'good' ? 'success' : 'failure';
@@ -190,7 +195,31 @@ export class ModelPerformanceTracker {
    */
   posteriorFor(modelId: string, taskType: TaskType): BetaPosterior {
     const s = this.stats.get(`${modelId}:${taskType}`);
-    return betaPosterior(s?.successCount ?? 0, s?.failureCount ?? 0);
+    // Weight decides where this sits, observation count decides how tight it
+    // is — see weightedPosterior. Passing the weights straight in would make
+    // one thumbs-up narrow the posterior exactly as much as three runs, which
+    // is the "count is confidence" error wearing different clothes.
+    return weightedPosterior(s?.successCount ?? 0, s?.failureCount ?? 0, s?.sampleCount ?? 0);
+  }
+
+  /**
+   * The observed success rate, 0–1 — what actually happened, unshrunk.
+   *
+   * For display (`cascade stats`), not for routing: routing wants
+   * `performanceScore`, which is shrunk toward 0.5 by how little is known.
+   *
+   * Lives here rather than at the call site because the denominator is not
+   * obvious and getting it wrong is silent. It is the EVIDENCE total, not
+   * `sampleCount`: an explicit rating contributes 3 units of evidence on 1
+   * observation, so dividing by the observation count renders a single
+   * thumbs-up as "300%" — and anything sorting on that column then ranks the
+   * impossible rates first.
+   */
+  observedSuccessRate(modelId: string, taskType: TaskType): number {
+    const s = this.stats.get(`${modelId}:${taskType}`);
+    if (!s) return 0;
+    const evidence = s.successCount + s.failureCount;
+    return evidence > 0 ? s.successCount / evidence : 0;
   }
 
   /** How many times this model was observed on this task type. */

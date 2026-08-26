@@ -177,6 +177,35 @@ describe('an exploratory pick explains itself', () => {
     expect(analyzer.takeExplorationNote()).toBeNull();
   });
 
+  it('clears the note when the next selection did not explore', async () => {
+    // Consuming is not enough. The root tier selects through selectModel
+    // directly while subtasks select through the router, so an exploratory
+    // root pick can go unread — and then the next selection, exploratory or
+    // not, hands it to /why under ITS tier and ITS model. The note has to be
+    // cleared by every selection, not only written by exploratory ones.
+    const tracker = mem();
+    for (let i = 0; i < 5; i++) tracker.record('incumbent', 'code', 'success');
+    const analyzer = new TaskAnalyzer(tracker);
+    analyzer.setRng(seeded(2718));
+    const explorable = selectorOver([model('untried'), model('incumbent')]);
+
+    let explored = false;
+    for (let i = 0; i < 200 && !explored; i++) {
+      TaskAnalyzer.clearCache();
+      await analyzer.selectModel(codePrompt(i), 'T3', explorable);
+      // Deliberately NOT consumed — that is the situation being tested.
+      explored = (analyzer as unknown as { explorationNote: string | null }).explorationNote !== null;
+    }
+    expect(explored, 'needed an unread exploratory note to leave behind').toBe(true);
+
+    // A selection with nothing to explore: one candidate, so the draw and the
+    // belief cannot disagree.
+    TaskAnalyzer.clearCache();
+    await analyzer.selectModel(codePrompt(999), 'T3', selectorOver([model('only')]));
+
+    expect(analyzer.takeExplorationNote()).toBeNull();
+  });
+
   it('consumes the note, so it cannot be blamed on a later selection', async () => {
     const tracker = mem();
     for (let i = 0; i < 5; i++) tracker.record('incumbent', 'code', 'success');

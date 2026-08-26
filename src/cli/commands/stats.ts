@@ -26,7 +26,12 @@ export async function statsCommand(): Promise<void> {
     for (const [key, stat] of all) {
       if (!key.endsWith(`:${taskType}`)) continue;
       const modelId = key.slice(0, -(taskType.length + 1));
-      const successRate = stat.sampleCount > 0 ? stat.successCount / stat.sampleCount : 0;
+      // NOT successCount / sampleCount. Those stopped being the same
+      // denominator when an explicit rating started carrying weight on one
+      // observation instead of being recorded three times — a single
+      // thumbs-up is 3 units of evidence over 1 sample, which this column
+      // rendered as "300%" and then sorted on.
+      const successRate = tracker.observedSuccessRate(modelId, taskType);
       const avgCostUsd = stat.sampleCount > 0 ? stat.totalCostUsd / stat.sampleCount : 0;
       entries.push({ modelId, successRate, samples: stat.sampleCount, avgCostUsd });
     }

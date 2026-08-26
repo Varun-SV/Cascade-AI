@@ -8,6 +8,7 @@ import {
   posteriorMean,
   posteriorStdDev,
   sampleBeta,
+  weightedPosterior,
   PERF_PRIOR_STRENGTH,
   type Rng,
 } from './bayes.js';
@@ -136,6 +137,24 @@ describe('sampleBeta — Thompson sampling', () => {
     expect(unsureWins).toBeLessThan(500);
   });
 
+  it('does not hang on a stream that never clears the squeeze', () => {
+    // The bound has to cover BOTH rejection kinds. Marsaglia–Tsang is usually
+    // written with the `1 + c*x <= 0` redraw in its own unbounded inner loop,
+    // and this stream — a legal [0,1) source alternating 0 and 0.5 — makes
+    // Box–Muller return the same large negative x every time, so that inner
+    // loop spins forever and the outer bound is never reached. A hung sampler
+    // is a hung routing call: no error, no timeout, the run simply stops.
+    let flip = false;
+    const alternating: Rng = () => {
+      flip = !flip;
+      return flip ? 0 : 0.5;
+    };
+    const v = sampleBeta(betaPosterior(5, 5), alternating);
+    expect(Number.isFinite(v)).toBe(true);
+    expect(v).toBeGreaterThanOrEqual(0);
+    expect(v).toBeLessThanOrEqual(1);
+  });
+
   it('does not hang or return junk on a degenerate RNG', () => {
     // A stub returning a constant is a realistic test-double mistake, and a
     // rejection sampler is exactly where that turns into a hung routing call.
@@ -159,5 +178,41 @@ describe('sampleBeta — Thompson sampling', () => {
   it('uses the documented default prior strength', () => {
     expect(PERF_PRIOR_STRENGTH).toBe(4);
     expect(posteriorMean(betaPosterior(0, 1, PERF_PRIOR_STRENGTH))).toBeCloseTo(0.4, 5);
+  });
+});
+
+describe('weightedPosterior — belief is bought with weight, certainty with observations', () => {
+  it('is the plain posterior when every observation weighs one', () => {
+    const weighted = weightedPosterior(3, 7, 10);
+    const plain = betaPosterior(3, 7);
+    expect(weighted.alpha).toBeCloseTo(plain.alpha, 10);
+    expect(weighted.beta).toBeCloseTo(plain.beta, 10);
+  });
+
+  it('does not let weight masquerade as evidence', () => {
+    // One observation worth 3 vs three observations. Same direction, but the
+    // single click stays visibly less certain — which is the entire point, and
+    // what passing weight straight into α/β silently destroys.
+    const oneHeavy = weightedPosterior(3, 0, 1);
+    const threeLight = weightedPosterior(3, 0, 3);
+    expect(posteriorStdDev(oneHeavy)).toBeGreaterThan(posteriorStdDev(threeLight));
+    expect(posteriorMean(oneHeavy)).toBeLessThan(posteriorMean(threeLight));
+  });
+
+  it('spends the weight where a weight belongs — against the evidence it disagrees with', () => {
+    const weighted = posteriorMean(weightedPosterior(3, 1, 2));   // thumbs-up + a failed run
+    const unweighted = posteriorMean(weightedPosterior(1, 1, 2)); // a good run + a failed run
+    expect(weighted).toBeGreaterThan(unweighted);
+    expect(unweighted).toBeCloseTo(0.5, 10);
+  });
+
+  it('is neutral when there is nothing to weigh', () => {
+    expect(posteriorMean(weightedPosterior(0, 0, 0))).toBe(0.5);
+    // Weight recorded against no observation is not evidence of anything.
+    expect(posteriorMean(weightedPosterior(9, 0, 0))).toBe(0.5);
+  });
+
+  it('ignores negative weights rather than inverting the evidence', () => {
+    expect(posteriorMean(weightedPosterior(-5, 0, 3))).toBe(0.5);
   });
 });

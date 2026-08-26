@@ -264,9 +264,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **An explicit thumbs-up no longer makes the router three times as confident
   as the evidence warrants.** A rating was worth three automatic outcomes and
   was implemented by recording the same observation three times, which also
-  tripled `sampleCount` — the count everything else reads as *confidence*. The
-  weight is now carried on one observation: belief moves as much as before, the
-  observation count moves by one.
+  tripled `sampleCount` — the count of how many times a model was actually run.
+  The weight is now carried on one observation, and it is spent on belief
+  rather than on certainty: a lone thumbs-up moves the score exactly as far as
+  a lone successful run, and what the weight buys is winning the argument
+  against automatic outcomes that disagree with it. A single click no longer
+  narrows the router's uncertainty as much as three independent runs would.
+  `cascade stats` divides the success column by the evidence total rather than
+  the observation count, so a rated model can no longer display — and sort
+  by — a rate above 100%.
 
 ## 0.75.0 - 2026-08-14
 

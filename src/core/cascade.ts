@@ -1664,6 +1664,12 @@ ${prompt}`
           // Analyze the user's actual request, not the host-augmented prompt —
           // delivery guidance/memories would poison the task-type profile.
           const model = await this.taskAnalyzer!.selectModel(routingPrompt, tier, this.router.getSelector());
+          // The root tier selects here rather than through the router, so the
+          // router's `routing:exploring` wiring never sees this pick. Read the
+          // note on this path too, or an exploratory root choice is the one
+          // routing decision /why cannot explain.
+          const exploration = this.taskAnalyzer!.takeExplorationNote();
+          if (exploration) this.recordDecision('model', `${tier} ${exploration}`);
           if (model) {
             this.router.overrideTierModel(tier, model);
             const taskType = this.taskAnalyzer!.getLastProfile()?.type ?? 'mixed';

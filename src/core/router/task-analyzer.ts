@@ -266,6 +266,16 @@ export class TaskAnalyzer {
     selector: ModelSelector,
     opts?: { requiresToolUse?: boolean },
   ): Promise<ModelInfo | null> {
+    // Cleared per selection, not only written per exploratory selection. A
+    // note left standing belongs to a decision that has already happened: the
+    // root tier selects through this method directly (cascade.ts) while
+    // subtasks select through the router, so an exploratory root pick could sit
+    // here unread and then be consumed by the next subtask selection — which
+    // may not have explored at all — and /why would blame the wrong tier for
+    // the wrong model. Every exit below leaves this null unless THIS call
+    // explored.
+    this.explorationNote = null;
+
     const profile = await this.analyze(prompt);
 
     // EVERY exit from this method must record, or the run is only partially

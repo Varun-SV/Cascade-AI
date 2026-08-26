@@ -65,6 +65,47 @@ export function betaPosterior(
   };
 }
 
+/**
+ * Posterior from weighted evidence over a known number of observations.
+ *
+ * The weights say WHERE the posterior sits; the observation count says HOW
+ * TIGHT it is. Those are different questions and folding them together is the
+ * mistake this exists to avoid: passing weight straight into α/β makes one
+ * thumbs-up worth 3 evidence units arithmetically indistinguishable from three
+ * successful runs — same mean, and, more damagingly, the same narrowness. A
+ * single click would then shut down exploration as hard as three independent
+ * observations, and this codebase already treats explicit feedback as the
+ * channel least able to bear that: feedback-prior.ts guards it with a prior
+ * more than twice this one's strength precisely because it is tiny,
+ * self-selected and gameable.
+ *
+ * So the weight is spent where a weight belongs — on the mean, relative to the
+ * evidence it competes with — and concentration tracks real observations:
+ *
+ *   1 thumbs-up alone           → 0.60   (as one success: one look is one look)
+ *   1 thumbs-up + 1 failure     → 0.58   (vs 0.50 unweighted — the thumb wins)
+ *   1 thumbs-up + 3 failures    → 0.50   (vs 0.38 unweighted)
+ *
+ * With unweighted evidence every observation weighs 1, so `successWeight +
+ * failureWeight === observations` and this is exactly `betaPosterior` — which
+ * is also what makes a stats file written by an older build read correctly.
+ */
+export function weightedPosterior(
+  successWeight: number,
+  failureWeight: number,
+  observations: number,
+  priorStrength: number = PERF_PRIOR_STRENGTH,
+): BetaPosterior {
+  const success = Math.max(0, successWeight);
+  const failure = Math.max(0, failureWeight);
+  const evidence = success + failure;
+  const n = Math.max(0, observations);
+  if (evidence <= 0 || n <= 0) return betaPosterior(0, 0, priorStrength);
+  const mean = success / evidence;
+  const half = Math.max(0, priorStrength) / 2;
+  return { alpha: half + mean * n, beta: half + (1 - mean) * n };
+}
+
 /** What we currently believe the success rate is. */
 export function posteriorMean(p: BetaPosterior): number {
   const total = p.alpha + p.beta;
@@ -106,17 +147,18 @@ function sampleGamma(shape: number, rng: Rng): number {
   }
   const d = shape - 1 / 3;
   const c = 1 / Math.sqrt(9 * d);
-  // Bounded rather than `while (true)`: acceptance is ~95% per iteration, so a
-  // thousand rejections means the RNG is degenerate (a stub returning a
-  // constant, say) and looping forever would hang a routing decision.
+  // ONE bound over BOTH rejection kinds — the `v <= 0` redraw and the
+  // acceptance test. Published presentations nest the redraw in its own
+  // unbounded `do…while`, and that inner loop is the one that actually hangs:
+  // a stream alternating 0 and 0.5 makes Box–Muller return the same large
+  // negative x forever, so v is never positive and the outer bound is never
+  // reached. Acceptance is ~95% per iteration, so exhausting this means the
+  // RNG is degenerate, not that we were unlucky.
   for (let i = 0; i < 1000; i++) {
-    let x: number;
-    let v: number;
-    do {
-      x = gaussian(rng);
-      v = 1 + c * x;
-    } while (v <= 0);
-    v = v * v * v;
+    const x = gaussian(rng);
+    const root = 1 + c * x;
+    if (root <= 0) continue;
+    const v = root * root * root;
     const u = rng();
     if (u < 1 - 0.0331 * x * x * x * x) return d * v;
     if (Math.log(u) < 0.5 * x * x + d * (1 - v + Math.log(v))) return d * v;
