@@ -78,6 +78,23 @@ describe('a Markdown table becomes a real PowerPoint table', () => {
     expect(slide.body.join(' ')).toContain('wc -l');
   });
 
+  it('treats an escaped pipe as content, not a column break', () => {
+    // `| A \| B | union |` is a two-column row. Splitting on every pipe made a
+    // phantom third column and left the backslash in the text.
+    const slide = parseSlide('# T\n\n| Expression | Meaning |\n|---|---|\n| A \\| B | union |');
+    expect(slide.tables[0]![1]).toEqual(['A | B', 'union']);
+  });
+
+  it('leaves a table-shaped line inside a code fence as code', () => {
+    // Only chart: fences were consumed, so a code sample containing
+    // `| in | out |` had that line lifted out as a real table while its
+    // backticks stayed behind in the body.
+    const slide = parseSlide('# T\n\n```\n| in | out |\n| 1  | 2   |\n```\n\nAfter.');
+    expect(slide.tables).toHaveLength(0);
+    expect(slide.body.join(' ')).not.toContain('```');
+    expect(slide.body.join(' ')).toContain('| in | out |');
+  });
+
   it('does not backtrack itself to death on a pathological row', () => {
     // CodeQL, high severity: the obvious alignment-rule regex
     // /^\|[\s:|-]+\|?\s*$/ puts two whitespace-matching quantifiers next to

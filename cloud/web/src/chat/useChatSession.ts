@@ -151,6 +151,7 @@ function parseReview(raw: unknown): ReviewSummary | undefined {
       : [];
     return [{ title, ...(detail ? { detail } : {}), ...(sections.length ? { sections } : {}) }];
   });
+  // No gaps means the pass approved — an explicit clear, not a missing field.
   if (gaps.length === 0) return undefined;
   const summary = typeof obj['summary'] === 'string' ? obj['summary'].trim() : '';
   return { gaps, ...(summary ? { summary } : {}) };
@@ -195,7 +196,9 @@ function mergeActivity(prev: ActivityNode[], e: Record<string, unknown>): Activi
     model: str('model') ?? cur?.model,
     status: str('status') ?? cur?.status ?? 'ACTIVE',
     currentAction: str('currentAction') ?? cur?.currentAction,
-    review: parseReview(e['review']) ?? cur?.review,
+    // Present-but-approved clears the card; absent carries the last one
+    // forward, since a review arrives on one event and the run keeps ticking.
+    review: 'review' in e ? parseReview(e['review']) : cur?.review,
     progressPct: typeof e['progressPct'] === 'number' ? (e['progressPct'] as number) : cur?.progressPct,
     blockedBy: Array.isArray(e['blockedBy'])
       ? (e['blockedBy'] as unknown[]).filter((c): c is string => typeof c === 'string')
@@ -374,6 +377,12 @@ export function useChatSession(
       });
     };
     const onStatus = (e: Record<string, unknown>) => {
+      // One socket can carry several conversations, so a background run's
+      // tiers would otherwise post their status — and now a whole review
+      // rejection — into whichever chat happens to be open. The provider
+      // exhaustion handler below has filtered for this reason all along.
+      const convo = e['conversationId'];
+      if (typeof convo === 'string' && convo !== conversationIdRef.current) return;
       setStatus(statusLabel(e));
       setActivity((prev) => mergeActivity(prev, e));
     };

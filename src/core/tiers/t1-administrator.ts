@@ -329,6 +329,17 @@ export class T1Administrator extends BaseTier {
       const reviewResult = await this.reviewT2Outputs(enrichedPrompt, plan, allT2Results);
       if (reviewResult.approved) {
         this.log('T1 Review passed.');
+        // Sent so the UI can drop a rejection card from the previous pass.
+        // Without it the client has no way to tell "this pass approved" from
+        // "this update simply carries no review", and the old gaps sit on
+        // screen saying "replanning" while the run assembles an accepted
+        // result.
+        this.sendStatusUpdate({
+          progressPct: 80 + (pass * 5),
+          currentAction: 'Review passed',
+          status: 'IN_PROGRESS',
+          review: reviewResult,
+        });
         break;
       }
 

@@ -249,6 +249,22 @@ function isAlignmentRule(row: string): boolean {
   return sawDash && sawPipe;
 }
 
+/**
+ * Split one table row into cells.
+ *
+ * `\|` is a literal pipe inside a cell — `| A \| B | union |` is a two-column
+ * row, not three. Splitting on every pipe produced a phantom column and left
+ * the backslash in the text, which the slide renderer then drew as a malformed
+ * grid.
+ */
+function splitCells(row: string): string[] {
+  return row
+    .replace(/^\|/, '')
+    .replace(/\|\s*$/, '')
+    .split(/(?<!\\)\|/)
+    .map((c) => c.trim().replace(/\\\|/g, '|'));
+}
+
 export function scanTable(lines: string[], start: number): { rows: string[][]; next: number } {
   const rows: string[][] = [];
   let i = start;
@@ -260,7 +276,7 @@ export function scanTable(lines: string[], start: number): { rows: string[][]; n
       // inlineRuns, so stripping here silently flattened **bold** in every
       // docx table; a renderer that needs plain text (PowerPoint's addTable)
       // strips it itself.
-      rows.push(raw.replace(/^\||\|\s*$/g, '').split('|').map((c) => c.trim()));
+      rows.push(splitCells(raw));
     }
     i++;
   }
@@ -566,6 +582,19 @@ export function parseSlide(chunk: string): Slide {
     }
     const line = raw.trim();
     if (!line) continue;
+    // An ordinary code fence. Only `chart:` fences were consumed above, so
+    // everything else fell through — and a code sample containing `| in | out |`
+    // had that line lifted out as a real table while its backticks stayed
+    // behind in the body.
+    if (/^```/.test(line)) {
+      i++;
+      while (i < lines.length && !/^\s*```/.test(lines[i] ?? '')) {
+        const inner = (lines[i] ?? '').trim();
+        if (inner) body.push(inner);
+        i++;
+      }
+      continue;
+    }
     // A table, not four bullets of pipe characters. Checked before the list and
     // paragraph branches, both of which would happily swallow `| a | b |`.
     if (isTableStart(lines, i)) {
