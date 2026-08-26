@@ -208,8 +208,12 @@ export function isTableRow(line: string): boolean {
 export function isTableStart(lines: string[], i: number): boolean {
   const line = (lines[i] ?? '').trim();
   if (!line.includes('|')) return false;
-  if (line.startsWith('|')) return true;
-  return isAlignmentRule((lines[i + 1] ?? '').trim());
+  // The alignment rule on the next line settles it either way.
+  if (isAlignmentRule((lines[i + 1] ?? '').trim())) return true;
+  // Otherwise a leading pipe needs a SECOND one to be a row rather than a line
+  // that merely opens with a pipe — `| alternative syntax` is prose, and the
+  // predicate this replaced required the closing delimiter for that reason.
+  return line.startsWith('|') && line.indexOf('|', 1) !== -1;
 }
 
 /**

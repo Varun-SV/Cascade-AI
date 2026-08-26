@@ -70,6 +70,15 @@ describe('a Markdown table becomes a real PowerPoint table', () => {
     expect(slide.tables[0]).toEqual([['Name', 'Score'], ['Ada', '99']]);
   });
 
+  it('does not turn a line that merely opens with a pipe into a table', () => {
+    // `| alternative syntax` is prose. The predicate this replaced required a
+    // closing delimiter, and dropping that turned one-pipe lines into
+    // single-cell tables in both Word and PowerPoint.
+    const slide = parseSlide('# T\n\n| alternative syntax\n\nAnd more prose.');
+    expect(slide.tables).toHaveLength(0);
+    expect(slide.body.join(' ')).toContain('alternative syntax');
+  });
+
   it('does not turn prose containing a pipe into a table', () => {
     // The other half of that change: a bare pipe is ordinary punctuation, so a
     // line only opens a table when the next line is the alignment rule.
@@ -271,6 +280,32 @@ describe('animation reaches the rendered deck', () => {
     const ids = [...xml.matchAll(/<p:cNvPr id="(\d+)"/g)].map((m) => m[1]);
     expect(new Set(ids).size).toBe(ids.length);
     expect(xml).not.toContain('<p:timing');
+  });
+});
+
+describe('host animation options', () => {
+  it('ignores fields that are present but undefined', async () => {
+    // exactOptionalPropertyTypes is off, so a caller assembling this from
+    // optional config can legally pass { durationMs: undefined }. A plain
+    // spread put that over the default and emitted dur="NaN" — which
+    // PowerPoint reads as a corrupt file, not a bad animation.
+    const zip = await JSZip.loadAsync(await renderPptx('# One\n\n- a', {
+      animation: { durationMs: undefined, transition: undefined },
+    }));
+    const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
+    expect(xml).not.toContain('NaN');
+    expect(xml).not.toContain('undefined');
+    expect(xml).toContain('<p:fade/>');
+  });
+
+  it('rejects an out-of-range host value the same way it rejects a bad directive', async () => {
+    const zip = await JSZip.loadAsync(await renderPptx('# One\n\n- a', {
+      animation: { transition: 'explode' as never, durationMs: -5 },
+    }));
+    const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
+    expect(xml).toContain('<p:fade/>');
+    expect(xml).not.toContain('explode');
+    expect(xml).not.toContain('dur="-5"');
   });
 });
 

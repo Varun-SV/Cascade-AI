@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   written into the XML, because PowerPoint treats a bad timing tree as a
   corrupt file rather than a bad animation.
 
+
 ### Fixed
 - **A failed review printed a wall of text instead of saying what was wrong.**
   The reviewer answered in prose and that prose went into `currentAction`, a
@@ -56,7 +57,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the bottom edge where nothing showed they were missing. Cells keep their
   inline markup, so `**Total**` is still bold in a Word table.
 
-### Fixed
 - **An exhausted provider quota was retried for the rest of the run.** A spent
   billing quota and a 429 arrive as the same status, and the router's failover
   path told them apart with a regex that matched `/quota/` — so a dead wallet

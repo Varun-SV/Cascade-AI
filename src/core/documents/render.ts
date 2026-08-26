@@ -443,6 +443,21 @@ function resolveAnimation(
   fromOpts: Partial<AnimationScheme> | undefined,
 ): AnimationScheme {
   const merged: AnimationScheme = { ...DEFAULT_ANIMATION, ...(fromOpts ?? {}) };
+  // Every field is re-checked after the spread, whatever it came from.
+  //
+  // exactOptionalPropertyTypes is off, so a caller assembling this from
+  // optional config can legally pass `{ durationMs: undefined }` — and a
+  // spread puts that undefined over the default, emitting dur="NaN" or an
+  // `undefined` transition child. PowerPoint reads either as a corrupt file,
+  // which is the one outcome this whole path exists to avoid. Filtering
+  // undefined out of the spread would fix that single case; validating the
+  // result covers it along with every other way a host value can be wrong,
+  // and a host value is no more trustworthy than the directive values that
+  // were already being checked.
+  if (!ANIMATION_VALUES.transition.includes(merged.transition)) merged.transition = DEFAULT_ANIMATION.transition;
+  if (!ANIMATION_VALUES.entrance.includes(merged.entrance)) merged.entrance = DEFAULT_ANIMATION.entrance;
+  if (!ANIMATION_VALUES.advance.includes(merged.advance)) merged.advance = DEFAULT_ANIMATION.advance;
+  if (!Number.isFinite(merged.durationMs) || merged.durationMs <= 0) merged.durationMs = DEFAULT_ANIMATION.durationMs;
   if (!directive) return merged;
   const pick = <K extends keyof AnimationScheme>(key: K, allowed: readonly string[]): void => {
     const raw = directive[key === 'durationMs' ? 'duration' : key];
@@ -456,12 +471,19 @@ function resolveAnimation(
     }
     if (allowed.includes(raw)) (merged[key] as string) = raw;
   };
-  pick('transition', ['none', 'fade', 'push', 'wipe', 'split']);
-  pick('entrance', ['none', 'fade', 'appear', 'fly']);
-  pick('advance', ['click', 'auto']);
+  pick('transition', ANIMATION_VALUES.transition);
+  pick('entrance', ANIMATION_VALUES.entrance);
+  pick('advance', ANIMATION_VALUES.advance);
   pick('durationMs', []);
   return merged;
 }
+
+/** The accepted values for each animation field, shared by both sources. */
+const ANIMATION_VALUES = {
+  transition: ['none', 'fade', 'push', 'wipe', 'split'],
+  entrance: ['none', 'fade', 'appear', 'fly'],
+  advance: ['click', 'auto'],
+} as const satisfies Record<string, readonly string[]>;
 
 /** Inches. Below this a 12pt row clips its own text. */
 const MIN_TABLE_ROW_H = 0.28;
