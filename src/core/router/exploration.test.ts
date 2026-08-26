@@ -404,3 +404,87 @@ describe('a model is credited for the work it actually did', () => {
     expect(tracker.sampleCountFor('writer', 'creative')).toBe(2);
   });
 });
+
+describe('the score floor does not become a bonus', () => {
+  it('never amplifies a draw for a model with a long failure record', async () => {
+    // performanceScore floors at 0.05. Recovering the retry factor as
+    // performanceScore / posteriorMean therefore stops being the retry factor
+    // once the mean falls under the floor — around 37 straight failures — and
+    // becomes 0.05/mean, which GROWS without limit as the model gets worse.
+    // 100 failures multiplied every draw by 2.6; 300 by 7.6. The worst models
+    // in the catalogue were the ones getting their draws inflated.
+    const tracker = mem();
+    for (let i = 0; i < 300; i++) tracker.record('hopeless', 'code', 'failure');
+
+    const analyzer = new TaskAnalyzer(tracker);
+    analyzer.setRng(seeded(4242));
+    const perfFor = (a: TaskAnalyzer) => (a as unknown as {
+      perfFor(m: ModelInfo, p: { type: string }, mode: string): number;
+    }).perfFor(model('hopeless'), { type: 'code' } as never, 'sample');
+
+    // No retries were recorded, so a draw must not be scaled at all — and can
+    // never exceed the belief floor by more than the floor itself allows.
+    for (let i = 0; i < 200; i++) {
+      const v = perfFor(analyzer);
+      expect(v).toBeLessThanOrEqual(0.05 + 1e-9);
+    }
+  });
+
+  it('still applies a real retry penalty to a model that is not floored', async () => {
+    const clean = mem();
+    const retried = mem();
+    for (let i = 0; i < 20; i++) {
+      clean.record('m', 'code', 'success', 0);
+      retried.record('m', 'code', 'success', 3);
+    }
+    expect(retried.retryFactorFor('m', 'code')).toBeCloseTo(0.6, 5);
+    expect(clean.retryFactorFor('m', 'code')).toBe(1);
+  });
+});
+
+describe('a tier that never ran earns nothing', () => {
+  it('drops a tier default when the tier made no call', async () => {
+    // A rejected plan, or a T1 that fails before dispatching managers, leaves
+    // T2/T3 defaults selected but never used. "Nothing superseded it" is not
+    // "it ran" — costByTier is incremented per actual provider call, so a tier
+    // with no key made none.
+    const tracker = mem();
+    const analyzer = new TaskAnalyzer(tracker);
+
+    TaskAnalyzer.clearCache();
+    await analyzer.select(codePrompt(1), 'T1', selectorOver([model('planner')]));
+    TaskAnalyzer.clearCache();
+    await analyzer.select(codePrompt(2), 'T3', selectorOver([model('never-ran')]), { provisional: true });
+
+    // Only T1 made a call — the plan was rejected before any T3 work.
+    analyzer.recordRunOutcome('failure', { T1: 0.01 });
+
+    expect(tracker.sampleCountFor('planner', 'code')).toBe(1);
+    expect(tracker.sampleCountFor('never-ran', 'code'), 'served zero calls').toBe(0);
+  });
+
+  it('does not let a rating credit a tier that never ran either', async () => {
+    const tracker = mem();
+    const analyzer = new TaskAnalyzer(tracker);
+
+    TaskAnalyzer.clearCache();
+    await analyzer.select(codePrompt(1), 'T1', selectorOver([model('planner')]));
+    TaskAnalyzer.clearCache();
+    await analyzer.select(codePrompt(2), 'T3', selectorOver([model('never-ran')]), { provisional: true });
+    analyzer.recordRunOutcome('failure', { T1: 0 });
+
+    expect(analyzer.recordExplicitRating('good')).toBe(true);
+    expect(tracker.sampleCountFor('never-ran', 'code')).toBe(0);
+  });
+
+  it('keeps a tier default that did make a call', async () => {
+    const tracker = mem();
+    const analyzer = new TaskAnalyzer(tracker);
+
+    TaskAnalyzer.clearCache();
+    await analyzer.select(codePrompt(1), 'T3', selectorOver([model('served')]), { provisional: true });
+    analyzer.recordRunOutcome('success', { T3: 0.03 });
+
+    expect(tracker.sampleCountFor('served', 'code')).toBe(1);
+  });
+});

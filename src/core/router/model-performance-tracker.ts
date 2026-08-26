@@ -228,6 +228,22 @@ export class ModelPerformanceTracker {
   }
 
   /**
+   * The retry cost as a multiplier in (0.6, 1] — 1.0 when a model never
+   * retries, 0.6 when it retries three times or more on average.
+   *
+   * Exposed separately because it is genuinely a separate quantity from the
+   * success rate, and because the alternative — recovering it by dividing
+   * `performanceScore` by `posteriorMean` — silently stops being the retry
+   * penalty at all once the score floor engages. See perfFor().
+   */
+  retryFactorFor(modelId: string, taskType: TaskType): number {
+    const s = this.stats.get(`${modelId}:${taskType}`);
+    if (!s || s.sampleCount === 0) return 1;
+    const avgRetries = s.totalRetries / s.sampleCount;
+    return 1 - Math.min(0.4, avgRetries / 3);
+  }
+
+  /**
    * Believed success rate, 0–1, shrunk toward 0.5 by how little is known.
    *
    * Replaces a raw successCount/sampleCount. That rate read one failure as 0%
@@ -243,9 +259,7 @@ export class ModelPerformanceTracker {
     const s = this.stats.get(`${modelId}:${taskType}`);
     const mean = posteriorMean(this.posteriorFor(modelId, taskType));
     if (!s || s.sampleCount === 0) return mean;
-    const avgRetries = s.totalRetries / s.sampleCount;
-    const retryPenalty = Math.min(0.4, avgRetries / 3);
-    return Math.max(0.05, mean * (1 - retryPenalty));
+    return Math.max(0.05, mean * this.retryFactorFor(modelId, taskType));
   }
 
   /**

@@ -286,6 +286,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a tier default that a per-section or per-subtask selection replaced is
   dropped rather than paid for work it never did.
 
+- **A long run of failures no longer inflated a model's chances.** The retry
+  penalty was recovered by dividing the believed score by the posterior mean,
+  which is the retry penalty only while the score's 0.05 floor is slack. Past
+  about 37 straight failures the floor engages and that ratio becomes
+  `0.05 / mean`, which grows without limit as the model gets worse — 2.6x after
+  100 failures, 7.6x after 300 — so the worst-established models in the
+  catalogue were the ones having their sampled scores amplified. The retry
+  factor is now asked for directly rather than reverse-engineered from two
+  outputs.
+
+- **A tier that never made a call no longer records an outcome.** A rejected
+  plan, or a planner that fails before dispatching, leaves later tiers with a
+  chosen default that served nothing; those defaults were being given the run's
+  success or failure, and an explicit rating along with it. Per-tier cost is
+  recorded per actual provider call, so a tier absent from it made none, and
+  its unused default is now dropped.
+
 - **A model is credited under the task type it actually served.** Outcomes for
   a whole run were recorded under the task type of the LAST thing analysed, so
   a model that refactored a function early in a run could be recorded as having

@@ -402,8 +402,18 @@ export class TaskAnalyzer {
    */
   recordRunOutcome(outcome: 'success' | 'failure', costByTier: Record<string, number>, contextTokens = 0): void {
     if (!this.tracker) return;
-    for (const [tier, used] of this.currentRunSelections) {
+    const served = new Map<TierRole, RunSelection[]>();
+    for (const [tier, all] of this.currentRunSelections) {
+      // A provisional entry is the tier's DEFAULT, and "nothing superseded it"
+      // is not the same as "it ran". A rejected plan, or a T1 that fails before
+      // dispatching managers, leaves T2/T3 defaults sitting here having served
+      // zero calls. `costByTier` is incremented per actual provider call, so a
+      // tier with no key never made one — the only real execution evidence
+      // reaching this method.
+      const tierRan = Object.prototype.hasOwnProperty.call(costByTier, tier);
+      const used = tierRan ? all : all.filter((sel) => !sel.provisional);
       if (used.length === 0) continue;
+      served.set(tier, used);
       // The caller only knows what a TIER cost, not what each model in it cost,
       // so a tier served by several models splits its cost evenly across them.
       // An approximation, and a deliberate one: charging every model the whole
@@ -422,7 +432,10 @@ export class TaskAnalyzer {
     // Hand the selections to the completed-run snapshot rather than dropping
     // them, so a rating that arrives after this point still knows what to rate —
     // and what task type to rate it under.
-    this.lastCompletedRun = { selections: new Map(this.currentRunSelections) };
+    // The SAME set that received the outcome — a tier that never ran must not
+    // collect an explicit rating either, or the thumb credits a model the run
+    // never used.
+    this.lastCompletedRun = { selections: new Map(served) };
     this.currentRunSelections.clear();
     void this.tracker.save();
   }
@@ -517,11 +530,15 @@ export class TaskAnalyzer {
     if (mode === 'mean') return this.tracker.performanceScore(model.id, profile.type);
     const posterior = this.tracker.posteriorFor(model.id, profile.type);
     const drawn = sampleBeta(posterior, this.rng);
-    const mean = posteriorMean(posterior);
-    const believed = this.tracker.performanceScore(model.id, profile.type);
-    // performanceScore is the mean with the retry penalty already folded in;
-    // carry that same ratio onto the draw rather than recomputing it.
-    const retryFactor = mean > 0 ? believed / mean : 1;
+    // Asked for directly, NOT recovered as performanceScore / posteriorMean.
+    // That ratio is the retry factor only while the score floor is slack: once
+    // the mean drops under 0.05 — around 37 straight failures — performanceScore
+    // returns the floor instead of the penalised mean, and the "retry factor"
+    // becomes 0.05/mean, which GROWS as the model gets worse. At 100 failures
+    // it multiplied every draw by 2.6, at 300 by 7.6. The worst-established
+    // models in the catalogue were having their draws amplified, which is the
+    // exact opposite of letting exploration self-limit.
+    const retryFactor = this.tracker.retryFactorFor(model.id, profile.type);
     return Math.max(0.05, drawn * retryFactor);
   }
 

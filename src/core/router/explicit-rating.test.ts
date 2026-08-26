@@ -24,6 +24,7 @@ function makeTracker() {
     // rating bookkeeping rather than about which model wins.
     posteriorFor: () => ({ alpha: 2, beta: 2 }),
     sampleCountFor: () => 0,
+    retryFactorFor: () => 1,
     costEfficiencyScore: () => 0.5,
   };
 }
