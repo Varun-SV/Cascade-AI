@@ -28,7 +28,7 @@ export interface SelectOptions {
  * One model this run selected, what it was selected FOR, and whether it ever
  * actually ran.
  *
- * `served` is set by noteServed() from the provider-call boundary. It is a
+ * `attempted` is set by noteAttempted() at the provider-call boundary. It is a
  * FACT, and it replaces three successive attempts to infer the same thing:
  *
  *   1. "the last model selected for a tier is the one that ran" — false as soon
@@ -42,11 +42,17 @@ export interface SelectOptions {
  * Each inference was reasonable and each was wrong in a way the next one
  * exposed. Selecting a model is not running it, and no amount of reasoning
  * about selections recovers what only the call site knows.
+ *
+ * ATTEMPTED, not succeeded — the flag is set before the request is awaited.
+ * Hanging it off the success path instead meant a run that failed outright
+ * recorded no failure evidence for the model that broke it: its posterior
+ * never moved, so sampling kept choosing it. Evidence about failure is the
+ * half that matters most here.
  */
 export interface RunSelection {
   model: ModelInfo;
   taskType: TaskType;
-  served: boolean;
+  attempted: boolean;
 }
 
 /** A routing choice, plus why it might not be the obvious one. */
@@ -340,10 +346,10 @@ export class TaskAnalyzer {
         // draw exists — would record no evidence at all, so exploration could
         // never learn from what it tried, nor stop trying it.
         //
-        // Selecting is not running, so these arrive unserved; noteServed()
-        // marks the ones that reach a provider.
+        // Selecting is not running, so these arrive unattempted;
+        // noteAttempted() marks the ones that reach a provider.
         if (!used.some((sel) => sel.model.id === model.id && sel.taskType === profile.type)) {
-          used.push({ model, taskType: profile.type, served: false });
+          used.push({ model, taskType: profile.type, attempted: false });
         }
         this.currentRunSelections.set(tier, used);
       }
@@ -396,22 +402,26 @@ export class TaskAnalyzer {
   }
 
   /**
-   * Mark a selected model as having actually served a call on this tier.
+   * Mark a selected model as having actually been sent a request on this tier.
    *
-   * Called from the provider-call boundary (RouterCore.recordStats), which is
-   * the only place that knows a request was really made and which model made
-   * it. Everything upstream of that knows only what was CHOSEN.
+   * Called at the provider-call boundary, which is the only place that knows a
+   * request was really made and which model made it. Everything upstream knows
+   * only what was CHOSEN.
    *
-   * A model that serves without having been selected here — an explicitly
-   * pinned tier, a failover replacement — has no entry and is ignored, which
-   * matches the existing contract that this analyzer only rates its own
-   * choices.
+   * Called BEFORE the request is awaited, deliberately. Hanging it off the
+   * success path looks tidier and quietly discards every failure: a run that
+   * died recorded nothing about the model that killed it, so its posterior
+   * never moved and sampling kept picking it.
+   *
+   * A model that runs without having been selected here — an explicitly pinned
+   * tier, a failover replacement — has no entry and is ignored, which matches
+   * the existing contract that this analyzer rates only its own choices.
    */
-  noteServed(tier: TierRole, modelId: string): void {
+  noteAttempted(tier: TierRole, modelId: string): void {
     const used = this.currentRunSelections.get(tier);
     if (!used) return;
     for (const sel of used) {
-      if (sel.model.id === modelId) sel.served = true;
+      if (sel.model.id === modelId) sel.attempted = true;
     }
   }
 
@@ -427,8 +437,9 @@ export class TaskAnalyzer {
       // not an observation: a rejected plan, a cancelled subtask, or a tier
       // default that per-work routing replaced all leave selections behind
       // that never ran, and paying them the run's outcome teaches the router
-      // about work that did not happen.
-      const used = all.filter((sel) => sel.served);
+      // about work that did not happen. A model that was called and FAILED did
+      // run, and its failure is the most useful thing the run produced.
+      const used = all.filter((sel) => sel.attempted);
       if (used.length === 0) continue;
       servedByTier.set(tier, used);
       // The caller only knows what a TIER cost, not what each model in it cost,

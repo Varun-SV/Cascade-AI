@@ -2190,7 +2190,7 @@ describe('CascadeRouter — routing evidence reaches the model that ran', () => 
 
   it('tells the analyzer a model served, from the provider-call boundary', async () => {
     // The wiring this depends on is one line in recordStats(), and every unit
-    // test of the analyzer calls noteServed() directly — so without this test
+    // test of the analyzer calls noteAttempted() directly — so without this test
     // the line could be deleted and nothing would fail while production
     // silently stopped recording any routing evidence at all. That is worse
     // than the bug it replaced: no evidence rather than wrong evidence.
@@ -2206,7 +2206,7 @@ describe('CascadeRouter — routing evidence reaches the model that ran', () => 
 
     const served: Array<{ tier: string; modelId: string }> = [];
     router.setTaskAnalyzer({
-      noteServed: (tier: string, modelId: string) => { served.push({ tier, modelId }); },
+      noteAttempted: (tier: string, modelId: string) => { served.push({ tier, modelId }); },
       setFeedbackSource: () => {},
     } as never);
 
@@ -2215,6 +2215,34 @@ describe('CascadeRouter — routing evidence reaches the model that ran', () => 
     await router.generate('T2', { messages: [{ role: 'user', content: 'hi' }], model: pinned });
 
     expect(served).toEqual([{ tier: 'T2', modelId: pinned!.id }]);
+    vi.restoreAllMocks();
+  });
+
+  it('still reports the model when the call FAILS', async () => {
+    // The half that matters most, and the half that hanging this off the
+    // success path silently discarded: a run that died recorded nothing about
+    // the model that killed it, so its posterior never moved and sampling kept
+    // choosing it. Failure evidence is what stops a broken model being picked.
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('provider exploded'));
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['anthropic']));
+    await router.init(makeConfigLocal({ providers: [{ type: 'anthropic', apiKey: 'sk-ant-test' }] }));
+
+    const attempted: Array<{ tier: string; modelId: string }> = [];
+    router.setTaskAnalyzer({
+      noteAttempted: (tier: string, modelId: string) => { attempted.push({ tier, modelId }); },
+      setFeedbackSource: () => {},
+    } as never);
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'anthropic');
+    await router.generate('T3', { messages: [{ role: 'user', content: 'hi' }], model: pinned })
+      .catch(() => { /* the failure is the point */ });
+
+    expect(attempted).toContainEqual({ tier: 'T3', modelId: pinned!.id });
     vi.restoreAllMocks();
   });
 });

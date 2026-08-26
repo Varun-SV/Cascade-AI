@@ -283,10 +283,10 @@ describe('an explored model learns from having been tried', () => {
     // exactly what a sampled selection produces.
     TaskAnalyzer.clearCache();
     await analyzer.select(codePrompt(1), 'T3', selectorOver([model('alpha')]));
-    analyzer.noteServed('T3', 'alpha');
+    analyzer.noteAttempted('T3', 'alpha');
     TaskAnalyzer.clearCache();
     await analyzer.select(codePrompt(2), 'T3', selectorOver([model('beta')]));
-    analyzer.noteServed('T3', 'beta');
+    analyzer.noteAttempted('T3', 'beta');
 
     analyzer.recordRunOutcome('success', { T3: 0.09 });
 
@@ -303,10 +303,10 @@ describe('an explored model learns from having been tried', () => {
 
     TaskAnalyzer.clearCache();
     await analyzer.select(codePrompt(1), 'T3', selectorOver([model('alpha')]));
-    analyzer.noteServed('T3', 'alpha');
+    analyzer.noteAttempted('T3', 'alpha');
     TaskAnalyzer.clearCache();
     await analyzer.select(codePrompt(2), 'T3', selectorOver([model('beta')]));
-    analyzer.noteServed('T3', 'beta');
+    analyzer.noteAttempted('T3', 'beta');
 
     analyzer.recordRunOutcome('success', { T3: 0.10 });
 
@@ -321,10 +321,10 @@ describe('an explored model learns from having been tried', () => {
 
     TaskAnalyzer.clearCache();
     await analyzer.select(codePrompt(1), 'T3', selector);
-    analyzer.noteServed('T3', 'alpha');
+    analyzer.noteAttempted('T3', 'alpha');
     TaskAnalyzer.clearCache();
     await analyzer.select(codePrompt(2), 'T3', selector);
-    analyzer.noteServed('T3', 'alpha');
+    analyzer.noteAttempted('T3', 'alpha');
 
     analyzer.recordRunOutcome('success', { T3: 0.04 });
     expect(tracker.sampleCountFor('alpha', 'code')).toBe(1);
@@ -342,10 +342,10 @@ describe('a model is credited for the work it actually did', () => {
 
     TaskAnalyzer.clearCache();
     await analyzer.select('refactor the parser function', 'T3', selectorOver([model('coder')]));
-    analyzer.noteServed('T3', 'coder');
+    analyzer.noteAttempted('T3', 'coder');
     TaskAnalyzer.clearCache();
     await analyzer.select('write a short poem about the sea', 'T3', selectorOver([model('writer')]));
-    analyzer.noteServed('T3', 'writer');
+    analyzer.noteAttempted('T3', 'writer');
 
     analyzer.recordRunOutcome('success', { T3: 0.06 });
 
@@ -360,10 +360,10 @@ describe('a model is credited for the work it actually did', () => {
 
     TaskAnalyzer.clearCache();
     await analyzer.select('refactor the parser function', 'T3', selectorOver([model('coder')]));
-    analyzer.noteServed('T3', 'coder');
+    analyzer.noteAttempted('T3', 'coder');
     TaskAnalyzer.clearCache();
     await analyzer.select('write a short poem about the sea', 'T3', selectorOver([model('writer')]));
-    analyzer.noteServed('T3', 'writer');
+    analyzer.noteAttempted('T3', 'writer');
     analyzer.recordRunOutcome('success', { T3: 0 });
 
     expect(analyzer.recordExplicitRating('good')).toBe(true);
@@ -424,12 +424,12 @@ describe('only a model that actually ran is rated', () => {
 
     TaskAnalyzer.clearCache();
     await analyzer.select(codePrompt(1), 'T1', selectorOver([model('planner')]));
-    analyzer.noteServed('T1', 'planner');
+    analyzer.noteAttempted('T1', 'planner');
     TaskAnalyzer.clearCache();
     await analyzer.select(codePrompt(2), 'T3', selectorOver([model('never-ran')]));
 
     // A cost key for T3 is NOT evidence that T3 ran — it survives from earlier
-    // runs in the same session. Only noteServed() is.
+    // runs in the same session. Only noteAttempted() is.
     analyzer.recordRunOutcome('failure', { T1: 0.01, T3: 0.02 });
 
     expect(tracker.sampleCountFor('planner', 'code')).toBe(1);
@@ -442,7 +442,7 @@ describe('only a model that actually ran is rated', () => {
 
     TaskAnalyzer.clearCache();
     await analyzer.select(codePrompt(1), 'T1', selectorOver([model('planner')]));
-    analyzer.noteServed('T1', 'planner');
+    analyzer.noteAttempted('T1', 'planner');
     TaskAnalyzer.clearCache();
     await analyzer.select(codePrompt(2), 'T3', selectorOver([model('never-ran')]));
     analyzer.recordRunOutcome('failure', { T1: 0, T3: 0 });
@@ -460,7 +460,7 @@ describe('only a model that actually ran is rated', () => {
 
     TaskAnalyzer.clearCache();
     await analyzer.select(codePrompt(1), 'T3', selectorOver([model('served')]));
-    analyzer.noteServed('T3', 'served');
+    analyzer.noteAttempted('T3', 'served');
     analyzer.recordRunOutcome('success', { T3: 0.03 });
 
     expect(tracker.sampleCountFor('served', 'code')).toBe(1);
@@ -475,8 +475,8 @@ describe('only a model that actually ran is rated', () => {
 
     TaskAnalyzer.clearCache();
     await analyzer.select(codePrompt(1), 'T3', selectorOver([model('chosen')]));
-    analyzer.noteServed('T3', 'chosen');
-    analyzer.noteServed('T3', 'some-failover-model');
+    analyzer.noteAttempted('T3', 'chosen');
+    analyzer.noteAttempted('T3', 'some-failover-model');
     analyzer.recordRunOutcome('success', { T3: 0.01 });
 
     expect(tracker.sampleCountFor('chosen', 'code')).toBe(1);

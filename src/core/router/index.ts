@@ -1211,6 +1211,13 @@ export class CascadeRouter extends EventEmitter {
       // attempt accounting, the retry preflight and the second reservation all
       // existed to paper over. Those are gone: the first request is on its way
       // down before the fallback starts.
+      // Routing evidence is attached HERE — the last point before the request
+      // goes out — rather than after it comes back. Recording on success only
+      // looks tidier and throws away every failure: a run that died recorded
+      // nothing about the model that killed it, so its posterior never moved
+      // and sampling kept choosing it. See TaskAnalyzer.noteAttempted.
+      this.taskAnalyzer?.noteAttempted(tier, model.id);
+
       if (model.isLocal) {
         // Apply a hard timeout to local inference calls so a slow/overloaded
         // model doesn't block the worker indefinitely.
@@ -2146,11 +2153,6 @@ export class CascadeRouter extends EventEmitter {
     this.stats.callsByProvider[model.provider] = (this.stats.callsByProvider[model.provider] ?? 0) + 1;
     this.stats.callsByTier[tier] = (this.stats.callsByTier[tier] ?? 0) + 1;
 
-    // The one place that knows a model actually RAN rather than being chosen.
-    // Routing evidence is only defensible if it reaches the model that did the
-    // work, and every attempt to infer that from the selections themselves was
-    // wrong in a different way — see RunSelection.
-    this.taskAnalyzer?.noteServed(tier, model.id);
 
     // ── Per-tier cost & token breakdown ──────────
     this.stats.costByTier[tier] = (this.stats.costByTier[tier] ?? 0) + usage.estimatedCostUsd;
