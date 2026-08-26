@@ -1667,7 +1667,13 @@ ${prompt}`
           // router's `routing:exploring` wiring never sees this pick. The note
           // comes back WITH the selection because these tier selections run
           // concurrently — see TaskAnalyzer.select().
-          const { model, note } = await this.taskAnalyzer!.select(routingPrompt, tier, this.router.getSelector());
+          // provisional: this establishes the tier DEFAULT. T2Manager and
+          // T3Worker select again per section and per subtask and use that
+          // model for the actual call, so this choice may never serve anything
+          // — in which case it must not be paid for the run's outcome.
+          const { model, note } = await this.taskAnalyzer!.select(
+            routingPrompt, tier, this.router.getSelector(), { provisional: true },
+          );
           if (note) this.recordDecision('model', `${tier} ${note}`);
           if (model) {
             this.router.overrideTierModel(tier, model);

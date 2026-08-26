@@ -282,7 +282,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the whole tier's outcome went to whichever was chosen last. The explored
   model — the entire point of trying it — recorded nothing, so its estimate
   never moved and its trial taught the router nothing. A tier's cost is split
-  evenly across the models that served it rather than charged to each in full.
+  evenly across the models that served it rather than charged to each in full,
+  and a tier default that a per-section or per-subtask selection replaced is
+  dropped rather than paid for work it never did.
+
+- **A model is credited under the task type it actually served.** Outcomes for
+  a whole run were recorded under the task type of the LAST thing analysed, so
+  a model that refactored a function early in a run could be recorded as having
+  succeeded at `creative` because the closing section was prose — and an
+  explicit rating inherited the same misattribution. Each selection now carries
+  its own task type.
 
 ## 0.75.0 - 2026-08-14
 

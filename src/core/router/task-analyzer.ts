@@ -19,6 +19,34 @@ export type TaskType = 'code' | 'analysis' | 'creative' | 'data' | 'mixed';
 /** Cascade Auto cost/quality trade-off bias. See CascadeConfig.autoBias. */
 export type AutoBias = 'balanced' | 'quality' | 'cost';
 
+/** Options shared by both selection entry points. */
+export interface SelectOptions {
+  requiresToolUse?: boolean;
+  /**
+   * This selection only establishes the tier's default; a later per-work
+   * selection for the same tier replaces it. See RunSelection.provisional.
+   */
+  provisional?: boolean;
+}
+
+/**
+ * One model this run used, and what it was used FOR.
+ *
+ * `provisional` marks a selection that only establishes a tier's default. The
+ * root selection in Cascade.run picks a model per tier before any work exists,
+ * and T2Manager/T3Worker then select again per section and per subtask and use
+ * THAT model for the actual call. When they do, the root choice never served
+ * anything — so it must not receive the run's outcome or a share of its cost.
+ * A non-provisional selection for the same tier supersedes it; if none arrives
+ * (Cascade Auto off for subtasks, or a tier that runs once), the provisional
+ * choice is the model that served and it stands.
+ */
+export interface RunSelection {
+  model: ModelInfo;
+  taskType: TaskType;
+  provisional: boolean;
+}
+
 /** A routing choice, plus why it might not be the obvious one. */
 export interface Selection {
   model: ModelInfo | null;
@@ -162,16 +190,20 @@ export class TaskAnalyzer {
   private feedback?: FeedbackSource;
   private bias: AutoBias;
   private lastProfile: TaskProfile | null = null;
-  /** Models chosen by the run currently in flight. Cleared when it completes. */
   /**
-   * Models used per tier this run — a LIST, not one model.
+   * Models used per tier this run — a LIST, each carrying its own task type.
    *
-   * A tier can legitimately run several models now that selection samples:
-   * two T3 subtasks in the same run may draw differently. Every one of them
-   * has to receive the run's outcome, or the explored model records nothing
-   * and exploration cannot learn from its own experiment.
+   * A tier can legitimately run several models now that selection samples: two
+   * T3 subtasks in one run may draw differently. Every one of them has to
+   * receive the run's outcome, or the explored model records nothing and
+   * exploration cannot learn from its own experiment.
+   *
+   * And each carries the task type IT was chosen for, because subtasks within
+   * one run are not all the same type. Crediting them all to the last
+   * selection's profile teaches the router that whichever model happened to
+   * write the closing paragraph is good at code.
    */
-  private currentRunSelections = new Map<TierRole, ModelInfo[]>();
+  private currentRunSelections = new Map<TierRole, RunSelection[]>();
   /**
    * Immutable snapshot of the last COMPLETED run: its selections AND the task
    * type they were chosen for.
@@ -187,7 +219,7 @@ export class TaskAnalyzer {
    * every explicit rating iterated an empty map, recorded nothing, and returned
    * false: the 3x-weighted user signal never reached the tracker at all.
    */
-  private lastCompletedRun?: { selections: Map<TierRole, ModelInfo[]>; taskType: TaskType };
+  private lastCompletedRun?: { selections: Map<TierRole, RunSelection[]> };
 
   /**
    * Uniform source for Thompson draws. Injectable so a test can pin the
@@ -263,7 +295,7 @@ export class TaskAnalyzer {
     prompt: string,
     tier: TierRole,
     selector: ModelSelector,
-    opts?: { requiresToolUse?: boolean },
+    opts?: SelectOptions,
   ): Promise<ModelInfo | null> {
     return (await this.select(prompt, tier, selector, opts)).model;
   }
@@ -286,7 +318,7 @@ export class TaskAnalyzer {
     prompt: string,
     tier: TierRole,
     selector: ModelSelector,
-    opts?: { requiresToolUse?: boolean },
+    opts?: SelectOptions,
   ): Promise<Selection> {
     const profile = await this.analyze(prompt);
 
@@ -294,19 +326,26 @@ export class TaskAnalyzer {
     // represented in the rating snapshot: a vision-routed run had nothing to
     // rate at all, and a fallback selection was silently omitted from the
     // feedback that is supposed to teach the router which models work.
+    const provisional = opts?.provisional === true;
     const recordSelection = (model: ModelInfo | null, note: string | null = null): Selection => {
       if (model) {
-        const used = this.currentRunSelections.get(tier) ?? [];
-        // ACCUMULATE. This was `set(tier, model)`, which was harmless while
-        // selection was a deterministic argmax — every subtask in a tier picked
-        // the same model, so the overwrite replaced a model with itself. A
-        // sampled selection breaks that: two T3 subtasks can legitimately pick
-        // different models, and the overwrite then hands the whole tier's
-        // outcome to whichever one happened to be chosen last. The explored
-        // model — the entire reason the draw exists — would record no evidence
-        // at all, so exploration could never learn from what it tried and could
-        // never stop trying it.
-        if (!used.some((m) => m.id === model.id)) used.push(model);
+        let used = this.currentRunSelections.get(tier) ?? [];
+        // ACCUMULATE. This was `set(tier, model)`, harmless while selection was
+        // a deterministic argmax — every subtask in a tier picked the same
+        // model, so the overwrite replaced a model with itself. A sampled
+        // selection breaks that: two T3 subtasks can legitimately pick
+        // different models, and the overwrite hands the whole tier's outcome to
+        // whichever was chosen last. The explored model — the entire reason the
+        // draw exists — would record no evidence at all, so exploration could
+        // never learn from what it tried, nor stop trying it.
+        //
+        // …but accumulating everything is wrong in the other direction: a
+        // real selection for this tier means the tier DEFAULT never ran, so
+        // drop it rather than paying it for work it did not do.
+        if (!provisional) used = used.filter((sel) => !sel.provisional);
+        const already = used.find((sel) => sel.model.id === model.id && sel.taskType === profile.type);
+        if (already) already.provisional = already.provisional && provisional;
+        else used.push({ model, taskType: profile.type, provisional });
         this.currentRunSelections.set(tier, used);
       }
       return { model, note };
@@ -362,25 +401,28 @@ export class TaskAnalyzer {
    * during this session and persist stats to disk.
    */
   recordRunOutcome(outcome: 'success' | 'failure', costByTier: Record<string, number>, contextTokens = 0): void {
-    if (!this.tracker || !this.lastProfile) return;
-    const taskType = this.lastProfile.type;
-    for (const [tier, models] of this.currentRunSelections) {
-      if (models.length === 0) continue;
+    if (!this.tracker) return;
+    for (const [tier, used] of this.currentRunSelections) {
+      if (used.length === 0) continue;
       // The caller only knows what a TIER cost, not what each model in it cost,
       // so a tier served by several models splits its cost evenly across them.
       // An approximation, and a deliberate one: charging every model the whole
       // tier's cost would multiply the recorded spend by the number of models
       // and make an explored model look ruinous purely for having been tried.
       // The tier total stays right, which is what the cost column reports.
-      const cost = (costByTier[tier] ?? 0) / models.length;
-      for (const model of models) {
-        this.tracker.record(model.id, taskType, outcome, 0, cost, contextTokens);
+      const cost = (costByTier[tier] ?? 0) / used.length;
+      for (const sel of used) {
+        // sel.taskType, not the run's last profile: a run's subtasks are not
+        // all the same type, and crediting a coding model under `creative`
+        // because the closing section was prose teaches the router something
+        // no observation ever said.
+        this.tracker.record(sel.model.id, sel.taskType, outcome, 0, cost, contextTokens);
       }
     }
     // Hand the selections to the completed-run snapshot rather than dropping
     // them, so a rating that arrives after this point still knows what to rate —
     // and what task type to rate it under.
-    this.lastCompletedRun = { selections: new Map(this.currentRunSelections), taskType };
+    this.lastCompletedRun = { selections: new Map(this.currentRunSelections) };
     this.currentRunSelections.clear();
     void this.tracker.save();
   }
@@ -407,12 +449,16 @@ export class TaskAnalyzer {
     // and each of those records three samples for its 3x weighting. One thumbs
     // up became nine samples, and the models a user happens to run on every
     // tier drifted fastest purely from that.
-    const ratedModels = new Set<string>();
-    for (const [, models] of snapshot.selections) {
-      for (const model of models) {
-        if (ratedModels.has(model.id)) continue;
-        ratedModels.add(model.id);
-        this.tracker.recordExplicit(model.id, snapshot.taskType, rating, 0);
+    // Deduped by (model, task type) — the tracker's own key. The same model
+    // serving a coding subtask and a creative one is two things the user's
+    // thumb is an opinion about, not one.
+    const rated = new Set<string>();
+    for (const [, used] of snapshot.selections) {
+      for (const sel of used) {
+        const key = `${sel.model.id}:${sel.taskType}`;
+        if (rated.has(key)) continue;
+        rated.add(key);
+        this.tracker.recordExplicit(sel.model.id, sel.taskType, rating, 0);
       }
     }
     this.lastCompletedRun = undefined;

@@ -326,3 +326,81 @@ describe('an explored model learns from having been tried', () => {
     expect(tracker.sampleCountFor('alpha', 'code')).toBe(1);
   });
 });
+
+describe('evidence goes to the model that actually served', () => {
+  it('does not pay a tier default that a per-work selection superseded', async () => {
+    // Cascade.run picks a model per tier before any work exists, then
+    // T2Manager/T3Worker select again per section and per subtask and call
+    // THAT model. The root choice served nothing. Accumulating it anyway —
+    // which is what fixing the per-tier overwrite did on its own — hands
+    // success/failure evidence and a share of the cost to a model that never
+    // ran, and a sampled root choice differs from the per-work one often
+    // enough for that to matter.
+    const tracker = mem();
+    const analyzer = new TaskAnalyzer(tracker);
+
+    TaskAnalyzer.clearCache();
+    await analyzer.select(codePrompt(1), 'T3', selectorOver([model('tier-default')]), { provisional: true });
+    TaskAnalyzer.clearCache();
+    await analyzer.select(codePrompt(2), 'T3', selectorOver([model('actually-ran')]));
+
+    analyzer.recordRunOutcome('success', { T3: 0.08 });
+
+    expect(tracker.sampleCountFor('tier-default', 'code'), 'never served a call').toBe(0);
+    expect(tracker.sampleCountFor('actually-ran', 'code')).toBe(1);
+    const spend = tracker.getAll().get('actually-ran:code')?.totalCostUsd ?? 0;
+    expect(spend, 'the whole tier cost belongs to the model that ran').toBeCloseTo(0.08, 6);
+  });
+
+  it('keeps the tier default when nothing supersedes it', async () => {
+    // Cascade Auto off for subtasks, or a tier that runs once: the root choice
+    // IS the model that serves, and dropping it would lose the run entirely.
+    const tracker = mem();
+    const analyzer = new TaskAnalyzer(tracker);
+
+    TaskAnalyzer.clearCache();
+    await analyzer.select(codePrompt(1), 'T1', selectorOver([model('planner')]), { provisional: true });
+    analyzer.recordRunOutcome('success', { T1: 0.02 });
+
+    expect(tracker.sampleCountFor('planner', 'code')).toBe(1);
+  });
+});
+
+describe('a model is credited for the work it actually did', () => {
+  it('records each selection under the task type it was chosen for', async () => {
+    // One run is not one task type. `lastProfile` is whatever the LAST
+    // selection analysed, so crediting the whole run to it teaches the router
+    // that the model which wrote the closing prose is good at code — from an
+    // observation that never said so.
+    const tracker = mem();
+    const analyzer = new TaskAnalyzer(tracker);
+
+    TaskAnalyzer.clearCache();
+    await analyzer.select('refactor the parser function', 'T3', selectorOver([model('coder')]));
+    TaskAnalyzer.clearCache();
+    await analyzer.select('write a short poem about the sea', 'T3', selectorOver([model('writer')]));
+
+    analyzer.recordRunOutcome('success', { T3: 0.06 });
+
+    expect(tracker.sampleCountFor('coder', 'code'), 'the coding subtask').toBe(1);
+    expect(tracker.sampleCountFor('coder', 'creative'), 'must not be credited as prose').toBe(0);
+    expect(tracker.sampleCountFor('writer', 'creative')).toBe(1);
+  });
+
+  it('rates each model under the type it served, not the run’s last profile', async () => {
+    const tracker = mem();
+    const analyzer = new TaskAnalyzer(tracker);
+
+    TaskAnalyzer.clearCache();
+    await analyzer.select('refactor the parser function', 'T3', selectorOver([model('coder')]));
+    TaskAnalyzer.clearCache();
+    await analyzer.select('write a short poem about the sea', 'T3', selectorOver([model('writer')]));
+    analyzer.recordRunOutcome('success', { T3: 0 });
+
+    expect(analyzer.recordExplicitRating('good')).toBe(true);
+    // 1 automatic + 1 rated observation each, under their own types.
+    expect(tracker.sampleCountFor('coder', 'code')).toBe(2);
+    expect(tracker.sampleCountFor('coder', 'creative')).toBe(0);
+    expect(tracker.sampleCountFor('writer', 'creative')).toBe(2);
+  });
+});
