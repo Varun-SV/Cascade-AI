@@ -233,6 +233,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the status line. Execution is unchanged — it still falls through to the
   adaptive fallback that substitutes or synthesizes a real tool.
 
+### Changed
+- **Routing no longer writes a model off for one bad moment.** The performance
+  term was a raw `successCount / sampleCount` floored at 0.05, so a single
+  failure scored a model at 0.05 against a benchmark range spanning about 1.5x
+  — one flaky network call outweighed every measured quality difference in the
+  catalogue. Worse, selection was a pure argmax, so nothing ever routed to that
+  model again to find out whether the failure meant anything: the penalty was
+  an absorbing state that persisted for the life of the stats file. The score
+  is now the mean of a Beta posterior with a weak 50/50 prior, so one failure
+  reads as 0.40 and one success as 0.60, and the number moves as evidence
+  accumulates rather than lurching on the first observation. The retry penalty
+  is unchanged.
+
+- **Exploration is off when there is nothing to learn from.** With
+  `routing.learnFromOutcomes` disabled the tracker reads the shared scores but
+  drops every observation, so a sampled posterior could never narrow: uncertain
+  models would stay uncertain forever and routing would keep spending on
+  experiments whose results it throws away. Selection ranks on belief in that
+  configuration. An exploratory pick is also announced only when its call
+  actually goes out, so `/why` no longer reports an alternative for a subtask
+  that was cancelled before reaching a provider.
+
+- **Routing occasionally tries a plausible alternative instead of only ever
+  picking the current best.** Selection now scores each candidate twice — on
+  what we believe (the posterior mean) and on a draw from the same posterior —
+  and picks on the draw. A model we have barely tried has a wide posterior and
+  will sometimes draw high enough to earn a turn; a model we have measured a
+  hundred times draws its own mean every time and stops being explored. There
+  is no exploration rate to configure and no bonus to decay, because the decay
+  is the posterior narrowing: measured against an incumbent, a once-failed
+  model is tried about 18% of the time after 2 incumbent successes, 7% after 5,
+  2% after 10, and effectively never after 300. A draw carries the same retry
+  penalty as the mean, so exploring cannot smuggle a model past a cost it has
+  been shown to carry. When a pick is one the evidence alone would not have
+  made, it is labelled as such in `/why`, naming both models and how little is
+  known about the one that won.
+
+- **An explicit thumbs-up no longer makes the router three times as confident
+  as the evidence warrants.** A rating was worth three automatic outcomes and
+  was implemented by recording the same observation three times, which also
+  tripled `sampleCount` — the count of how many times a model was actually run.
+  The weight is now carried on one observation, and it is spent on belief
+  rather than on certainty: a lone thumbs-up moves the score exactly as far as
+  a lone successful run, and what the weight buys is winning the argument
+  against automatic outcomes that disagree with it. A single click no longer
+  narrows the router's uncertainty as much as three independent runs would.
+  `cascade stats` divides the success column by the evidence total rather than
+  the observation count, so a rated model can no longer display — and sort
+  by — a rate above 100%.
+
+- **Every model a tier used now records the run's outcome, not just the last
+  one.** Selections were stored one-per-tier and overwritten, which was
+  harmless while routing was deterministic — every subtask in a tier picked the
+  same model, so the overwrite replaced a model with itself. Sampled selection
+  breaks that: two subtasks in one tier can legitimately pick different models,
+  and the whole tier's outcome went to whichever was chosen last. The explored
+  model — the entire point of trying it — recorded nothing, so its estimate
+  never moved and its trial taught the router nothing. A tier's cost is split
+  evenly across the models that served it rather than charged to each in full,
+  and a tier default that a per-section or per-subtask selection replaced is
+  dropped rather than paid for work it never did.
+
+- **A long run of failures no longer inflated a model's chances.** The retry
+  penalty was recovered by dividing the believed score by the posterior mean,
+  which is the retry penalty only while the score's 0.05 floor is slack. Past
+  about 37 straight failures the floor engages and that ratio becomes
+  `0.05 / mean`, which grows without limit as the model gets worse — 2.6x after
+  100 failures, 7.6x after 300 — so the worst-established models in the
+  catalogue were the ones having their sampled scores amplified. The retry
+  factor is now asked for directly rather than reverse-engineered from two
+  outputs.
+
+- **Only a model that actually ran is rated.** Routing evidence was recorded
+  when a model was *chosen*, and choosing is not running: a rejected plan, a
+  cancelled subtask, or a tier default that per-section routing replaced all
+  left behind a selection that never reached a provider, and each was given the
+  run's success or failure and an explicit rating along with it. The router now
+  reports a model at the provider-call boundary — the only place that knows a
+  request was really made and which model made it — and reports it *before*
+  awaiting the response, so a run that fails still records failure evidence
+  against the model that broke it. The report names the task type the model was
+  selected under as well as the model, so a tier that chose one model for two
+  kinds of work credits only the call that actually happened.
+
+- **A model is credited under the task type it actually served.** Outcomes for
+  a whole run were recorded under the task type of the LAST thing analysed, so
+  a model that refactored a function early in a run could be recorded as having
+  succeeded at `creative` because the closing section was prose — and an
+  explicit rating inherited the same misattribution. Each selection now carries
+  its own task type.
+
 ## 0.75.0 - 2026-08-14
 
 ### Fixed

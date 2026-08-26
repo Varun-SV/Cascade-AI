@@ -18,6 +18,13 @@ function makeTracker() {
     save: async () => {},
     getStats: () => undefined,
     performanceScore: () => 0.5,
+    // Selection now scores twice — on the posterior mean and on a draw from
+    // it — so a stand-in tracker has to answer both questions. A flat
+    // Beta(2,2) is the no-evidence posterior, which keeps these tests about
+    // rating bookkeeping rather than about which model wins.
+    posteriorFor: () => ({ alpha: 2, beta: 2 }),
+    sampleCountFor: () => 0,
+    retryFactorFor: () => 1,
     costEfficiencyScore: () => 0.5,
   };
 }
@@ -39,6 +46,7 @@ describe('explicit ratings after a completed run', () => {
       getCandidatesForTier: () => [model],
     } as never;
     await analyzer.selectModel('Refactor the auth module and add tests', 'T3', selector);
+    analyzer.noteAttempted('T3', 'model-a');
 
     analyzer.recordRunOutcome('success', { T3: 0.01 });
     expect(tracker.auto.length).toBeGreaterThan(0);
@@ -62,6 +70,7 @@ describe('explicit ratings after a completed run', () => {
     } as never;
 
     await analyzer.selectModel('Describe this screenshot image in detail', 'T3', selector);
+    analyzer.noteAttempted('T3', 'vision-model');
     analyzer.recordRunOutcome('success', { T3: 0 });
 
     expect(analyzer.recordExplicitRating('good')).toBe(true);
@@ -79,6 +88,7 @@ describe('explicit ratings after a completed run', () => {
     } as never;
 
     await analyzer.selectModel('Refactor the auth module', 'T3', selector);
+    analyzer.noteAttempted('T3', 'fallback-model');
     analyzer.recordRunOutcome('success', { T3: 0 });
 
     expect(analyzer.recordExplicitRating('good')).toBe(true);
@@ -97,6 +107,7 @@ describe('explicit ratings after a completed run', () => {
       getCandidatesForTier: () => [model],
     } as never;
     await analyzer.selectModel('Refactor the auth module', 'T3', selector);
+    analyzer.noteAttempted('T3', 'model-a');
     analyzer.recordRunOutcome('success', { T3: 0 });
 
     expect(analyzer.recordExplicitRating('good')).toBe(true);
@@ -121,6 +132,7 @@ describe('explicit ratings after a completed run', () => {
 
     // Run A: a code task, completed.
     await analyzer.selectModel('Refactor the auth module, fix the failing test, and export the class', 'T3', selector);
+    analyzer.noteAttempted('T3', 'code-model');
     const codeType = analyzer.getLastProfile()?.type;
     expect(codeType).toBe('code');
     analyzer.recordRunOutcome('success', { T3: 0 });
@@ -150,6 +162,7 @@ describe('explicit ratings after a completed run', () => {
 
     for (const tier of ['T1', 'T2', 'T3'] as const) {
       await analyzer.selectModel('Refactor the auth module', tier, selector);
+      analyzer.noteAttempted(tier, 'solo-model');
     }
     analyzer.recordRunOutcome('success', { T1: 0, T2: 0, T3: 0 });
 

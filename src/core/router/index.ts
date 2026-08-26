@@ -16,6 +16,7 @@ import type {
   TierLimits,
   TierRole,
   TokenUsage,
+  TaskType,
 } from '../../types.js';
 import { AnthropicProvider } from '../../providers/anthropic.js';
 import { AzureOpenAIProvider, azureModelForDeployment } from '../../providers/azure.js';
@@ -423,6 +424,12 @@ export function applyTierLimits(options: GenerateOptions, tier: TierRole, limits
     next = { ...next, temperature };
   }
   return next;
+}
+
+
+/** Identity of one routing selection, for the notes held against it. */
+function explorationKey(tier: string, modelId: string, taskType?: string): string {
+  return `${tier}\u0000${modelId}\u0000${taskType ?? ''}`;
 }
 
 export class CascadeRouter extends EventEmitter {
@@ -1211,6 +1218,31 @@ export class CascadeRouter extends EventEmitter {
       // attempt accounting, the retry preflight and the second reservation all
       // existed to paper over. Those are gone: the first request is on its way
       // down before the fallback starts.
+      // Routing evidence is attached HERE — the last point before the request
+      // goes out — rather than after it comes back. Recording on success only
+      // looks tidier and throws away every failure: a run that died recorded
+      // nothing about the model that killed it, so its posterior never moved
+      // and sampling kept choosing it. See TaskAnalyzer.noteAttempted.
+      // Only for the run this call was ADMITTED in. A call queued when the
+      // previous run ended is supported and can reach here after beginRun()
+      // has zeroed everything — `generate()` captures runGeneration for exactly
+      // that reason. Without the guard, the straggler marks a NEW run's
+      // identically-keyed selection as attempted, and that run then persists
+      // evidence, and accepts a rating, for a model that served none of its
+      // calls.
+      if (runGeneration === this.runGeneration) {
+        // The task type is the other half of the selection's identity. A
+        // per-call model carries its own; a tier default carries the one the
+        // root selection recorded.
+        const selectionTaskType = options.selectionTaskType ?? this.tierSelectionTaskTypes.get(tier);
+        this.taskAnalyzer?.noteAttempted(tier, model.id, selectionTaskType);
+        // …and an exploratory pick is announced only now, because a selection
+        // is not a call: T3Worker selects before its cancellation checkpoint,
+        // so a worker that loses a wave race threw before reaching a provider
+        // while /why already claimed the run tried an alternative.
+        this.flushExplorationNote(tier, model.id, selectionTaskType);
+      }
+
       if (model.isLocal) {
         // Apply a hard timeout to local inference calls so a slow/overloaded
         // model doesn't block the worker indefinitely.
@@ -1571,7 +1603,9 @@ export class CascadeRouter extends EventEmitter {
    * Used by TaskAnalyzer to inject task-optimal models before execution.
    * The override is valid for the current task only — restored by restoreTierModels().
    */
-  overrideTierModel(tier: TierRole, model: ModelInfo): void {
+  overrideTierModel(tier: TierRole, model: ModelInfo, taskType?: TaskType): void {
+    if (taskType === undefined) this.tierSelectionTaskTypes.delete(tier);
+    else this.tierSelectionTaskTypes.set(tier, taskType);
     // Snapshot the configured/default tier models once so they can be restored
     // after the run — Cascade Auto's per-task picks must not leak across runs.
     if (!this.originalTierModels) {
@@ -1683,13 +1717,38 @@ export class CascadeRouter extends EventEmitter {
    * null when Cascade Auto is off (callers then use the shared tier model).
    * Pure heuristic — no extra LLM call.
    */
-  async selectModelForSubtask(tier: TierRole, text: string, opts?: { requiresToolUse?: boolean }): Promise<ModelInfo | null> {
+  async selectModelForSubtask(
+    tier: TierRole,
+    text: string,
+    opts?: { requiresToolUse?: boolean },
+  ): Promise<{ model: ModelInfo; taskType?: TaskType } | null> {
     // An explicit per-tier pin always wins over Cascade Auto — the user chose
     // that exact model for this tier, so never re-select it per subtask.
-    if (this.explicitTierModels.has(tier)) return this.tierModels.get(tier) ?? null;
+    // An explicit pin is not a Cascade Auto selection: the same model is
+    // returned as before, but with no task type, because there is no selection
+    // of ours to credit it against.
+    if (this.explicitTierModels.has(tier)) {
+      const pinned = this.tierModels.get(tier);
+      return pinned ? { model: pinned } : null;
+    }
     if (!this.config?.cascadeAuto || !this.taskAnalyzer || !text.trim()) return null;
     try {
-      return await this.taskAnalyzer.selectModel(text, tier, this.selector, opts);
+      // An exploratory pick is one the evidence alone would not have made. It
+      // looks like a bad routing decision to anyone who cannot see the
+      // posterior behind it, so it is announced rather than left to be
+      // discovered in a bill. The note arrives with the selection, so two
+      // subtasks selecting at once cannot be attributed to each other.
+      const { model: chosen, note, taskType } = await this.taskAnalyzer.select(text, tier, this.selector, opts);
+      // HELD, not emitted. A selection is not a call: T3Worker selects before
+      // its cancellation checkpoint and T2Manager before its approval gate, so
+      // a subtask that loses a wave race throws without ever reaching a
+      // provider. Announcing at selection time put "tried an alternative" in
+      // /why for a model that never ran. Released when the call actually goes
+      // out — see flushExplorationNote.
+      if (note && chosen) {
+        this.pendingExplorationNotes.set(explorationKey(tier, chosen.id, taskType), note);
+      }
+      return chosen ? { model: chosen, taskType } : null;
     } catch {
       return null;
     }
@@ -2139,6 +2198,7 @@ export class CascadeRouter extends EventEmitter {
     this.stats.callsByProvider[model.provider] = (this.stats.callsByProvider[model.provider] ?? 0) + 1;
     this.stats.callsByTier[tier] = (this.stats.callsByTier[tier] ?? 0) + 1;
 
+
     // ── Per-tier cost & token breakdown ──────────
     this.stats.costByTier[tier] = (this.stats.costByTier[tier] ?? 0) + usage.estimatedCostUsd;
     this.stats.tokensByTier[tier] = (this.stats.tokensByTier[tier] ?? 0) + usage.totalTokens;
@@ -2201,7 +2261,39 @@ export class CascadeRouter extends EventEmitter {
    * totals and a session-wide budget halt are deliberately preserved; only the
    * per-task ceiling is cleared so the next task starts with a fresh allowance.
    */
+  /**
+   * The task type each tier's Cascade Auto default was selected under.
+   *
+   * A call that does not carry its own `selectionTaskType` is using the tier
+   * default, and its evidence belongs to the selection that established that
+   * default rather than to any other selection of the same model.
+   */
+  private tierSelectionTaskTypes = new Map<TierRole, TaskType>();
+
+  /**
+   * Exploration notes for selections that have not yet reached a provider,
+   * keyed by the selection's identity.
+   *
+   * Held rather than emitted so /why only ever claims an experiment that was
+   * actually run. Cleared by beginRun() along with everything else run-scoped;
+   * a note whose call never happens is simply dropped, which is the point.
+   */
+  private pendingExplorationNotes = new Map<string, string>();
+
+  /** Announce an exploratory pick, once, at the moment its call goes out. */
+  private flushExplorationNote(tier: TierRole, modelId: string, taskType?: TaskType): void {
+    const key = explorationKey(tier, modelId, taskType);
+    const note = this.pendingExplorationNotes.get(key);
+    if (!note) return;
+    this.pendingExplorationNotes.delete(key);
+    this.emit('routing:exploring', { tier, note });
+  }
+
   beginRun(): void {
+    // Per-run, like everything else here: a stale mapping would credit this
+    // run's calls to the task type a previous run happened to select under.
+    this.tierSelectionTaskTypes.clear();
+    this.pendingExplorationNotes.clear();
     this.runTokens = 0;
     this.runCostUsd = 0;
     // A run that ended mid-flight (cancelled, crashed) can leave a reservation

@@ -12,12 +12,24 @@ import os from 'node:os';
 import type { ModelInfo } from '../../types.js';
 import type { TaskType } from './task-analyzer.js';
 import { BLENDED_COST_CEILING, blendedCostPer1k } from './pricing.js';
+import { posteriorMean, weightedPosterior, type BetaPosterior } from './bayes.js';
 
 interface ModelStat {
+  /**
+   * Success and failure EVIDENCE, weighted — not observation counts.
+   *
+   * An explicit thumbs-up is worth more than "the HTTP call did not error",
+   * and that difference is expressed here, in the evidence, where a Beta
+   * posterior can read it. It used to be expressed by recording the same
+   * observation three times, which also tripled `sampleCount` — so the one
+   * number everything else treats as "how much do we know about this model"
+   * was inflated by a factor of three every time somebody clicked a thumb.
+   */
   successCount: number;
   failureCount: number;
   totalRetries: number;
   totalCostUsd: number;
+  /** How many times this model was actually OBSERVED. Confidence, not score. */
   sampleCount: number;
   /** Sum of input/context tokens across samples — so we can see whether a
    *  model tends to fail on larger contexts and route less to it accordingly. */
@@ -101,6 +113,12 @@ export class ModelPerformanceTracker {
     retries = 0,
     costUsd = 0,
     contextTokens = 0,
+    /**
+     * How much this observation counts as EVIDENCE. One for an automatic
+     * outcome; more for a signal we trust further. It never touches
+     * sampleCount: one thing happened, however much it tells us.
+     */
+    weight = 1,
   ): void {
     if (this.readOnly) return; // opted out — read scores, don't contribute
     const key = `${modelId}:${taskType}`;
@@ -108,9 +126,10 @@ export class ModelPerformanceTracker {
       successCount: 0, failureCount: 0, totalRetries: 0, totalCostUsd: 0, sampleCount: 0,
       totalContextTokens: 0, failureContextTokens: 0,
     };
+    const w = Math.max(0, weight);
     this.stats.set(key, {
-      successCount: s.successCount + (outcome === 'success' ? 1 : 0),
-      failureCount: s.failureCount + (outcome === 'failure' ? 1 : 0),
+      successCount: s.successCount + (outcome === 'success' ? w : 0),
+      failureCount: s.failureCount + (outcome === 'failure' ? w : 0),
       totalRetries: s.totalRetries + retries,
       totalCostUsd: s.totalCostUsd + costUsd,
       sampleCount: s.sampleCount + 1,
@@ -129,15 +148,32 @@ export class ModelPerformanceTracker {
   }
 
   /**
-   * Record an explicit user rating (good/bad). Counts as 3 automatic samples
-   * so user feedback carries significantly more weight than auto-detected outcomes.
+   * Weight an explicit rating carries relative to an automatic outcome.
+   *
+   * An automatic outcome says only that the call completed; a person saying
+   * "this was good" is about the thing routing actually cares about. Three is
+   * the ratio this has always used — kept, now that it is expressed honestly.
+   */
+  static readonly EXPLICIT_RATING_WEIGHT = 3;
+
+  /**
+   * Record an explicit user rating (good/bad), worth EXPLICIT_RATING_WEIGHT
+   * automatic outcomes.
+   *
+   * ONE observation carrying that weight, not three observations. Recording it
+   * three times also tripled `sampleCount` — the count of how many times this
+   * model was actually run, which the exploration note reports and the
+   * lifecycle states will read. One click claimed three runs' worth of
+   * history that never happened.
+   *
+   * The weight is spent on belief, relative to the evidence it competes with;
+   * it does not buy confidence. A lone thumbs-up moves the score exactly as
+   * far as a lone successful run (0.5 → 0.6) — what it buys is winning the
+   * argument against automatic outcomes that disagree with it.
    */
   recordExplicit(modelId: string, taskType: TaskType, rating: 'good' | 'bad', costUsd = 0): void {
     const outcome = rating === 'good' ? 'success' : 'failure';
-    // 3× weight: call record three times
-    this.record(modelId, taskType, outcome, 0, costUsd);
-    this.record(modelId, taskType, outcome, 0, 0);
-    this.record(modelId, taskType, outcome, 0, 0);
+    this.record(modelId, taskType, outcome, 0, costUsd, 0, ModelPerformanceTracker.EXPLICIT_RATING_WEIGHT);
   }
 
   /** Returns all stats keyed by "modelId:taskType" — used by `cascade stats`. */
@@ -150,17 +186,93 @@ export class ModelPerformanceTracker {
   }
 
   /**
-   * Returns 0.05–1.0; defaults to 0.5 (neutral prior) when no history exists.
-   * High retry counts penalise the score.
+   * Whether outcomes recorded here go anywhere.
+   *
+   * A read-only tracker (routing.learnFromOutcomes = false) reads the shared
+   * scores but drops every observation — not just the write to disk, the
+   * in-memory update too. Anything whose correctness depends on evidence
+   * accumulating has to know that: see TaskAnalyzer.perfFor, where sampling a
+   * posterior that can never narrow means exploring forever.
+   */
+  learnsFromOutcomes(): boolean {
+    return !this.readOnly;
+  }
+
+  /**
+   * The Beta posterior over this model's success rate for this task type.
+   *
+   * Exposed as the posterior rather than a number so callers can ask the two
+   * different questions it answers: what we believe (the mean, for ranking)
+   * and how little we know (the spread, for deciding whether to explore).
+   * Collapsing it to a scalar here is what made those inseparable.
+   */
+  posteriorFor(modelId: string, taskType: TaskType): BetaPosterior {
+    const s = this.stats.get(`${modelId}:${taskType}`);
+    // Weight decides where this sits, observation count decides how tight it
+    // is — see weightedPosterior. Passing the weights straight in would make
+    // one thumbs-up narrow the posterior exactly as much as three runs, which
+    // is the "count is confidence" error wearing different clothes.
+    return weightedPosterior(s?.successCount ?? 0, s?.failureCount ?? 0, s?.sampleCount ?? 0);
+  }
+
+  /**
+   * The observed success rate, 0–1 — what actually happened, unshrunk.
+   *
+   * For display (`cascade stats`), not for routing: routing wants
+   * `performanceScore`, which is shrunk toward 0.5 by how little is known.
+   *
+   * Lives here rather than at the call site because the denominator is not
+   * obvious and getting it wrong is silent. It is the EVIDENCE total, not
+   * `sampleCount`: an explicit rating contributes 3 units of evidence on 1
+   * observation, so dividing by the observation count renders a single
+   * thumbs-up as "300%" — and anything sorting on that column then ranks the
+   * impossible rates first.
+   */
+  observedSuccessRate(modelId: string, taskType: TaskType): number {
+    const s = this.stats.get(`${modelId}:${taskType}`);
+    if (!s) return 0;
+    const evidence = s.successCount + s.failureCount;
+    return evidence > 0 ? s.successCount / evidence : 0;
+  }
+
+  /** How many times this model was observed on this task type. */
+  sampleCountFor(modelId: string, taskType: TaskType): number {
+    return this.stats.get(`${modelId}:${taskType}`)?.sampleCount ?? 0;
+  }
+
+  /**
+   * The retry cost as a multiplier in (0.6, 1] — 1.0 when a model never
+   * retries, 0.6 when it retries three times or more on average.
+   *
+   * Exposed separately because it is genuinely a separate quantity from the
+   * success rate, and because the alternative — recovering it by dividing
+   * `performanceScore` by `posteriorMean` — silently stops being the retry
+   * penalty at all once the score floor engages. See perfFor().
+   */
+  retryFactorFor(modelId: string, taskType: TaskType): number {
+    const s = this.stats.get(`${modelId}:${taskType}`);
+    if (!s || s.sampleCount === 0) return 1;
+    const avgRetries = s.totalRetries / s.sampleCount;
+    return 1 - Math.min(0.4, avgRetries / 3);
+  }
+
+  /**
+   * Believed success rate, 0–1, shrunk toward 0.5 by how little is known.
+   *
+   * Replaces a raw successCount/sampleCount. That rate read one failure as 0%
+   * — floored to 0.05, a 10x penalty against a benchmark range spanning about
+   * 1.5x — so a single bad moment outweighed every measured quality difference
+   * in the catalogue, and with nothing exploring, the model was never tried
+   * again to find out otherwise. See bayes.ts for the numbers.
+   *
+   * The retry penalty survives unchanged: retries are a real cost that a
+   * success/failure verdict does not capture.
    */
   performanceScore(modelId: string, taskType: TaskType): number {
-    const key = `${modelId}:${taskType}`;
-    const s = this.stats.get(key);
-    if (!s || s.sampleCount === 0) return 0.5;
-    const successRate = s.successCount / s.sampleCount;
-    const avgRetries = s.totalRetries / s.sampleCount;
-    const retryPenalty = Math.min(0.4, avgRetries / 3);
-    return Math.max(0.05, successRate * (1 - retryPenalty));
+    const s = this.stats.get(`${modelId}:${taskType}`);
+    const mean = posteriorMean(this.posteriorFor(modelId, taskType));
+    if (!s || s.sampleCount === 0) return mean;
+    return Math.max(0.05, mean * this.retryFactorFor(modelId, taskType));
   }
 
   /**

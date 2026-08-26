@@ -122,8 +122,11 @@ describe('CascadeRouter — explicit per-tier pin overrides Cascade Auto', () =>
     internals['explicitTierModels'] = new Set(['T3']);
 
     const chosen = await router.selectModelForSubtask('T3', 'Design and implement a new image format');
-    expect(chosen?.id).toBe(pinned.id);
-    expect(chosen?.provider).toBe('openai-compatible');
+    expect(chosen?.model.id).toBe(pinned.id);
+    expect(chosen?.model.provider).toBe('openai-compatible');
+    // …and no task type: an explicit pin is not a Cascade Auto selection, so
+    // there is nothing of ours for its calls to be credited against.
+    expect(chosen?.taskType).toBeUndefined();
   });
 });
 
@@ -2180,5 +2183,97 @@ describe('credential identity retention is capped, not slid', () => {
     const first = discoveryCacheKey('anthropic', cfg);
     vi.advanceTimersByTime(TTL_MS / 2);
     expect(discoveryCacheKey('anthropic', cfg)).toBe(first);
+  });
+});
+
+describe('CascadeRouter — routing evidence reaches the model that ran', () => {
+  function makeConfigLocal(overrides: Partial<CascadeConfig> = {}): CascadeConfig {
+    return { providers: [], models: {}, tools: { allowedTools: [] }, ...overrides } as unknown as CascadeConfig;
+  }
+
+  it('tells the analyzer a model served, from the provider-call boundary', async () => {
+    // The wiring this depends on is one line in recordStats(), and every unit
+    // test of the analyzer calls noteAttempted() directly — so without this test
+    // the line could be deleted and nothing would fail while production
+    // silently stopped recording any routing evidence at all. That is worse
+    // than the bug it replaced: no evidence rather than wrong evidence.
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream').mockResolvedValue({
+      content: 'ok', usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'stop',
+    } as never);
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['anthropic']));
+    await router.init(makeConfigLocal({ providers: [{ type: 'anthropic', apiKey: 'sk-ant-test' }] }));
+
+    const served: Array<{ tier: string; modelId: string }> = [];
+    router.setTaskAnalyzer({
+      noteAttempted: (tier: string, modelId: string) => { served.push({ tier, modelId }); },
+      setFeedbackSource: () => {},
+    } as never);
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'anthropic');
+    expect(pinned, 'need an anthropic model to pin').toBeTruthy();
+    await router.generate('T2', { messages: [{ role: 'user', content: 'hi' }], model: pinned });
+
+    expect(served).toEqual([{ tier: 'T2', modelId: pinned!.id }]);
+    vi.restoreAllMocks();
+  });
+
+  it('still reports the model when the call FAILS', async () => {
+    // The half that matters most, and the half that hanging this off the
+    // success path silently discarded: a run that died recorded nothing about
+    // the model that killed it, so its posterior never moved and sampling kept
+    // choosing it. Failure evidence is what stops a broken model being picked.
+    const { AnthropicProvider } = await import('../../providers/anthropic.js');
+    vi.spyOn(AnthropicProvider.prototype, 'generateStream')
+      .mockRejectedValue(new Error('provider exploded'));
+
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['anthropic']));
+    await router.init(makeConfigLocal({ providers: [{ type: 'anthropic', apiKey: 'sk-ant-test' }] }));
+
+    const attempted: Array<{ tier: string; modelId: string }> = [];
+    router.setTaskAnalyzer({
+      noteAttempted: (tier: string, modelId: string) => { attempted.push({ tier, modelId }); },
+      setFeedbackSource: () => {},
+    } as never);
+
+    const pinned = router.getAvailableModels().find((m) => m.provider === 'anthropic');
+    await router.generate('T3', { messages: [{ role: 'user', content: 'hi' }], model: pinned })
+      .catch(() => { /* the failure is the point */ });
+
+    expect(attempted).toContainEqual({ tier: 'T3', modelId: pinned!.id });
+    vi.restoreAllMocks();
+  });
+
+  it('announces an exploratory pick only when its call goes out', async () => {
+    // A selection is not a call. T3Worker selects before its cancellation
+    // checkpoint, so a subtask that loses a wave race throws without reaching
+    // a provider — and /why claimed the run "tried an alternative" that never
+    // ran.
+    const router = new CascadeRouter();
+    (router as unknown as Record<string, unknown>)['detectAvailableProviders'] =
+      vi.fn().mockResolvedValue(new Set(['anthropic']));
+    await router.init(makeConfigLocal({
+      providers: [{ type: 'anthropic', apiKey: 'sk-ant-test' }],
+      cascadeAuto: true,
+    } as Partial<CascadeConfig>));
+
+    const chosen = router.getAvailableModels().find((m) => m.provider === 'anthropic')!;
+    router.setTaskAnalyzer({
+      select: async () => ({ model: chosen, note: 'exploring something', taskType: 'code' }),
+      noteAttempted: () => {},
+      setFeedbackSource: () => {},
+    } as never);
+
+    const announced: string[] = [];
+    router.on('routing:exploring', (e: { note: string }) => announced.push(e.note));
+
+    await router.selectModelForSubtask('T3', 'refactor the parser function');
+    expect(announced, 'selecting is not running').toEqual([]);
+    vi.restoreAllMocks();
   });
 });

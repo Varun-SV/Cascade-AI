@@ -1091,6 +1091,14 @@ export class Cascade extends EventEmitter {
         this.emit('budget:warning', payload);
       });
 
+      // Exploration picks go in the decision trail. Routing occasionally tries
+      // a model the current evidence would not have chosen — that is how a
+      // model that failed once ever gets tried again — and a user looking at
+      // /why deserves to see that it was deliberate rather than a misroute.
+      this.router.on('routing:exploring', (e: { tier: string; note: string }) => {
+        this.recordDecision('model', `${e.tier} ${e.note}`);
+      });
+
       // Record provider failovers in the per-run decision trail (/why).
       this.router.on('failover', (e: { tier: string; from: string; to: string; reason: string }) => {
         this.recordDecision('failover', `${e.tier} ${e.from} → ${e.to} (${e.reason})`);
@@ -1655,18 +1663,48 @@ ${prompt}`
         try {
           // Analyze the user's actual request, not the host-augmented prompt —
           // delivery guidance/memories would poison the task-type profile.
-          const model = await this.taskAnalyzer!.selectModel(routingPrompt, tier, this.router.getSelector());
+          // The root tier selects here rather than through the router, so the
+          // router's `routing:exploring` wiring never sees this pick. The note
+          // comes back WITH the selection because these tier selections run
+          // concurrently — see TaskAnalyzer.select().
+          const { model, note, taskType } = await this.taskAnalyzer!.select(
+            routingPrompt, tier, this.router.getSelector(),
+          );
+          // T2Manager and T3Worker select AGAIN, per section and per subtask,
+          // and call that model — so for those tiers this pick only establishes
+          // a default and is normally replaced before any provider call. /why
+          // claiming the run "tried an alternative" that never ran is worse
+          // than saying nothing, and the per-work selection emits its own note
+          // for the model that actually runs. T1 has no per-work re-selection,
+          // so its pick is the one that serves and is announced. If per-work
+          // selection is ever added to T1, this must move with it.
+          //
+          // This governs only what /why SAYS. What gets rated is decided by
+          // whether a model actually ran — see noteAttempted().
+          const willReselect = tier !== 'T1';
+          if (note && !willReselect) this.recordDecision('model', `${tier} ${note}`);
           if (model) {
-            this.router.overrideTierModel(tier, model);
-            const taskType = this.taskAnalyzer!.getLastProfile()?.type ?? 'mixed';
+            this.router.overrideTierModel(tier, model, taskType);
+            // taskType comes from the selection itself, not getLastProfile():
+            // these tier selections run concurrently against one analyzer, so
+            // the shared "last profile" can belong to another tier by the time
+            // this line reads it — the same hazard the exploration note had.
             const bench = Math.round(benchmarkScore01(model, taskType) * 100);
             const price = model.inputCostPer1kTokens === 0 && model.outputCostPer1kTokens === 0
               ? 'free'
               : `$${model.outputCostPer1kTokens.toFixed(4)}/1K out`;
             const dataSrc = this.router.getLiveData()?.getDataSource() ?? 'bundled';
+            // "best value" is a claim about the BELIEF ranking, and an
+            // exploratory pick is by definition not the model that won it.
+            // Printing both lines unchanged gave /why two contradictory
+            // explanations for the same choice, which reads as a bug rather
+            // than as the deliberate experiment it is.
+            const rationale = note && !willReselect
+              ? `Cascade Auto: trying an alternative for ${taskType}`
+              : `Cascade Auto: best value for ${taskType}`;
             this.recordDecision(
               'model',
-              `${tier} → ${model.provider}:${model.id} — Cascade Auto: best value for ${taskType} ` +
+              `${tier} → ${model.provider}:${model.id} — ${rationale} ` +
               `(bench ${bench}/100, ${price}, data: ${dataSrc})`,
             );
           }

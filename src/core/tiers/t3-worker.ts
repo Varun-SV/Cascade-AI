@@ -11,6 +11,7 @@ import type {
   PermissionRequest,
   T2ToT3Assignment,
   T3Result,
+  TaskType,
   ToolCall,
   ToolDefinition,
 } from '../../types.js';
@@ -776,11 +777,16 @@ export class T3Worker extends BaseTier {
     // its type (coding → Claude, writing → GPT/Gemini, …). Returns null when
     // Cascade Auto is off, in which case the shared tier model is used.
     let subtaskModel: ModelInfo | undefined;
+    // The task type it was selected under — the other half of the selection's
+    // identity, carried into the call so evidence lands on this invocation.
+    let subtaskTaskType: TaskType | undefined;
     try {
       const subtaskText = `${this.assignment?.subtaskTitle ?? ''} ${this.assignment?.description ?? ''} ${this.assignment?.expectedOutput ?? ''}`;
       // Tool-equipped subtasks prefer models with native tool support (the
       // text fallback still works when none is available).
-      subtaskModel = (await this.router.selectModelForSubtask('T3', subtaskText, { requiresToolUse: tools.length > 0 })) ?? undefined;
+      const picked = await this.router.selectModelForSubtask('T3', subtaskText, { requiresToolUse: tools.length > 0 });
+      subtaskModel = picked?.model;
+      subtaskTaskType = picked?.taskType;
       if (subtaskModel) {
         this.log(`Cascade Auto: routing this subtask to ${subtaskModel.provider}:${subtaskModel.id}`);
       }
@@ -839,7 +845,7 @@ export class T3Worker extends BaseTier {
         // Don't pass tools array when model can't use them natively
         tools: useTextTools ? undefined : (tools.length ? tools : undefined),
         maxTokens: 4096,
-        ...(subtaskModel ? { model: subtaskModel } : {}),
+        ...(subtaskModel ? { model: subtaskModel, selectionTaskType: subtaskTaskType } : {}),
         featureTag: this.assignment?.sectionTitle,
         // The wave signal, so cancel-and-respawn reaches the request that is
         // RUNNING rather than only stopping the worker at its next checkpoint.

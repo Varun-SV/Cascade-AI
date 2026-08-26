@@ -119,6 +119,14 @@ export interface TokenUsage {
   costUnknown?: boolean;
 }
 
+/**
+ * The kind of work a prompt represents, as the heuristic analyser classifies
+ * it. Declared here rather than in the router because routing evidence, per-call
+ * options and the performance tracker all key on it; `task-analyzer.ts`
+ * re-exports it so existing imports keep working.
+ */
+export type TaskType = 'code' | 'analysis' | 'creative' | 'data' | 'mixed';
+
 export interface GenerateOptions {
   messages: ConversationMessage[];
   systemPrompt?: string;
@@ -138,6 +146,13 @@ export interface GenerateOptions {
   model?: ModelInfo;
   /** Name/tag of the current sub-feature (e.g. T2 section title) for cost accounting. */
   featureTag?: string;
+  /**
+   * The task type the per-call `model` was selected under, when Cascade Auto
+   * chose it. Carried so routing evidence lands on the exact selection that
+   * ran: a tier can select the same model for two kinds of work in one run,
+   * and only the one that reaches a provider should be credited.
+   */
+  selectionTaskType?: TaskType;
   /**
    * Privacy-tier constraint: when set, the call must resolve to a LOCAL model
    * (never a cloud provider). The router errors if no local model is available
