@@ -7,52 +7,99 @@ import { AZURE_BASE_URL_TEMPLATE, MODELS } from '../constants.js';
 import type { ModelInfo, ProviderConfig } from '../types.js';
 import { OpenAIProvider, isReasoningModel, isParamShapeError } from './openai.js';
 import { resolvePricing } from '../core/router/pricing.js';
+import cloudModelCatalog from './cloud-model-catalog.json' with { type: 'json' };
 
 // Default Azure API version. Bumped from 2024-08-01-preview, which predates the
 // gpt-5 / reasoning deployments and made their availability probe (and runs)
 // fail as "deployment not found". Users can still override it per-deployment.
 const DEFAULT_AZURE_API_VERSION = '2024-12-01-preview';
 
+type CloudCatalogEntry = {
+  id: string;
+  name: string;
+  providers: string[];
+  lifecycle: 'ga' | 'preview';
+  contextWindow?: number;
+  maxOutputTokens?: number;
+  vision?: boolean;
+  toolUse?: boolean;
+};
+
+const CLOUD_MODELS = cloudModelCatalog.models as CloudCatalogEntry[];
+const AZURE_CATALOG = CLOUD_MODELS
+  .filter((m) => m.providers.includes('azure'))
+  // Match longer/more-specific ids first: gpt-5.6-sol before the generic gpt-5.
+  .slice()
+  .sort((a, b) => b.id.length - a.id.length || a.id.localeCompare(b.id));
+
+/**
+ * Selectable Azure base models, generated from the verified cloud-model catalog.
+ *
+ * Capability identity lives in cloud-model-catalog.json; price does NOT. The
+ * same GPT model can cost a different amount on OpenAI vs Azure (and by Azure
+ * region), so azureModelForDeployment() resolves economics from pricing-data
+ * using provider='azure' + region rather than copying a model-global price.
+ */
+export const AZURE_BASE_MODELS: readonly string[] = AZURE_CATALOG.map((m) => m.id);
+
+function compactModelId(id: string): string {
+  return id.toLowerCase().replace(/[^a-z0-9.]/g, '');
+}
+
+function catalogEntry(id: string): CloudCatalogEntry | undefined {
+  const n = id.toLowerCase();
+  return CLOUD_MODELS.find((m) => m.id.toLowerCase() === n);
+}
+
 /**
  * Best-effort guess of the canonical base model an Azure deployment backs, from
- * its (arbitrary) deployment name. Ordered most-specific → least so "gpt-5-mini"
- * doesn't match the "gpt-5" base. Distinct point releases (gpt-5.5, gpt-5.4,
- * gpt-5.4-mini) resolve to their OWN base so their real economics + benchmark
- * scores apply — only unrecognised gpt-5.x fold into the gpt-5 base.
- * Returns null when the name gives no signal (e.g. "prod-fast") — the caller
- * then keeps neutral defaults, or the user can set an explicit base model.
+ * its (arbitrary) deployment name. The verified catalog is checked
+ * most-specific → least-specific, then legacy family fallbacks preserve the old
+ * behavior for deployment names such as `gpt5nano-prod` or an as-yet-unknown
+ * gpt-5.x point release.
  */
-/**
- * Base models an Azure deployment can be mapped onto, most-specific first.
- *
- * Single source for BOTH the inference below and any UI that offers a picker.
- * The cloud web app used to keep its own hand-copied array, which silently went
- * stale the moment a family was added — gpt-5.4 and gpt-5.5 landed in the SDK
- * and never appeared in the dropdown, so an Azure deployment of either got the
- * wrong benchmark scores and the wrong prices. The list is served to the web via
- * /api/config rather than duplicated (see cloud/server/src/app.ts).
- */
-const AZURE_BASE_MODEL_RULES: ReadonlyArray<readonly [RegExp, string]> = [
-  [/gpt-?5\.5/, 'gpt-5.5'],
-  [/gpt-?5\.4.*mini/, 'gpt-5.4-mini'],
-  [/gpt-?5\.4/, 'gpt-5.4'],
-  [/gpt-?5.*nano/, 'gpt-5-nano'],
-  [/gpt-?5.*mini/, 'gpt-5-mini'],
-  [/gpt-?5/, 'gpt-5'],
-  [/gpt-?4\.1-nano/, 'gpt-4.1-nano'],
-  [/gpt-?4\.1-mini/, 'gpt-4.1-mini'],
-  [/gpt-?4\.1/, 'gpt-4.1'],
-  [/gpt-?4o-mini/, 'gpt-4o-mini'],
-  [/gpt-?4o/, 'gpt-4o'],
-];
-
-/** Selectable base models, in the order a picker should show them. */
-export const AZURE_BASE_MODELS: readonly string[] = AZURE_BASE_MODEL_RULES.map(([, id]) => id);
-
 export function inferAzureBaseModel(deploymentName: string): string | null {
   const n = deploymentName.toLowerCase();
-  for (const [re, base] of AZURE_BASE_MODEL_RULES) if (re.test(n)) return base;
+  const compact = compactModelId(n);
+  for (const model of AZURE_CATALOG) {
+    if (n.includes(model.id.toLowerCase()) || compact.includes(compactModelId(model.id))) {
+      return model.id;
+    }
+  }
+
+  // OpenAI documents bare `gpt-5.6` as the Sol alias. Keep that useful signal
+  // even when an Azure deployment name omits the tier suffix.
+  if (/gpt-?5\.6(?:$|[-_])/.test(n) || compact.includes('gpt5.6')) return 'gpt-5.6-sol';
+
+  // Legacy / forward-compatible family fallbacks.
+  if (/gpt-?5.*nano/.test(n)) return 'gpt-5-nano';
+  if (/gpt-?5.*mini/.test(n)) return 'gpt-5-mini';
+  if (/gpt-?5/.test(n)) return 'gpt-5';
+  if (/gpt-?4\.1-nano/.test(n)) return 'gpt-4.1-nano';
+  if (/gpt-?4\.1-mini/.test(n)) return 'gpt-4.1-mini';
+  if (/gpt-?4\.1/.test(n)) return 'gpt-4.1';
+  if (/gpt-?4o-mini/.test(n)) return 'gpt-4o-mini';
+  if (/gpt-?4o/.test(n)) return 'gpt-4o';
   return null;
+}
+
+function catalogModelInfo(baseModelId: string): ModelInfo | undefined {
+  const entry = catalogEntry(baseModelId);
+  if (!entry?.contextWindow) return undefined;
+  return {
+    id: entry.id,
+    name: entry.name,
+    provider: 'openai',
+    contextWindow: entry.contextWindow,
+    isVisionCapable: entry.vision ?? false,
+    inputCostPer1kTokens: 0,
+    outputCostPer1kTokens: 0,
+    maxOutputTokens: entry.maxOutputTokens ?? 16_000,
+    supportsStreaming: true,
+    isLocal: false,
+    supportsToolUse: entry.toolUse ?? true,
+    pricingUnknown: true,
+  };
 }
 
 /**
@@ -61,46 +108,57 @@ export function inferAzureBaseModel(deploymentName: string): string | null {
  * opaque to the API) — so each `providers[]` entry with a deploymentName becomes
  * one selectable model.
  *
- * Which base model it serves drives correct benchmark scoring + pricing, so we
- * resolve it: an explicit `cfg.model` (user override) wins, else we infer it from
- * the deployment name. When resolved to a known catalog model, this deployment
- * INHERITS that model's real economics (context window, pricing, vision, output
- * cap) while keeping the deployment name as its callable `id` and carrying the
- * base identity in `baseModelId`. Unresolved deployments fall back to neutral
- * GPT-4o-class defaults (an estimate, not $0), exactly as before.
+ * Which base model it serves drives correct benchmark scoring + capabilities,
+ * while economics stay provider-specific. An explicit `cfg.model` wins over
+ * inference. Known legacy models come from MODELS; newer catalog models (for
+ * example GPT-5.6 Sol/Terra/Luna and GPT-5.4 Nano) use the verified cloud
+ * capability catalog until constants.ts catches up.
  */
 export function azureModelForDeployment(cfg: ProviderConfig): ModelInfo | null {
   if (cfg.type !== 'azure' || !cfg.deploymentName?.trim()) return null;
   const id = cfg.deploymentName.trim();
   const name = cfg.label?.trim() || id;
   const baseModelId = cfg.model?.trim() || inferAzureBaseModel(id) || undefined;
-  const base = baseModelId ? MODELS[baseModelId] : undefined;
-  if (base) {
-    // Azure charges its own rates for the same model, and they vary by region
-    // (gpt-5.4 is $2.50/$15 per 1M on a global deployment but $2.75/$16.50 in
-    // `us`/`eu`). Prefer the dataset's azure entry for the configured region;
-    // it falls back to OpenAI list price only when Azure has no entry, and the
-    // catalogue value below is the last resort.
+  const base = baseModelId
+    ? (MODELS[baseModelId] ?? catalogModelInfo(baseModelId))
+    : undefined;
+
+  if (base && baseModelId) {
+    // Azure gets its OWN price lookup. resolvePricing may fall back to OpenAI if
+    // the Azure dataset has no row; that is useful as an estimate, but must not
+    // masquerade as a confirmed Azure quote. pricingUnknown remains true in
+    // that case so cost-sensitive routing/budgeting stays conservative.
     const azurePrice = resolvePricing(
       { id, provider: 'azure', isLocal: false, baseModelId },
       { region: cfg.region },
     );
+    const exactAzurePrice = !azurePrice.unknown && !azurePrice.estimatedFromProvider;
+
+    // Microsoft documents GPT-5.6 function tools on Chat Completions only with
+    // reasoning_effort=none. Cascade's Azure transport does not currently send
+    // that knob, so advertise the TRANSPORT truth (text-tool fallback) instead
+    // of claiming native tool use and then failing the request.
+    const nativeToolsOnThisTransport = /^gpt-5\.6-(?:sol|terra|luna)$/i.test(baseModelId)
+      ? false
+      : (base.supportsToolUse ?? true);
+
     return {
       ...base,
       id,               // callable deployment name
       name,
       provider: 'azure',
-      baseModelId,      // real identity for benchmark + live pricing
-      supportsToolUse: base.supportsToolUse ?? true,
-      ...(azurePrice.unknown
-        ? {}
-        : {
+      baseModelId,      // canonical identity for benchmark + provider pricing
+      supportsToolUse: nativeToolsOnThisTransport,
+      ...(!azurePrice.unknown
+        ? {
             inputCostPer1kTokens: azurePrice.input,
             outputCostPer1kTokens: azurePrice.output,
-            pricingUnknown: false,
-          }),
+            pricingUnknown: !exactAzurePrice,
+          }
+        : { pricingUnknown: true }),
     };
   }
+
   // Unknown base — keep neutral defaults so cost/context read as an estimate.
   return {
     id,
@@ -115,6 +173,7 @@ export function azureModelForDeployment(cfg: ProviderConfig): ModelInfo | null {
     supportsStreaming: true,
     isLocal: false,
     supportsToolUse: true,
+    pricingUnknown: true,
   };
 }
 
