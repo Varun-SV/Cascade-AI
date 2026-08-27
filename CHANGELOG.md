@@ -78,7 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closing delimiter. Tilde fences (`~~~`) are fences too, in both parsers and
   for `chart:` blocks — recognising only backticks left a `~~~` block's markers
   in the body while the table-shaped lines between them were lifted out as a
-  real table.
+  real table. One definition of "what opens a fence" now backs both parsers and
+  both `chart:` sites, including the up-to-three spaces of indentation Markdown
+  permits — the block parser required column zero while the slide parser
+  trimmed first, so the two disagreed about the same input.
 
 - **An exhausted provider quota was retried for the rest of the run.** A spent
   billing quota and a 429 arrive as the same status, and the router's failover

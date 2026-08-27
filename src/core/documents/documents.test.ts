@@ -373,3 +373,43 @@ describe('an escaped pipe survives at the end of the last cell', () => {
     expect(table.rows[1]).toEqual(['x', 'y']);
   });
 });
+
+describe('a fence opens at the indentation Markdown allows', () => {
+  // parseBlocks required column zero while parseSlide trimmed before matching,
+  // so the two parsers disagreed about what a code block is — the drift the
+  // shared scanner exists to prevent. Up to three spaces still open a fence.
+  for (const indent of ['', ' ', '  ', '   ']) {
+    it(`treats a fence indented by ${indent.length} space(s) as code in both parsers`, () => {
+      const md = `# T\n\n${indent}\`\`\`\n| in | out |\n${indent}\`\`\`\n\nAfter.`;
+      const blocks = parseBlocks(md);
+      expect(blocks.find((b) => b.t === 'code'), 'block parser').toEqual({ t: 'code', lines: ['| in | out |'] });
+      expect(blocks.find((b) => b.t === 'table'), 'block parser').toBeUndefined();
+
+      const [slide] = splitSlides(md);
+      expect(slide!.tables, 'slide parser').toHaveLength(0);
+    });
+  }
+
+  it('agrees with the slide parser on an indented tilde fence too', () => {
+    const md = '# T\n\n  ~~~\n| in | out |\n  ~~~\n\nAfter.';
+    expect(parseBlocks(md).find((b) => b.t === 'table')).toBeUndefined();
+    expect(splitSlides(md)[0]!.tables).toHaveLength(0);
+  });
+});
+
+describe('extractCharts uses the same fence rule as the parsers', () => {
+  it('reads a chart fence written with tildes', () => {
+    // Backtick-only here meant a `~~~chart:` block reached the spreadsheet as
+    // raw CSV rows instead of becoming a chart.
+    const { charts, rest } = extractCharts('~~~chart: bar\nQuarter,Revenue\nQ1,120\n~~~');
+    expect(charts).toHaveLength(1);
+    expect(charts[0]!.kind).toBe('bar');
+    expect(rest).not.toContain('Q1,120');
+  });
+
+  it('leaves an ordinary fence alone', () => {
+    const { charts, rest } = extractCharts('```\nnot a chart\n```');
+    expect(charts).toHaveLength(0);
+    expect(rest).toContain('not a chart');
+  });
+});

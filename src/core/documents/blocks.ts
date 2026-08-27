@@ -206,6 +206,31 @@ function fenceCloser(opener: string): RegExp {
 }
 
 /**
+ * A fence OPENER, with the indentation CommonMark allows.
+ *
+ * Up to three leading spaces still open a fence; a fourth makes the line
+ * indented code instead. Requiring column zero — which the block parser did —
+ * left an indented fence unrecognised, so the table scanner lifted the
+ * `| in | out |` inside it out as a real table and left both markers behind as
+ * paragraphs. The slide parser trims before matching and so never had the bug,
+ * which is exactly the drift between the two parsers this module exists to
+ * prevent.
+ *
+ * One definition, used by both parsers AND by both `chart:` fence sites, so
+ * there is a single answer to "what opens a fence" rather than four.
+ */
+function fenceOpen(line: string): { marker: string; info: string } | null {
+  const m = /^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$/.exec(line);
+  return m ? { marker: m[1]!, info: (m[2] ?? '').trim() } : null;
+}
+
+/** The chart kind a fence's info string names, or null when it names none. */
+function chartFenceKind(info: string): ChartKind | null {
+  const m = /^chart[ \t]*:(.*)$/i.exec(info);
+  return m ? chartKind(m[1]!) : null;
+}
+
+/**
  * True for a line that opens a block of its own, and so ENDS a table already
  * in progress.
  *
@@ -354,14 +379,10 @@ export function parseBlocks(md: string): Block[] {
   while (i < lines.length) {
     const line = lines[i] ?? '';
 
-    // Tildes fence too, and close on their own character — same rule as the
-    // slide parser. Fixing only that one would put the two parsers back in
-    // disagreement about what a code block is, which is the drift this shared
-    // scanner exists to prevent.
-    const fence = line.match(/^(`{3,}|~{3,})\s*(.*)$/);
+    const fence = fenceOpen(line);
     if (fence) { // code fence — or a `chart:` block wearing one
-      const closer = fenceCloser(fence[1]!);
-      const info = (fence[2] ?? '').trim();
+      const closer = fenceCloser(fence.marker);
+      const info = fence.info;
       i++;
       const code: string[] = [];
       while (i < lines.length && !closer.test(lines[i] ?? '')) { code.push(lines[i] ?? ''); i++; }
@@ -626,10 +647,11 @@ export function parseSlide(chunk: string): Slide {
     // A `chart:` fence is a real chart object, not bullet text. Pulled out here
     // (and its body skipped) so the numbers reach addChart() instead of being
     // flattened into a list of CSV rows.
-    const fence = raw.match(/^[ \t]*(`{3,}|~{3,})[ \t]*chart[ \t]*:(.*)/i);
-    if (fence) {
-      const chartCloser = fenceCloser(fence[1]!);
-      const kind = chartKind(fence[2]!);
+    const fence = fenceOpen(raw);
+    const chartFence = fence && chartFenceKind(fence.info) !== null ? fence : null;
+    if (chartFence) {
+      const chartCloser = fenceCloser(chartFence.marker);
+      const kind = chartFenceKind(chartFence.info);
       const bodyLines: string[] = [];
       i++;
       while (i < lines.length && !chartCloser.test(lines[i] ?? '')) { bodyLines.push(lines[i] ?? ''); i++; }
@@ -649,9 +671,9 @@ export function parseSlide(chunk: string): Slide {
     // lifted out as a real table — the same corruption the backtick branch was
     // added to stop, in the other half of CommonMark's fence syntax. A fence
     // closes on its OWN character, so the two cannot cross-close.
-    const codeFence = /^(`{3,}|~{3,})/.exec(line);
+    const codeFence = fenceOpen(line);
     if (codeFence) {
-      const closer = fenceCloser(codeFence[1]!);
+      const closer = fenceCloser(codeFence.marker);
       i++;
       while (i < lines.length && !closer.test(lines[i] ?? '')) {
         const inner = (lines[i] ?? '').trim();
@@ -703,12 +725,16 @@ export function extractCharts(source: string): { charts: ChartSpec[]; rest: stri
   const charts: ChartSpec[] = [];
   const rest: string[] = [];
   for (let i = 0; i < lines.length; i++) {
-    const fence = lines[i]!.match(/^[ \t]*```+[ \t]*chart[ \t]*:(.*)/i);
-    if (!fence) { rest.push(lines[i]!); continue; }
-    const kind = chartKind(fence[1]!);
+    // Same fence definition as both parsers: tildes count, and a fence closes
+    // on its own character. This was backtick-only, so a `~~~chart:` block
+    // reached the spreadsheet as raw rows.
+    const fence = fenceOpen(lines[i]!);
+    const kind = fence ? chartFenceKind(fence.info) : null;
+    if (!fence || kind === null) { rest.push(lines[i]!); continue; }
+    const closer = fenceCloser(fence.marker);
     const body: string[] = [];
     i++;
-    while (i < lines.length && !/^\s*```/.test(lines[i] ?? '')) { body.push(lines[i] ?? ''); i++; }
+    while (i < lines.length && !closer.test(lines[i] ?? '')) { body.push(lines[i] ?? ''); i++; }
     const spec = kind ? parseChartSpec(kind, body.join('\n')) : null;
     if (spec) charts.push(spec);
     else rest.push(...body); // unparseable → leave the rows in the sheet
