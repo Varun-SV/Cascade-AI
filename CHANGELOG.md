@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+## 0.76.0 - 2026-08-27
+
 ### Added
 - **PowerPoint decks animate.** `pptxgenjs` has no timeline at all — no
   `p:timing`, no `p:transition` anywhere in its output — so every generated
