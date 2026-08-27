@@ -324,22 +324,46 @@ function isAlignmentRule(row: string): boolean {
 /**
  * Split one table row into cells.
  *
- * `\|` is a literal pipe inside a cell — `| A \| B | union |` is a two-column
- * row, not three. Splitting on every pipe produced a phantom column and left
- * the backslash in the text, which the slide renderer then drew as a malformed
- * grid.
+ * A character scan, not a regex with a negative lookbehind. Three separate
+ * review findings landed on escape handling here — the interior pipe, then the
+ * trailing one, then backslash parity — because `(?<!\\)` asks "is the
+ * previous character a backslash", and that is not the question. The question
+ * is how MANY backslashes precede the pipe: an even run is literal backslashes
+ * and the pipe still delimits, an odd run escapes it. So `| C:\\\\| next |` is
+ * two cells whose first is `C:\\`, which the lookbehind read as one cell with
+ * an escaped pipe, eating a backslash on the way out.
+ *
+ * Scanning left to right answers that by construction: a backslash consumes
+ * the character after it, so parity is never in question and there is no
+ * pattern to backtrack. Same move as isAlignmentRule above, for the same
+ * reason.
  */
 function splitCells(row: string): string[] {
-  return row
-    .replace(/^\|/, '')
-    // Only an UNESCAPED trailing pipe is the row's closing delimiter. A table
-    // written without one whose last cell ends in a literal `\|` had that pipe
-    // eaten here, before the split ever saw it, leaving a bare backslash as the
-    // cell's last character. Same guard as the split below, for the same
-    // reason — the leading pipe needs none, since nothing can precede it.
-    .replace(/(?<!\\)\|\s*$/, '')
-    .split(/(?<!\\)\|/)
-    .map((c) => c.trim().replace(/\\\|/g, '|'));
+  const cells: string[] = [];
+  let cur = '';
+  // A leading delimiter is decoration, not an empty first cell.
+  let i = row.startsWith('|') ? 1 : 0;
+  for (; i < row.length; i++) {
+    const ch = row[i]!;
+    if (ch === '\\') {
+      const next = row[i + 1];
+      // Markdown defines an escape only for punctuation. `\\|` is a literal
+      // pipe and `\\\\` a literal backslash; anything else keeps its backslash,
+      // because dropping it would quietly eat the separator in a path like
+      // `C:\\Users`.
+      if (next === '|' || next === '\\') { cur += next; i++; continue; }
+      cur += ch;
+      continue;
+    }
+    if (ch === '|') { cells.push(cur); cur = ''; continue; }
+    cur += ch;
+  }
+  cells.push(cur);
+  // A trailing delimiter is decoration too, and would otherwise leave a
+  // phantom empty cell — but only the LAST one, so `| a | |` keeps its
+  // genuinely empty middle cell.
+  if (cells.length > 1 && cells[cells.length - 1]!.trim() === '') cells.pop();
+  return cells.map((c) => c.trim());
 }
 
 export function scanTable(lines: string[], start: number): { rows: string[][]; next: number } {

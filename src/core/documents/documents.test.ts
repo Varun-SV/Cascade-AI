@@ -413,3 +413,36 @@ describe('extractCharts uses the same fence rule as the parsers', () => {
     expect(rest).toContain('not a chart');
   });
 });
+
+describe('backslash parity decides whether a pipe delimits', () => {
+  const rowsOf = (md: string): string[][] => {
+    const t = parseBlocks(`| a | b |\n|---|---|\n${md}`).find((b) => b.t === 'table');
+    return (t as { rows: string[][] }).rows;
+  };
+
+  it('treats an even backslash run as literal, leaving the pipe a delimiter', () => {
+    // `C:\\` is a literal backslash; the pipe after it still starts a cell.
+    // The lookbehind read "previous char is a backslash" and merged the two.
+    expect(rowsOf('| C:\\\\| next |')[1]).toEqual(['C:\\', 'next']);
+  });
+
+  it('treats an odd backslash run as escaping the pipe', () => {
+    expect(rowsOf('| A \\| B | union |')[1]).toEqual(['A | B', 'union']);
+  });
+
+  it('keeps a backslash that escapes nothing Markdown defines', () => {
+    // A Windows path separator is not an escape sequence — dropping it would
+    // quietly corrupt the cell.
+    expect(rowsOf('| C:\\Users | home |')[1]).toEqual(['C:\\Users', 'home']);
+  });
+
+  it('keeps a genuinely empty middle cell while dropping the closing delimiter', () => {
+    expect(rowsOf('| x |  | y |')[1]).toEqual(['x', '', 'y']);
+  });
+
+  it('still reads a row with no outer pipes at all', () => {
+    const blocks = parseBlocks('Name | Score\n--- | ---\nAda | 99');
+    const t = blocks.find((b) => b.t === 'table') as { rows: string[][] };
+    expect(t.rows).toEqual([['Name', 'Score'], ['Ada', '99']]);
+  });
+});

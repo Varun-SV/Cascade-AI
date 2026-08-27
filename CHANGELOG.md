@@ -74,8 +74,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   needs no blank line before a heading or a list, so `## Notes | caveats`
   written straight after a table is a heading again rather than another row.
   Cells keep their inline markup, so `**Total**` is still bold in a Word table,
-  and a cell ending in an escaped `\|` keeps that pipe when the row omits its
-  closing delimiter. Tilde fences (`~~~`) are fences too, in both parsers and
+  and cell splitting reads backslash parity rather than asking whether the
+  previous character was one, so `C:\\| next` is two cells with a literal
+  backslash and `A \| B` stays one cell with a literal pipe. Tilde fences (`~~~`) are fences too, in both parsers and
   for `chart:` blocks — recognising only backticks left a `~~~` block's markers
   in the body while the table-shaped lines between them were lifted out as a
   real table. One definition of "what opens a fence" now backs both parsers and
