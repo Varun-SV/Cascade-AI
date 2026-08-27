@@ -1,0 +1,24 @@
+{
+  "source": "frontier-2026-08",
+  "label": "August 2026 cross-vendor frontier benchmark capture",
+  "url": "https://openai.com/index/gpt-5-6/",
+  "capturedAt": "2026-08-27",
+  "provenance": "captured",
+  "scale": "index0-100",
+  "calibration": {
+    "code": { "min": 0, "max": 90 },
+    "analysis": { "min": 0, "max": 60 },
+    "data": { "min": 0, "max": 95 }
+  },
+  "notes": "code uses Terminal-Bench 2.1, analysis uses Artificial Analysis Intelligence Index v4.1, and data uses GPQA Diamond. Creative is omitted because this source has no directly comparable writing metric.",
+  "models": {
+    "gpt-5.6-sol": { "code": 88.8, "analysis": 58.9, "data": 94.6 },
+    "gpt-5.6-terra": { "code": 87.4, "analysis": 55.0, "data": 92.9 },
+    "gpt-5.6-luna": { "code": 84.7, "analysis": 51.2, "data": 92.3 },
+    "gpt-5.5": { "code": 85.6, "analysis": 54.8, "data": 93.6 },
+    "claude-fable-5": { "code": 83.1, "analysis": 59.9, "data": 92.6 },
+    "claude-opus": { "code": 78.9, "analysis": 55.7, "data": 92.0 },
+    "gemini-3.1-pro": { "code": 70.7, "analysis": 46.5, "data": 94.3 },
+    "gemini-3.5-flash": { "analysis": 50.2 }
+  }
+}
