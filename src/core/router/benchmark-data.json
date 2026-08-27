@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2026-07-21T08:19:49.216Z",
+  "generatedAt": "2026-08-27T00:00:00.000Z",
   "source": "aggregate",
-  "note": "0-100 quality scores per model family per task type (SWE-bench/HumanEval -> code, MMLU/GPQA -> analysis, writing evals/LMArena -> creative, GSM8K/MATH -> data). Produced by scripts/refresh-benchmarks.mjs: each source in scripts/benchmarks/sources/ (Artificial Analysis, LMArena, suite leaderboards) is normalized onto a common 0-100 quality scale, then the CONSERVATIVE (lowest) value per family/task is taken across covering sources (strict quality-to-cost). Cells no source covers keep the prior baseline. Refreshed weekly via .github/workflows/refresh-benchmarks.yml; fetched live from GitHub raw at runtime, this committed copy is the offline baseline. See docs/benchmark-aggregation.md.",
+  "note": "0-100 quality scores per model family per task type (SWE-bench/HumanEval -> code, MMLU/GPQA -> analysis, writing evals/LMArena -> creative, GSM8K/MATH -> data). Produced by scripts/refresh-benchmarks.mjs: each source in scripts/benchmarks/sources/ is normalized onto a common 0-100 quality scale, then the CONSERVATIVE (lowest) value per family/task is taken across covering sources (strict quality-to-cost). Cells no source covers keep the prior baseline. Refreshed weekly via .github/workflows/refresh-benchmarks.yml; fetched live from GitHub raw at runtime, this committed copy is the offline baseline. See docs/benchmark-aggregation.md.",
   "families": {
     "claude-haiku": { "code": 79, "analysis": 75, "creative": 77, "data": 73 },
     "claude-opus": { "code": 93, "analysis": 92, "creative": 90, "data": 87 },
@@ -25,6 +25,9 @@
     "gpt-5.4": { "code": 93, "analysis": 94, "creative": 92, "data": 92 },
     "gpt-5.4-mini": { "code": 85, "analysis": 85, "creative": 85, "data": 83 },
     "gpt-5.5": { "code": 97, "analysis": 96, "creative": 94, "data": 95 },
+    "gpt-5.6-luna": { "code": 93, "analysis": 85, "creative": 74, "data": 60 },
+    "gpt-5.6-sol": { "code": 100, "analysis": 98, "creative": 88, "data": 88 },
+    "gpt-5.6-terra": { "code": 97, "analysis": 92, "creative": 82, "data": 85 },
     "llama-70b": { "code": 74, "analysis": 72, "creative": 73, "data": 70 },
     "llama-small": { "code": 55, "analysis": 56, "creative": 60, "data": 54 },
     "mistral": { "code": 62, "analysis": 64, "creative": 66, "data": 60 },
