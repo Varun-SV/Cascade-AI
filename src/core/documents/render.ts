@@ -383,9 +383,15 @@ export async function renderPptx(md: string, opts: RenderOptions = {}): Promise<
           // Rows shrink to fit, and past the point where they would stop being
           // legible the table is cut with a count of what was dropped.
           const maxRows = Math.max(2, Math.floor(h / MIN_TABLE_ROW_H));
-          const overflow = Math.max(0, v.rows.length - maxRows);
-          const body = overflow > 0
-            ? [...v.rows.slice(0, maxRows - 1), [`+${overflow} more rows`, ...Array(cols - 1).fill('')]]
+          // The marker row occupies one of the slots, so a cut table keeps only
+          // maxRows - 1 SOURCE rows. Counting the drop against maxRows reported
+          // one row fewer than was actually dropped: a 60-row table cut to 12
+          // kept 11 and claimed "+48 more rows" when 49 were missing. Measure
+          // against what is retained, which is true whichever branch runs.
+          const kept = v.rows.length > maxRows ? maxRows - 1 : v.rows.length;
+          const dropped = v.rows.length - kept;
+          const body = dropped > 0
+            ? [...v.rows.slice(0, kept), [`+${dropped} more rows`, ...Array(cols - 1).fill('')]]
             : v.rows;
           const rowH = Math.max(MIN_TABLE_ROW_H, Math.min(NATURAL_TABLE_ROW_H, h / body.length));
           slide.addTable(

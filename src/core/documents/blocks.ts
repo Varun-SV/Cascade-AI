@@ -190,9 +190,37 @@ export function chartToTableRows(spec: ChartSpec): string[][] {
 // ── Block model ──────────────────────────────────────────────────
 // A tiny subset of Markdown, parsed once into blocks that each renderer
 // (PDF, Word, Excel) lays out in its own way.
+/**
+ * True for a line that opens a block of its own, and so ENDS a table already
+ * in progress.
+ *
+ * Markdown does not require a blank line before a heading or a list, so a
+ * table followed straight away by `## Notes | caveats` or `- Choose A | B`
+ * used to swallow it as a row — every line with a pipe continued the table.
+ *
+ * Anchored patterns with bounded quantifiers only, and no two adjacent
+ * quantifiers that can match the same character, so none of these can
+ * backtrack on the long model-authored lines this file has to survive.
+ */
+function startsAnotherBlock(trimmed: string): boolean {
+  return /^#{1,6}\s/.test(trimmed)        // ATX heading
+    || /^>/.test(trimmed)                  // block quote
+    || /^(?:```|~~~)/.test(trimmed)        // code fence
+    || /^[-*+]\s/.test(trimmed)            // bullet
+    || /^\d{1,9}[.)]\s/.test(trimmed);     // ordered list item
+}
+
 /** True for a line that could be a row of a table already in progress. */
 export function isTableRow(line: string): boolean {
-  return line.includes('|');
+  const trimmed = line.trim();
+  if (!trimmed.includes('|')) return false;
+  // A leading pipe is unambiguous: `| - not a bullet | x |` is a row, and
+  // every fully-delimited table is written this way.
+  if (trimmed.startsWith('|')) return true;
+  // The pipe-less alignment rule can itself look like a bullet (`- | -`), so
+  // it is settled before the block-start check rather than after it.
+  if (isAlignmentRule(trimmed)) return true;
+  return !startsAnotherBlock(trimmed);
 }
 
 /**

@@ -285,3 +285,42 @@ describe('documents — embedded images', () => {
     expect(Object.keys(zip.files).some((n) => n.startsWith('word/media/'))).toBe(false);
   }, 30_000);
 });
+
+describe('a table ends where the next block begins', () => {
+  // scanTable continued while any line contained a pipe, so a block that
+  // followed a table without a blank line between them — which Markdown does
+  // not require — was eaten as table rows.
+  const table = '| a | b |\n|---|---|\n| 1 | 2 |\n';
+
+  it('does not swallow a heading', () => {
+    const blocks = parseBlocks(`${table}## Notes | caveats`);
+    expect(blocks.find((b) => b.t === 'table')).toEqual({ t: 'table', rows: [['a', 'b'], ['1', '2']] });
+    expect(blocks.find((b) => b.t === 'heading')).toEqual({ t: 'heading', level: 2, text: 'Notes | caveats' });
+  });
+
+  it('does not swallow a list item', () => {
+    const blocks = parseBlocks(`${table}- Choose A | B`);
+    expect(blocks.find((b) => b.t === 'table')).toEqual({ t: 'table', rows: [['a', 'b'], ['1', '2']] });
+    expect(blocks.find((b) => b.t === 'bullet')).toMatchObject({ t: 'bullet', text: 'Choose A | B' });
+  });
+
+  it('does not swallow a quote or a fence', () => {
+    expect(parseBlocks(`${table}> quoted | aside`).find((b) => b.t === 'quote'))
+      .toEqual({ t: 'quote', text: 'quoted | aside' });
+    expect(parseBlocks(`${table}\`\`\`\na | b\n\`\`\``).find((b) => b.t === 'code'))
+      .toEqual({ t: 'code', lines: ['a | b'] });
+  });
+
+  it('still reads a row whose first cell would otherwise look like a bullet', () => {
+    // A leading pipe settles it: this is a row, not a list item.
+    const blocks = parseBlocks('| a | b |\n|---|---|\n| - dash | 1 |');
+    expect(blocks.find((b) => b.t === 'table')).toEqual({ t: 'table', rows: [['a', 'b'], ['- dash', '1']] });
+  });
+
+  it('still accepts the pipe-less alignment rule that looks like a bullet', () => {
+    // `- | -` is a valid single-dash rule AND matches the bullet pattern, so
+    // the rule has to be settled before the block-start check.
+    const blocks = parseBlocks('A | B\n- | -\n1 | 2');
+    expect(blocks.find((b) => b.t === 'table')).toEqual({ t: 'table', rows: [['A', 'B'], ['1', '2']] });
+  });
+});

@@ -43,7 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gaps as data, each naming the sections it applies to. The web chat shows them
   as a card; the correction pass still receives the full detail. A reviewer that
   ignores the format and answers in prose degrades to a first-sentence summary
-  plus one gap, rather than back to a paragraph on the status line.
+  plus one gap, rather than back to a paragraph on the status line. The summary
+  leads that status line on every surface, so the CLI, the local dashboard and
+  the desktop run drawer — none of which render the card — still say what was
+  wrong and not merely that something was. Section attribution keeps titles
+  intact: one called "Research and Development" is no longer reported as two
+  sections, and one called "All Hands Migration" is no longer read as the
+  "all" wildcard and stripped of its attribution.
 
 - **A table in a slide came out as literal `|---|---|` text.** `parseSlide` had
   branches for headings, images, list items, quotes and chart fences, and none
@@ -54,8 +60,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drift apart again. Tables written without outer pipes (`Name | Score` over
   `--- | ---`) are recognised too, and a table too long for its slide is cut to
   fit with a count of the rows that did not make it, rather than running off
-  the bottom edge where nothing showed they were missing. Cells keep their
-  inline markup, so `**Total**` is still bold in a Word table.
+  the bottom edge where nothing showed they were missing — a count measured
+  against the rows actually kept, since the "+N more rows" marker occupies one
+  of the slots itself. A table also ends where the next block begins: Markdown
+  needs no blank line before a heading or a list, so `## Notes | caveats`
+  written straight after a table is a heading again rather than another row.
+  Cells keep their inline markup, so `**Total**` is still bold in a Word table.
 
 - **An exhausted provider quota was retried for the rest of the run.** A spent
   billing quota and a 429 arrive as the same status, and the router's failover

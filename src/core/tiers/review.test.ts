@@ -34,6 +34,25 @@ describe('a verdict is data, not a paragraph', () => {
     expect(parseReviewResponse(structured).gaps[3]!.detail).toBeUndefined();
   });
 
+  it('keeps a section title that contains "and" whole', () => {
+    // Splitting on " and " invented two sections, neither of them in the plan.
+    const v = parseReviewResponse('REJECTED\nSummary: s\n- gap || Research and Development ||');
+    expect(v.gaps[0]!.sections).toEqual(['Research and Development']);
+  });
+
+  it('keeps a section title that merely starts with "All"', () => {
+    // `/^all\b/` read this as the wildcard and dropped the attribution.
+    const v = parseReviewResponse('REJECTED\nSummary: s\n- gap || All Hands Migration ||');
+    expect(v.gaps[0]!.sections).toEqual(['All Hands Migration']);
+  });
+
+  it('still reads the bare wildcard as every section', () => {
+    for (const raw of ['all', 'All', 'all sections', '-']) {
+      const v = parseReviewResponse(`REJECTED\nSummary: s\n- gap || ${raw} ||`);
+      expect(v.gaps[0]!.sections, raw).toBeUndefined();
+    }
+  });
+
   it('keeps a summary short enough for a status line', () => {
     // The whole point. This string is rendered unclamped by the web chat's
     // status button, so anything long here is a wall of text on screen.
@@ -100,8 +119,9 @@ describe('a rejection with nothing in it', () => {
   });
 
   it('never reports a count it does not have', () => {
-    expect(reviewStatusLine(parseReviewResponse('REJECTED'), 1, 2))
-      .toBe('Review found 1 gap — replanning, pass 1 of 2');
+    const line = reviewStatusLine(parseReviewResponse('REJECTED'), 1, 2);
+    expect(line).toContain('1 gap,');
+    expect(line).not.toContain('0 gap');
   });
 });
 
@@ -112,13 +132,37 @@ describe('the status line', () => {
     // fit the 80-character status bar whole.
     const v = parseReviewResponse(structured);
     const line = reviewStatusLine(v, 1, 2);
-    expect(line).toBe('Review found 4 gaps — replanning, pass 1 of 2');
+    expect(line).toBe('The output partly answers the request; four things are… — 4 gaps, pass 1 of 2');
     expect(line.length).toBeLessThanOrEqual(80);
-    expect(line.slice(0, 38)).toContain('4 gaps');
+    // The summary leads, so the 38-character cut still says what is wrong.
+    expect(line.slice(0, 38)).toContain('partly answers');
+  });
+
+  it('carries the summary, which is all three non-cloud surfaces get', () => {
+    // Only cloud/web renders the structured verdict as a card. The CLI, the
+    // local dashboard and the desktop drawer show currentAction alone, so a
+    // line without the summary tells them the run is repeating but not why.
+    const v = parseReviewResponse(structured);
+    expect(reviewStatusLine(v, 1, 2)).toContain('partly answers the request');
+  });
+
+  it('still fits 80 characters at the widest counter', () => {
+    const gaps = Array.from({ length: 12 }, (_, i) => `- gap ${i} || all ||`).join('\n');
+    const v = parseReviewResponse(
+      `REJECTED\nSummary: ${'x'.repeat(300)}\n${gaps}`,
+    );
+    const line = reviewStatusLine(v, 9, 9);
+    expect(line).toContain('12 gaps, pass 9 of 9');
+    expect(line.length).toBeLessThanOrEqual(80);
   });
 
   it('does not say "1 gaps"', () => {
     const v = parseReviewResponse('REJECTED\nSummary: one thing\n- a single gap || all ||');
-    expect(reviewStatusLine(v, 2, 2)).toBe('Review found 1 gap — replanning, pass 2 of 2');
+    expect(reviewStatusLine(v, 2, 2)).toBe('one thing — 1 gap, pass 2 of 2');
+  });
+
+  it('falls back to the count when there is no summary to lead with', () => {
+    expect(reviewStatusLine({ approved: false, gaps: [{ title: 'x' }, { title: 'y' }] }, 1, 3))
+      .toBe('Review found 2 gaps — replanning, pass 1 of 3');
   });
 });

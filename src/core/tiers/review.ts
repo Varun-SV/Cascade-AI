@@ -42,6 +42,14 @@ export interface ReviewVerdict {
 const SUMMARY_MAX = 120;
 
 /**
+ * Tighter cap for the summary WHEN it shares the status line with the gap
+ * count and pass counter. Chosen so the assembled line still fits the
+ * 80-character status bar: the longest tail (` — 12 gaps, pass 9 of 9`) is 23
+ * characters, and 56 + 23 leaves a character in hand.
+ */
+const STATUS_SUMMARY_MAX = 56;
+
+/**
  * The reviewer's requested answer format.
  *
  * Asking for a shape rather than a paragraph is the whole fix; the parser
@@ -53,7 +61,7 @@ If they do not, reply in exactly this shape and nothing else:
 
 REJECTED
 Summary: <one sentence, at most 15 words, saying what is wrong overall>
-- <a single sentence naming one missing thing> || <which section titles it applies to, or "all"> || <one sentence of detail>
+- <a single sentence naming one missing thing> || <comma-separated section titles it applies to, or "all"> || <one sentence of detail>
 - <the next one, same shape>
 
 List at most 6 gaps, most important first. Keep every line on one line.`;
@@ -67,11 +75,26 @@ function tidy(text: string, max = 0): string {
   return `${(lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut).replace(/[.,;:]$/, '')}…`;
 }
 
-/** Split a `a, b and c` / `a; b` section list into titles. Empty for "all". */
+/**
+ * Split a `a, b` / `a; b` section list into titles. Empty for "all".
+ *
+ * Both rules here exist because a section title is ordinary English and the
+ * old ones read it as syntax:
+ *
+ * - Splitting on ` and ` invented two sections out of one real title —
+ *   "Research and Development" became "Research" and "Development", neither of
+ *   which is in the plan. A conjunction is far more often part of a title than
+ *   between two of them, so punctuation is now the only separator. The cost is
+ *   that a reviewer writing "Alpha and Beta" for two sections gets one label
+ *   instead of two; a slightly odd label beats a pair of invented ones.
+ * - `/^all\b/` discarded the attribution of any title merely STARTING with
+ *   "All", such as "All Hands Migration", reporting a gap against every
+ *   section instead of the one it was found in. Only the bare wildcard counts.
+ */
 function parseSections(raw: string): string[] | undefined {
   const flat = tidy(raw);
-  if (!flat || /^all\b/i.test(flat) || flat === '-') return undefined;
-  const parts = flat.split(/[;,]| and /).map((s) => tidy(s)).filter(Boolean);
+  if (!flat || /^all(\s+sections)?$/i.test(flat) || flat === '-') return undefined;
+  const parts = flat.split(/[;,]/).map((s) => tidy(s)).filter(Boolean);
   return parts.length ? parts : undefined;
 }
 
@@ -159,6 +182,19 @@ function verdictToProse(summary: string, gaps: ReviewGap[]): string {
  */
 export function reviewStatusLine(verdict: ReviewVerdict, pass: number, maxPasses: number): string {
   const n = verdict.gaps.length;
-  const what = n === 1 ? 'Review found 1 gap' : `Review found ${n} gaps`;
-  return `${what} — replanning, pass ${pass} of ${maxPasses}`;
+  const what = n === 1 ? '1 gap' : `${n} gaps`;
+  // The summary LEADS, and that ordering is the point of including it.
+  //
+  // Only the web chat renders the structured verdict as a card; the CLI, the
+  // local dashboard and the desktop run drawer show `currentAction` and
+  // nothing else. Reporting a count and a pass number told those three that
+  // the run was repeating but not why — strictly less than the paragraph this
+  // replaced, which at least named the problem before it was cut off. The
+  // summary is already bounded (SUMMARY_MAX) and is re-bounded tighter here so
+  // the whole line still fits the 80-character status bar; the CLI's agent
+  // tree cuts at 38, so whatever goes first is the part most people read.
+  const summary = verdict.summary ? tidy(verdict.summary, STATUS_SUMMARY_MAX) : '';
+  return summary
+    ? `${summary} — ${what}, pass ${pass} of ${maxPasses}`
+    : `Review found ${what} — replanning, pass ${pass} of ${maxPasses}`;
 }

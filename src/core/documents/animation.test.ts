@@ -151,6 +151,21 @@ describe('a long table stays on the slide', () => {
     expect(xml).not.toContain('row 59');
   });
 
+  it('counts the dropped rows against what it actually kept', async () => {
+    // The marker row takes one of the slots, so the cut keeps maxRows - 1
+    // source rows while the count was computed against maxRows — the deck
+    // reported one fewer dropped row than it had dropped. Asserted against the
+    // rows really present rather than against a fixed number, so this does not
+    // encode whatever row height the layout happens to use.
+    const rows = Array.from({ length: 60 }, (_, i) => `| row ${i} | ${i} |`).join('\n');
+    const zip = await JSZip.loadAsync(await renderPptx(`# Big\n\n| a | b |\n|---|---|\n${rows}`));
+    const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
+    const shown = (xml.match(/row \d+/g) ?? []).length;
+    const claimed = Number(/\+(\d+) more rows/.exec(xml)![1]);
+    expect(shown).toBeGreaterThan(0);
+    expect(claimed).toBe(60 - shown);
+  });
+
   it('leaves a table that fits alone', async () => {
     const zip = await JSZip.loadAsync(await renderPptx('# Small\n\n| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |'));
     const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
