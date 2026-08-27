@@ -383,3 +383,21 @@ describe('transitionXml', () => {
     expect(transitionXml({ ...DEFAULT_ANIMATION, transition: 'wipe' })).toContain('<p:wipe');
   });
 });
+
+describe('the entrance filter has to match the effect it advertises', () => {
+  it('renders fly as a slide, not a wipe', async () => {
+    // The presetId only labels the effect in PowerPoint's UI; the filter is
+    // what renders. `wipe(up)` reveals the shape in place from the bottom edge
+    // — a Wipe wearing the Fly In name.
+    const zip = await JSZip.loadAsync(await renderPptx('animation: entrance=fly\n\n# A\n\nbody text'));
+    const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
+    expect(xml).toContain('slide(fromBottom)');
+    expect(xml).not.toContain('wipe(up)');
+  });
+
+  it('still renders fade as a fade', async () => {
+    const zip = await JSZip.loadAsync(await renderPptx('animation: entrance=fade\n\n# A\n\nbody text'));
+    const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
+    expect(xml).toContain('filter="fade"');
+  });
+});

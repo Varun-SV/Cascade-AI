@@ -191,6 +191,21 @@ export function chartToTableRows(spec: ChartSpec): string[][] {
 // A tiny subset of Markdown, parsed once into blocks that each renderer
 // (PDF, Word, Excel) lays out in its own way.
 /**
+ * The pattern that closes a fence opened by `opener`.
+ *
+ * CommonMark: a fence closes on a run of its OWN character, at least as long as
+ * the run that opened it — so `~~~` does not close a backtick block and vice
+ * versa. Built per fence rather than kept as a constant because both the
+ * character and the length come from the opener.
+ *
+ * `\s*`, then a run of a non-whitespace character, then `\s*$`: no two adjacent
+ * quantifiers here can match the same input, so it cannot backtrack.
+ */
+function fenceCloser(opener: string): RegExp {
+  return new RegExp(`^\\s*\\${opener[0]!}{${opener.length},}\\s*$`);
+}
+
+/**
  * True for a line that opens a block of its own, and so ENDS a table already
  * in progress.
  *
@@ -292,7 +307,12 @@ function isAlignmentRule(row: string): boolean {
 function splitCells(row: string): string[] {
   return row
     .replace(/^\|/, '')
-    .replace(/\|\s*$/, '')
+    // Only an UNESCAPED trailing pipe is the row's closing delimiter. A table
+    // written without one whose last cell ends in a literal `\|` had that pipe
+    // eaten here, before the split ever saw it, leaving a bare backslash as the
+    // cell's last character. Same guard as the split below, for the same
+    // reason — the leading pipe needs none, since nothing can precede it.
+    .replace(/(?<!\\)\|\s*$/, '')
     .split(/(?<!\\)\|/)
     .map((c) => c.trim().replace(/\\\|/g, '|'));
 }
@@ -334,12 +354,17 @@ export function parseBlocks(md: string): Block[] {
   while (i < lines.length) {
     const line = lines[i] ?? '';
 
-    const fence = line.match(/^```+\s*(.*)$/);
+    // Tildes fence too, and close on their own character — same rule as the
+    // slide parser. Fixing only that one would put the two parsers back in
+    // disagreement about what a code block is, which is the drift this shared
+    // scanner exists to prevent.
+    const fence = line.match(/^(`{3,}|~{3,})\s*(.*)$/);
     if (fence) { // code fence — or a `chart:` block wearing one
-      const info = (fence[1] ?? '').trim();
+      const closer = fenceCloser(fence[1]!);
+      const info = (fence[2] ?? '').trim();
       i++;
       const code: string[] = [];
-      while (i < lines.length && !/^```/.test(lines[i] ?? '')) { code.push(lines[i] ?? ''); i++; }
+      while (i < lines.length && !closer.test(lines[i] ?? '')) { code.push(lines[i] ?? ''); i++; }
       i++; // closing fence
       const chartInfo = info.match(/^chart\s*:\s*(.+)$/i);
       const kind = chartInfo ? chartKind(chartInfo[1]!) : null;
@@ -601,12 +626,13 @@ export function parseSlide(chunk: string): Slide {
     // A `chart:` fence is a real chart object, not bullet text. Pulled out here
     // (and its body skipped) so the numbers reach addChart() instead of being
     // flattened into a list of CSV rows.
-    const fence = raw.match(/^[ \t]*```+[ \t]*chart[ \t]*:(.*)/i);
+    const fence = raw.match(/^[ \t]*(`{3,}|~{3,})[ \t]*chart[ \t]*:(.*)/i);
     if (fence) {
-      const kind = chartKind(fence[1]!);
+      const chartCloser = fenceCloser(fence[1]!);
+      const kind = chartKind(fence[2]!);
       const bodyLines: string[] = [];
       i++;
-      while (i < lines.length && !/^\s*```/.test(lines[i] ?? '')) { bodyLines.push(lines[i] ?? ''); i++; }
+      while (i < lines.length && !chartCloser.test(lines[i] ?? '')) { bodyLines.push(lines[i] ?? ''); i++; }
       const spec = kind ? parseChartSpec(kind, bodyLines.join('\n')) : null;
       if (spec) charts.push(spec);
       else for (const bl of bodyLines) if (bl.trim()) body.push(stripInline(bl.trim()));
@@ -618,9 +644,16 @@ export function parseSlide(chunk: string): Slide {
     // everything else fell through — and a code sample containing `| in | out |`
     // had that line lifted out as a real table while its backticks stayed
     // behind in the body.
-    if (/^```/.test(line)) {
+    // Tildes fence too. Recognising only backticks left a `~~~` block's marker
+    // lines sitting in the body while the table-shaped lines between them were
+    // lifted out as a real table — the same corruption the backtick branch was
+    // added to stop, in the other half of CommonMark's fence syntax. A fence
+    // closes on its OWN character, so the two cannot cross-close.
+    const codeFence = /^(`{3,}|~{3,})/.exec(line);
+    if (codeFence) {
+      const closer = fenceCloser(codeFence[1]!);
       i++;
-      while (i < lines.length && !/^\s*```/.test(lines[i] ?? '')) {
+      while (i < lines.length && !closer.test(lines[i] ?? '')) {
         const inner = (lines[i] ?? '').trim();
         if (inner) body.push(inner);
         i++;

@@ -324,3 +324,52 @@ describe('a table ends where the next block begins', () => {
     expect(blocks.find((b) => b.t === 'table')).toEqual({ t: 'table', rows: [['A', 'B'], ['1', '2']] });
   });
 });
+
+describe('tilde fences are fences too', () => {
+  // The backtick branch was added because a code sample containing `| in | out |`
+  // had that line lifted out as a real table while its markers stayed in the
+  // body. `~~~` is the other half of CommonMark's fence syntax and had the
+  // identical bug.
+  const sample = '~~~\n| in | out |\n|----|-----|\n~~~';
+
+  it('keeps a tilde-fenced table-shaped block as code in parseBlocks', () => {
+    const blocks = parseBlocks(`# T\n\n${sample}`);
+    expect(blocks.find((b) => b.t === 'code')).toEqual({ t: 'code', lines: ['| in | out |', '|----|-----|'] });
+    expect(blocks.find((b) => b.t === 'table')).toBeUndefined();
+  });
+
+  it('keeps a tilde-fenced table-shaped block out of a slide table', () => {
+    const [slide] = splitSlides(`# T\n\n${sample}`);
+    expect(slide!.tables).toHaveLength(0);
+    expect(slide!.body.join('\n')).not.toContain('~~~');
+  });
+
+  it('does not let one fence character close the other', () => {
+    // A ``` line inside a ~~~ block is content, not the closing fence.
+    const blocks = parseBlocks('~~~\n```\n| a | b |\n~~~');
+    expect(blocks.find((b) => b.t === 'code')).toEqual({ t: 'code', lines: ['```', '| a | b |'] });
+    expect(blocks.find((b) => b.t === 'table')).toBeUndefined();
+  });
+
+  it('still parses a chart fence written with tildes', () => {
+    const blocks = parseBlocks('~~~chart: bar\nQuarter,Revenue\nQ1,120\n~~~');
+    expect(blocks.find((b) => b.t === 'chart')).toBeDefined();
+  });
+});
+
+describe('an escaped pipe survives at the end of the last cell', () => {
+  it('does not eat a trailing escaped pipe as the closing delimiter', () => {
+    // No closing delimiter, and the final cell ends in a literal pipe. The
+    // unconditional trailing-pipe strip removed it before the split ever saw
+    // it, leaving a bare backslash behind.
+    const blocks = parseBlocks('| a | b |\n|---|---|\n| x | ends with \\|');
+    const table = blocks.find((b) => b.t === 'table') as { rows: string[][] };
+    expect(table.rows[1]).toEqual(['x', 'ends with |']);
+  });
+
+  it('still strips a real unescaped closing delimiter', () => {
+    const blocks = parseBlocks('| a | b |\n|---|---|\n| x | y |');
+    const table = blocks.find((b) => b.t === 'table') as { rows: string[][] };
+    expect(table.rows[1]).toEqual(['x', 'y']);
+  });
+});

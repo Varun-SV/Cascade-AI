@@ -325,6 +325,12 @@ export class T1Administrator extends BaseTier {
     let pass = 1;
     const maxReplanPasses = this.config.maxReplanPasses ?? 2;
     const okCount = (rs: T2Result[]) => rs.filter(producedOutput).length;
+    // Did the loop end with a verdict the client has already been told about?
+    // Only the approval path sends one. The other two exits — the no-progress
+    // break and the pass limit running out — leave the last REJECTION standing,
+    // and the client carries the last review forward across updates that omit
+    // the field. See the clear below.
+    let reviewSettled = false;
     while (pass <= maxReplanPasses) {
       const reviewResult = await this.reviewT2Outputs(enrichedPrompt, plan, allT2Results);
       if (reviewResult.approved) {
@@ -340,6 +346,7 @@ export class T1Administrator extends BaseTier {
           status: 'IN_PROGRESS',
           review: reviewResult,
         });
+        reviewSettled = true;
         break;
       }
 
@@ -386,6 +393,18 @@ Create a CORRECTION PLAN that contains only the new sections needed to fix the i
       progressPct: 95,
       currentAction: 'Compiling final output',
       status: 'IN_PROGRESS',
+      // Clear a rejection the loop stopped on rather than resolved.
+      //
+      // Approval sends its own verdict and needs nothing here. The other two
+      // exits do: the corrective pass that made no net progress, and the pass
+      // limit running out. Both leave the last rejection as the newest review
+      // the client saw, so its card kept saying "replanning, pass N of M"
+      // while the run compiled — describing a loop that had already stopped.
+      //
+      // `null`, not an approval: those gaps were never addressed and saying
+      // they were would be a lie the final output has to carry. Null says only
+      // that no review is in flight, which is the true statement.
+      ...(reviewSettled ? {} : { review: null }),
     });
 
     // Step 5: Compile final output

@@ -206,7 +206,12 @@ export abstract class BaseTier extends EventEmitter {
       output: update.output,
       // Only present on a review update. Explicit rather than spread because
       // this emit names every field it forwards.
-      ...(update.review ? { review: update.review } : {}),
+      //
+      // Tested against `undefined`, NOT for truthiness: `null` is the explicit
+      // CLEAR, and a truthiness test drops it — which is indistinguishable on
+      // the client from an update that simply carries no review, so the stale
+      // rejection card it is meant to clear would stay on screen.
+      ...(update.review !== undefined ? { review: update.review } : {}),
       model: this.servingModel,
       ...this.graphFields(),
     });

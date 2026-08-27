@@ -30,7 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `animation: transition=push entrance=fly advance=auto duration=300`, tunes or
   disables it. Unknown values and malformed durations are ignored rather than
   written into the XML, because PowerPoint treats a bad timing tree as a
-  corrupt file rather than a bad animation.
+  corrupt file rather than a bad animation. `entrance=fly` renders as a fly:
+  the preset id only labels an effect in PowerPoint's UI while the filter is
+  what draws it, and this asked for a wipe under the Fly In name, so the shape
+  was revealed in place instead of moving onto the slide.
 
 
 ### Fixed
@@ -48,8 +51,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plus one gap, rather than back to a paragraph on the status line. The summary
   leads that status line on every surface, so the CLI, the local dashboard and
   the desktop run drawer — none of which render the card — still say what was
-  wrong and not merely that something was. Section attribution keeps titles
-  intact: one called "Research and Development" is no longer reported as two
+  wrong and not merely that something was. A rejection is also cleared when the
+  correction loop stops without resolving it — the pass limit running out, or a
+  corrective pass that made no progress — so the card no longer says
+  “replanning” over a run that has moved on to compiling. Section attribution
+  keeps titles intact: one called "Research and Development" is no longer reported as two
   sections, and one called "All Hands Migration" is no longer read as the
   "all" wildcard and stripped of its attribution.
 
@@ -67,7 +73,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the slots itself. A table also ends where the next block begins: Markdown
   needs no blank line before a heading or a list, so `## Notes | caveats`
   written straight after a table is a heading again rather than another row.
-  Cells keep their inline markup, so `**Total**` is still bold in a Word table.
+  Cells keep their inline markup, so `**Total**` is still bold in a Word table,
+  and a cell ending in an escaped `\|` keeps that pipe when the row omits its
+  closing delimiter. Tilde fences (`~~~`) are fences too, in both parsers and
+  for `chart:` blocks — recognising only backticks left a `~~~` block's markers
+  in the body while the table-shaped lines between them were lifted out as a
+  real table.
 
 - **An exhausted provider quota was retried for the rest of the run.** A spent
   billing quota and a 429 arrive as the same status, and the router's failover

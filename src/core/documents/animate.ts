@@ -59,7 +59,12 @@ const TRANSITION_TAG: Record<Exclude<AnimationScheme['transition'], 'none'>, str
 const ENTRANCE: Record<Exclude<AnimationScheme['entrance'], 'none'>, { presetId: number; filter: string }> = {
   fade: { presetId: 10, filter: 'fade' },
   appear: { presetId: 1, filter: 'appear' },
-  fly: { presetId: 2, filter: 'wipe(up)' },
+  // `slide`, not `wipe`. The presetId only labels the effect in PowerPoint's
+  // UI; the filter is what renders it. `wipe(up)` reveals the shape in place
+  // from the bottom edge, which is a Wipe — so a deck asking for Fly In got a
+  // wipe wearing the Fly In name. `slide(fromBottom)` moves the shape onto the
+  // slide, which is what Fly In means and what PowerPoint's own preset emits.
+  fly: { presetId: 2, filter: 'slide(fromBottom)' },
 };
 
 /**

@@ -435,7 +435,7 @@ export interface StatusUpdate {
    * folded into `currentAction`, which is a one-line field every surface
    * truncates — see core/tiers/review.ts.
    */
-  review?: import('./core/tiers/review.js').ReviewVerdict;
+  review?: import('./core/tiers/review.js').ReviewVerdict | null;
 }
 
 export interface T2Result {
