@@ -446,3 +446,35 @@ describe('backslash parity decides whether a pipe delimits', () => {
     expect(t.rows).toEqual([['Name', 'Score'], ['Ada', '99']]);
   });
 });
+
+describe('fence detection stays linear', () => {
+  it('does not backtrack on a long run of tabs before a bare carriage return', () => {
+    // CodeQL, high severity, on a line this PR introduced: the first fenceOpen
+    // was `^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$`, where `[ \t]*` and `(.*)` can both
+    // match a tab.
+    //
+    // The BARE `\r` is what makes this reachable, and the first version of this
+    // test omitted it and passed against the bug. `.` cannot match a line
+    // terminator, so with one present the tail fails and the engine retries
+    // every split of the two quantifiers; without one, `(.*)$` succeeds on the
+    // first attempt and nothing backtracks. parseBlocks normalises `\r\n` but
+    // leaves a lone `\r` alone, so this input reaches the matcher intact.
+    // Measured on the old pattern: 2k tabs 3ms, 4k 11ms, 8k 45ms, 16k 186ms —
+    // doubling the input quadruples the time.
+    const line = '```' + '\t'.repeat(60_000) + '\r' + 'x';
+    const started = Date.now();
+    parseBlocks(`# T\n\n${line}\n\nAfter.`);
+    expect(Date.now() - started, 'linear scan, not polynomial backtracking').toBeLessThan(1_000);
+  });
+
+  it('still closes a fence whose closing line carries trailing whitespace', () => {
+    const blocks = parseBlocks('```\ncode\n```   \n\nAfter.');
+    expect(blocks.find((b) => b.t === 'code')).toEqual({ t: 'code', lines: ['code'] });
+    expect(blocks.find((b) => b.t === 'para')).toEqual({ t: 'para', text: 'After.' });
+  });
+
+  it('does not close on a longer-marker line that carries other content', () => {
+    const blocks = parseBlocks('```\ncode\n``` not a closer\n```\n\nAfter.');
+    expect(blocks.find((b) => b.t === 'code')).toEqual({ t: 'code', lines: ['code', '``` not a closer'] });
+  });
+});

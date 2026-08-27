@@ -191,18 +191,33 @@ export function chartToTableRows(spec: ChartSpec): string[][] {
 // A tiny subset of Markdown, parsed once into blocks that each renderer
 // (PDF, Word, Excel) lays out in its own way.
 /**
- * The pattern that closes a fence opened by `opener`.
+ * A predicate that recognises the line closing a fence opened by `opener`.
  *
  * CommonMark: a fence closes on a run of its OWN character, at least as long as
  * the run that opened it — so `~~~` does not close a backtick block and vice
- * versa. Built per fence rather than kept as a constant because both the
- * character and the length come from the opener.
+ * versa. Built per fence because both the character and the length come from
+ * the opener.
  *
- * `\s*`, then a run of a non-whitespace character, then `\s*$`: no two adjacent
- * quantifiers here can match the same input, so it cannot backtrack.
+ * A scan rather than a built RegExp. The first version was
+ * `^\s*<char>{n,}\s*$`, which puts two whitespace-matching quantifiers on
+ * either side of a run — the same shape that made isAlignmentRule quadratic,
+ * and CodeQL flagged the sibling opener pattern for exactly it. Every step
+ * here is a single character test with no quantifier, so the check is linear
+ * in the line's length and there is nothing to backtrack.
  */
-function fenceCloser(opener: string): RegExp {
-  return new RegExp(`^\\s*\\${opener[0]!}{${opener.length},}\\s*$`);
+function fenceCloser(opener: string): (line: string) => boolean {
+  const ch = opener[0]!;
+  const min = opener.length;
+  return (line: string): boolean => {
+    let i = 0;
+    while (i < line.length && (line[i] === ' ' || line[i] === '\t')) i++;
+    let n = 0;
+    while (line[i + n] === ch) n++;
+    if (n < min) return false;
+    i += n;
+    while (i < line.length && (line[i] === ' ' || line[i] === '\t')) i++;
+    return i === line.length;
+  };
 }
 
 /**
@@ -218,10 +233,23 @@ function fenceCloser(opener: string): RegExp {
  *
  * One definition, used by both parsers AND by both `chart:` fence sites, so
  * there is a single answer to "what opens a fence" rather than four.
+ *
+ * Scanned, not matched, and that part is a correction: the first version was
+ * `^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$`, where `[ \t]*` and `(.*)` can both match
+ * a tab. CodeQL called it a polynomial regex on uncontrolled data — a HIGH, on
+ * a line this PR added — and document text is model-authored and arbitrarily
+ * long, which is the input class where that stops being theoretical.
  */
 function fenceOpen(line: string): { marker: string; info: string } | null {
-  const m = /^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$/.exec(line);
-  return m ? { marker: m[1]!, info: (m[2] ?? '').trim() } : null;
+  let i = 0;
+  // Up to three leading spaces; a fourth makes the line indented code.
+  while (i < 3 && line[i] === ' ') i++;
+  const ch = line[i];
+  if (ch !== '`' && ch !== '~') return null;
+  let n = 0;
+  while (line[i + n] === ch) n++;
+  if (n < 3) return null;
+  return { marker: ch.repeat(n), info: line.slice(i + n).trim() };
 }
 
 /** The chart kind a fence's info string names, or null when it names none. */
@@ -409,7 +437,7 @@ export function parseBlocks(md: string): Block[] {
       const info = fence.info;
       i++;
       const code: string[] = [];
-      while (i < lines.length && !closer.test(lines[i] ?? '')) { code.push(lines[i] ?? ''); i++; }
+      while (i < lines.length && !closer(lines[i] ?? '')) { code.push(lines[i] ?? ''); i++; }
       i++; // closing fence
       const chartInfo = info.match(/^chart\s*:\s*(.+)$/i);
       const kind = chartInfo ? chartKind(chartInfo[1]!) : null;
@@ -678,7 +706,7 @@ export function parseSlide(chunk: string): Slide {
       const kind = chartFenceKind(chartFence.info);
       const bodyLines: string[] = [];
       i++;
-      while (i < lines.length && !chartCloser.test(lines[i] ?? '')) { bodyLines.push(lines[i] ?? ''); i++; }
+      while (i < lines.length && !chartCloser(lines[i] ?? '')) { bodyLines.push(lines[i] ?? ''); i++; }
       const spec = kind ? parseChartSpec(kind, bodyLines.join('\n')) : null;
       if (spec) charts.push(spec);
       else for (const bl of bodyLines) if (bl.trim()) body.push(stripInline(bl.trim()));
@@ -699,7 +727,7 @@ export function parseSlide(chunk: string): Slide {
     if (codeFence) {
       const closer = fenceCloser(codeFence.marker);
       i++;
-      while (i < lines.length && !closer.test(lines[i] ?? '')) {
+      while (i < lines.length && !closer(lines[i] ?? '')) {
         const inner = (lines[i] ?? '').trim();
         if (inner) body.push(inner);
         i++;
@@ -758,7 +786,7 @@ export function extractCharts(source: string): { charts: ChartSpec[]; rest: stri
     const closer = fenceCloser(fence.marker);
     const body: string[] = [];
     i++;
-    while (i < lines.length && !closer.test(lines[i] ?? '')) { body.push(lines[i] ?? ''); i++; }
+    while (i < lines.length && !closer(lines[i] ?? '')) { body.push(lines[i] ?? ''); i++; }
     const spec = kind ? parseChartSpec(kind, body.join('\n')) : null;
     if (spec) charts.push(spec);
     else rest.push(...body); // unparseable → leave the rows in the sheet
