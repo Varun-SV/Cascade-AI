@@ -87,9 +87,10 @@ const FAMILY_BENCHMARKS: Record<string, BenchmarkProfile> = {
 
 // Ordered most-specific → least so e.g. "gpt-4.1-mini" doesn't match "gpt-4.1".
 const FAMILY_MATCHERS: Array<[RegExp, string]> = [
+  [/fable/i, 'claude-opus'],
   [/opus/i, 'claude-opus'],
   [/sonnet/i, 'claude-sonnet'],
-  [/haiku|fable/i, 'claude-haiku'],
+  [/haiku/i, 'claude-haiku'],
   // GPT-5 family — ordered most-specific first. GPT-5.6 durable tiers carry
   // their own profiles. 5.4 Nano intentionally maps to the nano class rather
   // than being swallowed by the generic 5.4 rule.
