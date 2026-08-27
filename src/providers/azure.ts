@@ -8,34 +8,99 @@ import type { ModelInfo, ProviderConfig } from '../types.js';
 import { OpenAIProvider, isReasoningModel, isParamShapeError } from './openai.js';
 import { resolvePricing } from '../core/router/pricing.js';
 
-// Default Azure API version. Bumped from 2024-08-01-preview, which predates the
-// gpt-5 / reasoning deployments and made their availability probe (and runs)
-// fail as "deployment not found". Users can still override it per-deployment.
-const DEFAULT_AZURE_API_VERSION = '2024-12-01-preview';
+// GPT-5.6 is documented on Azure Chat Completions with the 2025-04-01-preview
+// data-plane API. Users can still pin a different version per deployment.
+const DEFAULT_AZURE_API_VERSION = '2025-04-01-preview';
 
 /**
- * Best-effort guess of the canonical base model an Azure deployment backs, from
- * its (arbitrary) deployment name. Ordered most-specific → least so "gpt-5-mini"
- * doesn't match the "gpt-5" base. Distinct point releases (gpt-5.5, gpt-5.4,
- * gpt-5.4-mini) resolve to their OWN base so their real economics + benchmark
- * scores apply — only unrecognised gpt-5.x fold into the gpt-5 base.
- * Returns null when the name gives no signal (e.g. "prod-fast") — the caller
- * then keeps neutral defaults, or the user can set an explicit base model.
+ * Current Azure/OpenAI base-model metadata that is newer than Cascade's bundled
+ * fallback catalogue, or whose published limits changed after that catalogue
+ * was written. Keeping this beside the Azure picker means a newly-selected
+ * deployment gets the right context/output/vision shape even before constants.ts
+ * is refreshed. Pricing is still resolved through the authoritative pricing
+ * dataset below; these rates are only the last-resort published list prices.
  */
+const AZURE_CURRENT_BASE_MODELS: Readonly<Record<string, ModelInfo>> = {
+  'gpt-5.6-sol': {
+    id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', provider: 'openai',
+    contextWindow: 1_050_000, isVisionCapable: true,
+    inputCostPer1kTokens: 0.004, outputCostPer1kTokens: 0.02,
+    maxOutputTokens: 128_000, supportsStreaming: true, isLocal: false, supportsToolUse: true,
+  },
+  'gpt-5.6-terra': {
+    id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', provider: 'openai',
+    contextWindow: 1_050_000, isVisionCapable: true,
+    inputCostPer1kTokens: 0.002, outputCostPer1kTokens: 0.012,
+    maxOutputTokens: 128_000, supportsStreaming: true, isLocal: false, supportsToolUse: true,
+  },
+  'gpt-5.6-luna': {
+    id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', provider: 'openai',
+    contextWindow: 1_050_000, isVisionCapable: true,
+    inputCostPer1kTokens: 0.0002, outputCostPer1kTokens: 0.0012,
+    maxOutputTokens: 128_000, supportsStreaming: true, isLocal: false, supportsToolUse: true,
+  },
+  'gpt-5.5': {
+    id: 'gpt-5.5', name: 'GPT-5.5', provider: 'openai',
+    contextWindow: 1_050_000, isVisionCapable: true,
+    inputCostPer1kTokens: 0.005, outputCostPer1kTokens: 0.03,
+    maxOutputTokens: 128_000, supportsStreaming: true, isLocal: false, supportsToolUse: true,
+  },
+  'gpt-5.4': {
+    id: 'gpt-5.4', name: 'GPT-5.4', provider: 'openai',
+    contextWindow: 1_050_000, isVisionCapable: true,
+    inputCostPer1kTokens: 0.0025, outputCostPer1kTokens: 0.015,
+    maxOutputTokens: 128_000, supportsStreaming: true, isLocal: false, supportsToolUse: true,
+  },
+  'gpt-5.4-mini': {
+    id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini', provider: 'openai',
+    contextWindow: 400_000, isVisionCapable: true,
+    inputCostPer1kTokens: 0.00075, outputCostPer1kTokens: 0.0045,
+    maxOutputTokens: 128_000, supportsStreaming: true, isLocal: false, supportsToolUse: true,
+  },
+  'gpt-5.4-nano': {
+    id: 'gpt-5.4-nano', name: 'GPT-5.4 Nano', provider: 'openai',
+    contextWindow: 400_000, isVisionCapable: true,
+    inputCostPer1kTokens: 0.0002, outputCostPer1kTokens: 0.00125,
+    maxOutputTokens: 128_000, supportsStreaming: true, isLocal: false, supportsToolUse: true,
+  },
+  'gpt-5.2': {
+    id: 'gpt-5.2', name: 'GPT-5.2', provider: 'openai',
+    contextWindow: 400_000, isVisionCapable: true,
+    inputCostPer1kTokens: 0.00175, outputCostPer1kTokens: 0.014,
+    maxOutputTokens: 128_000, supportsStreaming: true, isLocal: false, supportsToolUse: true,
+  },
+  'gpt-5.1': {
+    id: 'gpt-5.1', name: 'GPT-5.1', provider: 'openai',
+    contextWindow: 400_000, isVisionCapable: true,
+    inputCostPer1kTokens: 0.00125, outputCostPer1kTokens: 0.01,
+    maxOutputTokens: 128_000, supportsStreaming: true, isLocal: false, supportsToolUse: true,
+  },
+  'o3': {
+    id: 'o3', name: 'o3', provider: 'openai',
+    contextWindow: 200_000, isVisionCapable: true,
+    inputCostPer1kTokens: 0.002, outputCostPer1kTokens: 0.008,
+    maxOutputTokens: 100_000, supportsStreaming: true, isLocal: false, supportsToolUse: true,
+  },
+};
+
 /**
  * Base models an Azure deployment can be mapped onto, most-specific first.
  *
- * Single source for BOTH the inference below and any UI that offers a picker.
- * The cloud web app used to keep its own hand-copied array, which silently went
- * stale the moment a family was added — gpt-5.4 and gpt-5.5 landed in the SDK
- * and never appeared in the dropdown, so an Azure deployment of either got the
- * wrong benchmark scores and the wrong prices. The list is served to the web via
- * /api/config rather than duplicated (see cloud/server/src/app.ts).
+ * This is the single source for BOTH deployment-name inference and every UI
+ * picker served through /api/config. It intentionally contains models Cascade's
+ * Chat-Completions provider can actually call; Responses-only Pro/Codex models,
+ * media models, and deprecated aliases are not advertised here.
  */
 const AZURE_BASE_MODEL_RULES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/gpt-?5\.6.*sol/, 'gpt-5.6-sol'],
+  [/gpt-?5\.6.*terra/, 'gpt-5.6-terra'],
+  [/gpt-?5\.6.*luna/, 'gpt-5.6-luna'],
   [/gpt-?5\.5/, 'gpt-5.5'],
+  [/gpt-?5\.4.*nano/, 'gpt-5.4-nano'],
   [/gpt-?5\.4.*mini/, 'gpt-5.4-mini'],
   [/gpt-?5\.4/, 'gpt-5.4'],
+  [/gpt-?5\.2/, 'gpt-5.2'],
+  [/gpt-?5\.1/, 'gpt-5.1'],
   [/gpt-?5.*nano/, 'gpt-5-nano'],
   [/gpt-?5.*mini/, 'gpt-5-mini'],
   [/gpt-?5/, 'gpt-5'],
@@ -44,6 +109,7 @@ const AZURE_BASE_MODEL_RULES: ReadonlyArray<readonly [RegExp, string]> = [
   [/gpt-?4\.1/, 'gpt-4.1'],
   [/gpt-?4o-mini/, 'gpt-4o-mini'],
   [/gpt-?4o/, 'gpt-4o'],
+  [/^o3(?:-|$)/, 'o3'],
 ];
 
 /** Selectable base models, in the order a picker should show them. */
@@ -53,6 +119,11 @@ export function inferAzureBaseModel(deploymentName: string): string | null {
   const n = deploymentName.toLowerCase();
   for (const [re, base] of AZURE_BASE_MODEL_RULES) if (re.test(n)) return base;
   return null;
+}
+
+/** Resolve published metadata, preferring the current Azure/OpenAI overlay. */
+function azureBaseModelInfo(baseModelId: string): ModelInfo | undefined {
+  return AZURE_CURRENT_BASE_MODELS[baseModelId] ?? MODELS[baseModelId];
 }
 
 /**
@@ -74,13 +145,12 @@ export function azureModelForDeployment(cfg: ProviderConfig): ModelInfo | null {
   const id = cfg.deploymentName.trim();
   const name = cfg.label?.trim() || id;
   const baseModelId = cfg.model?.trim() || inferAzureBaseModel(id) || undefined;
-  const base = baseModelId ? MODELS[baseModelId] : undefined;
+  const base = baseModelId ? azureBaseModelInfo(baseModelId) : undefined;
   if (base) {
-    // Azure charges its own rates for the same model, and they vary by region
-    // (gpt-5.4 is $2.50/$15 per 1M on a global deployment but $2.75/$16.50 in
-    // `us`/`eu`). Prefer the dataset's azure entry for the configured region;
-    // it falls back to OpenAI list price only when Azure has no entry, and the
-    // catalogue value below is the last resort.
+    // Azure charges its own rates for the same model, and they vary by region.
+    // Prefer the dataset's Azure entry for the configured region; it falls back
+    // to OpenAI list price only when Azure has no entry, and the published
+    // metadata value above is the last resort.
     const azurePrice = resolvePricing(
       { id, provider: 'azure', isLocal: false, baseModelId },
       { region: cfg.region },
