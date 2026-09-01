@@ -191,9 +191,19 @@ jobs:
         # truly scopes the rebuild. The desktop app uses the worker sandbox for
         # dynamic tools by design; the hard isolate remains a CLI/npm (plain
         # Node) feature via its prebuilds.
+        #
+        # The electron version is resolved by BARE specifier, not by the
+        # relative `./node_modules/electron/package.json` this used to use. A
+        # relative require reads one exact path and never searches a parent, so
+        # it only worked while npm happened to nest electron in
+        # app/node_modules. Whether it nests or hoists to the repo root is a
+        # property of the whole dependency tree, not of anything in app/ — a
+        # lockfile refresh moved it to the root and this line began failing with
+        # MODULE_NOT_FOUND, before any installer was built. A bare specifier
+        # walks up from app/ and finds it in either layout.
         run: |
           npx @electron/rebuild -f -o node-pty
-          ELECTRON_VERSION=$(node -p "require('./node_modules/electron/package.json').version")
+          ELECTRON_VERSION=$(node -p "require('electron/package.json').version")
           npx @electron/rebuild -f -m .. -o better-sqlite3 --version "$ELECTRON_VERSION"
         shell: bash
 

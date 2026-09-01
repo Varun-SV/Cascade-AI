@@ -18,6 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+### Security
+- **Dependency refresh, lockfile only.** `undici` 6.27.0 → 6.28.0 (an upstream
+  security release), plus `ws`, `mermaid`, `body-parser`, `brace-expansion`,
+  `fast-uri`, `ip-address`, `js-yaml`, `shell-quote` and `socket.io-parser`.
+  No `package.json` changed: every one of these was already permitted by the
+  range the project declares, and only the resolved version in the lockfile was
+  behind. Vite and Electron are deliberately excluded — both are majors and both
+  need their own change, Electron especially, since the desktop build rebuilds
+  `better-sqlite3` and `node-pty` against its ABI.
+
+- **Dependabot is configured** (`.github/dependabot.yml`). With no config it put
+  all 18 updates in one pull request, welding routine security patches to six
+  major versions of Electron — and that PR could not even install, because the
+  Vite major pulls in the `@rolldown/*` family and the generated lockfile was
+  missing every one of those entries. Patch and minor updates are grouped now;
+  majors arrive one PR each, where they can be looked at properly.
+
 ## 0.76.0 - 2026-08-27
 
 ### Added

@@ -1,0 +1,118 @@
+# Dependabot configuration.
+#
+# The problem this solves: with no config at all, Dependabot groups every npm
+# update it can find into ONE pull request. #222 was the result — 18 updates in
+# a single PR, mixing routine security patches (undici, body-parser, ws) with
+# six major versions of Electron and a Vite major.
+#
+# That combination fails twice over. It is unreviewable, because the security
+# fixes you want to merge today are welded to an Electron upgrade that needs a
+# native rebuild of better-sqlite3 and node-pty against a new ABI. And it did
+# not even install: the Vite major pulls @vitejs/plugin-react up a major, which
+# introduces the @rolldown/* family, and the lockfile Dependabot generated was
+# missing every one of those entries — so `npm ci` refused and all three build
+# jobs died before running a single test.
+#
+# So: group only what cannot change an API, and let every major arrive on its
+# own where it can be looked at properly.
+
+version: 2
+
+updates:
+  # ── npm ────────────────────────────────────────────────────────────────
+  # One entry covers the whole repo. The root package.json declares
+  # workspaces (web, app, cloud/server, cloud/web) and there is a single
+  # package-lock.json at the root, so `/` reaches all four.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Majors arrive one PR per package (see below), so the ceiling has to
+    # leave room for several of those WITHOUT crowding out the grouped
+    # security PR — a withheld security update is the expensive failure here.
+    open-pull-requests-limit: 10
+    groups:
+      # Patch and minor only. A group is worth having precisely because its
+      # members cannot break an API, which makes one green CI run enough
+      # evidence for all of them.
+      #
+      # `major` is deliberately absent rather than forgotten: omitting it is
+      # what makes each major open its own PR instead of joining the group.
+      #
+      # The pre-1.0 exclusions are the same argument one layer down. Dependabot
+      # classifies an update by which version COMPONENT moved, so
+      # `@anthropic-ai/sdk` 0.90 → 0.91 counts as "minor" — but under SemVer
+      # nothing before 1.0 promises compatibility, and 0.x is precisely where a
+      # minor bump is the breaking one. Grouping those with routine patches
+      # would put a provider-SDK API change in a PR whose whole justification is
+      # that its members cannot contain one.
+      #
+      # This list is maintained by hand and WILL drift: a new 0.x dependency is
+      # not added here automatically, and it will be grouped until someone
+      # notices. A stale entry is harmless (it matches nothing); a missing one
+      # is the failure to watch for. Worth re-checking when adding a dependency.
+      npm-minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "@anthropic-ai/sdk"
+          - "@mlc-ai/web-llm"
+          - "@tailwindcss/typography"
+          - "@types/pdfkit"
+          - "@xterm/addon-fit"
+          - "@xterm/addon-web-links"
+          - "katex"
+          - "lucide-react"
+          - "pdfkit"
+          - "vite-plugin-electron"
+          - "xlsx"
+      npm-security-minor-and-patch:
+        applies-to: security-updates
+        update-types:
+          - "minor"
+          - "patch"
+        patterns:
+          - "*"
+        # Repeated literally rather than shared with a YAML anchor. Anchors are
+        # valid YAML, but I am not certain Dependabot's parser honours them, and
+        # a config that silently fails to parse is the exact failure this file
+        # exists to prevent. Duplication is the cheaper risk; keep the two lists
+        # in step.
+        exclude-patterns:
+          - "@anthropic-ai/sdk"
+          - "@mlc-ai/web-llm"
+          - "@tailwindcss/typography"
+          - "@types/pdfkit"
+          - "@xterm/addon-fit"
+          - "@xterm/addon-web-links"
+          - "katex"
+          - "lucide-react"
+          - "pdfkit"
+          - "vite-plugin-electron"
+          - "xlsx"
+
+  # ── GitHub Actions ─────────────────────────────────────────────────────
+  # Every workflow here pins actions/checkout@v4 and actions/setup-node@v4,
+  # which the runner already warns about: "Node.js 20 is deprecated. The
+  # following actions target Node.js 20 but are being forced to run on
+  # Node.js 24." Nothing was watching for the v5 bumps that fix it.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    groups:
+      # Same rule as the npm groups, and for the same reason: `update-types`
+      # restricted to minor and patch is what keeps a major out of the group.
+      # Without it this `*` would have bundled the very v4 → v5 upgrades the
+      # comment above is about — two coupled majors in one PR, which is the
+      # shape of #222 that this whole file exists to prevent.
+      github-actions-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+        patterns:
+          - "*"
