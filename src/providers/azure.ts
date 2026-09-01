@@ -57,6 +57,12 @@ function catalogEntry(id: string): CloudCatalogEntry | undefined {
  * most-specific → least-specific, then legacy family fallbacks preserve the old
  * behavior for deployment names such as `gpt5nano-prod` or an as-yet-unknown
  * gpt-5.x point release.
+ *
+ * The fallback path deliberately uses string scans instead of `gpt-?5.*mini`
+ * style regular expressions. Deployment names are user/provider-controlled, and
+ * an unbounded `.*` between two literals can trigger polynomial backtracking in
+ * JS regex engines on adversarial inputs. `indexOf`/`includes` keeps this path
+ * linear in the deployment-name length while preserving the same semantics.
  */
 export function inferAzureBaseModel(deploymentName: string): string | null {
   const n = deploymentName.toLowerCase();
@@ -68,18 +74,28 @@ export function inferAzureBaseModel(deploymentName: string): string | null {
   }
 
   // OpenAI documents bare `gpt-5.6` as the Sol alias. Keep that useful signal
-  // even when an Azure deployment name omits the tier suffix.
-  if (/gpt-?5\.6(?:$|[-_])/.test(n) || compact.includes('gpt5.6')) return 'gpt-5.6-sol';
+  // even when an Azure deployment name omits the tier suffix. More-specific
+  // catalog entries were checked above, so Terra/Luna cannot be swallowed here.
+  if (compact.includes('gpt5.6')) return 'gpt-5.6-sol';
 
-  // Legacy / forward-compatible family fallbacks.
-  if (/gpt-?5.*nano/.test(n)) return 'gpt-5-nano';
-  if (/gpt-?5.*mini/.test(n)) return 'gpt-5-mini';
-  if (/gpt-?5/.test(n)) return 'gpt-5';
-  if (/gpt-?4\.1-nano/.test(n)) return 'gpt-4.1-nano';
-  if (/gpt-?4\.1-mini/.test(n)) return 'gpt-4.1-mini';
-  if (/gpt-?4\.1/.test(n)) return 'gpt-4.1';
-  if (/gpt-?4o-mini/.test(n)) return 'gpt-4o-mini';
-  if (/gpt-?4o/.test(n)) return 'gpt-4o';
+  // Legacy / forward-compatible GPT-5 family fallback. Search only the suffix
+  // after the first family marker so names such as `prod-gpt5foo-mini` retain
+  // the previous "gpt-5 ... mini" behavior without a backtracking regex.
+  const gpt5At = compact.indexOf('gpt5');
+  if (gpt5At !== -1) {
+    const suffix = compact.slice(gpt5At + 'gpt5'.length);
+    if (suffix.includes('nano')) return 'gpt-5-nano';
+    if (suffix.includes('mini')) return 'gpt-5-mini';
+    return 'gpt-5';
+  }
+
+  // Older families are simple literal variants after compaction; order the
+  // specific variants before their base model so mini/nano cannot be swallowed.
+  if (compact.includes('gpt4.1nano')) return 'gpt-4.1-nano';
+  if (compact.includes('gpt4.1mini')) return 'gpt-4.1-mini';
+  if (compact.includes('gpt4.1')) return 'gpt-4.1';
+  if (compact.includes('gpt4omini')) return 'gpt-4o-mini';
+  if (compact.includes('gpt4o')) return 'gpt-4o';
   return null;
 }
 
