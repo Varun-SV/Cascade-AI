@@ -1,15 +1,30 @@
 // ─────────────────────────────────────────────
-//  Cascade AI — Browser Automation Tool (T3 + multimodal only)
+//  Cascade AI — Browser Automation Tool
 // ─────────────────────────────────────────────
+//
+//  Registered only when `tools.browserEnabled` is on (registry.ts). That flag
+//  is the whole gate — this header used to claim "T3 + multimodal only" and the
+//  README claimed a vision-model restriction to match, but no model capability
+//  has ever been consulted anywhere. The claim was harmless only because the
+//  flag defaults to false, which would stop being true the moment anything in
+//  the product turned it on.
+//
+//  Vision matters for exactly one action, `screenshot`, and it is handled where
+//  it actually applies: the PNG is written into the workspace and the path
+//  handed back for `image_analyze` to read, so a non-vision model can still
+//  navigate, fill and extract text without being denied the tool outright.
 
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
+import { resolveInWorkspace } from './utils/workspace-path.js';
 
 const BROWSER_LAUNCH_TIMEOUT_MS = 15_000;
 
 export class BrowserTool extends BaseTool {
   readonly name = 'browser';
-  readonly description = 'Control a browser: navigate to URLs, click elements, fill forms, take screenshots. Only available with multimodal models.';
+  readonly description = 'Control a browser: navigate to URLs, click elements, fill forms, take screenshots. Screenshots are saved to a file for image_analyze to read.';
   readonly inputSchema = {
     type: 'object',
     properties: {
@@ -85,8 +100,23 @@ export class BrowserTool extends BaseTool {
           return `Filled ${input['selector']} with value`;
         }
         case 'screenshot': {
+          // Written to a file, NOT returned inline. This used to hand back a
+          // `data:image/png;base64,…` string, and a tool result is plain text
+          // that goes straight into the model's context — nothing anywhere in
+          // the codebase turns a data URI into an image content block. So the
+          // one action that needed a vision model was also the one action no
+          // model could see: a few hundred KB of base64 spent as tokens to say
+          // nothing. A path costs a dozen and `image_analyze` can actually read
+          // it.
           const buf = await page.screenshot({ type: 'png' });
-          return `data:image/png;base64,${buf.toString('base64')}`;
+          const rel = `screenshot-${Date.now()}.png`;
+          const abs = resolveInWorkspace(this.workspaceRoot, rel);
+          await fs.mkdir(path.dirname(abs), { recursive: true });
+          await fs.writeFile(abs, buf);
+          return [
+            `Screenshot saved to ${rel} (${Math.round(buf.byteLength / 1024)} KB).`,
+            `Call image_analyze with path "${rel}" to see what is on it — that needs a vision-capable model.`,
+          ].join(' ');
         }
         case 'evaluate': {
           const result = await page.evaluate(input['script'] as string);

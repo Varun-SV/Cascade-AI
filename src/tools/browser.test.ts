@@ -1,0 +1,103 @@
+// ─────────────────────────────────────────────
+//  Cascade AI — browser tool
+// ─────────────────────────────────────────────
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { BrowserTool } from './browser.js';
+
+/** A page that records what it was asked to do and hands back a fake PNG. */
+function fakePage(png: Buffer) {
+  return {
+    screenshot: vi.fn().mockResolvedValue(png),
+    goto: vi.fn().mockResolvedValue(undefined),
+    title: vi.fn().mockResolvedValue('T'),
+    close: vi.fn().mockResolvedValue(undefined),
+  };
+}
+
+/**
+ * Stub `playwright` at the module level — the tool imports it dynamically, so
+ * this intercepts that import without the package (or a real Chromium) being
+ * involved.
+ */
+function stubPlaywright(page: ReturnType<typeof fakePage>) {
+  vi.doMock('playwright', () => ({
+    chromium: {
+      launch: vi.fn().mockResolvedValue({
+        newPage: vi.fn().mockResolvedValue(page),
+        close: vi.fn().mockResolvedValue(undefined),
+      }),
+    },
+  }));
+}
+
+describe('BrowserTool — screenshot', () => {
+  let workspace: string;
+
+  beforeEach(async () => {
+    workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'cascade-browser-'));
+    vi.resetModules();
+  });
+
+  afterEach(async () => {
+    vi.doUnmock('playwright');
+    await fs.rm(workspace, { recursive: true, force: true });
+  });
+
+  it('writes the PNG to the workspace and returns the path, not the image', async () => {
+    // The bug this pins: it used to return `data:image/png;base64,…`. A tool
+    // result is plain text that goes straight into the model's context, and
+    // NOTHING in the codebase turns a data URI into an image content block —
+    // so the one action that needed a vision model was the one action no model
+    // could see, and it spent a few hundred KB of base64 as tokens saying
+    // nothing. `image_analyze` takes a path, so a path is what composes.
+    const png = Buffer.from('89504e470d0a1a0a' + '00'.repeat(4096), 'hex');
+    stubPlaywright(fakePage(png));
+    const { BrowserTool: Tool } = await import('./browser.js');
+    const tool = new Tool();
+    tool.setWorkspaceRoot(workspace);
+
+    const out = await tool.execute({ action: 'screenshot' }, {} as never);
+
+    expect(out).not.toContain('base64');
+    expect(out).not.toContain('data:image');
+    expect(out).toContain('image_analyze');
+
+    const named = /screenshot-\d+\.png/.exec(out)?.[0];
+    expect(named, `no filename in: ${out}`).toBeTruthy();
+    const written = await fs.readFile(path.join(workspace, named!));
+    expect(written.equals(png)).toBe(true);
+  });
+
+  it('keeps the result small enough to be worth putting in a context window', async () => {
+    // A 4 KB PNG became ~5.5 KB of base64 before; a real viewport screenshot is
+    // hundreds of KB. The assertion is on the ORDER of magnitude, not a byte
+    // count — the point is that the result no longer scales with the image.
+    const png = Buffer.alloc(512_000, 7);
+    stubPlaywright(fakePage(png));
+    const { BrowserTool: Tool } = await import('./browser.js');
+    const tool = new Tool();
+    tool.setWorkspaceRoot(workspace);
+
+    const out = await tool.execute({ action: 'screenshot' }, {} as never);
+    expect(out.length).toBeLessThan(300);
+  });
+});
+
+describe('BrowserTool — gating', () => {
+  it('requires approval, since it drives a real browser', () => {
+    expect(new BrowserTool().isDangerous()).toBe(true);
+  });
+
+  it('no longer advertises a model restriction it does not enforce', () => {
+    // registry.ts gates this tool on `tools.browserEnabled` and nothing else —
+    // no model capability is consulted anywhere. The description used to claim
+    // "Only available with multimodal models", and the README said the same,
+    // which was harmless only while the flag defaulted to false.
+    const { description } = new BrowserTool().getDefinition();
+    expect(description).not.toMatch(/multimodal|vision.only/i);
+  });
+});

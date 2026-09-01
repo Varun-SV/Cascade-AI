@@ -60,6 +60,17 @@ export const WebSearchConfigSchema = z.object({
   tavilyApiKey: z.string().optional(),
   /** Max results per search (default 5) */
   maxResults: z.number().default(5),
+  /**
+   * Send `searxngUrl` through the SSRF guard. Off for a local run, where the
+   * URL is the machine owner's own config and a self-hosted SearXNG is
+   * routinely on a private address; on for a host that accepts it from a
+   * request. See `src/tools/web-search.ts`.
+   *
+   * It has to be named HERE, not just on the TypeScript interfaces: the config
+   * passes through `CascadeConfigSchema.parse()` on its way into a run, and
+   * zod drops every key this object does not declare.
+   */
+  guardSearxngUrl: z.boolean().optional(),
 });
 
 export const ToolsConfigSchema = z.object({

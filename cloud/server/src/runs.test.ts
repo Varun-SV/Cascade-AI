@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { ToolRegistry } from '#cascade-ai';
+import { ToolRegistry, CascadeConfigSchema } from '#cascade-ai';
 import { buildCloudConfig, buildMediaSink, parseChatRunPayload, runChatTurn, tenantScratchDir } from './runs.js';
 import { CloudStore } from './db.js';
 import { limitsForPlan, PENDING_MEDIA_TTL_MS } from './entitlements.js';
@@ -87,17 +87,58 @@ describe('buildCloudConfig', () => {
 
   it('passes a configured web-search backend through only when web search is on', () => {
     const backend = { braveApiKey: 'brave-key' };
-    // On + configured → webSearch config is set.
-    expect(buildCloudConfig([], 0.5, { webSearch: true, webSearchConfig: backend }).webSearch).toEqual({
+    // On + configured → webSearch config is set, under `tools`.
+    expect(buildCloudConfig([], 0.5, { webSearch: true, webSearchConfig: backend }).tools?.webSearch).toEqual({
       searxngUrl: undefined,
       braveApiKey: 'brave-key',
       tavilyApiKey: undefined,
+      guardSearxngUrl: true,
     });
     // On but no backend configured → left unset (tool uses keyless fallback).
-    expect(buildCloudConfig([], 0.5, { webSearch: true }).webSearch).toBeUndefined();
-    expect(buildCloudConfig([], 0.5, { webSearch: true, webSearchConfig: {} }).webSearch).toBeUndefined();
+    expect(buildCloudConfig([], 0.5, { webSearch: true }).tools?.webSearch).toBeUndefined();
+    expect(buildCloudConfig([], 0.5, { webSearch: true, webSearchConfig: {} }).tools?.webSearch).toBeUndefined();
     // Web search off → never pass a backend, even if configured.
-    expect(buildCloudConfig([], 0.5, { webSearch: false, webSearchConfig: backend }).webSearch).toBeUndefined();
+    expect(buildCloudConfig([], 0.5, { webSearch: false, webSearchConfig: backend }).tools?.webSearch).toBeUndefined();
+  });
+
+  it('puts the backend where the tool reads it — surviving the schema parse', () => {
+    // The bug this pins: the block sat at the TOP level of the config, and the
+    // assertion above was written against that same wrong key, so it passed
+    // while every hosted search silently ran with no backend at all.
+    //
+    // Asserting on buildCloudConfig's own output is not enough to catch that
+    // again — a key can be present there and still be gone by the time a run
+    // sees it. `createCascade` calls CascadeConfigSchema.parse(), and zod
+    // strips keys the schema does not declare, which is what actually deleted
+    // it. So parse first, then look.
+    const cfg = buildCloudConfig([], 0.5, {
+      webSearch: true,
+      webSearchConfig: { searxngUrl: 'https://searx.example.com', tavilyApiKey: 'tav' },
+    });
+    const parsed = CascadeConfigSchema.parse(cfg);
+
+    expect(parsed.tools.webSearch).toMatchObject({
+      searxngUrl: 'https://searx.example.com',
+      tavilyApiKey: 'tav',
+    });
+    // Nothing reads a top-level webSearch; if one ever reappears it is the old
+    // bug coming back.
+    expect((parsed as Record<string, unknown>)['webSearch']).toBeUndefined();
+  });
+
+  it('marks the hosted SearXNG URL as untrusted so it goes through the SSRF guard', () => {
+    // The URL arrives in the request body, so it is caller-controlled input
+    // aimed at a fetch the SERVER makes — unlike a CLI run, where it is the
+    // machine owner's own config and a private address is normal. Losing this
+    // flag turns the fix above into an SSRF, so it is asserted after the same
+    // schema parse that would drop it if it were missing from the zod schema.
+    const parsed = CascadeConfigSchema.parse(
+      buildCloudConfig([], 0.5, {
+        webSearch: true,
+        webSearchConfig: { searxngUrl: 'http://169.254.169.254/' },
+      }),
+    );
+    expect(parsed.tools.webSearch?.guardSearxngUrl).toBe(true);
   });
 
   it('maps routing mode to Cascade Auto bias and pins the forced tier', () => {

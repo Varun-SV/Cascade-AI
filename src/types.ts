@@ -228,6 +228,20 @@ export interface WebSearchConfig {
   braveApiKey?: string;
   tavilyApiKey?: string;
   maxResults?: number;
+  /**
+   * Route `searxngUrl` through the SSRF guard — set by hosts that take the URL
+   * from a request rather than from local config. Full reasoning on the
+   * matching field in `src/tools/web-search.ts`, which is the copy the tool
+   * actually reads.
+   *
+   * This shape is declared in THREE places that must move together: here, that
+   * interface, and `WebSearchConfigSchema` in `src/config/schema.ts`. The zod
+   * one is load-bearing rather than decorative — `createCascade` runs the whole
+   * config through `CascadeConfigSchema.parse()`, which strips keys the schema
+   * does not name, so a field added only to the interfaces type-checks and then
+   * silently vanishes at runtime.
+   */
+  guardSearxngUrl?: boolean;
 }
 
 export interface Message {

@@ -167,7 +167,7 @@ User prompt
 - **Diff** — inline side-by-side diffs before applying edits
 - **Git** — status, diff, log, add, commit, branch, push, pull
 - **GitHub / GitLab** — create PRs, list/comment on issues
-- **Browser** — Playwright automation (multimodal models only)
+- **Browser** — Playwright automation; opt-in via `tools.browserEnabled`
 - **Image** — analyze images (vision-capable models only)
 
 ### Developer Experience
@@ -464,7 +464,7 @@ T3 workers have access to the following tools. All destructive operations requir
 | `file_delete` | Delete a file                                    | ✓         |
 | `git`         | status, diff, log, add, commit, push, pull, etc. | ✓         |
 | `github`      | Create PRs, list/comment issues (GitHub/GitLab)  | ✓         |
-| `browser`     | Playwright automation (vision models only)       | ✓         |
+| `browser`     | Playwright automation (off unless `browserEnabled`) | ✓       |
 | `image_analyze` | Describe an image file                         |           |
 | `generate_document` | Render a REAL `.docx` / `.pptx` / `.xlsx` from Markdown or CSV | ✓ |
 

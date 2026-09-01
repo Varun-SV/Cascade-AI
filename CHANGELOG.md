@@ -34,6 +34,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Vite major pulls in the `@rolldown/*` family and the generated lockfile was
   missing every one of those entries. Patch and minor updates are grouped now;
   majors arrive one PR each, where they can be looked at properly.
+- **A hosted SearXNG URL now goes through the SSRF guard.** `web_fetch` has
+  always routed through `safeFetch`, which rejects loopback, link-local and
+  private addresses and re-checks every redirect hop; `web_search` did not, and
+  on the hosted server that URL arrives in the request body. Guarded there via a
+  new `tools.webSearch.guardSearxngUrl`, and left off for CLI and desktop runs,
+  where the URL is the machine owner's own config and a self-hosted SearXNG
+  legitimately lives on a private address.
+
+### Fixed
+- **Hosted runs ignored the search backend you configured.** The SearXNG URL,
+  Brave key and Tavily key were written to a top-level `webSearch` key that
+  nothing reads — every reader goes through `tools.webSearch`, and the config
+  passes through `CascadeConfigSchema.parse()`, which strips keys the schema
+  does not declare. So the setting was deleted on its way into a run and every
+  hosted search silently fell back to the keyless DuckDuckGo scraper. It
+  type-checked throughout because the key was contributed by a spread, which
+  TypeScript does not excess-property-check.
+- **Browser screenshots are readable again.** The `browser` tool returned the
+  PNG inline as a `data:image/png;base64,…` string. A tool result is plain
+  text, and nothing converts a data URI into an image content block, so the one
+  action needing a vision model was the one no model could see — several
+  hundred KB of base64 spent as context tokens saying nothing. Screenshots are
+  written into the workspace now and the path returned.
+- **The `browser` tool no longer advertises a restriction it never enforced.**
+  Its description and two README entries claimed vision- or multimodal-only;
+  the only gate that has ever existed is `tools.browserEnabled`.
 
 ## 0.76.0 - 2026-08-27
 
