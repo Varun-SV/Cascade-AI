@@ -152,7 +152,7 @@ jobs:
       # Python 3.11 still ships distutils, which node-gyp needs to compile the
       # core's native better-sqlite3 dependency (Python 3.12 removed it).
       - name: Setup Python (node-gyp toolchain)
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.11'
 
