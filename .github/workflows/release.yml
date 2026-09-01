@@ -103,7 +103,7 @@ jobs:
 
       - name: Setup Node.js
         if: steps.check.outputs.exists == 'false'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           # 22, not 20: optional native deps (isolated-vm) ship prebuilds for the
           # Node 22/24 ABIs only — on 20 the source compile fails and npm silently
@@ -145,14 +145,14 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
 
       # Python 3.11 still ships distutils, which node-gyp needs to compile the
       # core's native better-sqlite3 dependency (Python 3.12 removed it).
       - name: Setup Python (node-gyp toolchain)
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.11'
 
