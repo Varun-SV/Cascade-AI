@@ -1,6 +1,6 @@
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 //  Cascade AI — Public-benchmark model strengths
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 //
 //  Curated 0–100 scores per model family per task type, approximated from
 //  public benchmarks so Cascade Auto can route each subtask to the model that
@@ -41,9 +41,15 @@ const FAMILY_BENCHMARKS: Record<string, BenchmarkProfile> = {
   'claude-opus':       { code: 95, analysis: 92, creative: 90, data: 88 },
   'claude-sonnet':     { code: 93, analysis: 88, creative: 87, data: 85 },
   'claude-haiku':      { code: 80, analysis: 75, creative: 76, data: 72 },
-  // OpenAI GPT-5 family — current flagship; strongest all-round. Offline
-  // baseline (the live fetch refreshes these). Distinct point releases carry
-  // their own scores: gpt-5.5 "Spud" leads SWE-bench (88.7%); gpt-5.4 ~80%.
+  // OpenAI GPT-5 family. GPT-5.6 is split by durable capability tier instead
+  // of being folded into generic gpt-5: Sol, Terra and Luna have materially
+  // different benchmark/cost envelopes and should compete independently.
+  // Scores are the committed normalized snapshot; provenance is in
+  // scripts/benchmarks/sources/openai-gpt-5.6-2026-08.json.
+  'gpt-5.6-sol':       { code: 100, analysis: 98, creative: 88, data: 88 },
+  'gpt-5.6-terra':     { code: 97, analysis: 92, creative: 82, data: 85 },
+  'gpt-5.6-luna':      { code: 93, analysis: 85, creative: 74, data: 60 },
+  // Older GPT-5 point releases remain distinct where public data supports it.
   'gpt-5.5':           { code: 97, analysis: 96, creative: 94, data: 95 },
   'gpt-5.4':           { code: 94, analysis: 94, creative: 92, data: 92 },
   'gpt-5.4-mini':      { code: 86, analysis: 85, creative: 85, data: 83 },
@@ -81,13 +87,19 @@ const FAMILY_BENCHMARKS: Record<string, BenchmarkProfile> = {
 
 // Ordered most-specific → least so e.g. "gpt-4.1-mini" doesn't match "gpt-4.1".
 const FAMILY_MATCHERS: Array<[RegExp, string]> = [
+  [/fable/i, 'claude-opus'],
   [/opus/i, 'claude-opus'],
   [/sonnet/i, 'claude-sonnet'],
   [/haiku/i, 'claude-haiku'],
-  // GPT-5 family — ordered most-specific first. Distinct point releases
-  // (gpt-5.5, gpt-5.4, gpt-5.4-mini) match their own family; nano/mini before
-  // the base; unrecognised gpt-5.x still fold into the gpt-5 base.
+  // GPT-5 family — ordered most-specific first. GPT-5.6 durable tiers carry
+  // their own profiles. 5.4 Nano intentionally maps to the nano class rather
+  // than being swallowed by the generic 5.4 rule.
+  [/gpt-?5\.6.*sol/i, 'gpt-5.6-sol'],
+  [/gpt-?5\.6.*terra/i, 'gpt-5.6-terra'],
+  [/gpt-?5\.6.*luna/i, 'gpt-5.6-luna'],
+  [/gpt-?5\.6(?:\s|$)/i, 'gpt-5.6-sol'],
   [/gpt-?5\.5/i, 'gpt-5.5'],
+  [/gpt-?5\.4.*nano/i, 'gpt-5-nano'],
   [/gpt-?5\.4.*mini/i, 'gpt-5.4-mini'],
   [/gpt-?5\.4/i, 'gpt-5.4'],
   [/gpt-?5.*nano/i, 'gpt-5-nano'],
