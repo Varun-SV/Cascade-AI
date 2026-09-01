@@ -38,16 +38,62 @@ updates:
       #
       # `major` is deliberately absent rather than forgotten: omitting it is
       # what makes each major open its own PR instead of joining the group.
+      #
+      # The pre-1.0 exclusions are the same argument one layer down. Dependabot
+      # classifies an update by which version COMPONENT moved, so
+      # `@anthropic-ai/sdk` 0.90 → 0.91 counts as "minor" — but under SemVer
+      # nothing before 1.0 promises compatibility, and 0.x is precisely where a
+      # minor bump is the breaking one. Grouping those with routine patches
+      # would put a provider-SDK API change in a PR whose whole justification is
+      # that its members cannot contain one.
+      #
+      # This list is maintained by hand and WILL drift: a new 0.x dependency is
+      # not added here automatically, and it will be grouped until someone
+      # notices. A stale entry is harmless (it matches nothing); a missing one
+      # is the failure to watch for. Worth re-checking when adding a dependency.
       npm-minor-and-patch:
         applies-to: version-updates
         update-types:
           - "minor"
           - "patch"
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "@anthropic-ai/sdk"
+          - "@mlc-ai/web-llm"
+          - "@tailwindcss/typography"
+          - "@types/pdfkit"
+          - "@xterm/addon-fit"
+          - "@xterm/addon-web-links"
+          - "katex"
+          - "lucide-react"
+          - "pdfkit"
+          - "vite-plugin-electron"
+          - "xlsx"
       npm-security-minor-and-patch:
         applies-to: security-updates
         update-types:
           - "minor"
           - "patch"
+        patterns:
+          - "*"
+        # Repeated literally rather than shared with a YAML anchor. Anchors are
+        # valid YAML, but I am not certain Dependabot's parser honours them, and
+        # a config that silently fails to parse is the exact failure this file
+        # exists to prevent. Duplication is the cheaper risk; keep the two lists
+        # in step.
+        exclude-patterns:
+          - "@anthropic-ai/sdk"
+          - "@mlc-ai/web-llm"
+          - "@tailwindcss/typography"
+          - "@types/pdfkit"
+          - "@xterm/addon-fit"
+          - "@xterm/addon-web-links"
+          - "katex"
+          - "lucide-react"
+          - "pdfkit"
+          - "vite-plugin-electron"
+          - "xlsx"
 
   # ── GitHub Actions ─────────────────────────────────────────────────────
   # Every workflow here pins actions/checkout@v4 and actions/setup-node@v4,
@@ -59,6 +105,14 @@ updates:
     schedule:
       interval: "monthly"
     groups:
-      github-actions:
+      # Same rule as the npm groups, and for the same reason: `update-types`
+      # restricted to minor and patch is what keeps a major out of the group.
+      # Without it this `*` would have bundled the very v4 → v5 upgrades the
+      # comment above is about — two coupled majors in one PR, which is the
+      # shape of #222 that this whole file exists to prevent.
+      github-actions-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
         patterns:
           - "*"
