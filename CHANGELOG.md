@@ -36,6 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Vite major pulls in the `@rolldown/*` family and the generated lockfile was
   missing every one of those entries. Patch and minor updates are grouped now;
   majors arrive one PR each, where they can be looked at properly.
+- **IPv6 addresses that carry an IPv4 address are blocked.** `http://[::ffff:127.0.0.1]/`
+  reached loopback, and `http://[::ffff:169.254.169.254]/` reached the cloud
+  metadata endpoint. The mapped-address check only recognised the dotted
+  spelling, and `new URL()` canonicalises every one of these to hex before the
+  guard sees it — so on a real URL that check never ran. A literal IP also
+  needs no DNS, so the connect-time guard does not apply either. IPv6 is now
+  expanded to its eight groups and judged by any IPv4 address it embeds:
+  IPv4-mapped, IPv4-compatible, NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`).
+  Public IPv6 is unaffected, mapped-public (`::ffff:8.8.8.8`) included.
 - **`safeFetch` now re-checks the address at connect time, closing a DNS
   rebinding window.** It resolved the hostname to decide whether to proceed and
   then let `fetch` resolve it again to open the socket — two independent
