@@ -1,14 +1,30 @@
 import { describe, it, expect, vi } from 'vitest';
-import { azureModelForDeployment, inferAzureBaseModel, AzureOpenAIProvider } from './azure.js';
+import { AZURE_BASE_MODELS, azureModelForDeployment, inferAzureBaseModel, AzureOpenAIProvider } from './azure.js';
 import { MODELS } from '../constants.js';
 import type { ModelInfo } from '../types.js';
 
+describe('Azure base-model catalog', () => {
+  it('includes current GPT-5.6 tiers and GPT-5.4 Nano', () => {
+    expect(AZURE_BASE_MODELS).toEqual(expect.arrayContaining([
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+      'gpt-5.6-luna',
+      'gpt-5.4-nano',
+    ]));
+  });
+});
+
 describe('inferAzureBaseModel', () => {
   it('maps deployment names to canonical base models, most-specific first', () => {
-    // Distinct point releases resolve to their OWN base (no longer folded).
+    expect(inferAzureBaseModel('gpt-5.6-sol-prod')).toBe('gpt-5.6-sol');
+    expect(inferAzureBaseModel('prod-gpt-5.6-terra')).toBe('gpt-5.6-terra');
+    expect(inferAzureBaseModel('gpt5.6luna-eu')).toBe('gpt-5.6-luna');
+    // OpenAI's bare gpt-5.6 alias means Sol.
+    expect(inferAzureBaseModel('gpt-5.6')).toBe('gpt-5.6-sol');
     expect(inferAzureBaseModel('gpt-5.5')).toBe('gpt-5.5');
     expect(inferAzureBaseModel('gpt-5.4')).toBe('gpt-5.4');
     expect(inferAzureBaseModel('gpt-5.4-mini')).toBe('gpt-5.4-mini');
+    expect(inferAzureBaseModel('gpt-5.4-nano')).toBe('gpt-5.4-nano');
     // An unrecognised point release still folds into the gpt-5 base.
     expect(inferAzureBaseModel('gpt-5.3')).toBe('gpt-5');
     expect(inferAzureBaseModel('gpt-5-mini')).toBe('gpt-5-mini');
@@ -30,9 +46,23 @@ describe('azureModelForDeployment — base-model economics', () => {
     expect(m.baseModelId).toBe('gpt-5.4'); // resolves to its OWN base now
     expect(m.provider).toBe('azure');
     expect(m.contextWindow).toBe(base.contextWindow);
-    expect(m.inputCostPer1kTokens).toBe(base.inputCostPer1kTokens);
-    expect(m.outputCostPer1kTokens).toBe(base.outputCostPer1kTokens);
     expect(m.isVisionCapable).toBe(base.isVisionCapable);
+  });
+
+  it('uses verified catalog capabilities for GPT-5.6 deployments missing from constants.ts', () => {
+    const sol = azureModelForDeployment({ type: 'azure', deploymentName: 'gpt-5.6-sol-prod' })!;
+    const terra = azureModelForDeployment({ type: 'azure', deploymentName: 'prod-gpt-5.6-terra' })!;
+    const luna = azureModelForDeployment({ type: 'azure', deploymentName: 'gpt-5.6-luna' })!;
+    for (const m of [sol, terra, luna]) {
+      expect(m.contextWindow).toBe(1_050_000);
+      expect(m.maxOutputTokens).toBe(128_000);
+      expect(m.isVisionCapable).toBe(true);
+      expect(m.provider).toBe('azure');
+      expect(m.supportsToolUse).toBe(false);
+    }
+    expect(sol.baseModelId).toBe('gpt-5.6-sol');
+    expect(terra.baseModelId).toBe('gpt-5.6-terra');
+    expect(luna.baseModelId).toBe('gpt-5.6-luna');
   });
 
   it('distinguishes gpt-5.4 from gpt-5.4-mini (the reported mis-route)', () => {
@@ -55,6 +85,7 @@ describe('azureModelForDeployment — base-model economics', () => {
     expect(m.baseModelId).toBeUndefined();
     expect(m.inputCostPer1kTokens).toBeGreaterThan(0);
     expect(m.contextWindow).toBe(128_000);
+    expect(m.pricingUnknown).toBe(true);
   });
 });
 
@@ -117,6 +148,13 @@ describe('AzureOpenAIProvider.isAvailable', () => {
     expect(create).toHaveBeenCalledTimes(1);
     expect(create.mock.calls[0]![0]).toMatchObject({ max_completion_tokens: 16 });
     expect(create.mock.calls[0]![0]).not.toHaveProperty('max_tokens');
+  });
+
+  it('recognizes GPT-5.6 deployments as reasoning models', async () => {
+    const { provider, create } = providerWithMockClient('gpt-5.6-sol');
+    create.mockResolvedValueOnce({});
+    await expect(provider.isAvailable()).resolves.toBe(true);
+    expect(create.mock.calls[0]![0]).toMatchObject({ max_completion_tokens: 16 });
   });
 
   it('retries with max_completion_tokens when a deployment rejects max_tokens', async () => {

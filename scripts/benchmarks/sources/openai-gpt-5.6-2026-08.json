@@ -1,0 +1,20 @@
+{
+  "source": "openai-gpt-5.6-2026-08",
+  "label": "GPT-5.6 public evals + blind writing panel",
+  "url": "https://openai.com/index/gpt-5-6/ , https://usenoren.ai/blog/gpt-5-6-writing-test",
+  "capturedAt": "2026-08-27",
+  "provenance": "captured",
+  "scale": "percent",
+  "calibration": {
+    "code": { "min": 0, "max": 80 },
+    "analysis": { "min": 0, "max": 60 },
+    "creative": { "min": 0, "max": 8.5 },
+    "data": { "min": 0, "max": 60 }
+  },
+  "note": "Current GPT-5.6 tier data. code = Artificial Analysis Coding Agent Index v1.1 from OpenAI's launch eval table; analysis = Artificial Analysis Intelligence Index v4.1; data = Big Finance Bench. creative uses the median blind-review fiction score from Noren's 24-story / six-reviewer comparison because OpenAI's launch table does not publish a writing-specific benchmark. Creative is therefore lower-confidence than the other three cells and is deliberately kept as a separate documented proxy rather than silently substituting a professional-work Elo. Calibration bands map each metric onto Cascade's 0-100 routing scale without within-capture min/max drift.",
+  "models": {
+    "gpt-5.6-sol":   { "code": 80, "analysis": 58.9, "creative": 7.5, "data": 53 },
+    "gpt-5.6-terra": { "code": 77.4, "analysis": 55, "creative": 7.0, "data": 51 },
+    "gpt-5.6-luna":  { "code": 74.6, "analysis": 51.2, "creative": 6.3, "data": 36 }
+  }
+}
