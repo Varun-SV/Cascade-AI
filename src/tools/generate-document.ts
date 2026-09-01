@@ -35,7 +35,8 @@ export type WorkspaceFileReader = (absPath: string) => Promise<Uint8Array>;
 
 const SOURCE_HINT: Record<DocumentFormat, string> = {
   docx: 'Markdown',
-  pptx: 'Markdown slides (separate slides with a --- rule; each slide starts with a heading)',
+  pptx: 'Markdown slides (separate slides with a --- rule; each slide starts with a heading). '
+    + 'Markdown tables become real PowerPoint tables; an optional first line "animation: …" tunes the deck animation',
   xlsx: 'CSV (one header row, then data rows)',
 };
 
@@ -47,8 +48,12 @@ export class GenerateDocumentTool extends BaseTool {
     + '(separated by --- rules) for .pptx, CSV for .xlsx. ALWAYS use this instead of file_write for those '
     + 'three extensions — file_write stores your text verbatim, which Office reports as a corrupted file. '
     + 'Supports embedded images (reference a generated image as ![alt](path-the-image-tool-returned) on its '
-    + 'own line) and real, data-accurate charts (a ```chart:bar / chart:line / chart:pie fenced block whose '
-    + 'body is CSV). Use pdf_create for PDFs.';
+    + 'own line), real, data-accurate charts (a ```chart:bar / chart:line / chart:pie fenced block whose '
+    + 'body is CSV), and real tables — write an ordinary Markdown table and .docx and .pptx both render an '
+    + 'actual table object, not text. PowerPoint decks animate by default (fade transition, elements '
+    + 'entering on click); to change or disable that, make the FIRST line of the source '
+    + '"animation: none" or e.g. "animation: transition=push entrance=fly advance=auto duration=300". '
+    + 'Use pdf_create for PDFs.';
 
   readonly inputSchema = {
     type: 'object',

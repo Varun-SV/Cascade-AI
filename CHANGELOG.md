@@ -18,7 +18,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+## 0.76.0 - 2026-08-27
+
+### Added
+- **PowerPoint decks animate.** `pptxgenjs` has no timeline at all — no
+  `p:timing`, no `p:transition` anywhere in its output — so every generated
+  deck appeared flat, all at once, on every slide. The rendered package now
+  gets a real OOXML timeline written into it: a slide transition, and each
+  slide's elements entering in reading order. Decks animate by default; a first
+  line of `animation: none`, or e.g.
+  `animation: transition=push entrance=fly advance=auto duration=300`, tunes or
+  disables it. Unknown values and malformed durations are ignored rather than
+  written into the XML, because PowerPoint treats a bad timing tree as a
+  corrupt file rather than a bad animation. `entrance=fly` renders as a fly:
+  the preset id only labels an effect in PowerPoint's UI while the filter is
+  what draws it, and this asked for a wipe under the Fly In name, so the shape
+  was revealed in place instead of moving onto the slide.
+
+
 ### Fixed
+- **A failed review printed a wall of text instead of saying what was wrong.**
+  The reviewer answered in prose and that prose went into `currentAction`, a
+  one-line status field. Most surfaces truncate it — the CLI at 38 to 80
+  characters, the run drawer with a CSS clamp — but the web chat's status
+  button renders its label unclamped, so a 780-character verdict appeared as a
+  paragraph beside a chevron sized for a sentence. Clamping it there would only
+  have hidden the one explanation of why the run was repeating itself. The
+  reviewer now returns a verdict: a short summary for the status line and the
+  gaps as data, each naming the sections it applies to. The web chat shows them
+  as a card; the correction pass still receives the full detail. A reviewer that
+  ignores the format and answers in prose degrades to a first-sentence summary
+  plus one gap, rather than back to a paragraph on the status line. The summary
+  leads that status line on every surface, so the CLI, the local dashboard and
+  the desktop run drawer — none of which render the card — still say what was
+  wrong and not merely that something was. A rejection is also cleared when the
+  correction loop stops without resolving it — the pass limit running out, or a
+  corrective pass that made no progress — so the card no longer says
+  “replanning” over a run that has moved on to compiling. Section attribution
+  keeps titles intact: one called "Research and Development" is no longer reported as two
+  sections, and one called "All Hands Migration" is no longer read as the
+  "all" wildcard and stripped of its attribution.
+
+- **A table in a slide came out as literal `|---|---|` text.** `parseSlide` had
+  branches for headings, images, list items, quotes and chart fences, and none
+  for a table row — so every row fell through to the bullet path. The same
+  Markdown already produced a real table in `.docx`, because the block parser
+  used by Word documents has always handled it. Slides now render a genuine
+  PowerPoint table object, and both parsers share one scanner so they cannot
+  drift apart again. Tables written without outer pipes (`Name | Score` over
+  `--- | ---`) are recognised too, and a table too long for its slide is cut to
+  fit with a count of the rows that did not make it, rather than running off
+  the bottom edge where nothing showed they were missing — a count measured
+  against the rows actually kept, since the "+N more rows" marker occupies one
+  of the slots itself. A table also ends where the next block begins: Markdown
+  needs no blank line before a heading or a list, so `## Notes | caveats`
+  written straight after a table is a heading again rather than another row.
+  Cells keep their inline markup, so `**Total**` is still bold in a Word table,
+  and cell splitting reads backslash parity rather than asking whether the
+  previous character was one, so `C:\\| next` is two cells with a literal
+  backslash and `A \| B` stays one cell with a literal pipe. Tilde fences (`~~~`) are fences too, in both parsers and
+  for `chart:` blocks — recognising only backticks left a `~~~` block's markers
+  in the body while the table-shaped lines between them were lifted out as a
+  real table. One definition of "what opens a fence" now backs both parsers and
+  both `chart:` sites, including the up-to-three spaces of indentation Markdown
+  permits — the block parser required column zero while the slide parser
+  trimmed first, so the two disagreed about the same input.
+
 - **An exhausted provider quota was retried for the rest of the run.** A spent
   billing quota and a 429 arrive as the same status, and the router's failover
   path told them apart with a regex that matched `/quota/` — so a dead wallet

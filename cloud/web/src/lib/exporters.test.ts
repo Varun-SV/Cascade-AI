@@ -36,7 +36,7 @@ describe('exporters — client-side binary generation', () => {
     expect(exportLabel('pptx')).toBe('PowerPoint');
     expect(sourceHint('xlsx')).toBe('from CSV');
     expect(sourceHint('pdf')).toBe('from Markdown');
-    expect(sourceHint('pptx')).toBe('from Markdown slides');
+    expect(sourceHint('pptx')).toBe('from Markdown slides — real tables, animated');
   });
 
   it('renders CSV source into a real .xlsx blob', async () => {

@@ -190,6 +190,228 @@ export function chartToTableRows(spec: ChartSpec): string[][] {
 // ── Block model ──────────────────────────────────────────────────
 // A tiny subset of Markdown, parsed once into blocks that each renderer
 // (PDF, Word, Excel) lays out in its own way.
+/**
+ * A predicate that recognises the line closing a fence opened by `opener`.
+ *
+ * CommonMark: a fence closes on a run of its OWN character, at least as long as
+ * the run that opened it — so `~~~` does not close a backtick block and vice
+ * versa. Built per fence because both the character and the length come from
+ * the opener.
+ *
+ * A scan rather than a built RegExp. The first version was
+ * `^\s*<char>{n,}\s*$`, which puts two whitespace-matching quantifiers on
+ * either side of a run — the same shape that made isAlignmentRule quadratic,
+ * and CodeQL flagged the sibling opener pattern for exactly it. Every step
+ * here is a single character test with no quantifier, so the check is linear
+ * in the line's length and there is nothing to backtrack.
+ */
+function fenceCloser(opener: string): (line: string) => boolean {
+  const ch = opener[0]!;
+  const min = opener.length;
+  return (line: string): boolean => {
+    let i = 0;
+    while (i < line.length && (line[i] === ' ' || line[i] === '\t')) i++;
+    let n = 0;
+    while (line[i + n] === ch) n++;
+    if (n < min) return false;
+    i += n;
+    while (i < line.length && (line[i] === ' ' || line[i] === '\t')) i++;
+    return i === line.length;
+  };
+}
+
+/**
+ * A fence OPENER, with the indentation CommonMark allows.
+ *
+ * Up to three leading spaces still open a fence; a fourth makes the line
+ * indented code instead. Requiring column zero — which the block parser did —
+ * left an indented fence unrecognised, so the table scanner lifted the
+ * `| in | out |` inside it out as a real table and left both markers behind as
+ * paragraphs. The slide parser trims before matching and so never had the bug,
+ * which is exactly the drift between the two parsers this module exists to
+ * prevent.
+ *
+ * One definition, used by both parsers AND by both `chart:` fence sites, so
+ * there is a single answer to "what opens a fence" rather than four.
+ *
+ * Scanned, not matched, and that part is a correction: the first version was
+ * `^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$`, where `[ \t]*` and `(.*)` can both match
+ * a tab. CodeQL called it a polynomial regex on uncontrolled data — a HIGH, on
+ * a line this PR added — and document text is model-authored and arbitrarily
+ * long, which is the input class where that stops being theoretical.
+ */
+function fenceOpen(line: string): { marker: string; info: string } | null {
+  let i = 0;
+  // Up to three leading spaces; a fourth makes the line indented code.
+  while (i < 3 && line[i] === ' ') i++;
+  const ch = line[i];
+  if (ch !== '`' && ch !== '~') return null;
+  let n = 0;
+  while (line[i + n] === ch) n++;
+  if (n < 3) return null;
+  return { marker: ch.repeat(n), info: line.slice(i + n).trim() };
+}
+
+/** The chart kind a fence's info string names, or null when it names none. */
+function chartFenceKind(info: string): ChartKind | null {
+  const m = /^chart[ \t]*:(.*)$/i.exec(info);
+  return m ? chartKind(m[1]!) : null;
+}
+
+/**
+ * True for a line that opens a block of its own, and so ENDS a table already
+ * in progress.
+ *
+ * Markdown does not require a blank line before a heading or a list, so a
+ * table followed straight away by `## Notes | caveats` or `- Choose A | B`
+ * used to swallow it as a row — every line with a pipe continued the table.
+ *
+ * Anchored patterns with bounded quantifiers only, and no two adjacent
+ * quantifiers that can match the same character, so none of these can
+ * backtrack on the long model-authored lines this file has to survive.
+ */
+function startsAnotherBlock(trimmed: string): boolean {
+  return /^#{1,6}\s/.test(trimmed)        // ATX heading
+    || /^>/.test(trimmed)                  // block quote
+    || /^(?:```|~~~)/.test(trimmed)        // code fence
+    || /^[-*+]\s/.test(trimmed)            // bullet
+    || /^\d{1,9}[.)]\s/.test(trimmed);     // ordered list item
+}
+
+/** True for a line that could be a row of a table already in progress. */
+export function isTableRow(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.includes('|')) return false;
+  // A leading pipe is unambiguous: `| - not a bullet | x |` is a row, and
+  // every fully-delimited table is written this way.
+  if (trimmed.startsWith('|')) return true;
+  // The pipe-less alignment rule can itself look like a bullet (`- | -`), so
+  // it is settled before the block-start check rather than after it.
+  if (isAlignmentRule(trimmed)) return true;
+  return !startsAnotherBlock(trimmed);
+}
+
+/**
+ * True when a table STARTS at `lines[i]`.
+ *
+ * Outer pipes are optional in Markdown — `Name | Score` over `--- | ---` is an
+ * ordinary table — but a bare pipe is also ordinary prose punctuation, so a
+ * line without the leading pipe only opens a table when the NEXT line is the
+ * alignment rule. Requiring the leading pipe (as this did) silently left the
+ * pipe-less form as bullet text; accepting any line with a pipe would turn
+ * half of prose into tables.
+ */
+export function isTableStart(lines: string[], i: number): boolean {
+  const line = (lines[i] ?? '').trim();
+  if (!line.includes('|')) return false;
+  // The alignment rule on the next line settles it either way.
+  if (isAlignmentRule((lines[i + 1] ?? '').trim())) return true;
+  // Otherwise a leading pipe needs a SECOND one to be a row rather than a line
+  // that merely opens with a pipe — `| alternative syntax` is prose, and the
+  // predicate this replaced required the closing delimiter for that reason.
+  return line.startsWith('|') && line.indexOf('|', 1) !== -1;
+}
+
+/**
+ * Consume a run of Markdown table lines starting at `start`.
+ *
+ * Shared by the block parser (docx/pdf) and the slide parser (pptx) so the two
+ * cannot disagree about what a table is. They did: slides had no table branch
+ * at all, so every row fell through to the bullet path and a deck showed
+ * `|---|---|` as literal text where Word had shown a real table from the same
+ * Markdown.
+ */
+/**
+ * Is this the `|---|:--:|` rule under a table header?
+ *
+ * A character scan rather than the obvious `/^\|[\s:|-]+\|?\s*$/`, which is a
+ * polynomial-backtracking regex and was flagged as such: `[\s:|-]+` and `\s*`
+ * sit next to each other and BOTH match whitespace, so a line of `|` followed
+ * by many tabs makes the engine try every split between them. Document text is
+ * model-authored and can be arbitrarily long, which is exactly the input class
+ * that turns quadratic matching into a hang.
+ *
+ * Each per-character test has no quantifier and cannot backtrack, so the whole
+ * scan is linear in the row's length.
+ */
+function isAlignmentRule(row: string): boolean {
+  if (row.length < 2) return false;
+  let sawDash = false;
+  let sawPipe = false;
+  for (let i = 0; i < row.length; i++) {
+    const ch = row[i]!;
+    if (ch === '-') sawDash = true;
+    else if (ch === '|') sawPipe = true;
+    else if (ch !== ':' && !/\s/.test(ch)) return false;
+  }
+  // A dash is what makes it a RULE rather than a row of empty cells; the pipe
+  // is what makes it a table rather than a horizontal rule.
+  return sawDash && sawPipe;
+}
+
+/**
+ * Split one table row into cells.
+ *
+ * A character scan, not a regex with a negative lookbehind. Three separate
+ * review findings landed on escape handling here — the interior pipe, then the
+ * trailing one, then backslash parity — because `(?<!\\)` asks "is the
+ * previous character a backslash", and that is not the question. The question
+ * is how MANY backslashes precede the pipe: an even run is literal backslashes
+ * and the pipe still delimits, an odd run escapes it. So `| C:\\\\| next |` is
+ * two cells whose first is `C:\\`, which the lookbehind read as one cell with
+ * an escaped pipe, eating a backslash on the way out.
+ *
+ * Scanning left to right answers that by construction: a backslash consumes
+ * the character after it, so parity is never in question and there is no
+ * pattern to backtrack. Same move as isAlignmentRule above, for the same
+ * reason.
+ */
+function splitCells(row: string): string[] {
+  const cells: string[] = [];
+  let cur = '';
+  // A leading delimiter is decoration, not an empty first cell.
+  let i = row.startsWith('|') ? 1 : 0;
+  for (; i < row.length; i++) {
+    const ch = row[i]!;
+    if (ch === '\\') {
+      const next = row[i + 1];
+      // Markdown defines an escape only for punctuation. `\\|` is a literal
+      // pipe and `\\\\` a literal backslash; anything else keeps its backslash,
+      // because dropping it would quietly eat the separator in a path like
+      // `C:\\Users`.
+      if (next === '|' || next === '\\') { cur += next; i++; continue; }
+      cur += ch;
+      continue;
+    }
+    if (ch === '|') { cells.push(cur); cur = ''; continue; }
+    cur += ch;
+  }
+  cells.push(cur);
+  // A trailing delimiter is decoration too, and would otherwise leave a
+  // phantom empty cell — but only the LAST one, so `| a | |` keeps its
+  // genuinely empty middle cell.
+  if (cells.length > 1 && cells[cells.length - 1]!.trim() === '') cells.pop();
+  return cells.map((c) => c.trim());
+}
+
+export function scanTable(lines: string[], start: number): { rows: string[][]; next: number } {
+  const rows: string[][] = [];
+  let i = start;
+  while (i < lines.length && isTableRow(lines[i] ?? '')) {
+    const raw = (lines[i] ?? '').trim();
+    // Skip the |---|:--:| alignment rule; it is punctuation, not data.
+    if (!isAlignmentRule(raw)) {
+      // Cells keep their inline markup. The Word renderer runs them through
+      // inlineRuns, so stripping here silently flattened **bold** in every
+      // docx table; a renderer that needs plain text (PowerPoint's addTable)
+      // strips it itself.
+      rows.push(splitCells(raw));
+    }
+    i++;
+  }
+  return { rows, next: i };
+}
+
 export type Block =
   | { t: 'heading'; level: number; text: string }
   | { t: 'para'; text: string }
@@ -209,12 +431,13 @@ export function parseBlocks(md: string): Block[] {
   while (i < lines.length) {
     const line = lines[i] ?? '';
 
-    const fence = line.match(/^```+\s*(.*)$/);
+    const fence = fenceOpen(line);
     if (fence) { // code fence — or a `chart:` block wearing one
-      const info = (fence[1] ?? '').trim();
+      const closer = fenceCloser(fence.marker);
+      const info = fence.info;
       i++;
       const code: string[] = [];
-      while (i < lines.length && !/^```/.test(lines[i] ?? '')) { code.push(lines[i] ?? ''); i++; }
+      while (i < lines.length && !closer(lines[i] ?? '')) { code.push(lines[i] ?? ''); i++; }
       i++; // closing fence
       const chartInfo = info.match(/^chart\s*:\s*(.+)$/i);
       const kind = chartInfo ? chartKind(chartInfo[1]!) : null;
@@ -242,13 +465,9 @@ export function parseBlocks(md: string): Block[] {
     }
     if (/^>\s?/.test(line)) { out.push({ t: 'quote', text: line.replace(/^>\s?/, '') }); i++; reset(); continue; }
 
-    if (/^\|.*\|/.test(line)) { // markdown table
-      const rows: string[][] = [];
-      while (i < lines.length && /^\|.*\|/.test(lines[i] ?? '')) {
-        const r = lines[i]!;
-        if (!/^\|[\s:|-]+\|?\s*$/.test(r)) rows.push(r.replace(/^\||\|\s*$/g, '').split('|').map((c) => c.trim()));
-        i++;
-      }
+    if (isTableStart(lines, i)) {
+      const { rows, next } = scanTable(lines, i);
+      i = next;
       out.push({ t: 'table', rows });
       reset();
       continue;
@@ -401,11 +620,52 @@ export function inlineRuns(text: string): InlineRun[] {
 
 // ── Slides ───────────────────────────────────────────────────────
 
+/**
+ * A deck-level `animation:` directive, if the source opens with one.
+ *
+ * The vocabulary is deliberately deck-wide rather than per element. A model
+ * writing Markdown will not reliably annotate thirty shapes, and a deck where
+ * half the slides animate and half do not looks broken rather than designed.
+ * Every deck gets a sane scheme for free; a directive tunes or disables it.
+ *
+ *   animation: none
+ *   animation: transition=push entrance=fly advance=auto duration=300
+ */
+export function parseAnimationDirective(md: string): { rest: string; directive: Record<string, string> | null } {
+  const lines = md.replace(/\r\n/g, '\n').split('\n');
+  let i = 0;
+  while (i < lines.length && !lines[i]!.trim()) i++;
+  const m = lines[i]?.match(/^[ \t]*animation[ \t]*:[ \t]*(.*)$/i);
+  if (!m) return { rest: md, directive: null };
+  const body = m[1]!.trim();
+  const directive: Record<string, string> = {};
+  if (/^none$/i.test(body)) {
+    directive['transition'] = 'none';
+    directive['entrance'] = 'none';
+  } else {
+    for (const pair of body.split(/[\s,]+/).filter(Boolean)) {
+      const [k, v] = pair.split('=');
+      if (k && v) directive[k.toLowerCase()] = v.toLowerCase();
+    }
+  }
+  return { rest: lines.slice(i + 1).join('\n'), directive };
+}
+
 export interface Slide {
   title: string;
   body: string[];
   images: ImageRef[];
   charts: ChartSpec[];
+  /**
+   * Real tables, laid out as a grid on the slide.
+   *
+   * PowerPoint holds a genuine table shape, so a Markdown table has somewhere
+   * to go. Before this existed, `parseSlide` had no branch for a `|…|` line
+   * and every row fell through to the bullet path — a deck rendered
+   * `|---|---|` as literal text where Word, from the same Markdown, showed a
+   * proper table.
+   */
+  tables: string[][][];
 }
 
 /** Split a Markdown deck into slides: on `---` rules, else on top-level headings. */
@@ -423,7 +683,8 @@ export function splitSlides(md: string): Slide[] {
     if (cur.length) sections.push(cur.join('\n'));
     if (sections.length > 1) chunks = sections;
   }
-  return chunks.map(parseSlide).filter((s) => s.title || s.body.length || s.images.length || s.charts.length);
+  return chunks.map(parseSlide)
+    .filter((s) => s.title || s.body.length || s.images.length || s.charts.length || s.tables.length);
 }
 
 export function parseSlide(chunk: string): Slide {
@@ -431,18 +692,21 @@ export function parseSlide(chunk: string): Slide {
   const body: string[] = [];
   const images: ImageRef[] = [];
   const charts: ChartSpec[] = [];
+  const tables: string[][][] = [];
   const lines = chunk.split('\n');
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i] ?? '';
     // A `chart:` fence is a real chart object, not bullet text. Pulled out here
     // (and its body skipped) so the numbers reach addChart() instead of being
     // flattened into a list of CSV rows.
-    const fence = raw.match(/^[ \t]*```+[ \t]*chart[ \t]*:(.*)/i);
-    if (fence) {
-      const kind = chartKind(fence[1]!);
+    const fence = fenceOpen(raw);
+    const chartFence = fence && chartFenceKind(fence.info) !== null ? fence : null;
+    if (chartFence) {
+      const chartCloser = fenceCloser(chartFence.marker);
+      const kind = chartFenceKind(chartFence.info);
       const bodyLines: string[] = [];
       i++;
-      while (i < lines.length && !/^\s*```/.test(lines[i] ?? '')) { bodyLines.push(lines[i] ?? ''); i++; }
+      while (i < lines.length && !chartCloser(lines[i] ?? '')) { bodyLines.push(lines[i] ?? ''); i++; }
       const spec = kind ? parseChartSpec(kind, bodyLines.join('\n')) : null;
       if (spec) charts.push(spec);
       else for (const bl of bodyLines) if (bl.trim()) body.push(stripInline(bl.trim()));
@@ -450,6 +714,34 @@ export function parseSlide(chunk: string): Slide {
     }
     const line = raw.trim();
     if (!line) continue;
+    // An ordinary code fence. Only `chart:` fences were consumed above, so
+    // everything else fell through — and a code sample containing `| in | out |`
+    // had that line lifted out as a real table while its backticks stayed
+    // behind in the body.
+    // Tildes fence too. Recognising only backticks left a `~~~` block's marker
+    // lines sitting in the body while the table-shaped lines between them were
+    // lifted out as a real table — the same corruption the backtick branch was
+    // added to stop, in the other half of CommonMark's fence syntax. A fence
+    // closes on its OWN character, so the two cannot cross-close.
+    const codeFence = fenceOpen(line);
+    if (codeFence) {
+      const closer = fenceCloser(codeFence.marker);
+      i++;
+      while (i < lines.length && !closer(lines[i] ?? '')) {
+        const inner = (lines[i] ?? '').trim();
+        if (inner) body.push(inner);
+        i++;
+      }
+      continue;
+    }
+    // A table, not four bullets of pipe characters. Checked before the list and
+    // paragraph branches, both of which would happily swallow `| a | b |`.
+    if (isTableStart(lines, i)) {
+      const { rows, next } = scanTable(lines, i);
+      if (rows.length) tables.push(rows);
+      i = next - 1; // the for-loop's i++ takes us to `next`
+      continue;
+    }
     const h = line.match(/^#{1,6}[ \t]+(.*)/);
     if (h) { if (!title) title = stripInline(h[1]!); else body.push(stripInline(h[1]!)); continue; }
     // A picture, not a bullet. Kept out of `body` entirely — stripInline would
@@ -467,7 +759,7 @@ export function parseSlide(chunk: string): Slide {
     if (/^>\s?/.test(line)) { body.push(stripInline(line.replace(/^>\s?/, ''))); continue; }
     body.push(stripInline(line));
   }
-  return { title, body, images, charts };
+  return { title, body, images, charts, tables };
 }
 
 /**
@@ -485,12 +777,16 @@ export function extractCharts(source: string): { charts: ChartSpec[]; rest: stri
   const charts: ChartSpec[] = [];
   const rest: string[] = [];
   for (let i = 0; i < lines.length; i++) {
-    const fence = lines[i]!.match(/^[ \t]*```+[ \t]*chart[ \t]*:(.*)/i);
-    if (!fence) { rest.push(lines[i]!); continue; }
-    const kind = chartKind(fence[1]!);
+    // Same fence definition as both parsers: tildes count, and a fence closes
+    // on its own character. This was backtick-only, so a `~~~chart:` block
+    // reached the spreadsheet as raw rows.
+    const fence = fenceOpen(lines[i]!);
+    const kind = fence ? chartFenceKind(fence.info) : null;
+    if (!fence || kind === null) { rest.push(lines[i]!); continue; }
+    const closer = fenceCloser(fence.marker);
     const body: string[] = [];
     i++;
-    while (i < lines.length && !/^\s*```/.test(lines[i] ?? '')) { body.push(lines[i] ?? ''); i++; }
+    while (i < lines.length && !closer(lines[i] ?? '')) { body.push(lines[i] ?? ''); i++; }
     const spec = kind ? parseChartSpec(kind, body.join('\n')) : null;
     if (spec) charts.push(spec);
     else rest.push(...body); // unparseable → leave the rows in the sheet
