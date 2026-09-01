@@ -14,6 +14,7 @@
 //  handed back for `image_analyze` to read, so a non-vision model can still
 //  navigate, fill and extract text without being denied the tool outright.
 
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { ToolExecuteOptions } from '../types.js';
@@ -109,13 +110,23 @@ export class BrowserTool extends BaseTool {
           // nothing. A path costs a dozen and `image_analyze` can actually read
           // it.
           const buf = await page.screenshot({ type: 'png' });
-          const rel = `screenshot-${Date.now()}.png`;
+          // `Date.now()` alone collides: T3 workers run concurrently and share
+          // one registry and one workspace, so two screenshots taken in the
+          // same millisecond resolve to the same path and one silently
+          // overwrites the other — each worker then told to inspect a file
+          // holding someone else's page.
+          const rel = `screenshot-${Date.now()}-${randomUUID().slice(0, 8)}.png`;
           const abs = resolveInWorkspace(this.workspaceRoot, rel);
           await fs.mkdir(path.dirname(abs), { recursive: true });
           await fs.writeFile(abs, buf);
+          // The ABSOLUTE path, not the relative one. image_analyze reads with a
+          // bare `fs.readFile(filePath)` and never consults its own workspace
+          // root, so a relative path resolves against process.cwd() — which is
+          // not the workspace for an SDK embedder, a hosted run, or the
+          // desktop app, and the read fails with ENOENT.
           return [
-            `Screenshot saved to ${rel} (${Math.round(buf.byteLength / 1024)} KB).`,
-            `Call image_analyze with path "${rel}" to see what is on it — that needs a vision-capable model.`,
+            `Screenshot saved to ${abs} (${Math.round(buf.byteLength / 1024)} KB).`,
+            `Call image_analyze with that path to see what is on it — that needs a vision-capable model.`,
           ].join(' ');
         }
         case 'evaluate': {

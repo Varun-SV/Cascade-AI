@@ -44,6 +44,9 @@ describe('BrowserTool — screenshot', () => {
 
   afterEach(async () => {
     vi.doUnmock('playwright');
+    // The collision test freezes Date.now(); leaving it frozen would quietly
+    // change what any later test in this file measures.
+    vi.restoreAllMocks();
     await fs.rm(workspace, { recursive: true, force: true });
   });
 
@@ -66,10 +69,52 @@ describe('BrowserTool — screenshot', () => {
     expect(out).not.toContain('data:image');
     expect(out).toContain('image_analyze');
 
-    const named = /screenshot-\d+\.png/.exec(out)?.[0];
+    // ABSOLUTE, because image_analyze reads with a bare fs.readFile and never
+    // consults its own workspace root — a relative path would resolve against
+    // process.cwd() and ENOENT wherever the workspace isn't the cwd, which is
+    // every hosted run, every SDK embedder, and the desktop app.
+    const named = /\S*screenshot-[\w-]+\.png/.exec(out)?.[0];
     expect(named, `no filename in: ${out}`).toBeTruthy();
-    const written = await fs.readFile(path.join(workspace, named!));
+    expect(path.isAbsolute(named!), `expected an absolute path, got: ${named}`).toBe(true);
+    expect(named!.startsWith(await fs.realpath(workspace))).toBe(true);
+
+    const written = await fs.readFile(named!);
     expect(written.equals(png)).toBe(true);
+  });
+
+  it('gives screenshots taken in the same millisecond distinct filenames', async () => {
+    // T3 workers run in parallel and share one registry and one workspace, so
+    // a `Date.now()`-only name collides whenever two land in the same
+    // millisecond — one PNG overwrites the other and both workers are told to
+    // inspect the survivor, each believing it holds their own page.
+    //
+    // The clock is FROZEN rather than the calls being raced. Racing them only
+    // reproduces the collision if two happen to land in the same millisecond,
+    // and they mostly do not — an earlier version of this test passed against
+    // the very bug it was written for, because every iteration got its own
+    // millisecond and uniqueness proved nothing. Pinning Date.now() makes the
+    // collision certain instead of likely: with a timestamp-only name all 25
+    // of these are the same path.
+    vi.spyOn(Date, 'now').mockReturnValue(1_788_000_000_000);
+
+    stubPlaywright(fakePage(Buffer.from('89504e470d0a1a0a', 'hex')));
+    const { BrowserTool: Tool } = await import('./browser.js');
+    const tool = new Tool();
+    tool.setWorkspaceRoot(workspace);
+
+    const names: string[] = [];
+    for (let i = 0; i < 25; i++) {
+      const out = await tool.execute({ action: 'screenshot' }, {} as never);
+      names.push(/\S*screenshot-\S*\.png/.exec(out)?.[0] ?? '');
+    }
+
+    expect(names.every(Boolean), `a call produced no filename: ${JSON.stringify(names)}`).toBe(true);
+    expect(new Set(names).size, `collided: ${JSON.stringify(names.slice(0, 3))}`).toBe(names.length);
+
+    // And every one of them is still on disk — a collision would have left
+    // fewer files than calls even if the names had differed.
+    const written = (await fs.readdir(workspace)).filter((f) => f.endsWith('.png'));
+    expect(written.length).toBe(names.length);
   });
 
   it('keeps the result small enough to be worth putting in a context window', async () => {

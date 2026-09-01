@@ -12,10 +12,17 @@
 //  non-public address, and follows redirects MANUALLY so each hop is
 //  re-validated (a public URL cannot 302 you to an internal one).
 //
+//  It ALSO re-checks the address at connect time (see ssrfAgent). Resolving up
+//  front and then letting fetch resolve again leaves a gap: an attacker who
+//  controls the name's DNS answers publicly for the check and privately for the
+//  connection, and no amount of strictness in a pre-flight lookup can see that.
+//
 //  Set CASCADE_ALLOW_LOCAL_FETCH=1 to opt out (e.g. fetching local dev docs).
 
 import dns from 'node:dns/promises';
+import dnsCallback from 'node:dns';
 import net from 'node:net';
+import { Agent } from 'undici';
 
 export class SsrfBlockedError extends Error {
   constructor(message: string) {
@@ -115,14 +122,65 @@ export async function assertPublicUrl(rawUrl: string): Promise<URL> {
 }
 
 /**
+ * The address that gets CONNECTED to, checked at the moment of connecting.
+ *
+ * `assertPublicUrl` resolves the hostname to decide whether to proceed, and
+ * then `fetch` resolves it AGAIN to open the socket. Those are two separate
+ * lookups, so a hostname whose DNS the attacker controls can answer publicly
+ * for the first and with 127.0.0.1 or 169.254.169.254 for the second — a
+ * check-then-resolve-again gap that a pre-flight lookup cannot close no matter
+ * how strict it is. This closes it by validating inside the resolution the
+ * connection itself uses: the address that passes here is the address the
+ * socket goes to, with no second lookup in between.
+ *
+ * `assertPublicUrl` is still worth running first. It validates the scheme,
+ * re-checks every redirect hop, and produces a precise message naming the host
+ * — where a rejection here surfaces as a connect error. Defence in depth: the
+ * pre-flight check explains, this one enforces.
+ */
+const ssrfAgent = new Agent({
+  connect: {
+    lookup(hostname, options, callback) {
+      if (allowLocal()) {
+        dnsCallback.lookup(hostname, options, callback as never);
+        return;
+      }
+      dnsCallback.lookup(hostname, { ...options, all: true }, (err, addresses) => {
+        if (err) return callback(err, '', 0);
+        const list = Array.isArray(addresses) ? addresses : [addresses];
+        const bad = list.find((a) => isPrivateAddress(a.address));
+        if (bad) {
+          return callback(
+            new SsrfBlockedError(`Blocked connection to "${hostname}" — resolved to non-public address ${bad.address}.`),
+            '',
+            0,
+          );
+        }
+        // Answer in the shape the caller asked for: undici passes `all` through
+        // from its own connect options, and handing back the wrong arity here
+        // fails in the socket layer rather than anywhere legible.
+        if (options.all) return (callback as unknown as (e: null, a: typeof list) => void)(null, list);
+        const first = list[0]!;
+        return callback(null, first.address, first.family);
+      });
+    },
+  },
+});
+
+/**
  * SSRF-safe fetch. Validates the initial URL and every redirect hop against
- * {@link assertPublicUrl}. Drop-in for `fetch` for agent-supplied URLs.
+ * {@link assertPublicUrl}, and pins the connection itself to a re-validated
+ * address (see {@link ssrfAgent}). Drop-in for `fetch` for agent-supplied URLs.
  */
 export async function safeFetch(rawUrl: string, init: RequestInit = {}): Promise<Response> {
   let currentUrl = (await assertPublicUrl(rawUrl)).toString();
 
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
-    const resp = await fetch(currentUrl, { ...init, redirect: 'manual' });
+    // `dispatcher` is undici's, which is what Node's global fetch is built on;
+    // it is absent from the DOM RequestInit type, hence the cast. Nothing in
+    // this repo installs a global dispatcher, so scoping one here overrides no
+    // proxy or pool configured elsewhere.
+    const resp = await fetch(currentUrl, { ...init, redirect: 'manual', dispatcher: ssrfAgent } as RequestInit);
 
     // Not a redirect — return as-is.
     if (resp.status < 300 || resp.status >= 400) return resp;

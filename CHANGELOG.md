@@ -36,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Vite major pulls in the `@rolldown/*` family and the generated lockfile was
   missing every one of those entries. Patch and minor updates are grouped now;
   majors arrive one PR each, where they can be looked at properly.
+- **`safeFetch` now re-checks the address at connect time, closing a DNS
+  rebinding window.** It resolved the hostname to decide whether to proceed and
+  then let `fetch` resolve it again to open the socket — two independent
+  lookups, so a name whose DNS an attacker controls could answer publicly for
+  the check and with `127.0.0.1` or `169.254.169.254` for the connection. No
+  amount of strictness in a pre-flight lookup can see that happen. Validation
+  now runs inside the resolution the connection itself uses, so the address
+  that passes is the address the socket goes to. Applies to every `safeFetch`
+  caller — `web_fetch` and the dynamic tool-creator as well as the hosted
+  search backend. `CASCADE_ALLOW_LOCAL_FETCH=1` still opts out.
 - **A hosted SearXNG URL now goes through the SSRF guard.** `web_fetch` has
   always routed through `safeFetch`, which rejects loopback, link-local and
   private addresses and re-checks every redirect hop; `web_search` did not, and
@@ -53,6 +63,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hosted search silently fell back to the keyless DuckDuckGo scraper. It
   type-checked throughout because the key was contributed by a spread, which
   TypeScript does not excess-property-check.
+- **Screenshots no longer overwrite each other.** The filename came from
+  `Date.now()` alone, and T3 workers run concurrently against one shared
+  registry and workspace — two screenshots in the same millisecond resolved to
+  the same path, so one silently replaced the other and both workers were told
+  to inspect the survivor. The path returned is also absolute now:
+  `image_analyze` reads with a bare `fs.readFile` and never consults its own
+  workspace root, so a relative path resolved against `process.cwd()` and
+  failed wherever that is not the workspace — every hosted run, every SDK
+  embedder, and the desktop app.
 - **Browser screenshots are readable again.** The `browser` tool returned the
   PNG inline as a `data:image/png;base64,…` string. A tool result is plain
   text, and nothing converts a data URI into an image content block, so the one
