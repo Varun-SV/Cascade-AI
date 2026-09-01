@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+## 0.77.0 - 2026-09-01
+
 ### Security
 - **Dependency refresh, lockfile only.** `undici` 6.27.0 → 6.28.0 (an upstream
   security release), plus `ws`, `mermaid`, `body-parser`, `brace-expansion`,
@@ -34,6 +36,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Vite major pulls in the `@rolldown/*` family and the generated lockfile was
   missing every one of those entries. Patch and minor updates are grouped now;
   majors arrive one PR each, where they can be looked at properly.
+- **NAT64 `64:ff9b:1::/48` decodes to the right IPv4 address.** RFC 6052 splits
+  the embedded address across bits 48-63 and 72-87 for the /48 local-use prefix,
+  not into the last 32 bits as for the well-known /96. Reading the wrong groups
+  yielded `0.0.0.0`, which counts as private — so it blocked every IPv4-only
+  destination on a /48 DNS64 deployment rather than letting anything through.
+  A `64:ff9b` address in no decodable layout is now refused rather than guessed at.
+- **IPv6 addresses that carry an IPv4 address are blocked.** `http://[::ffff:127.0.0.1]/`
+  reached loopback, and `http://[::ffff:169.254.169.254]/` reached the cloud
+  metadata endpoint. The mapped-address check only recognised the dotted
+  spelling, and `new URL()` canonicalises every one of these to hex before the
+  guard sees it — so on a real URL that check never ran. A literal IP also
+  needs no DNS, so the connect-time guard does not apply either. IPv6 is now
+  expanded to its eight groups and judged by any IPv4 address it embeds:
+  IPv4-mapped, IPv4-compatible, NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`).
+  Public IPv6 is unaffected, mapped-public (`::ffff:8.8.8.8`) included.
+- **`safeFetch` now re-checks the address at connect time, closing a DNS
+  rebinding window.** It resolved the hostname to decide whether to proceed and
+  then let `fetch` resolve it again to open the socket — two independent
+  lookups, so a name whose DNS an attacker controls could answer publicly for
+  the check and with `127.0.0.1` or `169.254.169.254` for the connection. No
+  amount of strictness in a pre-flight lookup can see that happen. Validation
+  now runs inside the resolution the connection itself uses, so the address
+  that passes is the address the socket goes to. Applies to every `safeFetch`
+  caller — `web_fetch` and the dynamic tool-creator as well as the hosted
+  search backend. `CASCADE_ALLOW_LOCAL_FETCH=1` still opts out.
+- **A hosted SearXNG URL now goes through the SSRF guard.** `web_fetch` has
+  always routed through `safeFetch`, which rejects loopback, link-local and
+  private addresses and re-checks every redirect hop; `web_search` did not, and
+  on the hosted server that URL arrives in the request body. Guarded there via a
+  new `tools.webSearch.guardSearxngUrl`, and left off for CLI and desktop runs,
+  where the URL is the machine owner's own config and a self-hosted SearXNG
+  legitimately lives on a private address.
+
+### Fixed
+- **Hosted runs ignored the search backend you configured.** The SearXNG URL,
+  Brave key and Tavily key were written to a top-level `webSearch` key that
+  nothing reads — every reader goes through `tools.webSearch`, and the config
+  passes through `CascadeConfigSchema.parse()`, which strips keys the schema
+  does not declare. So the setting was deleted on its way into a run and every
+  hosted search silently fell back to the keyless DuckDuckGo scraper. It
+  type-checked throughout because the key was contributed by a spread, which
+  TypeScript does not excess-property-check.
+- **Screenshots are written under `.cascade/screenshots/`.** They landed in the
+  workspace root, which is normally a git checkout — so ordinary browser use
+  left untracked PNGs behind and they accumulated. `.gitignore` already covers
+  `.cascade/`.
+- **Screenshots no longer overwrite each other.** The filename came from
+  `Date.now()` alone, and T3 workers run concurrently against one shared
+  registry and workspace — two screenshots in the same millisecond resolved to
+  the same path, so one silently replaced the other and both workers were told
+  to inspect the survivor. The path returned is also absolute now:
+  `image_analyze` reads with a bare `fs.readFile` and never consults its own
+  workspace root, so a relative path resolved against `process.cwd()` and
+  failed wherever that is not the workspace — every hosted run, every SDK
+  embedder, and the desktop app.
+- **Browser screenshots are readable again.** The `browser` tool returned the
+  PNG inline as a `data:image/png;base64,…` string. A tool result is plain
+  text, and nothing converts a data URI into an image content block, so the one
+  action needing a vision model was the one no model could see — several
+  hundred KB of base64 spent as context tokens saying nothing. Screenshots are
+  written into the workspace now and the path returned.
+- **The `browser` tool no longer advertises a restriction it never enforced.**
+  Its description and two README entries claimed vision- or multimodal-only;
+  the only gate that has ever existed is `tools.browserEnabled`.
 
 ## 0.76.0 - 2026-08-27
 

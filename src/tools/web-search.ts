@@ -18,6 +18,7 @@
 
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
+import { safeFetch } from './utils/safe-fetch.js';
 
 export interface WebSearchResult {
   title: string;
@@ -35,6 +36,26 @@ export interface WebSearchConfig {
   tavilyApiKey?: string;
   /** Max number of results to return (default: 5) */
   maxResults?: number;
+  /**
+   * Send `searxngUrl` through the SSRF guard instead of fetching it directly.
+   *
+   * This is a statement about where the URL CAME FROM, not about the URL
+   * itself. On a CLI or desktop run it is the machine owner's own config, and
+   * a self-hosted SearXNG legitimately lives on `localhost:8080` or a LAN
+   * address — guarding it there would break the setup this tool documents as
+   * its preferred backend. On the hosted server the same field arrives in a
+   * request body from a client, which makes it attacker-controlled input
+   * pointed at a fetch the server performs: exactly the shape `safeFetch`
+   * exists to stop.
+   *
+   * Brave and Tavily need no equivalent because their endpoints are hardcoded
+   * here; only the SearXNG URL is caller-supplied.
+   *
+   * Off by default, so the guard is something a host opts INTO. That default
+   * is deliberate: the CLI is the common case and must keep working, and a
+   * host that accepts remote input is the party that knows it did.
+   */
+  guardSearxngUrl?: boolean;
 }
 
 // ── SearXNG ───────────────────────────────────
@@ -43,6 +64,7 @@ async function searchSearXNG(
   query: string,
   baseUrl: string,
   maxResults: number,
+  guardUrl = false,
 ): Promise<WebSearchResult[]> {
   const url = new URL('/search', baseUrl);
   url.searchParams.set('q', query);
@@ -50,10 +72,16 @@ async function searchSearXNG(
   url.searchParams.set('categories', 'general');
   url.searchParams.set('engines', 'google,bing,duckduckgo');
 
-  const resp = await fetch(url.toString(), {
+  const init: RequestInit = {
     headers: { 'User-Agent': 'Cascade-AI/1.0 WebSearchTool' },
     signal: AbortSignal.timeout(10_000),
-  });
+  };
+  // Spelled out rather than picking a function into a variable: the global
+  // `fetch` is not reliably callable once detached from its receiver, and the
+  // two branches read more honestly than a name that hides which one ran.
+  const resp = guardUrl
+    ? await safeFetch(url.toString(), init)
+    : await fetch(url.toString(), init);
 
   if (!resp.ok) {
     throw new Error(`SearXNG returned HTTP ${resp.status}`);
@@ -266,6 +294,10 @@ export class WebSearchTool extends BaseTool {
       braveApiKey: config.braveApiKey ?? process.env['BRAVE_SEARCH_API_KEY'],
       tavilyApiKey: config.tavilyApiKey ?? process.env['TAVILY_API_KEY'],
       maxResults: config.maxResults ?? 5,
+      // Note this reads only from `config`, never from the environment: the
+      // guard tracks the trustworthiness of the URL the host passed in, and an
+      // env var says nothing about that.
+      guardSearxngUrl: config.guardSearxngUrl ?? false,
     };
   }
 
@@ -291,7 +323,7 @@ export class WebSearchTool extends BaseTool {
     // ── 1. SearXNG (preferred — self-hosted, privacy-preserving) ──────────
     if (this.config.searxngUrl) {
       try {
-        results = await searchSearXNG(query, this.config.searxngUrl, maxResults);
+        results = await searchSearXNG(query, this.config.searxngUrl, maxResults, this.config.guardSearxngUrl);
         anyBackendReachable = true;
         if (results.length > 0) return this.formatResults(query, results);
         errors.push('SearXNG: returned 0 results');

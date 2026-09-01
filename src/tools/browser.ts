@@ -1,15 +1,31 @@
 // ─────────────────────────────────────────────
-//  Cascade AI — Browser Automation Tool (T3 + multimodal only)
+//  Cascade AI — Browser Automation Tool
 // ─────────────────────────────────────────────
+//
+//  Registered only when `tools.browserEnabled` is on (registry.ts). That flag
+//  is the whole gate — this header used to claim "T3 + multimodal only" and the
+//  README claimed a vision-model restriction to match, but no model capability
+//  has ever been consulted anywhere. The claim was harmless only because the
+//  flag defaults to false, which would stop being true the moment anything in
+//  the product turned it on.
+//
+//  Vision matters for exactly one action, `screenshot`, and it is handled where
+//  it actually applies: the PNG is written into the workspace and the path
+//  handed back for `image_analyze` to read, so a non-vision model can still
+//  navigate, fill and extract text without being denied the tool outright.
 
+import { randomUUID } from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
+import { resolveInWorkspace } from './utils/workspace-path.js';
 
 const BROWSER_LAUNCH_TIMEOUT_MS = 15_000;
 
 export class BrowserTool extends BaseTool {
   readonly name = 'browser';
-  readonly description = 'Control a browser: navigate to URLs, click elements, fill forms, take screenshots. Only available with multimodal models.';
+  readonly description = 'Control a browser: navigate to URLs, click elements, fill forms, take screenshots. Screenshots are saved to a file for image_analyze to read.';
   readonly inputSchema = {
     type: 'object',
     properties: {
@@ -85,8 +101,38 @@ export class BrowserTool extends BaseTool {
           return `Filled ${input['selector']} with value`;
         }
         case 'screenshot': {
+          // Written to a file, NOT returned inline. This used to hand back a
+          // `data:image/png;base64,…` string, and a tool result is plain text
+          // that goes straight into the model's context — nothing anywhere in
+          // the codebase turns a data URI into an image content block. So the
+          // one action that needed a vision model was also the one action no
+          // model could see: a few hundred KB of base64 spent as tokens to say
+          // nothing. A path costs a dozen and `image_analyze` can actually read
+          // it.
           const buf = await page.screenshot({ type: 'png' });
-          return `data:image/png;base64,${buf.toString('base64')}`;
+          // `Date.now()` alone collides: T3 workers run concurrently and share
+          // one registry and one workspace, so two screenshots taken in the
+          // same millisecond resolve to the same path and one silently
+          // overwrites the other — each worker then told to inspect a file
+          // holding someone else's page.
+          // Under `.cascade/screenshots/`, not the workspace root. A workspace
+          // is usually a git checkout, `.gitignore` already covers `.cascade/`,
+          // and the alternative is every browser call leaving an untracked PNG
+          // in someone's repo for them to notice and delete. Same convention as
+          // the interpreter's `.cascade/tmp` scratch.
+          const rel = path.join('.cascade', 'screenshots', `screenshot-${Date.now()}-${randomUUID().slice(0, 8)}.png`);
+          const abs = resolveInWorkspace(this.workspaceRoot, rel);
+          await fs.mkdir(path.dirname(abs), { recursive: true });
+          await fs.writeFile(abs, buf);
+          // The ABSOLUTE path, not the relative one. image_analyze reads with a
+          // bare `fs.readFile(filePath)` and never consults its own workspace
+          // root, so a relative path resolves against process.cwd() — which is
+          // not the workspace for an SDK embedder, a hosted run, or the
+          // desktop app, and the read fails with ENOENT.
+          return [
+            `Screenshot saved to ${abs} (${Math.round(buf.byteLength / 1024)} KB).`,
+            `Call image_analyze with that path to see what is on it — that needs a vision-capable model.`,
+          ].join(' ');
         }
         case 'evaluate': {
           const result = await page.evaluate(input['script'] as string);

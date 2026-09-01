@@ -13,6 +13,11 @@ export * from './core/verification/index.js';
 export { runCascade, createCascade, streamCascade } from './sdk/index.js';
 
 export { ConfigManager, hasUsableProvider, hasProviderCredential, applyProviderApiKey } from './config/index.js';
+// The schema `createCascade` validates against. Exported so an embedder can
+// check a config it assembled BEFORE handing it over — the parse strips keys it
+// does not declare, which is silent, so being able to see what survives is the
+// difference between a setting that works and one that vanishes.
+export { CascadeConfigSchema } from './config/schema.js';
 export {
   applyProviderCredential, applyEndpointEdit, applySettingsCredentials,
   credentialDispositionForEdit, endpointFromSettingsPayload, explainRefusal,

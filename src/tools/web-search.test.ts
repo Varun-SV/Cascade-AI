@@ -54,6 +54,59 @@ describe('parseDdgAnchors', () => {
   });
 });
 
+describe('WebSearchTool — SearXNG URL trust', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // Where the URL came from decides whether it gets guarded. On a CLI run it is
+  // the machine owner's own config and a self-hosted SearXNG is routinely on
+  // localhost — guarding there would break the backend this tool documents as
+  // its preferred one. On the hosted server the same field arrives in a request
+  // body, which makes it caller-controlled input aimed at a fetch the server
+  // performs.
+
+  it('guards the URL when the host says it is untrusted — the fetch never happens', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    const tool = new WebSearchTool({ searxngUrl: 'http://169.254.169.254/', guardSearxngUrl: true });
+
+    await expect(tool.execute({ query: 'x' }, {} as never)).rejects.toMatchObject({
+      message: expect.stringContaining('non-public address'),
+    });
+    // The point is not that it errored — it is that nothing was ever sent. A
+    // guard that fails after the request has left is not a guard. (The DDG
+    // fallbacks run next and DO call fetch, so assert on the SearXNG URL
+    // specifically rather than on the call count.)
+    for (const [url] of fetchSpy.mock.calls) {
+      expect(String(url)).not.toContain('169.254.169.254');
+    }
+  });
+
+  it('does NOT guard by default, so a self-hosted SearXNG on localhost still works', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ results: [{ title: 'T', url: 'https://e.example', content: 'c' }] }),
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    const tool = new WebSearchTool({ searxngUrl: 'http://localhost:8080' });
+
+    const out = await tool.execute({ query: 'x' }, {} as never);
+    expect(out).toContain('https://e.example');
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toContain('localhost:8080');
+  });
+
+  it('leaves the flag off unless the host sets it — the default must not be the guarded one', () => {
+    // Off-by-default is what keeps every existing CLI and desktop install
+    // working; a host that accepts remote input is the party that knows it did.
+    // An env var deliberately cannot set this: it says nothing about where the
+    // URL came from.
+    vi.stubEnv('SEARXNG_URL', 'http://localhost:8080');
+    expect(new WebSearchTool({})['config'].guardSearxngUrl).toBe(false);
+    vi.unstubAllEnvs();
+  });
+});
+
 describe('WebSearchTool.execute — all backends down', () => {
   afterEach(() => {
     vi.unstubAllGlobals();

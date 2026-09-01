@@ -411,10 +411,39 @@ export function buildCloudConfig(
       // fence instead (see FILE_DELIVERY_GUIDANCE), which the browser renders
       // into a real .docx/.pptx/.xlsx on download.
       disabledTools: [...new Set([...(controls.disabledTools ?? []), 'generate_document'])],
+      // The user's own search backends.
+      //
+      // This block used to sit at the TOP level of the returned object, where
+      // nothing reads it. Every reader goes through `tools.webSearch` —
+      // registry.ts:264 hands `ToolsConfig.webSearch` to the tool, and keysync
+      // and settings-payload both address it the same way — and `createCascade`
+      // runs the config through `CascadeConfigSchema.parse()`, which strips keys
+      // the schema does not declare. So a hosted user's configured SearXNG URL,
+      // Brave key or Tavily key was deleted on the way in, and every hosted
+      // search silently fell through to the keyless DuckDuckGo scraper: the one
+      // backend with no API contract behind it, and the one whose own comment
+      // records a parsing bug that made it return nothing at all.
+      //
+      // It type-checked the whole time because the property was contributed by
+      // a SPREAD, and TypeScript only excess-property-checks direct literals.
+      //
+      // `guardSearxngUrl` is what makes moving it here safe rather than a new
+      // hole. Unlike a CLI run, this URL arrives in the request body — so it is
+      // caller-controlled input aimed at a fetch the server makes, and it goes
+      // through the SSRF guard. Setting it in the same edit is not tidiness:
+      // relocating the config without it is precisely what would turn a dormant
+      // bug into a live SSRF.
+      ...(webSearchOn && hasBackend
+        ? {
+            webSearch: {
+              searxngUrl: wsc!.searxngUrl,
+              braveApiKey: wsc!.braveApiKey,
+              tavilyApiKey: wsc!.tavilyApiKey,
+              guardSearxngUrl: true,
+            },
+          }
+        : {}),
     },
-    ...(webSearchOn && hasBackend
-      ? { webSearch: { searxngUrl: wsc!.searxngUrl, braveApiKey: wsc!.braveApiKey, tavilyApiKey: wsc!.tavilyApiKey } }
-      : {}),
     knowledge: { factsExtraction: false },
     telemetry: { enabled: false },
     // A hosted run has no shell/file tools; leaving runtime tool-creation on made
