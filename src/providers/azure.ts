@@ -67,7 +67,13 @@ function catalogEntry(id: string): CloudCatalogEntry | undefined {
 export function inferAzureBaseModel(deploymentName: string): string | null {
   const n = deploymentName.toLowerCase();
   const compact = compactModelId(n);
+  const hasBareGpt56Alias = compact.includes('gpt5.6');
+
   for (const model of AZURE_CATALOG) {
+    // A bare gpt-5.6 deployment name is OpenAI's Sol alias. Skip the generic
+    // gpt-5 catalog entry here so it cannot swallow that signal before the
+    // alias fallback below; explicit Sol/Terra/Luna entries still match first.
+    if (hasBareGpt56Alias && model.id === 'gpt-5') continue;
     if (n.includes(model.id.toLowerCase()) || compact.includes(compactModelId(model.id))) {
       return model.id;
     }
@@ -76,7 +82,7 @@ export function inferAzureBaseModel(deploymentName: string): string | null {
   // OpenAI documents bare `gpt-5.6` as the Sol alias. Keep that useful signal
   // even when an Azure deployment name omits the tier suffix. More-specific
   // catalog entries were checked above, so Terra/Luna cannot be swallowed here.
-  if (compact.includes('gpt5.6')) return 'gpt-5.6-sol';
+  if (hasBareGpt56Alias) return 'gpt-5.6-sol';
 
   // Legacy / forward-compatible GPT-5 family fallback. Search only the suffix
   // after the first family marker so names such as `prod-gpt5foo-mini` retain
@@ -140,30 +146,22 @@ export function azureModelForDeployment(cfg: ProviderConfig): ModelInfo | null {
     : undefined;
 
   if (base && baseModelId) {
-    // Azure gets its OWN price lookup. resolvePricing may fall back to OpenAI if
-    // the Azure dataset has no row; that is useful as an estimate, but must not
-    // masquerade as a confirmed Azure quote. pricingUnknown remains true in
-    // that case so cost-sensitive routing/budgeting stays conservative.
     const azurePrice = resolvePricing(
       { id, provider: 'azure', isLocal: false, baseModelId },
       { region: cfg.region },
     );
     const exactAzurePrice = !azurePrice.unknown && !azurePrice.estimatedFromProvider;
 
-    // Microsoft documents GPT-5.6 function tools on Chat Completions only with
-    // reasoning_effort=none. Cascade's Azure transport does not currently send
-    // that knob, so advertise the TRANSPORT truth (text-tool fallback) instead
-    // of claiming native tool use and then failing the request.
     const nativeToolsOnThisTransport = /^gpt-5\.6-(?:sol|terra|luna)$/i.test(baseModelId)
       ? false
       : (base.supportsToolUse ?? true);
 
     return {
       ...base,
-      id,               // callable deployment name
+      id,
       name,
       provider: 'azure',
-      baseModelId,      // canonical identity for benchmark + provider pricing
+      baseModelId,
       supportsToolUse: nativeToolsOnThisTransport,
       ...(!azurePrice.unknown
         ? {
@@ -175,7 +173,6 @@ export function azureModelForDeployment(cfg: ProviderConfig): ModelInfo | null {
     };
   }
 
-  // Unknown base — keep neutral defaults so cost/context read as an estimate.
   return {
     id,
     name,
@@ -196,16 +193,15 @@ export function azureModelForDeployment(cfg: ProviderConfig): ModelInfo | null {
 export class AzureOpenAIProvider extends OpenAIProvider {
   constructor(config: ProviderConfig, model: ModelInfo) {
     const rawUrl = config.baseUrl ?? AZURE_BASE_URL_TEMPLATE.replace('{resource}', 'YOUR_RESOURCE');
-    const endpoint = rawUrl.replace(/\/+$/, ''); // Strip trailing slashes
+    const endpoint = rawUrl.replace(/\/+$/, '');
     super(
       {
         ...config,
-        baseUrl: endpoint, // Kept for superclass compatibility if it reads it
+        baseUrl: endpoint,
       },
       model,
     );
 
-    // Use the official AzureOpenAI SDK class which correctly handles pathing and API keys natively
     this.client = new AzureOpenAI({
       apiKey: config.apiKey,
       endpoint: endpoint,
@@ -215,10 +211,6 @@ export class AzureOpenAIProvider extends OpenAIProvider {
   }
 
   async listModels(): Promise<ModelInfo[]> {
-    // Azure has no queryable model catalog — the configured deployment IS the
-    // model. Surface it under its deployment name (previously this returned
-    // the synthesized 'azure' seed, so real deployments never appeared in any
-    // model list and the desktop's Azure dropdown stayed empty).
     const fromDeployment = azureModelForDeployment(this.config);
     return [fromDeployment ?? this.model];
   }
@@ -231,18 +223,11 @@ export class AzureOpenAIProvider extends OpenAIProvider {
         ...extra,
       } as any);
 
-    // Reasoning deployments (o1/o3, gpt-5*) reject max_tokens and a custom
-    // temperature; give them max_completion_tokens (with enough budget to answer
-    // past their internal reasoning) up front, others the cheap max_tokens: 1.
     const reasoning = isReasoningModel(this.model.id);
     try {
       await ping(reasoning ? { max_completion_tokens: 16 } : { max_tokens: 1 });
       return true;
     } catch (err) {
-      // Wrong param shape → retry the other way. Crucially, a param complaint
-      // proves the deployment EXISTS and is reachable, so treat it as available
-      // rather than marking the whole provider down (which surfaced downstream
-      // as "No model available for tier T1").
       if (isParamShapeError(err)) {
         try {
           await ping({ max_completion_tokens: 16 });
