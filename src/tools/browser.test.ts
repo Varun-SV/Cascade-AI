@@ -113,8 +113,27 @@ describe('BrowserTool — screenshot', () => {
 
     // And every one of them is still on disk — a collision would have left
     // fewer files than calls even if the names had differed.
-    const written = (await fs.readdir(workspace)).filter((f) => f.endsWith('.png'));
+    const written = (await fs.readdir(path.join(workspace, '.cascade', 'screenshots')))
+      .filter((f) => f.endsWith('.png'));
     expect(written.length).toBe(names.length);
+  });
+
+  it('writes into .cascade/, leaving the workspace root clean', async () => {
+    // A workspace is usually a git checkout. Dropping PNGs in its root leaves
+    // the worktree dirty after ordinary browser use and they are never cleaned
+    // up, so they accumulate. `.gitignore` already covers `.cascade/`, and the
+    // interpreter's scratch dir sets the precedent.
+    stubPlaywright(fakePage(Buffer.from('89504e470d0a1a0a', 'hex')));
+    const { BrowserTool: Tool } = await import('./browser.js');
+    const tool = new Tool();
+    tool.setWorkspaceRoot(workspace);
+
+    const out = await tool.execute({ action: 'screenshot' }, {} as never);
+
+    expect(out).toContain(path.join('.cascade', 'screenshots'));
+    const rootEntries = await fs.readdir(workspace);
+    expect(rootEntries.filter((f) => f.endsWith('.png'))).toEqual([]);
+    expect(rootEntries).toContain('.cascade');
   });
 
   it('keeps the result small enough to be worth putting in a context window', async () => {

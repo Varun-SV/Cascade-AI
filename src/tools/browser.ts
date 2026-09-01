@@ -115,7 +115,12 @@ export class BrowserTool extends BaseTool {
           // same millisecond resolve to the same path and one silently
           // overwrites the other — each worker then told to inspect a file
           // holding someone else's page.
-          const rel = `screenshot-${Date.now()}-${randomUUID().slice(0, 8)}.png`;
+          // Under `.cascade/screenshots/`, not the workspace root. A workspace
+          // is usually a git checkout, `.gitignore` already covers `.cascade/`,
+          // and the alternative is every browser call leaving an untracked PNG
+          // in someone's repo for them to notice and delete. Same convention as
+          // the interpreter's `.cascade/tmp` scratch.
+          const rel = path.join('.cascade', 'screenshots', `screenshot-${Date.now()}-${randomUUID().slice(0, 8)}.png`);
           const abs = resolveInWorkspace(this.workspaceRoot, rel);
           await fs.mkdir(path.dirname(abs), { recursive: true });
           await fs.writeFile(abs, buf);

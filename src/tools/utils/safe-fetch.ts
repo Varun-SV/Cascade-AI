@@ -117,8 +117,28 @@ function embeddedIPv4(g: number[]): string | null {
   if (leadingZero(5) && g[5] === 0xffff) return quad(g[6]!, g[7]!);
   // ::a.b.c.d — IPv4-compatible. Deprecated, still accepted by some stacks.
   if (leadingZero(6)) return quad(g[6]!, g[7]!);
-  // 64:ff9b::/96 and 64:ff9b:1::/48 — NAT64 translation prefixes.
-  if (g[0] === 0x64 && g[1] === 0xff9b) return quad(g[6]!, g[7]!);
+  // NAT64. The two well-known prefixes put the IPv4 address in DIFFERENT
+  // places (RFC 6052 §2.2), and they are told apart by the prefix itself:
+  //
+  //   64:ff9b::/96   (RFC 6052) — v4 in the last 32 bits, groups 6-7.
+  //   64:ff9b:1::/48 (RFC 8215) — v4 SPLIT across bits 48-63 and 72-87,
+  //                               stepping over the u-octet at 64-71, which
+  //                               the RFC requires to be zero.
+  //
+  // Reading groups 6-7 for the /48 form yields 0.0.0.0 for a correctly encoded
+  // address, and 0.0.0.0 is "private" — so treating both alike did not let
+  // anything through, it blocked every IPv4-only destination on a /48 DNS64
+  // deployment. Fail-closed, but an outage.
+  if (g[0] === 0x64 && g[1] === 0xff9b) {
+    if (g[2] === 0x0001) {
+      // bits 48-63, then bits 72-87 (low byte of group 4, high byte of group 5).
+      return quad(g[3]!, ((g[4]! & 0xff) << 8) | (g[5]! >> 8));
+    }
+    if (g[2] === 0 && g[3] === 0 && g[4] === 0 && g[5] === 0) return quad(g[6]!, g[7]!);
+    // Any other 64:ff9b:* matches no defined layout. Handled by the caller,
+    // which blocks it rather than guessing at where the address might be.
+    return null;
+  }
   // 2002::/16 — 6to4, which carries the v4 address in the next two groups.
   if (g[0] === 0x2002) return quad(g[1]!, g[2]!);
   return null;
@@ -135,6 +155,13 @@ function isPrivateIPv6(ip: string): boolean {
   // IPv6 prefix at all — it is loopback only once you read the last 32 bits.
   const v4 = embeddedIPv4(g);
   if (v4) return isPrivateIPv4(v4);
+
+  // A NAT64 prefix whose layout embeddedIPv4 could not decode. It is a
+  // translator address by construction, so it reaches SOME IPv4 host — this
+  // just cannot tell which. Guessing wrong in the permissive direction is a
+  // bypass; guessing wrong in the strict direction blocks an address no
+  // standard defines. Block.
+  if (g[0] === 0x64 && g[1] === 0xff9b) return true;
 
   if (g.every((x) => x === 0)) return true;                 // :: unspecified
   if (leading7Zero(g) && g[7] === 1) return true;           // ::1 loopback

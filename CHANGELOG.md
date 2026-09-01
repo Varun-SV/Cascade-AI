@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Vite major pulls in the `@rolldown/*` family and the generated lockfile was
   missing every one of those entries. Patch and minor updates are grouped now;
   majors arrive one PR each, where they can be looked at properly.
+- **NAT64 `64:ff9b:1::/48` decodes to the right IPv4 address.** RFC 6052 splits
+  the embedded address across bits 48-63 and 72-87 for the /48 local-use prefix,
+  not into the last 32 bits as for the well-known /96. Reading the wrong groups
+  yielded `0.0.0.0`, which counts as private — so it blocked every IPv4-only
+  destination on a /48 DNS64 deployment rather than letting anything through.
+  A `64:ff9b` address in no decodable layout is now refused rather than guessed at.
 - **IPv6 addresses that carry an IPv4 address are blocked.** `http://[::ffff:127.0.0.1]/`
   reached loopback, and `http://[::ffff:169.254.169.254]/` reached the cloud
   metadata endpoint. The mapped-address check only recognised the dotted
@@ -72,6 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hosted search silently fell back to the keyless DuckDuckGo scraper. It
   type-checked throughout because the key was contributed by a spread, which
   TypeScript does not excess-property-check.
+- **Screenshots are written under `.cascade/screenshots/`.** They landed in the
+  workspace root, which is normally a git checkout — so ordinary browser use
+  left untracked PNGs behind and they accumulated. `.gitignore` already covers
+  `.cascade/`.
 - **Screenshots no longer overwrite each other.** The filename came from
   `Date.now()` alone, and T3 workers run concurrently against one shared
   registry and workspace — two screenshots in the same millisecond resolved to

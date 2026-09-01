@@ -43,8 +43,35 @@ describe('isPrivateAddress', () => {
     });
 
     it('blocks translation prefixes that embed an IPv4 address', () => {
-      expect(reaches('http://[64:ff9b::7f00:1]/')).toBe(true);    // NAT64
+      expect(reaches('http://[64:ff9b::7f00:1]/')).toBe(true);    // NAT64 /96
       expect(reaches('http://[2002:7f00:1::]/')).toBe(true);      // 6to4
+    });
+
+    // RFC 6052 §2.2 puts the IPv4 address in a DIFFERENT place for the /48
+    // local-use prefix than for the well-known /96: split across bits 48-63
+    // and 72-87, stepping over the u-octet at 64-71. Reading the last 32 bits
+    // for a /48 address yields 0.0.0.0, which is "private" — so treating both
+    // alike let nothing through, it blocked every IPv4-only destination on a
+    // /48 DNS64 deployment. Fail-closed, but still an outage.
+    describe('NAT64 64:ff9b:1::/48 (RFC 8215)', () => {
+      it('decodes the /48 layout instead of reading the wrong groups', () => {
+        // 8.8.8.8 encoded under the /48 prefix — must stay REACHABLE.
+        expect(isPrivateAddress('64:ff9b:1:808:8:800::')).toBe(false);
+      });
+
+      it('still blocks a private address encoded the same way', () => {
+        // 127.0.0.1 → bits 48-63 = 7f00, bits 72-87 = 0001.
+        expect(isPrivateAddress('64:ff9b:1:7f00:0:100::')).toBe(true);
+        // 169.254.169.254 → a9fe / a9fe.
+        expect(isPrivateAddress('64:ff9b:1:a9fe:0:a9fe::')).toBe(true);
+      });
+
+      it('blocks a 64:ff9b prefix whose layout it cannot decode', () => {
+        // No standard defines this shape. It is a translator address by
+        // construction, so it reaches some IPv4 host; refusing to guess which
+        // is the only safe answer.
+        expect(isPrivateAddress('64:ff9b:2:7f00:1::')).toBe(true);
+      });
     });
 
     it('still allows genuinely public IPv6, mapped or native', () => {
