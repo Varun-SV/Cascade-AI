@@ -285,3 +285,196 @@ describe('documents — embedded images', () => {
     expect(Object.keys(zip.files).some((n) => n.startsWith('word/media/'))).toBe(false);
   }, 30_000);
 });
+
+describe('a table ends where the next block begins', () => {
+  // scanTable continued while any line contained a pipe, so a block that
+  // followed a table without a blank line between them — which Markdown does
+  // not require — was eaten as table rows.
+  const table = '| a | b |\n|---|---|\n| 1 | 2 |\n';
+
+  it('does not swallow a heading', () => {
+    const blocks = parseBlocks(`${table}## Notes | caveats`);
+    expect(blocks.find((b) => b.t === 'table')).toEqual({ t: 'table', rows: [['a', 'b'], ['1', '2']] });
+    expect(blocks.find((b) => b.t === 'heading')).toEqual({ t: 'heading', level: 2, text: 'Notes | caveats' });
+  });
+
+  it('does not swallow a list item', () => {
+    const blocks = parseBlocks(`${table}- Choose A | B`);
+    expect(blocks.find((b) => b.t === 'table')).toEqual({ t: 'table', rows: [['a', 'b'], ['1', '2']] });
+    expect(blocks.find((b) => b.t === 'bullet')).toMatchObject({ t: 'bullet', text: 'Choose A | B' });
+  });
+
+  it('does not swallow a quote or a fence', () => {
+    expect(parseBlocks(`${table}> quoted | aside`).find((b) => b.t === 'quote'))
+      .toEqual({ t: 'quote', text: 'quoted | aside' });
+    expect(parseBlocks(`${table}\`\`\`\na | b\n\`\`\``).find((b) => b.t === 'code'))
+      .toEqual({ t: 'code', lines: ['a | b'] });
+  });
+
+  it('still reads a row whose first cell would otherwise look like a bullet', () => {
+    // A leading pipe settles it: this is a row, not a list item.
+    const blocks = parseBlocks('| a | b |\n|---|---|\n| - dash | 1 |');
+    expect(blocks.find((b) => b.t === 'table')).toEqual({ t: 'table', rows: [['a', 'b'], ['- dash', '1']] });
+  });
+
+  it('still accepts the pipe-less alignment rule that looks like a bullet', () => {
+    // `- | -` is a valid single-dash rule AND matches the bullet pattern, so
+    // the rule has to be settled before the block-start check.
+    const blocks = parseBlocks('A | B\n- | -\n1 | 2');
+    expect(blocks.find((b) => b.t === 'table')).toEqual({ t: 'table', rows: [['A', 'B'], ['1', '2']] });
+  });
+});
+
+describe('tilde fences are fences too', () => {
+  // The backtick branch was added because a code sample containing `| in | out |`
+  // had that line lifted out as a real table while its markers stayed in the
+  // body. `~~~` is the other half of CommonMark's fence syntax and had the
+  // identical bug.
+  const sample = '~~~\n| in | out |\n|----|-----|\n~~~';
+
+  it('keeps a tilde-fenced table-shaped block as code in parseBlocks', () => {
+    const blocks = parseBlocks(`# T\n\n${sample}`);
+    expect(blocks.find((b) => b.t === 'code')).toEqual({ t: 'code', lines: ['| in | out |', '|----|-----|'] });
+    expect(blocks.find((b) => b.t === 'table')).toBeUndefined();
+  });
+
+  it('keeps a tilde-fenced table-shaped block out of a slide table', () => {
+    const [slide] = splitSlides(`# T\n\n${sample}`);
+    expect(slide!.tables).toHaveLength(0);
+    expect(slide!.body.join('\n')).not.toContain('~~~');
+  });
+
+  it('does not let one fence character close the other', () => {
+    // A ``` line inside a ~~~ block is content, not the closing fence.
+    const blocks = parseBlocks('~~~\n```\n| a | b |\n~~~');
+    expect(blocks.find((b) => b.t === 'code')).toEqual({ t: 'code', lines: ['```', '| a | b |'] });
+    expect(blocks.find((b) => b.t === 'table')).toBeUndefined();
+  });
+
+  it('still parses a chart fence written with tildes', () => {
+    const blocks = parseBlocks('~~~chart: bar\nQuarter,Revenue\nQ1,120\n~~~');
+    expect(blocks.find((b) => b.t === 'chart')).toBeDefined();
+  });
+});
+
+describe('an escaped pipe survives at the end of the last cell', () => {
+  it('does not eat a trailing escaped pipe as the closing delimiter', () => {
+    // No closing delimiter, and the final cell ends in a literal pipe. The
+    // unconditional trailing-pipe strip removed it before the split ever saw
+    // it, leaving a bare backslash behind.
+    const blocks = parseBlocks('| a | b |\n|---|---|\n| x | ends with \\|');
+    const table = blocks.find((b) => b.t === 'table') as { rows: string[][] };
+    expect(table.rows[1]).toEqual(['x', 'ends with |']);
+  });
+
+  it('still strips a real unescaped closing delimiter', () => {
+    const blocks = parseBlocks('| a | b |\n|---|---|\n| x | y |');
+    const table = blocks.find((b) => b.t === 'table') as { rows: string[][] };
+    expect(table.rows[1]).toEqual(['x', 'y']);
+  });
+});
+
+describe('a fence opens at the indentation Markdown allows', () => {
+  // parseBlocks required column zero while parseSlide trimmed before matching,
+  // so the two parsers disagreed about what a code block is — the drift the
+  // shared scanner exists to prevent. Up to three spaces still open a fence.
+  for (const indent of ['', ' ', '  ', '   ']) {
+    it(`treats a fence indented by ${indent.length} space(s) as code in both parsers`, () => {
+      const md = `# T\n\n${indent}\`\`\`\n| in | out |\n${indent}\`\`\`\n\nAfter.`;
+      const blocks = parseBlocks(md);
+      expect(blocks.find((b) => b.t === 'code'), 'block parser').toEqual({ t: 'code', lines: ['| in | out |'] });
+      expect(blocks.find((b) => b.t === 'table'), 'block parser').toBeUndefined();
+
+      const [slide] = splitSlides(md);
+      expect(slide!.tables, 'slide parser').toHaveLength(0);
+    });
+  }
+
+  it('agrees with the slide parser on an indented tilde fence too', () => {
+    const md = '# T\n\n  ~~~\n| in | out |\n  ~~~\n\nAfter.';
+    expect(parseBlocks(md).find((b) => b.t === 'table')).toBeUndefined();
+    expect(splitSlides(md)[0]!.tables).toHaveLength(0);
+  });
+});
+
+describe('extractCharts uses the same fence rule as the parsers', () => {
+  it('reads a chart fence written with tildes', () => {
+    // Backtick-only here meant a `~~~chart:` block reached the spreadsheet as
+    // raw CSV rows instead of becoming a chart.
+    const { charts, rest } = extractCharts('~~~chart: bar\nQuarter,Revenue\nQ1,120\n~~~');
+    expect(charts).toHaveLength(1);
+    expect(charts[0]!.kind).toBe('bar');
+    expect(rest).not.toContain('Q1,120');
+  });
+
+  it('leaves an ordinary fence alone', () => {
+    const { charts, rest } = extractCharts('```\nnot a chart\n```');
+    expect(charts).toHaveLength(0);
+    expect(rest).toContain('not a chart');
+  });
+});
+
+describe('backslash parity decides whether a pipe delimits', () => {
+  const rowsOf = (md: string): string[][] => {
+    const t = parseBlocks(`| a | b |\n|---|---|\n${md}`).find((b) => b.t === 'table');
+    return (t as { rows: string[][] }).rows;
+  };
+
+  it('treats an even backslash run as literal, leaving the pipe a delimiter', () => {
+    // `C:\\` is a literal backslash; the pipe after it still starts a cell.
+    // The lookbehind read "previous char is a backslash" and merged the two.
+    expect(rowsOf('| C:\\\\| next |')[1]).toEqual(['C:\\', 'next']);
+  });
+
+  it('treats an odd backslash run as escaping the pipe', () => {
+    expect(rowsOf('| A \\| B | union |')[1]).toEqual(['A | B', 'union']);
+  });
+
+  it('keeps a backslash that escapes nothing Markdown defines', () => {
+    // A Windows path separator is not an escape sequence — dropping it would
+    // quietly corrupt the cell.
+    expect(rowsOf('| C:\\Users | home |')[1]).toEqual(['C:\\Users', 'home']);
+  });
+
+  it('keeps a genuinely empty middle cell while dropping the closing delimiter', () => {
+    expect(rowsOf('| x |  | y |')[1]).toEqual(['x', '', 'y']);
+  });
+
+  it('still reads a row with no outer pipes at all', () => {
+    const blocks = parseBlocks('Name | Score\n--- | ---\nAda | 99');
+    const t = blocks.find((b) => b.t === 'table') as { rows: string[][] };
+    expect(t.rows).toEqual([['Name', 'Score'], ['Ada', '99']]);
+  });
+});
+
+describe('fence detection stays linear', () => {
+  it('does not backtrack on a long run of tabs before a bare carriage return', () => {
+    // CodeQL, high severity, on a line this PR introduced: the first fenceOpen
+    // was `^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$`, where `[ \t]*` and `(.*)` can both
+    // match a tab.
+    //
+    // The BARE `\r` is what makes this reachable, and the first version of this
+    // test omitted it and passed against the bug. `.` cannot match a line
+    // terminator, so with one present the tail fails and the engine retries
+    // every split of the two quantifiers; without one, `(.*)$` succeeds on the
+    // first attempt and nothing backtracks. parseBlocks normalises `\r\n` but
+    // leaves a lone `\r` alone, so this input reaches the matcher intact.
+    // Measured on the old pattern: 2k tabs 3ms, 4k 11ms, 8k 45ms, 16k 186ms —
+    // doubling the input quadruples the time.
+    const line = '```' + '\t'.repeat(60_000) + '\r' + 'x';
+    const started = Date.now();
+    parseBlocks(`# T\n\n${line}\n\nAfter.`);
+    expect(Date.now() - started, 'linear scan, not polynomial backtracking').toBeLessThan(1_000);
+  });
+
+  it('still closes a fence whose closing line carries trailing whitespace', () => {
+    const blocks = parseBlocks('```\ncode\n```   \n\nAfter.');
+    expect(blocks.find((b) => b.t === 'code')).toEqual({ t: 'code', lines: ['code'] });
+    expect(blocks.find((b) => b.t === 'para')).toEqual({ t: 'para', text: 'After.' });
+  });
+
+  it('does not close on a longer-marker line that carries other content', () => {
+    const blocks = parseBlocks('```\ncode\n``` not a closer\n```\n\nAfter.');
+    expect(blocks.find((b) => b.t === 'code')).toEqual({ t: 'code', lines: ['code', '``` not a closer'] });
+  });
+});

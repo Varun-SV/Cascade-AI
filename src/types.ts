@@ -430,6 +430,12 @@ export interface StatusUpdate {
   currentAction: string;
   status: 'IN_PROGRESS' | 'BLOCKED' | 'ESCALATING';
   output?: string;
+  /**
+   * A review verdict, when this update is one. Carried as data rather than
+   * folded into `currentAction`, which is a one-line field every surface
+   * truncates — see core/tiers/review.ts.
+   */
+  review?: import('./core/tiers/review.js').ReviewVerdict | null;
 }
 
 export interface T2Result {

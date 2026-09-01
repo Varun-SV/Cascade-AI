@@ -116,6 +116,47 @@ function statusLabel(e: Record<string, unknown>): string {
   return 'Working…';
 }
 
+/** One gap a review pass found. Mirrors core/tiers/review.ts across the wire. */
+export interface ReviewGapSummary {
+  title: string;
+  detail?: string;
+  sections?: string[];
+}
+
+/** A review verdict as it arrives from a tier status event. */
+export interface ReviewSummary {
+  summary?: string;
+  gaps: ReviewGapSummary[];
+}
+
+/**
+ * Read a review verdict off a tier event.
+ *
+ * Everything here crosses a socket from a server that may be running a
+ * different build, so each field is checked rather than cast — a malformed
+ * verdict renders nothing instead of throwing inside the transcript.
+ */
+function parseReview(raw: unknown): ReviewSummary | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const obj = raw as Record<string, unknown>;
+  const gapsRaw = Array.isArray(obj['gaps']) ? obj['gaps'] : [];
+  const gaps = gapsRaw.flatMap((g): ReviewGapSummary[] => {
+    if (!g || typeof g !== 'object') return [];
+    const gap = g as Record<string, unknown>;
+    const title = typeof gap['title'] === 'string' ? gap['title'].trim() : '';
+    if (!title) return [];
+    const detail = typeof gap['detail'] === 'string' ? gap['detail'].trim() : '';
+    const sections = Array.isArray(gap['sections'])
+      ? gap['sections'].filter((x): x is string => typeof x === 'string' && !!x.trim())
+      : [];
+    return [{ title, ...(detail ? { detail } : {}), ...(sections.length ? { sections } : {}) }];
+  });
+  // No gaps means the pass approved — an explicit clear, not a missing field.
+  if (gaps.length === 0) return undefined;
+  const summary = typeof obj['summary'] === 'string' ? obj['summary'].trim() : '';
+  return { gaps, ...(summary ? { summary } : {}) };
+}
+
 /** One node of the live run activity — a tier and what it's doing right now. */
 export interface ActivityNode {
   tierId: string;
@@ -124,6 +165,8 @@ export interface ActivityNode {
   model?: string;          // provider:model serving this tier
   status: string;          // ACTIVE | COMPLETED | BLOCKED | …
   currentAction?: string;
+  /** Set only on a review update — the gaps that stopped the run passing. */
+  review?: ReviewSummary;
   progressPct?: number;
   /** Titles of the upstream work that stopped this one. BLOCKED nodes only. */
   blockedBy?: string[];
@@ -153,6 +196,9 @@ function mergeActivity(prev: ActivityNode[], e: Record<string, unknown>): Activi
     model: str('model') ?? cur?.model,
     status: str('status') ?? cur?.status ?? 'ACTIVE',
     currentAction: str('currentAction') ?? cur?.currentAction,
+    // Present-but-approved clears the card; absent carries the last one
+    // forward, since a review arrives on one event and the run keeps ticking.
+    review: 'review' in e ? parseReview(e['review']) : cur?.review,
     progressPct: typeof e['progressPct'] === 'number' ? (e['progressPct'] as number) : cur?.progressPct,
     blockedBy: Array.isArray(e['blockedBy'])
       ? (e['blockedBy'] as unknown[]).filter((c): c is string => typeof c === 'string')
@@ -331,6 +377,24 @@ export function useChatSession(
       });
     };
     const onStatus = (e: Record<string, unknown>) => {
+      // One socket can carry several conversations, so a background run's
+      // tiers would otherwise post their status — and now a whole review
+      // rejection — into whichever chat happens to be open.
+      //
+      // Only filter once this chat KNOWS its id. On the first turn of a new
+      // conversation the server tags events with an id it just created, while
+      // this side does not learn that id until the run's closing ack — so
+      // comparing against `undefined` discards the entire first run, which is
+      // the most common case there is.
+      //
+      // The exhaustion handler below deliberately does NOT do this, and its
+      // test says why: a stray billing warning in the wrong chat is worse than
+      // a missed one. Losing every tier event is not a comparable trade, so
+      // the two differ on purpose. Adopting the server's id from the first
+      // event would fix both properly and is a larger change than this.
+      const convo = e['conversationId'];
+      const current = conversationIdRef.current;
+      if (current && typeof convo === 'string' && convo !== current) return;
       setStatus(statusLabel(e));
       setActivity((prev) => mergeActivity(prev, e));
     };

@@ -6,7 +6,8 @@ import Message from './Message.js';
 import Composer from './Composer.js';
 import PlanNotice from './PlanNotice.js';
 import ActivityDrawer from './ActivityDrawer.js';
-import type { ActivityNode, ChatMessage, ForceTier, PlanApproval, RoutingMode, SendInput } from './useChatSession.js';
+import { ReviewCard } from './ReviewCard.js';
+import type { ActivityNode, ChatMessage, ForceTier, PlanApproval, RoutingMode, SendInput , ReviewSummary} from './useChatSession.js';
 import type { Skill } from '../lib/types.js';
 import type { UiMode } from '../lib/prefs.js';
 
@@ -54,6 +55,14 @@ export default function ChatPanel({
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, status]);
+
+  // The most recent verdict across the live tiers. Reviews come from T1, so
+  // there is at most one in flight; scanning the whole list rather than
+  // assuming a position keeps this correct if that ever stops being true.
+  const latestReview = activity.reduce<ReviewSummary | undefined>(
+    (found, node) => node.review ?? found,
+    undefined,
+  );
 
   return (
     <div className="flex h-full flex-col">
@@ -154,6 +163,12 @@ export default function ChatPanel({
               </button>
               <AnimatePresence initial={false}>
                 {activityOpen && activity.length > 0 && <ActivityDrawer activity={activity} />}
+              </AnimatePresence>
+              {/* A rejected review is shown WITHOUT waiting for the drawer to be
+                  opened: it explains why the run is repeating itself, which is
+                  the one thing a user watching a replan actually needs. */}
+              <AnimatePresence initial={false}>
+                {latestReview && <ReviewCard review={latestReview} />}
               </AnimatePresence>
             </motion.div>
           )}

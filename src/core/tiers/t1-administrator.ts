@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { randomUUID } from 'node:crypto';
+import { parseReviewResponse, reviewStatusLine, REVIEW_FORMAT_INSTRUCTIONS, type ReviewVerdict } from './review.js';
 import type {
   CascadeConfig,
   ConversationMessage,
@@ -324,18 +325,40 @@ export class T1Administrator extends BaseTier {
     let pass = 1;
     const maxReplanPasses = this.config.maxReplanPasses ?? 2;
     const okCount = (rs: T2Result[]) => rs.filter(producedOutput).length;
+    // Did the loop end with a verdict the client has already been told about?
+    // Only the approval path sends one. The other two exits — the no-progress
+    // break and the pass limit running out — leave the last REJECTION standing,
+    // and the client carries the last review forward across updates that omit
+    // the field. See the clear below.
+    let reviewSettled = false;
     while (pass <= maxReplanPasses) {
       const reviewResult = await this.reviewT2Outputs(enrichedPrompt, plan, allT2Results);
       if (reviewResult.approved) {
         this.log('T1 Review passed.');
+        // Sent so the UI can drop a rejection card from the previous pass.
+        // Without it the client has no way to tell "this pass approved" from
+        // "this update simply carries no review", and the old gaps sit on
+        // screen saying "replanning" while the run assembles an accepted
+        // result.
+        this.sendStatusUpdate({
+          progressPct: 80 + (pass * 5),
+          currentAction: 'Review passed',
+          status: 'IN_PROGRESS',
+          review: reviewResult,
+        });
+        reviewSettled = true;
         break;
       }
 
       this.log(`T1 Review rejected outputs. Replanning (Pass ${pass}/${maxReplanPasses}). Reason: ${reviewResult.reason}`);
+      // The SUMMARY goes on the status line — the gaps travel beside it as
+      // data. This field is rendered unclamped by the web chat's status
+      // button, so a paragraph here is a paragraph on screen.
       this.sendStatusUpdate({
         progressPct: 80 + (pass * 5),
-        currentAction: `Review failed: ${reviewResult.reason}. Replanning...`,
+        currentAction: reviewStatusLine(reviewResult, pass, maxReplanPasses),
         status: 'IN_PROGRESS',
+        review: reviewResult,
       });
 
       const okBefore = okCount(allT2Results);
@@ -370,6 +393,18 @@ Create a CORRECTION PLAN that contains only the new sections needed to fix the i
       progressPct: 95,
       currentAction: 'Compiling final output',
       status: 'IN_PROGRESS',
+      // Clear a rejection the loop stopped on rather than resolved.
+      //
+      // Approval sends its own verdict and needs nothing here. The other two
+      // exits do: the corrective pass that made no net progress, and the pass
+      // limit running out. Both leave the last rejection as the newest review
+      // the client saw, so its card kept saying "replanning, pass N of M"
+      // while the run compiled — describing a loop that had already stopped.
+      //
+      // `null`, not an approval: those gaps were never addressed and saying
+      // they were would be a lie the final output has to carry. Null says only
+      // that no review is in flight, which is the true statement.
+      ...(reviewSettled ? {} : { review: null }),
     });
 
     // Step 5: Compile final output
@@ -391,7 +426,7 @@ Create a CORRECTION PLAN that contains only the new sections needed to fix the i
     originalPrompt: string,
     plan: TaskPlan,
     t2Results: T2Result[],
-  ): Promise<{ approved: boolean; reason?: string }> {
+  ): Promise<ReviewVerdict> {
     // FAILED only, deliberately not BLOCKED. A blocked section was never
     // attempted, so it has no error of its own to report — and the section that
     // DID fail is already in this list, which is the one the corrective pass
@@ -399,9 +434,21 @@ Create a CORRECTION PLAN that contains only the new sections needed to fix the i
     // N sections that had nothing wrong with them.
     const failedSections = t2Results.filter(r => r.status === 'FAILED');
     if (failedSections.length > 0) {
-      return { 
-        approved: false, 
-        reason: `Some T2 managers failed entirely: ${failedSections.map(s => s.sectionTitle).join(', ')}. Errors: ${failedSections.flatMap(s => s.issues).join('; ')}`
+      // A hard failure is already structured — one gap per failed section,
+      // attributed to it. No model call needed to say what a thrown error was.
+      const gaps = failedSections.map((sec) => ({
+        title: `${sec.sectionTitle} failed to produce output`,
+        sections: [sec.sectionTitle],
+        ...(sec.issues.length ? { detail: sec.issues.join('; ') } : {}),
+      }));
+      const summary = failedSections.length === 1
+        ? `${failedSections[0]!.sectionTitle} failed entirely`
+        : `${failedSections.length} sections failed entirely`;
+      return {
+        approved: false,
+        summary,
+        gaps,
+        reason: [summary, ...gaps.map((g, i) => `${i + 1}. ${g.title}${g.detail ? ` ${g.detail}` : ''}`)].join('\n'),
       };
     }
 
@@ -432,8 +479,8 @@ ${sectionsText}
 
 Does the current state of the workspace and the outputs fully satisfy the user's request?
 A section marked as user-skipped above is accepted as-is by the user's own choice — treat it as satisfied, not as a gap.
-If yes, reply with exactly: "APPROVED".
-If no, reply with "REJECTED: [Detailed reason explaining exactly what is missing or incorrect]".`;
+
+${REVIEW_FORMAT_INSTRUCTIONS}`;
 
     try {
       const result = await this.generateTracked('T1', {
@@ -442,14 +489,10 @@ If no, reply with "REJECTED: [Detailed reason explaining exactly what is missing
         maxTokens: 500,
         temperature: 0,
       });
-      const response = result.content.trim();
-      if (response.toUpperCase().startsWith('APPROVED')) {
-        return { approved: true };
-      }
-      return { approved: false, reason: response.replace(/^REJECTED:\s*/i, '') };
+      return parseReviewResponse(result.content);
     } catch {
       // If review fails to generate, default to approve to avoid infinite loops on rate limits
-      return { approved: true };
+      return { approved: true, gaps: [] };
     }
   }
 
