@@ -41,14 +41,13 @@ function pricingResponse() {
           id: 'openai/gpt-4o',
           pricing: { prompt: '0.0000025', completion: '0.00001' },
           context_length: 128_000,
-          supported_parameters: ['temperature'], // no "tools" → supportsTools false
+          supported_parameters: ['temperature'],
         },
       ],
     }),
   };
 }
 
-/** A fetch mock that answers by URL so snapshot + pricing are independent. */
 function routedFetch(opts: { snapshot?: boolean; pricing?: boolean } = {}) {
   return vi.fn(async (url: string) => {
     const u = String(url);
@@ -95,7 +94,6 @@ describe('LiveDataProvider — live fetch', () => {
     expect(ld.getQualityProfile('claude-opus')?.code).toBe(99);
     expect(ld.hasLivePricing()).toBe(true);
 
-    // OpenRouter per-token strings convert to per-1k.
     const price = ld.getLivePrice('gemini-2.5-flash');
     expect(price?.input).toBeCloseTo(0.0003, 6);
     expect(price?.output).toBeCloseTo(0.0025, 6);
@@ -110,7 +108,7 @@ describe('LiveDataProvider — live fetch', () => {
     const before = original.outputCostPer1kTokens;
     const [updated] = ld.applyLivePricing([original]);
     expect(updated!.outputCostPer1kTokens).toBeCloseTo(0.0025, 6);
-    expect(original.outputCostPer1kTokens).toBe(before); // untouched
+    expect(original.outputCostPer1kTokens).toBe(before);
   });
 
   it('stays quiet when the live quote matches the bundled dataset', async () => {
@@ -118,8 +116,6 @@ describe('LiveDataProvider — live fetch', () => {
     const ld = new LiveDataProvider({ cacheFile });
     await ld.refresh(true);
 
-    // The mocked feed quotes gpt-4o at $0.0025/$0.01 per 1k — exactly what the
-    // pricing dataset says.
     ld.applyLivePricing([MODELS['gpt-4o']!]);
     expect(ld.getPriceDisagreements()).toHaveLength(0);
   });
@@ -131,8 +127,6 @@ describe('LiveDataProvider — live fetch', () => {
       return {
         ok: true,
         json: async () => ({
-          // Twice the dataset's $2.50/$10 per 1M — the shape a stale committed
-          // price takes once the vendor moves.
           data: [{ id: 'openai/gpt-4o', pricing: { prompt: '0.000005', completion: '0.00002' } }],
         }),
       } as unknown as Response;
@@ -141,11 +135,8 @@ describe('LiveDataProvider — live fetch', () => {
     await ld.refresh(true);
 
     const [updated] = ld.applyLivePricing([MODELS['gpt-4o']!]);
-    // Live wins — it is fresher by construction.
     expect(updated!.inputCostPer1kTokens).toBeCloseTo(0.005, 6);
 
-    // …but the mismatch is visible, because it is the best signal available
-    // that pricing-data.json needs a refresh.
     const drift = ld.getPriceDisagreements();
     expect(drift).toHaveLength(1);
     expect(drift[0]!.modelId).toBe('gpt-4o');
@@ -154,7 +145,6 @@ describe('LiveDataProvider — live fetch', () => {
     expect(drift[0]!.ratio).toBeCloseTo(2, 3);
     expect(drift[0]!.datasetAsOf).toMatch(/^\d{4}-\d{2}-\d{2}$/);
 
-    // Deduped: pricing the same model again doesn't spam the list.
     ld.applyLivePricing([MODELS['gpt-4o']!]);
     expect(ld.getPriceDisagreements()).toHaveLength(1);
   });
@@ -174,7 +164,6 @@ describe('LiveDataProvider — live fetch', () => {
     await ld.refresh(true);
 
     const [updated] = ld.applyLivePricing([MODELS['gpt-4o']!]);
-    // Falls back to the model's own (dataset-backed) price rather than $0.
     expect(updated!.inputCostPer1kTokens).toBeGreaterThan(0);
     expect(updated!.outputCostPer1kTokens).toBeGreaterThan(0);
   });
@@ -214,7 +203,7 @@ describe('LiveDataProvider — live fetch', () => {
     const fetch2 = routedFetch();
     vi.stubGlobal('fetch', fetch2);
     const ld = new LiveDataProvider({ cacheFile, refreshHours: 24 });
-    await ld.refresh(); // not forced — cache is fresh
+    await ld.refresh();
     expect(fetch2.mock.calls.length).toBe(0);
     expect(callsAfterSeed).toBeGreaterThan(0);
   });
@@ -246,9 +235,8 @@ describe('LiveDataProvider — capability facts (v0.15.0)', () => {
     expect(updated!.contextWindow).toBe(1_048_576);
     expect(updated!.supportsToolUse).toBe(true);
     expect(updated!.isVisionCapable).toBe(true);
-    expect(original.contextWindow).toBe(beforeCtx); // untouched
+    expect(original.contextWindow).toBe(beforeCtx);
 
-    // Unknown model passes through as the SAME reference.
     const stranger = { ...original, id: 'totally-unknown-model' };
     expect(ld.applyLiveCapabilities([stranger])[0]).toBe(stranger);
   });
@@ -268,13 +256,13 @@ describe('LiveDataProvider — offline fallback', () => {
   it('keeps bundled source and null profiles when fetch fails', async () => {
     vi.stubGlobal('fetch', routedFetch({ snapshot: false, pricing: false }));
     const ld = new LiveDataProvider({ cacheFile });
-    await ld.refresh(true); // must not throw
+    await ld.refresh(true);
 
     expect(ld.getDataSource()).toBe('bundled');
     expect(ld.getQualityProfile('claude-opus')).toBeNull();
     expect(ld.hasLivePricing()).toBe(false);
     const original = MODELS['gpt-4o']!;
-    expect(ld.applyLivePricing([original])[0]).toBe(original); // same ref, no price
+    expect(ld.applyLivePricing([original])[0]).toBe(original);
   });
 });
 
@@ -285,9 +273,9 @@ describe('benchmarkScore01 with a live provider', () => {
     await ld.refresh(true);
     setBenchmarkLiveProvider(ld);
 
-    // Live snapshot pushed claude-opus code to 99/100 → 0.99.
-    expect(benchmarkScore01(MODELS['claude-opus-4']!, 'code')).toBeCloseTo(0.99, 5);
-    // A family absent from the live snapshot falls back to the bundled table.
+    // Use an active Opus catalog entry; it resolves to the same claude-opus
+    // benchmark family that the live snapshot overrides.
+    expect(benchmarkScore01(MODELS['claude-opus-4-8']!, 'code')).toBeCloseTo(0.99, 5);
     expect(benchmarkScore01(MODELS['gpt-4o']!, 'code')).toBeGreaterThan(0.5);
   });
 });
