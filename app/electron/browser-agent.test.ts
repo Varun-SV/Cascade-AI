@@ -44,8 +44,10 @@ vi.mock('electron', () => ({
   },
 }));
 
+let minimized = false;
 const win = {
   isDestroyed: () => false,
+  isMinimized: () => minimized,
   webContents: fakeWebContents,
   contentView: { children: [] as unknown[], addChildView: vi.fn(), removeChildView: vi.fn() },
 };
@@ -72,6 +74,12 @@ const act = (sessionId: string, signal?: AbortSignal) =>
   mod.actOnCurrentPage({ kind: 'click', selector: '#a' }, { sessionId, ...(signal ? { signal } : {}) });
 
 beforeEach(async () => {
+  minimized = false;
+  fakeWebContents.executeJavaScript.mockReset();
+  fakeWebContents.executeJavaScript.mockResolvedValue(true);
+  fakeWebContents.loadURL.mockReset();
+  fakeWebContents.loadURL.mockResolvedValue(undefined);
+  fakeWebContents.stop.mockReset();
   mod = await load();
   mod.setAgentControlEnabled(true);
 });
@@ -179,7 +187,9 @@ describe('one browser, one run at a time', () => {
 
     const second = await act('run-B');
     expect(second.ok).toBe(false);
-    expect(second.detail).toMatch(/another run/i);
+    // Wording is about the ACTION, not the run: the lease rejects any overlap,
+    // including two workers of the same run sharing one taskId.
+    expect(second.detail).toMatch(/already running/i);
 
     release();
     expect((await first).ok).toBe(true);
@@ -232,5 +242,133 @@ describe('cancellation', () => {
     const out = await pending;
     expect(out.ok).toBe(false);
     expect(out.detail).toMatch(/stopped/i);
+  });
+});
+
+describe('watchable, not merely visible', () => {
+  it('refuses while the window is minimized', async () => {
+    // `visible` stays true when the window is minimized, and on macOS the view
+    // survives closing the last window entirely. Alive is not watchable.
+    await openPanel();
+    minimized = true;
+    const out = await act('run-1');
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/not on screen/i);
+  });
+
+  it('waits for the panel to come back rather than refusing the action just approved', async () => {
+    // BrowserView hides the panel whenever an approval modal is up — including
+    // the approval for THIS action. Approving dequeues the modal and reopening
+    // is a separate effect plus an IPC round-trip, so an instant check refused
+    // the very action the user had just said yes to, depending on which landed
+    // first. Waiting absorbs that without weakening the gate.
+    await openPanel();
+    await handlers.get('browser:hide')!();
+
+    const pending = act('run-1');
+    // …the panel reopens shortly after, as it does once the modal closes.
+    await new Promise((r) => setTimeout(r, 60));
+    await openPanel();
+
+    expect((await pending).ok).toBe(true);
+  });
+
+  it('still gives up if the panel never comes back', async () => {
+    await openPanel();
+    await handlers.get('browser:hide')!();
+    const out = await act('run-1');
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/not on screen/i);
+  }, 10_000);
+
+  it('stops waiting immediately when the user stops the run', async () => {
+    await openPanel();
+    await handlers.get('browser:hide')!();
+    const pending = act('run-1');
+    await new Promise((r) => setTimeout(r, 30));
+    mod.stopAgentControl('run-1');
+    const out = await pending;
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/stopped/i);
+  });
+});
+
+describe('the lease rejects any overlap, not just across runs', () => {
+  it('refuses a second action from the SAME run', async () => {
+    // Every T3 worker passes the run's taskId as sessionId and T2 runs worker
+    // waves in parallel, so siblings arrive with identical ids. A session-keyed
+    // lease waved them straight through to interleave on one page.
+    await openPanel();
+    let release!: () => void;
+    fakeWebContents.executeJavaScript.mockImplementationOnce(
+      () => new Promise((resolve) => { release = () => resolve(true); }),
+    );
+
+    const first = act('run-A');
+    await Promise.resolve();
+    const second = await act('run-A');
+
+    expect(second.ok).toBe(false);
+    expect(second.detail).toMatch(/already running/i);
+
+    release();
+    expect((await first).ok).toBe(true);
+  });
+
+  it('a sibling finishing does not report the survivor as user-stopped', async () => {
+    // The nastier half: the finally clause cleared the shared session, and a
+    // concurrent wait_for read that as the user having pressed Stop.
+    await openPanel();
+    fakeWebContents.executeJavaScript.mockImplementation(async () => false);
+
+    const waiting = mod.actOnCurrentPage(
+      { kind: 'wait_for', selector: '#never', timeoutMs: 400 },
+      { sessionId: 'run-A' },
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    // A sibling of the SAME run tries to act and is refused by the lease…
+    await act('run-A');
+
+    // …and the waiter must time out on its own terms, not claim it was stopped.
+    const out = await waiting;
+    expect(out.ok).toBe(false);
+    expect(out.detail).not.toMatch(/stopped/i);
+    expect(out.detail).toMatch(/did not appear/i);
+  }, 10_000);
+});
+
+describe('Stop reaches an action already under way', () => {
+  it('aborts an in-flight navigation and stops the page loading', async () => {
+    // browser:stopAgent cleared the lease but nothing told the navigation, so a
+    // slow loadURL kept going and could complete after the user pressed Stop.
+    await openPanel();
+    fakeWebContents.loadURL.mockImplementation(() => new Promise(() => {}));  // never settles
+
+    const pending = mod.actOnCurrentPage(
+      { kind: 'navigate', url: 'https://slow.test/' },
+      { sessionId: 'run-A' },
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    mod.stopAgentControl();
+
+    const out = await pending;
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/cancelled|stopped/i);
+    expect(fakeWebContents.stop, 'the page must be told to stop loading').toHaveBeenCalled();
+  });
+
+  it('aborts an in-flight navigation when the feature is switched off', async () => {
+    await openPanel();
+    fakeWebContents.loadURL.mockImplementation(() => new Promise(() => {}));
+
+    const pending = mod.actOnCurrentPage(
+      { kind: 'navigate', url: 'https://slow.test/' },
+      { sessionId: 'run-A' },
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    mod.setAgentControlEnabled(false);
+
+    expect((await pending).ok).toBe(false);
+    expect(fakeWebContents.stop).toHaveBeenCalled();
   });
 });

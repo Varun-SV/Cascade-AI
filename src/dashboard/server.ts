@@ -241,6 +241,8 @@ export class DashboardServer {
       // One transaction, shared with the desktop IPC writer: staged, validated,
       // adopted, written, rolled back on failure. See `commitSettings`.
       const result = await commitSettings(this.config, data, (committed) => this.persistConfig(committed));
+      // Same object the host holds, so the hook sees what actually landed.
+      if (result.ok) this.settingsChangeHook?.(this.config);
       const refused = result.refused.map((r) => ({
         type: r.type, reason: r.reason, message: explainRefusal(r.type, r.reason),
       }));
@@ -411,6 +413,24 @@ export class DashboardServer {
   /** Let runs act on that view, not just read it (desktop only). */
   setBrowserController(controller: BrowserController): void {
     this.browserController = controller;
+  }
+
+  /**
+   * Told whenever settings are committed through THIS server.
+   *
+   * Settings reach the live config by two routes — the desktop's Electron IPC
+   * handler and this server's `config:update` socket — and both run the same
+   * `commitSettings`. The desktop mirrors `tools.agentBrowserControl` into its
+   * browser module after its own route, but had no way to learn about the
+   * other, so a socket write left the module's copy stale: an enable the module
+   * still refused, or worse a disable the module still honoured for a run
+   * already holding the tool. This is the same sibling-writer drift
+   * `settings-payload.ts` exists to prevent, one layer up.
+   */
+  private settingsChangeHook?: (config: CascadeConfig) => void;
+
+  onSettingsChanged(hook: (config: CascadeConfig) => void): void {
+    this.settingsChangeHook = hook;
   }
 
   async start(): Promise<void> {

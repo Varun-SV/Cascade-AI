@@ -89,6 +89,31 @@ let agentControlEnabled = false;
 let drivingSession: string | null = null;
 
 /**
+ * The action holding the browser, if any.
+ *
+ * Separate from `drivingSession` because the lease must reject ANY overlapping
+ * action, not merely one from a different run. Every T3 worker in a run passes
+ * the same `taskId` as its session id and T2 executes worker waves in parallel,
+ * so two siblings arrive with identical session ids — keying the lease on the
+ * session let them straight through to interleave clicks on one page. Worse,
+ * whichever finished first cleared the shared session and a concurrent
+ * `wait_for` then read that as the user having stopped it.
+ */
+let activeAction: symbol | null = null;
+
+/**
+ * Aborts the action in flight for reasons that are the HOST's, not the run's.
+ *
+ * The run's own AbortSignal covers cancellation, but pressing Stop, turning the
+ * setting off, or the browser ceasing to be watchable are none of those — and
+ * without a signal of our own a slow `loadURL` kept loading through all three.
+ */
+let activeAbort: AbortController | null = null;
+
+/** Milliseconds an action waits for the browser to become watchable. */
+const WATCHABLE_WAIT_MS = 3_000;
+
+/**
  * The last run to hold the lease, whether or not it still does.
  *
  * The lease is per-ACTION — taken when one starts, released when it finishes —
@@ -120,7 +145,12 @@ const revokedSessions = new Set<string>();
 /** Reflects the persisted setting. Called by main.ts on load and on change. */
 export function setAgentControlEnabled(on: boolean): void {
   agentControlEnabled = on;
-  if (!on) drivingSession = null;
+  if (!on) {
+    drivingSession = null;
+    // Turning the feature off mid-action stops that action, rather than only
+    // preventing the next one.
+    activeAbort?.abort();
+  }
   pushStateToOwner();
 }
 
@@ -143,7 +173,12 @@ export function isAgentDriving(): boolean {
 export function stopAgentControl(sessionId?: string): void {
   const target = sessionId ?? drivingSession ?? lastActiveSession;
   if (target) revokedSessions.add(target);
-  if (!sessionId || sessionId === drivingSession) drivingSession = null;
+  if (!sessionId || sessionId === drivingSession) {
+    drivingSession = null;
+    // Reaches an action already under way. Clearing the lease alone left a
+    // navigation loading to completion after the user had pressed Stop.
+    activeAbort?.abort();
+  }
   pushStateToOwner();
 }
 
@@ -341,6 +376,52 @@ function pageWhere(): { url?: string; title?: string } {
  * checked HERE rather than only in the tool: the tool is one caller, and a gate
  * that lives at the edge is a gate that a second caller forgets.
  */
+/**
+ * Can the user see this happen, and reach the Stop control?
+ *
+ * `visible` alone is not that question. The panel is hidden while a modal is
+ * up — including the approval modal for this very action — and a minimized or
+ * destroyed window is not watchable either, while the view behind it stays
+ * alive (on macOS the module deliberately preserves it across closing the last
+ * window).
+ */
+function isWatchable(): boolean {
+  if (!visible) return false;
+  if (!owner || owner.isDestroyed()) return false;
+  // isMinimized is absent on some stubs/older shims; treat absence as "not
+  // minimized" rather than crashing the gate.
+  return typeof owner.isMinimized === 'function' ? !owner.isMinimized() : true;
+}
+
+/**
+ * Wait, briefly, for the browser to become watchable.
+ *
+ * This exists because of an interaction that made refusing outright wrong.
+ * BrowserView hides the panel whenever an approval modal is up, so that the
+ * native overlay does not cover it — and the approval for a browser_control
+ * action IS one of those. Approving it dequeues the modal and reopening the
+ * panel is a separate React effect and IPC round-trip, so an instant check
+ * refused the very action the user had just approved, nondeterministically,
+ * depending on which landed first.
+ *
+ * Waiting absorbs that race without weakening the gate: it still refuses when
+ * the browser genuinely is not watchable, and a run that is stopped or
+ * cancelled while waiting stops waiting.
+ */
+async function awaitWatchable(
+  session: string,
+  signal: AbortSignal | undefined,
+  hostSignal: AbortSignal,
+): Promise<boolean> {
+  const deadline = Date.now() + WATCHABLE_WAIT_MS;
+  for (;;) {
+    if (isWatchable()) return true;
+    if (signal?.aborted || hostSignal.aborted || revokedSessions.has(session)) return false;
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
 export async function actOnCurrentPage(
   action: AgentAction,
   context: { sessionId: string; signal?: AbortSignal },
@@ -359,45 +440,57 @@ export async function actOnCurrentPage(
   if (!view || view.webContents.isDestroyed()) {
     return { ok: false, detail: 'No page is open in the built-in browser. Ask the user to open one.' };
   }
-  // The browser must be ON SCREEN, not merely alive.
-  //
-  // Hiding the panel does not destroy the view — applyBounds() collapses it to
-  // zero precisely so the page and its login survive a trip to another tab. So
-  // the checks above all pass while the user is looking at something else, and
-  // without this one the agent would click and type in an authenticated page
-  // nobody is watching. That is the entire argument for driving the visible
-  // browser rather than a headless one, and it evaporates if the browser can be
-  // invisible. It also puts the Stop control out of reach: it lives in the panel
-  // the user has navigated away from.
-  if (!visible) {
-    return {
-      ok: false,
-      detail: 'The built-in browser is not on screen. Ask the user to open the Browser tab — actions only run where they can watch them and stop them.',
-    };
-  }
-  // One browser, many runs: a second run acting on the same page would
-  // interleave with the first and each would read a DOM the other just changed.
-  if (drivingSession && drivingSession !== session) {
-    return { ok: false, detail: 'Another run is currently using the browser. Wait for it to finish.' };
+  // One browser, one action. Rejects ANY overlap, including two workers of the
+  // same run: they share a taskId, so a session-keyed check waved them through.
+  if (activeAction) {
+    return { ok: false, detail: 'Another browser action is already running. Wait for it to finish.' };
   }
 
+  const token = Symbol('browser-action');
+  const abort = new AbortController();
+  activeAction = token;
+  activeAbort = abort;
   drivingSession = session;
   lastActiveSession = session;
   pushStateToOwner();
+
   try {
-    return await perform(action, context.signal);
+    if (!(await awaitWatchable(session, context.signal, abort.signal))) {
+      if (revokedSessions.has(session)) {
+        return { ok: false, detail: 'The user stopped agent browser control for this run.' };
+      }
+      if (context.signal?.aborted || abort.signal.aborted) {
+        return { ok: false, detail: 'The run was cancelled.' };
+      }
+      return {
+        ok: false,
+        detail: 'The built-in browser is not on screen. Ask the user to open the Browser tab — actions only run where they can watch them and stop them.',
+      };
+    }
+    return await perform(action, context.signal, abort.signal);
   } catch (err) {
     return { ok: false, detail: err instanceof Error ? err.message : String(err), ...pageWhere() };
   } finally {
-    // Only release a lease still held by this run — stopAgentControl may have
-    // cleared it mid-action, and clobbering that would hand the browser back.
-    if (drivingSession === session) drivingSession = null;
-    pushStateToOwner();
+    // Only the action that took the lease releases it. Keying this on the
+    // session instead let a sibling worker sharing the same taskId hand the
+    // browser back while this one was still using it.
+    if (activeAction === token) {
+      activeAction = null;
+      activeAbort = null;
+      drivingSession = null;
+      pushStateToOwner();
+    }
   }
 }
 
-async function perform(action: AgentAction, signal?: AbortSignal): Promise<AgentOutcome> {
+async function perform(
+  action: AgentAction,
+  signal: AbortSignal | undefined,
+  hostSignal: AbortSignal,
+): Promise<AgentOutcome> {
   const wc = view!.webContents;
+  /** Either reason to stop: the run was cancelled, or the host revoked. */
+  const stopped = () => signal?.aborted || hostSignal.aborted;
 
   switch (action.kind) {
     case 'navigate': {
@@ -409,10 +502,15 @@ async function perform(action: AgentAction, signal?: AbortSignal): Promise<Agent
       // a slow or hanging page. Racing the signal lets a cancelled run stop
       // waiting; wc.stop() also stops the page still loading underneath it,
       // rather than leaving it fetching in the user's session.
+      // Raced against BOTH signals. Listening only to the run's meant pressing
+      // Stop, or turning the setting off, left the page loading to completion
+      // in the user's session — the host had revoked but nothing told the
+      // navigation.
       const abort = new Promise<'cancelled'>((resolve) => {
-        if (!signal) return;
-        if (signal.aborted) return resolve('cancelled');
-        signal.addEventListener('abort', () => resolve('cancelled'), { once: true });
+        if (stopped()) return resolve('cancelled');
+        const fire = () => resolve('cancelled');
+        signal?.addEventListener('abort', fire, { once: true });
+        hostSignal.addEventListener('abort', fire, { once: true });
       });
       const raced = await Promise.race([wc.loadURL(target).then(() => 'loaded' as const), abort]);
       if (raced === 'cancelled') {
@@ -478,11 +576,20 @@ async function perform(action: AgentAction, signal?: AbortSignal): Promise<Agent
       // to survive a navigation mid-wait, which is exactly when a wait is most
       // likely to be running.
       for (;;) {
-        if (drivingSession === null) {
+        // The host signal covers Stop and the setting being turned off; the
+        // run's covers cancellation. Watching `drivingSession` instead was
+        // wrong once siblings shared a session — one finishing cleared it and
+        // this read that as the user having stopped.
+        if (hostSignal.aborted) {
           return { ok: false, detail: 'The user stopped agent browser control while waiting.', ...pageWhere() };
         }
         if (signal?.aborted) {
           return { ok: false, detail: 'The run was cancelled while waiting.', ...pageWhere() };
+        }
+        // A browser that stops being watchable mid-wait is no longer a browser
+        // the user can stop, so waiting on it is exactly what must not happen.
+        if (!isWatchable()) {
+          return { ok: false, detail: 'The built-in browser is no longer on screen; stopped waiting.', ...pageWhere() };
         }
         const there = await inPage<boolean>(
           `!!document.querySelector(${JSON.stringify(action.selector)})`,

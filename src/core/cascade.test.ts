@@ -65,6 +65,18 @@ describe('Cascade.setBrowserController — the gate on acting for real', () => {
     expect(c.getToolRegistry().hasTool('browser_control')).toBe(false);
   });
 
+  it('a run that was never given the controller cannot obtain the tool from config alone', () => {
+    // Scheduled/cron runs auto-approve every tool (runScheduledTask passes
+    // `approvalCallback: () => ({ approved: true })`, because nobody may be
+    // watching), and they build their own Cascade. The safety property is that
+    // browser_control is never ATTACHED to such a run — setBrowserController is
+    // simply not called — so turning the setting on cannot hand a headless run
+    // control of the signed-in browser. Asserted rather than left implicit,
+    // because the config alone looks identical from inside the run.
+    const c = cascadeWith({ agentBrowserControl: true });
+    expect(c.getToolRegistry().hasTool('browser_control')).toBe(false);
+  });
+
   it('leaves read_current_page unaffected — reading is not acting', () => {
     // The two capabilities are gated separately on purpose: reading a page the
     // user already opened reaches nothing new, acting on it does.

@@ -27,13 +27,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chain, and the browser panel carries a Stop control that halts the acting run
   without turning the feature off.
 
-  It only acts while the browser is **on screen** — hiding the panel does not
+  The Browser tab shows a banner and a **Stop** control while a run is acting,
+  shipped alongside the toggle rather than a release later: a user who can turn
+  the capability on has to be able to see it working and halt it.
+
+  It only acts while the browser is **watchable** — on screen, in a live,
+  un-minimized window. Hiding the panel does not
   destroy the view, so without that gate the agent could click and type in an
-  authenticated page nobody was watching, which is the whole argument for
-  driving the visible browser rather than a headless one. Stop is scoped to the
-  run the user was watching, not to the process, and the browser is leased to
-  one run at a time so two concurrent runs cannot interleave clicks on the same
-  page. Cancelling a run cancels an action already in flight.
+  authenticated page nobody was watching. An action waits briefly for the panel
+  to come back rather than refusing outright, because the approval modal for the
+  action itself hides it. Stop is scoped to the run the user was watching, not
+  to the process; the browser is leased to one ACTION at a time, so neither two
+  runs nor two workers of the same run can interleave clicks on a page; and
+  Stop, disabling the feature, or cancelling the run all abort an action already
+  in flight, including a navigation still loading.
 
   Deliberately separate from the existing `browser` tool, which drives a
   throwaway Playwright Chromium. Most pages worth automating are behind a login

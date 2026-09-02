@@ -60,6 +60,13 @@ export interface DesktopBrowserState {
   canGoBack: boolean;
   canGoForward: boolean;
   error?: string;
+  /** The Settings toggle: may an agent act on this page at all. */
+  agentControlEnabled?: boolean;
+  /** Live: an agent is acting right now. Drives the banner and Stop button. */
+  agentDriving?: boolean;
+  /** Which run is acting, so Stop targets that one rather than whatever is
+   *  driving by the time the click lands. */
+  agentDrivingSession?: string;
 }
 
 declare global {
@@ -156,6 +163,9 @@ declare global {
         state(): Promise<DesktopBrowserState>;
         readPage(): Promise<{ url: string; title: string; text: string } | null>;
         openExternal(url: string): Promise<{ ok: boolean }>;
+        /** Kill switch: stop the run currently driving the browser. */
+        stopAgent(sessionId?: string): Promise<{ ok: boolean; state: DesktopBrowserState }>;
+        resumeAgent(sessionId?: string): Promise<{ ok: boolean; state: DesktopBrowserState }>;
         /** Returns an unsubscribe — call it on unmount. */
         onState(cb: (s: DesktopBrowserState) => void): () => void;
       };

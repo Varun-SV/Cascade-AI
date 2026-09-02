@@ -16,15 +16,11 @@ import { CascadeMark } from '../components/CascadeMark.js';
  * whatever the user switched to.
  */
 
-interface BrowserState {
-  open: boolean;
-  url: string;
-  title: string;
-  loading: boolean;
-  canGoBack: boolean;
-  canGoForward: boolean;
-  error?: string;
-}
+// Imported rather than redeclared. This shape already exists in the preload
+// bridge and in App.tsx; a third private copy here is how a field added to the
+// pushed state (agentDriving, say) type-checks everywhere except the one place
+// that renders it.
+import type { DesktopBrowserState as BrowserState } from '../App';
 
 const EMPTY: BrowserState = {
   open: false, url: '', title: '', loading: false, canGoBack: false, canGoForward: false,
@@ -155,6 +151,43 @@ export function BrowserView() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-base)' }}>
+      {/* The kill switch, and the only signal that an agent is touching this
+          page. Rendered here rather than shipped a release later because the
+          Settings toggle that enables the capability is in the same change: a
+          user who can turn it on must be able to see it happening and stop it,
+          or one of the three gates the feature relies on does not exist. The
+          host refuses to act at all while this panel is off screen, so putting
+          the control here means it is present whenever anything can happen. */}
+      {state.agentDriving && (
+        <div
+          role="status"
+          style={{
+            display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px',
+            background: 'var(--warn-bg, #4a3410)', color: 'var(--warn-fg, #f5c96b)',
+            borderBottom: '1px solid var(--border)', fontSize: 12.5, flexShrink: 0,
+          }}
+        >
+          <span
+            aria-hidden
+            style={{
+              width: 7, height: 7, borderRadius: '50%', background: 'currentColor', flexShrink: 0,
+            }}
+          />
+          <span style={{ flex: 1 }}>Cascade is using this browser.</span>
+          <button
+            onClick={() => void api.stopAgent()}
+            title="Stop Cascade from using the browser for this run"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 5, padding: '3px 9px',
+              background: 'transparent', color: 'inherit',
+              border: '1px solid currentColor', borderRadius: 4,
+              fontSize: 12, cursor: 'pointer',
+            }}
+          >
+            <X size={12} /> Stop
+          </button>
+        </div>
+      )}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 4, padding: '6px 8px',
         borderBottom: '1px solid var(--border)', background: 'var(--bg-surface)', flexShrink: 0,

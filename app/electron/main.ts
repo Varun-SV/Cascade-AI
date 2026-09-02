@@ -132,6 +132,14 @@ async function startBackend(): Promise<void> {
     // gate itself, so handing the controller over unconditionally does not
     // enable anything — it makes the capability available to be enabled.
     server.setBrowserController(actOnCurrentPage);
+    // Settings reach the live config by two routes — the Electron IPC handler
+    // further down and this server's `config:update` socket — and only the
+    // first used to tell the browser module. A socket write therefore left the
+    // module's copy stale: an enable it still refused, or a disable it still
+    // honoured for a run already holding the tool. One hook covers both.
+    server.onSettingsChanged?.((next: { tools?: { agentBrowserControl?: boolean } }) => {
+      setAgentControlEnabled(next.tools?.agentBrowserControl === true);
+    });
     // Mirror the persisted setting into the browser module, which enforces it
     // on every action rather than trusting the caller to have checked.
     setAgentControlEnabled(cascadeConfig.tools?.agentBrowserControl === true);

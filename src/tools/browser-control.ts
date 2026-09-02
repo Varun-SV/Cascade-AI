@@ -174,10 +174,14 @@ export class BrowserControlTool extends BaseTool {
 /** The field a given action cannot run without, or null when it has what it needs. */
 function requiredFieldFor(kind: BrowserAction['kind'], input: Record<string, unknown>): string | null {
   const has = (k: string) => typeof input[k] === 'string' && (input[k] as string).length > 0;
+  // `value` is checked for PRESENCE, not for being non-empty: clearing a field
+  // is an ordinary form operation, and `{ action: 'fill', value: '' }` was
+  // rejected as malformed even though the host already handles it.
+  const given = (k: string) => typeof input[k] === 'string';
   switch (kind) {
     case 'navigate': return has('url') ? null : 'a url';
     case 'click': return has('selector') ? null : 'a selector';
-    case 'fill': return has('selector') ? (has('value') ? null : 'a value') : 'a selector';
+    case 'fill': return has('selector') ? (given('value') ? null : 'a value') : 'a selector';
     case 'press': return has('key') ? null : 'a key';
     case 'wait_for': return has('selector') ? null : 'a selector';
     // extract_text works with or without a selector.

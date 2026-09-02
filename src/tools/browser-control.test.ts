@@ -66,6 +66,21 @@ describe('BrowserControlTool', () => {
       });
     }
 
+    it('allows fill with an empty value — clearing a field is a normal operation', async () => {
+      // `value` is validated for PRESENCE, not for being non-empty. Requiring
+      // non-empty rejected `{ action: 'fill', value: '' }` as malformed even
+      // though emptying a textbox is an ordinary form step and the host already
+      // handled it. Selectors, URLs and keys keep the non-empty check, because
+      // an empty one of those is genuinely meaningless.
+      const { calls, controller } = recorder();
+      const out = await new BrowserControlTool(controller).execute(
+        { action: 'fill', selector: '#q', value: '' },
+        {} as never,
+      );
+      expect(out).not.toContain('needs');
+      expect(calls).toEqual([{ kind: 'fill', selector: '#q', value: '' }]);
+    });
+
     it('allows extract_text with no selector — the whole page is the default', async () => {
       const { calls, controller } = recorder({ detail: 'page text' });
       await new BrowserControlTool(controller).execute({ action: 'extract_text' }, {} as never);
