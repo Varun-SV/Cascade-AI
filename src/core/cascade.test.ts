@@ -36,6 +36,46 @@ const baseConfig: CascadeConfig = {
   },
 };
 
+describe('Cascade.setBrowserController — the gate on acting for real', () => {
+  const controller = async () => ({ ok: true, detail: 'ok' });
+
+  const cascadeWith = (tools: Partial<CascadeConfig['tools']>) =>
+    new Cascade({ ...baseConfig, tools: { ...baseConfig.tools, ...tools } }, '/tmp');
+
+  it('does NOT register the tool when agentBrowserControl is off', () => {
+    // The default. Handing the desktop's controller over must not by itself
+    // give a run the ability to click things in the user's signed-in session —
+    // main.ts wires the controller unconditionally and relies on this.
+    const c = cascadeWith({});
+    c.setBrowserController(controller);
+    expect(c.getToolRegistry().hasTool('browser_control')).toBe(false);
+  });
+
+  it('registers it once the user turns it on', () => {
+    const c = cascadeWith({ agentBrowserControl: true });
+    c.setBrowserController(controller);
+    expect(c.getToolRegistry().hasTool('browser_control')).toBe(true);
+  });
+
+  it('still honours disabledTools when the setting is on', () => {
+    // disabledTools reaches tools registered outside the enabledTools
+    // allowlist, and this is one of them.
+    const c = cascadeWith({ agentBrowserControl: true, disabledTools: ['browser_control'] });
+    c.setBrowserController(controller);
+    expect(c.getToolRegistry().hasTool('browser_control')).toBe(false);
+  });
+
+  it('leaves read_current_page unaffected — reading is not acting', () => {
+    // The two capabilities are gated separately on purpose: reading a page the
+    // user already opened reaches nothing new, acting on it does.
+    const c = cascadeWith({});
+    c.setCurrentPageProvider(async () => null);
+    c.setBrowserController(controller);
+    expect(c.getToolRegistry().hasTool('read_current_page')).toBe(true);
+    expect(c.getToolRegistry().hasTool('browser_control')).toBe(false);
+  });
+});
+
 describe('Cascade routing complexity', () => {
   it('passes recent conversation context into complexity routing', async () => {
     const cascade = new Cascade(baseConfig, process.cwd());

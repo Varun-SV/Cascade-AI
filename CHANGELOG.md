@@ -18,6 +18,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+### Added
+- **The agent can act on the page you have open** (`browser_control`, desktop
+  only). Navigate, click, fill a field, press a key, wait for an element,
+  extract text — in the built-in browser you are already signed into, not a
+  headless copy with an empty cookie jar. Off by default behind a new Settings
+  toggle (**Agent browser control**); every run still goes through the approval
+  chain, and the browser panel carries a Stop control that halts the acting run
+  without turning the feature off.
+
+  Deliberately separate from the existing `browser` tool, which drives a
+  throwaway Playwright Chromium. Most pages worth automating are behind a login
+  a fresh headless session does not have — and the desktop already runs a
+  Chromium the user is signed into. Registration is host-supplied, so the tool
+  does not exist in the CLI or a hosted run rather than being present and
+  always failing.
+
 ## 0.77.0 - 2026-09-01
 
 ### Security

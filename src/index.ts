@@ -59,6 +59,8 @@ export {
 } from './tools/tool-name.js';
 export type { McpServerRename } from './tools/tool-name.js';
 export { CurrentPageTool, MAX_PAGE_TEXT_CHARS } from './tools/current-page.js';
+export { BrowserControlTool } from './tools/browser-control.js';
+export type { BrowserController, BrowserAction, BrowserActionOutcome } from './tools/browser-control.js';
 export type { CurrentPageProvider, CurrentPageSnapshot } from './tools/current-page.js';
 export type { DiscoveredMcpTool, McpDiscoveryResult } from './mcp/discover.js';
 export {

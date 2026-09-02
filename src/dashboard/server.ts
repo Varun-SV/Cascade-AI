@@ -31,6 +31,7 @@ import { aggregateCostStats } from './cost-stats.js';
 import type { WhyReport } from './cost-stats.js';
 import { saveGlobalCredentials } from '../config/global-credentials.js';
 import type { CurrentPageProvider } from '../tools/current-page.js';
+import type { BrowserController } from '../tools/browser-control.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -151,6 +152,13 @@ export class DashboardServer {
    * always failing.
    */
   private currentPageProvider?: CurrentPageProvider;
+  /**
+   * Supplied by the desktop shell so a run can ACT on that page — click, type,
+   * submit — not just read it. Same reasoning as the provider above: absent in
+   * the CLI, so the tool is not registered rather than present and failing.
+   * Cascade applies the `tools.agentBrowserControl` gate on top of this.
+   */
+  private browserController?: BrowserController;
   private activeControllers = new Map<string, AbortController>();
   /**
    * Run taskIds per chat session — file snapshots are keyed by the run's
@@ -266,6 +274,7 @@ export class DashboardServer {
       const cascade = new Cascade(cfg, this.workspacePath, this.store);
       this.activeSessions.set(sessionId, cascade);
       if (this.currentPageProvider) cascade.setCurrentPageProvider(this.currentPageProvider);
+      if (this.browserController) cascade.setBrowserController(this.browserController);
 
       // Addressed by session, not by the socket that started the run: a
       // reconnect gives the same client a NEW socket id, and events aimed at
@@ -397,6 +406,11 @@ export class DashboardServer {
   /** Wire the host's browser view in (desktop only). */
   setCurrentPageProvider(provider: CurrentPageProvider): void {
     this.currentPageProvider = provider;
+  }
+
+  /** Let runs act on that view, not just read it (desktop only). */
+  setBrowserController(controller: BrowserController): void {
+    this.browserController = controller;
   }
 
   async start(): Promise<void> {
@@ -1441,6 +1455,7 @@ export class DashboardServer {
         const cascade = new Cascade(this.config, this.workspacePath, this.store);
         this.activeSessions.set(sessionId, cascade);
         if (this.currentPageProvider) cascade.setCurrentPageProvider(this.currentPageProvider);
+      if (this.browserController) cascade.setBrowserController(this.browserController);
 
         cascade.on('stream:token', (e: { text: string; tierId: string; primary?: boolean }) => {
           this.socket.broadcastToRoom(`session:${sessionId}`, 'stream:token', { sessionId, tierId: e.tierId, text: e.text, primary: e.primary });

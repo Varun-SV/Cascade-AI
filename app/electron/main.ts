@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
 import { registerCloudAuthIpc } from './cloudAuth';
-import { registerBrowserHandlers, readCurrentPage } from './browser';
+import { registerBrowserHandlers, readCurrentPage, actOnCurrentPage, setAgentControlEnabled, resumeAgentControl } from './browser';
 
 const isDev = process.env.ELECTRON_DEV === '1';
 
@@ -128,6 +128,16 @@ async function startBackend(): Promise<void> {
     // can reach the live view directly. In the CLI there is no browser and the
     // tool is simply never registered.
     server.setCurrentPageProvider(readCurrentPage);
+    // And the acting half. Cascade applies the `tools.agentBrowserControl`
+    // gate itself, so handing the controller over unconditionally does not
+    // enable anything — it makes the capability available to be enabled.
+    server.setBrowserController(actOnCurrentPage);
+    // Mirror the persisted setting into the browser module, which enforces it
+    // on every action rather than trusting the caller to have checked.
+    setAgentControlEnabled(cascadeConfig.tools?.agentBrowserControl === true);
+    // A revocation is per-run, not permanent: a fresh backend means a fresh
+    // run, so a stop the user hit earlier must not silently outlive it.
+    resumeAgentControl();
     await server.start();
     dashboardServer = server;
     console.log(`[main] Cascade backend started on port ${backendPort} (workspace: ${workspace})`);
@@ -632,6 +642,11 @@ function registerIPC(): void {
         (err: unknown) => ({ ok: false as const, error: err instanceof Error ? err.message : String(err) }),
       ));
       if (!committed.ok) return { ok: false, error: committed.error };
+      // The browser module enforces this flag on every action, so it has to be
+      // told when the flag moves. `commitSettings` mutates the live config the
+      // backend already holds, which is why no restart is needed here — but
+      // nothing pushes that value across to the module on its own.
+      setAgentControlEnabled(cascadeConfig.tools?.agentBrowserControl === true);
       const credentials = { refused: committed.refused };
       // Reported through the response the panel already renders as an error. A
       // key that was typed and not stored has to say so; the alternative is a

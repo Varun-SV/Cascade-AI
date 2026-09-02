@@ -66,6 +66,7 @@ import {
 } from './context/compaction.js';
 import { GuidanceQueue } from './steering/guidance.js';
 import { CurrentPageTool, type CurrentPageProvider } from '../tools/current-page.js';
+import { BrowserControlTool, type BrowserController } from '../tools/browser-control.js';
 
 /** One entry in the per-run orchestration decision trail (see /why). */
 export interface DecisionLogEntry {
@@ -696,6 +697,26 @@ export class Cascade extends EventEmitter {
   setCurrentPageProvider(provider: CurrentPageProvider): void {
     if ((this.config.tools?.disabledTools ?? []).includes('read_current_page')) return;
     this.toolRegistry.register(new CurrentPageTool(provider));
+  }
+
+  /**
+   * Wire the host's browser so a run can ACT on the open page, not just read it.
+   *
+   * Two gates before this registers anything, and both matter:
+   *
+   *   - `tools.agentBrowserControl` must be on. Unlike read_current_page, which
+   *     reaches nothing the user has not already opened themselves, this drives
+   *     the session they are signed into. That is opt-in, not a default.
+   *   - `disabledTools` still removes it, the same as every other tool.
+   *
+   * Host-supplied like the page provider: the tool exists only where there is a
+   * real browser to drive, so it never has to be refused in the CLI or a hosted
+   * run — it is simply not there.
+   */
+  setBrowserController(controller: BrowserController): void {
+    if (!this.config.tools?.agentBrowserControl) return;
+    if ((this.config.tools?.disabledTools ?? []).includes('browser_control')) return;
+    this.toolRegistry.register(new BrowserControlTool(controller));
   }
 
   private registerMediaTools(workspacePath: string): void {
