@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
 import { registerCloudAuthIpc } from './cloudAuth';
-import { registerBrowserHandlers, readCurrentPage, actOnCurrentPage, setAgentControlEnabled, resumeAgentControl, agentRunEnded, agentActorEnded } from './browser';
+import { registerBrowserHandlers, readCurrentPage, actOnCurrentPage, setAgentControlEnabled, resumeAgentControl, agentRunEnded, agentActorEnded, setApprovalWaitCeiling } from './browser';
 
 const isDev = process.env.ELECTRON_DEV === '1';
 
@@ -152,6 +152,11 @@ async function startBackend(): Promise<void> {
     server.onRunEnded?.((ids: { sessionId: string; taskId?: string }) => {
       if (ids.taskId) agentRunEnded(ids.taskId);
     });
+    // The panel stays hidden while ANY approval is pending, so an action waits
+    // on the approval window — and a ceiling shorter than that window fails
+    // actions the user has already approved. Margin on top so the approval's
+    // own timeout is what fires first, which is the one that can explain itself.
+    setApprovalWaitCeiling((cascadeConfig.approvalTimeoutMs ?? 600_000) + 60_000);
     // Mirror the persisted setting into the browser module, which enforces it
     // on every action rather than trusting the caller to have checked.
     setAgentControlEnabled(cascadeConfig.tools?.agentBrowserControl === true);

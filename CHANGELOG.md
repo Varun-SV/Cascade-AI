@@ -71,11 +71,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matched nothing: a finished run kept its Stop control armed and held its
   browser lease until the ceiling expired.
 
-  Unattended runs are refused outright. A scheduled task auto-approves every
-  tool because nobody is there to ask, which disqualifies it from one whose
-  safety rests on a person watching — so `runScheduledTask` declares itself
-  unattended and `setBrowserController` refuses, rather than the property
-  resting on a call that simply is not made.
+  Unattended runs are refused outright, in whichever order the host wires
+  things up. A scheduled task auto-approves every tool because nobody is there
+  to ask, which disqualifies it from one whose safety rests on a person
+  watching — so `runScheduledTask` declares itself unattended, and declaring it
+  revokes an already-registered tool rather than only refusing the next
+  registration. Enforced when the tool RUNS, so a caller holding its own
+  reference is refused too; the guarantee no longer depends on the scheduler
+  calling two methods in the lucky order.
+
+  An action approved by the user is no longer failed by a second approval
+  queued behind it. The browser panel hides while any approval is pending, so
+  the wait is bounded by the approval window rather than by a fixed ceiling
+  shorter than it — 120s against an `approvalTimeoutMs` that defaults to 600s
+  meant spending three minutes on the next prompt killed the action already
+  said yes to.
 
   Deliberately separate from the existing `browser` tool, which drives a
   throwaway Playwright Chromium. Most pages worth automating are behind a login

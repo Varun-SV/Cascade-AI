@@ -718,6 +718,17 @@ export class Cascade extends EventEmitter {
    */
   setUnattended(on: boolean): void {
     this.unattended = on;
+    if (!on) return;
+    // Revokes a controller that is ALREADY wired, rather than only refusing the
+    // next registration. The invariant was order-dependent: `setUnattended(true)`
+    // then `setBrowserController(...)` was safe, but the reverse left the tool
+    // registered and usable. The current scheduler happens to call them in the
+    // safe order — which is exactly the emergent, undocumented property this
+    // was supposed to replace with an enforced one.
+    const tool = this.toolRegistry.getTool('browser_control') as
+      | { revoke?: () => void }
+      | undefined;
+    tool?.revoke?.();
   }
 
   /**

@@ -685,6 +685,43 @@ describe('Stop stays reachable between actions', () => {
 });
 
 describe('queued approvals do not time out an approved action', () => {
+  it('waits out an approval window longer than the old fixed ceiling', async () => {
+    // The ceiling has to outlast the thing it is waiting ON. At a fixed 120s it
+    // did not: the escalator allows 600s by default, so approving the browser
+    // action and then spending three minutes reading the SECOND queued approval
+    // failed the first — its approval still valid, the second not yet timed
+    // out. Same multi-approval defect as the 3s budget, just moved to 120s.
+    await openPanel();
+    mod.setApprovalWaitCeiling(660_000);
+    await handlers.get('browser:hide')!({}, { reason: 'modal' });
+
+    vi.useFakeTimers();
+    let settled = false;
+    const pending = act('run-A').then((r) => { settled = true; return r; });
+
+    // Three minutes reading the next prompt — well past the old 120s ceiling.
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(settled, 'the approved action must still be waiting, not refused').toBe(false);
+
+    // Reopened while still on fake timers. Swapping back mid-wait orphans the
+    // poll loop's pending setTimeout — it was scheduled on the fake clock and
+    // the real one will never fire it — so the action hangs and the test times
+    // out for a reason that has nothing to do with what it is testing.
+    await openPanel();
+    await vi.advanceTimersByTimeAsync(200);
+    expect((await pending).ok, 'and it runs once the panel comes back').toBe(true);
+  });
+
+  it('still gives up eventually, so a stuck panel cannot pin a worker forever', async () => {
+    await openPanel();
+    mod.setApprovalWaitCeiling(1_000);
+    await handlers.get('browser:hide')!({}, { reason: 'modal' });
+
+    const out = await act('run-A');
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/not on screen/i);
+  }, 10_000);
+
   it('waits past the normal budget while a modal holds the panel', async () => {
     // BrowserView stays hidden while ANY approval is pending. With two queued,
     // approving the first leaves the panel hidden behind the second, and a

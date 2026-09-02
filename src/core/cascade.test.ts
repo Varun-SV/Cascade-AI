@@ -100,6 +100,56 @@ describe('Cascade.setBrowserController — the gate on acting for real', () => {
   });
 });
 
+describe('unattended revokes browser control whatever the call order', () => {
+  const controller = async () => ({ ok: true, detail: 'ok' });
+  const cascadeWith = (tools: Record<string, unknown>) =>
+    new Cascade({ ...baseConfig, tools: { ...baseConfig.tools, ...tools } }, '/tmp');
+
+  it('disables an ALREADY-registered tool when the run turns out to be unattended', async () => {
+    // The invariant used to be order-dependent, which made it not an invariant:
+    // setUnattended(true) then setBrowserController(...) was safe, but the
+    // reverse left browser_control registered and fully usable. The scheduler
+    // happens to call them in the safe order — the emergent property this was
+    // meant to replace.
+    const c = cascadeWith({ agentBrowserControl: true });
+    c.setBrowserController(controller);
+    const tool = c.getToolRegistry().getTool('browser_control');
+    expect(tool, 'sanity: wired before the run was declared unattended').toBeDefined();
+
+    c.setUnattended(true);
+
+    // Enforced at EXECUTION time, so a reference taken before the revocation
+    // is just as dead as the registry entry.
+    const out = await tool!.execute({ action: 'click', selector: '#a' }, {} as never);
+    expect(out).toMatch(/not available|nobody is/i);
+  });
+
+  it('does not act even when the caller kept its own reference', async () => {
+    const c = cascadeWith({ agentBrowserControl: true });
+    let reached = false;
+    c.setBrowserController(async () => { reached = true; return { ok: true, detail: 'ok' }; });
+    const tool = c.getToolRegistry().getTool('browser_control');
+
+    c.setUnattended(true);
+    await tool!.execute({ action: 'navigate', url: 'https://example.test/' }, {} as never);
+
+    expect(reached, 'a revoked tool must not reach the browser at all').toBe(false);
+  });
+
+  it('stays refused — revocation is one way', async () => {
+    // A safety gate that a later call can re-open is one a refactor re-opens
+    // by accident.
+    const c = cascadeWith({ agentBrowserControl: true });
+    c.setBrowserController(controller);
+    const tool = c.getToolRegistry().getTool('browser_control');
+    c.setUnattended(true);
+    c.setUnattended(false);
+
+    const out = await tool!.execute({ action: 'click', selector: '#a' }, {} as never);
+    expect(out).toMatch(/not available|nobody is/i);
+  });
+});
+
 describe('Cascade routing complexity', () => {
   it('passes recent conversation context into complexity routing', async () => {
     const cascade = new Cascade(baseConfig, process.cwd());

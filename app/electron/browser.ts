@@ -328,8 +328,33 @@ let activeAbort: AbortController | null = null;
 /** Milliseconds an action waits for the browser to become watchable. */
 const WATCHABLE_WAIT_MS = 3_000;
 
-/** Hard ceiling on that wait even while an approval modal holds the panel. */
-const MODAL_WAIT_CEILING_MS = 120_000;
+/**
+ * Hard ceiling on that wait even while an approval modal holds the panel.
+ *
+ * It must outlast the APPROVAL WINDOW, because that is what it is waiting on.
+ * At a fixed 120s it did not: the escalator allows 600s by default
+ * (`approvalTimeoutMs`), so with two approvals queued, approving the browser
+ * action and then spending three minutes reading the second one failed the
+ * first — its approval still perfectly valid, the second not yet timed out.
+ * That is the same multi-approval defect as before, moved from 3s to 120s.
+ *
+ * So the host sets it from the configured approval timeout. The default only
+ * covers a host that never calls the setter, and is deliberately above the
+ * escalator's own default rather than below it.
+ */
+let modalWaitCeilingMs = 660_000;
+
+/**
+ * Align the modal wait with how long an approval may legitimately take.
+ *
+ * Called by the host with the run's configured `approvalTimeoutMs` plus a
+ * margin: the panel stays hidden for as long as approvals are pending, so a
+ * ceiling shorter than the approval window fails actions the user has already
+ * said yes to.
+ */
+export function setApprovalWaitCeiling(ms: number): void {
+  if (Number.isFinite(ms) && ms > 0) modalWaitCeilingMs = ms;
+}
 
 /** How often a running action re-checks that it is still being watched. */
 const WATCHDOG_INTERVAL_MS = 250;
@@ -707,7 +732,7 @@ async function awaitWatchable(
   hostSignal: AbortSignal,
 ): Promise<boolean> {
   let budget = WATCHABLE_WAIT_MS;
-  const ceiling = Date.now() + MODAL_WAIT_CEILING_MS;
+  const ceiling = Date.now() + modalWaitCeilingMs;
   for (;;) {
     if (isWatchable()) return true;
     if (signal?.aborted || hostSignal.aborted || revokedSessions.has(session)) return false;

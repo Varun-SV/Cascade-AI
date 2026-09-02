@@ -141,6 +141,8 @@ export class BrowserControlTool extends BaseTool {
 
   private controller: BrowserController;
   private release: BrowserActorRelease | undefined;
+  /** One-way. See `revoke`. */
+  private revoked = false;
 
   constructor(controller: BrowserController, release?: BrowserActorRelease) {
     super();
@@ -159,12 +161,35 @@ export class BrowserControlTool extends BaseTool {
     this.release?.(actorId);
   }
 
+  /**
+   * Permanently disable this tool, whatever the registry still holds.
+   *
+   * Registration-time gates cannot express "this run turned out to be
+   * unattended": a host that wires the controller and only then declares the
+   * run unattended has already registered the tool, and a check that ran at
+   * registration has no second chance. Enforcing at EXECUTION time makes the
+   * guarantee independent of call order, which is the whole point of stating
+   * the invariant rather than relying on the scheduler's current sequence.
+   *
+   * One-way on purpose. A safety gate that can be re-opened by a later call is
+   * a gate that a refactor re-opens by accident.
+   */
+  revoke(): void {
+    this.revoked = true;
+  }
+
   // Acting on a session the user is signed into is the highest-consequence
   // thing in the tool set — higher than shell, arguably, because the blast
   // radius is someone else's server rather than this machine.
   isDangerous(): boolean { return true; }
 
   async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
+    // Checked before anything else, including argument validation: once
+    // revoked this tool must do nothing at all, however it is called.
+    if (this.revoked) {
+      return 'Error: browser control is not available in this run. It requires a person watching who can stop it, and nobody is.';
+    }
+
     const kind = input['action'] as BrowserAction['kind'] | undefined;
     if (!kind) return 'Error: action is required.';
 
