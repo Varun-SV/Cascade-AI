@@ -113,6 +113,12 @@ let activeAbort: AbortController | null = null;
 /** Milliseconds an action waits for the browser to become watchable. */
 const WATCHABLE_WAIT_MS = 3_000;
 
+/** Hard ceiling on that wait even while an approval modal holds the panel. */
+const MODAL_WAIT_CEILING_MS = 120_000;
+
+/** How often a running action re-checks that it is still being watched. */
+const WATCHDOG_INTERVAL_MS = 250;
+
 /**
  * The last run to hold the lease, whether or not it still does.
  *
@@ -189,6 +195,24 @@ export function stopAgentControl(sessionId?: string): void {
  * are no live runs to un-stop. It is NOT a per-run reset — that is what keying
  * revocation by session id removes the need for.
  */
+/**
+ * A run has finished, so its Stop affordance can go away.
+ *
+ * Called by the host when a run ends. Without it the panel would either drop
+ * the Stop button the moment an action finished — leaving the user no way to
+ * revoke during the model-thinking gap between two actions, which is exactly
+ * when `lastActiveSession` exists to be reachable — or keep offering to stop a
+ * run that ended hours ago.
+ */
+export function agentRunEnded(sessionId: string): void {
+  if (lastActiveSession === sessionId) lastActiveSession = null;
+  if (drivingSession === sessionId) {
+    drivingSession = null;
+    activeAbort?.abort();
+  }
+  pushStateToOwner();
+}
+
 export function resumeAgentControl(sessionId?: string): void {
   if (sessionId) revokedSessions.delete(sessionId);
   else revokedSessions.clear();
@@ -296,6 +320,16 @@ function getState() {
     // The run holding the browser, so the panel's Stop targets the run the user
     // is watching rather than "whatever is driving by the time the click lands".
     agentDrivingSession: drivingSession ?? undefined,
+    // A run that has acted and has neither been stopped nor finished. The panel
+    // keeps its Stop control while this is set, because the lease is released
+    // between actions and rendering Stop only while an action runs made it
+    // disappear during the model-thinking gap — the one moment a user watching
+    // a multi-step sequence is most likely to want it, and the moment the
+    // argument-less Stop fallback was built for.
+    agentArmedSession:
+      drivingSession
+      ?? (lastActiveSession && !revokedSessions.has(lastActiveSession) ? lastActiveSession : undefined)
+      ?? undefined,
   };
 }
 
@@ -388,10 +422,31 @@ function pageWhere(): { url?: string; title?: string } {
 function isWatchable(): boolean {
   if (!visible) return false;
   if (!owner || owner.isDestroyed()) return false;
-  // isMinimized is absent on some stubs/older shims; treat absence as "not
-  // minimized" rather than crashing the gate.
-  return typeof owner.isMinimized === 'function' ? !owner.isMinimized() : true;
+  // A window hidden to the tray is not watchable, and nothing else notices:
+  // the tray's Hide calls mainWindow.hide() directly, which never touches the
+  // panel's `visible` flag. Minimized and hidden are separate states in
+  // Electron and this gate has to fail on both.
+  //
+  // Each predicate is feature-detected rather than assumed: these run against
+  // whatever the host passes as a window, and a missing method should not
+  // decide the gate by throwing.
+  if (typeof owner.isMinimized === 'function' && owner.isMinimized()) return false;
+  if (typeof owner.isVisible === 'function' && !owner.isVisible()) return false;
+  return true;
 }
+
+/**
+ * Why the panel is hidden, when the renderer told us.
+ *
+ * The distinction matters for exactly one thing: a panel hidden because an
+ * approval modal is up is about to come back, and the user is looking at the
+ * prompt for this very action. Counting that against the wait budget made an
+ * approved action fail deterministically whenever a second approval was queued
+ * behind it — the modal stack keeps the panel hidden, the budget expires, and
+ * the action the user said yes to is refused while they are still reading the
+ * next prompt.
+ */
+let hiddenForModal = false;
 
 /**
  * Wait, briefly, for the browser to become watchable.
@@ -413,11 +468,20 @@ async function awaitWatchable(
   signal: AbortSignal | undefined,
   hostSignal: AbortSignal,
 ): Promise<boolean> {
-  const deadline = Date.now() + WATCHABLE_WAIT_MS;
+  let budget = WATCHABLE_WAIT_MS;
+  const ceiling = Date.now() + MODAL_WAIT_CEILING_MS;
   for (;;) {
     if (isWatchable()) return true;
     if (signal?.aborted || hostSignal.aborted || revokedSessions.has(session)) return false;
-    if (Date.now() >= deadline) return false;
+    // A modal is holding the panel down and will release it. Waiting through
+    // that is not the same as waiting on a browser the user walked away from,
+    // so it does not spend the budget — but it is still bounded, so a modal
+    // left open forever cannot pin a worker forever.
+    if (!hiddenForModal) {
+      budget -= 50;
+      if (budget <= 0) return false;
+    }
+    if (Date.now() >= ceiling) return false;
     await new Promise((r) => setTimeout(r, 50));
   }
 }
@@ -467,7 +531,21 @@ export async function actOnCurrentPage(
         detail: 'The built-in browser is not on screen. Ask the user to open the Browser tab — actions only run where they can watch them and stop them.',
       };
     }
-    return await perform(action, context.signal, abort.signal);
+    // Watches for the browser ceasing to be watchable WHILE an action runs.
+    // Without this, only Stop and disabling the feature aborted anything, so a
+    // slow loadURL kept going after the user switched tabs, minimized, hid the
+    // app to the tray, or a sibling approval covered the panel — and the
+    // comment on activeAbort claimed otherwise, which made it worse than the
+    // gap itself. wait_for polled watchability already; navigate did not, and
+    // a per-action watchdog covers both without every action remembering to.
+    const watchdog = setInterval(() => {
+      if (!isWatchable()) abort.abort();
+    }, WATCHDOG_INTERVAL_MS);
+    try {
+      return await perform(action, context.signal, abort.signal);
+    } finally {
+      clearInterval(watchdog);
+    }
   } catch (err) {
     return { ok: false, detail: err instanceof Error ? err.message : String(err), ...pageWhere() };
   } finally {
@@ -514,8 +592,16 @@ async function perform(
       });
       const raced = await Promise.race([wc.loadURL(target).then(() => 'loaded' as const), abort]);
       if (raced === 'cancelled') {
+        // Stop the page too: the alternative is a navigation that completes in
+        // the user's session after they stopped it.
         wc.stop();
-        return { ok: false, detail: 'The run was cancelled while the page was loading.', ...pageWhere() };
+        return {
+          ok: false,
+          detail: hostSignal.aborted && !signal?.aborted
+            ? 'Stopped while the page was loading — the browser was closed, hidden, or the user pressed Stop.'
+            : 'The run was cancelled while the page was loading.',
+          ...pageWhere(),
+        };
       }
       return { ok: true, detail: `Navigated to ${target}`, ...pageWhere() };
     }
@@ -630,6 +716,7 @@ export function registerBrowserHandlers(getWindow: () => BrowserWindow | null): 
     const v = ensureView(w);
     if (!w.contentView.children.includes(v)) w.contentView.addChildView(v);
     visible = true;
+    hiddenForModal = false;
     if (a.bounds) lastBounds = normalizeBounds(a.bounds);
     applyBounds();
     if (!v.webContents.getURL()) {
@@ -643,9 +730,17 @@ export function registerBrowserHandlers(getWindow: () => BrowserWindow | null): 
 
   // Hide, don't destroy: the page (and any session the user signed into)
   // survives a trip to another view.
-  ipcMain.handle('browser:hide', () => {
+  ipcMain.handle('browser:hide', (_e, arg: unknown) => {
     visible = false;
+    // The renderer says WHY. Hidden behind an approval modal is a state that
+    // resolves itself and must not spend an action's wait budget; hidden
+    // because the user went to another view is not.
+    const reason = (arg as { reason?: string } | undefined)?.reason;
+    hiddenForModal = reason === 'modal';
     applyBounds();
+    // An action already running is no longer being watched.
+    if (!isWatchable()) activeAbort?.abort();
+    pushStateToOwner();
     return { ok: true };
   });
 

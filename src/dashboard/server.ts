@@ -433,6 +433,19 @@ export class DashboardServer {
     this.settingsChangeHook = hook;
   }
 
+  /**
+   * Told when a run ends, so a host holding run-scoped state can release it.
+   *
+   * The desktop uses this to retire a run's browser Stop control: that has to
+   * outlive each individual action (the gap between two actions is when the
+   * user most wants it) but must not outlive the run.
+   */
+  private runEndedHook?: (sessionId: string) => void;
+
+  onRunEnded(hook: (sessionId: string) => void): void {
+    this.runEndedHook = hook;
+  }
+
   async start(): Promise<void> {
     const isLoopback = this.host === '127.0.0.1' || this.host === '::1' || this.host === 'localhost';
     if (!isLoopback) {
@@ -635,6 +648,9 @@ export class DashboardServer {
 
   /** Record run end: the assistant reply (when there is one) and the runtime row's final status. */
   private persistRunEnd(sessionId: string, title: string, latestPrompt: string, reply: string | undefined, status: 'COMPLETED' | 'FAILED', result?: CascadeRunResult): void {
+    // Every run-completion path lands here, so this is the one place that
+    // reliably means "this run is over".
+    this.runEndedHook?.(sessionId);
     try {
       if (reply && reply.trim()) {
         this.store.addMessage({ id: randomUUID(), sessionId, role: 'assistant', content: reply, timestamp: new Date().toISOString() });

@@ -67,6 +67,9 @@ export interface DesktopBrowserState {
   /** Which run is acting, so Stop targets that one rather than whatever is
    *  driving by the time the click lands. */
   agentDrivingSession?: string;
+  /** A run that has acted and is neither stopped nor finished — Stop stays
+   *  available for it between actions. */
+  agentArmedSession?: string;
 }
 
 declare global {
@@ -152,7 +155,7 @@ declare global {
        *  positions over the renderer at the bounds we report. */
       browser?: {
         open(url: string | undefined, bounds: { x: number; y: number; width: number; height: number }): Promise<{ ok: boolean; error?: string; state?: DesktopBrowserState }>;
-        hide(): Promise<{ ok: boolean }>;
+        hide(reason?: 'modal'): Promise<{ ok: boolean }>;
         close(): Promise<{ ok: boolean }>;
         setBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<{ ok: boolean }>;
         navigate(url: string): Promise<{ ok: boolean; error?: string }>;

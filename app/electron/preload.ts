@@ -16,6 +16,9 @@ interface BrowserState {
   /** Which run is acting, so Stop targets that one rather than whatever is
    *  driving by the time the click lands. */
   agentDrivingSession?: string;
+  /** A run that has acted and is neither stopped nor finished — Stop stays
+   *  available for it between actions. */
+  agentArmedSession?: string;
 }
 
 /** A message on a cloud conversation's active path (with branching data). */
@@ -237,7 +240,7 @@ contextBridge.exposeInMainWorld('cascade', {
   browser: {
     open: (url: string | undefined, bounds: { x: number; y: number; width: number; height: number }) =>
       ipcRenderer.invoke('browser:open', { url, bounds }) as Promise<{ ok: boolean; error?: string; state?: BrowserState }>,
-    hide: () => ipcRenderer.invoke('browser:hide') as Promise<{ ok: boolean }>,
+    hide: (reason?: 'modal') => ipcRenderer.invoke('browser:hide', { reason }) as Promise<{ ok: boolean }>,
     close: () => ipcRenderer.invoke('browser:close') as Promise<{ ok: boolean }>,
     setBounds: (bounds: { x: number; y: number; width: number; height: number }) =>
       ipcRenderer.invoke('browser:setBounds', bounds) as Promise<{ ok: boolean }>,

@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
 import { registerCloudAuthIpc } from './cloudAuth';
-import { registerBrowserHandlers, readCurrentPage, actOnCurrentPage, setAgentControlEnabled, resumeAgentControl } from './browser';
+import { registerBrowserHandlers, readCurrentPage, actOnCurrentPage, setAgentControlEnabled, resumeAgentControl, agentRunEnded } from './browser';
 
 const isDev = process.env.ELECTRON_DEV === '1';
 
@@ -140,6 +140,10 @@ async function startBackend(): Promise<void> {
     server.onSettingsChanged?.((next: { tools?: { agentBrowserControl?: boolean } }) => {
       setAgentControlEnabled(next.tools?.agentBrowserControl === true);
     });
+    // Retires a run's browser Stop control when the run ends. The control has
+    // to outlive each action — the gap between two is when the user most wants
+    // it — but offering to stop a run that finished an hour ago is noise.
+    server.onRunEnded?.((sessionId: string) => agentRunEnded(sessionId));
     // Mirror the persisted setting into the browser module, which enforces it
     // on every action rather than trusting the caller to have checked.
     setAgentControlEnabled(cascadeConfig.tools?.agentBrowserControl === true);

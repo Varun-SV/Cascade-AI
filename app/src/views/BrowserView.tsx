@@ -78,7 +78,10 @@ export function BrowserView() {
   useEffect(() => {
     if (!api) return;
     // Hide, not close — the page and any signed-in session survive the modal.
-    if (hidePage) void api.hide();
+    // `blocked` means a modal is covering the panel — including the approval
+    // modal for a browser action. Saying so lets the host wait for the panel to
+    // come back instead of counting that against the action's budget.
+    if (hidePage) void api.hide(blocked ? 'modal' : undefined);
     else {
       const el = pageRef.current;
       const r = el?.getBoundingClientRect();
@@ -158,7 +161,7 @@ export function BrowserView() {
           or one of the three gates the feature relies on does not exist. The
           host refuses to act at all while this panel is off screen, so putting
           the control here means it is present whenever anything can happen. */}
-      {state.agentDriving && (
+      {(state.agentDriving || state.agentArmedSession) && (
         <div
           role="status"
           style={{
@@ -173,7 +176,11 @@ export function BrowserView() {
               width: 7, height: 7, borderRadius: '50%', background: 'currentColor', flexShrink: 0,
             }}
           />
-          <span style={{ flex: 1 }}>Cascade is using this browser.</span>
+          <span style={{ flex: 1 }}>
+            {state.agentDriving
+              ? 'Cascade is using this browser.'
+              : 'Cascade may use this browser again in this run.'}
+          </span>
           <button
             onClick={() => void api.stopAgent()}
             title="Stop Cascade from using the browser for this run"

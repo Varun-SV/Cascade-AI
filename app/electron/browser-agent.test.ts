@@ -45,9 +45,11 @@ vi.mock('electron', () => ({
 }));
 
 let minimized = false;
+let windowShown = true;
 const win = {
   isDestroyed: () => false,
   isMinimized: () => minimized,
+  isVisible: () => windowShown,
   webContents: fakeWebContents,
   contentView: { children: [] as unknown[], addChildView: vi.fn(), removeChildView: vi.fn() },
 };
@@ -75,6 +77,7 @@ const act = (sessionId: string, signal?: AbortSignal) =>
 
 beforeEach(async () => {
   minimized = false;
+  windowShown = true;
   fakeWebContents.executeJavaScript.mockReset();
   fakeWebContents.executeJavaScript.mockResolvedValue(true);
   fakeWebContents.loadURL.mockReset();
@@ -371,4 +374,139 @@ describe('Stop reaches an action already under way', () => {
     expect((await pending).ok).toBe(false);
     expect(fakeWebContents.stop).toHaveBeenCalled();
   });
+});
+
+describe('hidden to the tray is not watchable', () => {
+  it('refuses while the whole window is hidden', async () => {
+    // The tray menu's Hide calls mainWindow.hide() directly and never touches
+    // the panel's `visible` flag, so every other check passed while the entire
+    // app was hidden — the exact state this gate exists to forbid.
+    await openPanel();
+    expect((await act('run-1')).ok, 'sanity').toBe(true);
+
+    windowShown = false;
+    const out = await act('run-1');
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/not on screen/i);
+  });
+
+  it('aborts a navigation in flight when the window is hidden', async () => {
+    await openPanel();
+    fakeWebContents.loadURL.mockImplementation(() => new Promise(() => {}));
+
+    const pending = mod.actOnCurrentPage(
+      { kind: 'navigate', url: 'https://slow.test/' },
+      { sessionId: 'run-A' },
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    windowShown = false;
+
+    const out = await pending;
+    expect(out.ok).toBe(false);
+    expect(fakeWebContents.stop, 'the page must be told to stop loading').toHaveBeenCalled();
+  });
+});
+
+describe('losing sight of the browser aborts the action', () => {
+  it('aborts a navigation when the panel is hidden mid-load', async () => {
+    // Only Stop and disabling the feature fired the host abort, so a slow
+    // loadURL kept going when the user simply switched away — while the comment
+    // on activeAbort claimed it covered exactly this.
+    await openPanel();
+    fakeWebContents.loadURL.mockImplementation(() => new Promise(() => {}));
+
+    const pending = mod.actOnCurrentPage(
+      { kind: 'navigate', url: 'https://slow.test/' },
+      { sessionId: 'run-A' },
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    await handlers.get('browser:hide')!({}, undefined);
+
+    const out = await pending;
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/stopped|hidden|closed/i);
+    expect(fakeWebContents.stop).toHaveBeenCalled();
+  });
+
+  it('aborts a navigation when the window is minimized mid-load', async () => {
+    await openPanel();
+    fakeWebContents.loadURL.mockImplementation(() => new Promise(() => {}));
+
+    const pending = mod.actOnCurrentPage(
+      { kind: 'navigate', url: 'https://slow.test/' },
+      { sessionId: 'run-A' },
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    minimized = true;
+
+    expect((await pending).ok).toBe(false);
+    expect(fakeWebContents.stop).toHaveBeenCalled();
+  });
+});
+
+describe('Stop stays reachable between actions', () => {
+  it('keeps a run armed after an action finishes', async () => {
+    // The lease is released in every action's finally, so a UI keyed only on
+    // "an action is running" loses its Stop button during the model-thinking
+    // gap — the moment the argument-less Stop fallback exists to serve.
+    await openPanel();
+    await act('run-A');
+
+    const state = handlers.get('browser:state')!() as { agentDriving: boolean; agentArmedSession?: string };
+    expect(state.agentDriving, 'no action is running').toBe(false);
+    expect(state.agentArmedSession, 'but the run is still stoppable').toBe('run-A');
+  });
+
+  it('drops the armed run once it is stopped', async () => {
+    await openPanel();
+    await act('run-A');
+    mod.stopAgentControl();
+
+    const state = handlers.get('browser:state')!() as { agentArmedSession?: string };
+    expect(state.agentArmedSession).toBeUndefined();
+  });
+
+  it('drops the armed run once the run ends', async () => {
+    await openPanel();
+    await act('run-A');
+    mod.agentRunEnded('run-A');
+
+    const state = handlers.get('browser:state')!() as { agentArmedSession?: string };
+    expect(state.agentArmedSession).toBeUndefined();
+  });
+
+  it('a Stop pressed between two actions still stops the second', async () => {
+    await openPanel();
+    expect((await act('run-A')).ok).toBe(true);
+    mod.stopAgentControl();                    // pressed in the gap
+    expect((await act('run-A')).ok).toBe(false);
+  });
+});
+
+describe('queued approvals do not time out an approved action', () => {
+  it('waits past the normal budget while a modal holds the panel', async () => {
+    // BrowserView stays hidden while ANY approval is pending. With two queued,
+    // approving the first leaves the panel hidden behind the second, and a
+    // budget that counted that time refused the action the user had just
+    // approved — deterministically, not as a race.
+    await openPanel();
+    await handlers.get('browser:hide')!({}, { reason: 'modal' });
+
+    const pending = act('run-A');
+    // Longer than WATCHABLE_WAIT_MS: the user is still reading the next prompt.
+    await new Promise((r) => setTimeout(r, 3_600));
+    await openPanel();
+
+    expect((await pending).ok, 'the approved action must still run').toBe(true);
+  }, 15_000);
+
+  it('still gives up on a panel the user simply navigated away from', async () => {
+    // The concession is only for a modal, which resolves itself. Hiding for any
+    // other reason keeps the ordinary budget.
+    await openPanel();
+    await handlers.get('browser:hide')!({}, undefined);
+    const out = await act('run-A');
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/not on screen/i);
+  }, 10_000);
 });
