@@ -700,6 +700,27 @@ export class Cascade extends EventEmitter {
   }
 
   /**
+   * True when nobody is watching this run — a scheduled/cron task, which
+   * auto-approves every tool because there is no one to ask.
+   *
+   * That auto-approval is fine for ordinary tools and disqualifying for this
+   * one: `browser_control` drives the signed-in browser, and "every run asks
+   * first" is the promise the Settings copy makes. The property used to hold
+   * only because `runScheduledTask` happens not to call `setBrowserController`
+   * — a guarantee resting on an ABSENT call, which is exactly what a later
+   * refactor adds without noticing. Stated and enforced instead.
+   */
+  private unattended = false;
+
+  /**
+   * Declare that no human is watching this run, so capabilities that depend on
+   * a person being able to see and stop them are refused outright.
+   */
+  setUnattended(on: boolean): void {
+    this.unattended = on;
+  }
+
+  /**
    * Wire the host's browser so a run can ACT on the open page, not just read it.
    *
    * Two gates before this registers anything, and both matter:
@@ -708,12 +729,15 @@ export class Cascade extends EventEmitter {
    *     reaches nothing the user has not already opened themselves, this drives
    *     the session they are signed into. That is opt-in, not a default.
    *   - `disabledTools` still removes it, the same as every other tool.
+   *   - The run must not be UNATTENDED. See `setUnattended`.
    *
    * Host-supplied like the page provider: the tool exists only where there is a
    * real browser to drive, so it never has to be refused in the CLI or a hosted
    * run — it is simply not there.
    */
   setBrowserController(controller: BrowserController): void {
+    if (this.unattended) return;
+
     if (!this.config.tools?.agentBrowserControl) return;
     if ((this.config.tools?.disabledTools ?? []).includes('browser_control')) return;
     this.toolRegistry.register(new BrowserControlTool(controller));

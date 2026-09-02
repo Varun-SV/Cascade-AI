@@ -45,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The Stop control stays available between a run's actions, not only while one
   is executing, and retires when the run ends.
 
+  Unattended runs are refused outright. A scheduled task auto-approves every
+  tool because nobody is there to ask, which disqualifies it from one whose
+  safety rests on a person watching — so `runScheduledTask` declares itself
+  unattended and `setBrowserController` refuses, rather than the property
+  resting on a call that simply is not made.
+
   Deliberately separate from the existing `browser` tool, which drives a
   throwaway Playwright Chromium. Most pages worth automating are behind a login
   a fresh headless session does not have — and the desktop already runs a

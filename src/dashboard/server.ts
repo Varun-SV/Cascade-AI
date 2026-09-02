@@ -757,6 +757,11 @@ export class DashboardServer {
     const prompt = task.prompt;
     const title = this.persistRunStart(sessionId, `[${task.name}] ${prompt}`);
     const cascade = new Cascade(this.config, task.workspacePath ?? this.workspacePath, this.store);
+    // Said out loud rather than left to the absence of a setBrowserController
+    // call below. A scheduled run auto-approves every tool (see the
+    // approvalCallback further down) because there is nobody to ask, and that
+    // is disqualifying for anything whose safety rests on a person watching.
+    cascade.setUnattended(true);
     this.activeSessions.set(sessionId, cascade);
 
     cascade.on('tier:status', (e: unknown) => {

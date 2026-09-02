@@ -65,6 +65,18 @@ describe('Cascade.setBrowserController — the gate on acting for real', () => {
     expect(c.getToolRegistry().hasTool('browser_control')).toBe(false);
   });
 
+  it('refuses the controller outright for an unattended run', () => {
+    // A scheduled run auto-approves every tool because nobody is there to ask,
+    // which is disqualifying for one whose safety rests on a person watching.
+    // Stated and enforced rather than resting on runScheduledTask happening not
+    // to wire the controller — a guarantee that shape survives only until
+    // someone adds the call.
+    const c = cascadeWith({ agentBrowserControl: true });
+    c.setUnattended(true);
+    c.setBrowserController(controller);
+    expect(c.getToolRegistry().hasTool('browser_control')).toBe(false);
+  });
+
   it('a run that was never given the controller cannot obtain the tool from config alone', () => {
     // Scheduled/cron runs auto-approve every tool (runScheduledTask passes
     // `approvalCallback: () => ({ approved: true })`, because nobody may be
