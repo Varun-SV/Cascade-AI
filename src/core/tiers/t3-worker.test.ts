@@ -68,6 +68,61 @@ function makeToolRegistry(overrides: Partial<ToolRegistry> = {}): ToolRegistry {
   } as unknown as ToolRegistry;
 }
 
+describe('a finished worker gives up the browser', () => {
+  // The lease that lets one worker hold the browser across navigate -> fill ->
+  // click can only be ended by the worker itself. A timer cannot do it: the gap
+  // between two steps is where the worker is at the LLM choosing its next call,
+  // and that routinely runs longer than any timeout short enough to be useful.
+  // So `execute` must signal on the way out, on EVERY path.
+  it('releases on the success path, naming itself as the actor', async () => {
+    const releaseActor = vi.fn();
+    const registry = makeToolRegistry({
+      getTool: (name: string) => (name === 'browser_control' ? { releaseActor } : undefined),
+    } as unknown as Partial<ToolRegistry>);
+    const router = makeRouter(['Final summary']);
+
+    const worker = new T3Worker(router, registry, 't2-parent');
+    await worker.execute(makeAssignment(), 'task-release');
+
+    // `this.id`, not the task id: siblings share a task, so the task cannot say
+    // WHICH worker finished, and releasing on it would free a lease another
+    // sibling is still using.
+    expect(releaseActor).toHaveBeenCalledWith(worker.id);
+  });
+
+  it('releases even when the worker throws', async () => {
+    const releaseActor = vi.fn();
+    const registry = makeToolRegistry({
+      getTool: (name: string) => (name === 'browser_control' ? { releaseActor } : undefined),
+    } as unknown as Partial<ToolRegistry>);
+    const router = makeRouter(
+      vi.fn(async () => { throw new Error('model exploded'); }) as unknown as CascadeRouter['generate'],
+    );
+
+    const worker = new T3Worker(router, registry, 't2-parent');
+    await worker.execute(makeAssignment(), 'task-boom');
+
+    expect(releaseActor, 'a worker that died holding the browser is the one that must not keep it')
+      .toHaveBeenCalledWith(worker.id);
+  });
+
+  it('survives a registry that has no browser tool at all', async () => {
+    // The CLI and hosted runs never register browser_control, and a registry
+    // may not even implement getTool. This runs in a finally, so anything
+    // thrown REPLACES the worker's result — it turned every completed subtask
+    // into "this.toolRegistry.getTool is not a function".
+    const router = makeRouter(['Final summary']);
+    const worker = new T3Worker(router, makeToolRegistry(), 't2-parent');
+
+    const result = await worker.execute(makeAssignment(), 'task-no-browser');
+    // Asserted on the defect itself rather than on a status, which depends on
+    // plenty of behaviour this test is not about. What must never happen is the
+    // cleanup's own error surfacing as the worker's outcome.
+    const seen = `${result.output} ${(result.issues ?? []).join(' ')}`;
+    expect(seen, 'cleanup must not be able to fail the work').not.toMatch(/getTool/);
+  });
+});
+
 describe('T3Worker', () => {
   it('executes a real approval + tool loop through the escalator', async () => {
     let loopCalls = 0;

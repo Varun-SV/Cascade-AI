@@ -729,6 +729,38 @@ export class T3Worker extends BaseTier {
       this.setStatus('FAILED', finalOutput);
       this.peerBus?.publish(this.id, assignment.subtaskId, finalOutput, 'FAILED');
       return this.buildResult('ESCALATED', finalOutput, { checksRun, passed, failed }, issues, correctionAttempts);
+    } finally {
+      // This worker will never ask for the browser again, whether it completed,
+      // failed, escalated or threw. A `finally` rather than the success path
+      // because a worker that died holding the browser is exactly the one that
+      // must not keep it, and the host's only alternative is a timeout long
+      // enough to be useless as a sequence boundary.
+      this.releaseBrowserControl();
+    }
+  }
+
+  /**
+   * End this worker's hold on the shared browser.
+   *
+   * Duck-typed rather than imported: `browser_control` is registered only by a
+   * host that HAS a browser (the desktop), so in the CLI and hosted runs there
+   * is no such tool and this is a no-op. Importing the class to instanceof-check
+   * it would couple the worker to a tool that usually is not there.
+   */
+  private releaseBrowserControl(): void {
+    // Best-effort, and swallowing is deliberate. This runs in `execute`'s
+    // finally, so anything thrown here REPLACES the worker's real result — a
+    // registry without `getTool` turned every completed subtask into a
+    // TypeError. Cleanup must never be able to fail the work it is cleaning up
+    // after, and a lease that outlives its worker is recovered by the host's
+    // deadlock ceiling anyway.
+    try {
+      const tool = this.toolRegistry.getTool?.('browser_control') as
+        | { releaseActor?: (actorId: string) => void }
+        | undefined;
+      tool?.releaseActor?.(this.id);
+    } catch {
+      // Nothing to do: the host's ceiling collects the lease.
     }
   }
 

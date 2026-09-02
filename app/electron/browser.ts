@@ -121,16 +121,41 @@ let activeAction: symbol | null = null;
 // Revocation stays keyed by RUN, because "stop" is something the user does to a
 // run, not to a worker they have never heard of.
 //
-// Released by IDLE TIMEOUT rather than an explicit call. A model cannot be
-// relied on to say it is finished, and a lease that leaks is a deadlock.
+// Released when the WORKER ITSELF finishes, not on a timer. This was wrong in
+// the first version and the mistake is worth recording: the lease was released
+// after 15s idle, on the reasoning that a model cannot be relied on to say it
+// is done. But the idle gap between two of a worker's steps is exactly where
+// that worker is back at the LLM deciding its next tool call, and a normal
+// generation takes longer than 15s routinely. So the timer fired mid-sequence,
+// handed the browser to a queued worker, and the original worker's next
+// fill/click landed on a page someone else had navigated — recreating the
+// precise corruption the sequence lease exists to prevent. A timer cannot be
+// what declares a live worker finished; only the worker's own lifecycle can.
+// See `agentActorEnded`, called from T3Worker.execute's finally.
 let leaseActor: string | null = null;
 let leaseSession: string | null = null;
 let leaseIdleTimer: NodeJS.Timeout | null = null;
 
-/** Idle time after which a held lease is released to whoever is waiting. */
-const LEASE_IDLE_MS = 15_000;
-/** How long a queued actor waits for its turn before giving up. */
-const QUEUE_WAIT_MS = 60_000;
+/**
+ * Defensive deadlock ceiling — NOT the sequence boundary.
+ *
+ * Deliberately far longer than any plausible model think-time, because its only
+ * job is to recover a lease whose owner died without ever signalling: a crashed
+ * worker, or a host that never wired `agentActorEnded`. Anything short enough
+ * to fire during normal operation is a correctness bug, not a safety net.
+ */
+const LEASE_DEADLOCK_CEILING_MS = 300_000;
+/**
+ * How long a queued actor waits for its turn before giving up.
+ *
+ * Raised from 60s when the lease started being held across the holder's
+ * think-time, as it must be. A whole `navigate → fill → click` sequence spans
+ * several model round trips, so a minute was short enough that queued workers
+ * routinely timed out on a browser that was working normally. Giving up is
+ * still recoverable — the model is told to retry or do something else — but it
+ * should mean the browser is genuinely monopolised, not merely busy.
+ */
+const QUEUE_WAIT_MS = 180_000;
 /** Waiters beyond this are refused rather than queued indefinitely. */
 const MAX_QUEUED = 8;
 /** How long a new holder waits for the previous action to unwind. */
@@ -222,9 +247,10 @@ function releaseLease(): void {
   pushStateToOwner();
 }
 
+/** Arm the deadlock ceiling. Not a release schedule — see the constant. */
 function armLeaseIdle(): void {
   clearLeaseTimer();
-  leaseIdleTimer = setTimeout(releaseLease, LEASE_IDLE_MS);
+  leaseIdleTimer = setTimeout(releaseLease, LEASE_DEADLOCK_CEILING_MS);
   leaseIdleTimer.unref?.();
 }
 
@@ -250,6 +276,27 @@ async function acquireLease(
   // LEASE_IDLE_MS, which is a stall no user would sit through.
   if (waiting.length >= MAX_QUEUED) return 'busy';
   return enqueue(actorId, sessionId, signal);
+}
+
+/**
+ * One worker has finished its whole sequence, so its hold on the browser ends.
+ *
+ * THIS is the semantic release. It is called from the worker's own terminal
+ * path, so it means "this actor will never ask again" — which a timer can
+ * never mean about a worker that is merely thinking. Without it the lease can
+ * only end by the deadlock ceiling, and a queued worker waits out that ceiling
+ * for a browser nobody is using.
+ *
+ * Idempotent and safe to call for an actor that never touched the browser.
+ */
+export function agentActorEnded(actorId: string): void {
+  if (!actorId) return;
+  for (let i = waiting.length - 1; i >= 0; i--) {
+    const w = waiting[i]!;
+    if (w.actorId === actorId) w.settle('cancelled');
+  }
+  releaseIfHeldBy(actorId);
+  pushStateToOwner();
 }
 
 /** Drop every queued waiter belonging to a run, and the lease if it holds it. */

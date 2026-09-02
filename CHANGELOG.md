@@ -52,14 +52,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   action was serialized and the sequence was still corrupted. The lease is
   keyed by worker rather than by run — every T3 worker in a run passes the same
   task id, so a run-keyed lease handed the same lease to all of them at once —
-  and it is released on an idle timer, because a model cannot be relied on to
-  announce that it is finished and a leaked lease is a deadlock. Workers that
+  and it is released by the worker's own terminal path, not by a timer. An
+  earlier version released after 15s idle; but that gap is exactly where the
+  worker is back at the model choosing its next step, and a normal generation
+  exceeds 15s routinely, so the timer handed the browser away mid-sequence and
+  recreated the corruption it was meant to prevent. A timer survives only as a
+  deadlock ceiling for a worker that dies without signalling. Workers that
   arrive while it is held wait their turn instead of being told "another action
   is running", which is a refusal a model can only answer by retrying blind.
   The banner says how many are waiting, since a queue nobody can see looks
   exactly like a hung action; Stop clears the queue as well as the step on
   screen; and a run that is stopped or ends gives the browser up at once rather
   than sitting on it for the rest of the idle window.
+
+  Run-end cleanup carries the Cascade **task id** rather than the chat session
+  id. They are different things — one conversation holds many runs — and it is
+  the task id that reaches tools, so passing the session id meant cleanup
+  matched nothing: a finished run kept its Stop control armed and held its
+  browser lease until the ceiling expired.
 
   Unattended runs are refused outright. A scheduled task auto-approves every
   tool because nobody is there to ask, which disqualifies it from one whose

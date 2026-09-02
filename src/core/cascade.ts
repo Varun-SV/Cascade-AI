@@ -66,7 +66,7 @@ import {
 } from './context/compaction.js';
 import { GuidanceQueue } from './steering/guidance.js';
 import { CurrentPageTool, type CurrentPageProvider } from '../tools/current-page.js';
-import { BrowserControlTool, type BrowserController } from '../tools/browser-control.js';
+import { BrowserControlTool, type BrowserController, type BrowserActorRelease } from '../tools/browser-control.js';
 
 /** One entry in the per-run orchestration decision trail (see /why). */
 export interface DecisionLogEntry {
@@ -735,12 +735,12 @@ export class Cascade extends EventEmitter {
    * real browser to drive, so it never has to be refused in the CLI or a hosted
    * run — it is simply not there.
    */
-  setBrowserController(controller: BrowserController): void {
+  setBrowserController(controller: BrowserController, release?: BrowserActorRelease): void {
     if (this.unattended) return;
 
     if (!this.config.tools?.agentBrowserControl) return;
     if ((this.config.tools?.disabledTools ?? []).includes('browser_control')) return;
-    this.toolRegistry.register(new BrowserControlTool(controller));
+    this.toolRegistry.register(new BrowserControlTool(controller, release));
   }
 
   private registerMediaTools(workspacePath: string): void {

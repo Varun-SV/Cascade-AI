@@ -31,7 +31,7 @@ import { aggregateCostStats } from './cost-stats.js';
 import type { WhyReport } from './cost-stats.js';
 import { saveGlobalCredentials } from '../config/global-credentials.js';
 import type { CurrentPageProvider } from '../tools/current-page.js';
-import type { BrowserController } from '../tools/browser-control.js';
+import type { BrowserController, BrowserActorRelease } from '../tools/browser-control.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -159,6 +159,7 @@ export class DashboardServer {
    * Cascade applies the `tools.agentBrowserControl` gate on top of this.
    */
   private browserController?: BrowserController;
+  private browserActorRelease?: BrowserActorRelease;
   private activeControllers = new Map<string, AbortController>();
   /**
    * Run taskIds per chat session — file snapshots are keyed by the run's
@@ -276,7 +277,7 @@ export class DashboardServer {
       const cascade = new Cascade(cfg, this.workspacePath, this.store);
       this.activeSessions.set(sessionId, cascade);
       if (this.currentPageProvider) cascade.setCurrentPageProvider(this.currentPageProvider);
-      if (this.browserController) cascade.setBrowserController(this.browserController);
+      if (this.browserController) cascade.setBrowserController(this.browserController, this.browserActorRelease);
 
       // Addressed by session, not by the socket that started the run: a
       // reconnect gives the same client a NEW socket id, and events aimed at
@@ -411,8 +412,9 @@ export class DashboardServer {
   }
 
   /** Let runs act on that view, not just read it (desktop only). */
-  setBrowserController(controller: BrowserController): void {
+  setBrowserController(controller: BrowserController, release?: BrowserActorRelease): void {
     this.browserController = controller;
+    this.browserActorRelease = release;
   }
 
   /**
@@ -440,9 +442,20 @@ export class DashboardServer {
    * outlive each individual action (the gap between two actions is when the
    * user most wants it) but must not outlive the run.
    */
-  private runEndedHook?: (sessionId: string) => void;
+  /**
+   * Fired when a run ends, carrying BOTH identifiers explicitly.
+   *
+   * They are different things and conflating them was a live bug: a chat
+   * `sessionId` can contain many runs (hence `sessionTaskIds`), while
+   * `Cascade.run()` mints a fresh random `taskId` per run — and it is the
+   * taskId that tools see as `ToolExecuteOptions.sessionId`. Passing only the
+   * chat id meant browser cleanup keyed on the task id matched nothing, so a
+   * finished run kept its Stop banner armed and held its browser lease until
+   * the deadlock ceiling.
+   */
+  private runEndedHook?: (ids: { sessionId: string; taskId?: string }) => void;
 
-  onRunEnded(hook: (sessionId: string) => void): void {
+  onRunEnded(hook: (ids: { sessionId: string; taskId?: string }) => void): void {
     this.runEndedHook = hook;
   }
 
@@ -650,7 +663,10 @@ export class DashboardServer {
   private persistRunEnd(sessionId: string, title: string, latestPrompt: string, reply: string | undefined, status: 'COMPLETED' | 'FAILED', result?: CascadeRunResult): void {
     // Every run-completion path lands here, so this is the one place that
     // reliably means "this run is over".
-    this.runEndedHook?.(sessionId);
+    // `result` is absent on the failure paths, so fall back to the last task
+    // recorded for this chat session — the run that just ended.
+    const endedTaskId = result?.taskId ?? this.sessionTaskIds.get(sessionId)?.at(-1);
+    this.runEndedHook?.({ sessionId, ...(endedTaskId ? { taskId: endedTaskId } : {}) });
     try {
       if (reply && reply.trim()) {
         this.store.addMessage({ id: randomUUID(), sessionId, role: 'assistant', content: reply, timestamp: new Date().toISOString() });
@@ -1496,7 +1512,7 @@ export class DashboardServer {
         const cascade = new Cascade(this.config, this.workspacePath, this.store);
         this.activeSessions.set(sessionId, cascade);
         if (this.currentPageProvider) cascade.setCurrentPageProvider(this.currentPageProvider);
-      if (this.browserController) cascade.setBrowserController(this.browserController);
+      if (this.browserController) cascade.setBrowserController(this.browserController, this.browserActorRelease);
 
         cascade.on('stream:token', (e: { text: string; tierId: string; primary?: boolean }) => {
           this.socket.broadcastToRoom(`session:${sessionId}`, 'stream:token', { sessionId, tierId: e.tierId, text: e.text, primary: e.primary });

@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
 import { registerCloudAuthIpc } from './cloudAuth';
-import { registerBrowserHandlers, readCurrentPage, actOnCurrentPage, setAgentControlEnabled, resumeAgentControl, agentRunEnded } from './browser';
+import { registerBrowserHandlers, readCurrentPage, actOnCurrentPage, setAgentControlEnabled, resumeAgentControl, agentRunEnded, agentActorEnded } from './browser';
 
 const isDev = process.env.ELECTRON_DEV === '1';
 
@@ -131,7 +131,7 @@ async function startBackend(): Promise<void> {
     // And the acting half. Cascade applies the `tools.agentBrowserControl`
     // gate itself, so handing the controller over unconditionally does not
     // enable anything — it makes the capability available to be enabled.
-    server.setBrowserController(actOnCurrentPage);
+    server.setBrowserController(actOnCurrentPage, agentActorEnded);
     // Settings reach the live config by two routes — the Electron IPC handler
     // further down and this server's `config:update` socket — and only the
     // first used to tell the browser module. A socket write therefore left the
@@ -143,7 +143,15 @@ async function startBackend(): Promise<void> {
     // Retires a run's browser Stop control when the run ends. The control has
     // to outlive each action — the gap between two is when the user most wants
     // it — but offering to stop a run that finished an hour ago is noise.
-    server.onRunEnded?.((sessionId: string) => agentRunEnded(sessionId));
+    //
+    // The TASK id, not the chat session id. `browser_control` receives the
+    // Cascade taskId as its `sessionId` (T3Worker passes `this.taskId`), while
+    // the dashboard's own sessionId identifies the chat — one chat holds many
+    // runs. Passing the chat id here matched nothing in the browser module, so
+    // a finished run kept its Stop banner armed and held its lease.
+    server.onRunEnded?.((ids: { sessionId: string; taskId?: string }) => {
+      if (ids.taskId) agentRunEnded(ids.taskId);
+    });
     // Mirror the persisted setting into the browser module, which enforces it
     // on every action rather than trusting the caller to have checked.
     setAgentControlEnabled(cascadeConfig.tools?.agentBrowserControl === true);

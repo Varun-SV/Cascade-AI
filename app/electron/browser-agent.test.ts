@@ -377,25 +377,61 @@ describe('the browser lease is held by one actor across a whole sequence', () =>
     expect((await queued).ok, 'the waiter gets its turn').toBe(true);
   });
 
-  it('hands the browser on once the holder has been idle', async () => {
-    // The ordinary release. A model cannot be relied on to announce that it is
-    // done with the browser, so the lease comes back on a timer rather than on
-    // a call that may never arrive — otherwise a leaked lease is a deadlock.
+  it('does NOT hand the browser on just because the holder is thinking', async () => {
+    // This test asserted the opposite and was wrong — it encoded the bug as the
+    // contract. The lease used to be released after 15s idle, but that gap is
+    // where the worker is back at the LLM choosing its next tool call, and a
+    // normal generation exceeds 15s routinely. So the timer handed the browser
+    // to a queued worker mid-sequence and the holder's next click landed on a
+    // page someone else had navigated — the exact corruption the lease exists
+    // to prevent. Think-time is not a release signal.
     await openPanel();
-    // Installed BEFORE the holder acts: armLeaseIdle() captures whatever
-    // setTimeout is global when it runs, so faking time afterwards leaves a
-    // real 15s timer that no amount of advancing will fire.
     vi.useFakeTimers();
+    await act('run-A', undefined, 'w1');
+
+    // Asserted on the OUTCOME, not on whether the promise settled: a waiter
+    // that gives up settles too, and "w2 was refused" is a pass, not a failure.
+    // The property is that w2 never gets to touch the page.
+    let granted = false;
+    const queued = act('run-A', undefined, 'w2').then((r) => { granted = r.ok; return r; });
+
+    // Far past the old 15s release, and well into ordinary think-time territory.
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(granted, 'w1 is thinking, not finished — w2 must not get the page').toBe(false);
+
+    mod.stopAgentControl('run-A');
+    await vi.advanceTimersByTimeAsync(10);
+    await queued;
+  });
+
+  it('hands the browser on when the holding WORKER finishes', async () => {
+    // The real release: the worker's own terminal path says it will never ask
+    // again, which is the one thing a timer can never mean about a worker that
+    // is merely waiting on a model response.
+    await openPanel();
     await act('run-A', undefined, 'w1');
 
     let settled = false;
     const queued = act('run-A', undefined, 'w2').then((r) => { settled = true; return r; });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(settled, 'still held while w1 is live').toBe(false);
 
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(settled, 'the holder still has it — waiting is the point').toBe(false);
+    mod.agentActorEnded('w1');
+    expect((await queued).ok, 'w2 gets its turn as soon as w1 is done').toBe(true);
+  });
 
-    await vi.advanceTimersByTimeAsync(16_000);
-    expect((await queued).ok).toBe(true);
+  it('ignores an actor that never touched the browser', async () => {
+    await openPanel();
+    await act('run-A', undefined, 'w1');
+    mod.agentActorEnded('a-worker-that-never-browsed');
+    mod.agentActorEnded('');
+    // w1 still holds it, so a different actor still queues rather than walking in.
+    let settled = false;
+    const queued = act('run-A', undefined, 'w2').then((r) => { settled = true; return r; });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(settled).toBe(false);
+    mod.stopAgentControl('run-A');
+    await queued;
   });
 
   it('still refuses two overlapping actions from the SAME actor', async () => {

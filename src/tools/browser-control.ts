@@ -100,6 +100,16 @@ export type BrowserController = (
   context: BrowserActionContext,
 ) => Promise<BrowserActionOutcome>;
 
+/**
+ * Told that one worker is finished with the browser for good.
+ *
+ * Separate from the controller because it is not an action: it carries no
+ * outcome and cannot fail. The host uses it to end that actor's sequence lease
+ * — the only signal that reliably means "will not ask again", as opposed to a
+ * worker that is merely waiting on its next model response.
+ */
+export type BrowserActorRelease = (actorId: string) => void;
+
 export class BrowserControlTool extends BaseTool {
   readonly name = 'browser_control';
 
@@ -130,10 +140,23 @@ export class BrowserControlTool extends BaseTool {
   };
 
   private controller: BrowserController;
+  private release: BrowserActorRelease | undefined;
 
-  constructor(controller: BrowserController) {
+  constructor(controller: BrowserController, release?: BrowserActorRelease) {
     super();
     this.controller = controller;
+    this.release = release;
+  }
+
+  /**
+   * A worker has finished. Ends its hold on the browser.
+   *
+   * Called from the tier's terminal path rather than by the model, because a
+   * model cannot be relied on to announce that it is done — which is why the
+   * host cannot use idle time as the boundary instead.
+   */
+  releaseActor(actorId: string): void {
+    this.release?.(actorId);
   }
 
   // Acting on a session the user is signed into is the highest-consequence
