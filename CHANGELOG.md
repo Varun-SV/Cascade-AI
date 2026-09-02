@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+## 0.78.0 - 2026-09-02
+
 ### Added
 - **The agent can act on the page you have open** (`browser_control`, desktop
   only). Navigate, click, fill a field, press a key, wait for an element,
@@ -38,12 +40,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   authenticated page nobody was watching. An action waits briefly for the panel
   to come back rather than refusing outright, because the approval modal for the
   action itself hides it. Stop is scoped to the run the user was watching, not
-  to the process; the browser is leased to one ACTION at a time, so neither two
-  runs nor two workers of the same run can interleave clicks on a page; and
-  Stop, disabling the feature, losing sight of the browser, or cancelling the run
-  all abort an action already in flight, including a navigation still loading.
-  The Stop control stays available between a run's actions, not only while one
-  is executing, and retires when the run ends.
+  to the process; and Stop, disabling the feature, losing sight of the browser,
+  or cancelling the run all abort an action already in flight, including a
+  navigation still loading. The Stop control stays available between a run's
+  actions, not only while one is executing, and retires when the run ends.
+
+  **The browser is leased to one worker for a whole sequence, and everyone else
+  queues.** Serializing individual actions was not enough: a worker doing
+  navigate → fill → click released the page between each step, so a sibling
+  could navigate away in the gap and the fill landed on the wrong page. Every
+  action was serialized and the sequence was still corrupted. The lease is
+  keyed by worker rather than by run — every T3 worker in a run passes the same
+  task id, so a run-keyed lease handed the same lease to all of them at once —
+  and it is released on an idle timer, because a model cannot be relied on to
+  announce that it is finished and a leaked lease is a deadlock. Workers that
+  arrive while it is held wait their turn instead of being told "another action
+  is running", which is a refusal a model can only answer by retrying blind.
+  The banner says how many are waiting, since a queue nobody can see looks
+  exactly like a hung action; Stop clears the queue as well as the step on
+  screen; and a run that is stopped or ends gives the browser up at once rather
+  than sitting on it for the rest of the idle window.
 
   Unattended runs are refused outright. A scheduled task auto-approves every
   tool because nobody is there to ask, which disqualifies it from one whose

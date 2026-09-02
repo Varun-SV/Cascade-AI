@@ -5,7 +5,7 @@
 //  These cover the gates, not the actions: whether a run is allowed to touch
 //  the page at all. Each one pins a property that was wrong in review.
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 
 /** IPC handlers registered by registerBrowserHandlers, so tests can call them. */
 const handlers = new Map<string, (...args: unknown[]) => unknown>();
@@ -18,7 +18,7 @@ const fakeWebContents = {
   isLoading: () => false,
   isDestroyed: () => false,
   navigationHistory: { canGoBack: () => false, canGoForward: () => false, goBack: vi.fn(), goForward: vi.fn() },
-  loadURL: vi.fn(async () => undefined),
+  loadURL: vi.fn(async (_url: string): Promise<void> => {}),
   executeJavaScript: vi.fn(async () => true),
   sendInputEvent: vi.fn(),
   reload: vi.fn(),
@@ -72,8 +72,20 @@ async function openPanel() {
   await handlers.get('browser:open')!({}, { bounds: { x: 0, y: 0, width: 800, height: 600 } });
 }
 
-const act = (sessionId: string, signal?: AbortSignal) =>
-  mod.actOnCurrentPage({ kind: 'click', selector: '#a' }, { sessionId, ...(signal ? { signal } : {}) });
+const act = (sessionId: string, signal?: AbortSignal, actorId?: string) =>
+  mod.actOnCurrentPage(
+    { kind: 'click', selector: '#a' },
+    { sessionId, ...(actorId ? { actorId } : {}), ...(signal ? { signal } : {}) },
+  );
+
+/** Navigate somewhere, as a named worker of a run. */
+const go = (sessionId: string, actorId: string, url: string) =>
+  mod.actOnCurrentPage({ kind: 'navigate', url }, { sessionId, actorId });
+
+// A test that times out never reaches its own cleanup, so fake timers installed
+// inside one leak into every test after it — where the real setTimeout they wait
+// on never fires and they time out too, hiding the one real failure behind three.
+afterEach(() => { vi.useRealTimers(); });
 
 beforeEach(async () => {
   minimized = false;
@@ -175,30 +187,38 @@ describe('Stop is scoped to one run', () => {
 });
 
 describe('one browser, one run at a time', () => {
-  it('refuses a second run while another holds the browser', async () => {
+  it('makes a second run wait for the first, and never act alongside it', async () => {
     // There is one browser and any number of runs. Two acting at once would
     // interleave clicks on the same page, each reading a DOM the other changed.
+    // The second one waits its turn rather than being refused — but the thing
+    // that matters is that it does not touch the page until the first is done.
     await openPanel();
 
     let release!: () => void;
-    fakeWebContents.executeJavaScript.mockImplementationOnce(
-      () => new Promise((resolve) => { release = () => resolve(true); }),
-    );
+    let acted = 0;
+    fakeWebContents.executeJavaScript.mockImplementation(() => {
+      acted += 1;
+      return acted === 1 ? new Promise((resolve) => { release = () => resolve(true); }) : Promise.resolve(true);
+    });
 
     const first = act('run-A');
-    await Promise.resolve();
+    // Waited out properly, not with a microtask hop: taking the browser goes
+    // through the queue and several awaits, so `await Promise.resolve()` let
+    // the second run start before the first had taken anything — and the test
+    // then passed against a build with no lease in it at all.
+    await new Promise((r) => setTimeout(r, 30));
+    expect(acted, 'sanity: the first run is on the page').toBe(1);
 
-    const second = await act('run-B');
-    expect(second.ok).toBe(false);
-    // Wording is about the ACTION, not the run: the lease rejects any overlap,
-    // including two workers of the same run sharing one taskId.
-    expect(second.detail).toMatch(/already running/i);
+    const second = act('run-B');
+    await new Promise((r) => setTimeout(r, 50));
+    expect(acted, 'the second run must not have touched the page').toBe(1);
 
     release();
     expect((await first).ok).toBe(true);
 
-    // …and the browser is free again once the first finishes.
-    expect((await act('run-B')).ok).toBe(true);
+    // …and the browser is free again once the first run is finished with it.
+    mod.agentRunEnded('run-A');
+    expect((await second).ok).toBe(true);
   });
 });
 
@@ -296,47 +316,192 @@ describe('watchable, not merely visible', () => {
   });
 });
 
-describe('the lease rejects any overlap, not just across runs', () => {
-  it('refuses a second action from the SAME run', async () => {
+describe('the browser lease is held by one actor across a whole sequence', () => {
+  it('does not let another worker take the page between two steps', async () => {
+    // THE bug the lease exists for. Serializing individual actions is not
+    // enough: worker A does navigate → think → click, and if the browser is
+    // free during "think", worker B navigates away and A's click lands on B's
+    // page. Every action was serialized and the sequence was still corrupted.
+    await openPanel();
+    const order: string[] = [];
+    fakeWebContents.loadURL.mockImplementation(async (url: string) => { order.push(new URL(url).hostname); });
+
+    await go('run-A', 'w1', 'https://first.test/');          // A's first step
+    const intruder = go('run-A', 'w2', 'https://second.test/');  // B, in the gap
+    await new Promise((r) => setTimeout(r, 50));
+    await go('run-A', 'w1', 'https://third.test/');          // A's second step
+
+    expect(order, 'B must not have navigated between A\'s two steps')
+      .toEqual(['first.test', 'third.test']);
+
+    mod.stopAgentControl('run-A');
+    expect((await intruder).ok).toBe(false);
+  });
+
+  it('queues the second actor rather than refusing it outright', async () => {
     // Every T3 worker passes the run's taskId as sessionId and T2 runs worker
-    // waves in parallel, so siblings arrive with identical ids. A session-keyed
-    // lease waved them straight through to interleave on one page.
+    // waves in parallel, so siblings arrive with identical run ids and
+    // different actor ids. Refusing all but one told the model "another action
+    // is running" — a refusal it can only answer by retrying blind.
+    await openPanel();
+    await act('run-A', undefined, 'w1');
+
+    const queued = act('run-A', undefined, 'w2');
+    await new Promise((r) => setTimeout(r, 30));
+
+    const state = handlers.get('browser:state')!() as { agentQueueDepth?: number };
+    expect(state.agentQueueDepth, 'the panel can say someone is waiting').toBe(1);
+
+    mod.stopAgentControl('run-A');
+    expect((await queued).ok).toBe(false);
+  });
+
+  it('hands the browser to the queued actor when the holder finishes its run', async () => {
+    // A run that has ended does not get to sit on the browser for the whole
+    // idle timeout while another run waits behind it.
     await openPanel();
     let release!: () => void;
     fakeWebContents.executeJavaScript.mockImplementationOnce(
       () => new Promise((resolve) => { release = () => resolve(true); }),
     );
 
-    const first = act('run-A');
-    await Promise.resolve();
-    const second = await act('run-A');
+    const holder = act('run-A', undefined, 'w1');
+    await new Promise((r) => setTimeout(r, 20));
+    const queued = act('run-B', undefined, 'w2');
+    await new Promise((r) => setTimeout(r, 20));
+
+    release();
+    expect((await holder).ok).toBe(true);
+    mod.agentRunEnded('run-A');
+
+    expect((await queued).ok, 'the waiter gets its turn').toBe(true);
+  });
+
+  it('hands the browser on once the holder has been idle', async () => {
+    // The ordinary release. A model cannot be relied on to announce that it is
+    // done with the browser, so the lease comes back on a timer rather than on
+    // a call that may never arrive — otherwise a leaked lease is a deadlock.
+    await openPanel();
+    // Installed BEFORE the holder acts: armLeaseIdle() captures whatever
+    // setTimeout is global when it runs, so faking time afterwards leaves a
+    // real 15s timer that no amount of advancing will fire.
+    vi.useFakeTimers();
+    await act('run-A', undefined, 'w1');
+
+    let settled = false;
+    const queued = act('run-A', undefined, 'w2').then((r) => { settled = true; return r; });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(settled, 'the holder still has it — waiting is the point').toBe(false);
+
+    await vi.advanceTimersByTimeAsync(16_000);
+    expect((await queued).ok).toBe(true);
+  });
+
+  it('still refuses two overlapping actions from the SAME actor', async () => {
+    // The lease is re-entrant for its holder — that is what makes a sequence a
+    // sequence — so the per-action mutex is what stops one worker running two
+    // actions at once. Removing it would let a retry race the call it retried.
+    await openPanel();
+    let release!: () => void;
+    fakeWebContents.executeJavaScript.mockImplementationOnce(
+      () => new Promise((resolve) => { release = () => resolve(true); }),
+    );
+
+    const first = act('run-A', undefined, 'w1');
+    await new Promise((r) => setTimeout(r, 20));
+    const second = await act('run-A', undefined, 'w1');
 
     expect(second.ok).toBe(false);
-    expect(second.detail).toMatch(/already running/i);
+    expect(second.detail).toMatch(/still finishing/i);
 
     release();
     expect((await first).ok).toBe(true);
+
+    // …and that refusal must not have given the browser away. The lease is
+    // re-entrant, so the action it gave up waiting on was this actor's OWN —
+    // releasing on the way out handed the page to a queued sibling in the
+    // middle of the very sequence the lease is there to keep whole.
+    const outsider = act('run-A', undefined, 'w2');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(handlers.get('browser:state')!(), 'w1 must still hold it')
+      .toMatchObject({ agentQueueDepth: 1 });
+
+    mod.stopAgentControl('run-A');
+    await outsider;
+  }, 10_000);
+
+  it('refuses rather than queues once the line is full', async () => {
+    // An unbounded queue turns a wide worker wave into hundreds of workers each
+    // holding a turn for up to the idle timeout — a stall no user sits through.
+    await openPanel();
+    await act('run-A', undefined, 'holder');
+
+    const queued = Array.from({ length: 8 }, (_, i) => act('run-A', undefined, `w${i}`));
+    await new Promise((r) => setTimeout(r, 30));
+
+    const overflow = await act('run-A', undefined, 'one-too-many');
+    expect(overflow.ok).toBe(false);
+    expect(overflow.detail).toMatch(/did not come free/i);
+
+    // Stop clears the whole line, not just the step on screen.
+    mod.stopAgentControl('run-A');
+    const outcomes = await Promise.all(queued);
+    expect(outcomes.every((o) => !o.ok)).toBe(true);
+    expect(handlers.get('browser:state')!()).toMatchObject({ agentQueueDepth: 0 });
   });
 
-  it('a sibling finishing does not report the survivor as user-stopped', async () => {
-    // The nastier half: the finally clause cleared the shared session, and a
-    // concurrent wait_for read that as the user having pressed Stop.
+  it('tells a queued actor the feature was switched off, not that it was busy', async () => {
+    // Reported as "busy" a full minute later, a model politely retries
+    // something that will never be granted.
+    await openPanel();
+    await act('run-A', undefined, 'w1');
+
+    const queued = act('run-A', undefined, 'w2');
+    await new Promise((r) => setTimeout(r, 20));
+    mod.setAgentControlEnabled(false);
+
+    const out = await queued;
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/turned off/i);
+  });
+
+  it('re-checks the gates after the wait, not only before it', async () => {
+    // A minute can pass in the queue. Checking only on the way in tested a
+    // world that no longer exists by the time the action actually runs.
+    await openPanel();
+    await act('run-A', undefined, 'w1');
+
+    const queued = act('run-B', undefined, 'w2');
+    await new Promise((r) => setTimeout(r, 20));
+    mod.stopAgentControl('run-B');    // run-B revoked while it waits
+    mod.agentRunEnded('run-A');       // …and then handed the browser
+
+    const out = await queued;
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/stopped/i);
+  });
+
+  it('a sibling waiting for the browser does not report the survivor as user-stopped', async () => {
+    // The finally clause cleared the shared session, and a concurrent wait_for
+    // read that as the user having pressed Stop.
     await openPanel();
     fakeWebContents.executeJavaScript.mockImplementation(async () => false);
 
-    const waiting = mod.actOnCurrentPage(
+    const waiter = mod.actOnCurrentPage(
       { kind: 'wait_for', selector: '#never', timeoutMs: 400 },
-      { sessionId: 'run-A' },
+      { sessionId: 'run-A', actorId: 'w1' },
     );
     await new Promise((r) => setTimeout(r, 30));
-    // A sibling of the SAME run tries to act and is refused by the lease…
-    await act('run-A');
+    const sibling = act('run-A', undefined, 'w2');
 
-    // …and the waiter must time out on its own terms, not claim it was stopped.
-    const out = await waiting;
+    const out = await waiter;
     expect(out.ok).toBe(false);
     expect(out.detail).not.toMatch(/stopped/i);
     expect(out.detail).toMatch(/did not appear/i);
+
+    mod.stopAgentControl('run-A');
+    await sibling;
   }, 10_000);
 });
 
@@ -446,7 +611,7 @@ describe('losing sight of the browser aborts the action', () => {
 
 describe('Stop stays reachable between actions', () => {
   it('keeps a run armed after an action finishes', async () => {
-    // The lease is released in every action's finally, so a UI keyed only on
+    // `drivingSession` clears in every action's finally, so a UI keyed only on
     // "an action is running" loses its Stop button during the model-thinking
     // gap — the moment the argument-less Stop fallback exists to serve.
     await openPanel();

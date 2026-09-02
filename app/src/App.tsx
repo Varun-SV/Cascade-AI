@@ -70,6 +70,10 @@ export interface DesktopBrowserState {
   /** A run that has acted and is neither stopped nor finished — Stop stays
    *  available for it between actions. */
   agentArmedSession?: string;
+  /** How many other workers are queued for the browser behind the one driving.
+   *  Shown because a queue nobody can see is indistinguishable from a hung
+   *  action, and because Stop clears the queue too. */
+  agentQueueDepth?: number;
 }
 
 declare global {

@@ -180,6 +180,15 @@ export function BrowserView() {
             {state.agentDriving
               ? 'Cascade is using this browser.'
               : 'Cascade may use this browser again in this run.'}
+            {/* Only one part of a run drives the browser at a time; the rest
+                wait their turn. Saying so turns a page that looks stuck into a
+                page that is plainly queued, and warns that Stop takes out the
+                whole line rather than just the step on screen. */}
+            {(state.agentQueueDepth ?? 0) > 0 && (
+              <span style={{ opacity: 0.85 }}>
+                {` ${state.agentQueueDepth} more ${state.agentQueueDepth === 1 ? 'step is' : 'steps are'} waiting.`}
+              </span>
+            )}
           </span>
           <button
             onClick={() => void api.stopAgent()}

@@ -70,6 +70,17 @@ export interface BrowserActionContext {
    */
   sessionId: string;
   /**
+   * The individual worker asking — `tierId`, a per-instance id.
+   *
+   * Distinct from `sessionId` and both are needed. Every T3 worker in a run
+   * passes the same `taskId` as the session, so the session says which RUN to
+   * stop but cannot tell two sibling workers apart. The host leases the browser
+   * to one actor for a whole sequence, and a lease keyed by session would hand
+   * the same lease to every sibling at once — which is the state that lets one
+   * worker navigate away in the middle of another's fill-then-click.
+   */
+  actorId: string;
+  /**
    * Cancels an action already in flight. `wait_for` can sit for 30s and
    * `navigate` waits on the network, so without this a cancelled run keeps
    * touching the user's authenticated page after it was stopped.
@@ -95,7 +106,8 @@ export class BrowserControlTool extends BaseTool {
   readonly description =
     'Act on the web page the user has open in the built-in browser: navigate, click an element, type into a field, press a key, or wait for something to appear. ' +
     'This drives the REAL browser the user is signed into and can see, so actions have real consequences — prefer read_current_page when you only need to look. ' +
-    'CSS selectors are matched against the live page; call extract_text first if you need to find one.';
+    'CSS selectors are matched against the live page; call extract_text first if you need to find one. ' +
+    'There is one browser: if another part of this run is using it, this call waits its turn, so a slow reply means queued, not stuck.';
 
   readonly inputSchema = {
     type: 'object',
@@ -160,6 +172,7 @@ export class BrowserControlTool extends BaseTool {
         // single-owner lease on it, so passing it is not telemetry — drop it
         // and a Stop in one run silently stops every later one.
         sessionId: options?.sessionId ?? '',
+        actorId: options?.tierId ?? options?.sessionId ?? '',
         ...(options?.signal ? { signal: options.signal } : {}),
       });
     } catch (err) {

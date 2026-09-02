@@ -82,24 +82,192 @@ let agentControlEnabled = false;
 /**
  * The run currently holding the browser, or null.
  *
- * A LEASE, not a flag. There is one browser and any number of runs, so without
- * an owner two concurrent runs interleave clicks on the same page and each
- * reads a DOM the other just changed. The second one is refused instead.
+ * Live state for the banner and the kill switch — "something is happening on
+ * your page right now" — not the ownership record. Ownership is `leaseActor`
+ * below, which outlives any one action; this is null in the gaps between a
+ * sequence's steps while that run is very much still the owner.
  */
 let drivingSession: string | null = null;
 
 /**
  * The action holding the browser, if any.
  *
- * Separate from `drivingSession` because the lease must reject ANY overlapping
- * action, not merely one from a different run. Every T3 worker in a run passes
- * the same `taskId` as its session id and T2 executes worker waves in parallel,
- * so two siblings arrive with identical session ids — keying the lease on the
- * session let them straight through to interleave clicks on one page. Worse,
- * whichever finished first cleared the shared session and a concurrent
- * `wait_for` then read that as the user having stopped it.
+ * Still needed alongside the lease, and for a reason the lease cannot cover:
+ * the lease is RE-ENTRANT for its holder — that is what makes a sequence a
+ * sequence — so nothing in it stops ONE actor running two actions at once. A
+ * retry racing the call it retried is exactly that shape.
+ *
+ * A symbol rather than an id because it identifies the individual call: the
+ * finally clause releases only if it is still the one that took it. Keying that
+ * on the session let a sibling sharing the run's taskId hand the browser back
+ * while this action was still using it, and whichever finished first cleared
+ * the shared session so a concurrent `wait_for` read it as the user having
+ * pressed Stop.
  */
 let activeAction: symbol | null = null;
+
+// ── The browser lease ─────────────────────────────────────────────────
+//
+// Held by ONE ACTOR across a whole sequence, not one action.
+//
+// Serializing individual actions is not enough. Worker A does
+// navigate → fill → click; if the browser is free between those steps, worker B
+// takes it, navigates away, and A's fill lands on B's page. Each action was
+// serialized and the sequence was still corrupted.
+//
+// Keyed by actor (`tierId`, unique per worker) rather than by run: every T3
+// worker in a run shares the run's taskId, so a session-keyed lease would hand
+// the same lease to all of them at once — exactly the state this prevents.
+// Revocation stays keyed by RUN, because "stop" is something the user does to a
+// run, not to a worker they have never heard of.
+//
+// Released by IDLE TIMEOUT rather than an explicit call. A model cannot be
+// relied on to say it is finished, and a lease that leaks is a deadlock.
+let leaseActor: string | null = null;
+let leaseSession: string | null = null;
+let leaseIdleTimer: NodeJS.Timeout | null = null;
+
+/** Idle time after which a held lease is released to whoever is waiting. */
+const LEASE_IDLE_MS = 15_000;
+/** How long a queued actor waits for its turn before giving up. */
+const QUEUE_WAIT_MS = 60_000;
+/** Waiters beyond this are refused rather than queued indefinitely. */
+const MAX_QUEUED = 8;
+/** How long a new holder waits for the previous action to unwind. */
+const ACTION_HANDOFF_MS = 2_000;
+const ACTION_HANDOFF_POLL_MS = 25;
+
+/**
+ * Why an actor did not get the browser.
+ *
+ * A boolean was not enough: "the queue is full, try again" and "your run was
+ * stopped" are different things to tell a model, and a waiter dropped because
+ * the user turned the feature off is neither. Reporting all three as "busy"
+ * had a model politely retrying something that would never be granted.
+ */
+type LeaseResult = 'granted' | 'busy' | 'cancelled' | 'off';
+
+interface Waiter {
+  actorId: string;
+  sessionId: string;
+  settle: (result: LeaseResult) => void;
+}
+
+const waiting: Waiter[] = [];
+
+/**
+ * Queue one actor, resolving when it gets the browser or is turned away.
+ *
+ * `settle` is wrapped so it runs at most once and always takes the waiter out
+ * of the line: the timeout, an abort and a handoff all race, and settling a
+ * promise twice would silently leave a dead entry holding a queue slot.
+ */
+function enqueue(
+  actorId: string,
+  sessionId: string,
+  signal: AbortSignal | undefined,
+): Promise<LeaseResult> {
+  return new Promise<LeaseResult>((resolve) => {
+    let done = false;
+    const waiter: Waiter = {
+      actorId,
+      sessionId,
+      settle: (result) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', giveUp);
+        const i = waiting.indexOf(waiter);
+        if (i >= 0) waiting.splice(i, 1);
+        resolve(result);
+      },
+    };
+    const timer = setTimeout(() => waiter.settle('busy'), QUEUE_WAIT_MS);
+    timer.unref?.();
+    const giveUp = () => waiter.settle('cancelled');
+    signal?.addEventListener('abort', giveUp, { once: true });
+    waiting.push(waiter);
+  });
+}
+
+function clearLeaseTimer(): void {
+  if (leaseIdleTimer) { clearTimeout(leaseIdleTimer); leaseIdleTimer = null; }
+}
+
+/** Hand the browser to the next actor in line, if any. */
+function releaseLease(): void {
+  clearLeaseTimer();
+  leaseActor = null;
+  leaseSession = null;
+
+  // Skip anyone whose run was stopped while they queued — handing the browser
+  // to a revoked run would only have it refused a line later, and the actor
+  // behind it would wait out the whole queue timeout for a turn it could have
+  // had immediately.
+  let next = waiting.shift();
+  while (next && revokedSessions.has(next.sessionId)) {
+    next.settle('cancelled');
+    next = waiting.shift();
+  }
+  if (next) {
+    leaseActor = next.actorId;
+    leaseSession = next.sessionId;
+    // Armed even though the winner is about to clear it: between settle() and
+    // the winner resuming there is a turn of the event loop, and if that actor
+    // never resumes — its run cancelled in exactly that gap — the lease would
+    // be held by nobody with nothing left to release it.
+    armLeaseIdle();
+    next.settle('granted');
+  }
+  pushStateToOwner();
+}
+
+function armLeaseIdle(): void {
+  clearLeaseTimer();
+  leaseIdleTimer = setTimeout(releaseLease, LEASE_IDLE_MS);
+  leaseIdleTimer.unref?.();
+}
+
+/**
+ * Take the browser for this actor, waiting in line if someone else holds it.
+ *
+ * Re-entrant for the actor that already holds it: that is the sequence case —
+ * the same worker coming back for its next step must not queue behind itself.
+ */
+async function acquireLease(
+  actorId: string,
+  sessionId: string,
+  signal: AbortSignal | undefined,
+): Promise<LeaseResult> {
+  if (leaseActor === null || leaseActor === actorId) {
+    leaseActor = actorId;
+    leaseSession = sessionId;
+    armLeaseIdle();
+    return 'granted';
+  }
+  // Refused rather than queued past this point. An unbounded queue turns a
+  // wide worker wave into hundreds of workers each holding a turn for up to
+  // LEASE_IDLE_MS, which is a stall no user would sit through.
+  if (waiting.length >= MAX_QUEUED) return 'busy';
+  return enqueue(actorId, sessionId, signal);
+}
+
+/** Drop every queued waiter belonging to a run, and the lease if it holds it. */
+function dropRunFromQueue(sessionId: string): void {
+  // Backwards: settle() splices, so forward iteration would skip entries.
+  for (let i = waiting.length - 1; i >= 0; i--) {
+    const w = waiting[i]!;
+    if (w.sessionId === sessionId) w.settle('cancelled');
+  }
+  // After the waiters, not before: releaseLease() hands the browser to the
+  // head of the queue, and this run's own waiters must be gone by then.
+  if (leaseSession === sessionId) releaseLease();
+}
+
+/** Turn everyone away — the capability itself has gone. */
+function dropAllWaiters(): void {
+  for (let i = waiting.length - 1; i >= 0; i--) waiting[i]!.settle('off');
+}
 
 /**
  * Aborts the action in flight for reasons that are the HOST's, not the run's.
@@ -120,11 +288,11 @@ const MODAL_WAIT_CEILING_MS = 120_000;
 const WATCHDOG_INTERVAL_MS = 250;
 
 /**
- * The last run to hold the lease, whether or not it still does.
+ * The last run to act, whether or not one of its actions is running now.
  *
- * The lease is per-ACTION — taken when one starts, released when it finishes —
- * so between the steps of a multi-step sequence `drivingSession` is null while
- * the run is very much still going. A Stop pressed in one of those gaps found
+ * `drivingSession` is per-ACTION — set when one starts, cleared when it
+ * finishes — so between the steps of a multi-step sequence it is null while the
+ * run is very much still going. A Stop pressed in one of those gaps found
  * nothing to stop and silently did nothing, and the next action went ahead.
  * That is the failure mode a kill switch cannot have, so an argument-less Stop
  * falls back to this.
@@ -156,6 +324,12 @@ export function setAgentControlEnabled(on: boolean): void {
     // Turning the feature off mid-action stops that action, rather than only
     // preventing the next one.
     activeAbort?.abort();
+    // And everyone queued behind it. Without this they keep their place in a
+    // line for a capability that no longer exists, and each waits out the full
+    // QUEUE_WAIT_MS before being told "busy" — the wrong reason, a minute late.
+    dropAllWaiters();
+    // Empty queue by now, so this releases rather than hands on.
+    releaseLease();
   }
   pushStateToOwner();
 }
@@ -185,6 +359,13 @@ export function stopAgentControl(sessionId?: string): void {
     // navigation loading to completion after the user had pressed Stop.
     activeAbort?.abort();
   }
+  // Stop has to mean the whole run, not just the step on screen. A run's other
+  // workers are queued behind the one the user is watching, so stopping only
+  // the visible action handed the browser straight to the next sibling and the
+  // user watched the thing they just stopped carry on under a different worker.
+  // Runs first added to revokedSessions above, so the handoff inside this skips
+  // them rather than dealing the browser back out to the same run.
+  if (target) dropRunFromQueue(target);
   pushStateToOwner();
 }
 
@@ -210,6 +391,9 @@ export function agentRunEnded(sessionId: string): void {
     drivingSession = null;
     activeAbort?.abort();
   }
+  // A finished run does not get to sit on the browser for another
+  // LEASE_IDLE_MS, and its queued workers are never going to run.
+  dropRunFromQueue(sessionId);
   pushStateToOwner();
 }
 
@@ -299,6 +483,7 @@ function getState() {
     return {
       open: false, url: '', title: '', loading: false, canGoBack: false, canGoForward: false,
       agentControlEnabled, agentDriving: drivingSession !== null,
+      agentQueueDepth: waiting.length,
     };
   }
   const wc = view.webContents;
@@ -321,7 +506,7 @@ function getState() {
     // is watching rather than "whatever is driving by the time the click lands".
     agentDrivingSession: drivingSession ?? undefined,
     // A run that has acted and has neither been stopped nor finished. The panel
-    // keeps its Stop control while this is set, because the lease is released
+    // keeps its Stop control while this is set, because `drivingSession` clears
     // between actions and rendering Stop only while an action runs made it
     // disappear during the model-thinking gap — the one moment a user watching
     // a multi-step sequence is most likely to want it, and the moment the
@@ -330,6 +515,12 @@ function getState() {
       drivingSession
       ?? (lastActiveSession && !revokedSessions.has(lastActiveSession) ? lastActiveSession : undefined)
       ?? undefined,
+    // How many actors are in line behind the one driving. Surfaced because a
+    // queue the user cannot see looks identical to a hung action: the page sits
+    // there doing nothing between steps either way. It is also what makes Stop
+    // legible — pressing it clears the line as well as the step on screen, and
+    // a user who never knew there was a line would not expect that.
+    agentQueueDepth: waiting.length,
   };
 }
 
@@ -488,9 +679,14 @@ async function awaitWatchable(
 
 export async function actOnCurrentPage(
   action: AgentAction,
-  context: { sessionId: string; signal?: AbortSignal },
+  context: { sessionId: string; actorId?: string; signal?: AbortSignal },
 ): Promise<AgentOutcome> {
   const session = context.sessionId || 'unknown';
+  // Falls back to the run when a host supplies no actor. That degrades to one
+  // lease per run — the behaviour before the lease existed — rather than
+  // throwing at a caller that has not been updated. The SDK tool always sends
+  // one, so the fallback is for embedders, not for the normal path.
+  const actor = context.actorId || session;
 
   if (!agentControlEnabled) {
     return { ok: false, detail: 'Agent browser control is turned off. The user can enable it in Settings.' };
@@ -504,10 +700,50 @@ export async function actOnCurrentPage(
   if (!view || view.webContents.isDestroyed()) {
     return { ok: false, detail: 'No page is open in the built-in browser. Ask the user to open one.' };
   }
-  // One browser, one action. Rejects ANY overlap, including two workers of the
-  // same run: they share a taskId, so a session-keyed check waved them through.
-  if (activeAction) {
-    return { ok: false, detail: 'Another browser action is already running. Wait for it to finish.' };
+
+  // Queue for the browser rather than refuse. A wave of T3 workers that each
+  // need the page used to have all but one told "another action is running" —
+  // a refusal the model can only answer by retrying blind. Waiting in line is
+  // both what the user asked for and the only ordering that keeps a
+  // navigate → fill → click sequence intact: the lease is held by the ACTOR
+  // across all three, so nobody navigates away in the middle of one.
+  const lease = await acquireLease(actor, session, context.signal);
+  if (lease !== 'granted') {
+    if (lease === 'off') {
+      return { ok: false, detail: 'Agent browser control was turned off while this action waited for the browser.' };
+    }
+    if (lease === 'cancelled') {
+      return {
+        ok: false,
+        detail: revokedSessions.has(session)
+          ? 'The user stopped agent browser control for this run.'
+          : 'The run was cancelled while waiting for the browser.',
+      };
+    }
+    return {
+      ok: false,
+      detail: 'The browser is in use by another part of this run and did not come free in time. Try again, or do something else first.',
+    };
+  }
+
+  // Re-checked AFTER the wait, which can be a minute long: the run may have
+  // been stopped, the feature turned off, or the browser closed while this
+  // actor sat in the queue. Checking only on the way in tested a world that no
+  // longer exists by the time the action runs.
+  const stale = staleAfterWait(session, context.signal);
+  if (stale) {
+    releaseIfHeldBy(actor);
+    return stale;
+  }
+
+  // The outgoing action may still be unwinding: releaseLease() can hand the
+  // browser on while the previous holder's abort is still propagating through
+  // an awaited navigation. That is a handoff, not a conflict, so it is waited
+  // out rather than refused — but it is bounded, because a wedged action must
+  // not pin the queue.
+  if (!(await awaitActionSlot())) {
+    releaseIfHeldBy(actor);
+    return { ok: false, detail: 'Another browser action is still finishing. Try again.' };
   }
 
   const token = Symbol('browser-action');
@@ -516,6 +752,10 @@ export async function actOnCurrentPage(
   activeAbort = abort;
   drivingSession = session;
   lastActiveSession = session;
+  // The idle clock is for the gap BETWEEN a sequence's steps. Left running, it
+  // would fire mid-action on any navigate slower than LEASE_IDLE_MS and hand
+  // the page to a queued worker while this one was still driving it.
+  clearLeaseTimer();
   pushStateToOwner();
 
   try {
@@ -549,16 +789,78 @@ export async function actOnCurrentPage(
   } catch (err) {
     return { ok: false, detail: err instanceof Error ? err.message : String(err), ...pageWhere() };
   } finally {
-    // Only the action that took the lease releases it. Keying this on the
+    // Only the action that took the slot releases it. Keying this on the
     // session instead let a sibling worker sharing the same taskId hand the
     // browser back while this one was still using it.
     if (activeAction === token) {
       activeAction = null;
       activeAbort = null;
       drivingSession = null;
+      // The LEASE deliberately outlives the action — that is the whole point,
+      // and what keeps the next step of this actor's sequence from being
+      // overtaken. It goes back on the idle clock now that nothing is running.
+      //
+      // Except when this run is finished with the browser either way, in which
+      // case holding it for another LEASE_IDLE_MS is dead time a queued worker
+      // spends waiting for a run that will never come back.
+      if (leaseActor === actor) {
+        if (context.signal?.aborted || revokedSessions.has(session)) releaseLease();
+        else armLeaseIdle();
+      }
       pushStateToOwner();
     }
   }
+}
+
+/**
+ * The gates that can have changed while an actor sat in the queue.
+ *
+ * Returns the outcome to hand back, or null when it is still fine to act.
+ */
+function staleAfterWait(session: string, signal: AbortSignal | undefined): AgentOutcome | null {
+  if (!agentControlEnabled) {
+    return { ok: false, detail: 'Agent browser control was turned off while this action waited for the browser.' };
+  }
+  if (revokedSessions.has(session)) {
+    return { ok: false, detail: 'The user stopped agent browser control for this run.' };
+  }
+  if (signal?.aborted) {
+    return { ok: false, detail: 'The run was cancelled.' };
+  }
+  if (!view || view.webContents.isDestroyed()) {
+    return { ok: false, detail: 'No page is open in the built-in browser. Ask the user to open one.' };
+  }
+  return null;
+}
+
+/**
+ * Give the browser up when we are about to return without using it.
+ *
+ * Two guards, both load-bearing.
+ *
+ * Never while an action is in flight, because the lease is RE-ENTRANT: the
+ * action still running may be this same actor's previous step, and taking the
+ * lease off it hands the page to a queued worker mid-sequence — precisely the
+ * interleave the lease exists to prevent. That action's own finally settles
+ * the lease when it unwinds, and the idle timer is already armed, so nothing
+ * leaks by leaving it alone.
+ *
+ * And only while still the holder, because by the time a refusal path runs a
+ * Stop may already have released the lease and handed it on — releasing it a
+ * second time would take the browser off whoever got it.
+ */
+function releaseIfHeldBy(actorId: string): void {
+  if (activeAction) return;
+  if (leaseActor === actorId) releaseLease();
+}
+
+/** Wait, briefly, for the outgoing action to unwind. See the call site. */
+async function awaitActionSlot(): Promise<boolean> {
+  for (let waited = 0; waited < ACTION_HANDOFF_MS; waited += ACTION_HANDOFF_POLL_MS) {
+    if (!activeAction) return true;
+    await new Promise((r) => setTimeout(r, ACTION_HANDOFF_POLL_MS));
+  }
+  return activeAction === null;
 }
 
 async function perform(
