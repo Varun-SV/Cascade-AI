@@ -62,48 +62,101 @@ let lastError: string | undefined;
 
 // ── Agent control ─────────────────────────────────────────────────────
 //
-// Two separate gates, and they are separate on purpose.
+// Three pieces of state, separate on purpose.
 //
 // `agentControlEnabled` is the SETTING: the user turned this capability on.
-// `agentDriving` is the live state: a run is actually acting right now, which
-// is what the panel shows and what the kill switch turns off.
+// `drivingSession` is who holds the browser right now — the panel shows it and
+// the kill switch targets it.
+// `revokedSessions` is who has been stopped, keyed by run.
 //
-// Collapsing them would mean the kill switch either does nothing lasting (the
-// next action re-enables it) or silently rewrites a persisted setting the user
-// has to go find and turn back on. Stopping the agent mid-run and revoking the
-// feature are different intentions and get different switches.
+// Collapsing the setting and the live state would mean the kill switch either
+// does nothing lasting (the next action re-enables it) or silently rewrites a
+// persisted setting the user has to go find and turn back on. Stopping a run
+// and revoking the feature are different intentions and get different switches.
+//
+// Keying the last two by RUN rather than using process-wide booleans is what
+// makes "stop this run" mean that, on a backend that starts once and then
+// serves every run for the life of the app.
 let agentControlEnabled = false;
-let agentDriving = false;
+
+/**
+ * The run currently holding the browser, or null.
+ *
+ * A LEASE, not a flag. There is one browser and any number of runs, so without
+ * an owner two concurrent runs interleave clicks on the same page and each
+ * reads a DOM the other just changed. The second one is refused instead.
+ */
+let drivingSession: string | null = null;
+
+/**
+ * The last run to hold the lease, whether or not it still does.
+ *
+ * The lease is per-ACTION — taken when one starts, released when it finishes —
+ * so between the steps of a multi-step sequence `drivingSession` is null while
+ * the run is very much still going. A Stop pressed in one of those gaps found
+ * nothing to stop and silently did nothing, and the next action went ahead.
+ * That is the failure mode a kill switch cannot have, so an argument-less Stop
+ * falls back to this.
+ */
+let lastActiveSession: string | null = null;
+
+/**
+ * Runs the user has stopped, by session id.
+ *
+ * A set rather than a boolean, and this is the whole point: the desktop backend
+ * starts ONCE and serves every run after it, so a process-wide flag meant a
+ * Stop in one run silently carried into every later run — and, being global,
+ * stopped a concurrent run as collateral while the message claimed it applied
+ * only "for this run". Keyed by run, a Stop lands on the run the user was
+ * actually watching and a new run is unaffected without anything having to
+ * remember to reset it.
+ *
+ * Growth is bounded by how many times the user presses Stop, which is small and
+ * user-paced; entries are deliberately not evicted, because evicting one would
+ * silently un-revoke the run it belongs to.
+ */
+const revokedSessions = new Set<string>();
 
 /** Reflects the persisted setting. Called by main.ts on load and on change. */
 export function setAgentControlEnabled(on: boolean): void {
   agentControlEnabled = on;
-  if (!on) agentDriving = false;
+  if (!on) drivingSession = null;
   pushStateToOwner();
 }
 
 export function isAgentDriving(): boolean {
-  return agentDriving;
+  return drivingSession !== null;
 }
 
 /**
- * The kill switch. Stops the current run from touching the page any further,
- * without disturbing the setting — turning it back on is a matter of approving
- * the next run, not of hunting through Settings.
+ * The kill switch. Stops one run from touching the page any further, without
+ * disturbing the setting — turning it back on is a matter of approving the next
+ * run, not of hunting through Settings.
+ *
+ * With no argument it stops whichever run is driving right now, which is what
+ * the button in the browser panel means: the user is watching something happen
+ * and wants THAT stopped.
  *
  * Deliberately does NOT close the browser or navigate away: whatever the agent
  * did is left on screen for the user to see and undo.
  */
-let revoked = false;
-export function stopAgentControl(): void {
-  revoked = true;
-  agentDriving = false;
+export function stopAgentControl(sessionId?: string): void {
+  const target = sessionId ?? drivingSession ?? lastActiveSession;
+  if (target) revokedSessions.add(target);
+  if (!sessionId || sessionId === drivingSession) drivingSession = null;
   pushStateToOwner();
 }
 
-/** Clears a revocation so a later, freshly-approved run can act again. */
-export function resumeAgentControl(): void {
-  revoked = false;
+/**
+ * Lets a previously-stopped run act again.
+ *
+ * Called with no argument only when the process is starting fresh, where there
+ * are no live runs to un-stop. It is NOT a per-run reset — that is what keying
+ * revocation by session id removes the need for.
+ */
+export function resumeAgentControl(sessionId?: string): void {
+  if (sessionId) revokedSessions.delete(sessionId);
+  else revokedSessions.clear();
   pushStateToOwner();
 }
 
@@ -186,7 +239,7 @@ function getState() {
   if (!view || view.webContents.isDestroyed()) {
     return {
       open: false, url: '', title: '', loading: false, canGoBack: false, canGoForward: false,
-      agentControlEnabled, agentDriving,
+      agentControlEnabled, agentDriving: drivingSession !== null,
     };
   }
   const wc = view.webContents;
@@ -204,7 +257,10 @@ function getState() {
     // Carried on the same channel the renderer already subscribes to, so the
     // "agent is driving" banner and the kill switch need no second stream.
     agentControlEnabled,
-    agentDriving,
+    agentDriving: drivingSession !== null,
+    // The run holding the browser, so the panel's Stop targets the run the user
+    // is watching rather than "whatever is driving by the time the click lands".
+    agentDrivingSession: drivingSession ?? undefined,
   };
 }
 
@@ -285,30 +341,62 @@ function pageWhere(): { url?: string; title?: string } {
  * checked HERE rather than only in the tool: the tool is one caller, and a gate
  * that lives at the edge is a gate that a second caller forgets.
  */
-export async function actOnCurrentPage(action: AgentAction): Promise<AgentOutcome> {
+export async function actOnCurrentPage(
+  action: AgentAction,
+  context: { sessionId: string; signal?: AbortSignal },
+): Promise<AgentOutcome> {
+  const session = context.sessionId || 'unknown';
+
   if (!agentControlEnabled) {
     return { ok: false, detail: 'Agent browser control is turned off. The user can enable it in Settings.' };
   }
-  if (revoked) {
+  if (revokedSessions.has(session)) {
     return { ok: false, detail: 'The user stopped agent browser control for this run.' };
+  }
+  if (context.signal?.aborted) {
+    return { ok: false, detail: 'The run was cancelled.' };
   }
   if (!view || view.webContents.isDestroyed()) {
     return { ok: false, detail: 'No page is open in the built-in browser. Ask the user to open one.' };
   }
+  // The browser must be ON SCREEN, not merely alive.
+  //
+  // Hiding the panel does not destroy the view — applyBounds() collapses it to
+  // zero precisely so the page and its login survive a trip to another tab. So
+  // the checks above all pass while the user is looking at something else, and
+  // without this one the agent would click and type in an authenticated page
+  // nobody is watching. That is the entire argument for driving the visible
+  // browser rather than a headless one, and it evaporates if the browser can be
+  // invisible. It also puts the Stop control out of reach: it lives in the panel
+  // the user has navigated away from.
+  if (!visible) {
+    return {
+      ok: false,
+      detail: 'The built-in browser is not on screen. Ask the user to open the Browser tab — actions only run where they can watch them and stop them.',
+    };
+  }
+  // One browser, many runs: a second run acting on the same page would
+  // interleave with the first and each would read a DOM the other just changed.
+  if (drivingSession && drivingSession !== session) {
+    return { ok: false, detail: 'Another run is currently using the browser. Wait for it to finish.' };
+  }
 
-  agentDriving = true;
+  drivingSession = session;
+  lastActiveSession = session;
   pushStateToOwner();
   try {
-    return await perform(action);
+    return await perform(action, context.signal);
   } catch (err) {
     return { ok: false, detail: err instanceof Error ? err.message : String(err), ...pageWhere() };
   } finally {
-    agentDriving = false;
+    // Only release a lease still held by this run — stopAgentControl may have
+    // cleared it mid-action, and clobbering that would hand the browser back.
+    if (drivingSession === session) drivingSession = null;
     pushStateToOwner();
   }
 }
 
-async function perform(action: AgentAction): Promise<AgentOutcome> {
+async function perform(action: AgentAction, signal?: AbortSignal): Promise<AgentOutcome> {
   const wc = view!.webContents;
 
   switch (action.kind) {
@@ -317,7 +405,20 @@ async function perform(action: AgentAction): Promise<AgentOutcome> {
       // reach file:// or a devtools: URL that the user could not type either.
       const target = toNavigable(action.url ?? '');
       if (!target) return { ok: false, detail: 'Only http and https addresses can be opened.' };
-      await wc.loadURL(target);
+      // loadURL resolves only when the navigation settles, which is unbounded on
+      // a slow or hanging page. Racing the signal lets a cancelled run stop
+      // waiting; wc.stop() also stops the page still loading underneath it,
+      // rather than leaving it fetching in the user's session.
+      const abort = new Promise<'cancelled'>((resolve) => {
+        if (!signal) return;
+        if (signal.aborted) return resolve('cancelled');
+        signal.addEventListener('abort', () => resolve('cancelled'), { once: true });
+      });
+      const raced = await Promise.race([wc.loadURL(target).then(() => 'loaded' as const), abort]);
+      if (raced === 'cancelled') {
+        wc.stop();
+        return { ok: false, detail: 'The run was cancelled while the page was loading.', ...pageWhere() };
+      }
       return { ok: true, detail: `Navigated to ${target}`, ...pageWhere() };
     }
 
@@ -377,7 +478,12 @@ async function perform(action: AgentAction): Promise<AgentOutcome> {
       // to survive a navigation mid-wait, which is exactly when a wait is most
       // likely to be running.
       for (;;) {
-        if (revoked) return { ok: false, detail: 'The user stopped agent browser control while waiting.', ...pageWhere() };
+        if (drivingSession === null) {
+          return { ok: false, detail: 'The user stopped agent browser control while waiting.', ...pageWhere() };
+        }
+        if (signal?.aborted) {
+          return { ok: false, detail: 'The run was cancelled while waiting.', ...pageWhere() };
+        }
         const there = await inPage<boolean>(
           `!!document.querySelector(${JSON.stringify(action.selector)})`,
         ).catch(() => false);
@@ -492,13 +598,16 @@ export function registerBrowserHandlers(getWindow: () => BrowserWindow | null): 
   // the run that is acting right now and leaves the setting alone, so the user
   // is not made to go re-enable a feature they still want in order to halt one
   // run that is doing the wrong thing.
-  ipcMain.handle('browser:stopAgent', () => {
-    stopAgentControl();
+  ipcMain.handle('browser:stopAgent', (_e, sessionId: unknown) => {
+    // No id from the panel's button means "stop whoever is driving" — the user
+    // is watching something happen and wants that stopped, and the module knows
+    // which run that is better than the renderer does.
+    stopAgentControl(typeof sessionId === 'string' && sessionId ? sessionId : undefined);
     return { ok: true, state: getState() };
   });
 
-  ipcMain.handle('browser:resumeAgent', () => {
-    resumeAgentControl();
+  ipcMain.handle('browser:resumeAgent', (_e, sessionId: unknown) => {
+    resumeAgentControl(typeof sessionId === 'string' && sessionId ? sessionId : undefined);
     return { ok: true, state: getState() };
   });
 

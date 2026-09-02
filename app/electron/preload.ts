@@ -13,6 +13,9 @@ interface BrowserState {
   agentControlEnabled?: boolean;
   /** Live: an agent is acting on the page right now. Drives the banner. */
   agentDriving?: boolean;
+  /** Which run is acting, so Stop targets that one rather than whatever is
+   *  driving by the time the click lands. */
+  agentDrivingSession?: string;
 }
 
 /** A message on a cloud conversation's active path (with branching data). */
@@ -249,8 +252,8 @@ contextBridge.exposeInMainWorld('cascade', {
     // The kill switch, and its undo. Separate from the Settings toggle on
     // purpose: stopping the run that is acting now should not make the user go
     // and re-enable a feature they still want.
-    stopAgent: () => ipcRenderer.invoke('browser:stopAgent') as Promise<{ ok: boolean; state: BrowserState }>,
-    resumeAgent: () => ipcRenderer.invoke('browser:resumeAgent') as Promise<{ ok: boolean; state: BrowserState }>,
+    stopAgent: (sessionId?: string) => ipcRenderer.invoke('browser:stopAgent', sessionId) as Promise<{ ok: boolean; state: BrowserState }>,
+    resumeAgent: (sessionId?: string) => ipcRenderer.invoke('browser:resumeAgent', sessionId) as Promise<{ ok: boolean; state: BrowserState }>,
     // Returns its own unsubscribe. Without one the renderer had no way to
     // detach: every switch to the Browser view added another listener that
     // outlived the component, so navigation events fanned out to every

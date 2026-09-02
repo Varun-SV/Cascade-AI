@@ -8,11 +8,13 @@ import { BrowserControlTool, type BrowserAction, type BrowserController } from '
 /** A controller that records what it was asked to do. */
 function recorder(outcome: Partial<Awaited<ReturnType<BrowserController>>> = {}) {
   const calls: BrowserAction[] = [];
-  const controller: BrowserController = async (action) => {
+  const contexts: Array<{ sessionId: string; signal?: AbortSignal }> = [];
+  const controller: BrowserController = async (action, context) => {
     calls.push(action);
+    contexts.push(context);
     return { ok: true, detail: 'done', ...outcome };
   };
-  return { calls, controller };
+  return { calls, contexts, controller };
 }
 
 describe('BrowserControlTool', () => {
@@ -111,6 +113,54 @@ describe('BrowserControlTool', () => {
     // The description has to say the consequence out loud: the two tools differ in
     // exactly the way that matters and the model picks between them by text.
     expect(def.description).toMatch(/real browser|signed into/i);
+  });
+});
+
+describe('BrowserControlTool — run identity and cancellation', () => {
+  it('passes the run id through, which is what scopes a Stop', async () => {
+    // The host keys both revocation and its single-owner lease on this. Drop it
+    // and a Stop in one run silently stops every later run on the same backend,
+    // because the desktop backend starts once and serves them all.
+    const { contexts, controller } = recorder();
+    await new BrowserControlTool(controller).execute(
+      { action: 'click', selector: '#a' },
+      { tierId: 'T3', sessionId: 'run-7', requireApproval: false } as never,
+    );
+    expect(contexts[0]?.sessionId).toBe('run-7');
+  });
+
+  it('passes the abort signal through', async () => {
+    // wait_for can sit for 30s and navigate waits on the network, so without
+    // this a cancelled run keeps touching the user's authenticated page.
+    const ac = new AbortController();
+    const { contexts, controller } = recorder();
+    await new BrowserControlTool(controller).execute(
+      { action: 'wait_for', selector: '#a' },
+      { tierId: 'T3', sessionId: 'run-7', requireApproval: false, signal: ac.signal } as never,
+    );
+    expect(contexts[0]?.signal).toBe(ac.signal);
+  });
+
+  it('refuses before touching the page when the run is already cancelled', async () => {
+    const ac = new AbortController();
+    ac.abort();
+    const { calls, controller } = recorder();
+    const out = await new BrowserControlTool(controller).execute(
+      { action: 'click', selector: '#a' },
+      { tierId: 'T3', sessionId: 'run-7', requireApproval: false, signal: ac.signal } as never,
+    );
+    expect(out).toContain('cancelled');
+    expect(calls, 'a cancelled run must not reach the page at all').toEqual([]);
+  });
+
+  it('still works when the host supplies no signal', async () => {
+    const { calls, contexts, controller } = recorder();
+    await new BrowserControlTool(controller).execute(
+      { action: 'click', selector: '#a' },
+      { tierId: 'T3', sessionId: 'run-7', requireApproval: false } as never,
+    );
+    expect(calls).toHaveLength(1);
+    expect(contexts[0]).not.toHaveProperty('signal');
   });
 });
 

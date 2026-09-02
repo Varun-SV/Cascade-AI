@@ -135,8 +135,14 @@ async function startBackend(): Promise<void> {
     // Mirror the persisted setting into the browser module, which enforces it
     // on every action rather than trusting the caller to have checked.
     setAgentControlEnabled(cascadeConfig.tools?.agentBrowserControl === true);
-    // A revocation is per-run, not permanent: a fresh backend means a fresh
-    // run, so a stop the user hit earlier must not silently outlive it.
+    // Clears revocations from a PREVIOUS process, not from a previous run.
+    //
+    // This used to be described as making revocation per-run, which it is not:
+    // startBackend() runs once and then serves every run for the life of the
+    // app, so a Stop in one run stayed in force for every later one. Revocation
+    // is keyed by run id now (see browser.ts revokedSessions), which is what
+    // actually scopes it — this call only matters because a restarted backend
+    // has no live runs and should not inherit a stale set.
     resumeAgentControl();
     await server.start();
     dashboardServer = server;

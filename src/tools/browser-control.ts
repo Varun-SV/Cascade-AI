@@ -55,13 +55,39 @@ export interface BrowserActionOutcome {
 }
 
 /**
+ * Who is asking, and how to stop them.
+ *
+ * Both fields exist because the browser is a SINGLETON the host owns while runs
+ * come and go. Without run identity the host cannot tell a Stop in one run from
+ * a Stop in every future run, and cannot tell two concurrent runs apart when
+ * they both reach for the same page.
+ */
+export interface BrowserActionContext {
+  /**
+   * The run this action belongs to. Revocation and the host's single-owner
+   * lease both key on it, so a Stop scopes to the run the user was watching
+   * rather than to the process.
+   */
+  sessionId: string;
+  /**
+   * Cancels an action already in flight. `wait_for` can sit for 30s and
+   * `navigate` waits on the network, so without this a cancelled run keeps
+   * touching the user's authenticated page after it was stopped.
+   */
+  signal?: AbortSignal;
+}
+
+/**
  * Performs one action against the browser view the host owns.
  *
  * Returning `ok: false` with a reason is expected and normal — a selector that
  * matches nothing is a thing the model should be told about and can recover
  * from, not an exception.
  */
-export type BrowserController = (action: BrowserAction) => Promise<BrowserActionOutcome>;
+export type BrowserController = (
+  action: BrowserAction,
+  context: BrowserActionContext,
+) => Promise<BrowserActionOutcome>;
 
 export class BrowserControlTool extends BaseTool {
   readonly name = 'browser_control';
@@ -103,9 +129,13 @@ export class BrowserControlTool extends BaseTool {
   // radius is someone else's server rather than this machine.
   isDangerous(): boolean { return true; }
 
-  async execute(input: Record<string, unknown>, _options: ToolExecuteOptions): Promise<string> {
+  async execute(input: Record<string, unknown>, options: ToolExecuteOptions): Promise<string> {
     const kind = input['action'] as BrowserAction['kind'] | undefined;
     if (!kind) return 'Error: action is required.';
+
+    // Checked before anything reaches the page: a run cancelled while this call
+    // was queued must not go on to click something.
+    if (options?.signal?.aborted) return 'Error: the run was cancelled before this action ran.';
 
     // Validated here rather than in the host so the model gets a specific,
     // correctable message instead of a generic failure from three layers down.
@@ -125,7 +155,13 @@ export class BrowserControlTool extends BaseTool {
 
     let outcome: BrowserActionOutcome;
     try {
-      outcome = await this.controller(action);
+      outcome = await this.controller(action, {
+        // `sessionId` is the run. The host scopes both revocation and its
+        // single-owner lease on it, so passing it is not telemetry — drop it
+        // and a Stop in one run silently stops every later one.
+        sessionId: options?.sessionId ?? '',
+        ...(options?.signal ? { signal: options.signal } : {}),
+      });
     } catch (err) {
       return `Error: the browser could not perform "${kind}" — ${err instanceof Error ? err.message : String(err)}`;
     }
