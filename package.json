@@ -71,7 +71,7 @@
     "marked": "^13.0.0",
     "node-cron": "^3.0.3",
     "node-notifier": "^10.0.1",
-    "openai": "^4.67.0",
+    "openai": "^7.8.0",
     "ora": "^8.1.0",
     "pdfkit": "^0.18.0",
     "posthog-node": "^5.37.1",
