@@ -15,6 +15,7 @@ import {
   azureModelForDeployment, DEFAULT_CONTEXT_LIMIT, MODELS,
 } from '#cascade-ai';
 import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ProviderConfig } from '#cascade-ai';
+import { attachRemoteBrowser } from './remote-browser.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { z, type ZodError } from 'zod';
@@ -1023,6 +1024,20 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
 
   cascade.setMediaSink(buildMediaSink({ env, store, userId, conversationId: conversation.id, socket }));
 
+  // A hosted run has no browser of its own. This attaches one from whatever
+  // provider the operator configured, and returns null when they configured
+  // none — which is the default, and why there is no switch to turn the
+  // capability off: it does not exist until an endpoint is supplied.
+  const remoteBrowser = attachRemoteBrowser({
+    cascade,
+    config,
+    conversationId: conversation.id,
+    // ONE socket, the run's owner. The live-view URL is a bearer capability:
+    // anyone holding it can watch the browser and drive it.
+    emit: (event, payload) => socket.emit(event, payload),
+    warn: (message) => console.warn(`[run ${conversation.id}] remote browser: ${message}`),
+  });
+
   // Your thumbs-up/down verdicts, folded into Auto routing as a bounded,
   // sample-size-shrunk adjustment to the public benchmark score. Read once per
   // run and closed over: routing decisions inside a run must not shift halfway
@@ -1237,6 +1252,10 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     cascade.off('escalation:decision-required', onEscalation);
     cascade.off('escalation:timeout', onEscalationTimeout);
     socket.off('escalation:decide', onEscalationDecision);
+    // Before closing the cascade: releasing the provider session is what stops
+    // the operator paying for a browser nobody is using, and a run that threw
+    // is exactly the one that would otherwise leave one running.
+    try { await remoteBrowser?.endRun(); } catch { /* non-critical */ }
     try { await cascade.close(); } catch { /* non-critical */ }
   }
 }
