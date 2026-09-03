@@ -101,6 +101,40 @@ describe('Steel', () => {
     expect(calls[0]?.url).toBe('https://steel.test/v1/sessions');
   });
 
+  it('strips every trailing slash, however many there are', async () => {
+    const calls = stubFetch([{ body: { id: 'a', websocketUrl: 'wss://s' } }]);
+    await new SteelProvider({ url: `https://steel.test${'/'.repeat(50_000)}` }).createSession();
+    expect(calls[0]?.url).toBe('https://steel.test/v1/sessions');
+  });
+
+  it('does not stall on a long run of slashes followed by anything else', async () => {
+    // The shape CodeQL flagged, and the one that actually backtracks. With
+    // /\/+$/ the greedy `+` consumes the whole run at every starting position
+    // and then fails `$` because of the trailing character, which is quadratic:
+    // 50k slashes is billions of steps. Trailing slashes alone would NOT show
+    // this — the match succeeds immediately — so a test using them proves the
+    // fix works and nothing about why it was needed.
+    //
+    // Timed EXPLICITLY, because a vitest timeout cannot catch this. The
+    // backtracking is synchronous, so it blocks the event loop and the timeout
+    // has no chance to fire — the test simply takes 31 seconds and passes. Two
+    // earlier versions of this test were green with the bug present for that
+    // reason, the first also sitting 30ms inside a 2s limit and so flaky as
+    // well as wrong.
+    //
+    // The bound comes from measurement: at 200k the regex is ~31s and the loop
+    // ~0.01ms. 500ms is far above the honest cost and far below the broken one.
+    const calls = stubFetch([{ body: { id: 'a', websocketUrl: 'wss://s' } }]);
+    const nasty = `https://steel.test${'/'.repeat(200_000)}a`;
+
+    const started = performance.now();
+    await new SteelProvider({ url: nasty }).createSession();
+    const elapsed = performance.now() - started;
+
+    expect(calls[0]?.url).toBe(`${nasty}/v1/sessions`);
+    expect(elapsed, `parsing the endpoint took ${elapsed.toFixed(0)}ms`).toBeLessThan(500);
+  }, 60_000);
+
   it('carries the failure body into the error', async () => {
     // Quota, bad key and wrong region all arrive as a status code; without the
     // body every one of them reads as an unexplained number.
