@@ -17,7 +17,7 @@
 //  Credential rules live next door in `credential-write.ts`; this is everything
 //  else, plus the ordering between them.
 
-import type { CascadeConfig } from '../types.js';
+import type { CascadeConfig, ToolsConfig } from '../types.js';
 import { sameAzureEndpoint } from './azure-endpoint.js';
 import { applySettingsCredentials, type SettingsCredentialResult } from './credential-write.js';
 import { validateConfig } from './validate.js';
@@ -61,6 +61,7 @@ export interface SettingsPayload {
   };
   azureDeployments?: AzureDeploymentInput[];
   webSearch?: { searxngUrl?: string; braveApiKey?: string; tavilyApiKey?: string };
+  remoteBrowser?: { provider?: string; url?: string; apiKey?: string; maxSessions?: number };
   advanced?: Record<string, unknown>;
 }
 
@@ -182,6 +183,29 @@ export function applySettingsPayload(
     config.tools.webSearch = next;
   }
 
+  if (data.remoteBrowser && typeof data.remoteBrowser === 'object') {
+    // Merged onto what is stored, not replacing it, and the KEY follows the
+    // same rule as the search keys: a falsy value is ignored rather than
+    // written. The panel cannot send back a secret it was never given — the
+    // snapshot reports only whether one exists — so treating an empty field as
+    // "clear it" would wipe the stored key every time anything else on the
+    // form was saved.
+    const prior = (config.tools.remoteBrowser ?? {}) as NonNullable<ToolsConfig['remoteBrowser']>;
+    const next: NonNullable<ToolsConfig['remoteBrowser']> = { ...prior };
+    if (data.remoteBrowser.provider === 'cdp' || data.remoteBrowser.provider === 'steel') {
+      next.provider = data.remoteBrowser.provider;
+    }
+    if (typeof data.remoteBrowser.url === 'string') next.url = data.remoteBrowser.url.trim() || undefined;
+    if (data.remoteBrowser.apiKey) next.apiKey = data.remoteBrowser.apiKey;
+    // Clamped inline rather than through the `num` helper below, which is
+    // scoped to the advanced block and declared after this one.
+    const n = data.remoteBrowser.maxSessions;
+    if (typeof n === 'number' && Number.isFinite(n)) {
+      next.maxSessions = Math.min(Math.max(Math.floor(n), 1), 16);
+    }
+    config.tools.remoteBrowser = next;
+  }
+
   // Advanced settings: every field is individually validated against an
   // explicit allowlist — an unknown or malformed key is IGNORED, never written,
   // so a renderer cannot inject arbitrary config.
@@ -252,6 +276,7 @@ export interface SettingsSnapshot {
     model?: string; region?: string; hasKey: boolean;
   }>;
   webSearch: { searxngUrl?: string; hasBraveKey: boolean; hasTavilyKey: boolean };
+  remoteBrowser: { provider?: string; url?: string; hasApiKey: boolean; maxSessions?: number };
   advanced: Record<string, unknown>;
 }
 
@@ -268,6 +293,7 @@ export function settingsSnapshot(config: CascadeConfig): SettingsSnapshot {
     if (p?.type && p?.baseUrl && p.type !== 'azure') endpoints[p.type] = p.baseUrl;
   }
   const ws = (config.tools?.webSearch ?? {}) as { searxngUrl?: string; braveApiKey?: string; tavilyApiKey?: string };
+  const rb = (config.tools?.remoteBrowser ?? {}) as NonNullable<ToolsConfig['remoteBrowser']>;
   return {
     models: (config.models ?? {}) as Record<string, string>,
     budget: {
@@ -298,6 +324,15 @@ export function settingsSnapshot(config: CascadeConfig): SettingsSnapshot {
       searxngUrl: ws.searxngUrl,
       hasBraveKey: typeof ws.braveApiKey === 'string' && ws.braveApiKey.length > 0,
       hasTavilyKey: typeof ws.tavilyApiKey === 'string' && ws.tavilyApiKey.length > 0,
+    },
+    // `hasApiKey`, never the key. The panel needs to show whether one is set;
+    // sending the value back would put a live credential in every settings
+    // response, where it reaches any client that can read them.
+    remoteBrowser: {
+      provider: rb.provider,
+      url: rb.url,
+      hasApiKey: typeof rb.apiKey === 'string' && rb.apiKey.length > 0,
+      maxSessions: rb.maxSessions,
     },
     advanced: {
       autonomy: config.autonomy,
