@@ -92,6 +92,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reference is refused too; the guarantee no longer depends on the scheduler
   calling two methods in the lucky order.
 
+  Every browser-module gate derived from settings is pushed by one helper that
+  both settings writers call. The desktop panel writes through an IPC handler
+  and the dashboard through a socket, and a gate wired into only one of them
+  does nothing on the other — which happened twice, to the control toggle and
+  then to the approval-wait ceiling.
+
   An action approved by the user is no longer failed by a second approval
   queued behind it. The browser panel hides while any approval is pending, so
   the wait is bounded by the approval window rather than by a fixed ceiling

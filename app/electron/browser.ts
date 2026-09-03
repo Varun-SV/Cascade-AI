@@ -400,6 +400,21 @@ let modalWaitCeilingMs = 660_000;
  * ceiling shorter than the approval window fails actions the user has already
  * said yes to.
  */
+/**
+ * The ceiling a given approval timeout implies.
+ *
+ * Exported and pure so the derivation has one definition and can be tested
+ * without a running app — it was written out by hand at three call sites, and
+ * hand-copied arithmetic is how two of them ended up disagreeing.
+ *
+ * The margin exists so the APPROVAL's own timeout is what fires first: that one
+ * can tell the user what happened, where a browser action cut short by its
+ * ceiling just fails.
+ */
+export function approvalWaitCeilingFor(approvalTimeoutMs?: number): number {
+  return (approvalTimeoutMs ?? 600_000) + 60_000;
+}
+
 export function setApprovalWaitCeiling(ms: number): void {
   if (Number.isFinite(ms) && ms > 0) modalWaitCeilingMs = ms;
 }
