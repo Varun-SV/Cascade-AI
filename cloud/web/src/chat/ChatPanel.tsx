@@ -10,6 +10,7 @@ import { ReviewCard } from './ReviewCard.js';
 import type { ActivityNode, ChatMessage, ForceTier, PlanApproval, RoutingMode, SendInput , ReviewSummary} from './useChatSession.js';
 import type { Skill } from '../lib/types.js';
 import type { UiMode } from '../lib/prefs.js';
+import { BrowserLiveView } from './BrowserLiveView.js';
 
 interface Props {
   messages: ChatMessage[];
@@ -41,13 +42,17 @@ interface Props {
   providerNotice: string | null;
   knowledgeNotice: string | null;
   activity: ActivityNode[];
+  /** Where the agent's browser can be watched, while it has one. */
+  browserLiveView?: string | undefined;
+  /** Withdraw the browser from the run, without stopping the run itself. */
+  onStopBrowser?: () => void;
 }
 
 export default function ChatPanel({
   messages, busy, error, status, hasProviders, skills, skillId, onSkillChange, onSend, onStop, onRegenerate,
   onEditMessage, onDeleteMessage, onSelectSibling,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange, uiMode, approval,
-  compactionNotice, providerNotice, knowledgeNotice, activity,
+  compactionNotice, providerNotice, knowledgeNotice, activity, browserLiveView, onStopBrowser,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [activityOpen, setActivityOpen] = useState(false);
@@ -182,6 +187,14 @@ export default function ChatPanel({
           <span>{error}</span>
         </div>
       )}
+
+      {/* Above the composer, not inside the transcript: the browser is live for
+          as long as the run holds it, and a panel that scrolled away with the
+          messages would take the Stop control off screen exactly when the user
+          wanted it. */}
+      <div className="mx-4 sm:mx-6">
+        <BrowserLiveView liveViewUrl={browserLiveView} onStop={() => onStopBrowser?.()} />
+      </div>
 
       {!hasProviders && (
         <div className="mx-4 mb-2 flex items-center gap-2 rounded-md border border-info-800 bg-info-950/40 px-3 py-2 text-sm text-info-300 sm:mx-6">

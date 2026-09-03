@@ -300,6 +300,28 @@ export function useChatSession(
   const conversationIdRef = useRef(conversationId);
   conversationIdRef.current = conversationId;
   const [error, setError] = useState<string | null>(null);
+  /**
+   * Where the agent's browser can be watched, while it has one.
+   *
+   * State only, never persisted. The URL is a bearer capability: the provider
+   * issues it without a token precisely so it can be embedded, which means
+   * anyone who obtains it can watch the session and drive it. Storing it with
+   * the conversation would turn a live credential into a durable one.
+   */
+  const [browserLiveView, setBrowserLiveView] = useState<string | undefined>(undefined);
+
+  /**
+   * Stop the agent using the browser, without stopping the run.
+   *
+   * Deliberately not `stop()`: the user may want the work to continue and only
+   * this capability withdrawn. The panel is hidden immediately rather than
+   * waiting for the server to confirm — a kill switch that looks like it did
+   * nothing is one people press repeatedly and then distrust.
+   */
+  const stopBrowser = useCallback(() => {
+    socket?.emit('browser:stop', {});
+    setBrowserLiveView(undefined);
+  }, [socket]);
   const [status, setStatus] = useState<string | null>(null);
   const [lastTokens, setLastTokens] = useState<number>(0);
   const [lastSaved, setLastSaved] = useState<{ usd: number; pct: number } | null>(null);
@@ -464,6 +486,15 @@ export function useChatSession(
     // button appear on the message as soon as the image lands. A saved file
     // needs nothing here (the Files panel has its own refresh).
     const onFileCreated = (e: { pending?: boolean }) => { if (e?.pending) void refreshPendingMedia(); };
+    // The agent has a browser and the user can watch it. Held in state only —
+    // this URL is a bearer capability (anyone with it can watch and drive the
+    // session), so it is never persisted with the conversation and never
+    // written to a log. An absent url means the run finished with it, or the
+    // provider offers no live view at all.
+    const onLiveView = (e: { conversationId?: string; liveViewUrl?: string }) => {
+      setBrowserLiveView(e?.liveViewUrl);
+    };
+    socket.on('browser:live-view', onLiveView);
     socket.on('stream:token', onToken);
     socket.on('tier:status', onStatus);
     socket.on('run:why', onWhy);
@@ -489,6 +520,7 @@ export function useChatSession(
       socket.off('provider:exhausted', onProviderExhausted);
       socket.off('knowledge:retrieved', onKnowledge);
       socket.off('file:created', onFileCreated);
+      socket.off('browser:live-view', onLiveView);
     };
   }, [socket]);
 
@@ -950,5 +982,6 @@ export function useChatSession(
     routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, approval,
     escalation, escalationQueued: escalations.length, resolveEscalation, clearEscalation,
     contextApproval, resolveContextApproval, compactionNotice, providerNotice, knowledgeNotice, activity,
+    browserLiveView, stopBrowser,
   };
 }

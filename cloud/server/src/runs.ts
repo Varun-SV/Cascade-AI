@@ -1037,6 +1037,11 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     emit: (event, payload) => socket.emit(event, payload),
     warn: (message) => console.warn(`[run ${conversation.id}] remote browser: ${message}`),
   });
+  // The kill switch, alongside the live view that makes it meaningful. Scoped
+  // to this run and removed with the run's other listeners below: a Stop is
+  // something the user does to the run they are watching, not to the process.
+  const onBrowserStop = () => remoteBrowser?.stop();
+  socket.on('browser:stop', onBrowserStop);
 
   // Your thumbs-up/down verdicts, folded into Auto routing as a bounded,
   // sample-size-shrunk adjustment to the public benchmark score. Read once per
@@ -1255,6 +1260,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     // Before closing the cascade: releasing the provider session is what stops
     // the operator paying for a browser nobody is using, and a run that threw
     // is exactly the one that would otherwise leave one running.
+    socket.off('browser:stop', onBrowserStop);
     try { await remoteBrowser?.endRun(); } catch { /* non-critical */ }
     try { await cascade.close(); } catch { /* non-critical */ }
   }

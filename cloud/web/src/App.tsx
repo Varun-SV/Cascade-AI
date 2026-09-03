@@ -301,6 +301,8 @@ export default function App() {
             onSkillChange={setSkillId}
             onSend={chat.send}
             onStop={chat.stop}
+            browserLiveView={chat.browserLiveView}
+            onStopBrowser={chat.stopBrowser}
             onRegenerate={chat.regenerate}
             onEditMessage={chat.editMessage}
             onDeleteMessage={chat.deleteMessage}
