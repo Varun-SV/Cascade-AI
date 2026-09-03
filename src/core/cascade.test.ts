@@ -100,6 +100,28 @@ describe('Cascade.setBrowserController — the gate on acting for real', () => {
   });
 });
 
+describe('a run announces its id before it can fail', () => {
+  it('emits run:started even when the run itself throws', async () => {
+    // The whole point. A caller that learns the task id only from a successful
+    // CascadeRunResult cannot name the run that FAILED — and a failed run is
+    // exactly the one whose browser lease and Stop affordance need clearing.
+    // No pre-recording here: the id has to come out of a real run() call that
+    // does not reach a result.
+    const cascade = new Cascade(baseConfig, '/tmp');
+    const started: string[] = [];
+    cascade.on('run:started', (e: unknown) => {
+      const id = (e as { taskId?: string }).taskId;
+      if (id) started.push(id);
+    });
+
+    // baseConfig has no providers, so this cannot complete.
+    await cascade.run({ prompt: 'anything' }).catch(() => undefined);
+
+    expect(started, 'the run named itself before failing').toHaveLength(1);
+    expect(started[0]).toMatch(/[0-9a-f-]{36}/);
+  });
+});
+
 describe('unattended revokes browser control whatever the call order', () => {
   const controller = async () => ({ ok: true, detail: 'ok' });
   const cascadeWith = (tools: Record<string, unknown>) =>

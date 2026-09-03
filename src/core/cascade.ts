@@ -1602,6 +1602,14 @@ ${prompt}`
     this.router.setRunSignal(options.signal);
     const startMs = Date.now();
     const taskId = randomUUID();
+    // Announced at the START, not carried out on the result.
+    //
+    // A caller that learns the task id only from a successful CascadeRunResult
+    // cannot name the run that just FAILED — and a run that throws is exactly
+    // the one whose resources need releasing. Hosts keying cleanup on this id
+    // were left guessing from the previous run's, which is worse than knowing
+    // nothing: it names a real run, just not this one.
+    this.emit('run:started', { taskId });
     this.decisionLog = [];
     // Sections finished by THIS run. Reset per run so a checkpoint can never
     // restore work from an earlier, unrelated task.

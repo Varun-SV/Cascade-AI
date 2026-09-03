@@ -52,12 +52,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   action was serialized and the sequence was still corrupted. The lease is
   keyed by worker rather than by run — every T3 worker in a run passes the same
   task id, so a run-keyed lease handed the same lease to all of them at once —
-  and it is released by the worker's own terminal path, not by a timer. An
-  earlier version released after 15s idle; but that gap is exactly where the
-  worker is back at the model choosing its next step, and a normal generation
-  exceeds 15s routinely, so the timer handed the browser away mid-sequence and
-  recreated the corruption it was meant to prevent. A timer survives only as a
-  deadlock ceiling for a worker that dies without signalling. Workers that
+  and it is released by the worker's own terminal path, not by a timer. Earlier
+  versions released after 15s, then 5 minutes, of idleness; but that gap is
+  where the worker is back at the model choosing its next step — or waiting on
+  a human approval, which allows 10 minutes by default — so any fixed bound
+  handed the browser away mid-sequence and recreated the corruption it was
+  meant to prevent. Where the host reports worker lifecycles, no timer decides
+  ownership at all. Workers that
   arrive while it is held wait their turn instead of being told "another action
   is running", which is a refusal a model can only answer by retrying blind.
   The banner says how many are waiting, since a queue nobody can see looks
@@ -65,8 +66,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   screen; and a run that is stopped or ends gives the browser up at once rather
   than sitting on it for the rest of the idle window.
 
+  **A queued action will not run on a page it was not prepared for.** Approval
+  happens in the worker, before the tool runs, so an action can be approved for
+  one page, wait its turn, and arrive at a different one — the holder is
+  deliberately free to navigate during its own sequence. On a signed-in site
+  the same selector can be a different button doing something else entirely, so
+  a page-relative action whose document changed while it waited is refused and
+  the model is told to look again.
+
   Run-end cleanup carries the Cascade **task id** rather than the chat session
-  id. They are different things — one conversation holds many runs — and it is
+  id, and a run announces that id when it STARTS rather than only on success —
+  a run that throws is exactly the one whose browser lease needs releasing, and
+  a caller that learned the id from the result could only name the run before
+  it. They are different things — one conversation holds many runs — and it is
   the task id that reaches tools, so passing the session id meant cleanup
   matched nothing: a finished run kept its Stop control armed and held its
   browser lease until the ceiling expired.

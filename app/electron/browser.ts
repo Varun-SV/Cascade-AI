@@ -52,6 +52,23 @@ const HOME_URL = 'https://duckduckgo.com/';
  *  the tokens cost real money; the SDK tool truncates again on its own side. */
 const MAX_TEXT_CHARS = 200_000;
 
+/**
+ * Bumped on every navigation, so an action can tell whether the page it was
+ * prepared for is still the page in front of it.
+ *
+ * Approval is resolved in the WORKER, before the tool runs, while the browser
+ * lease is taken inside the action. So a worker can be approved for
+ * `click #submit`, queue behind another worker, and by the time it runs the
+ * holder has navigated somewhere else — and `#submit` on that page is a
+ * different button doing a different thing to a signed-in account. Re-checking
+ * the setting, revocation and cancellation does not catch it: all of those are
+ * still perfectly valid, and only the page changed.
+ *
+ * A counter rather than the URL, because a reload or an in-page navigation
+ * replaces the document while the URL stays put.
+ */
+let pageGeneration = 0;
+
 let view: WebContentsView | null = null;
 let owner: BrowserWindow | null = null;
 let visible = false;
@@ -207,8 +224,15 @@ function enqueue(
         resolve(result);
       },
     };
-    const timer = setTimeout(() => waiter.settle('busy'), QUEUE_WAIT_MS);
-    timer.unref?.();
+    // Same reasoning as the ceiling: 180s is shorter than a healthy holder's
+    // interval (300s local inference, 600s approval), so a fixed timeout told
+    // queued workers the browser was busy while it was working normally. With
+    // lifecycle release wired, a waiter is bounded by its own run's
+    // cancellation, the user's Stop, and MAX_QUEUED — not by a clock.
+    const timer = lifecycleReleaseWired
+      ? undefined
+      : setTimeout(() => waiter.settle('busy'), QUEUE_WAIT_MS);
+    timer?.unref?.();
     const giveUp = () => waiter.settle('cancelled');
     signal?.addEventListener('abort', giveUp, { once: true });
     waiting.push(waiter);
@@ -250,8 +274,32 @@ function releaseLease(): void {
 /** Arm the deadlock ceiling. Not a release schedule — see the constant. */
 function armLeaseIdle(): void {
   clearLeaseTimer();
+  // Not armed at all when the host reports a worker's terminal state, because
+  // ANY fixed bound is one a healthy worker can exceed. A worker waiting on a
+  // human approval has 600s by default and a local generation 300s — the same
+  // as the ceiling — and both are configurable far higher (86_400_000 and
+  // 3_600_000). So "far longer than any plausible think-time" was a number I
+  // picked without checking, and at five minutes the ceiling was still a normal
+  // sequence boundary: it would hand the page away from a live worker waiting
+  // on its own approval, which is exactly what the lifecycle release exists to
+  // stop. The backstops that do not need a clock: the worker's own terminal
+  // signal, run end, the user's Stop, and turning the feature off.
+  if (lifecycleReleaseWired) return;
   leaseIdleTimer = setTimeout(releaseLease, LEASE_DEADLOCK_CEILING_MS);
   leaseIdleTimer.unref?.();
+}
+
+/**
+ * Whether the host reports worker terminal states (`agentActorEnded`).
+ *
+ * When it does, timers stop being ownership boundaries entirely. When it does
+ * not — an embedder that wired the controller but not the release — the
+ * fallbacks stay, because something has to break a deadlock.
+ */
+let lifecycleReleaseWired = false;
+
+export function setLifecycleReleaseWired(on: boolean): void {
+  lifecycleReleaseWired = on;
 }
 
 /**
@@ -522,9 +570,9 @@ function ensureView(win: BrowserWindow): WebContentsView {
   // A successful or freshly-started navigation retires the old error — this
   // is the only place lastError is cleared, so did-stop-loading (below) can't
   // wipe it out from underneath a failure it didn't cause.
-  wc.on('did-navigate', () => { lastError = undefined; pushState(); });
+  wc.on('did-navigate', () => { pageGeneration += 1; lastError = undefined; pushState(); });
   wc.on('did-start-loading', () => { lastError = undefined; pushState(); });
-  wc.on('did-navigate-in-page', pushState);
+  wc.on('did-navigate-in-page', () => { pageGeneration += 1; pushState(); });
   wc.on('page-title-updated', pushState);
   // Electron always follows a failed navigation with did-stop-loading. That
   // handler calls the SAME pushState, which re-sends whatever lastError is
@@ -759,6 +807,11 @@ export async function actOnCurrentPage(
   // throwing at a caller that has not been updated. The SDK tool always sends
   // one, so the fallback is for embedders, not for the normal path.
   const actor = context.actorId || session;
+  // Captured BEFORE any waiting. This action was planned — and approved — against
+  // whatever is on screen now; if it has to queue, the holder is deliberately
+  // free to navigate during its own sequence, and what comes back may be a
+  // different document entirely.
+  const plannedGeneration = pageGeneration;
 
   if (!agentControlEnabled) {
     return { ok: false, detail: 'Agent browser control is turned off. The user can enable it in Settings.' };
@@ -841,6 +894,21 @@ export async function actOnCurrentPage(
       return {
         ok: false,
         detail: 'The built-in browser is not on screen. Ask the user to open the Browser tab — actions only run where they can watch them and stop them.',
+      };
+    }
+    // The page must still be the page this action was prepared for. Checked
+    // after every wait — the lease queue and the watchable wait both — and only
+    // for actions that are page-relative: `navigate` names its own destination,
+    // so it is the one thing that is still meaningful on a changed page.
+    //
+    // Refused rather than retried, because the selector cannot be re-planned
+    // here: only the model knows what it was trying to do, and guessing on a
+    // signed-in page is how a click lands on the wrong button.
+    if (action.kind !== 'navigate' && pageGeneration !== plannedGeneration) {
+      return {
+        ok: false,
+        detail: 'The page changed while this action was waiting for the browser, so it was not run — the selector was chosen for a different page. Look at the page again before retrying.',
+        ...pageWhere(),
       };
     }
     // Watches for the browser ceasing to be watchable WHILE an action runs.

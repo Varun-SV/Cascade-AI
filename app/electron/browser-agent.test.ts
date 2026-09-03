@@ -78,6 +78,19 @@ const act = (sessionId: string, signal?: AbortSignal, actorId?: string) =>
     { sessionId, ...(actorId ? { actorId } : {}), ...(signal ? { signal } : {}) },
   );
 
+/**
+ * Fire the module's own `did-navigate` handler, as Electron would.
+ *
+ * Goes through the registered handler rather than poking module state, so the
+ * test covers the actual wiring: if the page-generation bump is ever moved off
+ * this event, this stops working — which is the point.
+ */
+function navigated(): void {
+  for (const [event, handler] of fakeWebContents.on.mock.calls) {
+    if (event === 'did-navigate' && typeof handler === 'function') (handler as () => void)();
+  }
+}
+
 /** Navigate somewhere, as a named worker of a run. */
 const go = (sessionId: string, actorId: string, url: string) =>
   mod.actOnCurrentPage({ kind: 'navigate', url }, { sessionId, actorId });
@@ -88,6 +101,9 @@ const go = (sessionId: string, actorId: string, url: string) =>
 afterEach(() => { vi.useRealTimers(); });
 
 beforeEach(async () => {
+  // Cleared before load(), or handlers registered by earlier module instances
+  // pile up and `navigated()` fires every one of them.
+  fakeWebContents.on.mockClear();
   minimized = false;
   windowShown = true;
   fakeWebContents.executeJavaScript.mockReset();
@@ -404,6 +420,31 @@ describe('the browser lease is held by one actor across a whole sequence', () =>
     await queued;
   });
 
+  it('never hands the page away from a live worker, however long it takes', async () => {
+    // A five-minute "deadlock ceiling" was still a normal sequence boundary.
+    // A worker legitimately outlives any fixed bound: approvalTimeoutMs is
+    // 600s by default (configurable to 86_400_000) and localInferenceTimeoutMs
+    // is 300s (to 3_600_000) — so a worker waiting on its own human approval
+    // was having its page handed to a sibling at minute five, which is the
+    // corruption the lifecycle release exists to eliminate.
+    await openPanel();
+    mod.setLifecycleReleaseWired(true);
+    vi.useFakeTimers();
+    await act('run-A', undefined, 'w1');
+
+    let granted = false;
+    const queued = act('run-A', undefined, 'w2').then((r) => { granted = r.ok; return r; });
+
+    // Twenty minutes: past the old ceiling, past the approval window, past the
+    // queue timeout. None of them may decide ownership.
+    await vi.advanceTimersByTimeAsync(1_200_000);
+    expect(granted, 'w1 has not finished, so w1 still owns the browser').toBe(false);
+
+    mod.agentActorEnded('w1');
+    await vi.advanceTimersByTimeAsync(10);
+    expect((await queued).ok, 'and only w1 finishing releases it').toBe(true);
+  });
+
   it('hands the browser on when the holding WORKER finishes', async () => {
     // The real release: the worker's own terminal path says it will never ask
     // again, which is the one thing a timer can never mean about a worker that
@@ -418,6 +459,33 @@ describe('the browser lease is held by one actor across a whole sequence', () =>
 
     mod.agentActorEnded('w1');
     expect((await queued).ok, 'w2 gets its turn as soon as w1 is done').toBe(true);
+  });
+
+  it('refuses a queued action whose page changed while it waited', async () => {
+    // Approval is resolved in the WORKER, before the tool runs, so w2 can be
+    // approved for `click #submit` and then queue. The holder is deliberately
+    // free to navigate during its own sequence — that is what the lease is for
+    // — so what w2 finds when its turn comes may be a different document, on
+    // which the same selector is a different button doing a different thing to
+    // a signed-in account. Setting, revocation and cancellation are all still
+    // valid at that point; only the page changed.
+    await openPanel();
+    mod.setLifecycleReleaseWired(true);
+    let clicked = 0;
+    fakeWebContents.executeJavaScript.mockImplementation(async () => { clicked += 1; return true; });
+
+    await act('run-A', undefined, 'w1');                 // w1 takes the browser
+    const queued = act('run-A', undefined, 'w2');        // w2 queues, page as it is now
+    await new Promise((r) => setTimeout(r, 20));
+
+    // w1 navigates during its own sequence, which is allowed.
+    await go('run-A', 'w1', 'https://somewhere-else.test/');
+    navigated();
+    mod.agentActorEnded('w1');
+
+    const out = await queued;
+    expect(out.ok, 'w2 must not act on a page it was not prepared for').toBe(false);
+    expect(out.detail).toMatch(/page changed/i);
   });
 
   it('ignores an actor that never touched the browser', async () => {

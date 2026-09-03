@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
 import { registerCloudAuthIpc } from './cloudAuth';
-import { registerBrowserHandlers, readCurrentPage, actOnCurrentPage, setAgentControlEnabled, resumeAgentControl, agentRunEnded, agentActorEnded, setApprovalWaitCeiling } from './browser';
+import { registerBrowserHandlers, readCurrentPage, actOnCurrentPage, setAgentControlEnabled, resumeAgentControl, agentRunEnded, agentActorEnded, setApprovalWaitCeiling, setLifecycleReleaseWired } from './browser';
 
 const isDev = process.env.ELECTRON_DEV === '1';
 
@@ -137,8 +137,15 @@ async function startBackend(): Promise<void> {
     // first used to tell the browser module. A socket write therefore left the
     // module's copy stale: an enable it still refused, or a disable it still
     // honoured for a run already holding the tool. One hook covers both.
-    server.onSettingsChanged?.((next: { tools?: { agentBrowserControl?: boolean } }) => {
+    server.onSettingsChanged?.((next: { tools?: { agentBrowserControl?: boolean }; approvalTimeoutMs?: number }) => {
       setAgentControlEnabled(next.tools?.agentBrowserControl === true);
+      // `approvalTimeoutMs` is a live Advanced setting, so a ceiling derived
+      // once at startup goes stale the moment it changes: raise the approval
+      // window to 30 minutes without restarting and the browser module would
+      // still cut an already-approved action off at the old one. A wait already
+      // in flight keeps the ceiling it started with — awaitWatchable captures
+      // it at entry — so a change cannot shorten a run that is mid-wait.
+      setApprovalWaitCeiling((next.approvalTimeoutMs ?? 600_000) + 60_000);
     });
     // Retires a run's browser Stop control when the run ends. The control has
     // to outlive each action — the gap between two is when the user most wants
@@ -157,6 +164,12 @@ async function startBackend(): Promise<void> {
     // actions the user has already approved. Margin on top so the approval's
     // own timeout is what fires first, which is the one that can explain itself.
     setApprovalWaitCeiling((cascadeConfig.approvalTimeoutMs ?? 600_000) + 60_000);
+    // This host reports worker terminal states, so the browser module stops
+    // using timers as ownership boundaries. Any fixed bound is one a healthy
+    // worker can exceed — an approval alone may legitimately take 600s, and a
+    // local generation 300s — and a timer that fires while a worker is alive
+    // hands its page to somebody else mid-sequence.
+    setLifecycleReleaseWired(true);
     // Mirror the persisted setting into the browser module, which enforces it
     // on every action rather than trusting the caller to have checked.
     setAgentControlEnabled(cascadeConfig.tools?.agentBrowserControl === true);

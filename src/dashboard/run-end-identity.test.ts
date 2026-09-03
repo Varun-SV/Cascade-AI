@@ -69,19 +69,29 @@ describe('run-end reports the run, not the conversation', () => {
     expect(seen[0]?.taskId).not.toBe(seen[0]?.sessionId);
   });
 
-  it('falls back to the run recorded for this session when there is no result', () => {
-    // The failure paths call persistRunEnd with no CascadeRunResult, so the
-    // taskId has to come from somewhere — otherwise a failed run never releases
-    // whatever it was holding.
+  it('names the run that actually failed, not the one before it', () => {
+    // This test used to pre-record a task id and then assert the fallback found
+    // it — manufacturing a state production never produced, and so proving the
+    // wrong thing. In production nothing recorded a task id until AFTER a run
+    // succeeded, so on a failed run the list held the PREVIOUS run's id (on a
+    // continuing chat) or nothing at all (on the first). The fallback did not
+    // merely fail to identify the run — it confidently named a different one.
+    //
+    // Runs are recorded at START now, via Cascade's `run:started`. Modelled
+    // here as two runs on one chat: the first completes, the second fails.
     const server = new DashboardServer(config, store, '/tmp');
     const seen: Ended[] = [];
     server.onRunEnded((ids) => seen.push(ids));
-    (server as unknown as { recordSessionTask: (s: string, t: string) => void })
-      .recordSessionTask('chat-session-2', 'task-xyz');
+    const started = (t: string) =>
+      (server as unknown as { recordSessionTask: (s: string, t: string) => void })
+        .recordSessionTask('chat-2', t);
 
-    endRun(server, ['chat-session-2', 'title', 'prompt', undefined, 'FAILED']);
+    started('task-first');
+    endRun(server, ['chat-2', 'title', 'prompt', 'reply', 'COMPLETED', { taskId: 'task-first' }]);
+    started('task-second');
+    endRun(server, ['chat-2', 'title', 'prompt', undefined, 'FAILED']);
 
-    expect(seen[0]?.taskId).toBe('task-xyz');
+    expect(seen[1]?.taskId, 'the failed run, not the one that succeeded before it').toBe('task-second');
   });
 
   it('omits the task id rather than substituting the session id', () => {

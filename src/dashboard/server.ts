@@ -313,13 +313,22 @@ export class DashboardServer {
         this.emitToSessionClients(socketId, sessionId, 'escalation:timeout', { sessionId, ...(e as object) });
       });
 
+      // Recorded when the run STARTS, so a run that throws can still be named.
+      // The failure paths below call persistRunEnd with no result, and its
+      // fallback reads the last task recorded for this session — which, before
+      // this listener existed, was the PREVIOUS run's id on a continuing chat
+      // and nothing at all on the first one.
+      cascade.on('run:started', (e: unknown) => {
+        const id = (e as { taskId?: string }).taskId;
+        if (id) this.recordSessionTask(sessionId, id);
+      });
+
       try {
         const result = await cascade.run({
           prompt: runPrompt,
           signal: abortController.signal,
           approvalCallback: this.makeApprovalCallback(sessionId),
         });
-        this.recordSessionTask(sessionId, result.taskId);
         this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED', result);
         this.captureWhy(sessionId, cascade, result);
         this.emitToSessionClients(socketId, sessionId, 'session:complete', { sessionId, result });
@@ -786,6 +795,12 @@ export class DashboardServer {
     cascade.on('peer:message', (e: unknown) => {
       this.socket.emitPeerMessage(e as import('../types.js').PeerMessageEvent);
     });
+    // See the socket run handler: recorded at start so a failed run is still
+    // nameable by the cleanup that runs after it.
+    cascade.on('run:started', (e: unknown) => {
+      const id = (e as { taskId?: string }).taskId;
+      if (id) this.recordSessionTask(sessionId, id);
+    });
 
     try {
       const result = await cascade.run({
@@ -793,7 +808,6 @@ export class DashboardServer {
         identityId: task.identityId,
         approvalCallback: async () => ({ approved: true, always: false }),
       });
-      this.recordSessionTask(sessionId, result.taskId);
       this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED', result);
       this.captureWhy(sessionId, cascade, result);
       this.socket.broadcast('session:complete', { sessionId, result });
@@ -1554,13 +1568,17 @@ export class DashboardServer {
           this.socket.broadcastToRoom(`session:${sessionId}`, 'escalation:timeout', { sessionId, ...(e as object) });
         });
 
+        cascade.on('run:started', (e: unknown) => {
+          const id = (e as { taskId?: string }).taskId;
+          if (id) this.recordSessionTask(sessionId, id);
+        });
+
         try {
           const result = await cascade.run({
             prompt: runPrompt,
             identityId: body.identityId,
             approvalCallback: this.makeApprovalCallback(sessionId),
           });
-          this.recordSessionTask(sessionId, result.taskId);
           this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED', result);
           this.captureWhy(sessionId, cascade, result);
           this.socket.broadcast('cost:update', {
