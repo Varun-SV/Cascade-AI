@@ -18,6 +18,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+## 0.79.0 - 2026-09-03
+
+### Added
+- **Browser control on the web surface, through a browser you point it at.**
+  The desktop drives the Chromium you are signed into and can watch. A hosted
+  deployment has neither, so it connects to a remote browser over CDP instead
+  of running one in the container — which would be an SSRF engine (a page's own
+  JavaScript issues requests no URL check ever sees, from inside the trust
+  boundary) and would cost 200–400 MB per session against tiers that start at
+  512 MB.
+
+  Two adapters. A **generic CDP endpoint** is the important one: a `ws://` URL
+  and nothing else, covering a self-hosted Steel, a Browserless container, or a
+  bare `chromium --remote-debugging-port`, with no vendor account and no
+  dependency on anyone's API staying stable. **Steel** is the branded one,
+  because a real create/release lifecycle and a separate live-view URL exercise
+  the parts of the seam a bare URL does not.
+
+  **You can watch it work, and take it away.** The live session is embedded in
+  the chat, you can take the page over in that frame, and Stop withdraws the
+  browser without stopping the run. That panel does for the web what the
+  desktop's on-screen requirement does there: it is what makes the kill switch
+  mean something. A provider with no live view is a weaker configuration and
+  says so rather than showing an empty box.
+
+  Absent by default — no provider, no capability, nothing to switch off. One
+  session at a time unless raised, because every session is billed and a wave
+  of workers each opening their own is a cost nobody chose. The API key is
+  never echoed back in any settings response, and the live-view URL is treated
+  as the bearer capability it is: it goes to the run's owner and is never
+  persisted or logged.
+
+  The remote browser is signed into nothing, which is the honest limit of this
+  surface: it is for public-web work, and the desktop remains the place for
+  anything authenticated.
+
+### Fixed
+- **A regular expression that could stall on a long URL.** Stripping trailing
+  slashes from a configured endpoint used a pattern that backtracks
+  quadratically — 32 seconds on a 200,000-character input, against effectively
+  nothing for the replacement. Found by CodeQL.
+
 ## 0.78.0 - 2026-09-02
 
 ### Added
