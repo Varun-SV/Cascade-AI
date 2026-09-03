@@ -60,6 +60,20 @@ export interface DesktopBrowserState {
   canGoBack: boolean;
   canGoForward: boolean;
   error?: string;
+  /** The Settings toggle: may an agent act on this page at all. */
+  agentControlEnabled?: boolean;
+  /** Live: an agent is acting right now. Drives the banner and Stop button. */
+  agentDriving?: boolean;
+  /** Which run is acting, so Stop targets that one rather than whatever is
+   *  driving by the time the click lands. */
+  agentDrivingSession?: string;
+  /** A run that has acted and is neither stopped nor finished — Stop stays
+   *  available for it between actions. */
+  agentArmedSession?: string;
+  /** How many other workers are queued for the browser behind the one driving.
+   *  Shown because a queue nobody can see is indistinguishable from a hung
+   *  action, and because Stop clears the queue too. */
+  agentQueueDepth?: number;
 }
 
 declare global {
@@ -145,7 +159,7 @@ declare global {
        *  positions over the renderer at the bounds we report. */
       browser?: {
         open(url: string | undefined, bounds: { x: number; y: number; width: number; height: number }): Promise<{ ok: boolean; error?: string; state?: DesktopBrowserState }>;
-        hide(): Promise<{ ok: boolean }>;
+        hide(reason?: 'modal'): Promise<{ ok: boolean }>;
         close(): Promise<{ ok: boolean }>;
         setBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<{ ok: boolean }>;
         navigate(url: string): Promise<{ ok: boolean; error?: string }>;
@@ -156,6 +170,9 @@ declare global {
         state(): Promise<DesktopBrowserState>;
         readPage(): Promise<{ url: string; title: string; text: string } | null>;
         openExternal(url: string): Promise<{ ok: boolean }>;
+        /** Kill switch: stop the run currently driving the browser. */
+        stopAgent(sessionId?: string): Promise<{ ok: boolean; state: DesktopBrowserState }>;
+        resumeAgent(sessionId?: string): Promise<{ ok: boolean; state: DesktopBrowserState }>;
         /** Returns an unsubscribe — call it on unmount. */
         onState(cb: (s: DesktopBrowserState) => void): () => void;
       };

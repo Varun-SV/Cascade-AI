@@ -36,6 +36,142 @@ const baseConfig: CascadeConfig = {
   },
 };
 
+describe('Cascade.setBrowserController — the gate on acting for real', () => {
+  const controller = async () => ({ ok: true, detail: 'ok' });
+
+  const cascadeWith = (tools: Partial<CascadeConfig['tools']>) =>
+    new Cascade({ ...baseConfig, tools: { ...baseConfig.tools, ...tools } }, '/tmp');
+
+  it('does NOT register the tool when agentBrowserControl is off', () => {
+    // The default. Handing the desktop's controller over must not by itself
+    // give a run the ability to click things in the user's signed-in session —
+    // main.ts wires the controller unconditionally and relies on this.
+    const c = cascadeWith({});
+    c.setBrowserController(controller);
+    expect(c.getToolRegistry().hasTool('browser_control')).toBe(false);
+  });
+
+  it('registers it once the user turns it on', () => {
+    const c = cascadeWith({ agentBrowserControl: true });
+    c.setBrowserController(controller);
+    expect(c.getToolRegistry().hasTool('browser_control')).toBe(true);
+  });
+
+  it('still honours disabledTools when the setting is on', () => {
+    // disabledTools reaches tools registered outside the enabledTools
+    // allowlist, and this is one of them.
+    const c = cascadeWith({ agentBrowserControl: true, disabledTools: ['browser_control'] });
+    c.setBrowserController(controller);
+    expect(c.getToolRegistry().hasTool('browser_control')).toBe(false);
+  });
+
+  it('refuses the controller outright for an unattended run', () => {
+    // A scheduled run auto-approves every tool because nobody is there to ask,
+    // which is disqualifying for one whose safety rests on a person watching.
+    // Stated and enforced rather than resting on runScheduledTask happening not
+    // to wire the controller — a guarantee that shape survives only until
+    // someone adds the call.
+    const c = cascadeWith({ agentBrowserControl: true });
+    c.setUnattended(true);
+    c.setBrowserController(controller);
+    expect(c.getToolRegistry().hasTool('browser_control')).toBe(false);
+  });
+
+  it('a run that was never given the controller cannot obtain the tool from config alone', () => {
+    // Scheduled/cron runs auto-approve every tool (runScheduledTask passes
+    // `approvalCallback: () => ({ approved: true })`, because nobody may be
+    // watching), and they build their own Cascade. The safety property is that
+    // browser_control is never ATTACHED to such a run — setBrowserController is
+    // simply not called — so turning the setting on cannot hand a headless run
+    // control of the signed-in browser. Asserted rather than left implicit,
+    // because the config alone looks identical from inside the run.
+    const c = cascadeWith({ agentBrowserControl: true });
+    expect(c.getToolRegistry().hasTool('browser_control')).toBe(false);
+  });
+
+  it('leaves read_current_page unaffected — reading is not acting', () => {
+    // The two capabilities are gated separately on purpose: reading a page the
+    // user already opened reaches nothing new, acting on it does.
+    const c = cascadeWith({});
+    c.setCurrentPageProvider(async () => null);
+    c.setBrowserController(controller);
+    expect(c.getToolRegistry().hasTool('read_current_page')).toBe(true);
+    expect(c.getToolRegistry().hasTool('browser_control')).toBe(false);
+  });
+});
+
+describe('a run announces its id before it can fail', () => {
+  it('emits run:started even when the run itself throws', async () => {
+    // The whole point. A caller that learns the task id only from a successful
+    // CascadeRunResult cannot name the run that FAILED — and a failed run is
+    // exactly the one whose browser lease and Stop affordance need clearing.
+    // No pre-recording here: the id has to come out of a real run() call that
+    // does not reach a result.
+    const cascade = new Cascade(baseConfig, '/tmp');
+    const started: string[] = [];
+    cascade.on('run:started', (e: unknown) => {
+      const id = (e as { taskId?: string }).taskId;
+      if (id) started.push(id);
+    });
+
+    // baseConfig has no providers, so this cannot complete.
+    await cascade.run({ prompt: 'anything' }).catch(() => undefined);
+
+    expect(started, 'the run named itself before failing').toHaveLength(1);
+    expect(started[0]).toMatch(/[0-9a-f-]{36}/);
+  });
+});
+
+describe('unattended revokes browser control whatever the call order', () => {
+  const controller = async () => ({ ok: true, detail: 'ok' });
+  const cascadeWith = (tools: Record<string, unknown>) =>
+    new Cascade({ ...baseConfig, tools: { ...baseConfig.tools, ...tools } }, '/tmp');
+
+  it('disables an ALREADY-registered tool when the run turns out to be unattended', async () => {
+    // The invariant used to be order-dependent, which made it not an invariant:
+    // setUnattended(true) then setBrowserController(...) was safe, but the
+    // reverse left browser_control registered and fully usable. The scheduler
+    // happens to call them in the safe order — the emergent property this was
+    // meant to replace.
+    const c = cascadeWith({ agentBrowserControl: true });
+    c.setBrowserController(controller);
+    const tool = c.getToolRegistry().getTool('browser_control');
+    expect(tool, 'sanity: wired before the run was declared unattended').toBeDefined();
+
+    c.setUnattended(true);
+
+    // Enforced at EXECUTION time, so a reference taken before the revocation
+    // is just as dead as the registry entry.
+    const out = await tool!.execute({ action: 'click', selector: '#a' }, {} as never);
+    expect(out).toMatch(/not available|nobody is/i);
+  });
+
+  it('does not act even when the caller kept its own reference', async () => {
+    const c = cascadeWith({ agentBrowserControl: true });
+    let reached = false;
+    c.setBrowserController(async () => { reached = true; return { ok: true, detail: 'ok' }; });
+    const tool = c.getToolRegistry().getTool('browser_control');
+
+    c.setUnattended(true);
+    await tool!.execute({ action: 'navigate', url: 'https://example.test/' }, {} as never);
+
+    expect(reached, 'a revoked tool must not reach the browser at all').toBe(false);
+  });
+
+  it('stays refused — revocation is one way', async () => {
+    // A safety gate that a later call can re-open is one a refactor re-opens
+    // by accident.
+    const c = cascadeWith({ agentBrowserControl: true });
+    c.setBrowserController(controller);
+    const tool = c.getToolRegistry().getTool('browser_control');
+    c.setUnattended(true);
+    c.setUnattended(false);
+
+    const out = await tool!.execute({ action: 'click', selector: '#a' }, {} as never);
+    expect(out).toMatch(/not available|nobody is/i);
+  });
+});
+
 describe('Cascade routing complexity', () => {
   it('passes recent conversation context into complexity routing', async () => {
     const cascade = new Cascade(baseConfig, process.cwd());

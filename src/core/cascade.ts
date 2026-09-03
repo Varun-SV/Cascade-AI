@@ -66,6 +66,7 @@ import {
 } from './context/compaction.js';
 import { GuidanceQueue } from './steering/guidance.js';
 import { CurrentPageTool, type CurrentPageProvider } from '../tools/current-page.js';
+import { BrowserControlTool, type BrowserController, type BrowserActorRelease } from '../tools/browser-control.js';
 
 /** One entry in the per-run orchestration decision trail (see /why). */
 export interface DecisionLogEntry {
@@ -696,6 +697,61 @@ export class Cascade extends EventEmitter {
   setCurrentPageProvider(provider: CurrentPageProvider): void {
     if ((this.config.tools?.disabledTools ?? []).includes('read_current_page')) return;
     this.toolRegistry.register(new CurrentPageTool(provider));
+  }
+
+  /**
+   * True when nobody is watching this run — a scheduled/cron task, which
+   * auto-approves every tool because there is no one to ask.
+   *
+   * That auto-approval is fine for ordinary tools and disqualifying for this
+   * one: `browser_control` drives the signed-in browser, and "every run asks
+   * first" is the promise the Settings copy makes. The property used to hold
+   * only because `runScheduledTask` happens not to call `setBrowserController`
+   * — a guarantee resting on an ABSENT call, which is exactly what a later
+   * refactor adds without noticing. Stated and enforced instead.
+   */
+  private unattended = false;
+
+  /**
+   * Declare that no human is watching this run, so capabilities that depend on
+   * a person being able to see and stop them are refused outright.
+   */
+  setUnattended(on: boolean): void {
+    this.unattended = on;
+    if (!on) return;
+    // Revokes a controller that is ALREADY wired, rather than only refusing the
+    // next registration. The invariant was order-dependent: `setUnattended(true)`
+    // then `setBrowserController(...)` was safe, but the reverse left the tool
+    // registered and usable. The current scheduler happens to call them in the
+    // safe order — which is exactly the emergent, undocumented property this
+    // was supposed to replace with an enforced one.
+    const tool = this.toolRegistry.getTool('browser_control') as
+      | { revoke?: () => void }
+      | undefined;
+    tool?.revoke?.();
+  }
+
+  /**
+   * Wire the host's browser so a run can ACT on the open page, not just read it.
+   *
+   * Two gates before this registers anything, and both matter:
+   *
+   *   - `tools.agentBrowserControl` must be on. Unlike read_current_page, which
+   *     reaches nothing the user has not already opened themselves, this drives
+   *     the session they are signed into. That is opt-in, not a default.
+   *   - `disabledTools` still removes it, the same as every other tool.
+   *   - The run must not be UNATTENDED. See `setUnattended`.
+   *
+   * Host-supplied like the page provider: the tool exists only where there is a
+   * real browser to drive, so it never has to be refused in the CLI or a hosted
+   * run — it is simply not there.
+   */
+  setBrowserController(controller: BrowserController, release?: BrowserActorRelease): void {
+    if (this.unattended) return;
+
+    if (!this.config.tools?.agentBrowserControl) return;
+    if ((this.config.tools?.disabledTools ?? []).includes('browser_control')) return;
+    this.toolRegistry.register(new BrowserControlTool(controller, release));
   }
 
   private registerMediaTools(workspacePath: string): void {
@@ -1546,6 +1602,14 @@ ${prompt}`
     this.router.setRunSignal(options.signal);
     const startMs = Date.now();
     const taskId = randomUUID();
+    // Announced at the START, not carried out on the result.
+    //
+    // A caller that learns the task id only from a successful CascadeRunResult
+    // cannot name the run that just FAILED — and a run that throws is exactly
+    // the one whose resources need releasing. Hosts keying cleanup on this id
+    // were left guessing from the previous run's, which is worse than knowing
+    // nothing: it names a real run, just not this one.
+    this.emit('run:started', { taskId });
     this.decisionLog = [];
     // Sections finished by THIS run. Reset per run so a checkpoint can never
     // restore work from an earlier, unrelated task.

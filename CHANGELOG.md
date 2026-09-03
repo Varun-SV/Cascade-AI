@@ -18,6 +18,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+## 0.78.0 - 2026-09-02
+
+### Added
+- **The agent can act on the page you have open** (`browser_control`, desktop
+  only). Navigate, click, fill a field, press a key, wait for an element,
+  extract text — in the built-in browser you are already signed into, not a
+  headless copy with an empty cookie jar. Off by default behind a new Settings
+  toggle (**Agent browser control**); every run still goes through the approval
+  chain, and the browser panel carries a Stop control that halts the acting run
+  without turning the feature off.
+
+  The Browser tab shows a banner and a **Stop** control while a run is acting,
+  shipped alongside the toggle rather than a release later: a user who can turn
+  the capability on has to be able to see it working and halt it.
+
+  It only acts while the browser is **watchable** — on screen, in a live window
+  that is neither minimized nor hidden to the tray, and it stops the moment that
+  stops being true, including part-way through a page load. Hiding the panel does not
+  destroy the view, so without that gate the agent could click and type in an
+  authenticated page nobody was watching. An action waits briefly for the panel
+  to come back rather than refusing outright, because the approval modal for the
+  action itself hides it. Stop is scoped to the run the user was watching, not
+  to the process; and Stop, disabling the feature, losing sight of the browser,
+  or cancelling the run all abort an action already in flight, including a
+  navigation still loading. The Stop control stays available between a run's
+  actions, not only while one is executing, and retires when the run ends.
+
+  **The browser is leased to one worker for a whole sequence, and everyone else
+  queues.** Serializing individual actions was not enough: a worker doing
+  navigate → fill → click released the page between each step, so a sibling
+  could navigate away in the gap and the fill landed on the wrong page. Every
+  action was serialized and the sequence was still corrupted. The lease is
+  keyed by worker rather than by run — every T3 worker in a run passes the same
+  task id, so a run-keyed lease handed the same lease to all of them at once —
+  and it is released by the worker's own terminal path, not by a timer. Earlier
+  versions released after 15s, then 5 minutes, of idleness; but that gap is
+  where the worker is back at the model choosing its next step — or waiting on
+  a human approval, which allows 10 minutes by default — so any fixed bound
+  handed the browser away mid-sequence and recreated the corruption it was
+  meant to prevent. Where the host reports worker lifecycles, no timer decides
+  ownership at all. Workers that
+  arrive while it is held wait their turn instead of being told "another action
+  is running", which is a refusal a model can only answer by retrying blind.
+  The banner says how many are waiting, since a queue nobody can see looks
+  exactly like a hung action; Stop clears the queue as well as the step on
+  screen; and a run that is stopped or ends gives the browser up at once rather
+  than sitting on it for the rest of the idle window.
+
+  **A queued action will not run on a page it was not prepared for.** Approval
+  happens in the worker, before the tool runs, so an action can be approved for
+  one page, wait its turn, and arrive at a different one — the holder is
+  deliberately free to navigate during its own sequence. On a signed-in site
+  the same selector can be a different button doing something else entirely, so
+  a page-relative action whose document changed while it waited is refused and
+  the model is told to look again.
+
+  Run-end cleanup carries the Cascade **task id** rather than the chat session
+  id, and a run announces that id when it STARTS rather than only on success —
+  a run that throws is exactly the one whose browser lease needs releasing, and
+  a caller that learned the id from the result could only name the run before
+  it. They are different things — one conversation holds many runs — and it is
+  the task id that reaches tools, so passing the session id meant cleanup
+  matched nothing: a finished run kept its Stop control armed and held its
+  browser lease until the ceiling expired.
+
+  Unattended runs are refused outright, in whichever order the host wires
+  things up. A scheduled task auto-approves every tool because nobody is there
+  to ask, which disqualifies it from one whose safety rests on a person
+  watching — so `runScheduledTask` declares itself unattended, and declaring it
+  revokes an already-registered tool rather than only refusing the next
+  registration. Enforced when the tool RUNS, so a caller holding its own
+  reference is refused too; the guarantee no longer depends on the scheduler
+  calling two methods in the lucky order.
+
+  Every browser-module gate derived from settings is pushed by one helper that
+  both settings writers call. The desktop panel writes through an IPC handler
+  and the dashboard through a socket, and a gate wired into only one of them
+  does nothing on the other — which happened twice, to the control toggle and
+  then to the approval-wait ceiling.
+
+  An action approved by the user is no longer failed by a second approval
+  queued behind it. The browser panel hides while any approval is pending, so
+  the wait is bounded by the approval window rather than by a fixed ceiling
+  shorter than it — 120s against an `approvalTimeoutMs` that defaults to 600s
+  meant spending three minutes on the next prompt killed the action already
+  said yes to.
+
+  Deliberately separate from the existing `browser` tool, which drives a
+  throwaway Playwright Chromium. Most pages worth automating are behind a login
+  a fresh headless session does not have — and the desktop already runs a
+  Chromium the user is signed into. Registration is host-supplied, so the tool
+  does not exist in the CLI or a hosted run rather than being present and
+  always failing.
+
 ## 0.77.0 - 2026-09-01
 
 ### Security

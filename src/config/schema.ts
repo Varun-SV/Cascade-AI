@@ -78,6 +78,20 @@ export const ToolsConfigSchema = z.object({
   shellBlocklist: z.array(z.string()).default(['rm -rf', 'sudo rm', 'format', 'mkfs']),
   requireApprovalFor: z.array(z.string()).default([]),
   browserEnabled: z.boolean().default(false),
+  /**
+   * Let a run ACT on the page open in the desktop's built-in browser — click,
+   * type, submit — not just read it.
+   *
+   * Distinct from `browserEnabled`, which turns on the headless Playwright
+   * tool. That one drives a throwaway browser with an empty cookie jar; this
+   * one drives the session the user is signed into, which is a different order
+   * of consequence and so gets its own switch rather than riding on that one.
+   *
+   * Off by default. Turning it on does not hand anything over silently: the
+   * tool still goes through the approval chain, and the browser panel carries a
+   * stop control for the run that is acting.
+   */
+  agentBrowserControl: z.boolean().default(false),
   mcpServers: z.array(McpServerConfigSchema).optional(),
   mcpTrusted: z.array(z.string()).optional(),
   /** Web search backends — at least one should be configured for best results */

@@ -26,6 +26,7 @@ interface AdvancedSettings {
   forceTier: 'auto' | 'T1' | 'T2' | 'T3';
   benchmarksLive: boolean;
   dynamicToolSandbox: 'isolate' | 'worker' | 'auto';
+  agentBrowserControl: boolean;
   factsExtraction: boolean;
   rememberSessions: boolean;
   enableToolCreation: boolean;
@@ -46,6 +47,7 @@ const ADVANCED_DEFAULTS: AdvancedSettings = {
   forceTier: 'auto',
   benchmarksLive: true,
   dynamicToolSandbox: 'auto',
+  agentBrowserControl: false,
   factsExtraction: true,
   rememberSessions: false,
   enableToolCreation: true,
@@ -869,6 +871,7 @@ export function SettingsView({ socket }: Props) {
                 <AdvSelect label="Dynamic-tool sandbox" hint="isolate = hard V8 isolate (no Node globals); worker = thread sandbox; auto = isolate when available" value={adv.dynamicToolSandbox} options={['auto', 'isolate', 'worker']} onChange={(v) => setAdvField('dynamicToolSandbox', v as AdvancedSettings['dynamicToolSandbox'])} />
                 <AdvToggle label="Facts extraction" hint="Distill worker outputs into the queryable project knowledge graph" value={adv.factsExtraction} onChange={(v) => setAdvField('factsExtraction', v)} />
                 <AdvToggle label="Remember sessions" hint="Opt-in: after a run, distill the whole conversation into durable project knowledge (undoable from Insights → Knowledge). Off by default." value={adv.rememberSessions} onChange={(v) => setAdvField('rememberSessions', v)} />
+                <AdvToggle label="Agent browser control" hint="Let a run click, type and submit in the built-in browser — the session you are signed into, not a throwaway one. Every run still asks first, and the Browser tab has a Stop control while it acts. Off by default." value={adv.agentBrowserControl} onChange={(v) => setAdvField('agentBrowserControl', v)} />
                 <AdvToggle label="Tool creation" hint="Let workers generate new tools at runtime when none fits" value={adv.enableToolCreation} onChange={(v) => setAdvField('enableToolCreation', v)} />
                 <AdvToggle label="Persist dynamic tools" hint="Reload created tools next run (always as untrusted)" value={adv.persistDynamicTools} onChange={(v) => setAdvField('persistDynamicTools', v)} />
               </AdvGroup>

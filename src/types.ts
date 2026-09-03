@@ -786,6 +786,13 @@ export interface ToolsConfig {
   shellBlocklist: string[];
   requireApprovalFor: string[];
   browserEnabled: boolean;
+  /**
+   * Let a run act on the desktop's built-in browser, not just read it. Separate
+   * from `browserEnabled` (headless Playwright) because it drives the user's
+   * signed-in session. See `src/config/schema.ts` and
+   * `src/tools/browser-control.ts`.
+   */
+  agentBrowserControl?: boolean;
   mcpServers?: McpServerConfig[];
   /**
    * Names of MCP servers (matching McpServerConfig.name) that the user has

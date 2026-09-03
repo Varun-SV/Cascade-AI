@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
 import { registerCloudAuthIpc } from './cloudAuth';
-import { registerBrowserHandlers, readCurrentPage } from './browser';
+import { registerBrowserHandlers, readCurrentPage, actOnCurrentPage, setAgentControlEnabled, resumeAgentControl, agentRunEnded, agentActorEnded, setApprovalWaitCeiling, setLifecycleReleaseWired, approvalWaitCeilingFor } from './browser';
 
 const isDev = process.env.ELECTRON_DEV === '1';
 
@@ -80,6 +80,29 @@ function loadCore(): { DashboardServer: any; ConfigManager: any; CascadeRouter: 
   return require(corePath);
 }
 
+/** The slice of config the browser module's gates are derived from. */
+type BrowserGateConfig = { tools?: { agentBrowserControl?: boolean }; approvalTimeoutMs?: number } | null;
+
+/**
+ * Push every browser-module gate that is derived from config.
+ *
+ * ONE function, and the reason is a bug that has now happened twice. There are
+ * two independent settings writers — the `cascade:updateSettings` IPC handler,
+ * which the desktop Settings panel tries FIRST, and DashboardServer's socket
+ * `config:update` path — and a derived gate wired into only one of them does
+ * nothing at all on the other. That is how `agentBrowserControl` drifted, and
+ * then, after fixing exactly that, how the approval-wait ceiling drifted the
+ * same way: I added it to the socket hook and not to the primary route.
+ *
+ * With both writers calling this, the next derived gate is one edit here rather
+ * than something to remember in two places.
+ */
+function syncBrowserGates(config: BrowserGateConfig): void {
+  if (!config) return;
+  setAgentControlEnabled(config.tools?.agentBrowserControl === true);
+  setApprovalWaitCeiling(approvalWaitCeilingFor(config.approvalTimeoutMs));
+}
+
 async function startBackend(): Promise<void> {
   backendPort = await findFreePort();
   // Generate a random session token for auto-login
@@ -128,6 +151,49 @@ async function startBackend(): Promise<void> {
     // can reach the live view directly. In the CLI there is no browser and the
     // tool is simply never registered.
     server.setCurrentPageProvider(readCurrentPage);
+    // And the acting half. Cascade applies the `tools.agentBrowserControl`
+    // gate itself, so handing the controller over unconditionally does not
+    // enable anything — it makes the capability available to be enabled.
+    server.setBrowserController(actOnCurrentPage, agentActorEnded);
+    // Settings reach the live config by two routes — the Electron IPC handler
+    // further down and this server's `config:update` socket — and only the
+    // first used to tell the browser module. A socket write therefore left the
+    // module's copy stale: an enable it still refused, or a disable it still
+    // honoured for a run already holding the tool. One hook covers both.
+    server.onSettingsChanged?.((next: BrowserGateConfig) => syncBrowserGates(next));
+    // Retires a run's browser Stop control when the run ends. The control has
+    // to outlive each action — the gap between two is when the user most wants
+    // it — but offering to stop a run that finished an hour ago is noise.
+    //
+    // The TASK id, not the chat session id. `browser_control` receives the
+    // Cascade taskId as its `sessionId` (T3Worker passes `this.taskId`), while
+    // the dashboard's own sessionId identifies the chat — one chat holds many
+    // runs. Passing the chat id here matched nothing in the browser module, so
+    // a finished run kept its Stop banner armed and held its lease.
+    server.onRunEnded?.((ids: { sessionId: string; taskId?: string }) => {
+      if (ids.taskId) agentRunEnded(ids.taskId);
+    });
+    // The panel stays hidden while ANY approval is pending, so an action waits
+    // on the approval window — and a ceiling shorter than that window fails
+    // actions the user has already approved. Margin on top so the approval's
+    // own timeout is what fires first, which is the one that can explain itself.
+    syncBrowserGates(cascadeConfig);
+    // This host reports worker terminal states, so the browser module stops
+    // using timers as ownership boundaries. Any fixed bound is one a healthy
+    // worker can exceed — an approval alone may legitimately take 600s, and a
+    // local generation 300s — and a timer that fires while a worker is alive
+    // hands its page to somebody else mid-sequence.
+    setLifecycleReleaseWired(true);
+
+    // Clears revocations from a PREVIOUS process, not from a previous run.
+    //
+    // This used to be described as making revocation per-run, which it is not:
+    // startBackend() runs once and then serves every run for the life of the
+    // app, so a Stop in one run stayed in force for every later one. Revocation
+    // is keyed by run id now (see browser.ts revokedSessions), which is what
+    // actually scopes it — this call only matters because a restarted backend
+    // has no live runs and should not inherit a stale set.
+    resumeAgentControl();
     await server.start();
     dashboardServer = server;
     console.log(`[main] Cascade backend started on port ${backendPort} (workspace: ${workspace})`);
@@ -632,6 +698,16 @@ function registerIPC(): void {
         (err: unknown) => ({ ok: false as const, error: err instanceof Error ? err.message : String(err) }),
       ));
       if (!committed.ok) return { ok: false, error: committed.error };
+      // The browser module enforces this flag on every action, so it has to be
+      // told when the flag moves. `commitSettings` mutates the live config the
+      // backend already holds, which is why no restart is needed here — but
+      // nothing pushes that value across to the module on its own.
+      // The desktop panel's PRIMARY route. Every browser-module gate derived
+      // from config goes through the one helper, because this handler and the
+      // socket path are two independent writers and a gate added to only one of
+      // them silently does nothing on the other — which happened to
+      // agentBrowserControl, and then again to the approval-wait ceiling.
+      syncBrowserGates(cascadeConfig);
       const credentials = { refused: committed.refused };
       // Reported through the response the panel already renders as an error. A
       // key that was typed and not stored has to say so; the alternative is a

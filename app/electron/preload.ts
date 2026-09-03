@@ -9,6 +9,20 @@ interface BrowserState {
   canGoBack: boolean;
   canGoForward: boolean;
   error?: string;
+  /** The Settings toggle: may an agent act on this page at all. */
+  agentControlEnabled?: boolean;
+  /** Live: an agent is acting on the page right now. Drives the banner. */
+  agentDriving?: boolean;
+  /** Which run is acting, so Stop targets that one rather than whatever is
+   *  driving by the time the click lands. */
+  agentDrivingSession?: string;
+  /** A run that has acted and is neither stopped nor finished — Stop stays
+   *  available for it between actions. */
+  agentArmedSession?: string;
+  /** How many other workers are queued for the browser behind the one driving.
+   *  Shown because a queue nobody can see is indistinguishable from a hung
+   *  action, and because Stop clears the queue too. */
+  agentQueueDepth?: number;
 }
 
 /** A message on a cloud conversation's active path (with branching data). */
@@ -230,7 +244,7 @@ contextBridge.exposeInMainWorld('cascade', {
   browser: {
     open: (url: string | undefined, bounds: { x: number; y: number; width: number; height: number }) =>
       ipcRenderer.invoke('browser:open', { url, bounds }) as Promise<{ ok: boolean; error?: string; state?: BrowserState }>,
-    hide: () => ipcRenderer.invoke('browser:hide') as Promise<{ ok: boolean }>,
+    hide: (reason?: 'modal') => ipcRenderer.invoke('browser:hide', { reason }) as Promise<{ ok: boolean }>,
     close: () => ipcRenderer.invoke('browser:close') as Promise<{ ok: boolean }>,
     setBounds: (bounds: { x: number; y: number; width: number; height: number }) =>
       ipcRenderer.invoke('browser:setBounds', bounds) as Promise<{ ok: boolean }>,
@@ -242,6 +256,11 @@ contextBridge.exposeInMainWorld('cascade', {
     state: () => ipcRenderer.invoke('browser:state') as Promise<BrowserState>,
     readPage: () => ipcRenderer.invoke('browser:readPage') as Promise<{ url: string; title: string; text: string } | null>,
     openExternal: (url: string) => ipcRenderer.invoke('browser:openExternal', url) as Promise<{ ok: boolean }>,
+    // The kill switch, and its undo. Separate from the Settings toggle on
+    // purpose: stopping the run that is acting now should not make the user go
+    // and re-enable a feature they still want.
+    stopAgent: (sessionId?: string) => ipcRenderer.invoke('browser:stopAgent', sessionId) as Promise<{ ok: boolean; state: BrowserState }>,
+    resumeAgent: (sessionId?: string) => ipcRenderer.invoke('browser:resumeAgent', sessionId) as Promise<{ ok: boolean; state: BrowserState }>,
     // Returns its own unsubscribe. Without one the renderer had no way to
     // detach: every switch to the Browser view added another listener that
     // outlived the component, so navigation events fanned out to every

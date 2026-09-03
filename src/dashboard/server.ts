@@ -31,6 +31,7 @@ import { aggregateCostStats } from './cost-stats.js';
 import type { WhyReport } from './cost-stats.js';
 import { saveGlobalCredentials } from '../config/global-credentials.js';
 import type { CurrentPageProvider } from '../tools/current-page.js';
+import type { BrowserController, BrowserActorRelease } from '../tools/browser-control.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -151,6 +152,14 @@ export class DashboardServer {
    * always failing.
    */
   private currentPageProvider?: CurrentPageProvider;
+  /**
+   * Supplied by the desktop shell so a run can ACT on that page — click, type,
+   * submit — not just read it. Same reasoning as the provider above: absent in
+   * the CLI, so the tool is not registered rather than present and failing.
+   * Cascade applies the `tools.agentBrowserControl` gate on top of this.
+   */
+  private browserController?: BrowserController;
+  private browserActorRelease?: BrowserActorRelease;
   private activeControllers = new Map<string, AbortController>();
   /**
    * Run taskIds per chat session — file snapshots are keyed by the run's
@@ -233,6 +242,8 @@ export class DashboardServer {
       // One transaction, shared with the desktop IPC writer: staged, validated,
       // adopted, written, rolled back on failure. See `commitSettings`.
       const result = await commitSettings(this.config, data, (committed) => this.persistConfig(committed));
+      // Same object the host holds, so the hook sees what actually landed.
+      if (result.ok) this.settingsChangeHook?.(this.config);
       const refused = result.refused.map((r) => ({
         type: r.type, reason: r.reason, message: explainRefusal(r.type, r.reason),
       }));
@@ -266,6 +277,7 @@ export class DashboardServer {
       const cascade = new Cascade(cfg, this.workspacePath, this.store);
       this.activeSessions.set(sessionId, cascade);
       if (this.currentPageProvider) cascade.setCurrentPageProvider(this.currentPageProvider);
+      if (this.browserController) cascade.setBrowserController(this.browserController, this.browserActorRelease);
 
       // Addressed by session, not by the socket that started the run: a
       // reconnect gives the same client a NEW socket id, and events aimed at
@@ -301,13 +313,22 @@ export class DashboardServer {
         this.emitToSessionClients(socketId, sessionId, 'escalation:timeout', { sessionId, ...(e as object) });
       });
 
+      // Recorded when the run STARTS, so a run that throws can still be named.
+      // The failure paths below call persistRunEnd with no result, and its
+      // fallback reads the last task recorded for this session — which, before
+      // this listener existed, was the PREVIOUS run's id on a continuing chat
+      // and nothing at all on the first one.
+      cascade.on('run:started', (e: unknown) => {
+        const id = (e as { taskId?: string }).taskId;
+        if (id) this.recordSessionTask(sessionId, id);
+      });
+
       try {
         const result = await cascade.run({
           prompt: runPrompt,
           signal: abortController.signal,
           approvalCallback: this.makeApprovalCallback(sessionId),
         });
-        this.recordSessionTask(sessionId, result.taskId);
         this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED', result);
         this.captureWhy(sessionId, cascade, result);
         this.emitToSessionClients(socketId, sessionId, 'session:complete', { sessionId, result });
@@ -397,6 +418,54 @@ export class DashboardServer {
   /** Wire the host's browser view in (desktop only). */
   setCurrentPageProvider(provider: CurrentPageProvider): void {
     this.currentPageProvider = provider;
+  }
+
+  /** Let runs act on that view, not just read it (desktop only). */
+  setBrowserController(controller: BrowserController, release?: BrowserActorRelease): void {
+    this.browserController = controller;
+    this.browserActorRelease = release;
+  }
+
+  /**
+   * Told whenever settings are committed through THIS server.
+   *
+   * Settings reach the live config by two routes — the desktop's Electron IPC
+   * handler and this server's `config:update` socket — and both run the same
+   * `commitSettings`. The desktop mirrors `tools.agentBrowserControl` into its
+   * browser module after its own route, but had no way to learn about the
+   * other, so a socket write left the module's copy stale: an enable the module
+   * still refused, or worse a disable the module still honoured for a run
+   * already holding the tool. This is the same sibling-writer drift
+   * `settings-payload.ts` exists to prevent, one layer up.
+   */
+  private settingsChangeHook?: (config: CascadeConfig) => void;
+
+  onSettingsChanged(hook: (config: CascadeConfig) => void): void {
+    this.settingsChangeHook = hook;
+  }
+
+  /**
+   * Told when a run ends, so a host holding run-scoped state can release it.
+   *
+   * The desktop uses this to retire a run's browser Stop control: that has to
+   * outlive each individual action (the gap between two actions is when the
+   * user most wants it) but must not outlive the run.
+   */
+  /**
+   * Fired when a run ends, carrying BOTH identifiers explicitly.
+   *
+   * They are different things and conflating them was a live bug: a chat
+   * `sessionId` can contain many runs (hence `sessionTaskIds`), while
+   * `Cascade.run()` mints a fresh random `taskId` per run — and it is the
+   * taskId that tools see as `ToolExecuteOptions.sessionId`. Passing only the
+   * chat id meant browser cleanup keyed on the task id matched nothing, so a
+   * finished run kept its Stop banner armed and held its browser lease until
+   * the deadlock ceiling.
+   */
+  private runEndedHook?: (ids: { sessionId: string; taskId?: string }) => void;
+
+  onRunEnded(hook: (ids: { sessionId: string; taskId?: string }) => void): void {
+    this.runEndedHook = hook;
   }
 
   async start(): Promise<void> {
@@ -601,6 +670,12 @@ export class DashboardServer {
 
   /** Record run end: the assistant reply (when there is one) and the runtime row's final status. */
   private persistRunEnd(sessionId: string, title: string, latestPrompt: string, reply: string | undefined, status: 'COMPLETED' | 'FAILED', result?: CascadeRunResult): void {
+    // Every run-completion path lands here, so this is the one place that
+    // reliably means "this run is over".
+    // `result` is absent on the failure paths, so fall back to the last task
+    // recorded for this chat session — the run that just ended.
+    const endedTaskId = result?.taskId ?? this.sessionTaskIds.get(sessionId)?.at(-1);
+    this.runEndedHook?.({ sessionId, ...(endedTaskId ? { taskId: endedTaskId } : {}) });
     try {
       if (reply && reply.trim()) {
         this.store.addMessage({ id: randomUUID(), sessionId, role: 'assistant', content: reply, timestamp: new Date().toISOString() });
@@ -707,6 +782,11 @@ export class DashboardServer {
     const prompt = task.prompt;
     const title = this.persistRunStart(sessionId, `[${task.name}] ${prompt}`);
     const cascade = new Cascade(this.config, task.workspacePath ?? this.workspacePath, this.store);
+    // Said out loud rather than left to the absence of a setBrowserController
+    // call below. A scheduled run auto-approves every tool (see the
+    // approvalCallback further down) because there is nobody to ask, and that
+    // is disqualifying for anything whose safety rests on a person watching.
+    cascade.setUnattended(true);
     this.activeSessions.set(sessionId, cascade);
 
     cascade.on('tier:status', (e: unknown) => {
@@ -715,6 +795,12 @@ export class DashboardServer {
     cascade.on('peer:message', (e: unknown) => {
       this.socket.emitPeerMessage(e as import('../types.js').PeerMessageEvent);
     });
+    // See the socket run handler: recorded at start so a failed run is still
+    // nameable by the cleanup that runs after it.
+    cascade.on('run:started', (e: unknown) => {
+      const id = (e as { taskId?: string }).taskId;
+      if (id) this.recordSessionTask(sessionId, id);
+    });
 
     try {
       const result = await cascade.run({
@@ -722,7 +808,6 @@ export class DashboardServer {
         identityId: task.identityId,
         approvalCallback: async () => ({ approved: true, always: false }),
       });
-      this.recordSessionTask(sessionId, result.taskId);
       this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED', result);
       this.captureWhy(sessionId, cascade, result);
       this.socket.broadcast('session:complete', { sessionId, result });
@@ -1441,6 +1526,7 @@ export class DashboardServer {
         const cascade = new Cascade(this.config, this.workspacePath, this.store);
         this.activeSessions.set(sessionId, cascade);
         if (this.currentPageProvider) cascade.setCurrentPageProvider(this.currentPageProvider);
+      if (this.browserController) cascade.setBrowserController(this.browserController, this.browserActorRelease);
 
         cascade.on('stream:token', (e: { text: string; tierId: string; primary?: boolean }) => {
           this.socket.broadcastToRoom(`session:${sessionId}`, 'stream:token', { sessionId, tierId: e.tierId, text: e.text, primary: e.primary });
@@ -1482,13 +1568,17 @@ export class DashboardServer {
           this.socket.broadcastToRoom(`session:${sessionId}`, 'escalation:timeout', { sessionId, ...(e as object) });
         });
 
+        cascade.on('run:started', (e: unknown) => {
+          const id = (e as { taskId?: string }).taskId;
+          if (id) this.recordSessionTask(sessionId, id);
+        });
+
         try {
           const result = await cascade.run({
             prompt: runPrompt,
             identityId: body.identityId,
             approvalCallback: this.makeApprovalCallback(sessionId),
           });
-          this.recordSessionTask(sessionId, result.taskId);
           this.persistRunEnd(sessionId, title, prompt, result.output, 'COMPLETED', result);
           this.captureWhy(sessionId, cascade, result);
           this.socket.broadcast('cost:update', {
