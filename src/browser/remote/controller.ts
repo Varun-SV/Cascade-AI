@@ -48,9 +48,14 @@ type Page = {
   isClosed(): boolean;
   close(): Promise<void>;
 };
+type BrowserContext = {
+  pages(): Page[];
+  newPage(): Promise<Page>;
+  close(): Promise<void>;
+};
 type Browser = {
-  contexts(): Array<{ pages(): Page[]; newPage(): Promise<Page> }>;
-  newContext(): Promise<{ pages(): Page[]; newPage(): Promise<Page> }>;
+  contexts(): BrowserContext[];
+  newContext(): Promise<BrowserContext>;
   close(): Promise<void>;
 };
 
@@ -81,6 +86,15 @@ interface RunBrowser {
   session: RemoteBrowserSession;
   browser: Browser;
   page: Page;
+  /**
+   * A context this run created and must therefore destroy.
+   *
+   * Set only for a provider that does NOT isolate sessions — a shared endpoint
+   * whose default context belongs to the operator and outlives every run.
+   * Undefined when the provider handed us a browser of its own, because there
+   * the default context IS the session and disposing it is `endSession`'s job.
+   */
+  ownedContext?: BrowserContext;
   /** Bumped on every main-frame navigation. See the desktop's equivalent. */
   generation: number;
   /**
@@ -275,6 +289,19 @@ export class RemoteBrowserController {
   private async disposeRun(runId: string, held: RunBrowser): Promise<void> {
     held.abort.abort();
     this.announceLiveView(runId, undefined, false);
+    // Before the connection goes, because it is reached THROUGH the connection.
+    // This is the run's own context on a shared endpoint: closing it takes its
+    // pages, cookies and storage with it, which is what stops the next tenant
+    // inheriting them. Absent for a provider-owned browser, where endSession
+    // below disposes the whole thing.
+    await held.ownedContext?.close().catch(() => {});
+    // Disconnects this Playwright client. Checked against Playwright 1.62.1
+    // rather than assumed: after `connectOverCDP`, `Browser.close()` resolves
+    // to closing the websocket transport, not to a `Browser.close` command — a
+    // real `chromium --remote-debugging-port` stayed up and kept serving
+    // /json/version across two full connect/close cycles, with the operator's
+    // own page intact. If that ever changes, this is the line that would start
+    // terminating somebody else's browser.
     await held.browser.close().catch(() => {});
     await this.provider.endSession(held.session.id).catch(() => {});
   }
@@ -417,14 +444,29 @@ export class RemoteBrowserController {
     // view for a browser that will never be driven.
     try {
       const browser = await playwright.chromium.connectOverCDP(session.cdpUrl) as unknown as Browser;
-      // Reuse the context the remote browser already has: providers start one,
-      // and a second context would leave the live view showing the first —
-      // the user would watch an idle page while the agent worked elsewhere.
-      const context = browser.contexts()[0] ?? await browser.newContext();
-      const page = context.pages()[0] ?? await context.newPage();
+      // Whose context this is decides everything about how the run may use it.
+      //
+      // A provider that ISOLATES sessions just made this browser for this run,
+      // and its default context is the session — the one the live-view URL
+      // points at. Opening a second context there would leave the user watching
+      // an idle page while the agent worked somewhere they could not see, which
+      // defeats the only supervision this surface has.
+      //
+      // A provider that does NOT isolate is a shared endpoint. Its default
+      // context is the operator's and outlives every run, so reusing it made
+      // one tenant's run inherit the previous tenant's page: same URL, same
+      // cookies, same localStorage. `maxSessions = 1` prevents two runs
+      // OVERLAPPING there; it does nothing about the run that comes after.
+      // Verified against a real `chromium --remote-debugging-port`: a second
+      // connection landed on the first's page and read back its localStorage
+      // and its session cookie. So this run gets a context of its own, and
+      // destroys it on the way out.
+      const owned = this.provider.isolatesSessions ? undefined : await browser.newContext();
+      const context = owned ?? browser.contexts()[0] ?? await browser.newContext();
+      const page = owned ? await owned.newPage() : (context.pages()[0] ?? await context.newPage());
 
       const abort = this.aborts.get(runId) ?? new AbortController();
-      const held: RunBrowser = { session, browser, page, generation: 0, abort };
+      const held: RunBrowser = { session, browser, page, generation: 0, abort, ...(owned ? { ownedContext: owned } : {}) };
       page.on('framenavigated', (() => { held.generation += 1; }) as never);
       this.runs.set(runId, held);
       return held;
@@ -451,11 +493,12 @@ export class RemoteBrowserController {
       // Named and removed when the work wins, because `{ once: true }` only
       // fires once — it does not detach on the OTHER outcome. Every successful
       // action left one behind, so ordinary run cleanup (which aborts) fired
-      // all of them and called page.close() with nothing in flight. On a
-      // persistent CDP endpoint that page is the operator's own, and
-      // GenericCdpProvider.endSession deliberately does nothing precisely
-      // because the endpoint outlives the run — so a normal completion was
-      // reaching out and closing somebody else's tab.
+      // all of them and called page.close() with nothing in flight. That page
+      // used to be the operator's own on a persistent CDP endpoint — a normal
+      // completion reached out and closed somebody else's tab. The run-owned
+      // context above means it is now always ours, but the listener still has
+      // to be removed: closing the page mid-sequence would break the run's own
+      // next action.
       let onAbort!: () => void;
       try {
         return await Promise.race([

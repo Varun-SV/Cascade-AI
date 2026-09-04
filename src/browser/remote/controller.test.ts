@@ -25,7 +25,33 @@ const page = {
   isClosed() { return this.closed; },
 };
 
-const browser = { closed: false, contexts: () => [{ pages: () => [page], newPage: async () => page }], newContext: async () => ({ pages: () => [page], newPage: async () => page }), close: async () => { browser.closed = true; } };
+/**
+ * A context, modelled properly rather than as an object literal.
+ *
+ * `close()` is what stops one run's cookies and storage reaching the next on a
+ * shared endpoint, so the fake has to be able to say whether it was called.
+ */
+function fakeContext(pageForThisContext: typeof page) {
+  const c = {
+    closed: false,
+    pages: () => [pageForThisContext],
+    newPage: async () => pageForThisContext,
+    close: async () => { c.closed = true; },
+  };
+  return c;
+}
+
+/** The context a shared endpoint already had. Belongs to the operator. */
+const defaultContext = fakeContext(page);
+/** Every context a run asked the browser to make for itself. */
+const createdContexts: Array<ReturnType<typeof fakeContext>> = [];
+
+const browser = {
+  closed: false,
+  contexts: () => [defaultContext],
+  newContext: async () => { const c = fakeContext(page); createdContexts.push(c); return c; },
+  close: async () => { browser.closed = true; },
+};
 
 vi.mock('playwright', () => ({ chromium: { connectOverCDP: async () => browser } }));
 
@@ -61,6 +87,9 @@ beforeEach(() => {
   page.calls = [];
   page.navHandlers = [];
   browser.closed = false;
+  browser.contexts = () => [defaultContext];
+  defaultContext.closed = false;
+  createdContexts.length = 0;
 });
 
 describe('the six actions reach the page', () => {
@@ -540,5 +569,84 @@ describe('the live view', () => {
     const c = new RemoteBrowserController({ provider, onLiveView: (r, u) => seen.push([r, u]) });
     await c.controller({ kind: 'click', selector: '#a' }, ctx('run', 'w1'));
     expect(seen[0]).toEqual(['run', undefined]);
+  });
+});
+
+// `maxSessions = 1` stops two runs sharing a page AT THE SAME TIME. It says
+// nothing about the run that comes next, and on a shared endpoint the next run
+// is usually a different person.
+//
+// Verified against a real `chromium --remote-debugging-port` before writing
+// this: a second connection taking `contexts()[0].pages()[0]` landed on the
+// first connection's page — same URL — and read back its localStorage value
+// and its session cookie. The fake below models the mechanism that prevents
+// that; the browser confirmed the mechanism is needed.
+describe('a shared endpoint between two tenants', () => {
+  it('drives a context of its own, not the one the endpoint already had', async () => {
+    const { provider } = fakeProvider();          // isolatesSessions is falsy
+    const c = new RemoteBrowserController({ provider });
+
+    // A page nobody in this run should ever touch — the operator's own tab.
+    const operatorPage = { ...page, calls: [] as string[], closed: false };
+    const operatorContext = fakeContext(operatorPage as unknown as typeof page);
+    browser.contexts = () => [operatorContext];
+
+    const out = await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    expect(out.ok).toBe(true);
+    expect(page.calls, 'the run drove its own page').toContain('click:#a');
+    expect(operatorPage.calls, 'and never the endpoint\'s existing one').toEqual([]);
+    expect(operatorContext.closed, 'the operator\'s context is not ours to close').toBe(false);
+  });
+
+  it('destroys that context when the run ends, taking its cookies with it', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    expect(createdContexts, 'the run made itself a context').toHaveLength(1);
+    expect(createdContexts[0]!.closed).toBe(false);
+
+    await c.endRun('run-A');
+
+    // Leaving it open is the leak: the endpoint keeps it, and it keeps the
+    // storage and cookies this run wrote.
+    expect(createdContexts[0]!.closed, 'closed on the way out').toBe(true);
+    expect(defaultContext.closed, 'without touching the operator\'s').toBe(false);
+  });
+
+  it('gives the next tenant a different context from the last one', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await c.endRun('run-A');
+    // The slot is free now — this is the sequential case the cap never covered.
+    await c.controller({ kind: 'click', selector: '#b' }, ctx('run-B', 'w2'));
+
+    expect(createdContexts).toHaveLength(2);
+    expect(createdContexts[1], 'B is not handed A\'s context').not.toBe(createdContexts[0]);
+    expect(createdContexts[0]!.closed, 'and A\'s is gone before B starts writing').toBe(true);
+    expect(createdContexts[1]!.closed).toBe(false);
+  });
+
+  it('leaves a provider-owned session on the context its live view points at', async () => {
+    // The opposite case, and it is not symmetry for its own sake: a provider
+    // that isolates just made this browser for this run, and the live-view URL
+    // shows its default context. A second context there would leave the user
+    // watching an idle page while the agent worked out of sight.
+    const { provider } = fakeProvider();
+    (provider as { isolatesSessions: boolean }).isolatesSessions = true;
+    const c = new RemoteBrowserController({ provider });
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    expect(createdContexts, 'nothing to create — the session IS the context').toHaveLength(0);
+    expect(page.calls).toContain('click:#a');
+
+    await c.endRun('run-A');
+    // endSession disposes the whole browser; closing its context by hand would
+    // be reaching into something the provider owns.
+    expect(defaultContext.closed).toBe(false);
   });
 });
