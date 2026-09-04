@@ -120,6 +120,16 @@ export class RemoteBrowserController {
    * check-then-act across four awaits, and simultaneous first uses both won.
    */
   private opening = new Set<string>();
+  /**
+   * A run's stop signal, created when its slot is reserved.
+   *
+   * Before this, Stop looked only in `runs` — so during the first `open()`,
+   * while the run existed only in `opening` and four awaits were in flight, it
+   * found nothing and returned. The open then completed, built a FRESH
+   * unaborted controller, and the click the user had stopped went ahead. The
+   * signal has to exist before the browser does.
+   */
+  private aborts = new Map<string, AbortController>();
   /** Runs the user has stopped, by run id — same meaning as on the desktop. */
   private revoked = new Set<string>();
   /**
@@ -187,6 +197,23 @@ export class RemoteBrowserController {
     this.onLiveViewAll?.(runId, liveViewUrl);
   }
 
+  /**
+   * Hand back a session the run turned out not to want.
+   *
+   * A browser opened for an action that is then refused would otherwise stay
+   * allocated and billed until the whole run ended, for a run that has just
+   * been stopped.
+   */
+  private async releaseIfIdle(runId: string): Promise<void> {
+    const held = this.runs.get(runId);
+    if (!held) return;
+    this.runs.delete(runId);
+    // Awaited, not fired and forgotten: the caller is about to report the
+    // refusal, and the session should be gone by the time it does. Otherwise
+    // "stopped" and "still paying for a browser" are true at the same moment.
+    await this.disposeRun(runId, held);
+  }
+
   /** Release every run's session. For when the deployment's config changes. */
   async dispose(): Promise<void> {
     await Promise.all([...this.runs.keys()].map((runId) => this.endRun(runId)));
@@ -203,11 +230,12 @@ export class RemoteBrowserController {
   stopRun(runId: string): void {
     this.revoked.add(runId);
     this.leases.get(runId)?.dropRun(runId);
-    // Reaches an action already under way. Without this, Stop only prevented
-    // the NEXT action while the current one — possibly mid-click — continued.
+    // Aborted whether or not a browser exists yet: a run whose session is still
+    // opening has a signal but no RunBrowser, and looking only in `runs` let
+    // the first action of a stopped run go ahead once the open finished.
+    this.aborts.get(runId)?.abort();
     const held = this.runs.get(runId);
     if (!held) return;
-    held.abort.abort();
     // Released NOW, not when the Cascade run eventually ends. Browser Stop
     // deliberately lets the rest of the run continue, so the session would
     // otherwise stay allocated and billed for all of it — while the user has
@@ -234,6 +262,7 @@ export class RemoteBrowserController {
     // process. The run is over; there is nothing left to refuse.
     this.revoked.delete(runId);
     this.leases.delete(runId);
+    this.aborts.delete(runId);
   }
 
   /**
@@ -296,6 +325,21 @@ export class RemoteBrowserController {
 
     try {
       const held = await this.open(runId, context.signal);
+
+      // Re-checked AFTER the open, which can take seconds: createSession and
+      // connectOverCDP are not interruptible, so a Stop or cancellation during
+      // them resolves into a perfectly good browser and the action would go
+      // straight ahead. Aborting the signal is not enough on its own — nothing
+      // is awaiting it at that moment.
+      if (this.revoked.has(runId)) {
+        await this.releaseIfIdle(runId);
+        return { ok: false, detail: 'The user stopped browser control for this run.' };
+      }
+      if (context.signal?.aborted || held.abort.signal.aborted) {
+        await this.releaseIfIdle(runId);
+        return { ok: false, detail: 'The run was cancelled.' };
+      }
+
       return await this.perform(held, action, planned);
     } catch (err) {
       return { ok: false, detail: err instanceof Error ? err.message : String(err) };
@@ -344,6 +388,10 @@ export class RemoteBrowserController {
       );
     }
     this.opening.add(runId);
+    // Created here, not after the browser exists, so a Stop arriving mid-open
+    // has something to abort — and so the RunBrowser adopts the same signal
+    // rather than a new one that has forgotten it.
+    if (!this.aborts.has(runId)) this.aborts.set(runId, new AbortController());
 
     try {
       return await this.openReserved(runId, signal);
@@ -375,7 +423,8 @@ export class RemoteBrowserController {
       const context = browser.contexts()[0] ?? await browser.newContext();
       const page = context.pages()[0] ?? await context.newPage();
 
-      const held: RunBrowser = { session, browser, page, generation: 0, abort: new AbortController() };
+      const abort = this.aborts.get(runId) ?? new AbortController();
+      const held: RunBrowser = { session, browser, page, generation: 0, abort };
       page.on('framenavigated', (() => { held.generation += 1; }) as never);
       this.runs.set(runId, held);
       return held;
@@ -399,15 +448,29 @@ export class RemoteBrowserController {
      */
     const stoppable = async <T>(work: Promise<T>): Promise<T> => {
       if (held.abort.signal.aborted) throw new Error('The user stopped browser control for this run.');
-      return await Promise.race([
-        work,
-        new Promise<never>((_, reject) => {
-          held.abort.signal.addEventListener('abort', () => {
-            void page.close().catch(() => {});
-            reject(new Error('The user stopped browser control for this run.'));
-          }, { once: true });
-        }),
-      ]);
+      // Named and removed when the work wins, because `{ once: true }` only
+      // fires once — it does not detach on the OTHER outcome. Every successful
+      // action left one behind, so ordinary run cleanup (which aborts) fired
+      // all of them and called page.close() with nothing in flight. On a
+      // persistent CDP endpoint that page is the operator's own, and
+      // GenericCdpProvider.endSession deliberately does nothing precisely
+      // because the endpoint outlives the run — so a normal completion was
+      // reaching out and closing somebody else's tab.
+      let onAbort!: () => void;
+      try {
+        return await Promise.race([
+          work,
+          new Promise<never>((_, reject) => {
+            onAbort = () => {
+              void page.close().catch(() => {});
+              reject(new Error('The user stopped browser control for this run.'));
+            };
+            held.abort.signal.addEventListener('abort', onAbort, { once: true });
+          }),
+        ]);
+      } finally {
+        held.abort.signal.removeEventListener('abort', onAbort);
+      }
     };
     const timeout = Math.min(action.timeoutMs ?? 10_000, ACTION_TIMEOUT_MS);
     const where = async (): Promise<{ url: string; title: string }> => ({

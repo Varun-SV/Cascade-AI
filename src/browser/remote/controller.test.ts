@@ -215,6 +215,82 @@ describe('Stop reaches an action already under way', () => {
   }, 10_000);
 });
 
+describe('Stop during the very first open', () => {
+  it('does not let the first action land once the browser arrives', async () => {
+    // The existing Stop test warms a session up first, so it only ever covered
+    // the already-held branch. On FIRST use the run lives only in `opening`
+    // while createSession and connectOverCDP await — Stop found no RunBrowser,
+    // returned, and the click went ahead the moment the open finished.
+    let landed = false;
+    page.click = async () => { landed = true; };
+
+    let releaseCreate!: () => void;
+    const slowCreate = new Promise<void>((r) => { releaseCreate = r; });
+    const ended: string[] = [];
+    const provider = {
+      name: 'slow',
+      isolatesSessions: true,
+      async createSession() {
+        await slowCreate;
+        return { id: 'sess-1', cdpUrl: 'ws://fake/cdp' };
+      },
+      async endSession(id: string) { ended.push(id); },
+    };
+
+    const c = new RemoteBrowserController({ provider });
+    const pending = c.controller({ kind: 'click', selector: '#submit' }, ctx('run-A', 'w1'));
+
+    // Stop while the session is still being created — no RunBrowser exists yet.
+    await new Promise((r) => setTimeout(r, 20));
+    c.stopRun('run-A');
+    releaseCreate();
+
+    const out = await pending;
+    expect(out.ok).toBe(false);
+    expect(landed, 'the action must not run after Stop').toBe(false);
+    expect(ended, 'and the session it allocated is handed back').toEqual(['sess-1']);
+  }, 10_000);
+
+  it('keeps refusing after the interrupted open', async () => {
+    let releaseCreate!: () => void;
+    const slowCreate = new Promise<void>((r) => { releaseCreate = r; });
+    const provider = {
+      name: 'slow',
+      isolatesSessions: true,
+      async createSession() { await slowCreate; return { id: 'sess-1', cdpUrl: 'ws://fake/cdp' }; },
+      async endSession() {},
+    };
+
+    const c = new RemoteBrowserController({ provider });
+    const pending = c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await new Promise((r) => setTimeout(r, 20));
+    c.stopRun('run-A');
+    releaseCreate();
+    await pending;
+
+    const next = await c.controller({ kind: 'click', selector: '#b' }, ctx('run-A', 'w1'));
+    expect(next.ok, 'a stopped run stays stopped').toBe(false);
+  }, 10_000);
+});
+
+describe('a normal completion does not close somebody else\'s page', () => {
+  it('leaves no abort listener behind after a successful action', async () => {
+    // stoppable() added a { once: true } abort listener per action and never
+    // removed it when the work won. disposeRun aborts on ordinary completion,
+    // so every listener a successful run accumulated fired then and called
+    // page.close() — and on a persistent CDP endpoint that page belongs to the
+    // operator, which is exactly why GenericCdpProvider.endSession does nothing.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await c.controller({ kind: 'click', selector: '#b' }, ctx('run-A', 'w1'));
+    await c.controller({ kind: 'click', selector: '#c' }, ctx('run-A', 'w1'));
+
+    expect(page.closed, 'nothing is in flight, so nothing should be closed').toBe(false);
+  });
+});
+
 describe('a session that half-opened', () => {
   it('is released rather than left running and billed', async () => {
     // createSession succeeded, so the provider allocated a browser. If the CDP
