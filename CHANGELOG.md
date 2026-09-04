@@ -37,8 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the parts of the seam a bare URL does not.
 
   **You can watch it work, and take it away.** The live session is embedded in
-  the chat, you can take the page over in that frame, and Stop withdraws the
-  browser without stopping the run. That panel does for the web what the
+  the chat and Stop withdraws the browser without stopping the run. The frame is
+  watch-only, deliberately: input there would reach the session over the
+  provider's own channel rather than through the lease that decides who may
+  drive the page, so "taking over" would mean driving it at the same time as the
+  agent, not instead of it. That panel does for the web what the
   desktop's on-screen requirement does there: it is what makes the kill switch
   mean something. A provider with no live view is a weaker configuration and
   says so rather than showing an empty box.
@@ -62,6 +65,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anything authenticated.
 
 ### Fixed
+- **A dangerous-action prompt that outlived the decision it was asking for.**
+  The orchestrator times an unanswered approval out after ten minutes, denies
+  it, and carries on; the hosted chat was never told, so the buttons stayed on
+  screen for the rest of the run and pressing one changed nothing. The prompt
+  now goes away when the window closes.
 - **One tenant's browsing state reaching the next on a shared endpoint.** A
   hosted run took the browser's existing context and the page left in it, so
   the run that came after inherited the previous one's page, cookies and local
