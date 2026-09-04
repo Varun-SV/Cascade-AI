@@ -79,7 +79,17 @@ interface RunBrowser {
 export class RemoteBrowserController {
   private provider: RemoteBrowserProvider;
   private maxSessions: number;
-  private onLiveView: ((runId: string, liveViewUrl: string | undefined) => void) | undefined;
+  /**
+   * Live-view listeners, one per run.
+   *
+   * A single callback was fine while each run had its own controller. Now the
+   * controller is shared across a deployment, so one callback would send run
+   * A's live-view URL to whichever run registered last — and that URL is a
+   * bearer capability for a browser somebody else is driving.
+   */
+  private liveViewListeners = new Map<string, (liveViewUrl: string | undefined) => void>();
+  /** An embedder that wants every run's live view, told which run each is. */
+  private onLiveViewAll: ((runId: string, liveViewUrl: string | undefined) => void) | undefined;
 
   private runs = new Map<string, RunBrowser>();
   /** Runs the user has stopped, by run id — same meaning as on the desktop. */
@@ -97,8 +107,15 @@ export class RemoteBrowserController {
 
   constructor(options: RemoteBrowserControllerOptions) {
     this.provider = options.provider;
-    this.maxSessions = Math.max(1, options.maxSessions ?? 1);
-    this.onLiveView = options.onLiveView;
+    // Capped at one for a provider that cannot isolate, whatever was
+    // configured. Otherwise raising the limit on a bare CDP endpoint buys no
+    // concurrency at all — it just lets a second run drive the first one's
+    // page, which on a shared deployment is one user typing into another's.
+    const asked = Math.max(1, options.maxSessions ?? 1);
+    this.maxSessions = options.provider.isolatesSessions ? asked : 1;
+    // Kept as its own field rather than folded into the per-run map: it needs
+    // the run id, and squeezing it in under a sentinel key lost exactly that.
+    this.onLiveViewAll = options.onLiveView;
   }
 
   private leaseFor(runId: string): BrowserLease {
@@ -117,6 +134,25 @@ export class RemoteBrowserController {
   /** The controller to hand to `Cascade.setBrowserController`. */
   get controller() {
     return (action: BrowserAction, context: BrowserActionContext) => this.act(action, context);
+  }
+
+  /** Watch one run's browser. The URL never goes to any other run's listener. */
+  onLiveViewFor(runKey: string, listener: (liveViewUrl: string | undefined) => void): void {
+    this.liveViewListeners.set(runKey, listener);
+  }
+
+  offLiveViewFor(runKey: string): void {
+    this.liveViewListeners.delete(runKey);
+  }
+
+  private announceLiveView(runId: string, liveViewUrl: string | undefined): void {
+    this.liveViewListeners.get(runId)?.(liveViewUrl);
+    this.onLiveViewAll?.(runId, liveViewUrl);
+  }
+
+  /** Release every run's session. For when the deployment's config changes. */
+  async dispose(): Promise<void> {
+    await Promise.all([...this.runs.keys()].map((runId) => this.endRun(runId)));
   }
 
   /** A worker finished; it will never ask for the browser again. */
@@ -139,7 +175,7 @@ export class RemoteBrowserController {
     const held = this.runs.get(runId);
     if (!held) return;
     this.runs.delete(runId);
-    this.onLiveView?.(runId, undefined);
+    this.announceLiveView(runId, undefined);
     // Both are best-effort: a run is already over, and a provider that is
     // briefly unreachable must not turn that into a failure the user sees.
     await held.browser.close().catch(() => {});
@@ -229,7 +265,7 @@ export class RemoteBrowserController {
     // Handed to the owner as soon as it exists, so the user can watch from the
     // first action rather than after it. A CAPABILITY URL — see the provider
     // seam: never persisted, never logged, never sent to another client.
-    this.onLiveView?.(runId, session.liveViewUrl);
+    this.announceLiveView(runId, session.liveViewUrl);
 
     const browser = await playwright.chromium.connectOverCDP(session.cdpUrl) as unknown as Browser;
     // Reuse the context the remote browser already has: providers start one,

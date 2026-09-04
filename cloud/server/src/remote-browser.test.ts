@@ -2,8 +2,8 @@
 //  Cascade Cloud — attaching a browser to a hosted run
 // ─────────────────────────────────────────────
 
-import { describe, it, expect, vi } from 'vitest';
-import { attachRemoteBrowser, withViewerControls } from './remote-browser.js';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { attachRemoteBrowser, withViewerControls, resetSharedBrowser } from './remote-browser.js';
 import { Cascade, type CascadeConfig } from '#cascade-ai';
 
 /**
@@ -50,6 +50,10 @@ function fakeCascade() {
 
 const emits: Array<{ event: string; payload: Record<string, unknown> }> = [];
 const emit = (event: string, payload: unknown) => { emits.push({ event, payload: payload as Record<string, unknown> }); };
+
+// The controller is deployment-scoped now, so it survives between tests unless
+// this runs — and a leaked one would make the next test's pool already full.
+beforeEach(async () => { emits.length = 0; await resetSharedBrowser(); });
 
 describe('a deployment with no provider configured', () => {
   it('attaches nothing at all', () => {
@@ -141,5 +145,41 @@ describe('the live view is a capability, and treated as one', () => {
     // Losing the only way the user has to watch is worse than a URL we did not
     // understand well enough to decorate.
     expect(withViewerControls('not-a-url')).toBe('not-a-url');
+  });
+});
+
+describe('the session pool is the deployment\'s, not one run\'s', () => {
+  const cdp = { tools: { remoteBrowser: { provider: 'cdp' as const, url: 'ws://browser.test:9222' } } };
+
+  it('shares one controller across separate attachments', async () => {
+    // The shape production actually has: runChatTurnInner calls
+    // attachRemoteBrowser per run. The earlier pool test put two run ids
+    // through ONE controller, which production never does — so it proved a cap
+    // that did not exist. Each run built its own controller with an empty
+    // session map, so the cap counted to one and stopped and two concurrent
+    // runs each opened a session at a configured limit of one.
+    const a = realCascade(cdp.tools.remoteBrowser);
+    const b = realCascade(cdp.tools.remoteBrowser);
+
+    const first = attachRemoteBrowser({ cascade: a.cascade, config: a.config, conversationId: 'c1', emit });
+    const second = attachRemoteBrowser({ cascade: b.cascade, config: b.config, conversationId: 'c2', emit });
+
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    // Both cascades got a working tool; what they share is the browser behind it.
+    expect(a.cascade.getToolRegistry().hasTool('browser_control')).toBe(true);
+    expect(b.cascade.getToolRegistry().hasTool('browser_control')).toBe(true);
+  });
+
+  it('rebuilds when the deployment\'s provider settings change', async () => {
+    // Otherwise a settings change leaves the old provider's sessions running at
+    // the operator's expense, with nothing left holding a reference to them.
+    const a = realCascade({ provider: 'cdp', url: 'ws://one.test:9222' });
+    attachRemoteBrowser({ cascade: a.cascade, config: a.config, conversationId: 'c1', emit });
+
+    const b = realCascade({ provider: 'cdp', url: 'ws://two.test:9222' });
+    const second = attachRemoteBrowser({ cascade: b.cascade, config: b.config, conversationId: 'c2', emit });
+
+    expect(second, 'a changed endpoint is a different deployment browser').not.toBeNull();
   });
 });

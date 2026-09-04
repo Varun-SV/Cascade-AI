@@ -19,6 +19,9 @@ import type { RemoteBrowserProvider, RemoteBrowserSession } from './provider.js'
 
 export class GenericCdpProvider implements RemoteBrowserProvider {
   readonly name = 'CDP endpoint';
+  // The endpoint is a single browser. There is no session to allocate, so two
+  // runs against it share a page — see the seam.
+  readonly isolatesSessions = false;
 
   private endpoint: string;
 

@@ -45,6 +45,9 @@ interface SteelSessionDetails {
 
 export class SteelProvider implements RemoteBrowserProvider {
   readonly name = 'Steel';
+  // POST /v1/sessions allocates a browser per call, so concurrent runs are
+  // genuinely separate.
+  readonly isolatesSessions = true;
 
   private base: string;
   private apiKey: string | undefined;

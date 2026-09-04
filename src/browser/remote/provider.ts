@@ -60,6 +60,19 @@ export interface RemoteBrowserSession {
 export interface RemoteBrowserProvider {
   /** A short name for messages the model and the user see. */
   readonly name: string;
+  /**
+   * Whether `createSession` yields a browser of its own.
+   *
+   * False for a bare CDP endpoint, and the consequence is not cosmetic: that
+   * endpoint IS one browser, so two "sessions" against it are the same browser
+   * and, taking `contexts()[0].pages()[0]`, the same PAGE. Two runs would then
+   * type into each other's forms — across users on a shared deployment.
+   *
+   * A provider that cannot isolate is therefore capped at one concurrent run
+   * whatever the configured limit says. Raising a limit must not silently buy
+   * concurrency the provider cannot actually deliver.
+   */
+  readonly isolatesSessions: boolean;
   createSession(signal?: AbortSignal): Promise<RemoteBrowserSession>;
   endSession(id: string): Promise<void>;
 }

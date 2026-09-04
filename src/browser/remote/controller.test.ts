@@ -207,6 +207,63 @@ describe('the session pool', () => {
   });
 });
 
+describe('a provider that cannot isolate sessions', () => {
+  it('is held to one run however high the limit is set', async () => {
+    // A bare CDP endpoint IS one browser: two "sessions" against it are the
+    // same browser and the same page. Honouring maxSessions: 4 there would not
+    // buy concurrency, it would let two runs — two users on a shared
+    // deployment — type into each other's forms.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider, maxSessions: 4 });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const out = await c.controller({ kind: 'click', selector: '#b' }, ctx('run-B', 'w2'));
+    expect(out.ok, 'the limit cannot exceed what the provider can deliver').toBe(false);
+  });
+
+  it('lets an isolating provider honour the configured limit', async () => {
+    const { provider } = fakeProvider();
+    (provider as { isolatesSessions: boolean }).isolatesSessions = true;
+    const c = new RemoteBrowserController({ provider, maxSessions: 2 });
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    const out = await c.controller({ kind: 'click', selector: '#b' }, ctx('run-B', 'w2'));
+    expect(out.ok).toBe(true);
+  });
+});
+
+describe('one controller, several runs', () => {
+  it('sends each run its own live view and no one else\'s', async () => {
+    // The controller is shared across a deployment now, so a single callback
+    // would send run A's URL to whichever run registered last — and that URL is
+    // a bearer capability for a browser someone else is driving.
+    const { provider } = fakeProvider('https://provider.test/live/abc');
+    (provider as { isolatesSessions: boolean }).isolatesSessions = true;
+    const c = new RemoteBrowserController({ provider, maxSessions: 2 });
+
+    const seenA: Array<string | undefined> = [];
+    const seenB: Array<string | undefined> = [];
+    c.onLiveViewFor('run-A', (u) => seenA.push(u));
+    c.onLiveViewFor('run-B', (u) => seenB.push(u));
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    expect(seenA).toEqual(['https://provider.test/live/abc']);
+    expect(seenB, 'run B is not driving anything yet').toEqual([]);
+  });
+
+  it('stops telling a run about a browser once it has detached', async () => {
+    const { provider } = fakeProvider('https://provider.test/live/abc');
+    const c = new RemoteBrowserController({ provider });
+    const seen: Array<string | undefined> = [];
+    c.onLiveViewFor('run-A', (u) => seen.push(u));
+    c.offLiveViewFor('run-A');
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    expect(seen).toEqual([]);
+  });
+});
+
 describe('the live view', () => {
   it('is handed to the owner as soon as the session exists', async () => {
     // Before the first action rather than after, or the user watches the

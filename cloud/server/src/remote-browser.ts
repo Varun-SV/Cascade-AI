@@ -56,8 +56,36 @@ export interface AttachedBrowser {
   stop(): void;
 }
 
+/**
+ * The deployment's ONE controller, and the config it was built for.
+ *
+ * Module scope, and that is the whole point of this change. A controller per
+ * run made `maxSessions` meaningless: every run got a fresh controller whose
+ * session map was empty, so the cap counted to one and stopped, and two
+ * concurrent runs each opened a paid session at a configured limit of one.
+ *
+ * With a bare CDP endpoint it was worse than cost. Both controllers connect to
+ * the same websocket and take `contexts()[0].pages()[0]`, so two runs — two
+ * USERS on a shared deployment — drive the same page, with per-run leases that
+ * do not know about each other. Ownership has to live where the browsers do.
+ */
+let shared: { key: string; controller: RemoteBrowserController } | null = null;
+
+/** Identity of a provider configuration, so a change rebuilds rather than drifts. */
+function configKey(s: RemoteBrowserSettings): string {
+  return JSON.stringify([s.provider, s.url, s.apiKey ? 'keyed' : 'anon', s.maxSessions]);
+}
+
+/** For tests, and for a deployment whose settings changed under it. */
+export async function resetSharedBrowser(): Promise<void> {
+  const previous = shared;
+  shared = null;
+  await previous?.controller.dispose();
+}
+
 export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null {
   const settings = opts.config.tools?.remoteBrowser;
+  if (!settings?.provider) return null;
   const provider = buildProvider(settings, opts.warn);
   if (!provider) return null;
 
@@ -70,19 +98,39 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
     if (id) taskId = id;
   });
 
-  const controller = new RemoteBrowserController({
-    provider,
-    ...(settings?.maxSessions ? { maxSessions: settings.maxSessions } : {}),
-    onLiveView: (_runId, liveViewUrl) => {
-      // To this socket only. See the file header.
-      opts.emit('browser:live-view', {
-        conversationId: opts.conversationId,
-        // `interactive` and `showControls` are what make the embedded view a
-        // control rather than a video: the user can take the page over and
-        // navigate, which is the whole point of watching.
-        liveViewUrl: liveViewUrl ? withViewerControls(liveViewUrl) : undefined,
-      });
-    },
+  // Reused across runs. A settings change makes a new one and disposes the old
+  // rather than leaving its sessions running at the operator's expense.
+  const key = configKey(settings);
+  if (shared && shared.key !== key) {
+    void shared.controller.dispose();
+    shared = null;
+  }
+  if (!shared) {
+    shared = {
+      key,
+      controller: new RemoteBrowserController({
+        provider,
+        ...(settings.maxSessions ? { maxSessions: settings.maxSessions } : {}),
+      }),
+    };
+  }
+  const controller = shared.controller;
+
+  // Per-run, not per-controller: the controller is shared, so a live view must
+  // reach only the socket whose run it belongs to.
+  controller.onLiveViewFor(opts.conversationId, (liveViewUrl) => {
+    // To this socket only. See the file header.
+    opts.emit('browser:live-view', {
+      conversationId: opts.conversationId,
+      // `interactive` and `showControls` are what make the embedded view a
+      // control rather than a video: the user can take the page over and
+      // navigate, which is the whole point of watching.
+      liveViewUrl: liveViewUrl ? withViewerControls(liveViewUrl) : undefined,
+      // Stated rather than implied by an absent URL: a provider with no live
+      // view cannot be watched, and the UI has to say so instead of showing
+      // nothing and quietly dropping the Stop control with it.
+      watchable: Boolean(liveViewUrl),
+    });
   });
 
   // setRemoteBrowserController, NOT setBrowserController: that one gates on
@@ -93,7 +141,9 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
 
   return {
     async endRun() {
+      // Only this run's session. The controller outlives the run.
       if (taskId) await controller.endRun(taskId);
+      controller.offLiveViewFor(opts.conversationId);
     },
     stop() {
       if (taskId) controller.stopRun(taskId);
