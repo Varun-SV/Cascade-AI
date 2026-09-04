@@ -1303,8 +1303,18 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // comes down just before the SDK stops accepting an answer, rather than just
   // after. Mirrors cascade.ts, which defaults it identically.
   const approvalWindowMs = Math.max(1_000, (config.approvalTimeoutMs ?? 600_000) - 250);
-  const onPermissionDecision = (d: PermissionDecision) =>
-    applyPermissionDecision(pendingApprovals, conversation.id, d);
+  const onPermissionDecision = (d: PermissionDecision) => {
+    if (!applyPermissionDecision(pendingApprovals, conversation.id, d)) return;
+    // Announced even though the answering client has already taken its own
+    // prompt down. One event means "this request is no longer actionable",
+    // whatever settled it — which is what lets the reconnect path know not to
+    // replay an answered question to a page that reloaded mid-run.
+    socket.emit('permission:resolved', {
+      conversationId: conversation.id,
+      requestId: d.requestId,
+      reason: 'decided',
+    });
+  };
   if (interactive) socket.on('permission:decide', onPermissionDecision);
 
   const approvalCallback = async (request: ApprovalRequest): Promise<{ approved: boolean; always: boolean }> => {

@@ -19,6 +19,8 @@ function fakeSocket() {
     sent,
     /** Settle the in-flight run the way the server's `chat:run` ack does. */
     ackRun(conversationId: string) { runAcks.shift()?.({ conversationId, output: 'done' }); },
+    /** The other ordinary ending: the run failed on this same socket. */
+    failRun(error = 'the run failed') { runAcks.shift()?.({ error }); },
     fire(event: string, payload?: unknown) {
       for (const h of [...(handlers.get(event) ?? [])]) h(payload);
     },
@@ -403,5 +405,118 @@ describe('useChatSession — approvals outliving their run', () => {
 
     act(() => { view.result.current.setConversationId('conv-other'); });
     expect(view.result.current.toolApprovals.map((a) => a.requestId)).toEqual(['req-2']);
+  });
+});
+
+// A run that fails is a run that has finished. The success ack does the whole
+// ending — clears the adopted id, disarms first-turn adoption, drops questions
+// nobody is waiting on — and the error ack returned before reaching any of it.
+//
+// `session:error` does not cover this: it deliberately ignores errors while the
+// ack is still reachable, which is exactly the case on the same socket.
+describe('useChatSession — a run that ends by failing', () => {
+  it('does not leave a dangerous-tool prompt behind', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+    act(() => { void view.result.current.send({ prompt: 'open the page' }); });
+
+    act(() => {
+      fake.fire('permission:user-required', {
+        conversationId: 'conv-new', requestId: 'req-1',
+        toolName: 'browser_control', args: { action: 'click', selector: '#buy' },
+      });
+    });
+    expect(view.result.current.toolApprovals).toHaveLength(1);
+
+    act(() => { fake.failRun('the model provider rejected the request'); });
+
+    expect(view.result.current.error).toContain('rejected');
+    // The run is over. Its questions are not answerable, and offering them
+    // invites a click that emits into nothing.
+    expect(view.result.current.toolApprovals).toEqual([]);
+  });
+
+  it('does not leave first-turn adoption armed after the run is over', () => {
+    // Still armed, the next event from ANY run — including one the user walked
+    // away from — could name this pane's conversation.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+    act(() => { void view.result.current.send({ prompt: 'open the page' }); });
+    act(() => { fake.failRun(); });
+
+    act(() => {
+      fake.fire('browser:live-view', {
+        conversationId: 'conv-somewhere-else', taskId: 'task-x',
+        liveViewUrl: 'https://viewer.example/x', active: true,
+      });
+    });
+
+    expect(view.result.current.browserActive).toBe(false);
+    expect(view.result.current.browserLiveView).toBeUndefined();
+  });
+});
+
+// A held run survives a page reload — that is the point of holding it. But the
+// browser panel and the consent prompt are one-shot events kept in React state,
+// which a reload destroys, so the server replays them to the connection that
+// takes the run over. This side has to be able to receive them.
+describe('useChatSession — a page reloaded into a run already using a browser', () => {
+  it('takes the browser panel and its Stop back', () => {
+    // A fresh mount: no conversation id, nothing sent from here, and a run
+    // already in flight that the server rebound to this connection.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { fake.fire('run:resumed', { active: 1 }); });
+    act(() => {
+      fake.fire('browser:live-view', {
+        conversationId: 'conv-held', taskId: 'task-held',
+        liveViewUrl: 'https://viewer.example/held', active: true,
+      });
+    });
+
+    // Without this the page is attached to a run whose agent is driving a real
+    // browser, with no way to watch it and no way to halt it.
+    expect(view.result.current.browserActive).toBe(true);
+    expect(view.result.current.browserTaskId).toBe('task-held');
+    expect(view.result.current.browserLiveView).toBe('https://viewer.example/held');
+  });
+
+  it('takes a still-pending consent prompt back, answerable against its own run', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { fake.fire('run:resumed', { active: 1 }); });
+    act(() => {
+      fake.fire('permission:user-required', {
+        conversationId: 'conv-held', requestId: 'req-held',
+        toolName: 'browser_control', args: { action: 'click', selector: '#confirm' },
+      });
+    });
+    expect(view.result.current.toolApprovals.map((a) => a.requestId)).toEqual(['req-held']);
+
+    act(() => { view.result.current.resolveToolApproval('req-held', false); });
+    expect(fake.sent.filter((m) => m.event === 'permission:decide')).toEqual([
+      { event: 'permission:decide', payload: { conversationId: 'conv-held', requestId: 'req-held', approved: false, always: false } },
+    ]);
+  });
+
+  it('does not let a resumed run rename a chat the user already had open', () => {
+    // Adoption is for a pane with nothing to compare against. A pane that knows
+    // its conversation must keep matching on it, or a background run's events
+    // would land in the chat on screen.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-mine'));
+
+    act(() => { fake.fire('run:resumed', { active: 1 }); });
+    act(() => {
+      fake.fire('browser:live-view', {
+        conversationId: 'conv-someone-elses', taskId: 'task-other',
+        liveViewUrl: 'https://viewer.example/other', active: true,
+      });
+    });
+
+    expect(view.result.current.browserActive).toBe(false);
+    expect(view.result.current.conversationId).toBe('conv-mine');
   });
 });

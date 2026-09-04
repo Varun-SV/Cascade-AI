@@ -861,6 +861,17 @@ export function useChatSession(
       if (e?.active) {
         ackLostRef.current = true;
         setBusy(true);
+        // This pane is attached to a run whose conversation it cannot name —
+        // the same position `send()` is in on a first turn, and armed for the
+        // same reason. The server replays the run's live view and any pending
+        // approval right after this, and those events are filtered by an exact
+        // conversation match; without adoption a reload mid-first-turn would
+        // discard the very state the replay exists to restore, leaving a page
+        // attached to a run driving a real browser it cannot see or stop.
+        //
+        // Only when there is genuinely nothing to compare against. A pane that
+        // already knows its conversation must keep matching on it.
+        if (!conversationIdRef.current) awaitingFirstTurnRef.current = true;
         return;
       }
       // Nothing running, and nothing waiting on it.
@@ -1039,6 +1050,18 @@ export function useChatSession(
           if (ack.error) {
             setError(ack.error);
             setMessages((prev) => prev.filter((m) => !m.streaming));
+            // The same ending as below, and it has to be done BEFORE the early
+            // return rather than after it. A failed run is still a finished
+            // one: leaving adoption armed lets a later event from somewhere
+            // else name this pane, and leaving the approvals queued keeps a
+            // dangerous-tool prompt on screen for a run that has already
+            // stopped asking. `session:error` does not cover this — it
+            // deliberately ignores errors while the ack is still reachable,
+            // which is exactly the case here.
+            const failed = ack.conversationId ?? activeConversationId();
+            pendingConversationIdRef.current = undefined;
+            awaitingFirstTurnRef.current = false;
+            settleConversation(failed);
             return;
           }
           if (typeof ack.totalTokens === 'number') setLastTokens(ack.totalTokens);
