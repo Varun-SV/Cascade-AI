@@ -43,9 +43,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mean something. A provider with no live view is a weaker configuration and
   says so rather than showing an empty box.
 
+  A hosted deployment turns it on with `REMOTE_BROWSER_PROVIDER` (`cdp` or
+  `steel`), `REMOTE_BROWSER_URL`, and — for Steel — `REMOTE_BROWSER_API_KEY`.
+  Operator configuration only, with no field on the run request: the value is a
+  URL the *server* connects to, so accepting one from a caller would aim that
+  connection at the deployment's own network.
+
   Absent by default — no provider, no capability, nothing to switch off. One
-  session at a time unless raised, because every session is billed and a wave
-  of workers each opening their own is a cost nobody chose. The API key is
+  session at a time unless raised (`REMOTE_BROWSER_MAX_SESSIONS`), because every
+  session is billed and a wave of workers each opening their own is a cost
+  nobody chose. The API key is
   never echoed back in any settings response, and the live-view URL is treated
   as the bearer capability it is: it goes to the run's owner and is never
   persisted or logged.
