@@ -14,7 +14,7 @@ import {
   distillSessionFacts, buildSessionTranscript, sessionWorthRemembering,
   azureModelForDeployment, DEFAULT_CONTEXT_LIMIT, MODELS,
 } from '#cascade-ai';
-import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ProviderConfig } from '#cascade-ai';
+import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ApprovalRequest, ProviderConfig } from '#cascade-ai';
 import { attachRemoteBrowser } from './remote-browser.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -1028,7 +1028,10 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // provider the operator configured, and returns null when they configured
   // none — which is the default, and why there is no switch to turn the
   // capability off: it does not exist until an endpoint is supplied.
-  const remoteBrowser = attachRemoteBrowser({
+  // Only for a run with a human on the other end. The safety story for this
+  // capability is "you can watch it and stop it"; a caller with no socket to
+  // render the live view and no way to press Stop has neither.
+  const remoteBrowser = !interactive ? null : attachRemoteBrowser({
     cascade,
     config,
     conversationId: conversation.id,
@@ -1040,7 +1043,12 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // The kill switch, alongside the live view that makes it meaningful. Scoped
   // to this run and removed with the run's other listeners below: a Stop is
   // something the user does to the run they are watching, not to the process.
-  const onBrowserStop = () => remoteBrowser?.stop();
+  const onBrowserStop = (d: { conversationId?: string }) => {
+    // One socket, several runs. An unkeyed Stop reached every listener on the
+    // socket, so stopping the run being watched also stopped the others.
+    if (d?.conversationId && d.conversationId !== conversation.id) return;
+    remoteBrowser?.stop();
+  };
   socket.on('browser:stop', onBrowserStop);
 
   // Your thumbs-up/down verdicts, folded into Auto routing as a bounded,
@@ -1132,6 +1140,45 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     socket.on('escalation:decide', onEscalationDecision);
   }
 
+  // ── Dangerous-tool approval ──────────────────────────────────────────
+  //
+  // Without this the hosted browser is not merely ungated, it is unusable:
+  // `browser_control` is dangerous, T2 and T1 only append advisory verdicts
+  // and pass it on, and `Cascade.run()` resolves the user's turn from
+  // `approvalCallback`. With no callback that resolves `approved = false`, so
+  // every action is refused — a capability that appears to exist and never
+  // works.
+  //
+  // Scoped by conversation for the same reason the escalation answer above is:
+  // one socket can carry several runs, and an unkeyed answer resolves whichever
+  // request happened to be first.
+  const pendingApprovals = new Map<string, (d: { approved: boolean; always: boolean }) => void>();
+  const onPermissionDecision = (d: { conversationId?: string; requestId?: string; approved?: boolean; always?: boolean }) => {
+    if (d?.conversationId && d.conversationId !== conversation.id) return;
+    if (!d?.requestId) return;
+    const resolve = pendingApprovals.get(d.requestId);
+    if (!resolve) return;
+    pendingApprovals.delete(d.requestId);
+    resolve({ approved: d.approved === true, always: d.always === true });
+  };
+  if (interactive) socket.on('permission:decide', onPermissionDecision);
+
+  const approvalCallback = async (request: ApprovalRequest): Promise<{ approved: boolean; always: boolean }> => {
+    // A non-interactive caller (the OpenAI-compatible/SSE path) has nobody to
+    // ask, nobody watching, and no Stop. Auto-approving there would hand a
+    // dangerous capability to exactly the runs that cannot supervise it, so it
+    // is refused rather than granted by default.
+    if (!interactive) return { approved: false, always: false };
+
+    return await new Promise<{ approved: boolean; always: boolean }>((resolve) => {
+      pendingApprovals.set(request.id, resolve);
+      socket.emit('permission:user-required', {
+        conversationId: conversation.id,
+        ...request,
+      });
+    });
+  };
+
   cascade.on('stream:token', onToken);
   cascade.on('tier:status', onStatus);
   // The plan gate resolves inline (onPlan calls resolvePlanApproval(true)), so
@@ -1144,6 +1191,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
 
   try {
     const result = await cascade.run({
+      approvalCallback,
       prompt: runPrompt,
       // Routing must see the user's actual message, not the augmented prompt —
       // otherwise the prepended guidance/memories make even "hi" read Complex.
@@ -1261,6 +1309,10 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     // the operator paying for a browser nobody is using, and a run that threw
     // is exactly the one that would otherwise leave one running.
     socket.off('browser:stop', onBrowserStop);
+    socket.off('permission:decide', onPermissionDecision);
+    // Anything still parked would otherwise hang forever holding a worker.
+    for (const resolve of pendingApprovals.values()) resolve({ approved: false, always: false });
+    pendingApprovals.clear();
     try { await remoteBrowser?.endRun(); } catch { /* non-critical */ }
     try { await cascade.close(); } catch { /* non-critical */ }
   }
