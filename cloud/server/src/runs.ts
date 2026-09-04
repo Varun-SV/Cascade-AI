@@ -326,6 +326,22 @@ export interface RunControls {
   mcpServers?: Array<{ name: string; url: string; headers?: Record<string, string> }>;
   /** Registered MCP tool names the user switched off in Settings. */
   disabledTools?: string[];
+  /**
+   * Where this deployment gets browsers from, when the operator configured a
+   * provider. OPERATOR config, read from the environment at the call site —
+   * never from the run payload, because the value is a URL the SERVER
+   * connects to and taking it from a request body would hand every caller a
+   * fetch from inside the deployment's network. See env.ts.
+   *
+   * Absent (the default) means a hosted run has no browser and
+   * `browser_control` is never registered.
+   */
+  remoteBrowser?: {
+    provider?: 'cdp' | 'steel';
+    url?: string;
+    apiKey?: string;
+    maxSessions?: number;
+  };
 }
 
 // Maps the UI's routing mode to Cascade Auto's bias. Cascade Auto stays ON for
@@ -441,6 +457,29 @@ export function buildCloudConfig(
               braveApiKey: wsc!.braveApiKey,
               tavilyApiKey: wsc!.tavilyApiKey,
               guardSearxngUrl: true,
+            },
+          }
+        : {}),
+      // The deployment's browser, from the operator's environment.
+      //
+      // This has to be written INTO the config rather than read beside it:
+      // `attachRemoteBrowser` looks at `config.tools.remoteBrowser`, and
+      // `setRemoteBrowserController` gates registration on the same field. A
+      // config that never carries it leaves the whole hosted feature inert no
+      // matter what the operator sets — the provider is built, and nothing ever
+      // asks for it.
+      //
+      // Emitted only when a provider is named, so the untouched default stays
+      // exactly as it was: no key, no tool.
+      ...(controls.remoteBrowser?.provider
+        ? {
+            remoteBrowser: {
+              provider: controls.remoteBrowser.provider,
+              ...(controls.remoteBrowser.url ? { url: controls.remoteBrowser.url } : {}),
+              ...(controls.remoteBrowser.apiKey ? { apiKey: controls.remoteBrowser.apiKey } : {}),
+              ...(controls.remoteBrowser.maxSessions
+                ? { maxSessions: controls.remoteBrowser.maxSessions }
+                : {}),
             },
           }
         : {}),
@@ -1019,6 +1058,19 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     maxTokensPerRun: payload.maxTokensPerRun,
     mcpServers: mcpServers.length ? mcpServers : undefined,
     disabledTools: payload.fastAnswer ? [] : store.listDisabledMcpTools(userId),
+    // From the environment, NOT from `payload`. The operator configures one
+    // browser for their deployment; a caller-supplied endpoint would be an
+    // SSRF vector aimed at a connection the server opens.
+    ...(env.REMOTE_BROWSER_PROVIDER
+      ? {
+          remoteBrowser: {
+            provider: env.REMOTE_BROWSER_PROVIDER,
+            ...(env.REMOTE_BROWSER_URL ? { url: env.REMOTE_BROWSER_URL } : {}),
+            ...(env.REMOTE_BROWSER_API_KEY ? { apiKey: env.REMOTE_BROWSER_API_KEY } : {}),
+            maxSessions: env.REMOTE_BROWSER_MAX_SESSIONS,
+          },
+        }
+      : {}),
   });
   const cascade: Cascade = createCascade(config, scratchDir);
 
