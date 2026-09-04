@@ -650,3 +650,54 @@ describe('a shared endpoint between two tenants', () => {
     expect(defaultContext.closed).toBe(false);
   });
 });
+
+// The existing half-open tests fail `connectOverCDP()` itself, so they stop
+// before any of this run's own state exists. The window that matters now is
+// AFTER the connection: on a shared endpoint the browser outlives the run, so
+// anything created and not cleaned up stays there.
+describe('an open that fails after the run already owns something', () => {
+  it('closes the context and the connection it had already made', async () => {
+    const { provider, ended } = fakeProvider();          // non-isolating
+    const c = new RemoteBrowserController({ provider });
+
+    // newContext() succeeds; the page after it does not. `endSession` is a
+    // no-op for this provider, so without an explicit teardown the context and
+    // the CDP connection are simply abandoned on the operator's browser.
+    const good = browser.newContext;
+    browser.newContext = async () => {
+      const ctxt = await good();
+      ctxt.newPage = async () => { throw new Error('target closed'); };
+      return ctxt;
+    };
+
+    try {
+      const out = await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+      expect(out.ok).toBe(false);
+    } finally {
+      browser.newContext = good;
+    }
+
+    expect(createdContexts, 'the context was created').toHaveLength(1);
+    expect(createdContexts[0]!.closed, 'and not left on the endpoint').toBe(true);
+    expect(browser.closed, 'the connection is dropped too').toBe(true);
+    expect(ended, 'and the provider is still told, in case it owns anything').toEqual(['sess-1']);
+  });
+
+  it('does not wedge the pool after the failure', async () => {
+    // A leaked reservation would cost the deployment its only session.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+
+    const good = browser.newContext;
+    browser.newContext = async () => {
+      const ctxt = await good();
+      ctxt.newPage = async () => { throw new Error('target closed'); };
+      return ctxt;
+    };
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    browser.newContext = good;
+
+    const next = await c.controller({ kind: 'click', selector: '#b' }, ctx('run-B', 'w2'));
+    expect(next.ok, 'the slot came back').toBe(true);
+  });
+});

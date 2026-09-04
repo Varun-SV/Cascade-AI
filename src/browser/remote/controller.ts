@@ -442,8 +442,17 @@ export class RemoteBrowserController {
     // CDP connection that dies leaves an allocated, billed session with nothing
     // holding a reference to release it — and the client still showing a live
     // view for a browser that will never be driven.
+    // Declared OUTSIDE the try so the rollback can reach them. They were
+    // `const`s inside it, which meant a throw after the connection was made —
+    // or after the run's own context was created — left both attached to a
+    // browser that outlives the run, with `endSession` (a deliberate no-op for
+    // a shared endpoint) the only cleanup the catch could perform. Repeated
+    // transient failures accumulated incognito contexts and CDP connections on
+    // the operator's browser for runs that never even reached `this.runs`.
+    let browser: Browser | undefined;
+    let owned: BrowserContext | undefined;
     try {
-      const browser = await playwright.chromium.connectOverCDP(session.cdpUrl) as unknown as Browser;
+      browser = await playwright.chromium.connectOverCDP(session.cdpUrl) as unknown as Browser;
       // Whose context this is decides everything about how the run may use it.
       //
       // A provider that ISOLATES sessions just made this browser for this run,
@@ -461,7 +470,7 @@ export class RemoteBrowserController {
       // connection landed on the first's page and read back its localStorage
       // and its session cookie. So this run gets a context of its own, and
       // destroys it on the way out.
-      const owned = this.provider.isolatesSessions ? undefined : await browser.newContext();
+      owned = this.provider.isolatesSessions ? undefined : await browser.newContext();
       const context = owned ?? browser.contexts()[0] ?? await browser.newContext();
       const page = owned ? await owned.newPage() : (context.pages()[0] ?? await context.newPage());
 
@@ -472,6 +481,11 @@ export class RemoteBrowserController {
       return held;
     } catch (err) {
       this.announceLiveView(runId, undefined, false);
+      // Innermost first, and before endSession: the context is reached through
+      // the connection, and for a shared endpoint endSession is a no-op that
+      // would leave both behind.
+      await owned?.close().catch(() => {});
+      await browser?.close().catch(() => {});
       await this.provider.endSession(session.id).catch(() => {});
       throw err;
     }
