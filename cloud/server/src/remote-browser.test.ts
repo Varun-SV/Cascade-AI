@@ -4,6 +4,35 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { attachRemoteBrowser, withViewerControls } from './remote-browser.js';
+import { Cascade, type CascadeConfig } from '#cascade-ai';
+
+/**
+ * A REAL Cascade, because the fake below is what let a shipped bug through.
+ *
+ * The registration tests used a stub whose setBrowserController always
+ * recorded the call. Production's gate returns early unless the capability is
+ * enabled, so the stub recorded a registration that never happened and the
+ * hosted tool was absent in every deployment while these tests passed. Any
+ * test that claims the tool IS registered has to ask the real registry.
+ */
+function realCascade(remoteBrowser?: Record<string, unknown>) {
+  const config = {
+    version: '1.0', defaultIdentityId: 'default', providers: [], models: {},
+    tools: {
+      shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [],
+      browserEnabled: false, ...(remoteBrowser ? { remoteBrowser } : {}),
+    },
+    hooks: {}, dashboard: { port: 4899, auth: false, teamMode: 'single' },
+    telemetry: { enabled: false },
+    memory: { maxSessionMessages: 10, autoSummarizeAt: 1000, retentionDays: 1 },
+    theme: 'cascade',
+    workspace: {
+      cascadeMdPath: 'CASCADE.md', configPath: '.cascade/config.json',
+      keystorePath: '.cascade/keystore.enc', auditLogPath: '.cascade/audit.log',
+    },
+  } as unknown as CascadeConfig;
+  return { cascade: new Cascade(config, '/tmp'), config };
+}
 
 /** A Cascade stand-in that records what was wired to it. */
 function fakeCascade() {
@@ -14,7 +43,7 @@ function fakeCascade() {
     wired,
     cascade: {
       on: (event: string, fn: (e: unknown) => void) => { handlers.set(event, fn); },
-      setBrowserController: (controller: unknown, release: unknown) => { wired.push({ controller, release }); },
+      setRemoteBrowserController: (controller: unknown, release: unknown) => { wired.push({ controller, release }); },
     } as never,
   };
 }
@@ -58,21 +87,28 @@ describe('a deployment with no provider configured', () => {
 });
 
 describe('a configured deployment', () => {
-  it('registers the controller and a worker-release hook', () => {
-    const { cascade, wired } = fakeCascade();
-    const attached = attachRemoteBrowser({
-      cascade, conversationId: 'c1', emit,
-      config: { tools: { remoteBrowser: { provider: 'cdp', url: 'ws://browser.test:9222' } } },
-    });
+  it('actually registers browser_control on a real Cascade', () => {
+    // The test that would have caught the shipped bug. attachRemoteBrowser was
+    // calling setBrowserController, which gates on the DESKTOP flag — default
+    // false, never set on a server — so the tool was never registered at all.
+    // Asserting against the real registry is the only version of this test
+    // that means anything.
+    const remoteBrowser = { provider: 'cdp', url: 'ws://browser.test:9222' };
+    const { cascade, config } = realCascade(remoteBrowser);
+
+    const attached = attachRemoteBrowser({ cascade, config, conversationId: 'c1', emit });
+
     expect(attached).not.toBeNull();
-    expect(wired).toHaveLength(1);
-    // Both halves: without the release, ownership would fall back to a timer,
-    // and no fixed timer is safe for a worker that may be waiting on a human.
-    expect(typeof wired[0]?.controller).toBe('function');
-    expect(typeof wired[0]?.release).toBe('function');
+    expect(cascade.getToolRegistry().hasTool('browser_control'), 'the model can actually call it').toBe(true);
   });
 
-  it('learns the run id when the run STARTS, not when it ends', () => {
+  it('registers nothing on a real Cascade when no provider is configured', () => {
+    const { cascade, config } = realCascade();
+    attachRemoteBrowser({ cascade, config, conversationId: 'c1', emit });
+    expect(cascade.getToolRegistry().hasTool('browser_control')).toBe(false);
+  });
+
+  it('subscribes to run:started before the run can fail', () => {
     // A run that throws is exactly the one whose session must be released, and
     // no result is available on that path.
     const { cascade, handlers } = fakeCascade();
@@ -80,7 +116,7 @@ describe('a configured deployment', () => {
       cascade, conversationId: 'c1', emit,
       config: { tools: { remoteBrowser: { provider: 'cdp', url: 'ws://browser.test:9222' } } },
     });
-    expect(handlers.has('run:started'), 'subscribed before the run can fail').toBe(true);
+    expect(handlers.has('run:started')).toBe(true);
   });
 });
 
