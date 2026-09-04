@@ -56,8 +56,8 @@ export function BrowserLiveView({ active, liveViewUrl, onStop }: Props) {
         />
         <span style={{ flex: 1 }}>
           {liveViewUrl
-            ? 'Cascade is using a browser. You can take over in this window.'
-            : 'Cascade is using a browser. This provider cannot stream it, so you cannot watch or take over — only stop it.'}
+            ? 'Cascade is using a browser. Watch it here, and stop it whenever you want.'
+            : 'Cascade is using a browser. This provider cannot stream it, so you cannot watch it — only stop it.'}
         </span>
         <button
           type="button"
@@ -74,14 +74,22 @@ export function BrowserLiveView({ active, liveViewUrl, onStop }: Props) {
       {/*
         A minimum height because these viewers are unusable when squeezed — the
         page renders at the remote viewport and scales down, so a short frame
-        shows a thumbnail nobody can read or click accurately.
+        shows a thumbnail nobody can read.
 
-        `sandbox` is deliberately NOT set. The provider's viewer needs scripts,
-        same-origin access to its own session, and pointer events to pass the
-        user's clicks through; a sandbox tight enough to be worth having would
-        break the interaction this panel exists for. The frame is third-party
-        content the operator explicitly configured, which is the trust decision
-        that was already made when they supplied the endpoint.
+        `pointer-events: none` is the point of this element, not styling. The
+        URL already asks the provider for a watch-only session, but that flag's
+        meaning belongs to the provider — and if input DOES get through, it goes
+        straight to the live session over the provider's own channel, never
+        through the lease that decides who may drive this page. The agent would
+        then be mid-`click` while the user typed into the same form, and its
+        action would land on top of theirs. Refusing pointer events here makes
+        watch-only a property of our own code rather than a request.
+
+        `sandbox` is deliberately NOT set. The viewer needs scripts and
+        same-origin access to its own session, and a sandbox permitting both is
+        equivalent to none — it would cost the stream and buy nothing. The frame
+        is third-party content the operator explicitly configured, which is the
+        trust decision they already made when they supplied the endpoint.
       */}
       {/* Only when there is something to show. An empty frame reads as broken;
           the banner above says plainly that this configuration cannot be
@@ -89,8 +97,13 @@ export function BrowserLiveView({ active, liveViewUrl, onStop }: Props) {
       {liveViewUrl && (
         <iframe
           src={liveViewUrl}
-          title="Agent browser session"
-          style={{ width: '100%', height: 600, border: 'none', display: 'block' }}
+          title="Agent browser session (view only)"
+          // Not focusable either: a keystroke into the frame is input too.
+          tabIndex={-1}
+          style={{
+            width: '100%', height: 600, border: 'none', display: 'block',
+            pointerEvents: 'none',
+          }}
         />
       )}
     </section>

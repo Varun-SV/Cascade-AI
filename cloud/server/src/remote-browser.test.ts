@@ -3,7 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { attachRemoteBrowser, withViewerControls, resetSharedBrowser, sharedBrowserGeneration } from './remote-browser.js';
+import { attachRemoteBrowser, asWatchOnlyViewer, resetSharedBrowser, sharedBrowserGeneration } from './remote-browser.js';
 import { Cascade, type CascadeConfig } from '#cascade-ai';
 
 /**
@@ -125,27 +125,40 @@ describe('a configured deployment', () => {
 });
 
 describe('the live view is a capability, and treated as one', () => {
-  it('asks the viewer for controls, so it is usable and not just watchable', () => {
-    // Watching alone is not a kill switch. The desktop's equivalent is that the
-    // user can reach the page; here it is that they can take it over.
-    const out = new URL(withViewerControls('https://provider.test/live/abc'));
-    expect(out.searchParams.get('interactive')).toBe('true');
-    expect(out.searchParams.get('showControls')).toBe('true');
+  it('asks the viewer for a watch-only session', () => {
+    // It used to ask for `interactive=true`, which made the frame a SECOND
+    // controller: viewer input reaches the session over the provider's own
+    // channel, never through BrowserLease, so a user "taking over" could edit
+    // the page while a Playwright call was in flight and have the agent's
+    // action land on top of their change. The panel promised exclusive control
+    // and delivered concurrent control.
+    const out = new URL(asWatchOnlyViewer('https://provider.test/live/abc'));
+    expect(out.searchParams.get('interactive')).toBe('false');
+    expect(out.searchParams.get('showControls')).toBe('false');
   });
 
   it('keeps the credential the provider put in the URL', () => {
     // The live-view URL carries its own session credential. Rebuilding it from
     // scratch would drop the one thing that makes it work.
-    const out = new URL(withViewerControls('https://provider.test/live/abc?token=xyz'));
+    const out = new URL(asWatchOnlyViewer('https://provider.test/live/abc?token=xyz'));
     expect(out.searchParams.get('token')).toBe('xyz');
-    expect(out.searchParams.get('interactive')).toBe('true');
+    expect(out.searchParams.get('interactive')).toBe('false');
   });
+
+  // There is deliberately NO end-to-end "the announcement carries a watch-only
+  // URL" test here. The one written first passed against the reverted code: it
+  // drove `run:started` without opening a session, so no live-view URL was ever
+  // announced and its loop asserted nothing. Reaching a real announcement needs
+  // the shared controller, which is module-private on purpose — and exporting
+  // it to satisfy a test would be a worse trade than relying on the single,
+  // revert-checked call site above.
 
   it('hands back something unparseable rather than dropping it', () => {
     // Losing the only way the user has to watch is worse than a URL we did not
     // understand well enough to decorate.
-    expect(withViewerControls('not-a-url')).toBe('not-a-url');
+    expect(asWatchOnlyViewer('not-a-url')).toBe('not-a-url');
   });
+
 });
 
 describe('the session pool is the deployment\'s, not one run\'s', () => {

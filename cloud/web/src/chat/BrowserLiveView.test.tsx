@@ -18,9 +18,9 @@ describe('BrowserLiveView', () => {
   it('embeds the provider URL exactly as given', () => {
     // It carries the session's own credential. Rebuilding or trimming it would
     // drop the one thing that makes the frame work.
-    const url = 'https://provider.test/live/abc?token=xyz&interactive=true';
+    const url = 'https://provider.test/live/abc?token=xyz&interactive=false';
     render(<BrowserLiveView active liveViewUrl={url} onStop={() => {}} />);
-    expect(screen.getByTitle('Agent browser session')).toHaveAttribute('src', url);
+    expect(screen.getByTitle('Agent browser session (view only)')).toHaveAttribute('src', url);
   });
 
   it('offers Stop whenever a browser is showing', () => {
@@ -38,11 +38,14 @@ describe('BrowserLiveView', () => {
     expect(onStop).toHaveBeenCalledOnce();
   });
 
-  it('says the user can take over, because they can', () => {
-    // The frame passes input through. Someone who believes it is a video will
-    // not try, and the whole point of watching is being able to intervene.
+  it('says what the user can actually do: watch it, and stop it', () => {
+    // This used to assert the banner offered to let the user take the page
+    // over, which the frame really did allow — and that was the bug. Viewer
+    // input reaches the session over the provider's own channel, bypassing the
+    // lease, so "taking over" meant driving the page AT THE SAME TIME as the
+    // agent rather than instead of it.
     render(<BrowserLiveView active liveViewUrl="https://provider.test/live/abc" onStop={() => {}} />);
-    expect(screen.getByText(/take over/i)).toBeInTheDocument();
+    expect(screen.getByText(/watch it here/i)).toBeInTheDocument();
   });
 
   it('keeps Stop when the provider cannot stream a view', () => {
@@ -63,5 +66,21 @@ describe('BrowserLiveView', () => {
     // An empty iframe reads as broken; the banner says the honest version.
     render(<BrowserLiveView active liveViewUrl={undefined} onStop={() => {}} />);
     expect(screen.queryByTitle('Agent browser session')).toBeNull();
+  });
+});
+
+describe('BrowserLiveView — the frame is for watching, not driving', () => {
+  it('refuses pointer and keyboard input into the session', () => {
+    // The URL asks the provider for a watch-only viewer, but that flag's
+    // meaning is the provider's. If input got through it would reach the live
+    // session over their channel, never through the lease that decides who may
+    // drive the page — so the agent could be mid-click while the user typed
+    // into the same form, and its action would land on top of theirs.
+    render(
+      <BrowserLiveView active liveViewUrl="https://provider.test/live/abc?interactive=false" onStop={() => {}} />,
+    );
+    const frame = screen.getByTitle('Agent browser session (view only)');
+    expect(frame).toHaveStyle({ pointerEvents: 'none' });
+    expect(frame).toHaveAttribute('tabindex', '-1');
   });
 });

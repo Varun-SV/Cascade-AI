@@ -164,10 +164,10 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
         // Echoed back by Stop, so a control action names the run it controls
         // rather than a chat that may hold several.
         taskId: id,
-        // `interactive` and `showControls` are what make the embedded view a
-        // control rather than a video: the user can take the page over and
-        // navigate, which is the whole point of watching.
-        liveViewUrl: liveViewUrl ? withViewerControls(liveViewUrl) : undefined,
+        // Watch-only. The user's supervision is the live view plus Stop; input
+        // through this frame would be a SECOND, uncoordinated controller racing
+        // the agent on the same page. See asWatchOnlyViewer.
+        liveViewUrl: liveViewUrl ? asWatchOnlyViewer(liveViewUrl) : undefined,
         // Stated rather than implied by an absent URL. Attached-but-unwatchable
         // and not-attached-at-all both have no URL, and the UI must tell them
         // apart: the first still needs a Stop control, the second needs no panel.
@@ -222,17 +222,38 @@ function buildProvider(
 }
 
 /**
- * Ask the provider's viewer for an interactive session with its own controls.
+ * Ask the provider's viewer for a WATCH-ONLY session.
+ *
+ * This used to request `interactive=true`, and the panel told the user they
+ * could "take over in this window". They could — but so could the agent, at
+ * the same time. Viewer input goes straight to the live session over the
+ * provider's own channel: it never passes through `BrowserLease`, and there is
+ * no handoff event back to the controller. So while a Playwright `click` or
+ * `fill` was in flight the user could edit the same page through the iframe and
+ * the agent's action would then land on top of what they had just done. The UI
+ * promised exclusive control and delivered concurrent control, which is the
+ * same shape as an action landing after Stop: a mutation the person believed
+ * they had prevented.
+ *
+ * Watch and Stop is a smaller promise that this code can actually keep. A real
+ * handoff needs the agent paused BEFORE viewer input is enabled, and pausing is
+ * not free here — the only way to make a patient Playwright call stop is to
+ * close the page it is waiting on, which is exactly the page the user wanted to
+ * take over. That is a feature, not a parameter, and it is not this PR.
  *
  * Added as query parameters on the URL the provider gave us rather than built
  * from scratch: it carries the session's own credentials, and reconstructing it
  * would mean reconstructing those too.
+ *
+ * The flag alone is not the guarantee — its meaning belongs to the provider.
+ * `BrowserLiveView` also makes the frame ignore pointer events, so input cannot
+ * reach the session whatever a given viewer does with `interactive`.
  */
-export function withViewerControls(liveViewUrl: string): string {
+export function asWatchOnlyViewer(liveViewUrl: string): string {
   try {
     const u = new URL(liveViewUrl);
-    u.searchParams.set('interactive', 'true');
-    u.searchParams.set('showControls', 'true');
+    u.searchParams.set('interactive', 'false');
+    u.searchParams.set('showControls', 'false');
     return u.toString();
   } catch {
     // Not a URL we can parse — hand it back untouched rather than dropping the
