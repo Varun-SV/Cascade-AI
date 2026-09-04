@@ -62,6 +62,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anything authenticated.
 
 ### Fixed
+- **One tenant's browsing state reaching the next on a shared endpoint.** A
+  hosted run took the browser's existing context and the page left in it, so
+  the run that came after inherited the previous one's page, cookies and local
+  storage — a different person, on a shared deployment. The one-session cap
+  prevented two runs overlapping there; it did nothing about the run after. A
+  run on an endpoint it does not own now gets a context of its own and destroys
+  it on the way out. Providers that hand out a browser per session are
+  unaffected, and deliberately so: their default context is the one the live
+  view shows.
 - **A regular expression that could stall on a long URL.** Stripping trailing
   slashes from a configured endpoint used a pattern that backtracks
   quadratically — 32 seconds on a 200,000-character input, against effectively
