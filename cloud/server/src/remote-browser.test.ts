@@ -3,7 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { attachRemoteBrowser, withViewerControls, resetSharedBrowser } from './remote-browser.js';
+import { attachRemoteBrowser, withViewerControls, resetSharedBrowser, sharedBrowserGeneration } from './remote-browser.js';
 import { Cascade, type CascadeConfig } from '#cascade-ai';
 
 /**
@@ -171,15 +171,45 @@ describe('the session pool is the deployment\'s, not one run\'s', () => {
     expect(b.cascade.getToolRegistry().hasTool('browser_control')).toBe(true);
   });
 
+  it('rebuilds when the API key is rotated', async () => {
+    // The case that made the first version wrong. Collapsing every credential
+    // to "keyed" meant A -> B looked identical, so the shared provider went on
+    // using a key that is usually being rotated BECAUSE it is being revoked.
+    const a = realCascade({ provider: 'steel', url: 'https://steel.test', apiKey: 'key-A' });
+    attachRemoteBrowser({ cascade: a.cascade, config: a.config, conversationId: 'c1', emit });
+    const before = sharedBrowserGeneration();
+
+    const b = realCascade({ provider: 'steel', url: 'https://steel.test', apiKey: 'key-B' });
+    attachRemoteBrowser({ cascade: b.cascade, config: b.config, conversationId: 'c2', emit });
+
+    // Observed, not assumed: attach returns an object either way, so asserting
+    // it is non-null proved nothing and passed against the bug.
+    expect(sharedBrowserGeneration(), 'a rotated key rebuilds the provider').toBe(before + 1);
+  });
+
+  it('does not rebuild when nothing changed', async () => {
+    // The other direction matters too: rebuilding on every attach would throw
+    // away the shared pool the whole change exists to create.
+    const a = realCascade({ provider: 'steel', url: 'https://steel.test', apiKey: 'key-A' });
+    attachRemoteBrowser({ cascade: a.cascade, config: a.config, conversationId: 'c1', emit });
+    const before = sharedBrowserGeneration();
+
+    const b = realCascade({ provider: 'steel', url: 'https://steel.test', apiKey: 'key-A' });
+    attachRemoteBrowser({ cascade: b.cascade, config: b.config, conversationId: 'c2', emit });
+
+    expect(sharedBrowserGeneration(), 'the pool is reused, which is the point').toBe(before);
+  });
+
   it('rebuilds when the deployment\'s provider settings change', async () => {
     // Otherwise a settings change leaves the old provider's sessions running at
     // the operator's expense, with nothing left holding a reference to them.
     const a = realCascade({ provider: 'cdp', url: 'ws://one.test:9222' });
     attachRemoteBrowser({ cascade: a.cascade, config: a.config, conversationId: 'c1', emit });
 
+    const before = sharedBrowserGeneration();
     const b = realCascade({ provider: 'cdp', url: 'ws://two.test:9222' });
-    const second = attachRemoteBrowser({ cascade: b.cascade, config: b.config, conversationId: 'c2', emit });
+    attachRemoteBrowser({ cascade: b.cascade, config: b.config, conversationId: 'c2', emit });
 
-    expect(second, 'a changed endpoint is a different deployment browser').not.toBeNull();
+    expect(sharedBrowserGeneration(), 'a changed endpoint is a different browser').toBe(before + 1);
   });
 });

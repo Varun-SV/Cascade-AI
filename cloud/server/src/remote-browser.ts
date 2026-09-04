@@ -19,7 +19,6 @@
 //      one conversation holds many runs — and using the wrong one meant
 //      cleanup matched nothing, which cost a review round on the desktop.
 
-import { createHash } from 'node:crypto';
 import {
   RemoteBrowserController,
   GenericCdpProvider,
@@ -72,29 +71,39 @@ export interface AttachedBrowser {
  * USERS on a shared deployment — drive the same page, with per-run leases that
  * do not know about each other. Ownership has to live where the browsers do.
  */
-let shared: { key: string; controller: RemoteBrowserController } | null = null;
+let shared: { settings: RemoteBrowserSettings; controller: RemoteBrowserController } | null = null;
 
 /**
- * Distinguishes one credential from another without being one.
+ * Bumped every time a controller is built.
  *
- * `apiKey ? 'keyed' : 'anon'` collapsed every key to the same value, so
- * rotating a Steel key from A to B produced an identical config key and the
- * shared provider went on using A until something else changed or the process
- * restarted — on a rotation that the settings payload explicitly supports,
- * which usually means the old key is being revoked.
- *
- * A hash rather than the key itself: this lives in a module-scoped object that
- * a stack trace or heap dump could surface, and a fingerprint distinguishes
- * just as well as the secret does.
+ * Exported so a test can OBSERVE a rebuild. Without it the only assertion
+ * available was "attach returned something", which is true whether the
+ * controller was reused or replaced — so the rotation test passed against the
+ * bug it was written for, and its revert-check went green.
  */
-function credentialFingerprint(apiKey: string | undefined): string {
-  if (!apiKey) return 'anon';
-  return createHash('sha256').update(apiKey).digest('hex').slice(0, 16);
-}
+let generation = 0;
+export function sharedBrowserGeneration(): number { return generation; }
 
-/** Identity of a provider configuration, so a change rebuilds rather than drifts. */
-function configKey(s: RemoteBrowserSettings): string {
-  return JSON.stringify([s.provider, s.url, credentialFingerprint(s.apiKey), s.maxSessions]);
+/**
+ * Whether two provider configurations are the same deployment browser.
+ *
+ * A direct comparison, deliberately, rather than a key derived from the
+ * settings. The first version built a string and had to decide what to do with
+ * the credential: `apiKey ? 'keyed' : 'anon'` was wrong because a rotation from
+ * A to B then looked identical and the revoked key stayed in use, and hashing
+ * it was worse — CodeQL flagged it as a weak password hash, and it was right
+ * that the derived value bought nothing. Comparing in place needs no artifact
+ * at all: no string to log, no digest to leak, and exact rather than
+ * collision-prone.
+ *
+ * The key is compared but never copied anywhere it was not already: the live
+ * config and the SteelProvider both hold it regardless.
+ */
+function sameProviderConfig(a: RemoteBrowserSettings, b: RemoteBrowserSettings): boolean {
+  return a.provider === b.provider
+    && a.url === b.url
+    && a.apiKey === b.apiKey
+    && a.maxSessions === b.maxSessions;
 }
 
 /** For tests, and for a deployment whose settings changed under it. */
@@ -117,14 +126,14 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
 
   // Reused across runs. A settings change makes a new one and disposes the old
   // rather than leaving its sessions running at the operator's expense.
-  const key = configKey(settings);
-  if (shared && shared.key !== key) {
+  if (shared && !sameProviderConfig(shared.settings, settings)) {
     void shared.controller.dispose();
     shared = null;
   }
   if (!shared) {
+    generation += 1;
     shared = {
-      key,
+      settings: { ...settings },
       controller: new RemoteBrowserController({
         provider,
         ...(settings.maxSessions ? { maxSessions: settings.maxSessions } : {}),
