@@ -118,7 +118,7 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
 
   // Per-run, not per-controller: the controller is shared, so a live view must
   // reach only the socket whose run it belongs to.
-  controller.onLiveViewFor(opts.conversationId, (liveViewUrl) => {
+  controller.onLiveViewFor(opts.conversationId, ({ active, liveViewUrl }) => {
     // To this socket only. See the file header.
     opts.emit('browser:live-view', {
       conversationId: opts.conversationId,
@@ -126,10 +126,10 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
       // control rather than a video: the user can take the page over and
       // navigate, which is the whole point of watching.
       liveViewUrl: liveViewUrl ? withViewerControls(liveViewUrl) : undefined,
-      // Stated rather than implied by an absent URL: a provider with no live
-      // view cannot be watched, and the UI has to say so instead of showing
-      // nothing and quietly dropping the Stop control with it.
-      watchable: Boolean(liveViewUrl),
+      // Stated rather than implied by an absent URL. Attached-but-unwatchable
+      // and not-attached-at-all both have no URL, and the UI must tell them
+      // apart: the first still needs a Stop control, the second needs no panel.
+      active,
     });
   });
 

@@ -46,12 +46,21 @@ type Page = {
   innerText(selector: string, opts?: { timeout?: number }): Promise<string>;
   on(event: string, handler: (...args: never[]) => void): void;
   isClosed(): boolean;
+  close(): Promise<void>;
 };
 type Browser = {
   contexts(): Array<{ pages(): Page[]; newPage(): Promise<Page> }>;
   newContext(): Promise<{ pages(): Page[]; newPage(): Promise<Page> }>;
   close(): Promise<void>;
 };
+
+/** What a run's watcher is told about its browser. */
+export interface BrowserViewInfo {
+  /** A browser is attached to this run. Stop is meaningful while true. */
+  active: boolean;
+  /** Where to watch it, when the provider can stream one. */
+  liveViewUrl?: string;
+}
 
 /** Default ceiling for a single action, matching the tool's own clamp. */
 const ACTION_TIMEOUT_MS = 30_000;
@@ -74,6 +83,18 @@ interface RunBrowser {
   page: Page;
   /** Bumped on every main-frame navigation. See the desktop's equivalent. */
   generation: number;
+  /**
+   * Fires when this run's browser must stop, now.
+   *
+   * Playwright takes no AbortSignal, and its calls are not merely slow — they
+   * are DELIBERATELY patient: `click` waits for the element to become
+   * actionable, which can be seconds, and then clicks. So a Stop pressed
+   * during that wait did nothing at all and the click landed afterwards, on a
+   * run the user believed they had halted. Racing the signal is not enough
+   * either, because the underlying operation keeps going; the page is closed,
+   * which makes the pending call reject instead of complete.
+   */
+  abort: AbortController;
 }
 
 export class RemoteBrowserController {
@@ -87,7 +108,7 @@ export class RemoteBrowserController {
    * A's live-view URL to whichever run registered last — and that URL is a
    * bearer capability for a browser somebody else is driving.
    */
-  private liveViewListeners = new Map<string, (liveViewUrl: string | undefined) => void>();
+  private liveViewListeners = new Map<string, (info: BrowserViewInfo) => void>();
   /** An embedder that wants every run's live view, told which run each is. */
   private onLiveViewAll: ((runId: string, liveViewUrl: string | undefined) => void) | undefined;
 
@@ -137,7 +158,7 @@ export class RemoteBrowserController {
   }
 
   /** Watch one run's browser. The URL never goes to any other run's listener. */
-  onLiveViewFor(runKey: string, listener: (liveViewUrl: string | undefined) => void): void {
+  onLiveViewFor(runKey: string, listener: (info: BrowserViewInfo) => void): void {
     this.liveViewListeners.set(runKey, listener);
   }
 
@@ -145,8 +166,17 @@ export class RemoteBrowserController {
     this.liveViewListeners.delete(runKey);
   }
 
-  private announceLiveView(runId: string, liveViewUrl: string | undefined): void {
-    this.liveViewListeners.get(runId)?.(liveViewUrl);
+  /**
+   * Tell a run's listener what its browser situation is.
+   *
+   * `active` is separate from the URL and both are needed: a provider with no
+   * live view is attached-but-unwatchable, and a finished run is not attached
+   * at all. Both have no URL, so a listener given only the URL cannot tell them
+   * apart — and would drop the Stop control for the first as if it were the
+   * second.
+   */
+  private announceLiveView(runId: string, liveViewUrl: string | undefined, active: boolean): void {
+    this.liveViewListeners.get(runId)?.({ active, ...(liveViewUrl ? { liveViewUrl } : {}) });
     this.onLiveViewAll?.(runId, liveViewUrl);
   }
 
@@ -166,6 +196,11 @@ export class RemoteBrowserController {
   stopRun(runId: string): void {
     this.revoked.add(runId);
     this.leases.get(runId)?.dropRun(runId);
+    // Reaches an action already under way. Without this, Stop only prevented
+    // the NEXT action while the current one — possibly mid-click — continued.
+    const held = this.runs.get(runId);
+    held?.abort.abort();
+    void held?.page.close().catch(() => {});
   }
 
   /** A run ended: release its browser rather than pay for an idle session. */
@@ -175,9 +210,19 @@ export class RemoteBrowserController {
     const held = this.runs.get(runId);
     if (!held) return;
     this.runs.delete(runId);
-    this.announceLiveView(runId, undefined);
-    // Both are best-effort: a run is already over, and a provider that is
-    // briefly unreachable must not turn that into a failure the user sees.
+    await this.disposeRun(runId, held);
+  }
+
+  /**
+   * Let go of one run's browser.
+   *
+   * Best-effort throughout: a run is already over by the time this runs, and a
+   * provider that is briefly unreachable must not turn that into a failure the
+   * user sees. The provider's own idle timeout collects anything left.
+   */
+  private async disposeRun(runId: string, held: RunBrowser): Promise<void> {
+    held.abort.abort();
+    this.announceLiveView(runId, undefined, false);
     await held.browser.close().catch(() => {});
     await this.provider.endSession(held.session.id).catch(() => {});
   }
@@ -252,8 +297,15 @@ export class RemoteBrowserController {
   private async open(runId: string, signal?: AbortSignal): Promise<RunBrowser> {
     const existing = this.runs.get(runId);
     if (existing && !existing.page.isClosed()) return existing;
+    if (existing) {
+      // Its page is gone, so it is unusable — but the provider session behind
+      // it is still allocated and still billed. Overwriting the map entry
+      // dropped the only reference to it.
+      this.runs.delete(runId);
+      await this.disposeRun(runId, existing);
+    }
 
-    if (!existing && this.runs.size >= this.maxSessions) {
+    if (this.runs.size >= this.maxSessions) {
       throw new Error(
         `All ${this.maxSessions} browser session${this.maxSessions === 1 ? '' : 's'} are in use by other runs. ` +
         'Try again when one finishes, or raise the session limit in settings.',
@@ -265,23 +317,54 @@ export class RemoteBrowserController {
     // Handed to the owner as soon as it exists, so the user can watch from the
     // first action rather than after it. A CAPABILITY URL — see the provider
     // seam: never persisted, never logged, never sent to another client.
-    this.announceLiveView(runId, session.liveViewUrl);
+    this.announceLiveView(runId, session.liveViewUrl, true);
 
-    const browser = await playwright.chromium.connectOverCDP(session.cdpUrl) as unknown as Browser;
-    // Reuse the context the remote browser already has: providers start one,
-    // and a second context would leave the live view showing the first —
-    // the user would watch an idle page while the agent worked elsewhere.
-    const context = browser.contexts()[0] ?? await browser.newContext();
-    const page = context.pages()[0] ?? await context.newPage();
+    // Everything past createSession is rolled back on failure. Without this a
+    // CDP connection that dies leaves an allocated, billed session with nothing
+    // holding a reference to release it — and the client still showing a live
+    // view for a browser that will never be driven.
+    try {
+      const browser = await playwright.chromium.connectOverCDP(session.cdpUrl) as unknown as Browser;
+      // Reuse the context the remote browser already has: providers start one,
+      // and a second context would leave the live view showing the first —
+      // the user would watch an idle page while the agent worked elsewhere.
+      const context = browser.contexts()[0] ?? await browser.newContext();
+      const page = context.pages()[0] ?? await context.newPage();
 
-    const held: RunBrowser = { session, browser, page, generation: 0 };
-    page.on('framenavigated', (() => { held.generation += 1; }) as never);
-    this.runs.set(runId, held);
-    return held;
+      const held: RunBrowser = { session, browser, page, generation: 0, abort: new AbortController() };
+      page.on('framenavigated', (() => { held.generation += 1; }) as never);
+      this.runs.set(runId, held);
+      return held;
+    } catch (err) {
+      this.announceLiveView(runId, undefined, false);
+      await this.provider.endSession(session.id).catch(() => {});
+      throw err;
+    }
   }
 
   private async perform(held: RunBrowser, action: BrowserAction, planned: number): Promise<BrowserActionOutcome> {
     const { page } = held;
+    /**
+     * Race one Playwright call against this run's Stop.
+     *
+     * The rejection is not the mechanism — closing the page is. Playwright's
+     * calls are deliberately patient (`click` waits for actionability), and
+     * abandoning the promise would leave the underlying operation running to
+     * completion, so the click would still land after Stop. Closing makes it
+     * fail instead.
+     */
+    const stoppable = async <T>(work: Promise<T>): Promise<T> => {
+      if (held.abort.signal.aborted) throw new Error('The user stopped browser control for this run.');
+      return await Promise.race([
+        work,
+        new Promise<never>((_, reject) => {
+          held.abort.signal.addEventListener('abort', () => {
+            void page.close().catch(() => {});
+            reject(new Error('The user stopped browser control for this run.'));
+          }, { once: true });
+        }),
+      ]);
+    };
     const timeout = Math.min(action.timeoutMs ?? 10_000, ACTION_TIMEOUT_MS);
     const where = async (): Promise<{ url: string; title: string }> => ({
       url: page.url(),
@@ -304,27 +387,27 @@ export class RemoteBrowserController {
         if (!/^https?:\/\//i.test(target)) {
           return { ok: false, detail: 'Only http and https addresses can be opened.' };
         }
-        await page.goto(target, { timeout: ACTION_TIMEOUT_MS, waitUntil: 'domcontentloaded' });
+        await stoppable(page.goto(target, { timeout: ACTION_TIMEOUT_MS, waitUntil: 'domcontentloaded' }));
         return { ok: true, detail: `Opened ${target}`, ...(await where()) };
       }
       case 'click':
-        await page.click(action.selector!, { timeout });
+        await stoppable(page.click(action.selector!, { timeout }));
         return { ok: true, detail: `Clicked ${action.selector}`, ...(await where()) };
       case 'fill':
-        await page.fill(action.selector!, action.value ?? '', { timeout });
+        await stoppable(page.fill(action.selector!, action.value ?? '', { timeout }));
         return { ok: true, detail: `Filled ${action.selector}`, ...(await where()) };
       case 'press': {
         // A selector focuses first; without one the key goes to whatever has
         // focus, which is what "press Escape" usually means.
-        if (action.selector) await page.press(action.selector, action.key!, { timeout });
-        else await page.keyboard.press(action.key!);
+        if (action.selector) await stoppable(page.press(action.selector, action.key!, { timeout }));
+        else await stoppable(page.keyboard.press(action.key!));
         return { ok: true, detail: `Pressed ${action.key}`, ...(await where()) };
       }
       case 'wait_for':
-        await page.waitForSelector(action.selector!, { timeout });
+        await stoppable(page.waitForSelector(action.selector!, { timeout }));
         return { ok: true, detail: `${action.selector} appeared`, ...(await where()) };
       case 'extract_text': {
-        const text = await page.innerText(action.selector ?? 'body', { timeout });
+        const text = await stoppable(page.innerText(action.selector ?? 'body', { timeout }));
         return { ok: true, detail: text.slice(0, 200_000), ...(await where()) };
       }
       default:

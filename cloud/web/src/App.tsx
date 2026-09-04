@@ -302,6 +302,7 @@ export default function App() {
             onSend={chat.send}
             onStop={chat.stop}
             browserLiveView={chat.browserLiveView}
+            browserActive={chat.browserActive}
             onStopBrowser={chat.stopBrowser}
             onRegenerate={chat.regenerate}
             onEditMessage={chat.editMessage}

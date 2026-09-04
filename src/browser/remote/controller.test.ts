@@ -21,6 +21,7 @@ const page = {
   async waitForSelector(s: string) { this.calls.push(`wait:${s}`); },
   async innerText(s: string) { this.calls.push(`text:${s}`); return 'page text'; },
   on(event: string, handler: () => void) { if (event === 'framenavigated') this.navHandlers.push(handler); },
+  async close() { this.closed = true; },
   isClosed() { return this.closed; },
 };
 
@@ -50,7 +51,11 @@ function fakeProvider(liveViewUrl?: string) {
 const ctx = (runId: string, actorId: string, signal?: AbortSignal) =>
   ({ sessionId: runId, actorId, ...(signal ? { signal } : {}) });
 
+/** Restored per test: several tests swap a method, and `page` is shared. */
+const pristineClick = page.click;
+
 beforeEach(() => {
+  page.click = pristineClick;
   page.closed = false;
   page.currentUrl = 'https://start.test/';
   page.calls = [];
@@ -183,6 +188,73 @@ describe('stopping and ending a run', () => {
   });
 });
 
+describe('Stop reaches an action already under way', () => {
+  it('does not let a pending click land after Stop', async () => {
+    // The dangerous case, and the reason racing alone is not enough:
+    // Playwright's click is deliberately patient — it waits for the element to
+    // become actionable and THEN clicks. Abandoning the promise would leave
+    // that running, so the click would still happen on a run the user believed
+    // they had halted. The page is closed instead, which makes it fail.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#warmup' }, ctx('run-A', 'w1'));
+
+    let landed = false;
+    // Restored by beforeEach. Leaving it in place made every later test wait
+    // five seconds on a click and time out — the fake page is module-level.
+    page.click = async () => { await new Promise((r) => setTimeout(r, 5_000)); landed = true; };
+
+    const pending = c.controller({ kind: 'click', selector: '#submit' }, ctx('run-A', 'w1'));
+    await new Promise((r) => setTimeout(r, 20));
+    c.stopRun('run-A');
+
+    const out = await pending;
+    expect(out.ok).toBe(false);
+    expect(landed, 'the click must not complete after Stop').toBe(false);
+    expect(page.closed, 'the page is closed so the pending call cannot finish').toBe(true);
+  }, 10_000);
+});
+
+describe('a session that half-opened', () => {
+  it('is released rather than left running and billed', async () => {
+    // createSession succeeded, so the provider allocated a browser. If the CDP
+    // connection then fails, nothing holds a reference to release it.
+    const { provider, created, ended } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    const { chromium } = await import('playwright') as unknown as { chromium: { connectOverCDP: unknown } };
+    const original = chromium.connectOverCDP;
+    (chromium as { connectOverCDP: unknown }).connectOverCDP = async () => { throw new Error('cdp refused'); };
+
+    try {
+      const out = await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+      expect(out.ok).toBe(false);
+      expect(created).toEqual(['sess-1']);
+      expect(ended, 'the allocated session is handed back').toEqual(['sess-1']);
+    } finally {
+      (chromium as { connectOverCDP: unknown }).connectOverCDP = original;
+    }
+  });
+
+  it('withdraws the live view it already announced', async () => {
+    // The URL was emitted the moment the session existed. Leaving it showing
+    // points the user at a browser that will never be driven.
+    const { provider } = fakeProvider('https://provider.test/live/abc');
+    const seen: Array<string | undefined> = [];
+    const c = new RemoteBrowserController({ provider });
+    c.onLiveViewFor('run-A', (info) => seen.push(info.liveViewUrl));
+    const { chromium } = await import('playwright') as unknown as { chromium: { connectOverCDP: unknown } };
+    const original = chromium.connectOverCDP;
+    (chromium as { connectOverCDP: unknown }).connectOverCDP = async () => { throw new Error('cdp refused'); };
+
+    try {
+      await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+      expect(seen).toEqual(['https://provider.test/live/abc', undefined]);
+    } finally {
+      (chromium as { connectOverCDP: unknown }).connectOverCDP = original;
+    }
+  });
+});
+
 describe('the session pool', () => {
   it('refuses a second run when only one session is allowed', async () => {
     // Every session is billed, so the default is one and raising it is a
@@ -243,8 +315,8 @@ describe('one controller, several runs', () => {
 
     const seenA: Array<string | undefined> = [];
     const seenB: Array<string | undefined> = [];
-    c.onLiveViewFor('run-A', (u) => seenA.push(u));
-    c.onLiveViewFor('run-B', (u) => seenB.push(u));
+    c.onLiveViewFor('run-A', (info) => seenA.push(info.liveViewUrl));
+    c.onLiveViewFor('run-B', (info) => seenB.push(info.liveViewUrl));
 
     await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
 
@@ -256,11 +328,41 @@ describe('one controller, several runs', () => {
     const { provider } = fakeProvider('https://provider.test/live/abc');
     const c = new RemoteBrowserController({ provider });
     const seen: Array<string | undefined> = [];
-    c.onLiveViewFor('run-A', (u) => seen.push(u));
+    c.onLiveViewFor('run-A', (info) => seen.push(info.liveViewUrl));
     c.offLiveViewFor('run-A');
 
     await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
     expect(seen).toEqual([]);
+  });
+});
+
+describe('attached is not the same as watchable', () => {
+  it('reports a browser as active even when it cannot be streamed', async () => {
+    // A bare CDP endpoint offers no view. The listener has to learn that a
+    // browser EXISTS anyway, or the UI drops the Stop control along with the
+    // picture — leaving the agent driving something the user can neither see
+    // nor halt.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    const seen: Array<{ active: boolean; liveViewUrl?: string }> = [];
+    c.onLiveViewFor('run-A', (info) => seen.push(info));
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    expect(seen[0]).toEqual({ active: true });
+  });
+
+  it('reports it inactive once the run is finished with it', async () => {
+    // Same absent URL, opposite meaning. Only `active` tells them apart.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    const seen: Array<{ active: boolean; liveViewUrl?: string }> = [];
+    c.onLiveViewFor('run-A', (info) => seen.push(info));
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await c.endRun('run-A');
+
+    expect(seen.at(-1)).toEqual({ active: false });
   });
 });
 

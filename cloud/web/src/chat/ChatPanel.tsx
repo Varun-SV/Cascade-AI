@@ -44,6 +44,8 @@ interface Props {
   activity: ActivityNode[];
   /** Where the agent's browser can be watched, while it has one. */
   browserLiveView?: string | undefined;
+  /** A browser is attached, whether or not the provider can stream it. */
+  browserActive?: boolean;
   /** Withdraw the browser from the run, without stopping the run itself. */
   onStopBrowser?: () => void;
 }
@@ -52,7 +54,7 @@ export default function ChatPanel({
   messages, busy, error, status, hasProviders, skills, skillId, onSkillChange, onSend, onStop, onRegenerate,
   onEditMessage, onDeleteMessage, onSelectSibling,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange, uiMode, approval,
-  compactionNotice, providerNotice, knowledgeNotice, activity, browserLiveView, onStopBrowser,
+  compactionNotice, providerNotice, knowledgeNotice, activity, browserLiveView, browserActive, onStopBrowser,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [activityOpen, setActivityOpen] = useState(false);
@@ -193,7 +195,7 @@ export default function ChatPanel({
           messages would take the Stop control off screen exactly when the user
           wanted it. */}
       <div className="mx-4 sm:mx-6">
-        <BrowserLiveView liveViewUrl={browserLiveView} onStop={() => onStopBrowser?.()} />
+        <BrowserLiveView active={browserActive === true} liveViewUrl={browserLiveView} onStop={() => onStopBrowser?.()} />
       </div>
 
       {!hasProviders && (

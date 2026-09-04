@@ -15,14 +15,24 @@
 //  It arrives over the socket, lives in component state, and goes nowhere else.
 
 interface Props {
-  /** The provider's live session URL, or undefined when there is no browser. */
+  /**
+   * Whether a browser is attached to this run at all.
+   *
+   * Separate from `liveViewUrl` on purpose. A bare CDP endpoint has no session
+   * API to ask a view from, so it streams nothing — and keying the panel on the
+   * URL meant that configuration got no Stop button either. The agent was
+   * driving a browser with neither of the two things that make the capability
+   * safe: you could not see it, and you could not halt it.
+   */
+  active: boolean;
+  /** The provider's live session URL, absent when it cannot be streamed. */
   liveViewUrl: string | undefined;
   /** Stop the agent using the browser for this run. */
   onStop: () => void;
 }
 
-export function BrowserLiveView({ liveViewUrl, onStop }: Props) {
-  if (!liveViewUrl) return null;
+export function BrowserLiveView({ active, liveViewUrl, onStop }: Props) {
+  if (!active) return null;
 
   return (
     <section
@@ -45,7 +55,9 @@ export function BrowserLiveView({ liveViewUrl, onStop }: Props) {
           style={{ width: 7, height: 7, borderRadius: '50%', background: 'currentColor', flexShrink: 0 }}
         />
         <span style={{ flex: 1 }}>
-          Cascade is using a browser. You can take over in this window.
+          {liveViewUrl
+            ? 'Cascade is using a browser. You can take over in this window.'
+            : 'Cascade is using a browser. This provider cannot stream it, so you cannot watch or take over — only stop it.'}
         </span>
         <button
           type="button"
@@ -71,11 +83,16 @@ export function BrowserLiveView({ liveViewUrl, onStop }: Props) {
         content the operator explicitly configured, which is the trust decision
         that was already made when they supplied the endpoint.
       */}
-      <iframe
-        src={liveViewUrl}
-        title="Agent browser session"
-        style={{ width: '100%', height: 600, border: 'none', display: 'block' }}
-      />
+      {/* Only when there is something to show. An empty frame reads as broken;
+          the banner above says plainly that this configuration cannot be
+          watched, which is the honest version of the same information. */}
+      {liveViewUrl && (
+        <iframe
+          src={liveViewUrl}
+          title="Agent browser session"
+          style={{ width: '100%', height: 600, border: 'none', display: 'block' }}
+        />
+      )}
     </section>
   );
 }

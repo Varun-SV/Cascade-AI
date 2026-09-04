@@ -309,6 +309,8 @@ export function useChatSession(
    * the conversation would turn a live credential into a durable one.
    */
   const [browserLiveView, setBrowserLiveView] = useState<string | undefined>(undefined);
+  /** A browser is attached to this run, whether or not it can be streamed. */
+  const [browserActive, setBrowserActive] = useState(false);
 
   /**
    * Stop the agent using the browser, without stopping the run.
@@ -319,8 +321,9 @@ export function useChatSession(
    * nothing is one people press repeatedly and then distrust.
    */
   const stopBrowser = useCallback(() => {
-    socket?.emit('browser:stop', {});
+    socket?.emit('browser:stop', { conversationId: conversationIdRef.current });
     setBrowserLiveView(undefined);
+    setBrowserActive(false);
   }, [socket]);
   const [status, setStatus] = useState<string | null>(null);
   const [lastTokens, setLastTokens] = useState<number>(0);
@@ -491,8 +494,17 @@ export function useChatSession(
     // session), so it is never persisted with the conversation and never
     // written to a log. An absent url means the run finished with it, or the
     // provider offers no live view at all.
-    const onLiveView = (e: { conversationId?: string; liveViewUrl?: string }) => {
+    const onLiveView = (e: { conversationId?: string; liveViewUrl?: string; active?: boolean }) => {
+      // Filtered by conversation. One socket carries several runs, and this
+      // wrote every run's URL into one state — so switching conversations left
+      // another run's bearer-capability URL rendered, and a late `undefined`
+      // from the run you left cleared the view of the one you were on.
+      if (e?.conversationId && e.conversationId !== conversationIdRef.current) return;
       setBrowserLiveView(e?.liveViewUrl);
+      // `active` says a browser exists even when it cannot be streamed, so Stop
+      // survives a provider with no live view — and goes away when the run is
+      // actually done with the browser. The URL alone cannot distinguish those.
+      setBrowserActive(e?.active === true);
     };
     socket.on('browser:live-view', onLiveView);
     socket.on('stream:token', onToken);
@@ -982,6 +994,6 @@ export function useChatSession(
     routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, approval,
     escalation, escalationQueued: escalations.length, resolveEscalation, clearEscalation,
     contextApproval, resolveContextApproval, compactionNotice, providerNotice, knowledgeNotice, activity,
-    browserLiveView, stopBrowser,
+    browserLiveView, browserActive, stopBrowser,
   };
 }
