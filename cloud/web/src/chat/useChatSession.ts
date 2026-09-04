@@ -628,6 +628,19 @@ export function useChatSession(
       if (!requestId) return;
       setToolApprovals((q) => (q.some((a) => a.requestId === requestId) ? q : [...q, { ...e, requestId }]));
     };
+    /**
+     * The server is no longer waiting on this question.
+     *
+     * Sent when the run's approval window closes: the SDK's escalator times the
+     * decision out, denies it, and lets the run continue — while this side, with
+     * nothing to tell it, kept the prompt on screen for the rest of the run.
+     * Clicking it then resolved a waiter the SDK had already given up on, so
+     * the button did nothing and said nothing.
+     */
+    const onPermissionResolved = (e: { requestId?: string }) => {
+      if (!e?.requestId) return;
+      setToolApprovals((q) => q.filter((a) => a.requestId !== e.requestId));
+    };
     const onEscalation = (e: EscalationRequest) => setEscalations((prev) => {
       const incoming = { ...e, receivedAt: Date.now() };
       // Re-delivery of one already queued (a reconnect replay) updates in place
@@ -724,6 +737,7 @@ export function useChatSession(
     socket.on('run:why', onWhy);
     socket.on('plan:approval-required', onPlan);
     socket.on('permission:user-required', onPermissionRequired);
+    socket.on('permission:resolved', onPermissionResolved);
     socket.on('escalation:decision-required', onEscalation);
     socket.on('escalation:timeout', onEscalationTimeout);
     socket.on('disconnect', onDisconnect);
@@ -738,6 +752,7 @@ export function useChatSession(
       socket.off('run:why', onWhy);
       socket.off('plan:approval-required', onPlan);
       socket.off('permission:user-required', onPermissionRequired);
+      socket.off('permission:resolved', onPermissionResolved);
       socket.off('escalation:decision-required', onEscalation);
       socket.off('escalation:timeout', onEscalationTimeout);
       socket.off('disconnect', onDisconnect);

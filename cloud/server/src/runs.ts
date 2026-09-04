@@ -344,6 +344,57 @@ export interface RunControls {
   };
 }
 
+/**
+ * Ask the user, and stop asking when the answer can no longer matter.
+ *
+ * Time-boxed to the SDK's own approval window, because the SDK does not wait
+ * for this promise. `PermissionEscalator.waitForUserDecision` runs its own
+ * timer and, when it fires, DELETES the pending decision and resolves the tool
+ * call as denied — the run carries on. This side knew nothing about that, so it
+ * stayed parked for the rest of the run: the client kept offering Allow/Deny
+ * for a request the SDK had already refused, and clicking it resolved a promise
+ * whose `escalator.resolveUserDecision` was by then a no-op. A control that
+ * silently does nothing is worse than no control.
+ *
+ * The escalator's timer is the authority. This one exists only to take the
+ * prompt down, which is why it fires slightly earlier and emits
+ * `permission:resolved` — the client has no other way to learn that the
+ * question expired.
+ *
+ * Exported so this is tested rather than a copy of it.
+ */
+export function parkApproval(
+  pending: Map<string, (d: { approved: boolean; always: boolean }) => void>,
+  opts: {
+    conversationId: string;
+    windowMs: number;
+    emit: (event: string, payload: Record<string, unknown>) => void;
+  },
+  request: ApprovalRequest,
+): Promise<{ approved: boolean; always: boolean }> {
+  return new Promise<{ approved: boolean; always: boolean }>((resolve) => {
+    const timer = setTimeout(() => {
+      // Only if nothing has answered it — `delete` returning false means the
+      // decision path already took it.
+      if (!pending.delete(request.id)) return;
+      resolve({ approved: false, always: false });
+      opts.emit('permission:resolved', {
+        conversationId: opts.conversationId,
+        requestId: request.id,
+        reason: 'timeout',
+      });
+    }, opts.windowMs);
+    // Never hold the process open for a prompt nobody is going to answer.
+    timer.unref?.();
+
+    pending.set(request.id, (d) => {
+      clearTimeout(timer);
+      resolve(d);
+    });
+    opts.emit('permission:user-required', { conversationId: opts.conversationId, ...request });
+  });
+}
+
 /** What the client sends when the user answers a dangerous-tool prompt. */
 export interface PermissionDecision {
   conversationId?: string;
@@ -1247,6 +1298,11 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // one socket can carry several runs, and an unkeyed answer resolves whichever
   // request happened to be first.
   const pendingApprovals = new Map<string, (d: { approved: boolean; always: boolean }) => void>();
+  // The same window the SDK's escalator uses, read from the same config so the
+  // two cannot drift. Shaved slightly so this side gives up FIRST: the prompt
+  // comes down just before the SDK stops accepting an answer, rather than just
+  // after. Mirrors cascade.ts, which defaults it identically.
+  const approvalWindowMs = Math.max(1_000, (config.approvalTimeoutMs ?? 600_000) - 250);
   const onPermissionDecision = (d: PermissionDecision) =>
     applyPermissionDecision(pendingApprovals, conversation.id, d);
   if (interactive) socket.on('permission:decide', onPermissionDecision);
@@ -1257,14 +1313,11 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     // dangerous capability to exactly the runs that cannot supervise it, so it
     // is refused rather than granted by default.
     if (!interactive) return { approved: false, always: false };
-
-    return await new Promise<{ approved: boolean; always: boolean }>((resolve) => {
-      pendingApprovals.set(request.id, resolve);
-      socket.emit('permission:user-required', {
-        conversationId: conversation.id,
-        ...request,
-      });
-    });
+    return await parkApproval(pendingApprovals, {
+      conversationId: conversation.id,
+      windowMs: approvalWindowMs,
+      emit: (event, payload) => socket.emit(event, payload),
+    }, request);
   };
 
   cascade.on('stream:token', onToken);

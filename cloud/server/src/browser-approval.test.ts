@@ -17,7 +17,7 @@
 //  there would hand the capability to exactly the runs that cannot supervise it.
 
 import { describe, it, expect, vi } from 'vitest';
-import { applyPermissionDecision, type PermissionDecision } from './runs.js';
+import { applyPermissionDecision, parkApproval, type PermissionDecision } from './runs.js';
 
 /**
  * The approval shape runs.ts builds.
@@ -31,6 +31,8 @@ function makeApprovalCallback(opts: {
   interactive: boolean;
   conversationId: string;
   emit: (event: string, payload: Record<string, unknown>) => void;
+  /** The approval window; defaults to the SDK's own. */
+  windowMs?: number;
 }) {
   const pending = new Map<string, (d: { approved: boolean; always: boolean }) => void>();
 
@@ -39,10 +41,11 @@ function makeApprovalCallback(opts: {
 
   const callback = async (request: { id: string }) => {
     if (!opts.interactive) return { approved: false, always: false };
-    return await new Promise<{ approved: boolean; always: boolean }>((resolve) => {
-      pending.set(request.id, resolve);
-      opts.emit('permission:user-required', { conversationId: opts.conversationId, ...request });
-    });
+    return await parkApproval(
+      pending,
+      { conversationId: opts.conversationId, windowMs: opts.windowMs ?? 600_000, emit: opts.emit },
+      request as never,
+    );
   };
 
   return { callback, onDecision, pending };
@@ -144,5 +147,75 @@ describe('a decision that does not name its conversation', () => {
     // And the right answer still gets through.
     expect(onDecision({ conversationId: 'c1', requestId: 'req-1', approved: true })).toBe(true);
     await expect(decided).resolves.toEqual({ approved: true, always: false });
+  });
+});
+
+// The SDK does not wait for this promise. `PermissionEscalator` runs its own
+// timer (covered in src/core/permissions/escalator.test.ts: it denies, clears
+// the pending decision, and the run carries on), so a cloud waiter with no
+// matching timeout kept offering a choice the SDK had already made.
+describe('the approval window closing while the run continues', () => {
+  it('gives up on its own, rather than parking for the rest of the run', async () => {
+    vi.useFakeTimers();
+    try {
+      const emit = vi.fn();
+      const { callback, pending } = makeApprovalCallback({
+        interactive: true, conversationId: 'c1', emit, windowMs: 60_000,
+      });
+      const decided = callback({ id: 'req-1' });
+      await Promise.resolve();
+      expect(pending.size).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(60_001);
+
+      // Denied, never approved — the safe direction, and the same one the SDK
+      // took a moment later.
+      await expect(decided).resolves.toEqual({ approved: false, always: false });
+      expect(pending.size, 'and nothing is left parked').toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('tells the client, which has no other way to know', async () => {
+    // Without this the prompt stays on screen for the rest of the run and its
+    // buttons do nothing: the cloud waiter is gone and the escalator's is too.
+    vi.useFakeTimers();
+    try {
+      const emit = vi.fn();
+      const { callback } = makeApprovalCallback({
+        interactive: true, conversationId: 'c1', emit, windowMs: 60_000,
+      });
+      void callback({ id: 'req-1' });
+      await vi.advanceTimersByTimeAsync(60_001);
+
+      expect(emit).toHaveBeenCalledWith('permission:resolved', {
+        conversationId: 'c1', requestId: 'req-1', reason: 'timeout',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('an answer inside the window still wins, and cancels the timer', async () => {
+    vi.useFakeTimers();
+    try {
+      const emit = vi.fn();
+      const { callback, onDecision } = makeApprovalCallback({
+        interactive: true, conversationId: 'c1', emit, windowMs: 60_000,
+      });
+      const decided = callback({ id: 'req-1' });
+      await Promise.resolve();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      onDecision({ conversationId: 'c1', requestId: 'req-1', approved: true, always: true });
+      await expect(decided).resolves.toEqual({ approved: true, always: true });
+
+      // The window passing must not then contradict the user.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(emit).not.toHaveBeenCalledWith('permission:resolved', expect.anything());
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

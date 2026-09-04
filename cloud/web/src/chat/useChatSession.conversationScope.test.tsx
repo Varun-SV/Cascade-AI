@@ -358,6 +358,34 @@ describe('useChatSession — approvals outliving their run', () => {
     expect(view.result.current.toolApprovals).toEqual([]);
   });
 
+  it('takes the prompt down when the server says the window closed', () => {
+    // The run is still going — this is not the terminal path. The SDK's
+    // escalator has timed the decision out and denied it, so the buttons would
+    // resolve a waiter that no longer exists on either side.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+    act(() => { void view.result.current.send({ prompt: 'open the page' }); });
+
+    act(() => {
+      fake.fire('permission:user-required', {
+        conversationId: 'conv-new', requestId: 'req-1', toolName: 'browser_control',
+      });
+      fake.fire('permission:user-required', {
+        conversationId: 'conv-new', requestId: 'req-2', toolName: 'browser_control',
+      });
+    });
+    expect(view.result.current.toolApprovals).toHaveLength(2);
+
+    act(() => {
+      fake.fire('permission:resolved', {
+        conversationId: 'conv-new', requestId: 'req-1', reason: 'timeout',
+      });
+    });
+
+    // Only the one that expired. The other is still live.
+    expect(view.result.current.toolApprovals.map((a) => a.requestId)).toEqual(['req-2']);
+  });
+
   it('leaves another conversation\'s live question alone', async () => {
     const fake = fakeSocket();
     const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
