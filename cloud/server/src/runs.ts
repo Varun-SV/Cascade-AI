@@ -344,6 +344,44 @@ export interface RunControls {
   };
 }
 
+/** What the client sends when the user answers a dangerous-tool prompt. */
+export interface PermissionDecision {
+  conversationId?: string;
+  requestId?: string;
+  approved?: boolean;
+  always?: boolean;
+}
+
+/**
+ * Settle one parked approval, if the decision is genuinely for this run.
+ *
+ * Exported so the test exercises THIS, rather than a copy of it living in the
+ * test file — which is how the conversation check below went un-covered while
+ * looking covered.
+ *
+ * The conversation id must be present AND equal. Treating an absent one as
+ * "matches anything" meant a decision that named no conversation resolved
+ * purely by request id, so a client answering from a chat it had navigated to
+ * could settle a dangerous call belonging to a run in a different one. The
+ * client sends the id the request itself carried, so a missing id is not a case
+ * worth being lenient about.
+ *
+ * @returns whether a waiter was resolved — for the caller's tests, not control flow.
+ */
+export function applyPermissionDecision(
+  pending: Map<string, (d: { approved: boolean; always: boolean }) => void>,
+  conversationId: string,
+  d: PermissionDecision,
+): boolean {
+  if (d?.conversationId !== conversationId) return false;
+  if (!d?.requestId) return false;
+  const resolve = pending.get(d.requestId);
+  if (!resolve) return false;
+  pending.delete(d.requestId);
+  resolve({ approved: d.approved === true, always: d.always === true });
+  return true;
+}
+
 // Maps the UI's routing mode to Cascade Auto's bias. Cascade Auto stays ON for
 // all three (per-task model selection); the bias tunes the quality↔cost knob.
 const BIAS_BY_MODE: Record<string, 'balanced' | 'quality' | 'cost'> = {
@@ -1209,14 +1247,8 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // one socket can carry several runs, and an unkeyed answer resolves whichever
   // request happened to be first.
   const pendingApprovals = new Map<string, (d: { approved: boolean; always: boolean }) => void>();
-  const onPermissionDecision = (d: { conversationId?: string; requestId?: string; approved?: boolean; always?: boolean }) => {
-    if (d?.conversationId && d.conversationId !== conversation.id) return;
-    if (!d?.requestId) return;
-    const resolve = pendingApprovals.get(d.requestId);
-    if (!resolve) return;
-    pendingApprovals.delete(d.requestId);
-    resolve({ approved: d.approved === true, always: d.always === true });
-  };
+  const onPermissionDecision = (d: PermissionDecision) =>
+    applyPermissionDecision(pendingApprovals, conversation.id, d);
   if (interactive) socket.on('permission:decide', onPermissionDecision);
 
   const approvalCallback = async (request: ApprovalRequest): Promise<{ approved: boolean; always: boolean }> => {

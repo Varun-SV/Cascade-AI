@@ -17,8 +17,16 @@
 //  there would hand the capability to exactly the runs that cannot supervise it.
 
 import { describe, it, expect, vi } from 'vitest';
+import { applyPermissionDecision, type PermissionDecision } from './runs.js';
 
-/** The approval shape runs.ts builds, isolated so it can be exercised. */
+/**
+ * The approval shape runs.ts builds.
+ *
+ * The DECISION half is imported rather than restated. It used to be copied in
+ * here, which meant the conversation check was tested in effigy: tightening the
+ * real one changed nothing this file could see, and loosening it would have
+ * broken nothing either.
+ */
 function makeApprovalCallback(opts: {
   interactive: boolean;
   conversationId: string;
@@ -26,14 +34,8 @@ function makeApprovalCallback(opts: {
 }) {
   const pending = new Map<string, (d: { approved: boolean; always: boolean }) => void>();
 
-  const onDecision = (d: { conversationId?: string; requestId?: string; approved?: boolean; always?: boolean }) => {
-    if (d?.conversationId && d.conversationId !== opts.conversationId) return;
-    if (!d?.requestId) return;
-    const resolve = pending.get(d.requestId);
-    if (!resolve) return;
-    pending.delete(d.requestId);
-    resolve({ approved: d.approved === true, always: d.always === true });
-  };
+  const onDecision = (d: PermissionDecision) =>
+    applyPermissionDecision(pending, opts.conversationId, d);
 
   const callback = async (request: { id: string }) => {
     if (!opts.interactive) return { approved: false, always: false };
@@ -119,5 +121,28 @@ describe('one socket, several runs', () => {
 
     onDecision({ conversationId: 'c1', requestId: 'some-other-request', approved: true });
     expect(pending.has('req-1'), 'the real request is still waiting').toBe(true);
+  });
+});
+
+describe('a decision that does not name its conversation', () => {
+  it('settles nothing', async () => {
+    // One socket carries several conversations, and this is the answer to a
+    // question about a DANGEROUS action. An id-less decision used to be matched
+    // by request id alone, so a client that had navigated elsewhere — a blank
+    // New Chat has no conversation id at all — could approve a browser click in
+    // a run it was no longer looking at.
+    const { callback, onDecision, pending } = makeApprovalCallback({
+      interactive: true, conversationId: 'c1', emit: vi.fn(),
+    });
+    const decided = callback({ id: 'req-1' });
+    await Promise.resolve();
+
+    expect(onDecision({ requestId: 'req-1', approved: true }), 'no conversation named').toBe(false);
+    expect(onDecision({ conversationId: undefined, requestId: 'req-1', approved: true })).toBe(false);
+    expect(pending.has('req-1'), 'the run is still waiting for a real answer').toBe(true);
+
+    // And the right answer still gets through.
+    expect(onDecision({ conversationId: 'c1', requestId: 'req-1', approved: true })).toBe(true);
+    await expect(decided).resolves.toEqual({ approved: true, always: false });
   });
 });

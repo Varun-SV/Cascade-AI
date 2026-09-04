@@ -14,8 +14,11 @@ vi.mock('../lib/api.js', () => ({
 function fakeSocket() {
   const handlers = new Map<string, Set<(...args: unknown[]) => void>>();
   const sent: Array<{ event: string; payload: unknown }> = [];
+  const runAcks: Array<(a: unknown) => void> = [];
   return {
     sent,
+    /** Settle the in-flight run the way the server's `chat:run` ack does. */
+    ackRun(conversationId: string) { runAcks.shift()?.({ conversationId, output: 'done' }); },
     fire(event: string, payload?: unknown) {
       for (const h of [...(handlers.get(event) ?? [])]) h(payload);
     },
@@ -31,7 +34,11 @@ function fakeSocket() {
         handlers.get(event)?.delete(listener);
         return this;
       },
-      emit(event: string, payload: unknown) { sent.push({ event, payload }); return this; },
+      emit(event: string, payload: unknown, ack?: (a: unknown) => void) {
+        sent.push({ event, payload });
+        if (event === 'chat:run' && ack) runAcks.push(ack);
+        return this;
+      },
     } as unknown as Socket,
   };
 }
@@ -52,6 +59,11 @@ describe('useChatSession — conversation-scoped gates on a brand-new chat', () 
     const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
     expect(view.result.current.conversationId).toBeUndefined();
 
+    // A genuine first turn: this pane started the run, so it is the pane
+    // entitled to adopt the id the server made for it. The fake never acks, so
+    // the run stays in flight — which is the state under test.
+    act(() => { void view.result.current.send({ prompt: 'open the page' }); });
+
     act(() => {
       fake.fire('permission:user-required', {
         conversationId: 'conv-created-by-the-server',
@@ -67,6 +79,7 @@ describe('useChatSession — conversation-scoped gates on a brand-new chat', () 
   it('shows the live view for a run whose id this chat has not learned yet', () => {
     const fake = fakeSocket();
     const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+    act(() => { void view.result.current.send({ prompt: 'open the page' }); });
 
     act(() => {
       fake.fire('browser:live-view', {
@@ -211,6 +224,7 @@ describe('useChatSession — switching conversations mid-run', () => {
     // the server could not match it to the waiting run.
     const fake = fakeSocket();
     const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+    act(() => { void view.result.current.send({ prompt: 'open the page' }); });
 
     act(() => {
       fake.fire('permission:user-required', {
@@ -223,5 +237,143 @@ describe('useChatSession — switching conversations mid-run', () => {
       { event: 'permission:decide', payload: { conversationId: 'conv-new', requestId: 'req-1', approved: true, always: false } },
     ]);
     expect(view.result.current.toolApprovals).toEqual([]);
+  });
+});
+
+// New Chat is not "every conversation" — it is a pane with no conversation at
+// all. The distinction matters because the thing being scoped is consent to a
+// dangerous action.
+describe('useChatSession — a blank New Chat pane', () => {
+  it('does not offer another conversation\'s dangerous-tool prompt', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('permission:user-required', {
+        conversationId: 'conv-a', requestId: 'req-a',
+        toolName: 'browser_control', args: { action: 'click', selector: '#confirm-purchase' },
+      });
+    });
+    expect(view.result.current.toolApprovals.map((a) => a.requestId)).toEqual(['req-a']);
+
+    // App.newChat() does exactly this.
+    act(() => { view.result.current.setConversationId(undefined); });
+
+    // Showing it here would let someone approve a click in a run they are no
+    // longer looking at, from a chat that has nothing to do with it.
+    expect(view.result.current.toolApprovals).toEqual([]);
+  });
+
+  it('does not let a run left behind adopt the blank pane', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => { view.result.current.setConversationId(undefined); });
+    // A's run is still going and still emitting.
+    act(() => {
+      fake.fire('browser:live-view', {
+        conversationId: 'conv-a', taskId: 'task-a', liveViewUrl: 'https://viewer.example/a', active: true,
+      });
+      fake.fire('permission:user-required', {
+        conversationId: 'conv-a', requestId: 'req-late', toolName: 'browser_control',
+      });
+    });
+
+    // Adopting `conv-a` here would drag the whole run — its live view, its
+    // Stop, its prompts — into the empty chat the user just opened.
+    expect(view.result.current.browserActive).toBe(false);
+    expect(view.result.current.browserLiveView).toBeUndefined();
+    expect(view.result.current.toolApprovals).toEqual([]);
+  });
+
+  it('answers with the conversation the request came from, never the pane\'s', () => {
+    // The pane must be showing something ELSE when the answer is sent, or the
+    // two candidate ids are equal and the assertion cannot tell them apart —
+    // which is what the first version of this test did, and it passed against
+    // the bug. A click handler captured before a conversation switch and run
+    // after it is the reachable version of this.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('permission:user-required', {
+        conversationId: 'conv-a', requestId: 'req-a', toolName: 'browser_control',
+      });
+    });
+    const deny = view.result.current.resolveToolApproval;
+    act(() => { view.result.current.setConversationId('conv-b'); });
+    act(() => { deny('req-a', false); });
+
+    // `conv-b` here would deny A's browser click by naming a conversation that
+    // has nothing to do with it — and the server, which used to accept a
+    // decision whose id was merely absent, would resolve it by request id.
+    expect(fake.sent.filter((m) => m.event === 'permission:decide')).toEqual([
+      { event: 'permission:decide', payload: { conversationId: 'conv-a', requestId: 'req-a', approved: false, always: false } },
+    ]);
+  });
+
+  it('sends nothing for a request that is no longer queued', () => {
+    // A second click on a prompt already answered, or one pruned by its run
+    // ending. Emitting again would name a conversation from the pane rather
+    // than from the request, which is the bug this pair is about.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('permission:user-required', {
+        conversationId: 'conv-a', requestId: 'req-a', toolName: 'browser_control',
+      });
+    });
+    act(() => { view.result.current.resolveToolApproval('req-a', true); });
+    act(() => { view.result.current.resolveToolApproval('req-a', true); });
+
+    expect(fake.sent.filter((m) => m.event === 'permission:decide')).toHaveLength(1);
+  });
+});
+
+// The server denies every approval still parked when a run ends and clears its
+// map in a `finally`, and it sends nothing to say so. Anything this side kept
+// would be a prompt with no waiter behind it.
+describe('useChatSession — approvals outliving their run', () => {
+  it('drops a question nobody is waiting on once the run has settled', async () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+    act(() => { void view.result.current.send({ prompt: 'open the page' }); });
+
+    act(() => {
+      fake.fire('permission:user-required', {
+        conversationId: 'conv-new', requestId: 'req-1', toolName: 'browser_control',
+      });
+    });
+    expect(view.result.current.toolApprovals).toHaveLength(1);
+
+    // The run ends — timed out, errored, or simply finished while the request
+    // was being torn down.
+    await act(async () => { fake.ackRun('conv-new'); });
+
+    expect(view.result.current.toolApprovals).toEqual([]);
+    // And it does not come back when the user revisits that conversation.
+    act(() => { view.result.current.setConversationId(undefined); });
+    act(() => { view.result.current.setConversationId('conv-new'); });
+    expect(view.result.current.toolApprovals).toEqual([]);
+  });
+
+  it('leaves another conversation\'s live question alone', async () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+    act(() => { void view.result.current.send({ prompt: 'open the page' }); });
+
+    act(() => {
+      fake.fire('permission:user-required', {
+        conversationId: 'conv-new', requestId: 'req-1', toolName: 'browser_control',
+      });
+      fake.fire('permission:user-required', {
+        conversationId: 'conv-other', requestId: 'req-2', toolName: 'browser_control',
+      });
+    });
+    await act(async () => { fake.ackRun('conv-new'); });
+
+    act(() => { view.result.current.setConversationId('conv-other'); });
+    expect(view.result.current.toolApprovals.map((a) => a.requestId)).toEqual(['req-2']);
   });
 });

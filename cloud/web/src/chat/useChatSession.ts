@@ -332,11 +332,22 @@ export function useChatSession(
    * re-run everything keyed on it mid-stream. This is routing only.
    */
   const pendingConversationIdRef = useRef<string | undefined>(undefined);
-  /** The conversation this pane's events belong to — known, or adopted above. */
+  /**
+   * This pane started a run before it had a conversation id, and is still
+   * waiting to be told which one the server made.
+   *
+   * Adoption is gated on it. Without the gate any late event could name this
+   * pane's conversation: press New Chat while a run is going and the run you
+   * walked away from re-adopts itself into the blank pane, bringing its browser
+   * panel and its dangerous-tool prompts with it.
+   */
+  const awaitingFirstTurnRef = useRef(false);
+  /** The conversation this pane's events belong to — known, or adopted below. */
   const activeConversationId = (): string | undefined =>
     conversationIdRef.current ?? pendingConversationIdRef.current;
   /** Learn the id the server minted for the run this pane just started. */
   const adoptConversationId = (convo: unknown): void => {
+    if (!awaitingFirstTurnRef.current) return;
     if (conversationIdRef.current || pendingConversationIdRef.current) return;
     if (typeof convo === 'string' && convo) pendingConversationIdRef.current = convo;
   };
@@ -394,15 +405,25 @@ export function useChatSession(
    * answer it invites a second, contradictory answer.
    */
   const resolveToolApproval = useCallback((requestId: string, approved: boolean, always = false) => {
-    socket?.emit('permission:decide', {
-      // The adopted id when this pane's first turn has not been acked yet —
-      // otherwise a first-turn answer names no conversation at all.
-      conversationId: activeConversationId(),
-      requestId,
-      approved,
-      always,
+    setToolApprovals((q) => {
+      const answered = q.find((a) => a.requestId === requestId);
+      // Nothing queued under that id — a double click, or a prompt already
+      // pruned by its run ending. Emitting anyway would name a conversation
+      // this pane merely happens to be showing.
+      if (!answered) return q;
+      socket?.emit('permission:decide', {
+        // The conversation the REQUEST came from, not the one on screen. The
+        // pane's own id is undefined in a blank New Chat, and the server's
+        // decision handler only rejects a conversation id that is present and
+        // wrong — so an absent one resolved by request id alone, letting a
+        // decision made in one chat settle a dangerous call in another.
+        conversationId: answered.conversationId,
+        requestId,
+        approved,
+        always,
+      });
+      return q.filter((a) => a.requestId !== requestId);
     });
-    setToolApprovals((q) => q.filter((a) => a.requestId !== requestId));
   }, [socket]);
 
   const stopBrowser = useCallback(() => {
@@ -446,9 +467,18 @@ export function useChatSession(
    * nothing, with no way for the user to unblock it.
    */
   const currentConversation = activeConversationId();
-  const toolApprovals = allToolApprovals.filter(
-    (a) => !a.conversationId || !currentConversation || a.conversationId === currentConversation,
-  );
+  /**
+   * An EXACT origin match. An unknown id is not a wildcard.
+   *
+   * The first version read "show it when either side is unknown", which made a
+   * blank pane match everything: `App.newChat()` sets the conversation to
+   * undefined, so conversation A's pending `browser_control` prompt appeared in
+   * the new empty chat and could be approved by someone who was no longer
+   * looking at the run asking. That is precisely the consent scoping this is
+   * for, so undefined now matches only undefined — and adoption above is what
+   * gives a genuine first turn a real id to match on.
+   */
+  const toolApprovals = allToolApprovals.filter((a) => a.conversationId === currentConversation);
 
   /**
    * Open a different conversation in this pane.
@@ -464,8 +494,32 @@ export function useChatSession(
    */
   const selectConversation = useCallback((id: string | undefined) => {
     pendingConversationIdRef.current = undefined;
+    // Whatever this pane was waiting to be told, it is not waiting for it here
+    // any more. Leaving the window open let a run the user navigated away from
+    // adopt the pane they navigated to.
+    awaitingFirstTurnRef.current = false;
     conversationIdRef.current = id;
     setConversationId(id);
+  }, []);
+
+  /**
+   * A run is over, so nothing is still waiting on its questions.
+   *
+   * The server resolves every remaining approval callback `false` and clears
+   * its map in the run's `finally`, and sends nothing to say so. Without a
+   * matching removal here a prompt survives its own run — it reappears when
+   * the user comes back to that conversation, and clicking it answers a waiter
+   * that no longer exists, which reads as a control that silently does nothing.
+   *
+   * Approvals only. The browser panel has its own authoritative ending in
+   * `browser:live-view` with `active: false`, which is scoped to the task
+   * rather than the conversation and so is the more precise of the two.
+   */
+  const settleConversation = useCallback((cid?: string) => {
+    if (!cid) return;
+    setToolApprovals((q) => (q.some((a) => a.conversationId === cid)
+      ? q.filter((a) => a.conversationId !== cid)
+      : q));
   }, []);
   // A QUEUE, not one slot. The SDK keys parked escalations by requestId
   // precisely because a Complex wave dispatches sections concurrently, so two
@@ -500,6 +554,7 @@ export function useChatSession(
 
   useEffect(() => {
     pendingConversationIdRef.current = undefined;
+    awaitingFirstTurnRef.current = false;
     setConversationId(initialConversationId);
   }, [initialConversationId]);
 
@@ -748,10 +803,12 @@ export function useChatSession(
     const target = cid ?? activeConversationId();
     if (!target) return;
     pendingConversationIdRef.current = undefined;
+    awaitingFirstTurnRef.current = false;
     conversationIdRef.current = target;
     setConversationId(target);
+    settleConversation(target);
     void reloadActivePath(target);
-  }, [reloadActivePath]);
+  }, [reloadActivePath, settleConversation]);
 
   // A reconnect re-reads the transcript, and settles what the lost ack cannot.
   //
@@ -863,6 +920,11 @@ export function useChatSession(
       // be said. See lib/limits.ts.
       const tooLarge = promptTooLargeError(text);
       if (tooLarge) { setError(tooLarge); return; }
+      // This run is about to start without a conversation id, so the server
+      // will make one and this pane may adopt it from the first event that
+      // carries it. Armed only here: adoption is a thing this pane does for a
+      // run it started, never something an arriving event can do to it.
+      awaitingFirstTurnRef.current = !conversationIdRef.current;
       setBusy(true);
       setError(null);
       setStatus('Sizing up the task…');
@@ -970,7 +1032,11 @@ export function useChatSession(
           }
           // The id is real now, so the adopted one has done its job.
           pendingConversationIdRef.current = undefined;
+          awaitingFirstTurnRef.current = false;
           setConversationId(ack.conversationId);
+          // The run is finished; the server has already denied anything still
+          // parked on it.
+          settleConversation(ack.conversationId);
           const why = pendingWhyRef.current;
           pendingWhyRef.current = null;
           setMessages((prev) => {
