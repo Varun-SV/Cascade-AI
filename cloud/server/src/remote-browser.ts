@@ -19,6 +19,7 @@
 //      one conversation holds many runs — and using the wrong one meant
 //      cleanup matched nothing, which cost a review round on the desktop.
 
+import { createHash } from 'node:crypto';
 import {
   RemoteBrowserController,
   GenericCdpProvider,
@@ -50,6 +51,8 @@ interface AttachOptions {
 
 /** Attached browser, or null when the deployment has no provider configured. */
 export interface AttachedBrowser {
+  /** The run this browser belongs to, once the run has announced itself. */
+  readonly taskId: string | null;
   /** Release the run's session. Keyed by the Cascade task id. */
   endRun(): Promise<void>;
   /** The user pressed Stop. */
@@ -71,9 +74,27 @@ export interface AttachedBrowser {
  */
 let shared: { key: string; controller: RemoteBrowserController } | null = null;
 
+/**
+ * Distinguishes one credential from another without being one.
+ *
+ * `apiKey ? 'keyed' : 'anon'` collapsed every key to the same value, so
+ * rotating a Steel key from A to B produced an identical config key and the
+ * shared provider went on using A until something else changed or the process
+ * restarted — on a rotation that the settings payload explicitly supports,
+ * which usually means the old key is being revoked.
+ *
+ * A hash rather than the key itself: this lives in a module-scoped object that
+ * a stack trace or heap dump could surface, and a fingerprint distinguishes
+ * just as well as the secret does.
+ */
+function credentialFingerprint(apiKey: string | undefined): string {
+  if (!apiKey) return 'anon';
+  return createHash('sha256').update(apiKey).digest('hex').slice(0, 16);
+}
+
 /** Identity of a provider configuration, so a change rebuilds rather than drifts. */
 function configKey(s: RemoteBrowserSettings): string {
-  return JSON.stringify([s.provider, s.url, s.apiKey ? 'keyed' : 'anon', s.maxSessions]);
+  return JSON.stringify([s.provider, s.url, credentialFingerprint(s.apiKey), s.maxSessions]);
 }
 
 /** For tests, and for a deployment whose settings changed under it. */
@@ -93,10 +114,6 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
   // run that throws is exactly the one whose session needs releasing, and a
   // result is not available on that path.
   let taskId: string | null = null;
-  opts.cascade.on('run:started', (e: unknown) => {
-    const id = (e as { taskId?: string }).taskId;
-    if (id) taskId = id;
-  });
 
   // Reused across runs. A settings change makes a new one and disposes the old
   // rather than leaving its sessions running at the operator's expense.
@@ -116,20 +133,37 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
   }
   const controller = shared.controller;
 
-  // Per-run, not per-controller: the controller is shared, so a live view must
-  // reach only the socket whose run it belongs to.
-  controller.onLiveViewFor(opts.conversationId, ({ active, liveViewUrl }) => {
-    // To this socket only. See the file header.
-    opts.emit('browser:live-view', {
-      conversationId: opts.conversationId,
-      // `interactive` and `showControls` are what make the embedded view a
-      // control rather than a video: the user can take the page over and
-      // navigate, which is the whole point of watching.
-      liveViewUrl: liveViewUrl ? withViewerControls(liveViewUrl) : undefined,
-      // Stated rather than implied by an absent URL. Attached-but-unwatchable
-      // and not-attached-at-all both have no URL, and the UI must tell them
-      // apart: the first still needs a Stop control, the second needs no panel.
-      active,
+  // Bound to the TASK id, and only once the run announces it.
+  //
+  // Registering under the conversation id was a silent no-op: the controller
+  // looks listeners up by `BrowserActionContext.sessionId`, which T3Worker sets
+  // to `this.taskId`. Those identities are deliberately different — one
+  // conversation holds many runs — so the announcement went to a key nothing
+  // was listening on and no live view ever reached the client. Same mismatch as
+  // the run-end bug on the desktop, reintroduced one layer up.
+  //
+  // The conversation id stays, but only as routing: it says WHICH socket and
+  // which chat pane. The task id is the control identity.
+  opts.cascade.on('run:started', (e: unknown) => {
+    const id = (e as { taskId?: string }).taskId;
+    if (!id) return;
+    taskId = id;
+    controller.onLiveViewFor(id, ({ active, liveViewUrl }) => {
+      // To this socket only. See the file header.
+      opts.emit('browser:live-view', {
+        conversationId: opts.conversationId,
+        // Echoed back by Stop, so a control action names the run it controls
+        // rather than a chat that may hold several.
+        taskId: id,
+        // `interactive` and `showControls` are what make the embedded view a
+        // control rather than a video: the user can take the page over and
+        // navigate, which is the whole point of watching.
+        liveViewUrl: liveViewUrl ? withViewerControls(liveViewUrl) : undefined,
+        // Stated rather than implied by an absent URL. Attached-but-unwatchable
+        // and not-attached-at-all both have no URL, and the UI must tell them
+        // apart: the first still needs a Stop control, the second needs no panel.
+        active,
+      });
     });
   });
 
@@ -140,10 +174,13 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
   opts.cascade.setRemoteBrowserController(controller.controller, (actorId) => controller.actorEnded(actorId));
 
   return {
+    get taskId() { return taskId; },
     async endRun() {
       // Only this run's session. The controller outlives the run.
-      if (taskId) await controller.endRun(taskId);
-      controller.offLiveViewFor(opts.conversationId);
+      if (taskId) {
+        await controller.endRun(taskId);
+        controller.offLiveViewFor(taskId);
+      }
     },
     stop() {
       if (taskId) controller.stopRun(taskId);

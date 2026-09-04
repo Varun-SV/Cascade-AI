@@ -366,6 +366,75 @@ describe('attached is not the same as watchable', () => {
   });
 });
 
+describe('two runs starting at the same moment', () => {
+  it('cannot both allocate at a limit of one', async () => {
+    // The sequential pool tests could never catch this: the cap was checked,
+    // then four awaits ran (loadPlaywright, createSession, connectOverCDP, page
+    // creation), and only then did the run enter the map. Two first-use calls
+    // starting together both saw an empty map and both allocated — two billed
+    // Steel sessions at maxSessions: 1, or two runs on one CDP page.
+    //
+    // The barrier is the point: createSession blocks until BOTH calls have
+    // reached it, which is exactly the interleaving a sequential test cannot
+    // produce.
+    // Time-limited on purpose. A barrier that WAITS for two arrivals
+    // deadlocks once the fix works, because the second call is now refused
+    // before it ever reaches the provider — the first version of this test hung
+    // for exactly that reason. Racing a short delay keeps it a barrier when
+    // both arrive (the buggy shape) without requiring that they do.
+    let reached = 0;
+    let release!: () => void;
+    const bothArrived = new Promise<void>((r) => { release = r; });
+    const barrier = () => Promise.race([bothArrived, new Promise((r) => setTimeout(r, 50))]);
+
+    const created: string[] = [];
+    const provider = {
+      name: 'barrier',
+      isolatesSessions: true,
+      async createSession() {
+        created.push(`sess-${created.length + 1}`);
+        if (++reached === 2) release();
+        await barrier();
+        return { id: `sess-${created.length}`, cdpUrl: 'ws://fake/cdp' };
+      },
+      async endSession() {},
+    };
+
+    const c = new RemoteBrowserController({ provider, maxSessions: 1 });
+    const [a, b] = await Promise.all([
+      c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1')),
+      c.controller({ kind: 'click', selector: '#b' }, ctx('run-B', 'w2')),
+    ]);
+
+    // One succeeds, one is refused — and crucially only ONE session was ever
+    // allocated, so the refusal happened before the provider was called.
+    expect([a.ok, b.ok].filter(Boolean), 'exactly one run gets the browser').toHaveLength(1);
+    expect(created, 'the loser must not have allocated a session').toHaveLength(1);
+  }, 10_000);
+
+  it('frees the reservation when opening fails', async () => {
+    // A reservation that leaked would count against the cap forever and wedge
+    // the deployment after a single transient provider error.
+    let attempt = 0;
+    const provider = {
+      name: 'flaky',
+      isolatesSessions: true,
+      async createSession() {
+        if (++attempt === 1) throw new Error('provider hiccup');
+        return { id: 'sess-2', cdpUrl: 'ws://fake/cdp' };
+      },
+      async endSession() {},
+    };
+
+    const c = new RemoteBrowserController({ provider, maxSessions: 1 });
+    const first = await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    expect(first.ok).toBe(false);
+
+    const second = await c.controller({ kind: 'click', selector: '#b' }, ctx('run-B', 'w2'));
+    expect(second.ok, 'the slot was given back').toBe(true);
+  });
+});
+
 describe('the live view', () => {
   it('is handed to the owner as soon as the session exists', async () => {
     // Before the first action rather than after, or the user watches the

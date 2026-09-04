@@ -1043,10 +1043,14 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // The kill switch, alongside the live view that makes it meaningful. Scoped
   // to this run and removed with the run's other listeners below: a Stop is
   // something the user does to the run they are watching, not to the process.
-  const onBrowserStop = (d: { conversationId?: string }) => {
-    // One socket, several runs. An unkeyed Stop reached every listener on the
-    // socket, so stopping the run being watched also stopped the others.
-    if (d?.conversationId && d.conversationId !== conversation.id) return;
+  const onBrowserStop = (d: { taskId?: string }) => {
+    // An EXACT task-id match, not a conversation match, and not an optional
+    // one. Conversation scoping was still too coarse — two runs on the same
+    // chat (two tabs, a retry) both matched — and treating a missing id as
+    // "matches everything" meant a stale or malformed `{}` stopped every run on
+    // the socket. The client learns this id from browser:live-view.
+    const mine = remoteBrowser?.taskId;
+    if (!mine || d?.taskId !== mine) return;
     remoteBrowser?.stop();
   };
   socket.on('browser:stop', onBrowserStop);

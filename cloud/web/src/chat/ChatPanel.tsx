@@ -11,6 +11,8 @@ import type { ActivityNode, ChatMessage, ForceTier, PlanApproval, RoutingMode, S
 import type { Skill } from '../lib/types.js';
 import type { UiMode } from '../lib/prefs.js';
 import { BrowserLiveView } from './BrowserLiveView.js';
+import { ToolApprovalPrompt } from './ToolApprovalPrompt.js';
+import type { ToolApproval } from './useChatSession.js';
 
 interface Props {
   messages: ChatMessage[];
@@ -46,6 +48,9 @@ interface Props {
   browserLiveView?: string | undefined;
   /** A browser is attached, whether or not the provider can stream it. */
   browserActive?: boolean;
+  /** Dangerous tool calls waiting on the user. */
+  toolApprovals?: ToolApproval[];
+  onDecideToolApproval?: (requestId: string, approved: boolean, always?: boolean) => void;
   /** Withdraw the browser from the run, without stopping the run itself. */
   onStopBrowser?: () => void;
 }
@@ -54,7 +59,7 @@ export default function ChatPanel({
   messages, busy, error, status, hasProviders, skills, skillId, onSkillChange, onSend, onStop, onRegenerate,
   onEditMessage, onDeleteMessage, onSelectSibling,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange, uiMode, approval,
-  compactionNotice, providerNotice, knowledgeNotice, activity, browserLiveView, browserActive, onStopBrowser,
+  compactionNotice, providerNotice, knowledgeNotice, activity, browserLiveView, browserActive, onStopBrowser, toolApprovals, onDecideToolApproval,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [activityOpen, setActivityOpen] = useState(false);
@@ -194,6 +199,15 @@ export default function ChatPanel({
           as long as the run holds it, and a panel that scrolled away with the
           messages would take the Stop control off screen exactly when the user
           wanted it. */}
+      {/* Above the browser panel: the run is BLOCKED on this, so it is the
+          most urgent thing on screen. */}
+      <div className="mx-4 sm:mx-6">
+        <ToolApprovalPrompt
+          approvals={toolApprovals ?? []}
+          onDecide={(id, ok, always) => onDecideToolApproval?.(id, ok, always)}
+        />
+      </div>
+
       <div className="mx-4 sm:mx-6">
         <BrowserLiveView active={browserActive === true} liveViewUrl={browserLiveView} onStop={() => onStopBrowser?.()} />
       </div>

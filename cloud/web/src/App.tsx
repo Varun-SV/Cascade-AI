@@ -303,6 +303,8 @@ export default function App() {
             onStop={chat.stop}
             browserLiveView={chat.browserLiveView}
             browserActive={chat.browserActive}
+            toolApprovals={chat.toolApprovals}
+            onDecideToolApproval={chat.resolveToolApproval}
             onStopBrowser={chat.stopBrowser}
             onRegenerate={chat.regenerate}
             onEditMessage={chat.editMessage}

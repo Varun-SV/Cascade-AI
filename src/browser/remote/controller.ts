@@ -113,6 +113,13 @@ export class RemoteBrowserController {
   private onLiveViewAll: ((runId: string, liveViewUrl: string | undefined) => void) | undefined;
 
   private runs = new Map<string, RunBrowser>();
+  /**
+   * Runs that have a pool slot but no browser yet.
+   *
+   * Counted alongside `runs` against the cap. Without it the limit was a
+   * check-then-act across four awaits, and simultaneous first uses both won.
+   */
+  private opening = new Set<string>();
   /** Runs the user has stopped, by run id — same meaning as on the desktop. */
   private revoked = new Set<string>();
   /**
@@ -199,18 +206,34 @@ export class RemoteBrowserController {
     // Reaches an action already under way. Without this, Stop only prevented
     // the NEXT action while the current one — possibly mid-click — continued.
     const held = this.runs.get(runId);
-    held?.abort.abort();
-    void held?.page.close().catch(() => {});
+    if (!held) return;
+    held.abort.abort();
+    // Released NOW, not when the Cascade run eventually ends. Browser Stop
+    // deliberately lets the rest of the run continue, so the session would
+    // otherwise stay allocated and billed for all of it — while the user has
+    // just been told the browser is no longer in use. `revoked` keeps refusing
+    // further actions, so giving the session back costs nothing.
+    this.runs.delete(runId);
+    void this.disposeRun(runId, held);
   }
 
   /** A run ended: release its browser rather than pay for an idle session. */
   async endRun(runId: string): Promise<void> {
     this.leases.get(runId)?.dropRun(runId);
-    this.leases.delete(runId);
     const held = this.runs.get(runId);
-    if (!held) return;
+    if (!held) { this.forgetRun(runId); return; }
     this.runs.delete(runId);
     await this.disposeRun(runId, held);
+    this.forgetRun(runId);
+  }
+
+  /** Forget a finished run entirely, so nothing accumulates per run. */
+  private forgetRun(runId: string): void {
+    // The controller now outlives every run on the deployment, so a set that
+    // only ever grew would collect one UUID per stopped run for the life of the
+    // process. The run is over; there is nothing left to refuse.
+    this.revoked.delete(runId);
+    this.leases.delete(runId);
   }
 
   /**
@@ -305,13 +328,34 @@ export class RemoteBrowserController {
       await this.disposeRun(runId, existing);
     }
 
-    if (this.runs.size >= this.maxSessions) {
+    // Counted WITH the open runs, and taken before the first await.
+    //
+    // The check used to sit above a run of awaits — loadPlaywright,
+    // createSession, connectOverCDP, page creation — with the run only entering
+    // `runs` at the very end. Two first-use calls starting together therefore
+    // both saw an empty map, both passed a limit of one, and both allocated. On
+    // Steel that is two billed sessions against maxSessions: 1; on a bare CDP
+    // endpoint it defeats the non-isolating cap and puts two runs back on one
+    // page. A reservation closes the window because it is taken synchronously.
+    if (this.runs.size + this.opening.size >= this.maxSessions) {
       throw new Error(
         `All ${this.maxSessions} browser session${this.maxSessions === 1 ? '' : 's'} are in use by other runs. ` +
         'Try again when one finishes, or raise the session limit in settings.',
       );
     }
+    this.opening.add(runId);
 
+    try {
+      return await this.openReserved(runId, signal);
+    } finally {
+      // Released on every path. A reservation that leaked would count against
+      // the cap forever and wedge the deployment.
+      this.opening.delete(runId);
+    }
+  }
+
+  /** The part that may fail, with the pool slot already reserved. */
+  private async openReserved(runId: string, signal?: AbortSignal): Promise<RunBrowser> {
     const playwright = await loadPlaywright();
     const session = await this.provider.createSession(signal);
     // Handed to the owner as soon as it exists, so the user can watch from the

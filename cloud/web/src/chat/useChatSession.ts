@@ -263,6 +263,23 @@ function escalationKey(e: { requestId?: string; sectionId?: string }): string {
   return e.requestId ?? `section:${e.sectionId ?? ''}`;
 }
 
+/**
+ * A dangerous tool asking permission, from the run to the person watching.
+ *
+ * The server has waited on this since the approval gate went in; nothing on
+ * the client listened, so every request sat until the SDK's timeout and was
+ * denied. A capability that is gated on an answer nobody can give is not gated,
+ * it is broken — and it silently changed the behaviour of every other dangerous
+ * cloud tool from "denied at once" to "denied in ten minutes".
+ */
+export interface ToolApproval {
+  requestId: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  description?: string;
+  isDangerous?: boolean;
+}
+
 export interface PlanApproval {
   taskId?: string;
   summary?: string;
@@ -311,6 +328,17 @@ export function useChatSession(
   const [browserLiveView, setBrowserLiveView] = useState<string | undefined>(undefined);
   /** A browser is attached to this run, whether or not it can be streamed. */
   const [browserActive, setBrowserActive] = useState(false);
+  /**
+   * The run that owns the browser.
+   *
+   * Stop names this rather than the conversation: one chat can hold several
+   * runs, and a conversation-scoped Stop halted all of them.
+   */
+  const [browserTaskId, setBrowserTaskId] = useState<string | undefined>(undefined);
+  // Read by stopBrowser, which is declared before this state and must not close
+  // over a stale value when the run changes under it.
+  const browserTaskIdRef = useRef<string | undefined>(undefined);
+  browserTaskIdRef.current = browserTaskId;
 
   /**
    * Stop the agent using the browser, without stopping the run.
@@ -320,10 +348,32 @@ export function useChatSession(
    * waiting for the server to confirm — a kill switch that looks like it did
    * nothing is one people press repeatedly and then distrust.
    */
+  /**
+   * Answer one pending request.
+   *
+   * Removed from the queue immediately rather than on a server acknowledgement:
+   * the run is blocked waiting, and a prompt that stays on screen after you
+   * answer it invites a second, contradictory answer.
+   */
+  const resolveToolApproval = useCallback((requestId: string, approved: boolean, always = false) => {
+    socket?.emit('permission:decide', {
+      conversationId: conversationIdRef.current,
+      requestId,
+      approved,
+      always,
+    });
+    setToolApprovals((q) => q.filter((a) => a.requestId !== requestId));
+  }, [socket]);
+
   const stopBrowser = useCallback(() => {
-    socket?.emit('browser:stop', { conversationId: conversationIdRef.current });
+    // The task id, which the server requires to match exactly. Without it the
+    // Stop is ignored — which is the correct failure: better a button that does
+    // nothing than one that stops somebody else's run.
+    if (!browserTaskIdRef.current) return;
+    socket?.emit('browser:stop', { taskId: browserTaskIdRef.current });
     setBrowserLiveView(undefined);
     setBrowserActive(false);
+    setBrowserTaskId(undefined);
   }, [socket]);
   const [status, setStatus] = useState<string | null>(null);
   const [lastTokens, setLastTokens] = useState<number>(0);
@@ -338,6 +388,13 @@ export function useChatSession(
   // The boardroom plan for the in-flight run, if Cascade produced one. Shown
   // read-only; cleared when the next run starts or the current one settles.
   const [approval, setApproval] = useState<PlanApproval | null>(null);
+  /**
+   * Pending tool approvals, oldest first.
+   *
+   * A queue rather than one slot: a run can have several workers asking at
+   * once, and holding only the newest would strand the others until timeout.
+   */
+  const [toolApprovals, setToolApprovals] = useState<ToolApproval[]>([]);
   // A QUEUE, not one slot. The SDK keys parked escalations by requestId
   // precisely because a Complex wave dispatches sections concurrently, so two
   // can be waiting at once — storing one here threw the first away, and
@@ -425,6 +482,14 @@ export function useChatSession(
     };
     const onWhy = (r: WhyReport) => { pendingWhyRef.current = r; };
     const onPlan = (e: PlanApproval) => setApproval(e);
+    const onPermissionRequired = (e: ToolApproval & { conversationId?: string; id?: string }) => {
+      // Same conversation filter as every other gate on this socket.
+      if (e?.conversationId && e.conversationId !== conversationIdRef.current) return;
+      // The SDK calls it `id`; keep one name on this side.
+      const requestId = e.requestId ?? e.id;
+      if (!requestId) return;
+      setToolApprovals((q) => (q.some((a) => a.requestId === requestId) ? q : [...q, { ...e, requestId }]));
+    };
     const onEscalation = (e: EscalationRequest) => setEscalations((prev) => {
       const incoming = { ...e, receivedAt: Date.now() };
       // Re-delivery of one already queued (a reconnect replay) updates in place
@@ -494,7 +559,7 @@ export function useChatSession(
     // session), so it is never persisted with the conversation and never
     // written to a log. An absent url means the run finished with it, or the
     // provider offers no live view at all.
-    const onLiveView = (e: { conversationId?: string; liveViewUrl?: string; active?: boolean }) => {
+    const onLiveView = (e: { conversationId?: string; taskId?: string; liveViewUrl?: string; active?: boolean }) => {
       // Filtered by conversation. One socket carries several runs, and this
       // wrote every run's URL into one state — so switching conversations left
       // another run's bearer-capability URL rendered, and a late `undefined`
@@ -505,12 +570,14 @@ export function useChatSession(
       // survives a provider with no live view — and goes away when the run is
       // actually done with the browser. The URL alone cannot distinguish those.
       setBrowserActive(e?.active === true);
+      setBrowserTaskId(e?.active === true ? e?.taskId : undefined);
     };
     socket.on('browser:live-view', onLiveView);
     socket.on('stream:token', onToken);
     socket.on('tier:status', onStatus);
     socket.on('run:why', onWhy);
     socket.on('plan:approval-required', onPlan);
+    socket.on('permission:user-required', onPermissionRequired);
     socket.on('escalation:decision-required', onEscalation);
     socket.on('escalation:timeout', onEscalationTimeout);
     socket.on('disconnect', onDisconnect);
@@ -524,6 +591,7 @@ export function useChatSession(
       socket.off('tier:status', onStatus);
       socket.off('run:why', onWhy);
       socket.off('plan:approval-required', onPlan);
+      socket.off('permission:user-required', onPermissionRequired);
       socket.off('escalation:decision-required', onEscalation);
       socket.off('escalation:timeout', onEscalationTimeout);
       socket.off('disconnect', onDisconnect);
@@ -994,6 +1062,7 @@ export function useChatSession(
     routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, approval,
     escalation, escalationQueued: escalations.length, resolveEscalation, clearEscalation,
     contextApproval, resolveContextApproval, compactionNotice, providerNotice, knowledgeNotice, activity,
-    browserLiveView, browserActive, stopBrowser,
+    browserLiveView, browserActive, browserTaskId, stopBrowser,
+    toolApprovals, resolveToolApproval,
   };
 }
