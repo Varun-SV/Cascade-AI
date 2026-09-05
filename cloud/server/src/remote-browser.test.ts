@@ -174,11 +174,18 @@ describe('the session pool is the deployment\'s, not one run\'s', () => {
     const a = realCascade(cdp.tools.remoteBrowser);
     const b = realCascade(cdp.tools.remoteBrowser);
 
+    // The counter, not just "both attaches returned something" — that was true
+    // whether the controller was shared or rebuilt per run, so the test passed
+    // against the exact bug it names. One build across two attaches is the
+    // property; two would mean each run got its own empty session map and the
+    // cap counted to one and stopped.
+    const before = sharedBrowserGeneration();
     const first = attachRemoteBrowser({ cascade: a.cascade, config: a.config, conversationId: 'c1', emit });
     const second = attachRemoteBrowser({ cascade: b.cascade, config: b.config, conversationId: 'c2', emit });
 
     expect(first).not.toBeNull();
     expect(second).not.toBeNull();
+    expect(sharedBrowserGeneration(), 'one controller, built once, for both runs').toBe(before + 1);
     // Both cascades got a working tool; what they share is the browser behind it.
     expect(a.cascade.getToolRegistry().hasTool('browser_control')).toBe(true);
     expect(b.cascade.getToolRegistry().hasTool('browser_control')).toBe(true);

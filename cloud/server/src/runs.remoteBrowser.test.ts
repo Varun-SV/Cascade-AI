@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { buildCloudConfig, parseChatRunPayload, runChatTurn } from './runs.js';
+import { buildCloudConfig, parseChatRunPayload, remoteBrowserControls, runChatTurn } from './runs.js';
 import { CloudStore } from './db.js';
 import { loadEnv } from './env.js';
 import { sharedBrowserGeneration, resetSharedBrowser } from './remote-browser.js';
@@ -67,15 +67,11 @@ describe('the operator configures a browser for their deployment', () => {
       REMOTE_BROWSER_MAX_SESSIONS: '3',
     });
 
-    // The same mapping the run path performs, asserted on the config that
-    // `attachRemoteBrowser` and `setRemoteBrowserController` both read.
-    const config = buildCloudConfig([], env.MAX_COST_PER_RUN_USD, {
-      remoteBrowser: {
-        provider: env.REMOTE_BROWSER_PROVIDER,
-        url: env.REMOTE_BROWSER_URL,
-        maxSessions: env.REMOTE_BROWSER_MAX_SESSIONS,
-      },
-    });
+    // THE mapping the run path performs, not a restatement of it. Rebuilding
+    // the controls object here was the bug in this test: dropping `apiKey` or
+    // `maxSessions` from the real mapping would have changed nothing it could
+    // see, because it never called the real mapping at all.
+    const config = buildCloudConfig([], env.MAX_COST_PER_RUN_USD, remoteBrowserControls(env));
 
     expect(config.tools?.remoteBrowser).toEqual({
       provider: 'cdp',
@@ -89,9 +85,7 @@ describe('the operator configures a browser for their deployment', () => {
     const env = loadEnv(baseEnv(dir));
     expect(env.REMOTE_BROWSER_PROVIDER).toBeUndefined();
 
-    const config = buildCloudConfig([], env.MAX_COST_PER_RUN_USD, {
-      ...(env.REMOTE_BROWSER_PROVIDER ? { remoteBrowser: { provider: env.REMOTE_BROWSER_PROVIDER } } : {}),
-    });
+    const config = buildCloudConfig([], env.MAX_COST_PER_RUN_USD, remoteBrowserControls(env));
 
     // Not "present but disabled" — absent. `setRemoteBrowserController` gates on
     // the field, so the tool is never registered and the model never sees it.
@@ -165,5 +159,42 @@ describe('the operator configures a browser for their deployment', () => {
 
     expect((payload as Record<string, unknown>).remoteBrowser).toBeUndefined();
     expect((payload as Record<string, unknown>).tools).toBeUndefined();
+  });
+});
+
+// Every field, not just the two the end-to-end test happens to exercise. That
+// one asserts a controller was built, which is true as soon as provider+url
+// arrive — so a dropped `apiKey` or `maxSessions` line would sail past it.
+describe('every REMOTE_BROWSER_* value reaches the run config', () => {
+  it('carries the credential and the session cap, not only the endpoint', () => {
+    const env = loadEnv({
+      ...baseEnv('/tmp'),
+      REMOTE_BROWSER_PROVIDER: 'steel',
+      REMOTE_BROWSER_URL: 'https://api.steel.example',
+      REMOTE_BROWSER_API_KEY: 'sk-operator-key',
+      REMOTE_BROWSER_MAX_SESSIONS: '4',
+    });
+
+    expect(buildCloudConfig([], 1, remoteBrowserControls(env)).tools?.remoteBrowser).toEqual({
+      provider: 'steel',
+      url: 'https://api.steel.example',
+      apiKey: 'sk-operator-key',
+      maxSessions: 4,
+    });
+  });
+
+  it('omits what the operator did not set, rather than sending empty strings', () => {
+    // A blank `url` reaching a provider is worse than an absent one: the CDP
+    // adapter refuses an unparseable endpoint by name, while Steel would fall
+    // back to its default API base only if the field is genuinely missing.
+    const env = loadEnv({
+      ...baseEnv('/tmp'),
+      REMOTE_BROWSER_PROVIDER: 'steel',
+    });
+
+    expect(buildCloudConfig([], 1, remoteBrowserControls(env)).tools?.remoteBrowser).toEqual({
+      provider: 'steel',
+      maxSessions: 1,
+    });
   });
 });

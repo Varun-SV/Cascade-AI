@@ -17,7 +17,7 @@
 //  there would hand the capability to exactly the runs that cannot supervise it.
 
 import { describe, it, expect, vi } from 'vitest';
-import { applyPermissionDecision, parkApproval, type PermissionDecision } from './runs.js';
+import { applyPermissionDecision, buildApprovalCallback, type PermissionDecision } from './runs.js';
 
 /**
  * The approval shape runs.ts builds.
@@ -39,14 +39,18 @@ function makeApprovalCallback(opts: {
   const onDecision = (d: PermissionDecision) =>
     applyPermissionDecision(pending, opts.conversationId, d);
 
-  const callback = async (request: { id: string }) => {
-    if (!opts.interactive) return { approved: false, always: false };
-    return await parkApproval(
-      pending,
-      { conversationId: opts.conversationId, windowMs: opts.windowMs ?? 600_000, emit: opts.emit },
-      request as never,
-    );
-  };
+  // The whole callback is imported, gate included. It used to restate the
+  // `interactive` check here, which meant the one test asserting that an
+  // unwatched run is refused was only asserting that this file's own copy
+  // returned false — deleting or inverting the real gate would have changed
+  // nothing it could see, while every OpenAI-compatible/SSE request goes
+  // through that gate with no socket to watch the browser or press Stop.
+  const callback = buildApprovalCallback(pending, {
+    interactive: opts.interactive,
+    conversationId: opts.conversationId,
+    windowMs: opts.windowMs ?? 600_000,
+    emit: opts.emit,
+  }) as (request: { id: string }) => Promise<{ approved: boolean; always: boolean }>;
 
   return { callback, onDecision, pending };
 }
@@ -58,9 +62,18 @@ describe('a run nobody is watching', () => {
     const emit = vi.fn();
     const { callback } = makeApprovalCallback({ interactive: false, conversationId: 'c1', emit });
 
-    const decision = await callback({ id: 'req-1' });
+    // Raced, not plainly awaited. Without the gate the callback falls through
+    // to `parkApproval` and waits out the ten-minute approval window before
+    // denying — so a bare `await` turns "the gate is gone" into a suite timeout
+    // that says only that something hung. AT ONCE is the property: a caller
+    // with nobody watching must be refused now, not eventually.
+    const decision = await Promise.race([
+      callback({ id: 'req-1' }),
+      new Promise<'parked'>((r) => setTimeout(() => r('parked'), 100)),
+    ]);
 
-    expect(decision.approved).toBe(false);
+    expect(decision, 'refused immediately, not parked until a timeout')
+      .toEqual({ approved: false, always: false });
     expect(emit, 'and nobody is asked, because nobody is there').not.toHaveBeenCalled();
   });
 });

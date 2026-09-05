@@ -395,6 +395,63 @@ export function parkApproval(
   });
 }
 
+/**
+ * The deployment's browser, read from the operator's environment.
+ *
+ * From the environment and NOWHERE else. The value is a URL the SERVER opens a
+ * connection to, so taking it from a request body would hand every signed-in
+ * caller a fetch from inside the deployment's private network — the SSRF this
+ * whole design exists to avoid. There is deliberately no field for it on the
+ * run payload, and a test asserts the schema strips one if a caller sends it.
+ *
+ * A function rather than an inline spread at the call site, because a mapping
+ * that only exists inline can only be tested by restating it — and a test that
+ * restates the mapping cannot catch a field dropped from the real one.
+ *
+ * Returns an empty object when no provider is configured, so an untouched
+ * deployment carries no `remoteBrowser` key at all and the tool is never
+ * registered.
+ */
+export function remoteBrowserControls(env: CloudEnv): Pick<RunControls, 'remoteBrowser'> {
+  if (!env.REMOTE_BROWSER_PROVIDER) return {};
+  return {
+    remoteBrowser: {
+      provider: env.REMOTE_BROWSER_PROVIDER,
+      ...(env.REMOTE_BROWSER_URL ? { url: env.REMOTE_BROWSER_URL } : {}),
+      ...(env.REMOTE_BROWSER_API_KEY ? { apiKey: env.REMOTE_BROWSER_API_KEY } : {}),
+      maxSessions: env.REMOTE_BROWSER_MAX_SESSIONS,
+    },
+  };
+}
+
+/**
+ * Who may be asked to approve a dangerous tool, and how the asking is done.
+ *
+ * The `interactive` gate lives HERE rather than inline in the run, because a
+ * gate whose only test is a copy of itself is not tested at all. This one
+ * decides whether a caller with no human attached — the OpenAI-compatible/SSE
+ * path, which has no socket to render a live view and no way to press Stop —
+ * gets a dangerous capability. Refused, never auto-approved: that path is
+ * exactly the one that cannot supervise what it is being handed.
+ *
+ * Exported for the same reason `parkApproval` and `applyPermissionDecision`
+ * are: so the test exercises this and not a restatement of it.
+ */
+export function buildApprovalCallback(
+  pending: Map<string, (d: { approved: boolean; always: boolean }) => void>,
+  opts: {
+    interactive: boolean;
+    conversationId: string;
+    windowMs: number;
+    emit: (event: string, payload: Record<string, unknown>) => void;
+  },
+): (request: ApprovalRequest) => Promise<{ approved: boolean; always: boolean }> {
+  return async (request: ApprovalRequest) => {
+    if (!opts.interactive) return { approved: false, always: false };
+    return await parkApproval(pending, opts, request);
+  };
+}
+
 /** What the client sends when the user answers a dangerous-tool prompt. */
 export interface PermissionDecision {
   conversationId?: string;
@@ -1147,19 +1204,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     maxTokensPerRun: payload.maxTokensPerRun,
     mcpServers: mcpServers.length ? mcpServers : undefined,
     disabledTools: payload.fastAnswer ? [] : store.listDisabledMcpTools(userId),
-    // From the environment, NOT from `payload`. The operator configures one
-    // browser for their deployment; a caller-supplied endpoint would be an
-    // SSRF vector aimed at a connection the server opens.
-    ...(env.REMOTE_BROWSER_PROVIDER
-      ? {
-          remoteBrowser: {
-            provider: env.REMOTE_BROWSER_PROVIDER,
-            ...(env.REMOTE_BROWSER_URL ? { url: env.REMOTE_BROWSER_URL } : {}),
-            ...(env.REMOTE_BROWSER_API_KEY ? { apiKey: env.REMOTE_BROWSER_API_KEY } : {}),
-            maxSessions: env.REMOTE_BROWSER_MAX_SESSIONS,
-          },
-        }
-      : {}),
+    ...remoteBrowserControls(env),
   });
   const cascade: Cascade = createCascade(config, scratchDir);
 
@@ -1317,18 +1362,12 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   };
   if (interactive) socket.on('permission:decide', onPermissionDecision);
 
-  const approvalCallback = async (request: ApprovalRequest): Promise<{ approved: boolean; always: boolean }> => {
-    // A non-interactive caller (the OpenAI-compatible/SSE path) has nobody to
-    // ask, nobody watching, and no Stop. Auto-approving there would hand a
-    // dangerous capability to exactly the runs that cannot supervise it, so it
-    // is refused rather than granted by default.
-    if (!interactive) return { approved: false, always: false };
-    return await parkApproval(pendingApprovals, {
-      conversationId: conversation.id,
-      windowMs: approvalWindowMs,
-      emit: (event, payload) => socket.emit(event, payload),
-    }, request);
-  };
+  const approvalCallback = buildApprovalCallback(pendingApprovals, {
+    interactive,
+    conversationId: conversation.id,
+    windowMs: approvalWindowMs,
+    emit: (event, payload) => socket.emit(event, payload),
+  });
 
   cascade.on('stream:token', onToken);
   cascade.on('tier:status', onStatus);
