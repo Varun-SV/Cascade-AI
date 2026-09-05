@@ -45,6 +45,8 @@ type Page = {
   waitForSelector(selector: string, opts?: { timeout?: number }): Promise<unknown>;
   innerText(selector: string, opts?: { timeout?: number }): Promise<string>;
   on(event: string, handler: (...args: never[]) => void): void;
+  /** The page's own top-level frame; sub-frames are not it. See `generation`. */
+  mainFrame(): unknown;
   isClosed(): boolean;
   close(): Promise<void>;
 };
@@ -254,7 +256,15 @@ export class RemoteBrowserController {
 
   /** Release every run's session. For when the deployment's config changes. */
   async dispose(): Promise<void> {
-    await Promise.all([...this.runs.keys()].map((runId) => this.endRun(runId)));
+    // Runs still OPENING as well as runs already open. A run inside `open()`
+    // has no RunBrowser yet, so enumerating `runs` alone walked straight past
+    // it — and the caller for this is `attachRemoteBrowser` noticing the
+    // operator changed the provider settings, which is usually a credential
+    // rotation. Missing an in-flight open there means the session it is about
+    // to allocate is allocated with the credential being retired, on a
+    // controller nothing holds a reference to any more.
+    const ids = new Set([...this.runs.keys(), ...this.opening]);
+    await Promise.all([...ids].map((runId) => this.endRun(runId)));
   }
 
   /** A worker finished; it will never ask for the browser again. */
@@ -293,6 +303,12 @@ export class RemoteBrowserController {
   /** A run ended: release its browser rather than pay for an idle session. */
   async endRun(runId: string): Promise<void> {
     this.leases.get(runId)?.dropRun(runId);
+    // Aborted whether or not a browser exists yet — the same reason `stopRun`
+    // does it, and the same bug if it does not. A run still inside `open()`
+    // has a signal and no RunBrowser, so the `!held` branch below used to
+    // forget it and return while the open ran on to completion, unstoppable.
+    // It has to happen BEFORE `forgetRun`, which deletes the signal.
+    this.aborts.get(runId)?.abort();
     const held = this.runs.get(runId);
     if (!held) { this.forgetRun(runId); return; }
     this.runs.delete(runId);
@@ -309,6 +325,15 @@ export class RemoteBrowserController {
     this.revoked.delete(runId);
     this.leases.delete(runId);
     this.aborts.delete(runId);
+    // The live-view listener is per-run state of exactly the same kind, and it
+    // closes over the embedder's socket. The one caller today does call
+    // `offLiveViewFor` right after `endRun`, so nothing leaks — but the run is
+    // over here, the controller owns every other scrap of its state, and an
+    // embedder that forgot the second call (or threw between the two) would
+    // hold a socket closure per run for the life of the process. The final
+    // "browser gone" announcement has already gone out by now: `disposeRun`
+    // makes it, and teardown completes before this runs.
+    this.liveViewListeners.delete(runId);
   }
 
   /**
@@ -355,7 +380,17 @@ export class RemoteBrowserController {
   }
 
   private async act(action: BrowserAction, context: BrowserActionContext): Promise<BrowserActionOutcome> {
-    const runId = context.sessionId || 'unknown';
+    // Refused rather than defaulted. `sessionId` is a required string on the
+    // tool contract, so this should be unreachable — but the old `|| 'unknown'`
+    // chose the worst possible failure if it ever were reached: on a
+    // deployment-wide controller serving many tenants, every identity-less call
+    // would land in ONE bucket, sharing a lease, a RunBrowser and — on a
+    // non-isolating CDP endpoint — a single page, across users. Failing closed
+    // costs an action; failing open costs a tenant boundary.
+    const runId = context.sessionId;
+    if (!runId) {
+      return { ok: false, detail: 'This browser action arrived without a run identity, so it was not run.' };
+    }
     const actor = context.actorId || runId;
 
     if (this.revoked.has(runId)) {
@@ -549,9 +584,32 @@ export class RemoteBrowserController {
       const context = owned ?? browser.contexts()[0] ?? await browser.newContext();
       const page = owned ? await owned.newPage() : (context.pages()[0] ?? await context.newPage());
 
-      const abort = this.aborts.get(runId) ?? new AbortController();
+      // The controller `open()` registered for this run. If it is GONE, the
+      // run was ended or disposed while these awaits were running: `forgetRun`
+      // deletes it. Registering a RunBrowser now would attach a browser to a
+      // run nothing is tracking any more — no `endRun` will come for it, and
+      // the `?? new AbortController()` this used to fall back to made it
+      // unstoppable too, since a later `stopRun` looks the signal up in
+      // `aborts` and would find nothing. Roll back instead.
+      const abort = this.aborts.get(runId);
+      if (!abort) throw new Error('The run ended while its browser was still opening.');
       const held: RunBrowser = { session, browser, page, generation: 0, abort, ...(owned ? { ownedContext: owned } : {}) };
-      page.on('framenavigated', (() => { held.generation += 1; }) as never);
+      // MAIN frame only. Playwright emits `framenavigated` for every frame,
+      // sub-frames included, and this handler used to discard the frame it was
+      // given and count them all — while the field it bumps is documented, and
+      // used, as "the page the model is looking at has changed".
+      //
+      // The consequence was a refusal, not a wrong action, but a common one:
+      // an ad slot or an embedded chat widget re-navigating on its own timer is
+      // ordinary on exactly the sites this feature gets pointed at. Any action
+      // that waited — for the lease, or for a session Steel can take up to a
+      // minute to create — could come back to a bumped generation and be told
+      // "the page changed while this action was waiting", about a page that had
+      // not changed at all.
+      page.on('framenavigated', ((frame: unknown) => {
+        if (frame !== page.mainFrame()) return;
+        held.generation += 1;
+      }) as never);
       this.runs.set(runId, held);
       return held;
     } catch (err) {

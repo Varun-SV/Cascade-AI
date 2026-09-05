@@ -5,24 +5,38 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { RemoteBrowserProvider } from './provider.js';
 
+/** Frame identities the fake reports, so main and sub can be told apart. */
+const MAIN_FRAME = { id: 'main' };
+const SUB_FRAME = { id: 'iframe-ad-slot' };
+
 /** The fake page every test drives, and the record of what it was asked. */
 const page = {
   closed: false,
   currentUrl: 'https://start.test/',
-  navHandlers: [] as Array<() => void>,
+  navHandlers: [] as Array<(frame: unknown) => void>,
   calls: [] as string[],
   url() { return this.currentUrl; },
   async title() { return 'Title'; },
-  async goto(u: string) { this.calls.push(`goto:${u}`); this.currentUrl = u; this.navHandlers.forEach((h) => h()); },
+  async goto(u: string) {
+    this.calls.push(`goto:${u}`); this.currentUrl = u;
+    // Playwright reports the frame that moved. A real top-level navigation
+    // reports the main frame; see `navigateSubframe` for the other kind.
+    this.navHandlers.forEach((h) => h(MAIN_FRAME));
+  },
+  /** An ad slot or embedded widget re-navigating itself. Not the page. */
+  navigateSubframe() { this.navHandlers.forEach((h) => h(SUB_FRAME)); },
+  mainFrame() { return MAIN_FRAME; },
   async click(s: string) { this.calls.push(`click:${s}`); },
   async fill(s: string, v: string) { this.calls.push(`fill:${s}=${v}`); },
   async press(s: string, k: string) { this.calls.push(`press:${s}:${k}`); },
   keyboard: { press: async (k: string) => { page.calls.push(`key:${k}`); } },
   async waitForSelector(s: string) { this.calls.push(`wait:${s}`); },
   async innerText(s: string) { this.calls.push(`text:${s}`); return 'page text'; },
-  on(event: string, handler: () => void) { if (event === 'framenavigated') this.navHandlers.push(handler); },
-  async close() { this.closed = true; },
+  on(event: string, handler: (frame: unknown) => void) { if (event === 'framenavigated') this.navHandlers.push(handler); },
+  async close() { this.closed = true; this.closeCount += 1; },
   isClosed() { return this.closed; },
+  /** How many times anything asked to close this page. See the leak test. */
+  closeCount: 0,
 };
 
 /**
@@ -83,6 +97,7 @@ const pristineClick = page.click;
 beforeEach(() => {
   page.click = pristineClick;
   page.closed = false;
+  page.closeCount = 0;
   page.currentUrl = 'https://start.test/';
   page.calls = [];
   page.navHandlers = [];
@@ -315,8 +330,22 @@ describe('a normal completion does not close somebody else\'s page', () => {
     await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
     await c.controller({ kind: 'click', selector: '#b' }, ctx('run-A', 'w1'));
     await c.controller({ kind: 'click', selector: '#c' }, ctx('run-A', 'w1'));
+    expect(page.closeCount, 'no action closed the page while it was winning').toBe(0);
 
-    expect(page.closed, 'nothing is in flight, so nothing should be closed').toBe(false);
+    // The abort has to actually FIRE, or this proves nothing: the leaked
+    // listeners are armed on `held.abort.signal` and do nothing until something
+    // aborts it. Asserting `page.closed` after three quiet successes was
+    // vacuous — it was false whether or not a single listener was ever
+    // removed. `stopRun` is the production path that aborts.
+    c.stopRun('run-A');
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Counted, not booleaned. Three leaked listeners would each call
+    // `page.close()` here, and on a persistent CDP endpoint that page is the
+    // operator's — which is why GenericCdpProvider.endSession deliberately does
+    // nothing. Nothing was in flight when Stop landed, so nothing should have
+    // been closed at all.
+    expect(page.closeCount, 'a completed action must leave no listener to fire on abort').toBe(0);
   });
 });
 
@@ -800,5 +829,138 @@ describe('an open that fails after the run already owns something', () => {
 
     const next = await c.controller({ kind: 'click', selector: '#b' }, ctx('run-B', 'w2'));
     expect(next.ok, 'the slot came back').toBe(true);
+  });
+});
+
+// "The page changed while this action was waiting" has to mean the page, not
+// something inside it. Playwright emits `framenavigated` for EVERY frame, and
+// the handler that decides this used to count them all.
+describe('an iframe navigating is not the page changing', () => {
+  it('runs a queued action that only an ad slot moved under', async () => {
+    // Deliberately the same shape as "refuses a queued action whose page
+    // changed while it waited" above, because the generation is captured at
+    // ENTRY: a frame navigating before the action starts is counted into the
+    // plan and cannot disagree with it. The bug only shows while an action
+    // WAITS — and waiting is ordinary here, for the lease or for a session
+    // Steel can take a minute to create. An ad or chat widget re-navigating on
+    // its own timer during that window is ordinary too, on exactly the sites
+    // this feature gets pointed at.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run', 'w1'));
+
+    const queued = c.controller({ kind: 'click', selector: '#buy' }, ctx('run', 'w2'));
+    await new Promise((r) => setTimeout(r, 20));
+    page.navigateSubframe();
+    page.navigateSubframe();
+    c.actorEnded('w1');
+
+    const out = await queued;
+    expect(out.ok, 'a sub-frame moving must not invalidate the plan').toBe(true);
+    expect(page.calls).toContain('click:#buy');
+  });
+});
+
+// A run that is still OPENING has a signal but no browser yet, and the paths
+// that end a run looked only at the browsers. `stopRun` was fixed for this in
+// an earlier round; `endRun` and `dispose` had the same hole.
+describe('ending a run whose browser has not arrived yet', () => {
+  /** A provider whose createSession only settles when its signal fires. */
+  function stalling() {
+    const created: string[] = [];
+    let sawAbort = false;
+    const provider = {
+      name: 'stalling',
+      isolatesSessions: true,
+      createSession(signal?: AbortSignal) {
+        created.push(`sess-${created.length + 1}`);
+        return new Promise<{ id: string; cdpUrl: string }>((_res, rej) => {
+          signal?.addEventListener('abort', () => { sawAbort = true; rej(new Error('aborted')); });
+        });
+      },
+      async endSession() {},
+    };
+    return { provider, created, sawAbort: () => sawAbort };
+  }
+
+  it('stops the open instead of letting it finish unattended', async () => {
+    const { provider, sawAbort } = stalling();
+    const c = new RemoteBrowserController({ provider });
+    const pending = c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    pending.catch(() => {});
+    await new Promise((r) => setTimeout(r, 20));
+
+    await c.endRun('run-A');
+
+    // Without this the open ran to completion on a run nothing was tracking
+    // any more — no endRun would ever come for the session it allocated.
+    expect(sawAbort(), 'endRun must reach a run that is still opening').toBe(true);
+    const out = await Promise.race([
+      pending,
+      new Promise<'hung'>((r) => setTimeout(() => r('hung'), 250)),
+    ]);
+    expect(out, 'and the caller is not left waiting on it').not.toBe('hung');
+  });
+
+  it('disposes a deployment whose only run has not opened yet', async () => {
+    // `dispose` is what a provider or credential change calls. It enumerated
+    // open browsers only, so a session about to be allocated with the
+    // credential being retired was invisible to it.
+    const { provider, sawAbort } = stalling();
+    const c = new RemoteBrowserController({ provider });
+    const pending = c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    pending.catch(() => {});
+    await new Promise((r) => setTimeout(r, 20));
+
+    await c.dispose();
+
+    expect(sawAbort(), 'dispose must reach a run that is still opening').toBe(true);
+  });
+});
+
+// Two hardening properties. Neither has a live trigger today; both pick the
+// safe side of a failure that would otherwise cross a tenant boundary or hold
+// a socket closure for the life of the process.
+describe('the controller owns every scrap of a run\'s state', () => {
+  it('refuses an action that cannot say which run it belongs to', async () => {
+    // `sessionId` is a required string on the tool contract, so this should be
+    // unreachable. The old fallback defaulted it to a shared 'unknown' bucket,
+    // which on a deployment-wide controller means two tenants sharing a lease,
+    // a browser and — on a non-isolating CDP endpoint — one page.
+    const { provider, created } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+
+    const out = await c.controller(
+      { kind: 'click', selector: '#a' },
+      { sessionId: '', actorId: 'w1' } as never,
+    );
+
+    expect(out.ok).toBe(false);
+    expect(created, 'and no session was allocated for an unattributable call').toEqual([]);
+  });
+
+  it('drops a finished run\'s live-view listener without being asked twice', async () => {
+    // The listener closes over the embedder's socket. The caller does remove
+    // it today, but the controller cleans up everything else about a finished
+    // run, and an embedder that threw between endRun and offLiveViewFor would
+    // keep one closure per run forever.
+    const { provider } = fakeProvider('https://provider.test/live/abc');
+    const c = new RemoteBrowserController({ provider });
+
+    const seen: Array<boolean> = [];
+    c.onLiveViewFor('run-A', (info) => seen.push(info.active));
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await c.endRun('run-A');
+
+    // The teardown's own "browser gone" announcement must still have arrived —
+    // dropping the listener any earlier would take the panel down by silence
+    // rather than by saying so.
+    expect(seen, 'attached, then explicitly released').toEqual([true, false]);
+
+    // Nothing further can reach it: a later announcement for a re-used run id
+    // must not fire the old run's callback.
+    seen.length = 0;
+    await c.controller({ kind: 'click', selector: '#b' }, ctx('run-A', 'w2'));
+    expect(seen, 'the finished run\'s listener is gone').toEqual([]);
   });
 });
