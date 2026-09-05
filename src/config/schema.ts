@@ -92,6 +92,31 @@ export const ToolsConfigSchema = z.object({
    * stop control for the run that is acting.
    */
   agentBrowserControl: z.boolean().default(false),
+  /**
+   * Where a HOSTED run gets a browser, since it has none of its own.
+   *
+   * The desktop drives the Chromium the user is signed into and can watch. A
+   * server has neither, and running one inside the container is wrong twice
+   * over — page JavaScript issues requests no URL check ever sees, from inside
+   * the trust boundary, and a session costs 200-400 MB. So this points at a
+   * browser somebody else runs.
+   *
+   * Absent by default: no provider, no capability. There is nothing to turn
+   * off because nothing is registered until an endpoint is supplied.
+   */
+  remoteBrowser: z.object({
+    /** `cdp` for an endpoint you run; `steel` for a Steel deployment. */
+    provider: z.enum(['cdp', 'steel']).optional(),
+    /** The websocket endpoint for `cdp`, or the API base for `steel`. */
+    url: z.string().optional(),
+    apiKey: z.string().optional(),
+    /**
+     * Concurrent sessions. One by default and deliberately so: every session
+     * is billed, and a wave of workers each opening their own is a cost the
+     * user did not choose. Raising it is a decision, not a default.
+     */
+    maxSessions: z.number().int().min(1).max(16).default(1),
+  }).optional(),
   mcpServers: z.array(McpServerConfigSchema).optional(),
   mcpTrusted: z.array(z.string()).optional(),
   /** Web search backends — at least one should be configured for best results */

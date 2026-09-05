@@ -14,7 +14,8 @@ import {
   distillSessionFacts, buildSessionTranscript, sessionWorthRemembering,
   azureModelForDeployment, DEFAULT_CONTEXT_LIMIT, MODELS,
 } from '#cascade-ai';
-import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ProviderConfig } from '#cascade-ai';
+import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ApprovalRequest, ProviderConfig } from '#cascade-ai';
+import { attachRemoteBrowser } from './remote-browser.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { z, type ZodError } from 'zod';
@@ -325,6 +326,168 @@ export interface RunControls {
   mcpServers?: Array<{ name: string; url: string; headers?: Record<string, string> }>;
   /** Registered MCP tool names the user switched off in Settings. */
   disabledTools?: string[];
+  /**
+   * Where this deployment gets browsers from, when the operator configured a
+   * provider. OPERATOR config, read from the environment at the call site —
+   * never from the run payload, because the value is a URL the SERVER
+   * connects to and taking it from a request body would hand every caller a
+   * fetch from inside the deployment's network. See env.ts.
+   *
+   * Absent (the default) means a hosted run has no browser and
+   * `browser_control` is never registered.
+   */
+  remoteBrowser?: {
+    provider?: 'cdp' | 'steel';
+    url?: string;
+    apiKey?: string;
+    maxSessions?: number;
+  };
+}
+
+/**
+ * Ask the user, and stop asking when the answer can no longer matter.
+ *
+ * Time-boxed to the SDK's own approval window, because the SDK does not wait
+ * for this promise. `PermissionEscalator.waitForUserDecision` runs its own
+ * timer and, when it fires, DELETES the pending decision and resolves the tool
+ * call as denied — the run carries on. This side knew nothing about that, so it
+ * stayed parked for the rest of the run: the client kept offering Allow/Deny
+ * for a request the SDK had already refused, and clicking it resolved a promise
+ * whose `escalator.resolveUserDecision` was by then a no-op. A control that
+ * silently does nothing is worse than no control.
+ *
+ * The escalator's timer is the authority. This one exists only to take the
+ * prompt down, which is why it fires slightly earlier and emits
+ * `permission:resolved` — the client has no other way to learn that the
+ * question expired.
+ *
+ * Exported so this is tested rather than a copy of it.
+ */
+export function parkApproval(
+  pending: Map<string, (d: { approved: boolean; always: boolean }) => void>,
+  opts: {
+    conversationId: string;
+    windowMs: number;
+    emit: (event: string, payload: Record<string, unknown>) => void;
+  },
+  request: ApprovalRequest,
+): Promise<{ approved: boolean; always: boolean }> {
+  return new Promise<{ approved: boolean; always: boolean }>((resolve) => {
+    const timer = setTimeout(() => {
+      // Only if nothing has answered it — `delete` returning false means the
+      // decision path already took it.
+      if (!pending.delete(request.id)) return;
+      resolve({ approved: false, always: false });
+      opts.emit('permission:resolved', {
+        conversationId: opts.conversationId,
+        requestId: request.id,
+        reason: 'timeout',
+      });
+    }, opts.windowMs);
+    // Never hold the process open for a prompt nobody is going to answer.
+    timer.unref?.();
+
+    pending.set(request.id, (d) => {
+      clearTimeout(timer);
+      resolve(d);
+    });
+    opts.emit('permission:user-required', { conversationId: opts.conversationId, ...request });
+  });
+}
+
+/**
+ * The deployment's browser, read from the operator's environment.
+ *
+ * From the environment and NOWHERE else. The value is a URL the SERVER opens a
+ * connection to, so taking it from a request body would hand every signed-in
+ * caller a fetch from inside the deployment's private network — the SSRF this
+ * whole design exists to avoid. There is deliberately no field for it on the
+ * run payload, and a test asserts the schema strips one if a caller sends it.
+ *
+ * A function rather than an inline spread at the call site, because a mapping
+ * that only exists inline can only be tested by restating it — and a test that
+ * restates the mapping cannot catch a field dropped from the real one.
+ *
+ * Returns an empty object when no provider is configured, so an untouched
+ * deployment carries no `remoteBrowser` key at all and the tool is never
+ * registered.
+ */
+export function remoteBrowserControls(env: CloudEnv): Pick<RunControls, 'remoteBrowser'> {
+  if (!env.REMOTE_BROWSER_PROVIDER) return {};
+  return {
+    remoteBrowser: {
+      provider: env.REMOTE_BROWSER_PROVIDER,
+      ...(env.REMOTE_BROWSER_URL ? { url: env.REMOTE_BROWSER_URL } : {}),
+      ...(env.REMOTE_BROWSER_API_KEY ? { apiKey: env.REMOTE_BROWSER_API_KEY } : {}),
+      maxSessions: env.REMOTE_BROWSER_MAX_SESSIONS,
+    },
+  };
+}
+
+/**
+ * Who may be asked to approve a dangerous tool, and how the asking is done.
+ *
+ * The `interactive` gate lives HERE rather than inline in the run, because a
+ * gate whose only test is a copy of itself is not tested at all. This one
+ * decides whether a caller with no human attached — the OpenAI-compatible/SSE
+ * path, which has no socket to render a live view and no way to press Stop —
+ * gets a dangerous capability. Refused, never auto-approved: that path is
+ * exactly the one that cannot supervise what it is being handed.
+ *
+ * Exported for the same reason `parkApproval` and `applyPermissionDecision`
+ * are: so the test exercises this and not a restatement of it.
+ */
+export function buildApprovalCallback(
+  pending: Map<string, (d: { approved: boolean; always: boolean }) => void>,
+  opts: {
+    interactive: boolean;
+    conversationId: string;
+    windowMs: number;
+    emit: (event: string, payload: Record<string, unknown>) => void;
+  },
+): (request: ApprovalRequest) => Promise<{ approved: boolean; always: boolean }> {
+  return async (request: ApprovalRequest) => {
+    if (!opts.interactive) return { approved: false, always: false };
+    return await parkApproval(pending, opts, request);
+  };
+}
+
+/** What the client sends when the user answers a dangerous-tool prompt. */
+export interface PermissionDecision {
+  conversationId?: string;
+  requestId?: string;
+  approved?: boolean;
+  always?: boolean;
+}
+
+/**
+ * Settle one parked approval, if the decision is genuinely for this run.
+ *
+ * Exported so the test exercises THIS, rather than a copy of it living in the
+ * test file — which is how the conversation check below went un-covered while
+ * looking covered.
+ *
+ * The conversation id must be present AND equal. Treating an absent one as
+ * "matches anything" meant a decision that named no conversation resolved
+ * purely by request id, so a client answering from a chat it had navigated to
+ * could settle a dangerous call belonging to a run in a different one. The
+ * client sends the id the request itself carried, so a missing id is not a case
+ * worth being lenient about.
+ *
+ * @returns whether a waiter was resolved — for the caller's tests, not control flow.
+ */
+export function applyPermissionDecision(
+  pending: Map<string, (d: { approved: boolean; always: boolean }) => void>,
+  conversationId: string,
+  d: PermissionDecision,
+): boolean {
+  if (d?.conversationId !== conversationId) return false;
+  if (!d?.requestId) return false;
+  const resolve = pending.get(d.requestId);
+  if (!resolve) return false;
+  pending.delete(d.requestId);
+  resolve({ approved: d.approved === true, always: d.always === true });
+  return true;
 }
 
 // Maps the UI's routing mode to Cascade Auto's bias. Cascade Auto stays ON for
@@ -440,6 +603,29 @@ export function buildCloudConfig(
               braveApiKey: wsc!.braveApiKey,
               tavilyApiKey: wsc!.tavilyApiKey,
               guardSearxngUrl: true,
+            },
+          }
+        : {}),
+      // The deployment's browser, from the operator's environment.
+      //
+      // This has to be written INTO the config rather than read beside it:
+      // `attachRemoteBrowser` looks at `config.tools.remoteBrowser`, and
+      // `setRemoteBrowserController` gates registration on the same field. A
+      // config that never carries it leaves the whole hosted feature inert no
+      // matter what the operator sets — the provider is built, and nothing ever
+      // asks for it.
+      //
+      // Emitted only when a provider is named, so the untouched default stays
+      // exactly as it was: no key, no tool.
+      ...(controls.remoteBrowser?.provider
+        ? {
+            remoteBrowser: {
+              provider: controls.remoteBrowser.provider,
+              ...(controls.remoteBrowser.url ? { url: controls.remoteBrowser.url } : {}),
+              ...(controls.remoteBrowser.apiKey ? { apiKey: controls.remoteBrowser.apiKey } : {}),
+              ...(controls.remoteBrowser.maxSessions
+                ? { maxSessions: controls.remoteBrowser.maxSessions }
+                : {}),
             },
           }
         : {}),
@@ -1018,10 +1204,42 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     maxTokensPerRun: payload.maxTokensPerRun,
     mcpServers: mcpServers.length ? mcpServers : undefined,
     disabledTools: payload.fastAnswer ? [] : store.listDisabledMcpTools(userId),
+    ...remoteBrowserControls(env),
   });
   const cascade: Cascade = createCascade(config, scratchDir);
 
   cascade.setMediaSink(buildMediaSink({ env, store, userId, conversationId: conversation.id, socket }));
+
+  // A hosted run has no browser of its own. This attaches one from whatever
+  // provider the operator configured, and returns null when they configured
+  // none — which is the default, and why there is no switch to turn the
+  // capability off: it does not exist until an endpoint is supplied.
+  // Only for a run with a human on the other end. The safety story for this
+  // capability is "you can watch it and stop it"; a caller with no socket to
+  // render the live view and no way to press Stop has neither.
+  const remoteBrowser = !interactive ? null : attachRemoteBrowser({
+    cascade,
+    config,
+    conversationId: conversation.id,
+    // ONE socket, the run's owner. The live-view URL is a bearer capability:
+    // anyone holding it can watch the browser and drive it.
+    emit: (event, payload) => socket.emit(event, payload),
+    warn: (message) => console.warn(`[run ${conversation.id}] remote browser: ${message}`),
+  });
+  // The kill switch, alongside the live view that makes it meaningful. Scoped
+  // to this run and removed with the run's other listeners below: a Stop is
+  // something the user does to the run they are watching, not to the process.
+  const onBrowserStop = (d: { taskId?: string }) => {
+    // An EXACT task-id match, not a conversation match, and not an optional
+    // one. Conversation scoping was still too coarse — two runs on the same
+    // chat (two tabs, a retry) both matched — and treating a missing id as
+    // "matches everything" meant a stale or malformed `{}` stopped every run on
+    // the socket. The client learns this id from browser:live-view.
+    const mine = remoteBrowser?.taskId;
+    if (!mine || d?.taskId !== mine) return;
+    remoteBrowser?.stop();
+  };
+  socket.on('browser:stop', onBrowserStop);
 
   // Your thumbs-up/down verdicts, folded into Auto routing as a bounded,
   // sample-size-shrunk adjustment to the public benchmark score. Read once per
@@ -1112,6 +1330,45 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     socket.on('escalation:decide', onEscalationDecision);
   }
 
+  // ── Dangerous-tool approval ──────────────────────────────────────────
+  //
+  // Without this the hosted browser is not merely ungated, it is unusable:
+  // `browser_control` is dangerous, T2 and T1 only append advisory verdicts
+  // and pass it on, and `Cascade.run()` resolves the user's turn from
+  // `approvalCallback`. With no callback that resolves `approved = false`, so
+  // every action is refused — a capability that appears to exist and never
+  // works.
+  //
+  // Scoped by conversation for the same reason the escalation answer above is:
+  // one socket can carry several runs, and an unkeyed answer resolves whichever
+  // request happened to be first.
+  const pendingApprovals = new Map<string, (d: { approved: boolean; always: boolean }) => void>();
+  // The same window the SDK's escalator uses, read from the same config so the
+  // two cannot drift. Shaved slightly so this side gives up FIRST: the prompt
+  // comes down just before the SDK stops accepting an answer, rather than just
+  // after. Mirrors cascade.ts, which defaults it identically.
+  const approvalWindowMs = Math.max(1_000, (config.approvalTimeoutMs ?? 600_000) - 250);
+  const onPermissionDecision = (d: PermissionDecision) => {
+    if (!applyPermissionDecision(pendingApprovals, conversation.id, d)) return;
+    // Announced even though the answering client has already taken its own
+    // prompt down. One event means "this request is no longer actionable",
+    // whatever settled it — which is what lets the reconnect path know not to
+    // replay an answered question to a page that reloaded mid-run.
+    socket.emit('permission:resolved', {
+      conversationId: conversation.id,
+      requestId: d.requestId,
+      reason: 'decided',
+    });
+  };
+  if (interactive) socket.on('permission:decide', onPermissionDecision);
+
+  const approvalCallback = buildApprovalCallback(pendingApprovals, {
+    interactive,
+    conversationId: conversation.id,
+    windowMs: approvalWindowMs,
+    emit: (event, payload) => socket.emit(event, payload),
+  });
+
   cascade.on('stream:token', onToken);
   cascade.on('tier:status', onStatus);
   // The plan gate resolves inline (onPlan calls resolvePlanApproval(true)), so
@@ -1124,6 +1381,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
 
   try {
     const result = await cascade.run({
+      approvalCallback,
       prompt: runPrompt,
       // Routing must see the user's actual message, not the augmented prompt —
       // otherwise the prepended guidance/memories make even "hi" read Complex.
@@ -1237,6 +1495,15 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     cascade.off('escalation:decision-required', onEscalation);
     cascade.off('escalation:timeout', onEscalationTimeout);
     socket.off('escalation:decide', onEscalationDecision);
+    // Before closing the cascade: releasing the provider session is what stops
+    // the operator paying for a browser nobody is using, and a run that threw
+    // is exactly the one that would otherwise leave one running.
+    socket.off('browser:stop', onBrowserStop);
+    socket.off('permission:decide', onPermissionDecision);
+    // Anything still parked would otherwise hang forever holding a worker.
+    for (const resolve of pendingApprovals.values()) resolve({ approved: false, always: false });
+    pendingApprovals.clear();
+    try { await remoteBrowser?.endRun(); } catch { /* non-critical */ }
     try { await cascade.close(); } catch { /* non-critical */ }
   }
 }

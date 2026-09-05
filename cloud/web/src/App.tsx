@@ -301,6 +301,11 @@ export default function App() {
             onSkillChange={setSkillId}
             onSend={chat.send}
             onStop={chat.stop}
+            browserLiveView={chat.browserLiveView}
+            browserActive={chat.browserActive}
+            toolApprovals={chat.toolApprovals}
+            onDecideToolApproval={chat.resolveToolApproval}
+            onStopBrowser={chat.stopBrowser}
             onRegenerate={chat.regenerate}
             onEditMessage={chat.editMessage}
             onDeleteMessage={chat.deleteMessage}

@@ -134,7 +134,7 @@ export class RebindableTransport implements RunSocket {
  * `done` exists because a finished run is still referenced by whichever set it
  * was in when it completed, and parking or adopting one is never right.
  */
-interface LiveRun {
+export interface LiveRun {
   controller: AbortController;
   transport: RebindableTransport;
   done: boolean;
@@ -148,6 +148,29 @@ interface LiveRun {
    * otherwise has no way to name the conversation whose answer it should load.
    */
   conversationId?: string;
+  /**
+   * The supervision surface a replacement connection has to be given back.
+   *
+   * These two events are what make the hosted browser safe to run at all: the
+   * live view is how the user sees what the agent is doing, and the approval
+   * prompt is how they consent to a dangerous action. Both are ONE-SHOT — they
+   * are emitted when the state changes and never again — and the client holds
+   * them in React state, which a page reload throws away.
+   *
+   * A run survives a reload; that is the whole point of holding it. But the UI
+   * that came back had no live view, no task id and therefore no browser Stop,
+   * while the agent kept driving a real browser. Worse with "Allow for this
+   * run": the escalator caches that decision task-wide, so subsequent actions
+   * never prompt again — an agent browsing on, with the one page that could
+   * see or halt it now blind.
+   *
+   * So the last state of each is retained here and replayed on rebind. Held on
+   * the run, not the connection, because the connection is the thing that just
+   * went away.
+   */
+  liveView?: Record<string, unknown>;
+  /** Outstanding approval requests, by request id, in the order they arrived. */
+  approvals?: Map<string, Record<string, unknown>>;
   /**
    * How the run actually ended, captured from its own terminal event.
    *
@@ -164,6 +187,45 @@ interface LiveRun {
 
 /** The events that mean a run is over, in either direction. */
 const TERMINAL_EVENTS = new Set(['session:complete', 'session:error']);
+
+/**
+ * Keep the run's supervision surface up to date as it is emitted.
+ *
+ * Only state that is still TRUE is kept: a live view that has been given up and
+ * an approval that has been answered or has expired are removed rather than
+ * replayed, because handing a reloaded page a Stop button for a browser that is
+ * gone, or a prompt for a decision already made, is its own kind of lie.
+ */
+export function rememberForReplay(run: LiveRun, event: string, payload: unknown): void {
+  const p = (payload ?? {}) as Record<string, unknown>;
+  if (event === 'browser:live-view') {
+    // `active: false` is the run giving the browser up. Dropping the entry
+    // rather than storing it also drops the live-view URL, which is a bearer
+    // capability and has no business outliving the session it opens.
+    if (p['active'] === true) run.liveView = p;
+    else delete run.liveView;
+    return;
+  }
+  if (event === 'permission:user-required') {
+    const id = p['id'] ?? p['requestId'];
+    if (typeof id !== 'string') return;
+    (run.approvals ??= new Map()).set(id, p);
+    return;
+  }
+  if (event === 'permission:resolved') {
+    const id = p['requestId'];
+    if (typeof id === 'string') run.approvals?.delete(id);
+  }
+}
+
+/** Give a replacement connection back the state the reloaded page lost. */
+export function replaySupervision(run: LiveRun, socket: Pick<Socket, 'emit'>): void {
+  if (run.done) return;
+  if (run.liveView) socket.emit('browser:live-view', run.liveView);
+  for (const request of run.approvals?.values() ?? []) {
+    socket.emit('permission:user-required', request);
+  }
+}
 
 export interface SocketOptions {
   /** Overridable for tests, which cannot wait out the real grace window. */
@@ -354,6 +416,9 @@ export function attachSocket(
     const adopt = (run: LiveRun): void => {
       run.transport.rebind(socket);
       activeRuns.add(run);
+      // After the rebind, so the emits go to the connection that just took the
+      // run over rather than to the one that dropped it.
+      replaySupervision(run, socket);
     };
 
     if (key) {
@@ -426,6 +491,10 @@ export function attachSocket(
       const run: LiveRun = {
         controller: new AbortController(),
         transport: new RebindableTransport(socket, (event, payload) => {
+          // Captured on the way out, whether or not anything is listening —
+          // which is the point: the events worth replaying are exactly the ones
+          // a disconnected or reloading client missed.
+          rememberForReplay(run, event, payload);
           if (!TERMINAL_EVENTS.has(event)) return;
           const p = (payload ?? {}) as { conversationId?: string; error?: string };
           run.terminal = { conversationId: p.conversationId, error: p.error };

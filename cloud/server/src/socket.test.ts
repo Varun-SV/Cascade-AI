@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { io as ioClient, type Socket as ClientSocket } from 'socket.io-client';
-import { attachSocket, RebindableTransport } from './socket.js';
+import { attachSocket, RebindableTransport, rememberForReplay, replaySupervision, type LiveRun } from './socket.js';
 import { CloudStore } from './db.js';
 import type { CloudEnv } from './env.js';
 import { createSessionToken, SESSION_COOKIE_NAME } from './auth/session.js';
@@ -1170,5 +1170,129 @@ describe('RebindableTransport', () => {
     expect(b.handlerCount('context:decision')).toBe(0);
     b.fire('context:decision', { approved: true });
     expect(seen).toEqual([]);
+  });
+});
+
+describe('rememberForReplay / replaySupervision — what a reload gets back', () => {
+  // A held run survives a page reload, but two of the events that make the
+  // hosted browser safe are one-shot: `browser:live-view` (the panel and its
+  // Stop button) and `permission:user-required` (the consent prompt) are
+  // emitted once, when the state changes, and the client only ever holds them
+  // in React state — which a reload throws away. So a reloaded page could end
+  // up attached to a run whose agent is actively driving a real browser, with
+  // no way to see it and no way to stop it. Worse for the approval: the SDK
+  // caches an "Allow for this run" decision task-wide, so nothing prompts
+  // again either.
+  //
+  // These two functions are the whole fix — `rememberForReplay` is fed every
+  // emit off the run's transport and keeps only what is still true;
+  // `replaySupervision` hands that back to whatever socket just adopted the
+  // run, from `adopt()` in `attachSocket`. They are tested directly here,
+  // rather than only through `attachSocket`, because the only thing that ever
+  // emits these two events for real is a genuine dangerous-tool call inside a
+  // live SDK run (`runs.ts` / `remote-browser.ts`) — and nothing in this
+  // file's harness can produce one: the stub OpenAI server below only ever
+  // returns plain text, never a tool call, so `approvalCallback` and the
+  // remote-browser controller are never reached by any `chat:run` this suite
+  // can drive. Reaching them would mean teaching the stub to emit tool calls
+  // or faking a browser provider — changes to test-support/production code
+  // that are out of scope here.
+
+  /** A socket stand-in that only records what was emitted to it. */
+  function recorder() {
+    const emitted: Array<{ event: string; payload: unknown }> = [];
+    return {
+      emitted,
+      socket: { emit: (event: string, payload: unknown) => { emitted.push({ event, payload }); return true; } },
+    };
+  }
+
+  /** A run in flight, with no supervision state yet — the ordinary case. */
+  function freshRun(overrides: Partial<LiveRun> = {}): LiveRun {
+    return {
+      controller: new AbortController(),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      transport: new RebindableTransport({ emit: () => true, on: () => undefined, off: () => undefined } as any),
+      done: false,
+      ...overrides,
+    };
+  }
+
+  it('retains a live view while the browser is active, and drops it the instant the run gives it up', () => {
+    const run = freshRun();
+    rememberForReplay(run, 'browser:live-view', {
+      active: true, taskId: 't1', liveViewUrl: 'https://provider.example/watch/abc',
+    });
+    expect(run.liveView).toEqual({ active: true, taskId: 't1', liveViewUrl: 'https://provider.example/watch/abc' });
+
+    // `active: false` is the run relinquishing the browser. The live-view URL
+    // is a bearer capability — anyone holding it can watch the session — so
+    // keeping it around after the run has given the browser up would replay a
+    // link to a session that no longer exists, or to whatever the provider
+    // hands the slot to next. Dropping the entry is what removes the URL too.
+    rememberForReplay(run, 'browser:live-view', { active: false, taskId: 't1' });
+    expect(run.liveView).toBeUndefined();
+  });
+
+  it('keeps an outstanding approval until permission:resolved names it, keyed by id or requestId', () => {
+    const run = freshRun();
+    rememberForReplay(run, 'permission:user-required', { id: 'req-1', conversationId: 'c1', tool: 'browser_control' });
+    // The escalator's own expiry path (parkApproval's timeout in runs.ts)
+    // emits with no `id` field, only `requestId` — the fallback exists so an
+    // expired request is bookkept exactly like a fresh one, instead of being
+    // silently dropped for want of the field this code checked first.
+    rememberForReplay(run, 'permission:user-required', { requestId: 'req-2', conversationId: 'c1', tool: 'browser_control' });
+    expect(run.approvals?.size).toBe(2);
+
+    rememberForReplay(run, 'permission:resolved', { requestId: 'req-1', reason: 'decided' });
+    // Answered once, it must not come back on the next reload — replaying it
+    // would offer Allow/Deny for a question the SDK already resolved.
+    expect(run.approvals?.has('req-1')).toBe(false);
+    expect(run.approvals?.has('req-2')).toBe(true);
+  });
+
+  it('hands a reconnecting socket back the live view and every outstanding approval', () => {
+    const run = freshRun();
+    rememberForReplay(run, 'browser:live-view', {
+      active: true, taskId: 't1', liveViewUrl: 'https://provider.example/watch/abc',
+    });
+    rememberForReplay(run, 'permission:user-required', { id: 'req-1', conversationId: 'c1' });
+    rememberForReplay(run, 'permission:user-required', { id: 'req-2', conversationId: 'c1' });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+
+    expect(emitted).toEqual([
+      { event: 'browser:live-view', payload: { active: true, taskId: 't1', liveViewUrl: 'https://provider.example/watch/abc' } },
+      { event: 'permission:user-required', payload: { id: 'req-1', conversationId: 'c1' } },
+      { event: 'permission:user-required', payload: { id: 'req-2', conversationId: 'c1' } },
+    ]);
+  });
+
+  it('replays nothing once the run is done, even with a live view or approval still sitting on it', () => {
+    // `done` is checked first, unconditionally. A run can finish
+    // (`session:complete`) with its last-known browser state still
+    // `active: true`, or with an approval that was never answered — this
+    // guard is what stops a reload from being handed a Stop button for a
+    // browser session, or a prompt for a decision, that the run is no longer
+    // there to act on either way.
+    const run = freshRun({ done: true });
+    rememberForReplay(run, 'browser:live-view', { active: true, taskId: 't1' });
+    rememberForReplay(run, 'permission:user-required', { id: 'req-1', conversationId: 'c1' });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+
+    expect(emitted).toEqual([]);
+  });
+
+  it('replays nothing for a run that never touched the browser or a dangerous tool', () => {
+    // The common case, and it has to stay silent: most runs never open a
+    // browser or hit an approval gate, so adopting one of them on reconnect
+    // must not manufacture events that never happened.
+    const run = freshRun();
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+    expect(emitted).toEqual([]);
   });
 });

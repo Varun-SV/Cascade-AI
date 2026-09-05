@@ -263,6 +263,23 @@ function escalationKey(e: { requestId?: string; sectionId?: string }): string {
   return e.requestId ?? `section:${e.sectionId ?? ''}`;
 }
 
+/**
+ * A dangerous tool asking permission, from the run to the person watching.
+ *
+ * The server has waited on this since the approval gate went in; nothing on
+ * the client listened, so every request sat until the SDK's timeout and was
+ * denied. A capability that is gated on an answer nobody can give is not gated,
+ * it is broken — and it silently changed the behaviour of every other dangerous
+ * cloud tool from "denied at once" to "denied in ten minutes".
+ */
+export interface ToolApproval {
+  requestId: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  description?: string;
+  isDangerous?: boolean;
+}
+
 export interface PlanApproval {
   taskId?: string;
   summary?: string;
@@ -300,6 +317,126 @@ export function useChatSession(
   const conversationIdRef = useRef(conversationId);
   conversationIdRef.current = conversationId;
   const [error, setError] = useState<string | null>(null);
+  /**
+   * The server's id for a run this pane started before it had one.
+   *
+   * A first turn sends `chat:run` with no conversationId; the server creates
+   * one and stamps every event for that run with it, but this side does not
+   * learn it until the closing ack. In between, this pane cannot name its own
+   * conversation — which is why the gates below used to accept anything while
+   * `conversationId` was undefined, and why per-conversation state had nothing
+   * to key on.
+   *
+   * A ref, not state, deliberately: the pane is still showing "new chat" and
+   * adopting the id into `conversationId` would move the sidebar selection and
+   * re-run everything keyed on it mid-stream. This is routing only.
+   */
+  const pendingConversationIdRef = useRef<string | undefined>(undefined);
+  /**
+   * This pane started a run before it had a conversation id, and is still
+   * waiting to be told which one the server made.
+   *
+   * Adoption is gated on it. Without the gate any late event could name this
+   * pane's conversation: press New Chat while a run is going and the run you
+   * walked away from re-adopts itself into the blank pane, bringing its browser
+   * panel and its dangerous-tool prompts with it.
+   */
+  const awaitingFirstTurnRef = useRef(false);
+  /** The conversation this pane's events belong to — known, or adopted below. */
+  const activeConversationId = (): string | undefined =>
+    conversationIdRef.current ?? pendingConversationIdRef.current;
+  /** Learn the id the server minted for the run this pane just started. */
+  const adoptConversationId = (convo: unknown): void => {
+    if (!awaitingFirstTurnRef.current) return;
+    if (conversationIdRef.current || pendingConversationIdRef.current) return;
+    if (typeof convo === 'string' && convo) pendingConversationIdRef.current = convo;
+  };
+  /**
+   * Where the agent's browser can be watched, while it has one — per
+   * conversation.
+   *
+   * Keyed rather than held in one slot. One socket carries several
+   * conversations, so a single slot meant the run you switched AWAY from wrote
+   * its live-view URL into the pane you switched TO, and its Stop button
+   * stopped a run you were no longer watching. Keying also keeps the kill
+   * switch reachable: come back to the first chat and its panel is still there,
+   * still naming its own task.
+   *
+   * State only, never persisted. The URL is a bearer capability: the provider
+   * issues it without a token precisely so it can be embedded, which means
+   * anyone who obtains it can watch the session and drive it. Storing it with
+   * the conversation would turn a live credential into a durable one — and an
+   * entry is DELETED, not blanked, the moment its run gives the browser up, so
+   * a spent capability is not kept around.
+   */
+  const [browserViews, setBrowserViews] = useState<
+    Record<string, { taskId?: string; liveViewUrl?: string }>
+  >({});
+  const browserView = browserViews[activeConversationId() ?? ''];
+  /** Where the agent's browser can be watched, for the conversation on screen. */
+  const browserLiveView = browserView?.liveViewUrl;
+  /** A browser is attached to this run, whether or not it can be streamed. */
+  const browserActive = browserView !== undefined;
+  /**
+   * The run that owns the browser.
+   *
+   * Stop names this rather than the conversation: one chat can hold several
+   * runs, and a conversation-scoped Stop halted all of them.
+   */
+  const browserTaskId = browserView?.taskId;
+  // Read by stopBrowser, which is declared before this value and must not close
+  // over a stale one when the run changes under it.
+  const browserTaskIdRef = useRef<string | undefined>(undefined);
+  browserTaskIdRef.current = browserTaskId;
+
+  /**
+   * Stop the agent using the browser, without stopping the run.
+   *
+   * Deliberately not `stop()`: the user may want the work to continue and only
+   * this capability withdrawn. The panel is hidden immediately rather than
+   * waiting for the server to confirm — a kill switch that looks like it did
+   * nothing is one people press repeatedly and then distrust.
+   */
+  /**
+   * Answer one pending request.
+   *
+   * Removed from the queue immediately rather than on a server acknowledgement:
+   * the run is blocked waiting, and a prompt that stays on screen after you
+   * answer it invites a second, contradictory answer.
+   */
+  const resolveToolApproval = useCallback((requestId: string, approved: boolean, always = false) => {
+    setToolApprovals((q) => {
+      const answered = q.find((a) => a.requestId === requestId);
+      // Nothing queued under that id — a double click, or a prompt already
+      // pruned by its run ending. Emitting anyway would name a conversation
+      // this pane merely happens to be showing.
+      if (!answered) return q;
+      socket?.emit('permission:decide', {
+        // The conversation the REQUEST came from, not the one on screen. The
+        // pane's own id is undefined in a blank New Chat, and the server's
+        // decision handler only rejects a conversation id that is present and
+        // wrong — so an absent one resolved by request id alone, letting a
+        // decision made in one chat settle a dangerous call in another.
+        conversationId: answered.conversationId,
+        requestId,
+        approved,
+        always,
+      });
+      return q.filter((a) => a.requestId !== requestId);
+    });
+  }, [socket]);
+
+  const stopBrowser = useCallback(() => {
+    // The task id, which the server requires to match exactly. Without it the
+    // Stop is ignored — which is the correct failure: better a button that does
+    // nothing than one that stops somebody else's run.
+    if (!browserTaskIdRef.current) return;
+    socket?.emit('browser:stop', { taskId: browserTaskIdRef.current });
+    // This conversation's panel only. Another chat's browser is not something
+    // this button withdraws.
+    const key = activeConversationId() ?? '';
+    setBrowserViews(({ [key]: _gone, ...rest }) => rest);
+  }, [socket]);
   const [status, setStatus] = useState<string | null>(null);
   const [lastTokens, setLastTokens] = useState<number>(0);
   const [lastSaved, setLastSaved] = useState<{ usd: number; pct: number } | null>(null);
@@ -313,6 +450,77 @@ export function useChatSession(
   // The boardroom plan for the in-flight run, if Cascade produced one. Shown
   // read-only; cleared when the next run starts or the current one settles.
   const [approval, setApproval] = useState<PlanApproval | null>(null);
+  /**
+   * Pending tool approvals, oldest first.
+   *
+   * A queue rather than one slot: a run can have several workers asking at
+   * once, and holding only the newest would strand the others until timeout.
+   */
+  const [allToolApprovals, setToolApprovals] = useState<Array<ToolApproval & { conversationId?: string }>>([]);
+  /**
+   * The ones belonging to the conversation on screen.
+   *
+   * Filtered on read rather than dropped on arrival, so switching chats does
+   * not strand a run: the question is still queued and re-appears when you come
+   * back to it. Dropping instead would leave the server's approval callback
+   * parked until its own timeout denied it — ten minutes of a run doing
+   * nothing, with no way for the user to unblock it.
+   */
+  const currentConversation = activeConversationId();
+  /**
+   * An EXACT origin match. An unknown id is not a wildcard.
+   *
+   * The first version read "show it when either side is unknown", which made a
+   * blank pane match everything: `App.newChat()` sets the conversation to
+   * undefined, so conversation A's pending `browser_control` prompt appeared in
+   * the new empty chat and could be approved by someone who was no longer
+   * looking at the run asking. That is precisely the consent scoping this is
+   * for, so undefined now matches only undefined — and adoption above is what
+   * gives a genuine first turn a real id to match on.
+   */
+  const toolApprovals = allToolApprovals.filter((a) => a.conversationId === currentConversation);
+
+  /**
+   * Open a different conversation in this pane.
+   *
+   * Wraps the raw setter so the adopted id is dropped: it names the run this
+   * pane started while it had no id of its own, and once the user has moved to
+   * another chat it would otherwise keep routing that run's browser panel and
+   * approvals into whatever is on screen.
+   *
+   * The keyed state itself is deliberately NOT cleared — a run left behind is
+   * still running, and its Stop button has to be there when the user comes
+   * back to it.
+   */
+  const selectConversation = useCallback((id: string | undefined) => {
+    pendingConversationIdRef.current = undefined;
+    // Whatever this pane was waiting to be told, it is not waiting for it here
+    // any more. Leaving the window open let a run the user navigated away from
+    // adopt the pane they navigated to.
+    awaitingFirstTurnRef.current = false;
+    conversationIdRef.current = id;
+    setConversationId(id);
+  }, []);
+
+  /**
+   * A run is over, so nothing is still waiting on its questions.
+   *
+   * The server resolves every remaining approval callback `false` and clears
+   * its map in the run's `finally`, and sends nothing to say so. Without a
+   * matching removal here a prompt survives its own run — it reappears when
+   * the user comes back to that conversation, and clicking it answers a waiter
+   * that no longer exists, which reads as a control that silently does nothing.
+   *
+   * Approvals only. The browser panel has its own authoritative ending in
+   * `browser:live-view` with `active: false`, which is scoped to the task
+   * rather than the conversation and so is the more precise of the two.
+   */
+  const settleConversation = useCallback((cid?: string) => {
+    if (!cid) return;
+    setToolApprovals((q) => (q.some((a) => a.conversationId === cid)
+      ? q.filter((a) => a.conversationId !== cid)
+      : q));
+  }, []);
   // A QUEUE, not one slot. The SDK keys parked escalations by requestId
   // precisely because a Complex wave dispatches sections concurrently, so two
   // can be waiting at once — storing one here threw the first away, and
@@ -345,6 +553,8 @@ export function useChatSession(
   const pendingWhyRef = useRef<WhyReport | null>(null);
 
   useEffect(() => {
+    pendingConversationIdRef.current = undefined;
+    awaitingFirstTurnRef.current = false;
     setConversationId(initialConversationId);
   }, [initialConversationId]);
 
@@ -400,6 +610,37 @@ export function useChatSession(
     };
     const onWhy = (r: WhyReport) => { pendingWhyRef.current = r; };
     const onPlan = (e: PlanApproval) => setApproval(e);
+    const onPermissionRequired = (e: ToolApproval & { conversationId?: string; id?: string }) => {
+      // Queued for whichever conversation it belongs to, not filtered here.
+      //
+      // A filter that compared against `conversationIdRef.current` dropped the
+      // whole first turn of a new chat: the server creates the conversation
+      // before the run and tags the gate with that real id, while this side
+      // does not learn it until the closing ack — so the comparison was
+      // `new-server-id !== undefined` and the approval was discarded. The
+      // prompt never rendered, nobody answered, and the tool sat until its own
+      // timeout denied it. Adopting the id fixes that; keeping every request
+      // and filtering on read fixes the other half, where switching chats
+      // stranded a question the run was still blocked on.
+      adoptConversationId(e?.conversationId);
+      // The SDK calls it `id`; keep one name on this side.
+      const requestId = e.requestId ?? e.id;
+      if (!requestId) return;
+      setToolApprovals((q) => (q.some((a) => a.requestId === requestId) ? q : [...q, { ...e, requestId }]));
+    };
+    /**
+     * The server is no longer waiting on this question.
+     *
+     * Sent when the run's approval window closes: the SDK's escalator times the
+     * decision out, denies it, and lets the run continue — while this side, with
+     * nothing to tell it, kept the prompt on screen for the rest of the run.
+     * Clicking it then resolved a waiter the SDK had already given up on, so
+     * the button did nothing and said nothing.
+     */
+    const onPermissionResolved = (e: { requestId?: string }) => {
+      if (!e?.requestId) return;
+      setToolApprovals((q) => q.filter((a) => a.requestId !== e.requestId));
+    };
     const onEscalation = (e: EscalationRequest) => setEscalations((prev) => {
       const incoming = { ...e, receivedAt: Date.now() };
       // Re-delivery of one already queued (a reconnect replay) updates in place
@@ -464,10 +705,39 @@ export function useChatSession(
     // button appear on the message as soon as the image lands. A saved file
     // needs nothing here (the Files panel has its own refresh).
     const onFileCreated = (e: { pending?: boolean }) => { if (e?.pending) void refreshPendingMedia(); };
+    // The agent has a browser and the user can watch it. Held in state only —
+    // this URL is a bearer capability (anyone with it can watch and drive the
+    // session), so it is never persisted with the conversation and never
+    // written to a log. An absent url means the run finished with it, or the
+    // provider offers no live view at all.
+    const onLiveView = (e: { conversationId?: string; taskId?: string; liveViewUrl?: string; active?: boolean }) => {
+      // Recorded AGAINST its conversation rather than into one shared slot. One
+      // socket carries several runs, and a single slot meant switching chats
+      // left another run's bearer-capability URL rendered in the pane you moved
+      // to, while a late `undefined` from the run you left cleared the view of
+      // the one you were on.
+      adoptConversationId(e?.conversationId);
+      const key = typeof e?.conversationId === 'string' ? e.conversationId : (activeConversationId() ?? '');
+      setBrowserViews((prev) => {
+        // `active` says a browser exists even when it cannot be streamed, so
+        // Stop survives a provider with no live view. Its absence is the run
+        // giving the browser up — drop the entry outright rather than blanking
+        // it, so the panel goes away and the spent capability URL is not kept.
+        if (e?.active !== true) {
+          if (!(key in prev)) return prev;
+          const { [key]: _done, ...rest } = prev;
+          return rest;
+        }
+        return { ...prev, [key]: { taskId: e?.taskId, liveViewUrl: e?.liveViewUrl } };
+      });
+    };
+    socket.on('browser:live-view', onLiveView);
     socket.on('stream:token', onToken);
     socket.on('tier:status', onStatus);
     socket.on('run:why', onWhy);
     socket.on('plan:approval-required', onPlan);
+    socket.on('permission:user-required', onPermissionRequired);
+    socket.on('permission:resolved', onPermissionResolved);
     socket.on('escalation:decision-required', onEscalation);
     socket.on('escalation:timeout', onEscalationTimeout);
     socket.on('disconnect', onDisconnect);
@@ -481,6 +751,8 @@ export function useChatSession(
       socket.off('tier:status', onStatus);
       socket.off('run:why', onWhy);
       socket.off('plan:approval-required', onPlan);
+      socket.off('permission:user-required', onPermissionRequired);
+      socket.off('permission:resolved', onPermissionResolved);
       socket.off('escalation:decision-required', onEscalation);
       socket.off('escalation:timeout', onEscalationTimeout);
       socket.off('disconnect', onDisconnect);
@@ -489,6 +761,7 @@ export function useChatSession(
       socket.off('provider:exhausted', onProviderExhausted);
       socket.off('knowledge:retrieved', onKnowledge);
       socket.off('file:created', onFileCreated);
+      socket.off('browser:live-view', onLiveView);
     };
   }, [socket]);
 
@@ -542,12 +815,15 @@ export function useChatSession(
     // the ack, which is the one thing a reconnect is guaranteed to lose. Ending
     // the wait without it clears the spinner over an empty chat while the
     // answer sits on a conversation the page cannot name.
-    const target = cid ?? conversationIdRef.current;
+    const target = cid ?? activeConversationId();
     if (!target) return;
+    pendingConversationIdRef.current = undefined;
+    awaitingFirstTurnRef.current = false;
     conversationIdRef.current = target;
     setConversationId(target);
+    settleConversation(target);
     void reloadActivePath(target);
-  }, [reloadActivePath]);
+  }, [reloadActivePath, settleConversation]);
 
   // A reconnect re-reads the transcript, and settles what the lost ack cannot.
   //
@@ -585,6 +861,17 @@ export function useChatSession(
       if (e?.active) {
         ackLostRef.current = true;
         setBusy(true);
+        // This pane is attached to a run whose conversation it cannot name —
+        // the same position `send()` is in on a first turn, and armed for the
+        // same reason. The server replays the run's live view and any pending
+        // approval right after this, and those events are filtered by an exact
+        // conversation match; without adoption a reload mid-first-turn would
+        // discard the very state the replay exists to restore, leaving a page
+        // attached to a run driving a real browser it cannot see or stop.
+        //
+        // Only when there is genuinely nothing to compare against. A pane that
+        // already knows its conversation must keep matching on it.
+        if (!conversationIdRef.current) awaitingFirstTurnRef.current = true;
         return;
       }
       // Nothing running, and nothing waiting on it.
@@ -659,6 +946,11 @@ export function useChatSession(
       // be said. See lib/limits.ts.
       const tooLarge = promptTooLargeError(text);
       if (tooLarge) { setError(tooLarge); return; }
+      // This run is about to start without a conversation id, so the server
+      // will make one and this pane may adopt it from the first event that
+      // carries it. Armed only here: adoption is a thing this pane does for a
+      // run it started, never something an arriving event can do to it.
+      awaitingFirstTurnRef.current = !conversationIdRef.current;
       setBusy(true);
       setError(null);
       setStatus('Sizing up the task…');
@@ -758,13 +1050,39 @@ export function useChatSession(
           if (ack.error) {
             setError(ack.error);
             setMessages((prev) => prev.filter((m) => !m.streaming));
+            // The same ending as below, and it has to be done BEFORE the early
+            // return rather than after it. A failed run is still a finished
+            // one: leaving adoption armed lets a later event from somewhere
+            // else name this pane, and leaving the approvals queued keeps a
+            // dangerous-tool prompt on screen for a run that has already
+            // stopped asking. `session:error` does not cover this — it
+            // deliberately ignores errors while the ack is still reachable,
+            // which is exactly the case here.
+            const failed = ack.conversationId ?? activeConversationId();
+            pendingConversationIdRef.current = undefined;
+            awaitingFirstTurnRef.current = false;
+            settleConversation(failed);
             return;
           }
           if (typeof ack.totalTokens === 'number') setLastTokens(ack.totalTokens);
           if (typeof ack.savedUsd === 'number' && ack.savedUsd > 0) {
             setLastSaved({ usd: ack.savedUsd, pct: ack.savedPct ?? 0 });
           }
+          // The id is real now, so the adopted one has done its job.
+          pendingConversationIdRef.current = undefined;
+          awaitingFirstTurnRef.current = false;
           setConversationId(ack.conversationId);
+          // The run is finished; the server has already denied anything still
+          // parked on it.
+          //
+          // No `?? activeConversationId()` fallback here, unlike the error path
+          // above, and the asymmetry is the ack shapes rather than an
+          // oversight: a success ack is a `ChatRunResult`, whose
+          // `conversationId` is a non-optional string, while an error ack is
+          // `{ error }` and carries no id at all. A fallback here would be dead
+          // code — and if the id really were missing, `setConversationId` on the
+          // line above would already have emptied the pane.
+          settleConversation(ack.conversationId);
           const why = pendingWhyRef.current;
           pendingWhyRef.current = null;
           setMessages((prev) => {
@@ -945,10 +1263,13 @@ export function useChatSession(
 
   return {
     messages, send, stop, regenerate, editMessage, deleteMessage: deleteMessageById, selectSibling,
-    busy, error, status, lastTokens, lastSaved, conversationId, loadMessages, setConversationId,
+    busy, error, status, lastTokens, lastSaved, conversationId, loadMessages,
+    setConversationId: selectConversation,
     contextTokens, contextWindow,
     routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, approval,
     escalation, escalationQueued: escalations.length, resolveEscalation, clearEscalation,
     contextApproval, resolveContextApproval, compactionNotice, providerNotice, knowledgeNotice, activity,
+    browserLiveView, browserActive, browserTaskId, stopBrowser,
+    toolApprovals, resolveToolApproval,
   };
 }
