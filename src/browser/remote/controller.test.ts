@@ -540,6 +540,107 @@ describe('two runs starting at the same moment', () => {
   });
 });
 
+describe('a session mid-release still counts against the pool', () => {
+  it('keeps a stopped run\'s slot reserved until the provider actually releases it', async () => {
+    // `stopRun` deletes the run from `runs` and hands its session's release to
+    // a fire-and-forget teardown. If the pool's admission check does not also
+    // count that in-flight release, a second run can pass admission and call
+    // `createSession` before the first run's session is actually given back —
+    // at `maxSessions: 1` that is two live, billed sessions at once, which is
+    // exactly what the cap exists to prevent.
+    let releaseEnd!: () => void;
+    const blockedEnd = new Promise<void>((r) => { releaseEnd = r; });
+    const created: string[] = [];
+    const ended: string[] = [];
+    let n = 0;
+    const provider = {
+      name: 'slow-release',
+      isolatesSessions: true,
+      async createSession() {
+        const id = `sess-${++n}`;
+        created.push(id);
+        return { id, cdpUrl: 'ws://fake/cdp' };
+      },
+      async endSession(id: string) {
+        ended.push(id);
+        await blockedEnd;
+      },
+    };
+
+    const c = new RemoteBrowserController({ provider, maxSessions: 1 });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    c.stopRun('run-A');
+
+    // Let A's fire-and-forget teardown actually reach `endSession`, where it
+    // is now blocked — well past the point where it deleted A from `runs`.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(ended, 'A\'s release has started but not finished').toEqual(['sess-1']);
+
+    const refused = await c.controller({ kind: 'click', selector: '#b' }, ctx('run-B', 'w2'));
+    expect(refused.ok, 'B must not be admitted while A\'s release is still in flight').toBe(false);
+    expect(created, 'and must never have reached the provider to prove it').toEqual(['sess-1']);
+
+    releaseEnd();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const out = await c.controller({ kind: 'click', selector: '#b' }, ctx('run-B', 'w2'));
+    expect(out.ok, 'B proceeds once the slot is truly free').toBe(true);
+    expect(created).toEqual(['sess-1', 'sess-2']);
+  });
+});
+
+describe('Stop cancels the browser it is still waiting on', () => {
+  it('aborts an in-flight session request rather than paying for it before giving it back', async () => {
+    // `openReserved` used to hand the provider only the CASCADE run's
+    // cancellation signal, never the per-run browser abort `stopRun` fires —
+    // so a browser-only Stop pressed while `createSession` was in flight (a
+    // real HTTP POST for Steel) went unheard: the request ran to completion
+    // and allocated a session that was only released afterwards, by the
+    // post-open revocation re-check. This provider blocks until ITS OWN
+    // signal fires and never resolves otherwise, so the test only passes if
+    // Stop actually reaches that signal — releasing the provider by hand
+    // instead would prove nothing.
+    let sawAbort = false;
+    const cascadeSignal = new AbortController(); // present, but never fires
+    const provider = {
+      name: 'abortable',
+      isolatesSessions: true,
+      createSession(signal?: AbortSignal) {
+        return new Promise<{ id: string; cdpUrl: string }>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => {
+            sawAbort = true;
+            reject(new Error('creation aborted'));
+          });
+        });
+      },
+      async endSession() {},
+    };
+
+    const c = new RemoteBrowserController({ provider });
+    const pending = c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1', cascadeSignal.signal));
+    // Nothing else will ever settle it, so keep an unhandled rejection from
+    // escaping if the assertions below fail.
+    pending.catch(() => {});
+
+    await new Promise((r) => setTimeout(r, 20));
+    c.stopRun('run-A');
+
+    // Raced rather than plainly awaited: without the fix this request is
+    // uncancellable and `pending` never settles at all, and a suite timeout
+    // five seconds later says only "timed out" — it does not say that Stop
+    // failed to reach the signal, which is the actual property.
+    const settled = await Promise.race([
+      pending.then((r) => r, () => undefined),
+      new Promise<'hung'>((r) => setTimeout(() => r('hung'), 250)),
+    ]);
+
+    expect(sawAbort, 'the signal handed to createSession must abort on Stop').toBe(true);
+    expect(settled, 'Stop must end the wait, not leave the run hanging on a request it cannot cancel')
+      .not.toBe('hung');
+    expect((settled as { ok?: boolean } | undefined)?.ok ?? false).toBe(false);
+  });
+});
+
 describe('the live view', () => {
   it('is handed to the owner as soon as the session exists', async () => {
     // Before the first action rather than after, or the user watches the

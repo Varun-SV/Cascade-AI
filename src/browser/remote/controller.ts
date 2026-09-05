@@ -144,6 +144,29 @@ export class RemoteBrowserController {
    * signal has to exist before the browser does.
    */
   private aborts = new Map<string, AbortController>();
+  /**
+   * Runs whose provider session is being released right now.
+   *
+   * `stopRun`, `endRun`, `releaseIfIdle`, and the stale-page branch of `open`
+   * all delete a run from `runs` synchronously and only THEN await
+   * `disposeRun` settling — the browser disconnect, and `provider.endSession`,
+   * which for Steel is a real HTTP `/release` call. Between that delete and
+   * the call actually finishing, the admission check in `open()` — which
+   * counts only `runs` and `opening` — saw the slot as free, so a second run
+   * could pass admission and call `createSession` before the first run's
+   * session was truly released. At `maxSessions: 1` that is two live, BILLED
+   * provider sessions at once, exactly what the pool exists to prevent.
+   * Counting this set alongside the other two closes the window.
+   *
+   * Keyed by run id, not a counter: every one of those four call sites checks
+   * the run is still IN `runs` before deleting it and starting teardown, and
+   * that delete is synchronous, so at most one teardown can ever be in flight
+   * for a given run id at a time — a second caller finds the entry already
+   * gone and never starts a competing one. The entry is removed only once its
+   * own teardown settles, so a later, genuine re-open of the same run id
+   * never collides with one still in flight.
+   */
+  private closing = new Set<string>();
   /** Runs the user has stopped, by run id — same meaning as on the desktop. */
   private revoked = new Set<string>();
   /**
@@ -222,10 +245,11 @@ export class RemoteBrowserController {
     const held = this.runs.get(runId);
     if (!held) return;
     this.runs.delete(runId);
+    this.closing.add(runId);
     // Awaited, not fired and forgotten: the caller is about to report the
     // refusal, and the session should be gone by the time it does. Otherwise
     // "stopped" and "still paying for a browser" are true at the same moment.
-    await this.disposeRun(runId, held);
+    await this.teardown(runId, held);
   }
 
   /** Release every run's session. For when the deployment's config changes. */
@@ -256,7 +280,14 @@ export class RemoteBrowserController {
     // just been told the browser is no longer in use. `revoked` keeps refusing
     // further actions, so giving the session back costs nothing.
     this.runs.delete(runId);
-    void this.disposeRun(runId, held);
+    // Added to `closing` synchronously, in this same synchronous stretch of
+    // `stopRun`, so the pool counts this slot as still-in-use for the entire
+    // window between here and the fire-and-forget teardown settling — not
+    // just for the part of it this function happens to await. `stopRun` must
+    // stay synchronous (callers do not await it), so the teardown itself is
+    // still fire-and-forget; only the bookkeeping around it changed.
+    this.closing.add(runId);
+    void this.teardown(runId, held);
   }
 
   /** A run ended: release its browser rather than pay for an idle session. */
@@ -265,7 +296,8 @@ export class RemoteBrowserController {
     const held = this.runs.get(runId);
     if (!held) { this.forgetRun(runId); return; }
     this.runs.delete(runId);
-    await this.disposeRun(runId, held);
+    this.closing.add(runId);
+    await this.teardown(runId, held);
     this.forgetRun(runId);
   }
 
@@ -304,6 +336,22 @@ export class RemoteBrowserController {
     // terminating somebody else's browser.
     await held.browser.close().catch(() => {});
     await this.provider.endSession(held.session.id).catch(() => {});
+  }
+
+  /**
+   * Run `disposeRun`, with the run id counted in `closing` until it settles.
+   *
+   * The caller adds the id to `closing` itself, synchronously, in the same
+   * breath as deleting the run from `runs` — see the field comment. This just
+   * guarantees the removal happens, success or failure, so a disposal that
+   * throws cannot leave the slot counted against the pool forever.
+   */
+  private async teardown(runId: string, held: RunBrowser): Promise<void> {
+    try {
+      await this.disposeRun(runId, held);
+    } finally {
+      this.closing.delete(runId);
+    }
   }
 
   private async act(action: BrowserAction, context: BrowserActionContext): Promise<BrowserActionOutcome> {
@@ -396,7 +444,13 @@ export class RemoteBrowserController {
       // it is still allocated and still billed. Overwriting the map entry
       // dropped the only reference to it.
       this.runs.delete(runId);
-      await this.disposeRun(runId, existing);
+      // Same delete-before-await shape as `stopRun`/`endRun`/`releaseIfIdle`,
+      // and the same fix: without counting this run in `closing` while its old
+      // session is disposed of, a DIFFERENT run's admission check below could
+      // see this slot as free and get admitted before the old session was
+      // actually released.
+      this.closing.add(runId);
+      await this.teardown(runId, existing);
     }
 
     // Counted WITH the open runs, and taken before the first await.
@@ -408,7 +462,12 @@ export class RemoteBrowserController {
     // Steel that is two billed sessions against maxSessions: 1; on a bare CDP
     // endpoint it defeats the non-isolating cap and puts two runs back on one
     // page. A reservation closes the window because it is taken synchronously.
-    if (this.runs.size + this.opening.size >= this.maxSessions) {
+    //
+    // `closing` joins the other two for the same reason: a run mid-teardown
+    // has left `runs` and `opening` already but has not yet actually given the
+    // provider session back, so leaving it out of this sum would reopen the
+    // exact race this comment describes, just via release instead of open.
+    if (this.runs.size + this.opening.size + this.closing.size >= this.maxSessions) {
       throw new Error(
         `All ${this.maxSessions} browser session${this.maxSessions === 1 ? '' : 's'} are in use by other runs. ` +
         'Try again when one finishes, or raise the session limit in settings.',
@@ -432,7 +491,23 @@ export class RemoteBrowserController {
   /** The part that may fail, with the pool slot already reserved. */
   private async openReserved(runId: string, signal?: AbortSignal): Promise<RunBrowser> {
     const playwright = await loadPlaywright();
-    const session = await this.provider.createSession(signal);
+    // `signal` alone is the CASCADE RUN's cancellation, passed down from
+    // `act()` — NOT the per-run browser abort `stopRun` fires, which lives in
+    // `this.aborts` and is created back in `open()` before this is ever
+    // called. SteelProvider's `createSession` genuinely honours whatever
+    // signal it is given (it is threaded straight into the underlying fetch),
+    // so a browser-only Stop pressed while that POST is in flight left it
+    // unheard: the request ran to completion, Steel allocated and started
+    // billing a real session, and only the post-open revocation re-check
+    // below noticed afterwards and released it. Composing both signals here
+    // means Stop cancels the request that creates the paid resource, not just
+    // the use of it once it exists. `AbortSignal.any` needs no listener
+    // cleanup of our own — it is the platform's own primitive for exactly
+    // this, unlike `stoppable()` above, which reaches for Playwright directly
+    // because Playwright has no signal to hand it in the first place.
+    const abort = this.aborts.get(runId)?.signal;
+    const creationSignal = signal && abort ? AbortSignal.any([signal, abort]) : (signal ?? abort);
+    const session = await this.provider.createSession(creationSignal);
     // Handed to the owner as soon as it exists, so the user can watch from the
     // first action rather than after it. A CAPABILITY URL — see the provider
     // seam: never persisted, never logged, never sent to another client.
