@@ -848,7 +848,11 @@ export function useChatSession(
       const cid = conversationIdRef.current;
       if (cid) void reloadActivePath(cid);
     };
-    const onResumed = (e: { active?: number; finished?: Array<{ conversationId?: string; error?: string }> }) => {
+    const onResumed = (e: {
+      active?: number;
+      active_conversations?: string[];
+      finished?: Array<{ conversationId?: string; error?: string }>;
+    }) => {
       // A live run is authoritative even on a page that has never seen one.
       //
       // The resume identity deliberately survives a reload, so the server can
@@ -871,7 +875,27 @@ export function useChatSession(
         //
         // Only when there is genuinely nothing to compare against. A pane that
         // already knows its conversation must keep matching on it.
-        if (!conversationIdRef.current) awaitingFirstTurnRef.current = true;
+        if (!conversationIdRef.current) {
+          // Taken from the resume itself rather than inferred from whichever
+          // event happens to arrive next. The server replays this run's live
+          // view and approval prompt immediately after this message, and those
+          // are one-shot: a pane still guessing at its own id when they land
+          // filters them out and never sees them again.
+          const named = (e?.active_conversations ?? []).filter((id): id is string => typeof id === 'string');
+          if (named.length > 1) {
+            // Several runs came back at once, so this pane cannot know which of
+            // them it is showing. Claim NOTHING: adopting the first id to
+            // arrive would put another conversation's browser, and its Stop
+            // button, in front of someone who never opened it.
+            awaitingFirstTurnRef.current = false;
+          } else {
+            awaitingFirstTurnRef.current = true;
+            // Exactly one: claim it outright. None named — an older server, or
+            // a run whose id nothing knows yet — leaves adoption armed so the
+            // first event that names itself can still be claimed.
+            if (named.length === 1) pendingConversationIdRef.current = named[0];
+          }
+        }
         return;
       }
       // Nothing running, and nothing waiting on it.

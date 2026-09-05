@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { io as ioClient, type Socket as ClientSocket } from 'socket.io-client';
-import { attachSocket, RebindableTransport, rememberForReplay, replaySupervision, type LiveRun } from './socket.js';
+import { attachSocket, RebindableTransport, rememberForReplay, replaySupervision, resumeAndReplay, type LiveRun } from './socket.js';
 import { CloudStore } from './db.js';
 import type { CloudEnv } from './env.js';
 import { createSessionToken, SESSION_COOKIE_NAME } from './auth/session.js';
@@ -1294,5 +1294,66 @@ describe('rememberForReplay / replaySupervision — what a reload gets back', ()
     const { emitted, socket } = recorder();
     replaySupervision(run, socket);
     expect(emitted).toEqual([]);
+  });
+});
+
+// The ORDER is the property, and it was wrong: `replaySupervision` ran inside
+// `adopt()`, long before `run:resumed` went out. A first-turn reload has no
+// conversation id of its own — the ack that would have carried it is exactly
+// what the reload lost — so the replayed live view and approval prompt arrived
+// unattributable, were filtered out as belonging to some other chat, and never
+// came again, because they are one-shot. The page then sat attached to a run
+// still driving a browser with neither the view nor the Stop button; worst
+// after "Allow for this run", where the escalator will never prompt again.
+describe('a reconnecting page is told what it owns before it is handed the state', () => {
+  function recorder() {
+    const emitted: Array<{ event: string; payload: unknown }> = [];
+    return {
+      emitted,
+      socket: { emit: (event: string, payload: unknown) => { emitted.push({ event, payload }); return true; } },
+    };
+  }
+  function runWithBrowser(conversationId: string): LiveRun {
+    const run = {
+      controller: new AbortController(),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      transport: new RebindableTransport({ emit: () => true, on: () => undefined, off: () => undefined } as any),
+      done: false,
+      conversationId,
+    } as LiveRun;
+    rememberForReplay(run, 'browser:live-view', { conversationId, taskId: 't1', liveViewUrl: 'https://v.example/a', active: true });
+    rememberForReplay(run, 'permission:user-required', { conversationId, id: 'req-1' });
+    return run;
+  }
+
+  it('emits run:resumed first, then everything replayed for it', () => {
+    const { emitted, socket } = recorder();
+    const run = runWithBrowser('conv-held');
+
+    resumeAndReplay(socket, { active: 1, active_conversations: ['conv-held'] }, [run]);
+
+    // Order, asserted as a sequence rather than as membership: every replayed
+    // event after this one is unattributable if `run:resumed` has not landed.
+    expect(emitted.map((e) => e.event)).toEqual([
+      'run:resumed',
+      'browser:live-view',
+      'permission:user-required',
+    ]);
+  });
+
+  it('names the conversations still running, so a first-turn reload can claim them', () => {
+    // Without this the page has to infer its own id from whichever event
+    // arrives next — which is precisely the inference the ordering bug broke.
+    const { emitted, socket } = recorder();
+    resumeAndReplay(socket, { active: 1, active_conversations: ['conv-held'] }, [runWithBrowser('conv-held')]);
+
+    const resumed = emitted[0]!.payload as { active_conversations?: string[] };
+    expect(resumed.active_conversations).toEqual(['conv-held']);
+  });
+
+  it('replays nothing when there is nothing owed', () => {
+    const { emitted, socket } = recorder();
+    resumeAndReplay(socket, { active: 0, finished: [] }, []);
+    expect(emitted.map((e) => e.event)).toEqual(['run:resumed']);
   });
 });

@@ -218,6 +218,29 @@ export function rememberForReplay(run: LiveRun, event: string, payload: unknown)
   }
 }
 
+/**
+ * Tell a connection what it owns, and only THEN hand back the state.
+ *
+ * The order is the contract, which is why it is a function rather than two
+ * statements that happen to be adjacent. `replaySupervision` used to run inside
+ * `adopt()`, long before `run:resumed` went out — and the client cannot
+ * attribute a replayed event until it knows it is holding a resumed run. On a
+ * first-turn reload it has no conversation id of its own, so the live view and
+ * the approval prompt arrived unattributable, were filtered out as belonging to
+ * some other chat, and never came again: they are one-shot. The page then sat
+ * attached to a run whose agent was still driving a browser, showing neither
+ * the view nor the Stop button — worst of all after "Allow for this run", where
+ * the escalator has cached the decision and will never prompt again.
+ */
+export function resumeAndReplay(
+  socket: Pick<Socket, 'emit'>,
+  resumed: Record<string, unknown>,
+  adopted: readonly LiveRun[],
+): void {
+  socket.emit('run:resumed', resumed);
+  for (const run of adopted) replaySupervision(run, socket);
+}
+
 /** Give a replacement connection back the state the reloaded page lost. */
 export function replaySupervision(run: LiveRun, socket: Pick<Socket, 'emit'>): void {
   if (run.done) return;
@@ -290,6 +313,8 @@ export function attachSocket(
   const owners = new Map<string, {
     socket: Socket;
     adopt: (run: LiveRun) => void;
+    /** Hand over the supervision state owed for runs adopted since the last flush. */
+    flushReplay: () => void;
     /** Give up every live run, so the taker owns them outright. */
     release: () => LiveRun[];
     /** Live runs, left where they are — see `successors`. */
@@ -413,12 +438,26 @@ export function attachSocket(
     /** The key this socket is queued to inherit, if it was renamed. */
     let successorFor: string | undefined;
 
+    /**
+     * Runs adopted by this connection whose supervision state is still owed.
+     *
+     * Queued rather than replayed on the spot: the client has to be told it
+     * holds a resumed run BEFORE that run's live view and approval prompt
+     * arrive, or it has nothing to attribute them to. Drained by
+     * `flushReplay`, which every path that adopts is responsible for calling
+     * once it has announced.
+     */
+    const pendingReplay: LiveRun[] = [];
     const adopt = (run: LiveRun): void => {
       run.transport.rebind(socket);
       activeRuns.add(run);
-      // After the rebind, so the emits go to the connection that just took the
-      // run over rather than to the one that dropped it.
-      replaySupervision(run, socket);
+      // Queued after the rebind, so when it does go out it goes to the
+      // connection that took the run over rather than the one that dropped it.
+      pendingReplay.push(run);
+    };
+    const flushReplay = (): void => {
+      const owed = pendingReplay.splice(0);
+      for (const run of owed) replaySupervision(run, socket);
     };
 
     if (key) {
@@ -460,6 +499,7 @@ export function attachSocket(
       owners.set(key, {
         socket,
         adopt,
+        flushReplay,
         release: () => {
           const live = [...activeRuns].filter((r) => !r.done);
           for (const run of live) activeRuns.delete(run);
@@ -595,6 +635,11 @@ export function attachSocket(
       const owner = owners.get(parkKey);
       if (owner && owner.socket !== socket && owner.socket.connected) {
         for (const r of inFlight) owner.adopt(r);
+        // That connection is already established and already knows which
+        // conversation it is on, so its replay is owed immediately — there is
+        // no `run:resumed` coming for it to wait behind, and an undrained queue
+        // would strand the live view and the approval prompt for good.
+        owner.flushReplay();
         return;
       }
 
@@ -653,13 +698,19 @@ export function attachSocket(
     // `clientId` appears only when this connection was renamed for colliding
     // with a live one. The client persists it, so the collision does not recur
     // on its next reload.
-      socket.emit('run:resumed', {
+      resumeAndReplay(socket, {
         active: activeRuns.size,
         finished: [...(held?.runs ?? [])]
           .filter((r) => r.done)
           .map((r) => ({ conversationId: r.terminal?.conversationId ?? r.conversationId, error: r.terminal?.error })),
+        // The conversations of the runs still going. A reloaded first-turn page
+        // has no id of its own — the ack that would have carried it is exactly
+        // what the reload lost — so without this it cannot name the run it is
+        // now holding, and cannot claim the state replayed for it below.
+        active_conversations: [...activeRuns].filter((r) => !r.done)
+          .map((r) => r.conversationId).filter((id): id is string => !!id),
         ...(assigned ? { clientId: assigned } : {}),
-      });
+      }, pendingReplay.splice(0));
     };
 
     announceResume(assignedClientId);

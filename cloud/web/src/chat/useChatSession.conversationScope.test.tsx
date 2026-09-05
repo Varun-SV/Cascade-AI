@@ -520,3 +520,93 @@ describe('useChatSession — a page reloaded into a run already using a browser'
     expect(view.result.current.conversationId).toBe('conv-mine');
   });
 });
+
+// The server names the resumed conversation in `run:resumed` itself, and only
+// then replays that run's one-shot supervision events. The page must claim its
+// id from the resume rather than infer it from whichever event lands next —
+// that inference is what the ordering bug broke, and the events do not repeat.
+describe('useChatSession — claiming a resumed run by name', () => {
+  it('shows the browser panel for a run named in run:resumed', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { fake.fire('run:resumed', { active: 1, active_conversations: ['conv-held'] }); });
+    expect(view.result.current.conversationId, 'the pane still shows "new chat"').toBeUndefined();
+
+    act(() => {
+      fake.fire('browser:live-view', {
+        conversationId: 'conv-held', taskId: 'task-held',
+        liveViewUrl: 'https://viewer.example/held', active: true,
+      });
+    });
+
+    expect(view.result.current.browserActive).toBe(true);
+    expect(view.result.current.browserTaskId).toBe('task-held');
+  });
+
+  it('answers a replayed prompt against the run it belongs to', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { fake.fire('run:resumed', { active: 1, active_conversations: ['conv-held'] }); });
+    act(() => {
+      fake.fire('permission:user-required', {
+        conversationId: 'conv-held', requestId: 'req-held', toolName: 'browser_control',
+      });
+    });
+    act(() => { view.result.current.resolveToolApproval('req-held', false); });
+
+    expect(fake.sent.filter((m) => m.event === 'permission:decide')).toEqual([
+      { event: 'permission:decide', payload: { conversationId: 'conv-held', requestId: 'req-held', approved: false, always: false } },
+    ]);
+  });
+
+  it('claims the run it was named, not whichever event arrives first', () => {
+    // The discriminating case for claiming by name. With the ordering fixed,
+    // the two happy-path tests above pass whether the id comes from
+    // `run:resumed` or is inferred from the first replayed event — the ids are
+    // the same, so they cannot tell the mechanisms apart.
+    //
+    // They differ when the first event to land belongs to something else: a
+    // background run the server did not name in `active_conversations`.
+    // Inferring would adopt THAT conversation and put its browser, and its
+    // Stop button, in front of a user who never opened it.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { fake.fire('run:resumed', { active: 1, active_conversations: ['conv-held'] }); });
+    act(() => {
+      fake.fire('browser:live-view', {
+        conversationId: 'conv-other', taskId: 'task-other',
+        liveViewUrl: 'https://viewer.example/other', active: true,
+      });
+    });
+
+    expect(view.result.current.browserActive, 'not the one it was not named').toBe(false);
+
+    act(() => {
+      fake.fire('browser:live-view', {
+        conversationId: 'conv-held', taskId: 'task-held',
+        liveViewUrl: 'https://viewer.example/held', active: true,
+      });
+    });
+    expect(view.result.current.browserTaskId).toBe('task-held');
+  });
+
+  it('claims nothing when several runs resumed at once', () => {
+    // Two concurrent runs means this pane cannot know which of them it is
+    // showing. Picking one would put another conversation's browser — and its
+    // Stop button — in front of the user.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => { fake.fire('run:resumed', { active: 2, active_conversations: ['conv-a', 'conv-b'] }); });
+    act(() => {
+      fake.fire('browser:live-view', {
+        conversationId: 'conv-a', taskId: 'task-a', liveViewUrl: 'https://viewer.example/a', active: true,
+      });
+    });
+
+    expect(view.result.current.browserActive).toBe(false);
+  });
+});
