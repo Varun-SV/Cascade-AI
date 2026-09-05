@@ -1074,6 +1074,14 @@ export function useChatSession(
           setConversationId(ack.conversationId);
           // The run is finished; the server has already denied anything still
           // parked on it.
+          //
+          // No `?? activeConversationId()` fallback here, unlike the error path
+          // above, and the asymmetry is the ack shapes rather than an
+          // oversight: a success ack is a `ChatRunResult`, whose
+          // `conversationId` is a non-optional string, while an error ack is
+          // `{ error }` and carries no id at all. A fallback here would be dead
+          // code — and if the id really were missing, `setConversationId` on the
+          // line above would already have emptied the pane.
           settleConversation(ack.conversationId);
           const why = pendingWhyRef.current;
           pendingWhyRef.current = null;
