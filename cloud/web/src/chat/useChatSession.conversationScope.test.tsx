@@ -15,7 +15,10 @@ function fakeSocket() {
   const handlers = new Map<string, Set<(...args: unknown[]) => void>>();
   const sent: Array<{ event: string; payload: unknown }> = [];
   const runAcks: Array<(a: unknown) => void> = [];
+  /** Registrations and the connect, in the order they happened. */
+  const order: string[] = [];
   return {
+    order,
     sent,
     /** Settle the in-flight run the way the server's `chat:run` ack does. */
     ackRun(conversationId: string) { runAcks.shift()?.({ conversationId, output: 'done' }); },
@@ -25,8 +28,8 @@ function fakeSocket() {
       for (const h of [...(handlers.get(event) ?? [])]) h(payload);
     },
     socket: {
-      connected: true,
       on(event: string, listener: (...args: unknown[]) => void) {
+        order.push(`on:${event}`);
         let set = handlers.get(event);
         if (!set) { set = new Set(); handlers.set(event, set); }
         set.add(listener);
@@ -36,6 +39,8 @@ function fakeSocket() {
         handlers.get(event)?.delete(listener);
         return this;
       },
+      connected: false,
+      connect() { (this as { connected: boolean }).connected = true; order.push('connect'); return this; },
       emit(event: string, payload: unknown, ack?: (a: unknown) => void) {
         sent.push({ event, payload });
         if (event === 'chat:run' && ack) runAcks.push(ack);
@@ -608,5 +613,92 @@ describe('useChatSession — claiming a resumed run by name', () => {
     });
 
     expect(view.result.current.browserActive).toBe(false);
+  });
+});
+
+// The server sends `run:resumed` the instant it accepts a connection, and the
+// held run's live view and pending approval immediately behind it. All three
+// are one-shot. If the socket can connect before this hook is listening, a
+// reloaded page loses them for good — attached to a run still driving a real
+// browser, with nothing to watch it by and no Stop.
+describe('useChatSession — subscribing before connecting', () => {
+  it('attaches every handshake handler before opening the connection', () => {
+    const fake = fakeSocket();
+    renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    const connectedAt = fake.order.indexOf('connect');
+    expect(connectedAt, 'the hook is what opens the socket').toBeGreaterThan(-1);
+
+    // The three the reconnect handshake delivers. Each must already be
+    // listening when the connection opens — `App` calls getSocket() during
+    // render, so an auto-connecting socket would be in flight while React was
+    // still committing and this effect had not run.
+    for (const event of ['run:resumed', 'browser:live-view', 'permission:user-required']) {
+      const at = fake.order.indexOf(`on:${event}`);
+      expect(at, `${event} must be subscribed`).toBeGreaterThan(-1);
+      expect(at, `${event} must be subscribed before connect`).toBeLessThan(connectedAt);
+    }
+  });
+});
+
+// A run can finish while nobody is connected. Its terminal event went to a dead
+// socket, so the reconnect payload is the only thing that still knows both the
+// answer's conversation and whether it failed.
+describe('useChatSession — a run that finished during the reload gap', () => {
+  it('adopts and reloads the conversation on a fresh mount', () => {
+    // Fresh mount: nothing sent from here, `busy` is just React state at false.
+    // The active-run branch does not apply, and returning early on "not busy"
+    // dropped the report entirely — an empty chat, nothing reloaded.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => {
+      fake.fire('run:resumed', { active: 0, finished: [{ conversationId: 'conv-held' }] });
+    });
+
+    expect(view.result.current.conversationId).toBe('conv-held');
+  });
+
+  it('surfaces the error when that run failed', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => {
+      fake.fire('run:resumed', {
+        active: 0,
+        finished: [{ conversationId: 'conv-held', error: 'the provider rejected the request' }],
+      });
+    });
+
+    expect(view.result.current.conversationId).toBe('conv-held');
+    expect(view.result.current.error).toContain('rejected');
+  });
+
+  it('claims nothing when several conversations finished', () => {
+    // The same non-guessing rule as a multi-run resume: this pane cannot know
+    // which of them it is, and picking one drops somebody else's chat into it.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+
+    act(() => {
+      fake.fire('run:resumed', {
+        active: 0,
+        finished: [{ conversationId: 'conv-a' }, { conversationId: 'conv-b' }],
+      });
+    });
+
+    expect(view.result.current.conversationId).toBeUndefined();
+  });
+
+  it('does not yank a pane that is already showing another conversation', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() =>
+      useChatSession(fake.socket, [], 'general', undefined, 'conv-mine'));
+
+    act(() => {
+      fake.fire('run:resumed', { active: 0, finished: [{ conversationId: 'conv-somewhere-else' }] });
+    });
+
+    expect(view.result.current.conversationId).toBe('conv-mine');
   });
 });

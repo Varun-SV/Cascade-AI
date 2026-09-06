@@ -898,8 +898,28 @@ export function useChatSession(
         }
         return;
       }
-      // Nothing running, and nothing waiting on it.
-      if (!busyRef.current) return;
+      // Nothing running. On a page that WAS running something, the block below
+      // ends it. On a fresh mount there is no run of our own to end — but the
+      // server may still be reporting one that finished while nobody was
+      // connected, and that report is the only carrier of both the answer's
+      // conversation id and any error. Returning here dropped it: a full reload
+      // landing just after the run completed showed an empty chat, reloaded
+      // nothing, and said nothing about a failure.
+      if (!busyRef.current) {
+        const finished = (e?.finished ?? []).filter((f) => f?.conversationId);
+        // Exactly one, or nothing — the same non-guessing rule as
+        // `active_conversations`. Several finished runs means this pane cannot
+        // know which of them it is, and picking one would drop somebody else's
+        // conversation into it.
+        if (finished.length !== 1) return;
+        const only = finished[0]!;
+        // A pane already showing a conversation must not be yanked to another.
+        const mine = conversationIdRef.current;
+        if (mine && mine !== only.conversationId) return;
+        if (only.error) setError(only.error);
+        finishWithoutAck(only.conversationId);
+        return;
+      }
       // Nothing is running. The terminal event was emitted while no socket was
       // bound, so this is the only remaining carrier of BOTH the id — for a run
       // that was a brand-new chat — and the outcome. A run can fail during the
@@ -941,6 +961,21 @@ export function useChatSession(
       socket.off('session:error', onError);
     };
   }, [socket, reloadActivePath, finishWithoutAck]);
+
+  // Connect only now, and deliberately LAST.
+  //
+  // The socket is created with `autoConnect: false` precisely so this line
+  // decides when it opens. The server sends `run:resumed` the instant it
+  // accepts a connection, and the held run's live view and pending approval
+  // immediately behind it — all one-shot. Every handler that consumes them is
+  // attached by the effects above, and effects run in declaration order, so by
+  // the time this one fires there is nothing left to miss.
+  //
+  // Reconnections need no equivalent: socket.io reconnects on its own, long
+  // after these listeners exist.
+  useEffect(() => {
+    if (socket && !socket.connected) socket.connect();
+  }, [socket]);
 
   // Shared run path for a fresh send, an edit (new branch), and a regenerate.
   // `appendUser` is false when regenerating (no new user turn is created). The
