@@ -579,6 +579,10 @@ describe('a session mid-release still counts against the pool', () => {
     // exactly what the cap exists to prevent.
     let releaseEnd!: () => void;
     const blockedEnd = new Promise<void>((r) => { releaseEnd = r; });
+    // Resolved from inside `endSession`, so the test proceeds when the release
+    // has actually started rather than when a sleep guesses it has.
+    let releasing!: () => void;
+    const releaseStarted = new Promise<void>((r) => { releasing = r; });
     const created: string[] = [];
     const ended: string[] = [];
     let n = 0;
@@ -592,6 +596,7 @@ describe('a session mid-release still counts against the pool', () => {
       },
       async endSession(id: string) {
         ended.push(id);
+        releasing();
         await blockedEnd;
       },
     };
@@ -600,9 +605,9 @@ describe('a session mid-release still counts against the pool', () => {
     await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
     c.stopRun('run-A');
 
-    // Let A's fire-and-forget teardown actually reach `endSession`, where it
-    // is now blocked — well past the point where it deleted A from `runs`.
-    await new Promise((r) => setTimeout(r, 20));
+    // A's fire-and-forget teardown has reached `endSession` and is blocked
+    // there — well past the point where it deleted A from `runs`.
+    await releaseStarted;
     expect(ended, 'A\'s release has started but not finished').toEqual(['sess-1']);
 
     const refused = await c.controller({ kind: 'click', selector: '#b' }, ctx('run-B', 'w2'));
@@ -630,6 +635,10 @@ describe('Stop cancels the browser it is still waiting on', () => {
     // Stop actually reaches that signal — releasing the provider by hand
     // instead would prove nothing.
     let sawAbort = false;
+    let entered!: () => void;
+    // See `stalling()` below: waited on rather than slept past, because getting
+    // here crosses loadPlaywright()'s dynamic import and a fixed sleep flakes.
+    const reached = new Promise<void>((r) => { entered = r; });
     const cascadeSignal = new AbortController(); // present, but never fires
     const provider = {
       name: 'abortable',
@@ -640,6 +649,7 @@ describe('Stop cancels the browser it is still waiting on', () => {
             sawAbort = true;
             reject(new Error('creation aborted'));
           });
+          entered();
         });
       },
       async endSession() {},
@@ -651,7 +661,7 @@ describe('Stop cancels the browser it is still waiting on', () => {
     // escaping if the assertions below fail.
     pending.catch(() => {});
 
-    await new Promise((r) => setTimeout(r, 20));
+    await reached;
     c.stopRun('run-A');
 
     // Raced rather than plainly awaited: without the fix this request is
@@ -869,6 +879,19 @@ describe('ending a run whose browser has not arrived yet', () => {
   function stalling() {
     const created: string[] = [];
     let sawAbort = false;
+    let entered!: () => void;
+    /**
+     * Resolves once the open has genuinely reached the provider AND registered
+     * its abort listener.
+     *
+     * A fixed `setTimeout` used to stand in for this, and it flaked: getting
+     * here goes through `loadPlaywright()`'s dynamic import, which on a loaded
+     * machine takes longer than any sleep short enough to be worth writing. The
+     * test then ended a run that had not started opening yet and saw no abort —
+     * a red suite reporting a bug that was not there. Waiting for the condition
+     * itself cannot guess wrong.
+     */
+    const reached = new Promise<void>((r) => { entered = r; });
     const provider = {
       name: 'stalling',
       isolatesSessions: true,
@@ -876,19 +899,22 @@ describe('ending a run whose browser has not arrived yet', () => {
         created.push(`sess-${created.length + 1}`);
         return new Promise<{ id: string; cdpUrl: string }>((_res, rej) => {
           signal?.addEventListener('abort', () => { sawAbort = true; rej(new Error('aborted')); });
+          // After the listener, never before: the test proceeds to fire the
+          // abort the moment this resolves.
+          entered();
         });
       },
       async endSession() {},
     };
-    return { provider, created, sawAbort: () => sawAbort };
+    return { provider, created, sawAbort: () => sawAbort, reached };
   }
 
   it('stops the open instead of letting it finish unattended', async () => {
-    const { provider, sawAbort } = stalling();
+    const { provider, sawAbort, reached } = stalling();
     const c = new RemoteBrowserController({ provider });
     const pending = c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
     pending.catch(() => {});
-    await new Promise((r) => setTimeout(r, 20));
+    await reached;
 
     await c.endRun('run-A');
 
@@ -906,11 +932,11 @@ describe('ending a run whose browser has not arrived yet', () => {
     // `dispose` is what a provider or credential change calls. It enumerated
     // open browsers only, so a session about to be allocated with the
     // credential being retired was invisible to it.
-    const { provider, sawAbort } = stalling();
+    const { provider, sawAbort, reached } = stalling();
     const c = new RemoteBrowserController({ provider });
     const pending = c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
     pending.catch(() => {});
-    await new Promise((r) => setTimeout(r, 20));
+    await reached;
 
     await c.dispose();
 
