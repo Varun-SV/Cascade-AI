@@ -11,6 +11,7 @@ import type { ActivityNode, ChatMessage, ForceTier, PlanApproval, RoutingMode, S
 import type { Skill } from '../lib/types.js';
 import type { UiMode } from '../lib/prefs.js';
 import { BrowserLiveView } from './BrowserLiveView.js';
+import type { BrowserInputEvent } from './BrowserLiveView.js';
 import { ToolApprovalPrompt } from './ToolApprovalPrompt.js';
 import type { ToolApproval } from './useChatSession.js';
 
@@ -52,6 +53,19 @@ interface Props {
   browserFrame?: { data: string; width: number; height: number } | undefined;
   /** The server confirmed the stream started, so an empty panel is worth explaining. */
   browserStreaming?: boolean;
+  /** The user, not the agent, is driving that browser right now. */
+  browserHuman?: boolean;
+  /** Whether it is still being pictured while they drive it. */
+  browserCapturing?: boolean;
+  /** Something the browser refused to do for this conversation. */
+  browserNotice?: string | undefined;
+  /** Ask for the browser, and give it back. */
+  onTakeOverBrowser?: () => void;
+  onHandBackBrowser?: () => void;
+  /** One thing the user did to the page while holding it. */
+  onBrowserInput?: (event: BrowserInputEvent) => void;
+  /** Pause or resume the picture without giving the page back. */
+  onBrowserCapture?: (on: boolean) => void;
   /** Dangerous tool calls waiting on the user. */
   toolApprovals?: ToolApproval[];
   onDecideToolApproval?: (requestId: string, approved: boolean, always?: boolean) => void;
@@ -64,7 +78,9 @@ export default function ChatPanel({
   onEditMessage, onDeleteMessage, onSelectSibling,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange, uiMode, approval,
   compactionNotice, providerNotice, knowledgeNotice, activity, browserLiveView, browserActive,
-  browserFrame, browserStreaming, onStopBrowser, toolApprovals, onDecideToolApproval,
+  browserFrame, browserStreaming, browserHuman, browserCapturing, browserNotice,
+  onStopBrowser, onTakeOverBrowser, onHandBackBrowser, onBrowserInput, onBrowserCapture,
+  toolApprovals, onDecideToolApproval,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [activityOpen, setActivityOpen] = useState(false);
@@ -219,7 +235,14 @@ export default function ChatPanel({
           liveViewUrl={browserLiveView}
           frame={browserFrame}
           streaming={browserStreaming}
+          human={browserHuman}
+          capturing={browserCapturing}
+          notice={browserNotice}
           onStop={() => onStopBrowser?.()}
+          onTakeOver={() => onTakeOverBrowser?.()}
+          onHandBack={() => onHandBackBrowser?.()}
+          onInput={(e) => onBrowserInput?.(e)}
+          onCapture={(on) => onBrowserCapture?.(on)}
         />
       </div>
 

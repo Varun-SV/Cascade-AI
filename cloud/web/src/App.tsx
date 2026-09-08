@@ -305,6 +305,13 @@ export default function App() {
             browserActive={chat.browserActive}
             browserFrame={chat.browserFrame}
             browserStreaming={chat.browserStreaming}
+            browserHuman={chat.browserHuman}
+            browserCapturing={chat.browserCapturing}
+            browserNotice={chat.browserNotice}
+            onTakeOverBrowser={chat.takeOverBrowser}
+            onHandBackBrowser={chat.handBackBrowser}
+            onBrowserInput={chat.sendBrowserInput}
+            onBrowserCapture={chat.setBrowserCapture}
             toolApprovals={chat.toolApprovals}
             onDecideToolApproval={chat.resolveToolApproval}
             onStopBrowser={chat.stopBrowser}

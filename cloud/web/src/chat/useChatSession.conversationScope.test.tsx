@@ -810,6 +810,82 @@ describe('useChatSession — frames of the agent\'s browser', () => {
     expect(view.result.current.browserStreaming).toBe(false);
   });
 
+  it('follows who holds each conversation\'s page', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:live-view', liveView('conv-b', 'task-b'));
+      fake.fire('browser:control', { conversationId: 'conv-b', taskId: 'task-b', human: true });
+    });
+    expect(view.result.current.browserHuman, 'not another chat\'s takeover').toBe(false);
+
+    act(() => { view.result.current.setConversationId('conv-b'); });
+    expect(view.result.current.browserHuman).toBe(true);
+  });
+
+  it('does not take control away over a refusal', () => {
+    // A refusal is not a statement about who holds the page: an unknown key is
+    // refused while the user still has it, and reading that as a loss of
+    // control would close their panel over a keystroke.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:control', { conversationId: 'conv-a', taskId: 'task-a', human: true });
+      fake.fire('browser:control', {
+        conversationId: 'conv-a', taskId: 'task-a', detail: 'That key cannot be sent to the page.',
+      });
+    });
+
+    expect(view.result.current.browserHuman).toBe(true);
+    expect(view.result.current.browserNotice).toMatch(/cannot be sent/i);
+
+    // And the next statement of ownership clears it, so a refusal does not
+    // outlive the situation it described.
+    act(() => {
+      fake.fire('browser:control', { conversationId: 'conv-a', taskId: 'task-a', human: false });
+    });
+    expect(view.result.current.browserHuman).toBe(false);
+    expect(view.result.current.browserNotice).toBeUndefined();
+  });
+
+  it('drives the browser this pane is showing, and only with its own run id', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    // No browser yet: every control is a no-op rather than an event the server
+    // would have to decide about.
+    act(() => {
+      view.result.current.takeOverBrowser();
+      view.result.current.sendBrowserInput({ kind: 'text', text: 'hello' });
+    });
+    expect(fake.sent.filter((m) => m.event.startsWith('browser:'))).toEqual([]);
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:live-view', liveView('conv-b', 'task-b'));
+    });
+    act(() => { view.result.current.setConversationId('conv-b'); });
+    act(() => {
+      view.result.current.takeOverBrowser();
+      view.result.current.sendBrowserInput({ kind: 'click', x: 0.5, y: 0.5 });
+      view.result.current.setBrowserCapture(false);
+      view.result.current.handBackBrowser();
+    });
+
+    expect(fake.sent.filter((m) => ['browser:take-over', 'browser:input', 'browser:capture', 'browser:hand-back']
+      .includes(m.event)))
+      .toEqual([
+        { event: 'browser:take-over', payload: { taskId: 'task-b' } },
+        { event: 'browser:input', payload: { taskId: 'task-b', event: { kind: 'click', x: 0.5, y: 0.5 } } },
+        { event: 'browser:capture', payload: { taskId: 'task-b', on: false } },
+        { event: 'browser:hand-back', payload: { taskId: 'task-b' } },
+      ]);
+  });
+
   it('watches the browser on screen, and stops watching when it leaves', () => {
     // Frames cost the operator money to encode and ship, so the stream follows
     // what is actually being looked at rather than what happens to be running.

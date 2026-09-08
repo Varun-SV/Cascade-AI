@@ -137,3 +137,125 @@ describe('BrowserLiveView — watching by frames', () => {
     expect(screen.getByRole('button', { name: /stop/i })).toBeInTheDocument();
   });
 });
+
+// Watching leaves a run stuck the moment the agent reaches a login only the
+// user can answer, with Stop — throwing the session away — as the only control.
+describe('BrowserLiveView — taking the page over', () => {
+  const frame = { data: 'AAAA', width: 1280, height: 800 };
+
+  it('offers control only where there are frames to drive', () => {
+    // The provider's iframe has no lease behind it: input through it would be a
+    // second, uncoordinated controller racing the agent on the same page.
+    render(<BrowserLiveView active liveViewUrl="https://provider.test/live/abc" onStop={() => {}} />);
+    expect(screen.queryByRole('button', { name: /take control/i })).not.toBeInTheDocument();
+  });
+
+  it('asks for the page rather than assuming it got it', () => {
+    // The agent may be mid-action; the server grants control only once that
+    // has settled, and says so on its own event.
+    const onTakeOver = vi.fn();
+    render(<BrowserLiveView active liveViewUrl={undefined} frame={frame} onStop={() => {}} onTakeOver={onTakeOver} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /take control/i }));
+    expect(onTakeOver).toHaveBeenCalledOnce();
+    expect(screen.getByRole('img'), 'still inert until the server says otherwise')
+      .toHaveStyle({ pointerEvents: 'none' });
+  });
+
+  it('becomes drivable once the server says the page is the user\'s', () => {
+    const onInput = vi.fn();
+    render(
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+    );
+    const img = screen.getByRole('img');
+    expect(img).toHaveAttribute('tabindex', '0');
+
+    fireEvent.keyDown(img, { key: 'a' });
+    fireEvent.keyDown(img, { key: 'Enter' });
+    expect(onInput.mock.calls.map((c) => c[0])).toEqual([
+      { kind: 'text', text: 'a' },
+      { kind: 'key', key: 'Enter' },
+    ]);
+  });
+
+  it('leaves the viewer\'s own shortcuts alone', () => {
+    // Ctrl-R, Cmd-W, Ctrl-C: these belong to the browser the person is
+    // actually sitting in front of, and stealing them to send somewhere else
+    // is worse than not supporting them.
+    const onInput = vi.fn();
+    render(
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+    );
+    fireEvent.keyDown(screen.getByRole('img'), { key: 'r', ctrlKey: true });
+    fireEvent.keyDown(screen.getByRole('img'), { key: 'w', metaKey: true });
+    expect(onInput).not.toHaveBeenCalled();
+  });
+
+  it('sends a click as a fraction of the picture, not of the element', () => {
+    // `object-fit: contain` centres the picture with bars on two sides whenever
+    // the aspect ratios differ, so measuring against the element is wrong by
+    // the width of those bars — and wronger the narrower the panel gets.
+    const onInput = vi.fn();
+    render(
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+    );
+    const img = screen.getByRole('img') as HTMLImageElement;
+    // A 400×400 element showing a 1280×800 picture: the picture is 400×250,
+    // letterboxed by 75px top and bottom.
+    Object.defineProperty(img, 'naturalWidth', { value: 1280 });
+    Object.defineProperty(img, 'naturalHeight', { value: 800 });
+    img.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 400 }) as DOMRect;
+
+    fireEvent.mouseDown(img, { clientX: 200, clientY: 200, button: 0, detail: 1 });
+    expect(onInput).toHaveBeenCalledWith({ kind: 'click', x: 0.5, y: 0.5, button: 'left', clicks: 1 });
+
+    // In the letterbox, which is not the page at all.
+    onInput.mockClear();
+    fireEvent.mouseDown(img, { clientX: 200, clientY: 10, button: 0, detail: 1 });
+    expect(onInput, 'a click on a black bar is not a click on anything').not.toHaveBeenCalled();
+  });
+
+  it('can pause the picture without giving the page back', () => {
+    // Signing in: the password is dots, but the manager's dropdown, a one-time
+    // code and the page afterwards are not.
+    const onCapture = vi.fn();
+    render(
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onCapture={onCapture} />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /hide the page/i }));
+    expect(onCapture).toHaveBeenCalledWith(false);
+  });
+
+  it('says the picture is paused rather than looking broken', () => {
+    render(
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human capturing={false} onStop={() => {}} />,
+    );
+    expect(screen.getByText(/picture is paused/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /show the page/i })).toBeInTheDocument();
+  });
+
+  it('hands the page back, and keeps Stop meaning what it meant', () => {
+    const onHandBack = vi.fn();
+    const onStop = vi.fn();
+    render(
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={onStop} onHandBack={onHandBack} />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /give it back/i }));
+    expect(onHandBack).toHaveBeenCalledOnce();
+    // Stop takes the browser from everyone, the user included. A takeover must
+    // not turn the kill switch into one that only stops the agent.
+    fireEvent.click(screen.getByRole('button', { name: /^stop$/i }));
+    expect(onStop).toHaveBeenCalledOnce();
+  });
+
+  it('says what the browser refused to do', () => {
+    render(
+      <BrowserLiveView
+        active liveViewUrl={undefined} frame={frame}
+        notice="The agent is still finishing an action on this page."
+        onStop={() => {}}
+      />,
+    );
+    expect(screen.getByRole('status')).toHaveTextContent(/still finishing/i);
+  });
+});

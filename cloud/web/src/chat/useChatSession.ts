@@ -11,6 +11,7 @@ import { refreshPendingMedia } from '../lib/pendingMedia.js';
 import { promptTooLargeError, payloadTooLargeError } from '../lib/limits.js';
 import { detectLocalModelCapability } from '../lib/localModel/capability.js';
 import { warmLocalModel } from '../lib/localModel/engine.js';
+import type { BrowserInputEvent } from './BrowserLiveView.js';
 import { classifyLocalComplexity } from '../lib/localModel/classifier.js';
 
 export interface ChatAttachment {
@@ -385,6 +386,18 @@ export function useChatSession(
       frame?: { data: string; width: number; height: number };
       /** The server confirmed a stream started, so an empty panel is a bug. */
       streaming?: boolean;
+      /** The user holds this page: the agent is being refused until they stop. */
+      human?: boolean;
+      /** Whether frames are being produced. False while the picture is paused. */
+      capturing?: boolean;
+      /**
+       * Something the user asked of the browser that did not happen.
+       *
+       * Kept with the view rather than in one shared banner, because a refusal
+       * belongs to the run it was refused for: showing another chat's "you do
+       * not have control" over this one's panel would be a lie about this page.
+       */
+      notice?: string;
     }>
   >({});
   const browserView = browserViews[activeConversationId() ?? ''];
@@ -394,6 +407,12 @@ export function useChatSession(
   const browserFrame = browserView?.frame;
   /** Whether the server said a stream is running, as opposed to merely asked for. */
   const browserStreaming = browserView?.streaming === true;
+  /** Whether the user, rather than the agent, is driving the browser on screen. */
+  const browserHuman = browserView?.human === true;
+  /** Whether frames are still being produced while they drive it. */
+  const browserCapturing = browserView?.capturing !== false;
+  /** The last thing the browser refused to do for this pane, if any. */
+  const browserNotice = browserView?.notice;
   /** A browser is attached to this run, whether or not it can be streamed. */
   const browserActive = browserView !== undefined;
   /**
@@ -455,6 +474,39 @@ export function useChatSession(
     // this button withdraws.
     const key = activeConversationId() ?? '';
     setBrowserViews(({ [key]: _gone, ...rest }) => rest);
+  }, [socket]);
+
+  /**
+   * Ask for the page, give it back, drive it, or pause the picture.
+   *
+   * All four name the run rather than the conversation, and refuse to send at
+   * all without one — the server requires an exact match, so a control event
+   * with no task id is ignored, and that is the correct failure: better a
+   * button that does nothing than one that drives somebody else's browser.
+   *
+   * Nothing is applied optimistically. Ownership is stated by the server on
+   * `browser:control`, because it changes without being asked — an idle hold
+   * lapses on its own — and a client that painted itself in control would show
+   * a page it could no longer touch.
+   */
+  const takeOverBrowser = useCallback(() => {
+    if (!browserTaskIdRef.current) return;
+    socket?.emit('browser:take-over', { taskId: browserTaskIdRef.current });
+  }, [socket]);
+
+  const handBackBrowser = useCallback(() => {
+    if (!browserTaskIdRef.current) return;
+    socket?.emit('browser:hand-back', { taskId: browserTaskIdRef.current });
+  }, [socket]);
+
+  const sendBrowserInput = useCallback((event: BrowserInputEvent) => {
+    if (!browserTaskIdRef.current) return;
+    socket?.emit('browser:input', { taskId: browserTaskIdRef.current, event });
+  }, [socket]);
+
+  const setBrowserCapture = useCallback((on: boolean) => {
+    if (!browserTaskIdRef.current) return;
+    socket?.emit('browser:capture', { taskId: browserTaskIdRef.current, on });
   }, [socket]);
   const [status, setStatus] = useState<string | null>(null);
   const [lastTokens, setLastTokens] = useState<number>(0);
@@ -789,6 +841,40 @@ export function useChatSession(
         return { ...prev, [key]: { ...view, streaming: e?.streaming === true } };
       });
     };
+    /**
+     * Who holds the page, and anything it refused to do.
+     *
+     * One event for both, because they are one question with two kinds of
+     * answer. A message carrying `human` is the server stating ownership —
+     * including the change nobody asked for, when an idle hold lapses. A
+     * message carrying only a detail is something that did not happen, and
+     * deliberately says nothing about ownership: an unknown key is refused
+     * while the user still has control, and treating that as a loss of control
+     * would take their panel away over a keystroke.
+     */
+    const onBrowserControl = (e: {
+      conversationId?: string; taskId?: string; human?: boolean; capturing?: boolean; detail?: string;
+    }) => {
+      adoptConversationId(e?.conversationId);
+      const key = typeof e?.conversationId === 'string' ? e.conversationId : (activeConversationId() ?? '');
+      setBrowserViews((prev) => {
+        const view = prev[key];
+        if (!view) return prev;
+        if (e.taskId && view.taskId && e.taskId !== view.taskId) return prev;
+        return {
+          ...prev,
+          [key]: {
+            ...view,
+            ...(typeof e.human === 'boolean' ? { human: e.human } : {}),
+            ...(typeof e.capturing === 'boolean' ? { capturing: e.capturing } : {}),
+            // Cleared by the next statement of ownership, so a refusal does not
+            // outlive the situation it described.
+            ...(typeof e.detail === 'string' ? { notice: e.detail } : { notice: undefined }),
+          },
+        };
+      });
+    };
+    socket.on('browser:control', onBrowserControl);
     socket.on('browser:frame', onBrowserFrame);
     socket.on('browser:watching', onBrowserWatching);
     socket.on('browser:live-view', onLiveView);
@@ -821,6 +907,7 @@ export function useChatSession(
       socket.off('provider:exhausted', onProviderExhausted);
       socket.off('knowledge:retrieved', onKnowledge);
       socket.off('file:created', onFileCreated);
+      socket.off('browser:control', onBrowserControl);
       socket.off('browser:frame', onBrowserFrame);
       socket.off('browser:watching', onBrowserWatching);
       socket.off('browser:live-view', onLiveView);
@@ -1409,7 +1496,9 @@ export function useChatSession(
     routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, approval,
     escalation, escalationQueued: escalations.length, resolveEscalation, clearEscalation,
     contextApproval, resolveContextApproval, compactionNotice, providerNotice, knowledgeNotice, activity,
-    browserLiveView, browserActive, browserTaskId, browserFrame, browserStreaming, stopBrowser,
+    browserLiveView, browserActive, browserTaskId, browserFrame, browserStreaming,
+    browserHuman, browserCapturing, browserNotice, stopBrowser,
+    takeOverBrowser, handBackBrowser, sendBrowserInput, setBrowserCapture,
     toolApprovals, resolveToolApproval,
   };
 }
