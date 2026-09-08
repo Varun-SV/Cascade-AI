@@ -1276,9 +1276,14 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   };
   socket.on('browser:watch', onBrowserWatch);
 
+  // The `catch` on these two is not about a failure anyone can produce today —
+  // both swallow their own CDP errors. It is about where they sit: a socket
+  // handler is a process boundary, and in Node an unhandled rejection ends the
+  // process. "This cannot throw" is a property of code somebody will edit, and
+  // the cost of not relying on it is one clause.
   const onBrowserUnwatch = (d: { taskId?: string }) => {
     if (!addressesRun(remoteBrowser?.taskId, d)) return;
-    void remoteBrowser?.unwatch();
+    void remoteBrowser?.unwatch().catch(() => {});
   };
   socket.on('browser:unwatch', onBrowserUnwatch);
 
@@ -1342,7 +1347,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
 
   const onBrowserCapture = (d: { taskId?: string; on?: boolean }) => {
     if (!addressesRun(remoteBrowser?.taskId, d)) return;
-    void remoteBrowser?.setCapture(d?.on === true);
+    void remoteBrowser?.setCapture(d?.on === true).catch(() => {});
   };
   socket.on('browser:capture', onBrowserCapture);
 

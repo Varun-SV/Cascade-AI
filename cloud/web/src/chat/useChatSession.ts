@@ -867,8 +867,12 @@ export function useChatSession(
             ...view,
             ...(typeof e.human === 'boolean' ? { human: e.human } : {}),
             ...(typeof e.capturing === 'boolean' ? { capturing: e.capturing } : {}),
-            // Cleared by the next statement of ownership, so a refusal does not
-            // outlive the situation it described.
+            // Cleared by the next thing the server says about this browser —
+            // every ownership announcement carries `human`, and none of them
+            // carries a detail, so a refusal lasts until something else
+            // happens rather than sitting on the panel for the rest of the run.
+            // Not "until ownership CHANGES": a stale "that key cannot be sent"
+            // would then survive every unrelated action the user took after it.
             ...(typeof e.detail === 'string' ? { notice: e.detail } : { notice: undefined }),
           },
         };
