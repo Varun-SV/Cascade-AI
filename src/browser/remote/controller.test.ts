@@ -5,6 +5,42 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { RemoteBrowserProvider } from './provider.js';
 
+/**
+ * A CDP session, modelled well enough to test flow control.
+ *
+ * `sent` is the record of protocol calls; `pushFrame` is Chrome delivering a
+ * screencast frame. The ack matters as much as the frame does — Chrome sends
+ * the next one only once the last is acknowledged — so the fake records both
+ * in one ordered list and a test can prove the ack came AFTER delivery.
+ */
+function fakeCdp() {
+  const handlers = new Map<string, (payload: unknown) => void>();
+  const session = {
+    sent: [] as string[],
+    detached: false,
+    /** Everything that happened, in order: deliveries and acks interleaved. */
+    order: [] as string[],
+    async send(method: string, params?: Record<string, unknown>) {
+      session.sent.push(method);
+      if (method === 'Page.screencastFrameAck') session.order.push(`ack:${params?.['sessionId']}`);
+      return {};
+    },
+    on(event: string, handler: (payload: never) => void) {
+      handlers.set(event, handler as (p: unknown) => void);
+    },
+    async detach() { session.detached = true; },
+    /** Chrome producing a frame. */
+    pushFrame(sessionId: number, data = 'BASE64JPEG') {
+      handlers.get('Page.screencastFrame')?.({
+        data, sessionId, metadata: { deviceWidth: 1280, deviceHeight: 800 },
+      });
+    },
+  };
+  return session;
+}
+/** The CDP session the current test's context will hand out. */
+let cdp = fakeCdp();
+
 /** Frame identities the fake reports, so main and sub can be told apart. */
 const MAIN_FRAME = { id: 'main' };
 const SUB_FRAME = { id: 'iframe-ad-slot' };
@@ -35,6 +71,7 @@ const page = {
   on(event: string, handler: (frame: unknown) => void) { if (event === 'framenavigated') this.navHandlers.push(handler); },
   async close() { this.closed = true; this.closeCount += 1; },
   isClosed() { return this.closed; },
+  context() { return pageContext; },
   /** How many times anything asked to close this page. See the leak test. */
   closeCount: 0,
 };
@@ -50,6 +87,7 @@ function fakeContext(pageForThisContext: typeof page) {
     closed: false,
     pages: () => [pageForThisContext],
     newPage: async () => pageForThisContext,
+    newCDPSession: async () => cdp,
     close: async () => { c.closed = true; },
   };
   return c;
@@ -57,6 +95,8 @@ function fakeContext(pageForThisContext: typeof page) {
 
 /** The context a shared endpoint already had. Belongs to the operator. */
 const defaultContext = fakeContext(page);
+/** What `page.context()` answers — the run's own context once it has one. */
+let pageContext = defaultContext;
 /** Every context a run asked the browser to make for itself. */
 const createdContexts: Array<ReturnType<typeof fakeContext>> = [];
 
@@ -105,6 +145,8 @@ beforeEach(() => {
   browser.contexts = () => [defaultContext];
   defaultContext.closed = false;
   createdContexts.length = 0;
+  cdp = fakeCdp();
+  pageContext = defaultContext;
 });
 
 describe('the six actions reach the page', () => {
@@ -988,5 +1030,121 @@ describe('the controller owns every scrap of a run\'s state', () => {
     seen.length = 0;
     await c.controller({ kind: 'click', selector: '#b' }, ctx('run-A', 'w2'));
     expect(seen, 'the finished run\'s listener is gone').toEqual([]);
+  });
+});
+
+// Owning the pixel stream is what gives every provider a live view — a bare
+// CDP endpoint has no viewer URL at all, so today that configuration ships a
+// Stop button and a banner apologising that it cannot be watched.
+describe('watching a run\'s browser', () => {
+  it('streams nothing until somebody actually asks', async () => {
+    // The reason this is a method rather than something open() does. An
+    // unwatched run would otherwise pay to encode frames nobody sees, on every
+    // run — and on a metered provider, pay to ship them too.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    expect(cdp.sent, 'a browser that nobody is watching encodes nothing').toEqual([]);
+
+    await c.startWatching('run-A', () => {});
+    expect(cdp.sent).toContain('Page.startScreencast');
+  });
+
+  it('hands each frame on, then acknowledges it', async () => {
+    // The ack IS the flow control: Chrome sends the next frame only once the
+    // last is acknowledged. Acking before delivery would turn that into a
+    // firehose bounded by nothing; never acking stops the stream dead.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const seen: string[] = [];
+    await c.startWatching('run-A', (f) => {
+      seen.push(f.data);
+      cdp.order.push(`deliver:${f.data}`);
+    });
+
+    cdp.pushFrame(1, 'FRAME-ONE');
+    cdp.pushFrame(2, 'FRAME-TWO');
+
+    expect(seen).toEqual(['FRAME-ONE', 'FRAME-TWO']);
+    // Delivery before its own ack, for each frame in turn.
+    expect(cdp.order).toEqual([
+      'deliver:FRAME-ONE', 'ack:1',
+      'deliver:FRAME-TWO', 'ack:2',
+    ]);
+  });
+
+  it('reports the remote viewport, so a canvas need not guess', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    let got: { width: number; height: number } | undefined;
+    await c.startWatching('run-A', (f) => { got = { width: f.width, height: f.height }; });
+    cdp.pushFrame(1);
+
+    expect(got).toEqual({ width: 1280, height: 800 });
+  });
+
+  it('stops paying for frames the moment nobody is watching', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await c.startWatching('run-A', () => {});
+
+    await c.stopWatching('run-A');
+
+    expect(cdp.sent).toContain('Page.stopScreencast');
+    expect(cdp.detached, 'and the session goes with it').toBe(true);
+  });
+
+  it('tears the stream down when the run ends, without being asked', async () => {
+    // A screencast left attached keeps Chrome encoding for a run that is over,
+    // into a session about to be detached underneath it.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await c.startWatching('run-A', () => {});
+
+    await c.endRun('run-A');
+
+    expect(cdp.sent).toContain('Page.stopScreencast');
+    expect(cdp.detached).toBe(true);
+  });
+
+  it('refuses to promise a stream it cannot deliver', async () => {
+    // A run with no browser has nothing to show. Saying so lets the caller
+    // avoid telling a viewer to expect frames that will never come.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+
+    expect(await c.startWatching('never-opened', () => {})).toBe(false);
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    expect(await c.startWatching('run-A', () => {}), 'the first watcher wins').toBe(true);
+    expect(await c.startWatching('run-A', () => {}), 'a second is already served').toBe(false);
+  });
+
+  it('leaves nothing attached when the stream will not start', async () => {
+    // The page went away between opening the session and starting the stream.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const good = cdp.send;
+    cdp.send = async (method: string) => {
+      if (method === 'Page.startScreencast') throw new Error('target closed');
+      return good.call(cdp, method);
+    };
+
+    expect(await c.startWatching('run-A', () => {})).toBe(false);
+    expect(cdp.detached, 'the half-open session is not left behind').toBe(true);
+
+    // And the run can still be watched later, rather than being wedged as
+    // "already watching" by the attempt that failed.
+    cdp.send = good;
+    expect(await c.startWatching('run-A', () => {})).toBe(true);
   });
 });

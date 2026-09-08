@@ -47,12 +47,27 @@ type Page = {
   on(event: string, handler: (...args: never[]) => void): void;
   /** The page's own top-level frame; sub-frames are not it. See `generation`. */
   mainFrame(): unknown;
+  /** The context this page belongs to — where a CDP session is opened from. */
+  context(): BrowserContext;
   isClosed(): boolean;
   close(): Promise<void>;
+};
+/**
+ * A raw Chrome DevTools Protocol session on one page.
+ *
+ * Playwright's high-level API has no screencast, so watching the page means
+ * talking to CDP directly. Deliberately narrow: three methods is the whole
+ * surface this needs, and a wider type would invite reaching past the seam.
+ */
+type CDPSession = {
+  send(method: string, params?: Record<string, unknown>): Promise<unknown>;
+  on(event: string, handler: (payload: never) => void): void;
+  detach(): Promise<void>;
 };
 type BrowserContext = {
   pages(): Page[];
   newPage(): Promise<Page>;
+  newCDPSession(page: Page): Promise<CDPSession>;
   close(): Promise<void>;
 };
 type Browser = {
@@ -68,6 +83,33 @@ export interface BrowserViewInfo {
   /** Where to watch it, when the provider can stream one. */
   liveViewUrl?: string;
 }
+
+/**
+ * One rendered frame of a run's browser, on its way to whoever is watching.
+ *
+ * A JPEG rather than a video stream, and deliberately: CDP's screencast is
+ * adaptive — Chrome sends a frame when the page actually changes, not on a
+ * clock — so an idle page costs nothing, and there is no media pipeline to run
+ * inside the deployment. It is worse than WebRTC for video-heavy pages and
+ * better than it for everything else this feature is pointed at.
+ */
+export interface BrowserFrame {
+  /** base64 JPEG, as CDP hands it over. Never decoded on the way through. */
+  data: string;
+  /** The remote viewport, so a canvas can size itself without guessing. */
+  width: number;
+  height: number;
+}
+
+/**
+ * How the frames are asked for.
+ *
+ * Capped rather than native-resolution: this crosses a socket to a panel a few
+ * hundred pixels wide, and a full-size frame would spend bandwidth on detail
+ * the viewer cannot see. Quality 60 is where JPEG stops being obviously lossy
+ * on text.
+ */
+const SCREENCAST = { format: 'jpeg', quality: 60, maxWidth: 1280, maxHeight: 800 } as const;
 
 /** Default ceiling for a single action, matching the tool's own clamp. */
 const ACTION_TIMEOUT_MS = 30_000;
@@ -88,6 +130,15 @@ interface RunBrowser {
   session: RemoteBrowserSession;
   browser: Browser;
   page: Page;
+  /**
+   * The CDP session streaming this run's page, while somebody is watching.
+   *
+   * Absent whenever nobody is: an unwatched run must not pay for encoding
+   * frames nobody sees, and on a metered provider it must not pay for the
+   * bandwidth either. Started by `startWatching`, and torn down by
+   * `stopWatching` or by the run ending — whichever comes first.
+   */
+  screencast?: CDPSession;
   /**
    * A context this run created and must therefore destroy.
    *
@@ -274,6 +325,76 @@ export class RemoteBrowserController {
     for (const lease of this.leases.values()) lease.actorEnded(actorId);
   }
 
+  /**
+   * Start streaming this run's page to whoever is watching it.
+   *
+   * Nothing streams until someone asks. That is the whole reason this is a
+   * method rather than something `open()` does: an unwatched run would
+   * otherwise pay to encode frames nobody sees, on every run, forever — and on
+   * a metered provider it would pay for the bandwidth too.
+   *
+   * Frames are ACKED after they are handed on, never before, because the ack
+   * is the flow control: Chrome sends the next frame only once the previous
+   * one is acknowledged, so a slow consumer throttles the stream instead of
+   * queueing memory behind it. Dropping the ack stops the stream dead, which is
+   * why the ack is best-effort but unconditional.
+   *
+   * Returns false when there is nothing to watch — the run has no browser, or
+   * it is already being watched. Callers use that to avoid promising a viewer
+   * a stream that will never arrive.
+   */
+  async startWatching(runId: string, onFrame: (frame: BrowserFrame) => void): Promise<boolean> {
+    const held = this.runs.get(runId);
+    if (!held || held.screencast) return false;
+
+    const cdp = await held.page.context().newCDPSession(held.page);
+    // Recorded before the first frame can arrive, so a `stopWatching` racing
+    // the very first frame still finds something to tear down.
+    held.screencast = cdp;
+
+    cdp.on('Page.screencastFrame', ((e: {
+      data?: string;
+      sessionId?: number;
+      metadata?: { deviceWidth?: number; deviceHeight?: number };
+    }) => {
+      if (typeof e?.data === 'string') {
+        onFrame({
+          data: e.data,
+          width: e.metadata?.deviceWidth ?? 0,
+          height: e.metadata?.deviceHeight ?? 0,
+        });
+      }
+      // Best-effort: the session may have been detached between the frame
+      // arriving and this running, and an ack into a dead session is not an
+      // error worth surfacing to a user watching a browser.
+      void cdp.send('Page.screencastFrameAck', { sessionId: e?.sessionId }).catch(() => {});
+    }) as never);
+
+    try {
+      await cdp.send('Page.startScreencast', { ...SCREENCAST });
+      return true;
+    } catch {
+      // The page went away between opening the session and starting the
+      // stream. Leave nothing half-attached behind.
+      held.screencast = undefined;
+      await cdp.detach().catch(() => {});
+      return false;
+    }
+  }
+
+  /** Nobody is watching any more: stop paying to render frames. */
+  async stopWatching(runId: string): Promise<void> {
+    const cdp = this.runs.get(runId)?.screencast;
+    if (!cdp) return;
+    const held = this.runs.get(runId);
+    if (held) held.screencast = undefined;
+    // Both best-effort and in this order: stop the stream first so no further
+    // frames are produced, then let the session go. A run whose page has
+    // already closed throws on both, and neither failure is actionable.
+    await cdp.send('Page.stopScreencast').catch(() => {});
+    await cdp.detach().catch(() => {});
+  }
+
   /** The user stopped this run. Refuses further actions and clears its queue. */
   stopRun(runId: string): void {
     this.revoked.add(runId);
@@ -346,6 +467,15 @@ export class RemoteBrowserController {
   private async disposeRun(runId: string, held: RunBrowser): Promise<void> {
     held.abort.abort();
     this.announceLiveView(runId, undefined, false);
+    // Before the page and the connection it rides on. A screencast left
+    // attached would keep Chrome encoding frames for a run that is over, into
+    // a session about to be detached underneath it.
+    const watching = held.screencast;
+    held.screencast = undefined;
+    if (watching) {
+      await watching.send('Page.stopScreencast').catch(() => {});
+      await watching.detach().catch(() => {});
+    }
     // Before the connection goes, because it is reached THROUGH the connection.
     // This is the run's own context on a shared endpoint: closing it takes its
     // pages, cookies and storage with it, which is what stops the next tenant
