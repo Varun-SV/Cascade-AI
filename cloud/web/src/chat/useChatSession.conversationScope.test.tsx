@@ -776,6 +776,27 @@ describe('useChatSession — frames of the agent\'s browser', () => {
     expect(view.result.current.browserFrame?.data).toBe('MINE');
   });
 
+  it('ignores a browser message that names no run at all', () => {
+    // The guard used to reject only when BOTH ids were present and differed,
+    // so an untagged message landed in whichever pane was on screen. This
+    // server always names the run, which is exactly why an unnamed message is
+    // not something to route on a guess — and a picture of someone else's page
+    // is worse than no picture.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:frame', { conversationId: 'conv-a', data: 'ORPHAN', width: 1, height: 1 });
+      fake.fire('browser:watching', { conversationId: 'conv-a', streaming: true });
+      fake.fire('browser:control', { conversationId: 'conv-a', human: true });
+    });
+
+    expect(view.result.current.browserFrame).toBeUndefined();
+    expect(view.result.current.browserStreaming).toBe(false);
+    expect(view.result.current.browserHuman).toBe(false);
+  });
+
   it('records that the server actually started streaming, per conversation', () => {
     // Asking to watch and being watched are different facts: a provider that
     // refuses the screencast leaves the panel blank, and only the server's

@@ -43,6 +43,22 @@ function fakeCdp() {
 }
 /** The CDP session the current test's context will hand out. */
 let cdp = fakeCdp();
+/** How many times anything asked the page for a CDP session. */
+let cdpCreated = 0;
+/**
+ * When set, `newCDPSession` waits on this before resolving.
+ *
+ * The whole point: the attach race lives between asking for a session and
+ * recording it, and a fake that resolves immediately never opens that window.
+ */
+let cdpGate: Promise<void> | null = null;
+
+/** A promise a test can settle by hand. */
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => { resolve = r; });
+  return { promise, resolve };
+}
 
 /** Frame identities the fake reports, so main and sub can be told apart. */
 const MAIN_FRAME = { id: 'main' };
@@ -90,7 +106,7 @@ function fakeContext(pageForThisContext: typeof page) {
     closed: false,
     pages: () => [pageForThisContext],
     newPage: async () => pageForThisContext,
-    newCDPSession: async () => cdp,
+    newCDPSession: async () => { cdpCreated += 1; if (cdpGate) await cdpGate; return cdp; },
     close: async () => { c.closed = true; },
   };
   return c;
@@ -149,6 +165,8 @@ beforeEach(() => {
   defaultContext.closed = false;
   createdContexts.length = 0;
   cdp = fakeCdp();
+  cdpCreated = 0;
+  cdpGate = null;
   pageContext = defaultContext;
 });
 
@@ -1429,5 +1447,65 @@ describe('handing the browser to the person watching', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// Watching is started by a client effect, and effects do not queue: a mount
+// that runs, cleans up and runs again emits watch, unwatch, watch with nothing
+// in between. Every test above awaits each call in turn, which is exactly the
+// ordering that hides what happens when they overlap.
+describe('two watches racing each other', () => {
+  it('opens one CDP session, not one per asker', async () => {
+    // The second used to overwrite the first, leaving a session attached,
+    // streaming and unreachable — Chrome encoding a page nobody can stop.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const gate = deferred();
+    cdpGate = gate.promise;
+    const first = c.startWatching('run-A', () => {});
+    const second = c.startWatching('run-A', () => {});
+    gate.resolve();
+
+    expect([await first, await second], 'the first asker wins').toEqual([true, false]);
+    expect(cdpCreated, 'and only it opened a session').toBe(1);
+    expect(cdp.sent.filter((m) => m === 'Page.startScreencast')).toHaveLength(1);
+  });
+
+  it('stops a stream that was still attaching when the panel closed', async () => {
+    // The stop used to find no session and return, and the attach finished
+    // behind it: a stream running for a panel already gone, which nothing
+    // afterwards would ever stop.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const gate = deferred();
+    cdpGate = gate.promise;
+    const watching = c.startWatching('run-A', () => {});
+    const stopping = c.stopWatching('run-A');
+    gate.resolve();
+    await watching;
+    await stopping;
+
+    expect(cdp.sent).toContain('Page.stopScreencast');
+    expect(cdp.detached, 'and the session goes with it').toBe(true);
+  });
+
+  it('lets the run end while a stream is still attaching', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const gate = deferred();
+    cdpGate = gate.promise;
+    const watching = c.startWatching('run-A', () => {});
+    const ending = c.endRun('run-A');
+    gate.resolve();
+    await watching;
+    await ending;
+
+    expect(cdp.detached, 'a run that is over leaves nothing encoding').toBe(true);
   });
 });

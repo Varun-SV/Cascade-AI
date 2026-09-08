@@ -206,6 +206,15 @@ interface RunBrowser {
    */
   screencast?: CDPSession;
   /**
+   * The stream being set up, while it is still being set up.
+   *
+   * Held so that a second watcher and an early stop can both SEE an attach
+   * that has not finished. Without it the check and the assignment sat either
+   * side of an await, which is the same check-then-act the session pool had to
+   * fix in `open()` — and it went wrong the same two ways.
+   */
+  attaching?: Promise<CDPSession | null>;
+  /**
    * Whether that session is currently producing frames.
    *
    * Separate from having one, because of the credential case: a person typing
@@ -473,12 +482,39 @@ export class RemoteBrowserController {
    */
   async startWatching(runId: string, onFrame: (frame: BrowserFrame) => void): Promise<boolean> {
     const held = this.runs.get(runId);
-    if (!held || held.screencast) return false;
+    if (!held || held.screencast || held.attaching) return false;
 
+    // Reserved SYNCHRONOUSLY, before the first await, for exactly the reason
+    // `open()` takes its pool slot synchronously. The check and the assignment
+    // used to sit either side of `newCDPSession`, so two watches starting
+    // together both passed: the second overwrote the first, leaving a CDP
+    // session attached, streaming and unreachable — the precise cost this
+    // method exists to avoid. And a `stopWatching` arriving in that window
+    // found nothing to stop, then the attach completed behind it and Chrome
+    // kept encoding for a panel that was already closed. Both are reachable
+    // from the client's own effect: a mount that runs, cleans up and runs
+    // again emits watch, unwatch, watch with nothing in between.
+    //
+    // A promise rather than a boolean flag, because a stop has to be able to
+    // WAIT for the attach rather than merely notice one. The state is settled
+    // inside the promise body, so whoever awaits it finds a stream that is
+    // either fully attached or fully rolled back — never half of either.
+    const attaching = this.attachScreencast(runId, held, onFrame);
+    held.attaching = attaching;
+    try {
+      return (await attaching) !== null;
+    } finally {
+      held.attaching = undefined;
+    }
+  }
+
+  /** Open the CDP session and start the stream, or leave nothing behind. */
+  private async attachScreencast(
+    runId: string,
+    held: RunBrowser,
+    onFrame: (frame: BrowserFrame) => void,
+  ): Promise<CDPSession | null> {
     const cdp = await held.page.context().newCDPSession(held.page);
-    // Recorded before the first frame can arrive, so a `stopWatching` racing
-    // the very first frame still finds something to tear down.
-    held.screencast = cdp;
 
     cdp.on('Page.screencastFrame', ((e: {
       data?: string;
@@ -501,24 +537,33 @@ export class RemoteBrowserController {
 
     try {
       await cdp.send('Page.startScreencast', { ...SCREENCAST });
-      held.capturing = true;
-      this.announceControl(runId);
-      return true;
     } catch {
       // The page went away between opening the session and starting the
       // stream. Leave nothing half-attached behind.
-      held.screencast = undefined;
       await cdp.detach().catch(() => {});
-      return false;
+      return null;
     }
+    // Recorded BEFORE this promise resolves, so a stop that awaited the attach
+    // finds the session rather than racing the assignment.
+    held.screencast = cdp;
+    held.capturing = true;
+    this.announceControl(runId);
+    return cdp;
   }
 
   /** Nobody is watching any more: stop paying to render frames. */
   async stopWatching(runId: string): Promise<void> {
-    const cdp = this.runs.get(runId)?.screencast;
-    if (!cdp) return;
     const held = this.runs.get(runId);
-    if (held) { held.screencast = undefined; held.capturing = false; }
+    if (!held) return;
+    // Waited out rather than raced. A stop landing mid-attach used to find no
+    // session and return, and the attach then finished behind it — a stream
+    // running for a panel that had already closed, which nothing afterwards
+    // would ever stop.
+    if (held.attaching) await held.attaching.catch(() => {});
+    const cdp = held.screencast;
+    if (!cdp) return;
+    held.screencast = undefined;
+    held.capturing = false;
     this.announceControl(runId);
     // Both best-effort and in this order: stop the stream first so no further
     // frames are produced, then let the session go. A run whose page has
@@ -778,6 +823,7 @@ export class RemoteBrowserController {
     // Before the page and the connection it rides on. A screencast left
     // attached would keep Chrome encoding frames for a run that is over, into
     // a session about to be detached underneath it.
+    if (held.attaching) await held.attaching.catch(() => {});
     const watching = held.screencast;
     held.screencast = undefined;
     if (watching) {

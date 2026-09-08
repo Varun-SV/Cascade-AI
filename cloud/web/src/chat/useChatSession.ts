@@ -823,7 +823,13 @@ export function useChatSession(
         // resurrecting it from a stray frame would show a Stop button for a
         // browser nobody holds.
         if (!view) return prev;
-        if (e.taskId && view.taskId && e.taskId !== view.taskId) return prev;
+        // An EXACT match, the same shape as the server's own `addressesRun`:
+        // a message that names no run is not a message about this one. The
+        // looser "reject only when both are present and differ" let an
+        // untagged frame land in whichever pane happened to be on screen,
+        // which is the one failure this keying exists to prevent — a picture
+        // of someone else's page, which is worse than no picture at all.
+        if (!e.taskId || e.taskId !== view.taskId) return prev;
         return {
           ...prev,
           [key]: { ...view, frame: { data: e.data!, width: e.width ?? 0, height: e.height ?? 0 } },
@@ -837,7 +843,7 @@ export function useChatSession(
       setBrowserViews((prev) => {
         const view = prev[key];
         if (!view) return prev;
-        if (e.taskId && view.taskId && e.taskId !== view.taskId) return prev;
+        if (!e.taskId || e.taskId !== view.taskId) return prev;
         return { ...prev, [key]: { ...view, streaming: e?.streaming === true } };
       });
     };
@@ -860,7 +866,7 @@ export function useChatSession(
       setBrowserViews((prev) => {
         const view = prev[key];
         if (!view) return prev;
-        if (e.taskId && view.taskId && e.taskId !== view.taskId) return prev;
+        if (!e.taskId || e.taskId !== view.taskId) return prev;
         return {
           ...prev,
           [key]: {
