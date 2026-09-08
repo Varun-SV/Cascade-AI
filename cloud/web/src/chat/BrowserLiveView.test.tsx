@@ -57,9 +57,12 @@ describe('BrowserLiveView', () => {
     expect(screen.getByRole('button', { name: /stop/i })).toBeInTheDocument();
   });
 
-  it('says plainly that this configuration cannot be watched', () => {
+  it('says plainly when there is nothing to watch', () => {
+    // Rarer than it was: frames come from the browser itself now, so this is a
+    // run that has not produced one yet or a stream that would not start —
+    // not, as before, an entire class of provider.
     render(<BrowserLiveView active liveViewUrl={undefined} onStop={() => {}} />);
-    expect(screen.getByText(/cannot stream it/i)).toBeInTheDocument();
+    expect(screen.getByText(/cannot be streamed/i)).toBeInTheDocument();
   });
 
   it('shows no empty frame when there is nothing to stream', () => {
@@ -82,5 +85,55 @@ describe('BrowserLiveView — the frame is for watching, not driving', () => {
     const frame = screen.getByTitle('Agent browser session (view only)');
     expect(frame).toHaveStyle({ pointerEvents: 'none' });
     expect(frame).toHaveAttribute('tabindex', '-1');
+  });
+});
+
+// A bare CDP endpoint has no viewer API, so before frames this configuration
+// got a Stop button and an apology. Rendering what Chrome itself drew is what
+// makes every provider watchable.
+describe('BrowserLiveView — watching by frames', () => {
+  const frame = { data: 'BASE64JPEG', width: 1280, height: 800 };
+
+  it('shows the page even with no provider viewer URL at all', () => {
+    render(<BrowserLiveView active liveViewUrl={undefined} frame={frame} onStop={() => {}} />);
+
+    const img = screen.getByAltText(/page Cascade's browser is on/i);
+    expect(img).toHaveAttribute('src', 'data:image/jpeg;base64,BASE64JPEG');
+    expect(screen.getByText(/watch it here/i)).toBeInTheDocument();
+  });
+
+  it('is inert: watching is not driving', () => {
+    // Input here would reach the session without passing through the lease
+    // that decides who may act on the page — the agent could be mid-click
+    // while the user typed into the same form.
+    render(<BrowserLiveView active liveViewUrl={undefined} frame={frame} onStop={() => {}} />);
+
+    const img = screen.getByAltText(/page Cascade's browser is on/i);
+    expect(img).toHaveStyle({ pointerEvents: 'none' });
+    expect(img).toHaveAttribute('tabindex', '-1');
+  });
+
+  it('prefers its own frames over the provider\'s viewer', () => {
+    // Both available: the frame is ours, arrives over an authenticated socket,
+    // and needs no bearer-capability URL. Showing both would double the cost
+    // and stream the page twice.
+    render(
+      <BrowserLiveView
+        active liveViewUrl="https://provider.test/live/abc" frame={frame} onStop={() => {}}
+      />,
+    );
+
+    expect(screen.getByAltText(/page Cascade's browser is on/i)).toBeInTheDocument();
+    expect(screen.queryByTitle('Agent browser session (view only)')?.tagName).not.toBe('IFRAME');
+  });
+
+  it('says it is waiting when a stream started but no frame has arrived', () => {
+    // Distinct from "cannot be streamed": one resolves itself in a moment, the
+    // other never will, and a user deciding whether to press Stop needs to
+    // know which they are looking at.
+    render(<BrowserLiveView active liveViewUrl={undefined} streaming onStop={() => {}} />);
+
+    expect(screen.getByText(/waiting for the first frame/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /stop/i })).toBeInTheDocument();
   });
 });

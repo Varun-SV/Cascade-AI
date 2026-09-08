@@ -370,11 +370,30 @@ export function useChatSession(
    * a spent capability is not kept around.
    */
   const [browserViews, setBrowserViews] = useState<
-    Record<string, { taskId?: string; liveViewUrl?: string }>
+    Record<string, {
+      taskId?: string;
+      liveViewUrl?: string;
+      /**
+       * The most recent frame, and only that one.
+       *
+       * Never a queue: a viewer shows the newest picture of the page, so
+       * holding older frames would spend memory to display something already
+       * untrue. A slow client simply misses intermediate frames, which is the
+       * correct behaviour for a live view and the reason the server acks each
+       * frame only once it has been handed on.
+       */
+      frame?: { data: string; width: number; height: number };
+      /** The server confirmed a stream started, so an empty panel is a bug. */
+      streaming?: boolean;
+    }>
   >({});
   const browserView = browserViews[activeConversationId() ?? ''];
   /** Where the agent's browser can be watched, for the conversation on screen. */
   const browserLiveView = browserView?.liveViewUrl;
+  /** The latest frame of the browser this pane is showing, if it is streaming. */
+  const browserFrame = browserView?.frame;
+  /** Whether the server said a stream is running, as opposed to merely asked for. */
+  const browserStreaming = browserView?.streaming === true;
   /** A browser is attached to this run, whether or not it can be streamed. */
   const browserActive = browserView !== undefined;
   /**
@@ -731,6 +750,47 @@ export function useChatSession(
         return { ...prev, [key]: { taskId: e?.taskId, liveViewUrl: e?.liveViewUrl } };
       });
     };
+    /**
+     * A rendered frame of a run's browser.
+     *
+     * Stored against the conversation it belongs to, exactly like the live view
+     * — one socket carries several chats, and a frame of somebody else's page
+     * appearing in the pane you are looking at would be worse than showing
+     * nothing. Only the newest is kept; see `browserViews`.
+     */
+    const onBrowserFrame = (e: {
+      conversationId?: string; taskId?: string; data?: string; width?: number; height?: number;
+    }) => {
+      if (typeof e?.data !== 'string') return;
+      adoptConversationId(e?.conversationId);
+      const key = typeof e?.conversationId === 'string' ? e.conversationId : (activeConversationId() ?? '');
+      setBrowserViews((prev) => {
+        const view = prev[key];
+        // A frame for a run this pane has no browser entry for is a late
+        // arrival from a run that already ended — the panel is gone, and
+        // resurrecting it from a stray frame would show a Stop button for a
+        // browser nobody holds.
+        if (!view) return prev;
+        if (e.taskId && view.taskId && e.taskId !== view.taskId) return prev;
+        return {
+          ...prev,
+          [key]: { ...view, frame: { data: e.data!, width: e.width ?? 0, height: e.height ?? 0 } },
+        };
+      });
+    };
+    /** The server answering whether a stream actually started. */
+    const onBrowserWatching = (e: { conversationId?: string; taskId?: string; streaming?: boolean }) => {
+      adoptConversationId(e?.conversationId);
+      const key = typeof e?.conversationId === 'string' ? e.conversationId : (activeConversationId() ?? '');
+      setBrowserViews((prev) => {
+        const view = prev[key];
+        if (!view) return prev;
+        if (e.taskId && view.taskId && e.taskId !== view.taskId) return prev;
+        return { ...prev, [key]: { ...view, streaming: e?.streaming === true } };
+      });
+    };
+    socket.on('browser:frame', onBrowserFrame);
+    socket.on('browser:watching', onBrowserWatching);
     socket.on('browser:live-view', onLiveView);
     socket.on('stream:token', onToken);
     socket.on('tier:status', onStatus);
@@ -761,6 +821,8 @@ export function useChatSession(
       socket.off('provider:exhausted', onProviderExhausted);
       socket.off('knowledge:retrieved', onKnowledge);
       socket.off('file:created', onFileCreated);
+      socket.off('browser:frame', onBrowserFrame);
+      socket.off('browser:watching', onBrowserWatching);
       socket.off('browser:live-view', onLiveView);
     };
   }, [socket]);
@@ -961,6 +1023,25 @@ export function useChatSession(
       socket.off('session:error', onError);
     };
   }, [socket, reloadActivePath, finishWithoutAck]);
+
+  // Watch the browser this pane is actually showing, and only that one.
+  //
+  // Driven from here rather than from the panel's own mount, because watching
+  // costs the operator money: the server encodes and ships frames only while
+  // somebody has asked for them, so a component that forgot to unwatch — on an
+  // error boundary, a fast conversation switch, a StrictMode double-mount —
+  // would quietly bill for a stream nobody is looking at. The condition is
+  // exactly "this pane is showing this run's browser", which is what the panel
+  // renders on, so the two cannot drift.
+  useEffect(() => {
+    if (!socket || !browserTaskId) return;
+    socket.emit('browser:watch', { taskId: browserTaskId });
+    return () => {
+      // The run may already be over, in which case the server ignores this —
+      // but an unwatch that arrives late is free and a missing one is not.
+      socket.emit('browser:unwatch', { taskId: browserTaskId });
+    };
+  }, [socket, browserTaskId]);
 
   // Connect only now, and deliberately LAST.
   //
@@ -1328,7 +1409,7 @@ export function useChatSession(
     routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, approval,
     escalation, escalationQueued: escalations.length, resolveEscalation, clearEscalation,
     contextApproval, resolveContextApproval, compactionNotice, providerNotice, knowledgeNotice, activity,
-    browserLiveView, browserActive, browserTaskId, stopBrowser,
+    browserLiveView, browserActive, browserTaskId, browserFrame, browserStreaming, stopBrowser,
     toolApprovals, resolveToolApproval,
   };
 }

@@ -702,3 +702,131 @@ describe('useChatSession — a run that finished during the reload gap', () => {
     expect(view.result.current.conversationId).toBe('conv-mine');
   });
 });
+
+// Frames are the same routing problem as the live view, but arriving many times
+// a second: one socket, several chats, and a picture of somebody else's page is
+// a worse failure than a blank panel — it is a plausible-looking lie about what
+// the agent is doing.
+describe('useChatSession — frames of the agent\'s browser', () => {
+  function liveView(conversationId: string, taskId: string, url?: string) {
+    return { conversationId, taskId, liveViewUrl: url, active: true };
+  }
+  function frame(conversationId: string, taskId: string, data: string) {
+    return { conversationId, taskId, data, width: 1280, height: 800 };
+  }
+
+  it('shows each conversation the frames of its own browser', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:live-view', liveView('conv-b', 'task-b'));
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'AAAA'));
+      fake.fire('browser:frame', frame('conv-b', 'task-b', 'BBBB'));
+    });
+
+    expect(view.result.current.browserFrame?.data).toBe('AAAA');
+    act(() => { view.result.current.setConversationId('conv-b'); });
+    expect(view.result.current.browserFrame?.data).toBe('BBBB');
+  });
+
+  it('keeps only the newest frame', () => {
+    // A queue would spend memory rendering something already untrue, and the
+    // server acks per frame precisely so a slow client falls behind by dropping
+    // pictures rather than by growing a backlog.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'OLD'));
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'NEW'));
+    });
+
+    expect(view.result.current.browserFrame).toEqual({ data: 'NEW', width: 1280, height: 800 });
+  });
+
+  it('ignores a frame for a run this pane has no browser for', () => {
+    // A frame outliving its run must not rebuild the panel: that would put a
+    // Stop button on screen for a browser nobody holds, and the user would be
+    // watching a still picture of a session that has already been closed.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => { fake.fire('browser:frame', frame('conv-a', 'task-gone', 'LATE')); });
+
+    expect(view.result.current.browserActive).toBe(false);
+    expect(view.result.current.browserFrame).toBeUndefined();
+  });
+
+  it('ignores a frame from a different run in the same conversation', () => {
+    // Second run in the same chat: the panel exists, so the "no view" guard
+    // above does not fire, and only the task id separates the new browser's
+    // frames from the previous one's still in flight.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-second'));
+      fake.fire('browser:frame', frame('conv-a', 'task-second', 'MINE'));
+      fake.fire('browser:frame', frame('conv-a', 'task-first', 'STALE'));
+    });
+
+    expect(view.result.current.browserFrame?.data).toBe('MINE');
+  });
+
+  it('records that the server actually started streaming, per conversation', () => {
+    // Asking to watch and being watched are different facts: a provider that
+    // refuses the screencast leaves the panel blank, and only the server's
+    // answer distinguishes "waiting for the first frame" from "never coming".
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:live-view', liveView('conv-b', 'task-b'));
+      fake.fire('browser:watching', { conversationId: 'conv-b', taskId: 'task-b', streaming: true });
+    });
+
+    // B's stream is B's. Borrowing it here would promise frames that are being
+    // sent to another pane, and this one would wait for them forever.
+    expect(view.result.current.browserStreaming, 'not another chat\'s stream').toBe(false);
+    act(() => { view.result.current.setConversationId('conv-b'); });
+    expect(view.result.current.browserStreaming).toBe(true);
+  });
+
+  it('ignores a watching reply about a run this conversation has replaced', () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-second'));
+      fake.fire('browser:watching', { conversationId: 'conv-a', taskId: 'task-first', streaming: true });
+    });
+
+    // The previous run's stream says nothing about this one's, and claiming it
+    // does turns "waiting for the first frame" into a permanent lie.
+    expect(view.result.current.browserStreaming).toBe(false);
+  });
+
+  it('watches the browser on screen, and stops watching when it leaves', () => {
+    // Frames cost the operator money to encode and ship, so the stream follows
+    // what is actually being looked at rather than what happens to be running.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:live-view', liveView('conv-b', 'task-b'));
+    });
+    expect(fake.sent.filter((m) => m.event === 'browser:watch'))
+      .toEqual([{ event: 'browser:watch', payload: { taskId: 'task-a' } }]);
+
+    act(() => { view.result.current.setConversationId('conv-b'); });
+    expect(fake.sent.filter((m) => m.event === 'browser:unwatch'))
+      .toEqual([{ event: 'browser:unwatch', payload: { taskId: 'task-a' } }]);
+    expect(fake.sent.filter((m) => m.event === 'browser:watch').at(-1))
+      .toEqual({ event: 'browser:watch', payload: { taskId: 'task-b' } });
+  });
+});
