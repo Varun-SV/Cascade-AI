@@ -233,3 +233,39 @@ describe('the session pool is the deployment\'s, not one run\'s', () => {
     expect(sharedBrowserGeneration(), 'a changed endpoint is a different browser').toBe(before + 1);
   });
 });
+
+// Frames are a picture of whatever the agent is looking at — a half-filled
+// form, a page someone is signed into. They are exactly as sensitive as the
+// live-view URL they replace, so who may ask for them, and where they go,
+// matters as much as who may press Stop.
+describe('asking to watch a run', () => {
+  const cdp = { tools: { remoteBrowser: { provider: 'cdp' as const, url: 'ws://browser.test:9222' } } };
+
+  it('sends frames to the run\'s own socket, tagged with the run they came from', async () => {
+    const { cascade, config } = realCascade(cdp.tools.remoteBrowser);
+    const handlers = new Map<string, (e: unknown) => void>();
+    const on = (ev: string, fn: (e: unknown) => void) => { handlers.set(ev, fn); };
+    (cascade as unknown as { on: typeof on }).on = on;
+
+    const attached = attachRemoteBrowser({ cascade, config, conversationId: 'c1', emit });
+    handlers.get('run:started')?.({ taskId: 't1' });
+    expect(attached).not.toBeNull();
+
+    // No browser has been opened, so there is nothing to stream — and saying
+    // so is the point: a panel must never be promised frames that cannot come.
+    emits.length = 0;
+    expect(await attached!.watch()).toBe(false);
+    expect(emits.filter((e) => e.event === 'browser:frame')).toEqual([]);
+  });
+
+  it('is a no-op before the run has announced itself', async () => {
+    // `taskId` is null until `run:started`. Watching then has no run to name,
+    // and a frame with no task id could not be routed or discarded correctly.
+    const { cascade, config } = realCascade(cdp.tools.remoteBrowser);
+    const attached = attachRemoteBrowser({ cascade, config, conversationId: 'c1', emit });
+
+    expect(attached!.taskId).toBeNull();
+    expect(await attached!.watch()).toBe(false);
+    await expect(attached!.unwatch()).resolves.toBeUndefined();
+  });
+});

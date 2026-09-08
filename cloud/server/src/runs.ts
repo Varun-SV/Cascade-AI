@@ -452,6 +452,26 @@ export function buildApprovalCallback(
   };
 }
 
+/**
+ * Whether a browser-control message names the run it claims to.
+ *
+ * Every control the client has over a run's browser — stop it, start watching
+ * it, stop watching it — goes through this, because they are the same question:
+ * is the sender addressing the run this connection is actually carrying?
+ *
+ * An EXACT match, and a required one. Conversation scoping was too coarse (two
+ * runs on one chat, from two tabs or a retry, both matched) and treating a
+ * missing id as "matches everything" meant a stale or malformed `{}` reached
+ * every run on the socket. That mattered for Stop; it matters as much for
+ * watching, because a frame is a picture of whatever the agent is looking at.
+ *
+ * Exported so the rule is tested once, rather than restated at each call site
+ * and tested nowhere.
+ */
+export function addressesRun(mine: string | null | undefined, d: { taskId?: string } | undefined): boolean {
+  return !!mine && d?.taskId === mine;
+}
+
 /** What the client sends when the user answers a dangerous-tool prompt. */
 export interface PermissionDecision {
   conversationId?: string;
@@ -1230,16 +1250,37 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   // to this run and removed with the run's other listeners below: a Stop is
   // something the user does to the run they are watching, not to the process.
   const onBrowserStop = (d: { taskId?: string }) => {
-    // An EXACT task-id match, not a conversation match, and not an optional
-    // one. Conversation scoping was still too coarse — two runs on the same
-    // chat (two tabs, a retry) both matched — and treating a missing id as
-    // "matches everything" meant a stale or malformed `{}` stopped every run on
-    // the socket. The client learns this id from browser:live-view.
-    const mine = remoteBrowser?.taskId;
-    if (!mine || d?.taskId !== mine) return;
+    if (!addressesRun(remoteBrowser?.taskId, d)) return;
     remoteBrowser?.stop();
   };
   socket.on('browser:stop', onBrowserStop);
+
+  // Watching costs money, so it is opt-in and scoped exactly like Stop.
+  //
+  // The same exact task-id match: a client with several chats open must not be
+  // able to start a stream of a run it is not showing, and a stale or malformed
+  // `{}` must not start every stream on the socket. Frames are a picture of
+  // whatever the agent is looking at — a half-filled form, a page someone is
+  // signed into — so who may ask for them matters as much as who may stop them.
+  const onBrowserWatch = (d: { taskId?: string }) => {
+    if (!addressesRun(remoteBrowser?.taskId, d)) return;
+    const mine = remoteBrowser!.taskId!;
+    void remoteBrowser?.watch().then((streaming) => {
+      // Said plainly rather than left to a timeout. A panel that opened and
+      // will never receive a frame — the run gave the browser up in between —
+      // should say so instead of showing an empty box forever.
+      socket.emit('browser:watching', { conversationId: conversation.id, taskId: mine, streaming });
+    }).catch(() => {
+      socket.emit('browser:watching', { conversationId: conversation.id, taskId: mine, streaming: false });
+    });
+  };
+  socket.on('browser:watch', onBrowserWatch);
+
+  const onBrowserUnwatch = (d: { taskId?: string }) => {
+    if (!addressesRun(remoteBrowser?.taskId, d)) return;
+    void remoteBrowser?.unwatch();
+  };
+  socket.on('browser:unwatch', onBrowserUnwatch);
 
   // Your thumbs-up/down verdicts, folded into Auto routing as a bounded,
   // sample-size-shrunk adjustment to the public benchmark score. Read once per
@@ -1499,6 +1540,8 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     // the operator paying for a browser nobody is using, and a run that threw
     // is exactly the one that would otherwise leave one running.
     socket.off('browser:stop', onBrowserStop);
+    socket.off('browser:watch', onBrowserWatch);
+    socket.off('browser:unwatch', onBrowserUnwatch);
     socket.off('permission:decide', onPermissionDecision);
     // Anything still parked would otherwise hang forever holding a worker.
     for (const resolve of pendingApprovals.values()) resolve({ approved: false, always: false });

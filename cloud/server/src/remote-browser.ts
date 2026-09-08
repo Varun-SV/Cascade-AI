@@ -56,6 +56,17 @@ export interface AttachedBrowser {
   endRun(): Promise<void>;
   /** The user pressed Stop. */
   stop(): void;
+  /**
+   * Somebody opened the panel: start sending them the page.
+   *
+   * Frames go to the run's own socket and nowhere else — the same rule the
+   * live-view URL had, but enforced by us rather than by a provider handing out
+   * an unguessable link. Answers false when there is nothing to stream, so the
+   * client is never promised frames that will not come.
+   */
+  watch(): Promise<boolean>;
+  /** The panel closed. Stop paying to render frames nobody is looking at. */
+  unwatch(): Promise<void>;
 }
 
 /**
@@ -193,6 +204,28 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
     },
     stop() {
       if (taskId) controller.stopRun(taskId);
+    },
+    async watch() {
+      if (!taskId) return false;
+      const id = taskId;
+      return await controller.startWatching(id, (frame) => {
+        // To this socket only. A frame is a picture of whatever the agent is
+        // looking at — a half-filled form, a logged-in page — so it is exactly
+        // as sensitive as the live-view URL it replaces, and travels the same
+        // single path to the run's owner.
+        opts.emit('browser:frame', {
+          conversationId: opts.conversationId,
+          // Echoed so a client showing several chats can route the frame, and
+          // so a late frame from a finished run is discardable.
+          taskId: id,
+          data: frame.data,
+          width: frame.width,
+          height: frame.height,
+        });
+      });
+    },
+    async unwatch() {
+      if (taskId) await controller.stopWatching(taskId);
     },
   };
 }

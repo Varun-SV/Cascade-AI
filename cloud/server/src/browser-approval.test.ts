@@ -17,7 +17,7 @@
 //  there would hand the capability to exactly the runs that cannot supervise it.
 
 import { describe, it, expect, vi } from 'vitest';
-import { applyPermissionDecision, buildApprovalCallback, type PermissionDecision } from './runs.js';
+import { addressesRun, applyPermissionDecision, buildApprovalCallback, type PermissionDecision } from './runs.js';
 
 /**
  * The approval shape runs.ts builds.
@@ -230,5 +230,40 @@ describe('the approval window closing while the run continues', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// Stop, watch and unwatch are the same question — is this message for the run
+// this connection is carrying? — so they share one gate. A frame is a picture
+// of whatever the agent is looking at, which makes "who may ask to watch" as
+// sensitive as "who may press Stop".
+describe('which run a browser-control message may reach', () => {
+  it('takes an exact task id, and only the run this connection carries', () => {
+    expect(addressesRun('task-1', { taskId: 'task-1' })).toBe(true);
+    expect(addressesRun('task-1', { taskId: 'task-2' }), 'another run on the same socket').toBe(false);
+  });
+
+  it('refuses a message that names no run at all', () => {
+    // A stale or malformed `{}` used to mean "matches everything" on handlers
+    // that treated a missing id as optional — one bad message reaching every
+    // run on the socket.
+    expect(addressesRun('task-1', {})).toBe(false);
+    expect(addressesRun('task-1', undefined)).toBe(false);
+    expect(addressesRun('task-1', { taskId: undefined })).toBe(false);
+  });
+
+  it('refuses everything before the run has announced itself', () => {
+    // `taskId` is null until `run:started`. Nothing can be addressed to a run
+    // that has not yet said what it is called.
+    expect(addressesRun(null, { taskId: 'task-1' })).toBe(false);
+    expect(addressesRun(undefined, { taskId: 'task-1' })).toBe(false);
+
+    // The case the `!!mine` guard is actually there for, and the only one that
+    // distinguishes it from a bare equality check: BOTH sides unknown, where
+    // JavaScript happily says `undefined === undefined`. A malformed `{}`
+    // arriving before the run announced itself would otherwise be treated as
+    // addressing it.
+    expect(addressesRun(undefined, {}), 'two unknowns are not a match').toBe(false);
+    expect(addressesRun(undefined, { taskId: undefined })).toBe(false);
   });
 });
