@@ -793,6 +793,17 @@ export interface ToolsConfig {
    * `src/tools/browser-control.ts`.
    */
   agentBrowserControl?: boolean;
+  /**
+   * Where a hosted run gets a browser. Absent means the capability does not
+   * exist on that surface. See `src/config/schema.ts` and
+   * `src/browser/remote/provider.ts`.
+   */
+  remoteBrowser?: {
+    provider?: 'cdp' | 'steel';
+    url?: string;
+    apiKey?: string;
+    maxSessions?: number;
+  };
   mcpServers?: McpServerConfig[];
   /**
    * Names of MCP servers (matching McpServerConfig.name) that the user has

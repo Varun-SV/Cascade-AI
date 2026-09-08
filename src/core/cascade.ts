@@ -747,9 +747,44 @@ export class Cascade extends EventEmitter {
    * run — it is simply not there.
    */
   setBrowserController(controller: BrowserController, release?: BrowserActorRelease): void {
-    if (this.unattended) return;
+    this.registerBrowserControl(controller, release, this.config.tools?.agentBrowserControl === true);
+  }
 
-    if (!this.config.tools?.agentBrowserControl) return;
+  /**
+   * Wire a REMOTE browser — one the host connects to rather than one the user
+   * is signed into.
+   *
+   * A separate entry point because the enablement is a different question, and
+   * conflating them made the hosted capability dead on arrival: this went out
+   * calling `setBrowserController`, which gates on `agentBrowserControl`, and
+   * that flag means "drive the browser I am signed into on this machine". It
+   * defaults to false and has no meaning on a server, so the hosted tool was
+   * never registered at all — the feature looked shipped and did nothing.
+   *
+   * Configuring a provider IS the opt-in here. It takes a deliberate act with
+   * an endpoint and usually a paid account, and the browser it reaches is a
+   * throwaway signed into nothing — a smaller consent than handing over the
+   * session the user is already authenticated in, and one the desktop flag
+   * cannot stand in for.
+   */
+  setRemoteBrowserController(controller: BrowserController, release?: BrowserActorRelease): void {
+    this.registerBrowserControl(controller, release, Boolean(this.config.tools?.remoteBrowser?.provider));
+  }
+
+  /**
+   * The gates every surface shares, with only enablement differing.
+   *
+   * One place, because the two callers above are exactly the sibling-writer
+   * shape that has already drifted twice in this feature: a rule added to one
+   * and not the other is silent on the surface that missed it.
+   */
+  private registerBrowserControl(
+    controller: BrowserController,
+    release: BrowserActorRelease | undefined,
+    enabled: boolean,
+  ): void {
+    if (this.unattended) return;
+    if (!enabled) return;
     if ((this.config.tools?.disabledTools ?? []).includes('browser_control')) return;
     this.toolRegistry.register(new BrowserControlTool(controller, release));
   }

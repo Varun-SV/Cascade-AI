@@ -100,6 +100,62 @@ describe('Cascade.setBrowserController — the gate on acting for real', () => {
   });
 });
 
+describe('the hosted browser gate is not the desktop one', () => {
+  // This is the bug that made the whole hosted feature inert: the cloud called
+  // setBrowserController, which gates on agentBrowserControl — a desktop flag
+  // meaning "drive the session I am signed into", default false and never set
+  // on a server. The tool was never registered and every test passed, because
+  // they used a fake Cascade that recorded the call instead of a real one that
+  // applies the gate. So these drive the REAL registry.
+  const controller = async () => ({ ok: true, detail: 'ok' });
+  const withTools = (tools: Record<string, unknown>) =>
+    new Cascade({ ...baseConfig, tools: { ...baseConfig.tools, ...tools } }, '/tmp');
+
+  it('registers when a remote provider is configured, with the desktop flag off', () => {
+    const c = withTools({ remoteBrowser: { provider: 'cdp', url: 'ws://b.test:9222' } });
+    c.setRemoteBrowserController(controller);
+    expect(c.getToolRegistry().hasTool('browser_control'), 'the hosted opt-in is the provider').toBe(true);
+  });
+
+  it('registers nothing when no provider is configured', () => {
+    // No provider, no capability — there is nothing to switch off.
+    const c = withTools({});
+    c.setRemoteBrowserController(controller);
+    expect(c.getToolRegistry().hasTool('browser_control')).toBe(false);
+  });
+
+  it('does not let the desktop flag alone enable the hosted tool', () => {
+    // The flags mean different things and neither stands in for the other.
+    const c = withTools({ agentBrowserControl: true });
+    c.setRemoteBrowserController(controller);
+    expect(c.getToolRegistry().hasTool('browser_control')).toBe(false);
+  });
+
+  it('does not let a remote provider alone enable the DESKTOP tool', () => {
+    // The reverse conflation would be worse: configuring a throwaway browser
+    // would silently hand over the session the user is signed into.
+    const c = withTools({ remoteBrowser: { provider: 'cdp', url: 'ws://b.test:9222' } });
+    c.setBrowserController(controller);
+    expect(c.getToolRegistry().hasTool('browser_control')).toBe(false);
+  });
+
+  it('still refuses an unattended run, whichever surface asks', () => {
+    const c = withTools({ remoteBrowser: { provider: 'cdp', url: 'ws://b.test:9222' } });
+    c.setUnattended(true);
+    c.setRemoteBrowserController(controller);
+    expect(c.getToolRegistry().hasTool('browser_control')).toBe(false);
+  });
+
+  it('still honours disabledTools, whichever surface asks', () => {
+    const c = withTools({
+      remoteBrowser: { provider: 'cdp', url: 'ws://b.test:9222' },
+      disabledTools: ['browser_control'],
+    });
+    c.setRemoteBrowserController(controller);
+    expect(c.getToolRegistry().hasTool('browser_control')).toBe(false);
+  });
+});
+
 describe('a run announces its id before it can fail', () => {
   it('emits run:started even when the run itself throws', async () => {
     // The whole point. A caller that learns the task id only from a successful

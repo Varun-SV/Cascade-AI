@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { applySettingsPayload, commitSettings, settingsSnapshot } from './settings-payload.js';
 import type { CascadeConfig } from '../types.js';
+import { CascadeConfigSchema } from './schema.js';
 
 // The socket handler applied keys, endpoints, models and TWO budget fields,
 // while the panel sends one payload to it and to the desktop IPC bridge alike.
@@ -444,5 +445,58 @@ describe('writer bounds are the schema’s', () => {
     const config = { providers: [], models: {}, budget: {}, tools: {} } as unknown as CascadeConfig;
     applySettingsPayload(config, { advanced: { localInferenceTimeoutMs: 999 } });
     expect(config.localInferenceTimeoutMs).toBeUndefined();
+  });
+});
+
+describe('remoteBrowser survives the round trip, and its key never comes back', () => {
+  // A config field is declared in four places and each is load-bearing: the
+  // zod schema, this allowlist, and both interfaces. A field named only in the
+  // UI is dropped here; one named only on the interfaces is stripped by
+  // CascadeConfigSchema.parse(). Both silently — which is the bug #242 fixed
+  // for the search backends, and the reason this test exists at all.
+  const base = () => ({ tools: { shellAllowlist: [], shellBlocklist: [], requireApprovalFor: [], browserEnabled: false } }) as never;
+
+  it('accepts a provider, endpoint and session cap', async () => {
+    const config = base();
+    await commitSettings(config, { remoteBrowser: { provider: 'steel', url: 'https://steel.test', maxSessions: 3 } } as never, async () => ({ ok: true }));
+    expect((config as { tools: { remoteBrowser?: unknown } }).tools.remoteBrowser)
+      .toMatchObject({ provider: 'steel', url: 'https://steel.test', maxSessions: 3 });
+  });
+
+  it('survives CascadeConfigSchema.parse, which silently strips what it does not declare', () => {
+    const parsed = CascadeConfigSchema.parse({
+      tools: { remoteBrowser: { provider: 'cdp', url: 'ws://localhost:9222' } },
+    });
+    expect(parsed.tools.remoteBrowser).toMatchObject({ provider: 'cdp', url: 'ws://localhost:9222' });
+  });
+
+  it('reports whether a key exists, never the key itself', async () => {
+    // Echoing it would put a live credential in every settings response, where
+    // it reaches any client that can read them.
+    const config = base();
+    await commitSettings(config, { remoteBrowser: { apiKey: 'secret-value' } } as never, async () => ({ ok: true }));
+    const snap = settingsSnapshot(config) as unknown as { remoteBrowser: { hasApiKey: boolean } };
+
+    expect(snap.remoteBrowser.hasApiKey).toBe(true);
+    expect(JSON.stringify(snap)).not.toContain('secret-value');
+  });
+
+  it('does not wipe a stored key when the form comes back with the field blank', async () => {
+    // The panel is never given the key, so it cannot send it back. Treating an
+    // empty field as "clear it" would drop the credential every time anything
+    // else on the form was saved.
+    const config = base();
+    await commitSettings(config, { remoteBrowser: { apiKey: 'secret-value' } } as never, async () => ({ ok: true }));
+    await commitSettings(config, { remoteBrowser: { url: 'https://steel.test' } } as never, async () => ({ ok: true }));
+
+    const stored = (config as { tools: { remoteBrowser?: { apiKey?: string } } }).tools.remoteBrowser;
+    expect(stored?.apiKey).toBe('secret-value');
+  });
+
+  it('clamps an absurd session count rather than trusting it', async () => {
+    const config = base();
+    await commitSettings(config, { remoteBrowser: { maxSessions: 9999 } } as never, async () => ({ ok: true }));
+    const stored = (config as { tools: { remoteBrowser?: { maxSessions?: number } } }).tools.remoteBrowser;
+    expect(stored?.maxSessions).toBeLessThanOrEqual(16);
   });
 });

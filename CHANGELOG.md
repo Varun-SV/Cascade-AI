@@ -18,6 +18,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      a bumped version with the heading still reading "Unreleased" matches
      nothing — which is how 0.70.0 published with an empty stub for notes. -->
 
+## 0.79.0 - 2026-09-03
+
+### Added
+- **Browser control on the web surface, through a browser you point it at.**
+  The desktop drives the Chromium you are signed into and can watch. A hosted
+  deployment has neither, so it connects to a remote browser over CDP instead
+  of running one in the container — which would be an SSRF engine (a page's own
+  JavaScript issues requests no URL check ever sees, from inside the trust
+  boundary) and would cost 200–400 MB per session against tiers that start at
+  512 MB.
+
+  Two adapters. A **generic CDP endpoint** is the important one: a `ws://` URL
+  and nothing else, covering a self-hosted Steel, a Browserless container, or a
+  bare `chromium --remote-debugging-port`, with no vendor account and no
+  dependency on anyone's API staying stable. **Steel** is the branded one,
+  because a real create/release lifecycle and a separate live-view URL exercise
+  the parts of the seam a bare URL does not.
+
+  **You can watch it work, and take it away.** The live session is embedded in
+  the chat and Stop withdraws the browser without stopping the run. The frame is
+  watch-only, deliberately: input there would reach the session over the
+  provider's own channel rather than through the lease that decides who may
+  drive the page, so "taking over" would mean driving it at the same time as the
+  agent, not instead of it. That panel does for the web what the
+  desktop's on-screen requirement does there: it is what makes the kill switch
+  mean something. A provider with no live view is a weaker configuration and
+  says so rather than showing an empty box.
+
+  A hosted deployment turns it on with `REMOTE_BROWSER_PROVIDER` (`cdp` or
+  `steel`), `REMOTE_BROWSER_URL`, and — for Steel — `REMOTE_BROWSER_API_KEY`.
+  Operator configuration only, with no field on the run request: the value is a
+  URL the *server* connects to, so accepting one from a caller would aim that
+  connection at the deployment's own network.
+
+  Absent by default — no provider, no capability, nothing to switch off. One
+  session at a time unless raised (`REMOTE_BROWSER_MAX_SESSIONS`), because every
+  session is billed and a wave of workers each opening their own is a cost
+  nobody chose. The API key is
+  never echoed back in any settings response, and the live-view URL is treated
+  as the bearer capability it is: it goes to the run's owner and is never
+  persisted or logged.
+
+  The remote browser is signed into nothing, which is the honest limit of this
+  surface: it is for public-web work, and the desktop remains the place for
+  anything authenticated.
+
+### Fixed
+- **A dangerous-action prompt that outlived the decision it was asking for.**
+  The orchestrator times an unanswered approval out after ten minutes, denies
+  it, and carries on; the hosted chat was never told, so the buttons stayed on
+  screen for the rest of the run and pressing one changed nothing. The prompt
+  now goes away when the window closes.
+- **One tenant's browsing state reaching the next on a shared endpoint.** A
+  hosted run took the browser's existing context and the page left in it, so
+  the run that came after inherited the previous one's page, cookies and local
+  storage — a different person, on a shared deployment. The one-session cap
+  prevented two runs overlapping there; it did nothing about the run after. A
+  run on an endpoint it does not own now gets a context of its own and destroys
+  it on the way out. Providers that hand out a browser per session are
+  unaffected, and deliberately so: their default context is the one the live
+  view shows.
+- **A regular expression that could stall on a long URL.** Stripping trailing
+  slashes from a configured endpoint used a pattern that backtracks
+  quadratically — 32 seconds on a 200,000-character input, against effectively
+  nothing for the replacement. Found by CodeQL.
+
 ## 0.78.0 - 2026-09-02
 
 ### Added

@@ -88,6 +88,32 @@ const EnvSchema = z.object({
   OPENAI_COMPATIBLE_API_KEY: z.string().optional(),
   OPENAI_COMPATIBLE_MODEL: z.string().optional(),
   OLLAMA_BASE_URL: z.string().optional(),
+
+  // ── Remote browser (OPERATOR-CONFIGURED, off by default) ──
+  // Where a hosted run gets a browser from. There is no per-user setting and
+  // no field on the run payload, deliberately: the value is a URL the SERVER
+  // connects to, so accepting it from a request body would hand every caller a
+  // fetch from inside the deployment's network — the exact SSRF the whole
+  // remote-browser design exists to avoid (see src/browser/remote/provider.ts).
+  // The operator sets it once, for their own deployment, and it applies to
+  // every run on it.
+  //
+  // Unset — the default — means hosted runs have no browser at all and the
+  // tool is never registered. That is why there is no "off" switch: the
+  // capability does not exist until an endpoint is supplied.
+  //   cdp   — a browser you run (Browserless, a self-hosted Chrome, anything
+  //           that speaks CDP). REMOTE_BROWSER_URL must be ws:// or wss://.
+  //   steel — a Steel deployment. REMOTE_BROWSER_URL is the API base and
+  //           defaults to Steel's hosted API; REMOTE_BROWSER_API_KEY is its key.
+  REMOTE_BROWSER_PROVIDER: z.enum(['cdp', 'steel']).optional(),
+  REMOTE_BROWSER_URL: z.string().optional(),
+  REMOTE_BROWSER_API_KEY: z.string().optional(),
+  // Concurrent sessions across the whole deployment. One by default and
+  // deliberately so: every session is billed, and a wave of workers each
+  // opening their own is a cost the operator did not choose. A bare CDP
+  // endpoint is capped at 1 whatever this says — that endpoint IS one browser,
+  // so a second "session" would be the same page.
+  REMOTE_BROWSER_MAX_SESSIONS: z.coerce.number().int().min(1).max(16).default(1),
 });
 
 export type CloudEnv = z.infer<typeof EnvSchema>;
