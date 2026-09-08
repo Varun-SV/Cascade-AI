@@ -14,7 +14,7 @@ import {
   distillSessionFacts, buildSessionTranscript, sessionWorthRemembering,
   azureModelForDeployment, DEFAULT_CONTEXT_LIMIT, MODELS,
 } from '#cascade-ai';
-import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ApprovalRequest, ProviderConfig } from '#cascade-ai';
+import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ApprovalRequest, ProviderConfig, BrowserInput } from '#cascade-ai';
 import { attachRemoteBrowser } from './remote-browser.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -1282,6 +1282,70 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   };
   socket.on('browser:unwatch', onBrowserUnwatch);
 
+  /**
+   * Something the user asked of the browser did not happen.
+   *
+   * Deliberately carries no `human`: a refusal is not a statement about who
+   * holds the page. An unknown key is refused while the user still has
+   * control, and saying `human: false` there would take their panel away from
+   * them over a keystroke. Who holds it is pushed by the controller, on the
+   * same event, and that is the only thing that sets it.
+   */
+  const refused = (taskId: string, detail: string | undefined) => {
+    socket.emit('browser:control', { conversationId: conversation.id, taskId, detail });
+  };
+
+  // Taking the page over, and giving it back.
+  //
+  // Same exact task-id match as Stop and Watch, and for a stricter reason: this
+  // one grants INPUT. A client with several chats open must not be able to
+  // start driving a run it is not showing, and a malformed `{}` must not grant
+  // control of every run on the socket.
+  //
+  // The answer is emitted rather than acked, because control changes hands
+  // without anyone asking too — the hold lapses on its own — so the client
+  // needs one path that tells it who has the page, not two that can disagree.
+  const onBrowserTakeOver = (d: { taskId?: string }) => {
+    if (!addressesRun(remoteBrowser?.taskId, d)) return;
+    const mine = remoteBrowser!.taskId!;
+    void remoteBrowser!.takeOver().then(({ ok, detail }) => {
+      // Only the refusal needs saying here: a granted takeover already reaches
+      // the client as a control change pushed by the controller.
+      if (!ok) refused(mine, detail);
+    }).catch(() => refused(mine, 'The browser could not be handed over.'));
+  };
+  socket.on('browser:take-over', onBrowserTakeOver);
+
+  const onBrowserHandBack = (d: { taskId?: string }) => {
+    if (!addressesRun(remoteBrowser?.taskId, d)) return;
+    remoteBrowser?.handBack();
+  };
+  socket.on('browser:hand-back', onBrowserHandBack);
+
+  // Every event, separately. A takeover is not a channel that stays open: the
+  // run can be stopped and the hold can lapse between two clicks, and the
+  // controller re-checks both — this only decides whether the event is even
+  // addressed to a run this socket owns.
+  const onBrowserInput = (d: { taskId?: string; event?: unknown }) => {
+    if (!addressesRun(remoteBrowser?.taskId, d)) return;
+    const event = d?.event;
+    if (!event || typeof event !== 'object') return;
+    const mine = remoteBrowser!.taskId!;
+    void remoteBrowser!.input(event as BrowserInput).then(({ ok, detail }) => {
+      // Silent on success. Input is a stream — a mouse move per frame while
+      // somebody drags — and a reply per event would double the traffic to say
+      // nothing. A refusal is the exception and worth a message.
+      if (!ok) refused(mine, detail);
+    }).catch(() => {});
+  };
+  socket.on('browser:input', onBrowserInput);
+
+  const onBrowserCapture = (d: { taskId?: string; on?: boolean }) => {
+    if (!addressesRun(remoteBrowser?.taskId, d)) return;
+    void remoteBrowser?.setCapture(d?.on === true);
+  };
+  socket.on('browser:capture', onBrowserCapture);
+
   // Your thumbs-up/down verdicts, folded into Auto routing as a bounded,
   // sample-size-shrunk adjustment to the public benchmark score. Read once per
   // run and closed over: routing decisions inside a run must not shift halfway
@@ -1542,6 +1606,10 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     socket.off('browser:stop', onBrowserStop);
     socket.off('browser:watch', onBrowserWatch);
     socket.off('browser:unwatch', onBrowserUnwatch);
+    socket.off('browser:take-over', onBrowserTakeOver);
+    socket.off('browser:hand-back', onBrowserHandBack);
+    socket.off('browser:input', onBrowserInput);
+    socket.off('browser:capture', onBrowserCapture);
     socket.off('permission:decide', onPermissionDecision);
     // Anything still parked would otherwise hang forever holding a worker.
     for (const resolve of pendingApprovals.values()) resolve({ approved: false, always: false });

@@ -1359,6 +1359,53 @@ describe('handing the browser to the person watching', () => {
     expect(out.detail).toMatch(/stopped/i);
   });
 
+  it('says who has the browser, and stays quiet while nothing changes', async () => {
+    // The lease reports every ownership change, and during ordinary work that
+    // is one per action as workers take it and hand it back. A viewer does not
+    // need a socket message on every click the agent makes.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    const seen: Array<{ human: boolean; capturing: boolean }> = [];
+    c.onControlFor('run-A', (state) => seen.push(state));
+
+    await watched(c);
+    await c.controller({ kind: 'click', selector: '#b' }, ctx('run-A', 'w1'));
+    await c.controller({ kind: 'click', selector: '#c' }, ctx('run-A', 'w1'));
+    c.actorEnded('w1');
+    expect(seen, 'the agent had it before and has it now').toEqual([
+      { human: false, capturing: true },
+    ]);
+
+    await c.takeOver('run-A');
+    await c.setCapture('run-A', false);
+    expect(seen.slice(1)).toEqual([
+      { human: true, capturing: true },
+      { human: true, capturing: false },
+    ]);
+  });
+
+  it('tells the viewer when a hold lapses, rather than letting it find out', async () => {
+    // A client left believing it still has control keeps sending input into a
+    // lease it no longer holds: every event refused, nothing on screen saying
+    // why, and the agent quietly driving again underneath.
+    vi.useFakeTimers();
+    try {
+      const { provider } = fakeProvider();
+      const c = new RemoteBrowserController({ provider });
+      const seen: Array<{ human: boolean }> = [];
+      c.onControlFor('run-A', (state) => seen.push({ human: state.human }));
+
+      await watched(c);
+      c.actorEnded('w1');
+      await c.takeOver('run-A');
+      await vi.advanceTimersByTimeAsync(180_000);
+
+      expect(seen.map((s) => s.human)).toEqual([false, true, false]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('lets go of a browser the person walked away from', async () => {
     // A person has no terminal signal — no worker end, no run completion. A
     // takeover nobody is using still holds a billed session and, at the default

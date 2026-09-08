@@ -101,6 +101,14 @@ export interface BrowserFrame {
   height: number;
 }
 
+/** Who is driving a run's browser, and whether it is being pictured. */
+export interface BrowserControlState {
+  /** True while a person holds it and the agent is being refused. */
+  human: boolean;
+  /** Whether frames are being produced right now. See `setCapture`. */
+  capturing: boolean;
+}
+
 /**
  * One thing a person did to the page while they held it.
  *
@@ -252,6 +260,17 @@ export class RemoteBrowserController {
    * bearer capability for a browser somebody else is driving.
    */
   private liveViewListeners = new Map<string, (info: BrowserViewInfo) => void>();
+  /**
+   * Told when a run's browser changes hands, or stops being pictured.
+   *
+   * Needed because a takeover can end without anybody asking. The hold lapses
+   * on its own after `HUMAN_IDLE_MS`, and a client left believing it still has
+   * control would keep sending input into a lease it no longer holds — every
+   * event refused, with nothing on screen saying why.
+   */
+  private controlListeners = new Map<string, (state: BrowserControlState) => void>();
+  /** What each run's listener was last told, so unchanged states stay quiet. */
+  private controlAnnounced = new Map<string, string>();
   /** An embedder that wants every run's live view, told which run each is. */
   private onLiveViewAll: ((runId: string, liveViewUrl: string | undefined) => void) | undefined;
 
@@ -325,7 +344,10 @@ export class RemoteBrowserController {
   private leaseFor(runId: string): BrowserLease {
     let lease = this.leases.get(runId);
     if (!lease) {
-      lease = new BrowserLease({ isRevoked: (id) => this.revoked.has(id) });
+      lease = new BrowserLease({
+        isRevoked: (id) => this.revoked.has(id),
+        onChange: () => this.announceControl(runId),
+      });
       // This host reports worker terminal states (see `actorEnded`), so no
       // timer may decide ownership: a worker waiting on a human approval
       // outlives any fixed bound.
@@ -347,6 +369,36 @@ export class RemoteBrowserController {
 
   offLiveViewFor(runKey: string): void {
     this.liveViewListeners.delete(runKey);
+  }
+
+  onControlFor(runKey: string, listener: (state: BrowserControlState) => void): void {
+    this.controlListeners.set(runKey, listener);
+  }
+
+  offControlFor(runKey: string): void {
+    this.controlListeners.delete(runKey);
+    this.controlAnnounced.delete(runKey);
+  }
+
+  /**
+   * Say who has the browser, but only when the answer has changed.
+   *
+   * The lease reports every ownership change, and during ordinary work that is
+   * one per action as workers take it and give it back. None of those are
+   * interesting to a viewer — the agent had it before and has it now — and
+   * emitting them would put a socket message on every click the agent makes.
+   */
+  private announceControl(runId: string): void {
+    const listener = this.controlListeners.get(runId);
+    if (!listener) return;
+    const state: BrowserControlState = {
+      human: this.leases.get(runId)?.heldByHuman === true,
+      capturing: this.runs.get(runId)?.capturing === true,
+    };
+    const key = `${state.human}:${state.capturing}`;
+    if (this.controlAnnounced.get(runId) === key) return;
+    this.controlAnnounced.set(runId, key);
+    listener(state);
   }
 
   /**
@@ -450,6 +502,7 @@ export class RemoteBrowserController {
     try {
       await cdp.send('Page.startScreencast', { ...SCREENCAST });
       held.capturing = true;
+      this.announceControl(runId);
       return true;
     } catch {
       // The page went away between opening the session and starting the
@@ -466,6 +519,7 @@ export class RemoteBrowserController {
     if (!cdp) return;
     const held = this.runs.get(runId);
     if (held) { held.screencast = undefined; held.capturing = false; }
+    this.announceControl(runId);
     // Both best-effort and in this order: stop the stream first so no further
     // frames are produced, then let the session go. A run whose page has
     // already closed throws on both, and neither failure is actionable.
@@ -501,6 +555,7 @@ export class RemoteBrowserController {
       if (on) await cdp.send('Page.startScreencast', { ...SCREENCAST });
       else await cdp.send('Page.stopScreencast');
       held.capturing = on;
+      this.announceControl(runId);
     } catch {
       // The page went away underneath. Report what is actually true rather
       // than what was requested — a UI that believes it is streaming when it
@@ -707,6 +762,7 @@ export class RemoteBrowserController {
     // "browser gone" announcement has already gone out by now: `disposeRun`
     // makes it, and teardown completes before this runs.
     this.liveViewListeners.delete(runId);
+    this.offControlFor(runId);
   }
 
   /**

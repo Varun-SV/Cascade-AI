@@ -24,6 +24,7 @@ import {
   GenericCdpProvider,
   SteelProvider,
   isCdpEndpoint,
+  type BrowserInput,
   type Cascade,
   type CascadeConfig,
   type RemoteBrowserProvider,
@@ -67,6 +68,19 @@ export interface AttachedBrowser {
   watch(): Promise<boolean>;
   /** The panel closed. Stop paying to render frames nobody is looking at. */
   unwatch(): Promise<void>;
+  /**
+   * The user wants the page for themselves.
+   *
+   * Resolves once the agent is actually out — an action already inside the
+   * page finishes first — so "you have control" is true when the UI says it.
+   */
+  takeOver(): Promise<{ ok: boolean; detail?: string }>;
+  /** The user is done with it, so the run may carry on. */
+  handBack(): boolean;
+  /** One thing the user did to the page, authorised on its own. */
+  input(event: BrowserInput): Promise<{ ok: boolean; detail?: string }>;
+  /** Suspend or resume the picture while keeping control. For signing in. */
+  setCapture(on: boolean): Promise<boolean>;
 }
 
 /**
@@ -168,6 +182,19 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
     const id = (e as { taskId?: string }).taskId;
     if (!id) return;
     taskId = id;
+    // Who holds the page, on the same one socket as everything else about it.
+    //
+    // Pushed rather than answered, because the interesting change is the one
+    // nobody asked for: an idle takeover lapses on its own, and a client that
+    // still believes it has control keeps typing into a lease it lost.
+    controller.onControlFor(id, ({ human, capturing }) => {
+      opts.emit('browser:control', {
+        conversationId: opts.conversationId,
+        taskId: id,
+        human,
+        capturing,
+      });
+    });
     controller.onLiveViewFor(id, ({ active, liveViewUrl }) => {
       // To this socket only. See the file header.
       opts.emit('browser:live-view', {
@@ -200,6 +227,7 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
       if (taskId) {
         await controller.endRun(taskId);
         controller.offLiveViewFor(taskId);
+        controller.offControlFor(taskId);
       }
     },
     stop() {
@@ -226,6 +254,21 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
     },
     async unwatch() {
       if (taskId) await controller.stopWatching(taskId);
+    },
+    async takeOver() {
+      if (!taskId) return { ok: false, detail: 'This run has no browser open.' };
+      return await controller.takeOver(taskId);
+    },
+    handBack() {
+      return taskId ? controller.handBack(taskId) : false;
+    },
+    async input(event: BrowserInput) {
+      if (!taskId) return { ok: false, detail: 'This run has no browser open.' };
+      return await controller.input(taskId, event);
+    },
+    async setCapture(on: boolean) {
+      if (!taskId) return false;
+      return await controller.setCapture(taskId, on);
     },
   };
 }
@@ -268,11 +311,11 @@ function buildProvider(
  * same shape as an action landing after Stop: a mutation the person believed
  * they had prevented.
  *
- * Watch and Stop is a smaller promise that this code can actually keep. A real
- * handoff needs the agent paused BEFORE viewer input is enabled, and pausing is
- * not free here — the only way to make a patient Playwright call stop is to
- * close the page it is waiting on, which is exactly the page the user wanted to
- * take over. That is a feature, not a parameter, and it is not this PR.
+ * Watch and Stop is a smaller promise that this code can actually keep, and the
+ * handoff that arrived since is deliberately NOT this: it runs over the frames
+ * this server streams, where the agent is paused on the same lease the workers
+ * queue on before a single event is accepted. The provider's viewer has no such
+ * gate, so it stays watch-only whatever else the panel can now do.
  *
  * Added as query parameters on the URL the provider gave us rather than built
  * from scratch: it carries the session's own credentials, and reconstructing it

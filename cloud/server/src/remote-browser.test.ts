@@ -258,6 +258,28 @@ describe('asking to watch a run', () => {
     expect(emits.filter((e) => e.event === 'browser:frame')).toEqual([]);
   });
 
+  it('refuses to hand over a browser that is not there', async () => {
+    // Every one of these is a control path a client can reach at any moment —
+    // the panel is open while the run is still starting, or after it ended —
+    // and each has to say no rather than throw into the socket handler.
+    const { cascade, config } = realCascade(cdp.tools.remoteBrowser);
+    const handlers = new Map<string, (e: unknown) => void>();
+    (cascade as unknown as { on: (ev: string, fn: (e: unknown) => void) => void }).on =
+      (ev, fn) => { handlers.set(ev, fn); };
+
+    const attached = attachRemoteBrowser({ cascade, config, conversationId: 'c1', emit });
+    handlers.get('run:started')?.({ taskId: 't1' });
+
+    const over = await attached!.takeOver();
+    expect(over.ok).toBe(false);
+    expect(over.detail).toMatch(/no browser/i);
+
+    const typed = await attached!.input({ kind: 'text', text: 'hello' });
+    expect(typed.ok, 'and input is refused for the same reason').toBe(false);
+    expect(attached!.handBack()).toBe(false);
+    expect(await attached!.setCapture(true)).toBe(false);
+  });
+
   it('is a no-op before the run has announced itself', async () => {
     // `taskId` is null until `run:started`. Watching then has no run to name,
     // and a frame with no task id could not be routed or discarded correctly.
@@ -267,5 +289,11 @@ describe('asking to watch a run', () => {
     expect(attached!.taskId).toBeNull();
     expect(await attached!.watch()).toBe(false);
     await expect(attached!.unwatch()).resolves.toBeUndefined();
+    // Control needs a run to name even more than watching does: an input event
+    // with no task id could be applied to whichever run happened to be open.
+    expect((await attached!.takeOver()).ok).toBe(false);
+    expect((await attached!.input({ kind: 'click', x: 0.5, y: 0.5 })).ok).toBe(false);
+    expect(attached!.handBack()).toBe(false);
+    expect(await attached!.setCapture(true)).toBe(false);
   });
 });
