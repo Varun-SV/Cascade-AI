@@ -27,7 +27,32 @@
  * the capability was switched off is neither. Reporting all three as "busy"
  * had a model politely retrying something that would never be granted.
  */
-export type LeaseResult = 'granted' | 'busy' | 'cancelled' | 'off';
+export type LeaseResult = 'granted' | 'busy' | 'cancelled' | 'off' | 'human';
+
+/**
+ * The actor id a human takeover holds the lease under.
+ *
+ * A person is an ACTOR, not a mode flag, because everything the lease already
+ * knows how to do — serialize, refuse, hand on, drop with the run — is exactly
+ * what a takeover needs, and a parallel `humanHasIt` boolean beside `actor`
+ * would be a second answer to "who owns the browser" that can disagree with the
+ * first. Prefixed and underscored so it cannot collide with a worker id, which
+ * is derived from the run and the worker index.
+ */
+export const HUMAN_ACTOR = '__human__';
+
+/**
+ * How long a human hold survives with no input at all.
+ *
+ * A person is not a worker: there is no terminal signal when someone closes the
+ * tab, walks away, or loses their connection mid-takeover, so the one rule that
+ * makes timers wrong for workers — a healthy holder outlasts any bound — does
+ * not hold here. And the hold is expensive: a browser session is billed while
+ * it exists and, at the default `maxSessions: 1`, one abandoned takeover blocks
+ * every other run on the deployment. Two minutes is long enough to read a page
+ * and type a password, short enough that a forgotten tab is not an outage.
+ */
+const HUMAN_IDLE_MS = 120_000;
 
 interface Waiter {
   actorId: string;
@@ -82,6 +107,8 @@ export class BrowserLease {
    * took the slot may release it.
    */
   private action: symbol | null = null;
+  /** Lapses a human hold nobody is using. See `HUMAN_IDLE_MS`. */
+  private humanTimer: ReturnType<typeof setTimeout> | null = null;
 
   private isRevoked: (sessionId: string) => boolean;
   private onChange: () => void;
@@ -92,6 +119,8 @@ export class BrowserLease {
   }
 
   get holderActor(): string | null { return this.actor; }
+  /** Whether a person, rather than the agent, is driving the page right now. */
+  get heldByHuman(): boolean { return this.actor === HUMAN_ACTOR; }
   get holderSession(): string | null { return this.session; }
   get queueDepth(): number { return this.waiting.length; }
   get actionInFlight(): boolean { return this.action !== null; }
@@ -114,6 +143,12 @@ export class BrowserLease {
    * the same worker coming back for its next step must not queue behind itself.
    */
   async acquire(actorId: string, sessionId: string, signal?: AbortSignal): Promise<LeaseResult> {
+    // Refused outright, and deliberately not queued. A worker that parks behind
+    // a person is a worker that will act the moment they look away — minutes
+    // later, on a page they have since changed, with a plan made before they
+    // touched it. Telling the model "the user has taken over" ends the sequence
+    // instead, which is the honest outcome and the one it can report.
+    if (this.actor === HUMAN_ACTOR && actorId !== HUMAN_ACTOR) return 'human';
     if (this.actor === null || this.actor === actorId) {
       this.actor = actorId;
       this.session = sessionId;
@@ -160,6 +195,59 @@ export class BrowserLease {
     if (this.actor === actorId) this.release();
   }
 
+  /**
+   * Give the browser to the person watching it.
+   *
+   * Callers must have waited the in-flight action out first — see
+   * `awaitActionSlot`. This does not interrupt one, because it cannot: a
+   * Playwright call already inside the page finishes whatever it started, and
+   * taking the lease off it would only mean the person and a still-running
+   * `fill` were both touching the same form. Waiting is what makes "you have
+   * control" true when the UI says it.
+   *
+   * Every queued worker is turned away rather than left in line, for the same
+   * reason `acquire` refuses: they were planned against a page the person is
+   * about to change.
+   */
+  takeOver(sessionId: string): void {
+    for (let i = this.waiting.length - 1; i >= 0; i--) this.waiting[i]!.settle('human');
+    this.clearCeiling();
+    this.actor = HUMAN_ACTOR;
+    this.session = sessionId;
+    this.touch();
+    this.onChange();
+  }
+
+  /**
+   * The person is still there — anything they did counts.
+   *
+   * Called per authorised input rather than on a heartbeat, so the hold is
+   * extended by USE and not merely by a tab being open. A left-open panel on a
+   * forgotten laptop stops holding a billed session two minutes later.
+   */
+  touch(): void {
+    if (this.actor !== HUMAN_ACTOR) return;
+    this.clearHumanIdle();
+    this.humanTimer = setTimeout(() => this.release(), HUMAN_IDLE_MS);
+    this.humanTimer.unref?.();
+  }
+
+  /**
+   * The person hands the browser back, or their hold lapses.
+   *
+   * Answers whether there was a human hold to end, so a caller can tell a real
+   * handback from a duplicate click or a lapse that already happened.
+   */
+  handBack(): boolean {
+    if (this.actor !== HUMAN_ACTOR) return false;
+    this.release();
+    return true;
+  }
+
+  private clearHumanIdle(): void {
+    if (this.humanTimer) { clearTimeout(this.humanTimer); this.humanTimer = null; }
+  }
+
   /** Drop every queued waiter belonging to a run, and the lease if it holds it. */
   dropRun(sessionId: string): void {
     // Backwards: settle() splices, so forward iteration would skip entries.
@@ -180,6 +268,11 @@ export class BrowserLease {
   /** Hand the browser to the next actor in line, if any. */
   release(): void {
     this.clearCeiling();
+    // Unconditional, because a human hold ends by every route the lease has —
+    // the person handing it back, their idle lapsing, the run being stopped,
+    // the capability being switched off — and a timer surviving one of those
+    // would fire into a lease somebody else has since taken.
+    this.clearHumanIdle();
     this.actor = null;
     this.session = null;
 
@@ -237,8 +330,8 @@ export class BrowserLease {
    * conflict, so it is waited out rather than refused — but bounded, because a
    * wedged action must not pin the queue.
    */
-  async awaitActionSlot(): Promise<boolean> {
-    for (let waited = 0; waited < ACTION_HANDOFF_MS; waited += ACTION_HANDOFF_POLL_MS) {
+  async awaitActionSlot(withinMs = ACTION_HANDOFF_MS): Promise<boolean> {
+    for (let waited = 0; waited < withinMs; waited += ACTION_HANDOFF_POLL_MS) {
       if (!this.action) return true;
       await new Promise((r) => setTimeout(r, ACTION_HANDOFF_POLL_MS));
     }

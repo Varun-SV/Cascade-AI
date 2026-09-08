@@ -17,11 +17,14 @@ function fakeCdp() {
   const handlers = new Map<string, (payload: unknown) => void>();
   const session = {
     sent: [] as string[],
+    /** The same calls with their arguments, for the ones whose arguments are the point. */
+    calls: [] as Array<{ method: string; params?: Record<string, unknown> }>,
     detached: false,
     /** Everything that happened, in order: deliveries and acks interleaved. */
     order: [] as string[],
     async send(method: string, params?: Record<string, unknown>) {
       session.sent.push(method);
+      session.calls.push({ method, ...(params ? { params } : {}) });
       if (method === 'Page.screencastFrameAck') session.order.push(`ack:${params?.['sessionId']}`);
       return {};
     },
@@ -1146,5 +1149,238 @@ describe('watching a run\'s browser', () => {
     // "already watching" by the attempt that failed.
     cdp.send = good;
     expect(await c.startWatching('run-A', () => {})).toBe(true);
+  });
+});
+
+// The other half of watching. A person who can see the page but cannot touch it
+// is stuck the moment the agent hits a login, a captcha, or a consent dialog
+// only they can answer — and the alternative the provider offers, an interactive
+// viewer, is a SECOND controller racing the agent on the same page.
+describe('handing the browser to the person watching', () => {
+  /** Open a run's browser, start its stream, and report one frame. */
+  async function watched(c: InstanceType<typeof RemoteBrowserController>, runId = 'run-A') {
+    await c.controller({ kind: 'click', selector: '#a' }, ctx(runId, 'w1'));
+    await c.startWatching(runId, () => {});
+    // The viewport is only ever learned from a frame, so a takeover test that
+    // never delivers one is testing a page nobody has seen.
+    cdp.pushFrame(1);
+  }
+
+  it('refuses the agent outright once a person has taken over', async () => {
+    // Refused, not queued. A worker parked behind a person acts the moment they
+    // look away — minutes later, on a page they have since changed.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+
+    expect(await c.takeOver('run-A')).toEqual({ ok: true });
+
+    const out = await c.controller({ kind: 'click', selector: '#b' }, ctx('run-A', 'w2'));
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/taken control/i);
+    expect(page.calls, 'and it never reached the page').not.toContain('click:#b');
+  });
+
+  it('waits for the action already in flight before saying you have control', async () => {
+    // The substance of the handoff. Playwright cannot be interrupted mid-call —
+    // `click` waits for its element and then clicks — so a takeover that
+    // returned immediately would put the person on a page an action was still
+    // about to change.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+
+    let finishClick = () => {};
+    page.click = async (selector: string) => {
+      page.calls.push(`click:${selector}`);
+      await new Promise<void>((r) => { finishClick = r; });
+    };
+    const acting = c.controller({ kind: 'click', selector: '#slow' }, ctx('run-A', 'w1'));
+    await new Promise((r) => setTimeout(r, 20));
+
+    let granted = false;
+    const handoff = c.takeOver('run-A').then((r) => { granted = r.ok; return r; });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(granted, 'not while the agent is still inside the page').toBe(false);
+
+    finishClick();
+    await acting;
+    expect((await handoff).ok).toBe(true);
+  });
+
+  it('places a click on the page it was clicked on', async () => {
+    // The client sends a fraction of the picture; only this side knows the
+    // viewport that picture was scaled down from.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    expect(await c.input('run-A', { kind: 'click', x: 0.5, y: 0.25 })).toEqual({ ok: true });
+
+    const mouse = cdp.calls.filter((call) => call.method === 'Input.dispatchMouseEvent');
+    // Half of 1280, a quarter of 800 — the viewport the frame reported.
+    expect(mouse.map((m) => [m.params?.['type'], m.params?.['x'], m.params?.['y']])).toEqual([
+      ['mouseMoved', 640, 200],
+      ['mousePressed', 640, 200],
+      ['mouseReleased', 640, 200],
+    ]);
+  });
+
+  it('keeps a click inside the picture it claims to come from', async () => {
+    // Coordinates arrive from a client. Out-of-range ones would otherwise be
+    // dispatched at negative or off-screen positions.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    await c.input('run-A', { kind: 'click', x: 4, y: -2 });
+
+    const pressed = cdp.calls.find((call) => call.params?.['type'] === 'mousePressed');
+    expect([pressed?.params?.['x'], pressed?.params?.['y']]).toEqual([1280, 0]);
+  });
+
+  it('types text in one piece and sends only keys that are commands', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    expect(await c.input('run-A', { kind: 'text', text: 'hunter2' })).toEqual({ ok: true });
+    expect(await c.input('run-A', { kind: 'key', key: 'Enter' })).toEqual({ ok: true });
+
+    const refused = await c.input('run-A', { kind: 'key', key: 'F12' });
+    expect(refused.ok, 'the key list is an allowlist, not a passthrough').toBe(false);
+
+    expect(cdp.calls.filter((call) => call.method === 'Input.insertText').map((m) => m.params?.['text']))
+      .toEqual(['hunter2']);
+    expect(cdp.calls.filter((call) => call.method === 'Input.dispatchKeyEvent')
+      .map((m) => [m.params?.['type'], m.params?.['windowsVirtualKeyCode']]))
+      .toEqual([['keyDown', 13], ['keyUp', 13]]);
+  });
+
+  it('refuses input from someone who has not taken control', async () => {
+    // Per event, not per session: a socket that was allowed to click once is
+    // not thereby allowed to click for the rest of the run.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+
+    const out = await c.input('run-A', { kind: 'click', x: 0.5, y: 0.5 });
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/take control/i);
+    expect(cdp.sent).not.toContain('Input.dispatchMouseEvent');
+  });
+
+  it('stops accepting input the moment the run is stopped', async () => {
+    // Stop takes the browser away from EVERYONE, the person included. It is
+    // the same kill switch it always was, and a takeover must not turn it into
+    // one that only stops the agent.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    c.stopRun('run-A');
+    expect(c.humanHolds('run-A'), 'the hold goes with the run').toBe(false);
+
+    const out = await c.input('run-A', { kind: 'click', x: 0.5, y: 0.5 });
+    expect(out.ok).toBe(false);
+    expect(cdp.sent).not.toContain('Input.dispatchMouseEvent');
+  });
+
+  it('will not drive a browser nobody is watching', async () => {
+    // Input you cannot see the result of is not a takeover.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+    await c.stopWatching('run-A');
+
+    const out = await c.input('run-A', { kind: 'click', x: 0.5, y: 0.5 });
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/streaming/i);
+  });
+
+  it('gives the agent the browser back when the person is done', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    expect(c.handBack('run-A')).toBe(true);
+    expect(c.handBack('run-A'), 'and a second click is not a second handback').toBe(false);
+
+    const out = await c.controller({ kind: 'click', selector: '#b' }, ctx('run-A', 'w2'));
+    expect(out.ok).toBe(true);
+    expect(page.calls).toContain('click:#b');
+  });
+
+  it('suspends the picture without giving up control', async () => {
+    // Signing in: the password is dots, but the manager's dropdown, a one-time
+    // code and the page afterwards are not.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    expect(await c.setCapture('run-A', false)).toBe(false);
+    expect(cdp.sent).toContain('Page.stopScreencast');
+    expect(cdp.detached, 'the session stays, or the input channel would go with it').toBe(false);
+
+    // Still theirs, and still able to type into the page they cannot see.
+    expect(await c.input('run-A', { kind: 'text', text: 'hunter2' })).toEqual({ ok: true });
+
+    expect(await c.setCapture('run-A', true)).toBe(true);
+    expect(cdp.sent.filter((m) => m === 'Page.startScreencast')).toHaveLength(2);
+  });
+
+  it('refuses a takeover of a run with no browser, and of a stopped one', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+
+    expect((await c.takeOver('never-opened')).ok).toBe(false);
+
+    await watched(c);
+    c.actorEnded('w1');
+    c.stopRun('run-A');
+    const out = await c.takeOver('run-A');
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/stopped/i);
+  });
+
+  it('lets go of a browser the person walked away from', async () => {
+    // A person has no terminal signal — no worker end, no run completion. A
+    // takeover nobody is using still holds a billed session and, at the default
+    // of one, blocks every other run on the deployment.
+    vi.useFakeTimers();
+    try {
+      const { provider } = fakeProvider();
+      const c = new RemoteBrowserController({ provider });
+      await watched(c);
+      c.actorEnded('w1');
+      await c.takeOver('run-A');
+      expect(c.humanHolds('run-A')).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await c.input('run-A', { kind: 'move', x: 0.1, y: 0.1 });
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(c.humanHolds('run-A'), 'using it keeps it').toBe(true);
+
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(c.humanHolds('run-A'), 'and not using it does not').toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

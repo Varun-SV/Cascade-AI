@@ -63,6 +63,7 @@ export { BrowserControlTool } from './tools/browser-control.js';
 export type { BrowserController, BrowserAction, BrowserActionOutcome } from './tools/browser-control.js';
 // The remote-browser surface, for hosts with no browser of their own.
 export { RemoteBrowserController } from './browser/remote/controller.js';
+export type { BrowserFrame, BrowserInput } from './browser/remote/controller.js';
 export { GenericCdpProvider, isCdpEndpoint } from './browser/remote/generic-cdp.js';
 export { SteelProvider } from './browser/remote/steel.js';
 export { BrowserLease } from './browser/lease.js';

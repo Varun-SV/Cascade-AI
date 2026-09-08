@@ -102,6 +102,64 @@ export interface BrowserFrame {
 }
 
 /**
+ * One thing a person did to the page while they held it.
+ *
+ * Coordinates are NORMALISED — 0..1 across the frame — rather than pixels, and
+ * that is a boundary decision rather than a convenience. The picture the user
+ * clicked is a JPEG scaled twice on its way to them: once by CDP into
+ * `maxWidth`/`maxHeight`, once by the panel into whatever width the layout
+ * gave it. Only this side knows the viewport those pixels came from, so only
+ * this side can turn a click back into a page coordinate. A client sending
+ * pixels would have to reconstruct both scalings and would silently miss by a
+ * few pixels whenever it got one wrong — which, on a page of small controls, is
+ * a click on the wrong thing.
+ *
+ * Typing is `text` rather than a stream of key events because `Input.insertText`
+ * puts the whole string in at once: no IME to emulate, no per-character key
+ * codes to get wrong for anything but a US layout, and no chance of a password
+ * arriving one keystroke per socket message. `key` covers the keys that are
+ * commands rather than characters, from a fixed list — see `KEYS`.
+ */
+export type BrowserInput =
+  | { kind: 'move'; x: number; y: number }
+  | { kind: 'click'; x: number; y: number; button?: 'left' | 'right' | 'middle'; clicks?: number }
+  | { kind: 'scroll'; x: number; y: number; deltaY: number }
+  | { kind: 'text'; text: string }
+  | { kind: 'key'; key: string };
+
+/**
+ * The keys a person may send, and what Chrome needs to be told about each.
+ *
+ * An allowlist, not a passthrough. `Input.dispatchKeyEvent` is a raw protocol
+ * call: it will deliver anything, including the modifier combinations a browser
+ * itself acts on, and there is no reason a takeover needs them. These are the
+ * keys that move a caret or submit a form — everything a person actually types
+ * goes through `insertText` instead.
+ *
+ * The virtual key codes are not optional decoration: Chrome dispatches on
+ * `windowsVirtualKeyCode`, and a key event without one arrives as a keypress
+ * that no page handler recognises.
+ */
+const KEYS: Record<string, { code: number; text?: string }> = {
+  Enter: { code: 13, text: '\r' },
+  Tab: { code: 9 },
+  Backspace: { code: 8 },
+  Delete: { code: 46 },
+  Escape: { code: 27 },
+  ArrowUp: { code: 38 },
+  ArrowDown: { code: 40 },
+  ArrowLeft: { code: 37 },
+  ArrowRight: { code: 39 },
+  Home: { code: 36 },
+  End: { code: 35 },
+  PageUp: { code: 33 },
+  PageDown: { code: 34 },
+};
+
+/** Which CDP button name each pointer button maps to, and its `buttons` mask. */
+const BUTTONS = { left: 1, middle: 4, right: 2 } as const;
+
+/**
  * How the frames are asked for.
  *
  * Capped rather than native-resolution: this crosses a socket to a panel a few
@@ -139,6 +197,24 @@ interface RunBrowser {
    * `stopWatching` or by the run ending — whichever comes first.
    */
   screencast?: CDPSession;
+  /**
+   * Whether that session is currently producing frames.
+   *
+   * Separate from having one, because of the credential case: a person typing
+   * a password wants the picture to stop WITHOUT giving up control, and giving
+   * up the CDP session would give up their input channel with it. So capture
+   * is suspended on a session that stays attached.
+   */
+  capturing?: boolean;
+  /**
+   * The remote viewport, as the last frame reported it.
+   *
+   * Where a normalised click becomes a page coordinate. Read from the frame
+   * metadata rather than configured, because the page decides it: a provider
+   * may hand out any window size, and `SCREENCAST`'s caps change the picture's
+   * size without changing the viewport it depicts.
+   */
+  viewport?: { width: number; height: number };
   /**
    * A context this run created and must therefore destroy.
    *
@@ -358,11 +434,12 @@ export class RemoteBrowserController {
       metadata?: { deviceWidth?: number; deviceHeight?: number };
     }) => {
       if (typeof e?.data === 'string') {
-        onFrame({
-          data: e.data,
-          width: e.metadata?.deviceWidth ?? 0,
-          height: e.metadata?.deviceHeight ?? 0,
-        });
+        const width = e.metadata?.deviceWidth ?? 0;
+        const height = e.metadata?.deviceHeight ?? 0;
+        // Kept for the takeover: this is the only place the remote viewport is
+        // ever stated, and a click cannot be placed on the page without it.
+        if (width > 0 && height > 0) held.viewport = { width, height };
+        onFrame({ data: e.data, width, height });
       }
       // Best-effort: the session may have been detached between the frame
       // arriving and this running, and an ack into a dead session is not an
@@ -372,6 +449,7 @@ export class RemoteBrowserController {
 
     try {
       await cdp.send('Page.startScreencast', { ...SCREENCAST });
+      held.capturing = true;
       return true;
     } catch {
       // The page went away between opening the session and starting the
@@ -387,12 +465,186 @@ export class RemoteBrowserController {
     const cdp = this.runs.get(runId)?.screencast;
     if (!cdp) return;
     const held = this.runs.get(runId);
-    if (held) held.screencast = undefined;
+    if (held) { held.screencast = undefined; held.capturing = false; }
     // Both best-effort and in this order: stop the stream first so no further
     // frames are produced, then let the session go. A run whose page has
     // already closed throws on both, and neither failure is actionable.
     await cdp.send('Page.stopScreencast').catch(() => {});
     await cdp.detach().catch(() => {});
+  }
+
+  /**
+   * Suspend or resume the picture without giving up control.
+   *
+   * The credential case, and the only reason this is separate from watching. A
+   * person who has taken the page over to sign in is about to type a password
+   * into a field whose contents are echoed as dots — but a password manager's
+   * dropdown, a "show password" toggle, a one-time code in plain text and the
+   * confirmation page afterwards are not, and all of them would otherwise be
+   * encoded into frames and sent across the network.
+   *
+   * What this does NOT do is hide anything from the agent: it stops the
+   * picture, not the page. Nothing about a suspended capture would stop a
+   * `extract_text` from reading the same screen — it is the lease that stops
+   * that, by refusing the agent for as long as the person holds it.
+   *
+   * Answers whether frames are flowing afterwards, which is what a UI needs to
+   * show and is not always what was asked for: a run with nobody watching has
+   * no session to suspend.
+   */
+  async setCapture(runId: string, on: boolean): Promise<boolean> {
+    const held = this.runs.get(runId);
+    const cdp = held?.screencast;
+    if (!held || !cdp) return false;
+    if (held.capturing === on) return on;
+    try {
+      if (on) await cdp.send('Page.startScreencast', { ...SCREENCAST });
+      else await cdp.send('Page.stopScreencast');
+      held.capturing = on;
+    } catch {
+      // The page went away underneath. Report what is actually true rather
+      // than what was requested — a UI that believes it is streaming when it
+      // is not is the failure this whole panel exists to avoid.
+      return held.capturing === true;
+    }
+    return on;
+  }
+
+  /** Whether a person is driving this run's browser right now. */
+  humanHolds(runId: string): boolean {
+    return this.leases.get(runId)?.heldByHuman === true;
+  }
+
+  /**
+   * Hand this run's browser to the person watching it.
+   *
+   * The wait is the substance. An agent action already inside Playwright cannot
+   * be interrupted — `click` waits for its element to become actionable and
+   * then clicks, whatever anyone decided in the meantime — so a takeover that
+   * returned immediately would put the person on a page an action was still
+   * about to change. Bounded by the action ceiling, because that is the longest
+   * an action can legitimately take; past it something is wedged, and saying so
+   * is better than a spinner that never resolves.
+   *
+   * Idempotent for someone who already holds it: a second click of Take control
+   * just says they are still there.
+   */
+  async takeOver(runId: string): Promise<{ ok: boolean; detail?: string }> {
+    if (this.revoked.has(runId)) {
+      return { ok: false, detail: 'Browser control was stopped for this run.' };
+    }
+    if (!this.runs.has(runId)) {
+      return { ok: false, detail: 'This run has no browser open.' };
+    }
+    const lease = this.leaseFor(runId);
+    if (lease.heldByHuman) { lease.touch(); return { ok: true }; }
+    if (!(await lease.awaitActionSlot(ACTION_TIMEOUT_MS))) {
+      return {
+        ok: false,
+        detail: 'The agent is still finishing an action on this page. Try again in a moment.',
+      };
+    }
+    lease.takeOver(runId);
+    return { ok: true };
+  }
+
+  /** The person is done. Answers whether they were holding it at all. */
+  handBack(runId: string): boolean {
+    return this.leases.get(runId)?.handBack() === true;
+  }
+
+  /**
+   * One thing the person did to the page.
+   *
+   * Authorised per event, not per session. A takeover is not a channel that
+   * stays open once opened: between two clicks the run can be stopped, the hold
+   * can lapse, the page can close, and each of those has to stop the NEXT
+   * event rather than be noticed at the end. So every event re-checks that this
+   * run is live and that the lease is still the person's, and every accepted
+   * event says so by extending the hold.
+   */
+  async input(runId: string, event: BrowserInput): Promise<{ ok: boolean; detail?: string }> {
+    // No separate `revoked` check, and that is deliberate rather than an
+    // omission. Stop drops the run's lease along with everything else, so a
+    // stopped run has no human holder and the check below already refuses it —
+    // proven by taking it out and watching the stopped-run test still fail.
+    // Two answers to "may this land" is how they come to disagree.
+    const held = this.runs.get(runId);
+    const cdp = held?.screencast;
+    if (!held || held.page.isClosed()) return { ok: false, detail: 'This run has no browser open.' };
+    // No CDP session means nobody is watching, and input you cannot see the
+    // result of is not a takeover — it is typing into the dark.
+    if (!cdp) return { ok: false, detail: 'Nothing is streaming this browser, so it cannot be driven.' };
+    const lease = this.leaseFor(runId);
+    if (!lease.heldByHuman) {
+      return { ok: false, detail: 'You do not have control of this browser. Take control first.' };
+    }
+
+    try {
+      await this.dispatch(cdp, held, event);
+    } catch (err) {
+      return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+    }
+    lease.touch();
+    return { ok: true };
+  }
+
+  /** Turn one authorised event into CDP calls. Coordinates arrive normalised. */
+  private async dispatch(cdp: CDPSession, held: RunBrowser, event: BrowserInput): Promise<void> {
+    if (event.kind === 'text') {
+      // Bounded because it crosses a socket and lands in a page: a paste is a
+      // reasonable thing to do during a takeover, a novel is not.
+      const text = String(event.text ?? '').slice(0, 4_000);
+      if (!text) return;
+      await cdp.send('Input.insertText', { text });
+      return;
+    }
+    if (event.kind === 'key') {
+      const spec = KEYS[event.key];
+      if (!spec) throw new Error(`That key cannot be sent to the page: ${event.key}`);
+      const base = {
+        key: event.key,
+        code: event.key,
+        windowsVirtualKeyCode: spec.code,
+        nativeVirtualKeyCode: spec.code,
+        ...(spec.text ? { text: spec.text } : {}),
+      };
+      await cdp.send('Input.dispatchKeyEvent', { ...base, type: spec.text ? 'keyDown' : 'rawKeyDown' });
+      await cdp.send('Input.dispatchKeyEvent', { ...base, type: 'keyUp' });
+      return;
+    }
+
+    // The viewport comes from a frame, so an event arriving before the first
+    // one has nowhere to land. Refused rather than guessed at a default size:
+    // a click placed by guesswork lands on whatever happens to be there.
+    const view = held.viewport;
+    if (!view) throw new Error('The page has not been seen yet, so a click cannot be placed on it.');
+    const x = clamp01(event.x) * view.width;
+    const y = clamp01(event.y) * view.height;
+
+    if (event.kind === 'move') {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
+      return;
+    }
+    if (event.kind === 'scroll') {
+      await cdp.send('Input.dispatchMouseEvent', {
+        type: 'mouseWheel', x, y, button: 'none', buttons: 0,
+        deltaX: 0, deltaY: clampScroll(event.deltaY),
+      });
+      return;
+    }
+
+    const button = event.button && event.button in BUTTONS ? event.button : 'left';
+    const buttons = BUTTONS[button];
+    // Double-click is two events with clickCount 2, which pages read to mean
+    // word-selection. Capped because a click count is a number from a client.
+    const clickCount = Math.min(Math.max(Math.trunc(event.clicks ?? 1), 1), 3);
+    // Moved first: hover states, menus and anything listening for mouseover
+    // otherwise never see the pointer arrive, and a press on an element that
+    // was never hovered is not what a real click looks like to the page.
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, buttons, clickCount });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, buttons: 0, clickCount });
   }
 
   /** The user stopped this run. Refuses further actions and clears its queue. */
@@ -843,10 +1095,26 @@ export class RemoteBrowserController {
   }
 }
 
-function refusal(result: 'busy' | 'cancelled' | 'off'): string {
+function refusal(result: 'busy' | 'cancelled' | 'off' | 'human'): string {
+  // Said plainly, and as a finished outcome rather than a delay: a model told
+  // "busy" retries, and retrying a person is exactly the behaviour a takeover
+  // exists to prevent.
+  if (result === 'human') {
+    return 'The user has taken control of this browser. Stop using it and tell them what you were about to do.';
+  }
   if (result === 'off') return 'Browser control was turned off while this action waited for the browser.';
   if (result === 'cancelled') return 'The run was cancelled while waiting for the browser.';
   return 'The browser is in use by another part of this run and did not come free in time. Try again, or do something else first.';
+}
+
+/** A client's coordinate, kept inside the picture it claims to be from. */
+function clamp01(n: number): number {
+  return Number.isFinite(n) ? Math.min(Math.max(n, 0), 1) : 0;
+}
+
+/** A scroll, bounded so one wheel event cannot ask for an absurd jump. */
+function clampScroll(n: number): number {
+  return Number.isFinite(n) ? Math.min(Math.max(n, -2_000), 2_000) : 0;
 }
 
 /**
