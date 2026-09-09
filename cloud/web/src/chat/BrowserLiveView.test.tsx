@@ -275,6 +275,52 @@ describe('BrowserLiveView — taking the page over', () => {
     expect(screen.queryByRole('group', { name: /picture hidden/i })).not.toBeInTheDocument();
   });
 
+  it('will not offer to hide a page that has never been shown', () => {
+    // The bypass. Take control before the first frame is deliberately allowed —
+    // pausing the agent is the useful half — but Hide was offered for EVERY
+    // driving state, so "waiting for the first picture" was one click from the
+    // focusable blind-typing placeholder. `capturing === false` is supposed to
+    // prove the person saw the page and then chose to stop seeing it; the UI
+    // could manufacture that state before a picture had ever arrived.
+    const onCapture = vi.fn();
+    const onInput = vi.fn();
+    const { rerender } = render(
+      <BrowserLiveView
+        active liveViewUrl={undefined} frame={undefined} human capturing streaming
+        onStop={() => {}} onCapture={onCapture} onInput={onInput}
+      />,
+    );
+
+    expect(screen.getByLabelText(/waiting for the first picture/i)).not.toHaveAttribute('tabindex');
+    expect(
+      screen.queryByRole('button', { name: /hide the page/i }),
+      'there is nothing to hide yet',
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: /picture hidden/i })).not.toBeInTheDocument();
+    expect(onCapture, 'so the blind period cannot be asked for').not.toHaveBeenCalled();
+
+    // A picture arrives. Now it is a page they have seen, and hiding it is a
+    // choice they can actually make.
+    rerender(
+      <BrowserLiveView
+        active liveViewUrl={undefined} frame={frame} human capturing streaming
+        onStop={() => {}} onCapture={onCapture} onInput={onInput}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /hide the page/i }));
+    expect(onCapture).toHaveBeenCalledWith(false);
+
+    // And Show stays offered while hidden — the frame is gone by then, so a
+    // gate that only asked for a frame would strand them on a dark panel.
+    rerender(
+      <BrowserLiveView
+        active liveViewUrl={undefined} frame={undefined} human capturing={false} streaming
+        onStop={() => {}} onCapture={onCapture} onInput={onInput}
+      />,
+    );
+    expect(screen.getByRole('button', { name: /show the page/i })).toBeInTheDocument();
+  });
+
   it('offers no pointer surface without a picture to aim at', () => {
     // A coordinate means nothing with no frame to measure against, and
     // inventing one would put a click somewhere the person cannot see.

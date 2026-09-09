@@ -179,7 +179,19 @@ export function BrowserLiveView({
           style={{ width: 7, height: 7, borderRadius: '50%', background: 'currentColor', flexShrink: 0 }}
         />
         <span style={{ flex: 1 }}>{banner}</span>
-        {driving && (
+        {/*
+          Offered only once there is a picture to hide. Take control is
+          deliberately available before the first frame — pausing the agent is
+          useful on its own — but Hide was offered for any takeover, which gave a
+          one-click path from "waiting for the first picture" to the focusable
+          blind-typing placeholder. That inverts the whole claim `capturing ===
+          false` makes: a period the person chose, having already seen the page.
+
+          `capturing === false` stays in the condition so **Show** is always
+          reachable. A hidden page with no way to bring it back is a worse trap
+          than the one being closed.
+        */}
+        {driving && (!!frame || capturing === false) && (
           <button
             type="button"
             onClick={() => onCapture?.(capturing === false)}

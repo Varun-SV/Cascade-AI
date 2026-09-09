@@ -1614,6 +1614,53 @@ describe('handing the browser to the person watching', () => {
     expect(cdp.sent).not.toContain('Page.stopScreencast');
   });
 
+  it('will not hide a page that has never been shown', async () => {
+    // The same invariant below the UI, because a client is an affordance and
+    // this is the rule. `streaming` is announced the moment startScreencast
+    // returns, so a takeover in the window before the first frame could ask for
+    // the blind period on a page nobody had seen — and a hand-made or
+    // version-skewed client is not stopped by hiding a button.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await c.startWatching('run-A', () => {});
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    expect(await c.setCapture('run-A', false), 'still showing').toBe(true);
+    expect(cdp.sent, 'the picture was never stopped').not.toContain('Page.stopScreencast');
+
+    // A frame arrives, and only now is there a page they have seen to hide.
+    cdp.pushFrame(1);
+    expect(await c.setCapture('run-A', false), 'now it is theirs to hide').toBe(false);
+    expect(cdp.sent).toContain('Page.stopScreencast');
+  });
+
+  it('does not let one watcher\'s picture vouch for the next', async () => {
+    // `framed` belongs to the STREAM, not to the run. A remount tears the
+    // screencast down and builds another, and the client that comes back has an
+    // empty panel however much the last one saw — so the new stream earns the
+    // claim again rather than inheriting it. The re-attach already resets
+    // `capturing` for the same reason.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    await c.stopWatching('run-A');
+    await c.startWatching('run-A', () => {});
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    const stopped = cdp.sent.filter((m) => m === 'Page.stopScreencast').length;
+    expect(await c.setCapture('run-A', false), 'the new stream has shown nothing').toBe(true);
+    expect(
+      cdp.sent.filter((m) => m === 'Page.stopScreencast'),
+      'and nothing was stopped on its account',
+    ).toHaveLength(stopped);
+
+    cdp.pushFrame(1);
+    expect(await c.setCapture('run-A', false), 'once it has, hiding is theirs again').toBe(false);
+  });
+
   it('brings the page back before the agent acts, after an explicit handback', async () => {
     // Hide the page, give it back, and the agent must not carry on against a
     // panel frozen on the last picture.

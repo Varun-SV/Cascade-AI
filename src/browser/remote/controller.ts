@@ -263,6 +263,19 @@ interface RunBrowser {
    */
   metricsStale?: boolean;
   /**
+   * Whether this screencast has ever put a picture in front of the person.
+   *
+   * The gate on hiding the page. `capturing === false` is supposed to mean a
+   * blind period the person CHOSE — they saw the page, put the caret where they
+   * wanted it, then asked us to stop showing it — and that claim is only true if
+   * there was ever a picture. `streaming` is announced the moment
+   * `Page.startScreencast` returns, so without this a takeover in the window
+   * before the first frame could hide a page nobody had seen and then be typed
+   * into. Reset with each attach, because a fresh watcher has seen nothing
+   * whatever the previous one saw.
+   */
+  framed?: boolean;
+  /**
    * A context this run created and must therefore destroy.
    *
    * Set only for a provider that does NOT isolate sessions — a shared endpoint
@@ -570,6 +583,9 @@ export class RemoteBrowserController {
         // The page repainted, so whatever was measured before may no longer be
         // true. Broad on purpose: see `metricsStale`.
         held.metricsStale = true;
+        // Set before the hand-off, not after: this records that a picture of
+        // this page exists to have been seen, which is what hiding it claims.
+        held.framed = true;
         // Through the run rather than the captured argument, so a later watcher
         // that joined an already-attached stream is the one that receives.
         held.onFrame?.({ data: e.data, width, height });
@@ -593,6 +609,7 @@ export class RemoteBrowserController {
     held.screencast = cdp;
     held.onFrame = onFrame;
     held.capturing = true;
+    held.framed = false;
     this.announceControl(runId);
     return cdp;
   }
@@ -649,6 +666,14 @@ export class RemoteBrowserController {
     // visibility is not a privilege.
     const lease = this.leaseFor(runId);
     if (!on && !lease.heldByHuman) return held.capturing === true;
+    // And only a page they have actually SEEN. Taking control before the first
+    // frame is deliberately allowed — pausing the agent is the useful half — but
+    // the UI offered Hide for any takeover, so the person could reach the blind
+    // typing surface without a picture ever having been on screen. That inverts
+    // what `capturing === false` is supposed to prove. Refused here as well as
+    // hidden in the client, because a client is an affordance and this is the
+    // invariant.
+    if (!on && held.framed !== true) return held.capturing === true;
     // Hide and Show are things the holder DID, so they extend the hold like any
     // other authorised event. Without this, clicking Hide at 119.9s took the
     // action slot, the old deadline fired while CDP was still stopping capture,
