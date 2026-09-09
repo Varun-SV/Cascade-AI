@@ -263,15 +263,23 @@ interface RunBrowser {
    */
   metricsStale?: boolean;
   /**
-   * Whether the CURRENT watcher has been shown a picture of this page.
+   * Whether a frame has been DISPATCHED to the current watcher.
    *
-   * The gate on hiding the page. `capturing === false` is supposed to mean a
-   * blind period the person CHOSE — they saw the page, put the caret where they
-   * wanted it, then asked us to stop showing it — and that claim is only true if
-   * a picture reached THEM. `streaming` is announced the moment
-   * `Page.startScreencast` returns, so without this a takeover in the window
-   * before the first frame could hide a page nobody had seen and then be typed
-   * into.
+   * Named for what it proves rather than for what it is used for, because the
+   * two are not the same and an earlier version of this comment claimed they
+   * were. The gate on hiding the page wants "the person saw this page"; what
+   * the server can establish on its own is that it handed a frame to this
+   * watcher's consumer. That consumer ends at `socket.volatile.emit`, which
+   * DROPS rather than queues when the transport is not writable — so a
+   * dispatched frame is not a received one.
+   *
+   * The remaining distance cannot be closed from here. Receipt is a fact only
+   * the client can report, and the client is also who asks to hide the page:
+   * anything willing to lie about the second would lie about the first. So this
+   * is deliberately the server-side half — it rules out the two windows that
+   * ARE server-side facts, a takeover before any frame was sent (`streaming` is
+   * announced the moment `Page.startScreencast` returns) and a reconnect
+   * inheriting the previous viewer's, and it claims nothing more.
    *
    * Scoped to the watcher rather than the CDP session, which is a distinction
    * with a real case behind it: a reconnect deliberately keeps the existing
@@ -279,7 +287,7 @@ interface RunBrowser {
    * reloaded page inherit the previous viewer's picture. Cleared wherever the
    * consumer is replaced, and set where a frame is actually handed to one.
    */
-  framed?: boolean;
+  frameSent?: boolean;
   /**
    * A context this run created and must therefore destroy.
    *
@@ -558,7 +566,7 @@ export class RemoteBrowserController {
       // previous viewer's picture and hide a page it had never been shown.
       // Cleared BEFORE any attach, so a frame arriving while
       // `Page.startScreencast` is still in flight still counts.
-      held.framed = false;
+      held.frameSent = false;
       if (held.screencast) return true;
       return (await this.attachScreencast(runId, held, onFrame)) !== null;
     });
@@ -601,11 +609,12 @@ export class RemoteBrowserController {
         // that joined an already-attached stream is the one that receives.
         const deliver = held.onFrame;
         if (deliver) {
-          // Recorded on DELIVERY rather than on emission. A frame Chrome
-          // produced with nobody listening — between an unwatch and the next
-          // watch — was never shown to anyone, and hiding the page claims that
-          // somebody saw it.
-          held.framed = true;
+          // Recorded on dispatch to a consumer rather than on emission: a
+          // frame Chrome produced between an unwatch and the next watch went
+          // nowhere at all. What happens after the consumer is the transport's
+          // business, and lossy — see the field's own comment for why that gap
+          // is not closable from this side.
+          held.frameSent = true;
           deliver({ data: e.data, width, height });
         }
       }
@@ -684,14 +693,14 @@ export class RemoteBrowserController {
     // visibility is not a privilege.
     const lease = this.leaseFor(runId);
     if (!on && !lease.heldByHuman) return held.capturing === true;
-    // And only a page they have actually SEEN. Taking control before the first
-    // frame is deliberately allowed — pausing the agent is the useful half — but
-    // the UI offered Hide for any takeover, so the person could reach the blind
-    // typing surface without a picture ever having been on screen. That inverts
-    // what `capturing === false` is supposed to prove. Refused here as well as
-    // hidden in the client, because a client is an affordance and this is the
-    // invariant.
-    if (!on && held.framed !== true) return held.capturing === true;
+    // And only a page a frame has been sent to this watcher for. Taking control
+    // before the first frame is deliberately allowed — pausing the agent is the
+    // useful half — but the UI offered Hide for any takeover, so the person
+    // could reach the blind typing surface without a picture ever having been
+    // dispatched. Refused here as well as hidden in the client, so an honest
+    // client that has been given no frame cannot be talked into the blind state
+    // by a stale or skewed build.
+    if (!on && held.frameSent !== true) return held.capturing === true;
     // Hide and Show are things the holder DID, so they extend the hold like any
     // other authorised event. Without this, clicking Hide at 119.9s took the
     // action slot, the old deadline fired while CDP was still stopping capture,
