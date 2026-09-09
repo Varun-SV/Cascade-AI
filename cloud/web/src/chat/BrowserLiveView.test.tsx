@@ -252,6 +252,29 @@ describe('BrowserLiveView — taking the page over', () => {
     ]);
   });
 
+  it('refuses to be typed into before the first picture has ever arrived', () => {
+    // The deliberate blind period is the exception, not the rule. `streaming`
+    // is announced as soon as Page.startScreencast returns — before Chrome has
+    // necessarily produced a frame — so a takeover in that window would be
+    // typing into a page nobody has ever seen. That is the same "typing into
+    // the dark" the server refuses, and a component is not where it becomes
+    // acceptable.
+    const onInput = vi.fn();
+    render(
+      <BrowserLiveView
+        active liveViewUrl={undefined} frame={undefined} human capturing streaming
+        onStop={() => {}} onInput={onInput}
+      />,
+    );
+
+    const waiting = screen.getByLabelText(/waiting for the first picture/i);
+    expect(waiting).not.toHaveAttribute('tabindex');
+    fireEvent.keyDown(waiting, { key: 'h' });
+    fireEvent.keyDown(waiting, { key: 'Enter' });
+    expect(onInput, 'nothing reaches a page that has never been seen').not.toHaveBeenCalled();
+    expect(screen.queryByRole('group', { name: /picture hidden/i })).not.toBeInTheDocument();
+  });
+
   it('offers no pointer surface without a picture to aim at', () => {
     // A coordinate means nothing with no frame to measure against, and
     // inventing one would put a click somewhere the person cannot see.

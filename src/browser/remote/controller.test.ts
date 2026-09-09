@@ -22,9 +22,20 @@ function fakeCdp() {
     detached: false,
     /** Everything that happened, in order: deliveries and acks interleaved. */
     order: [] as string[],
+    /**
+     * What `Page.getLayoutMetrics` answers — the page's CSS-pixel viewport.
+     *
+     * Defaults to the same numbers the screencast metadata reports, because
+     * that IS the ordinary desktop case and every existing assertion depends
+     * on it. A test that wants the two spaces to differ says so.
+     */
+    layout: { clientWidth: 1280, clientHeight: 800 },
     async send(method: string, params?: Record<string, unknown>) {
       session.sent.push(method);
       session.calls.push({ method, ...(params ? { params } : {}) });
+      if (method === 'Page.getLayoutMetrics') {
+        return { cssVisualViewport: { ...session.layout } };
+      }
       if (method === 'Page.screencastFrameAck') session.order.push(`ack:${params?.['sessionId']}`);
       return {};
     },
@@ -32,10 +43,18 @@ function fakeCdp() {
       handlers.set(event, handler as (p: unknown) => void);
     },
     async detach() { session.detached = true; },
-    /** Chrome producing a frame. */
-    pushFrame(sessionId: number, data = 'BASE64JPEG') {
+    /**
+     * Chrome producing a frame.
+     *
+     * `metadata` is overridable because the picture's geometry and the page's
+     * coordinate space are DIFFERENT things — `deviceWidth`/`deviceHeight` are
+     * the device screen in DIP, and `offsetTop` is the browser chrome above the
+     * page. A fake that only ever reports the identity case cannot tell a
+     * correct mapping from one that multiplies by the wrong numbers.
+     */
+    pushFrame(sessionId: number, data = 'BASE64JPEG', metadata: Record<string, number> = {}) {
       handlers.get('Page.screencastFrame')?.({
-        data, sessionId, metadata: { deviceWidth: 1280, deviceHeight: 800 },
+        data, sessionId, metadata: { deviceWidth: 1280, deviceHeight: 800, offsetTop: 0, ...metadata },
       });
     },
   };
@@ -1250,6 +1269,65 @@ describe('handing the browser to the person watching', () => {
     ]);
   });
 
+  it('maps into the page\'s space, not the picture\'s', async () => {
+    // The identity case above cannot tell these apart. `deviceWidth/Height` are
+    // the DEVICE SCREEN in DIP and `offsetTop` is browser chrome above the
+    // page, while `Input.dispatchMouseEvent` wants the main frame's viewport in
+    // CSS pixels. Here they differ in every dimension: a 1280x900 screen with a
+    // 100px chrome band, showing a 1024x600 page.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    cdp.layout = { clientWidth: 1024, clientHeight: 600 };
+    await c.startWatching('run-A', () => {});
+    cdp.pushFrame(1, 'JPEG', { deviceWidth: 1280, deviceHeight: 900, offsetTop: 100 });
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    // The centre of the PAGE AREA of the picture: the band is 100/900 of it,
+    // so the page runs from 0.111 to 1 and its middle is at 0.5556.
+    await c.input('run-A', { kind: 'click', x: 0.5, y: 0.5555555555555556 });
+
+    const pressed = cdp.calls.find((call) => call.params?.['type'] === 'mousePressed');
+    // The centre of the viewport, in its own pixels — not 0.5 x 1280 by 0.5556 x 900.
+    expect([pressed?.params?.['x'], Math.round(Number(pressed?.params?.['y']))]).toEqual([512, 300]);
+
+    // And the chrome above the page is not the page.
+    const onChrome = await c.input('run-A', { kind: 'click', x: 0.5, y: 0.05 });
+    expect(onChrome.ok).toBe(false);
+    expect(onChrome.detail).toMatch(/above the page/i);
+  });
+
+  it('re-measures the page when the picture changes shape', async () => {
+    // A resize, a zoom, or device emulation changes the space a click belongs
+    // in. The metadata that says so arrives with every frame anyway, so the
+    // cached measurement is invalidated by it rather than polled for.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await c.startWatching('run-A', () => {});
+    cdp.pushFrame(1);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    await c.input('run-A', { kind: 'click', x: 1, y: 0 });
+    expect(cdp.calls.filter((m) => m.method === 'Page.getLayoutMetrics')).toHaveLength(1);
+
+    // Same shape again: nothing to re-measure.
+    cdp.pushFrame(2);
+    await c.input('run-A', { kind: 'click', x: 1, y: 0 });
+    expect(cdp.calls.filter((m) => m.method === 'Page.getLayoutMetrics'), 'still cached').toHaveLength(1);
+
+    // The page resized under them.
+    cdp.layout = { clientWidth: 500, clientHeight: 400 };
+    cdp.pushFrame(3, 'JPEG', { deviceWidth: 500, deviceHeight: 400 });
+    await c.input('run-A', { kind: 'click', x: 1, y: 0 });
+
+    expect(cdp.calls.filter((m) => m.method === 'Page.getLayoutMetrics'), 're-measured').toHaveLength(2);
+    const last = cdp.calls.filter((call) => call.params?.['type'] === 'mousePressed').at(-1);
+    expect(last?.params?.['x'], 'and mapped into the new space').toBe(500);
+  });
+
   it('keeps a click inside the picture it claims to come from', async () => {
     // Coordinates arrive from a client. Out-of-range ones would otherwise be
     // dispatched at negative or off-screen positions.
@@ -1495,6 +1573,53 @@ describe('handing the browser to the person watching', () => {
     // Restarted before the click, not after it.
     const restarted = cdp.sent.lastIndexOf('Page.startScreencast');
     expect(restarted, 'the picture came back').toBeGreaterThan(cdp.sent.indexOf('Page.stopScreencast'));
+  });
+
+  it('does not let a handback slip past a capture that is still being suspended', async () => {
+    // The window the sequential tests cannot see. Hiding the page awaits CDP,
+    // and nothing used to record that the transition was in flight — so a
+    // handback landing inside it found no action, released the hold, and the
+    // agent reached the visibility gate while `capturing` was still true. It
+    // passed, and entered the page as the suspension completed behind it.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    // Hold the suspension open inside CDP.
+    const gate = deferred();
+    const realSend = cdp.send;
+    cdp.send = async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'Page.stopScreencast') await gate.promise;
+      return realSend.call(cdp, method, params);
+    };
+
+    const hiding = c.setCapture('run-A', false);
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(c.handBack('run-A'), 'not while the picture is still going down').toBe(false);
+
+    // The hold therefore still stands, so the agent is turned away rather than
+    // slipping through the gate while `capturing` is mid-change.
+    const during = await c.controller({ kind: 'click', selector: '#agent' }, ctx('run-A', 'w2'));
+    expect(during.ok).toBe(false);
+    expect(during.detail).toMatch(/taken control/i);
+    expect(page.calls, 'nothing of the agent\'s reached the page').not.toContain('click:#agent');
+
+    // Let the suspension land. The deferred handback then retries and releases.
+    gate.resolve();
+    cdp.send = realSend;
+    expect(await hiding, 'the picture is off').toBe(false);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(c.humanHolds('run-A'), 'and only now does the hold end').toBe(false);
+
+    // And when the agent finally does act, it acts with the picture back on.
+    const after = await c.controller({ kind: 'click', selector: '#agent' }, ctx('run-A', 'w2'));
+    expect(after.ok).toBe(true);
+    expect(cdp.sent.filter((m) => m === 'Page.startScreencast'), 'hidden, then shown again')
+      .toHaveLength(2);
+    expect(page.calls).toContain('click:#agent');
   });
 
   it('brings the page back before the agent acts, after the hold lapses', async () => {

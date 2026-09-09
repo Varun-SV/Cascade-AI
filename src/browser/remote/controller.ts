@@ -239,14 +239,29 @@ interface RunBrowser {
    */
   capturing?: boolean;
   /**
-   * The remote viewport, as the last frame reported it.
+   * The main frame's viewport, in CSS pixels, from `Page.getLayoutMetrics`.
    *
-   * Where a normalised click becomes a page coordinate. Read from the frame
-   * metadata rather than configured, because the page decides it: a provider
-   * may hand out any window size, and `SCREENCAST`'s caps change the picture's
-   * size without changing the viewport it depicts.
+   * NOT the screencast metadata, which is where this used to come from and was
+   * the wrong coordinate space. `metadata.deviceWidth/deviceHeight` are the
+   * device screen in DIP; `Input.dispatchMouseEvent` documents x/y as relative
+   * to the main frame's viewport in CSS pixels. They coincide on a plain
+   * desktop page at scale 1 — exactly why a fake reporting 1280x800 could not
+   * tell the difference — and diverge under device emulation, page zoom, or a
+   * headful window.
    */
   viewport?: { width: number; height: number };
+  /**
+   * Where the page sits inside the picture, from the last frame's metadata.
+   *
+   * `offsetTop` is the band above the page in a screencast frame — browser
+   * chrome on a headful endpoint. The client sends a fraction of the WHOLE
+   * picture, so without this a click near the top lands that far down the page,
+   * and a click on the chrome lands on the page at all rather than being
+   * refused.
+   */
+  screen?: { deviceWidth: number; deviceHeight: number; offsetTop: number };
+  /** The picture changed shape, so the cached CSS viewport is no longer true. */
+  metricsStale?: boolean;
   /**
    * A context this run created and must therefore destroy.
    *
@@ -547,14 +562,25 @@ export class RemoteBrowserController {
     cdp.on('Page.screencastFrame', ((e: {
       data?: string;
       sessionId?: number;
-      metadata?: { deviceWidth?: number; deviceHeight?: number };
+      metadata?: { deviceWidth?: number; deviceHeight?: number; offsetTop?: number };
     }) => {
       if (typeof e?.data === 'string') {
         const width = e.metadata?.deviceWidth ?? 0;
         const height = e.metadata?.deviceHeight ?? 0;
-        // Kept for the takeover: this is the only place the remote viewport is
-        // ever stated, and a click cannot be placed on the page without it.
-        if (width > 0 && height > 0) held.viewport = { width, height };
+        const offsetTop = e.metadata?.offsetTop ?? 0;
+        // The picture's geometry, kept for the takeover. A change in it means
+        // the page changed shape — resized, zoomed, emulated — so the CSS
+        // viewport measured earlier is no longer the space a click belongs in.
+        // Detected from metadata that arrives anyway, rather than polled.
+        if (width > 0 && height > 0) {
+          const before = held.screen;
+          if (before?.deviceWidth !== width
+            || before.deviceHeight !== height
+            || before.offsetTop !== offsetTop) {
+            held.screen = { deviceWidth: width, deviceHeight: height, offsetTop };
+            held.metricsStale = true;
+          }
+        }
         // Through the run rather than the captured argument, so a later watcher
         // that joined an already-attached stream is the one that receives.
         held.onFrame?.({ data: e.data, width, height });
@@ -632,7 +658,38 @@ export class RemoteBrowserController {
     // picture, which is precisely the invisible agent this panel exists to
     // prevent. Turning the picture back ON is never refused: restoring
     // visibility is not a privilege.
-    if (!on && this.leases.get(runId)?.heldByHuman !== true) return held.capturing === true;
+    const lease = this.leaseFor(runId);
+    if (!on && !lease.heldByHuman) return held.capturing === true;
+    if (held.capturing === on) return on;
+
+    // Through the ACTION SLOT, like every other thing that changes the page's
+    // state. The check above was made before an awaited CDP call and nothing
+    // recorded that the transition was in flight, so a handback landing in
+    // that window found no action, released the hold, and the agent reached
+    // the visibility gate while `capturing` was still its old value — passing
+    // the gate, then entering the page as the suspension completed behind it.
+    // The same invisible-agent window, one await further along.
+    if (!(await lease.awaitActionSlot())) return held.capturing === true;
+    const token = lease.beginAction();
+    if (!token) return held.capturing === true;
+    try {
+      // Re-checked after the wait: the hold can end while an earlier action
+      // finishes, and hiding the page is only the holder's to ask for.
+      if (!on && !lease.heldByHuman) return held.capturing === true;
+      return await this.applyCapture(runId, held, cdp, on);
+    } finally {
+      lease.endAction(token);
+    }
+  }
+
+  /**
+   * The capture transition itself, with no lease bookkeeping.
+   *
+   * Separate because the agent's restore in `act()` already holds the action
+   * slot — taking it again there would deadlock against itself, and the whole
+   * point of that call site is that it happens INSIDE the agent's turn.
+   */
+  private async applyCapture(runId: string, held: RunBrowser, cdp: CDPSession, on: boolean): Promise<boolean> {
     if (held.capturing === on) return on;
     try {
       if (on) await cdp.send('Page.startScreencast', { ...SCREENCAST });
@@ -759,6 +816,37 @@ export class RemoteBrowserController {
   }
 
   /**
+   * The page's own coordinate space, measured rather than inferred.
+   *
+   * Cached, because a click should not cost a round trip, and invalidated by
+   * the frame metadata changing shape — which arrives free with every frame. A
+   * failed measurement falls back to the last good one rather than to a guess:
+   * a stale viewport is off by a resize, an invented one is off by anything.
+   */
+  private async pageViewport(held: RunBrowser, cdp: CDPSession): Promise<{ width: number; height: number } | null> {
+    if (held.viewport && !held.metricsStale) return held.viewport;
+    try {
+      const metrics = await cdp.send('Page.getLayoutMetrics') as {
+        cssVisualViewport?: { clientWidth?: number; clientHeight?: number };
+        visualViewport?: { clientWidth?: number; clientHeight?: number };
+      };
+      // `cssVisualViewport` is the field documented in CSS pixels.
+      // `visualViewport` is the older one, kept only for a Chrome predating it.
+      const v = metrics?.cssVisualViewport ?? metrics?.visualViewport;
+      const width = v?.clientWidth;
+      const height = v?.clientHeight;
+      if (typeof width === 'number' && typeof height === 'number' && width > 0 && height > 0) {
+        held.viewport = { width, height };
+        held.metricsStale = false;
+        return held.viewport;
+      }
+    } catch {
+      // The page may have gone. Fall through to whatever was last true.
+    }
+    return held.viewport ?? null;
+  }
+
+  /**
    * Turn one authorised event into CDP calls. Coordinates arrive normalised.
    *
    * A switch with a default that REFUSES, rather than a chain of ifs ending in
@@ -814,14 +902,19 @@ export class RemoteBrowserController {
       case 'move':
       case 'scroll':
       case 'click': {
-        // The viewport comes from a frame, so an event arriving before the
-        // first one has nowhere to land. Refused rather than guessed at a
-        // default size: a click placed by guesswork lands on whatever happens
-        // to be there.
-        const view = held.viewport;
-        if (!view) throw new Error('The page has not been seen yet, so a click cannot be placed on it.');
-        const x = coordinate(event.x, 'horizontal position') * view.width;
-        const y = coordinate(event.y, 'vertical position') * view.height;
+        // Measured from the page rather than inferred from the picture.
+        // Refused rather than guessed at a default size: a click placed by
+        // guesswork lands on whatever happens to be there.
+        const view = await this.pageViewport(held, cdp);
+        if (!view) throw new Error('The page has not been measured yet, so a click cannot be placed on it.');
+        const placed = onThePage(
+          coordinate(event.x, 'horizontal position'),
+          coordinate(event.y, 'vertical position'),
+          view,
+          held.screen,
+        );
+        if (!placed) throw new Error('That is above the page, not on it.');
+        const { x, y } = placed;
 
         if (event.kind === 'move') {
           await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
@@ -1076,7 +1169,9 @@ export class RemoteBrowserController {
       // enforce. If the picture cannot be brought back, the action does not
       // happen — the same trade the desktop's visibility gate makes.
       if (held.screencast && held.capturing === false) {
-        if (!(await this.setCapture(runId, true))) {
+        // `applyCapture`, not `setCapture`: this already holds the action slot,
+        // and asking for it again would deadlock against itself.
+        if (!(await this.applyCapture(runId, held, held.screencast, true))) {
           return {
             ok: false,
             detail: 'The page could not be shown again, so nothing was done to it.',
@@ -1374,6 +1469,30 @@ function coordinate(n: unknown, what: string): number {
     throw new Error(`That ${what} is not a position on the page.`);
   }
   return Math.min(Math.max(n, 0), 1);
+}
+
+/**
+ * A fraction of the PICTURE, turned into a point on the PAGE.
+ *
+ * Two different spaces, and conflating them was the bug. The picture spans the
+ * device screen; the page occupies it from `offsetTop` downwards, with browser
+ * chrome above on a headful endpoint. So the vertical fraction is rebased onto
+ * the page's share of the picture before being scaled into CSS pixels, and a
+ * point in the chrome band is refused rather than pushed onto the page's top
+ * edge — what the person clicked was not the page.
+ */
+function onThePage(
+  fx: number,
+  fy: number,
+  view: { width: number; height: number },
+  screen: { deviceHeight: number; offsetTop: number } | undefined,
+): { x: number; y: number } | null {
+  const above = screen && screen.deviceHeight > 0
+    ? Math.min(Math.max(screen.offsetTop / screen.deviceHeight, 0), 0.99)
+    : 0;
+  const onPage = (fy - above) / (1 - above);
+  if (onPage < 0 || onPage > 1) return null;
+  return { x: fx * view.width, y: onPage * view.height };
 }
 
 /** A scroll, bounded so one wheel event cannot ask for an absurd jump. */
