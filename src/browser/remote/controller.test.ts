@@ -1646,6 +1646,81 @@ describe('handing the browser to the person watching', () => {
     expect(cdp.sent).toContain('Page.stopScreencast');
   });
 
+  it('refuses hidden typing from a watcher that arrived after the page was hidden', async () => {
+    // The full lifecycle, and the one path here reachable with the ordinary web
+    // client rather than a stale or hand-made one. A takeover survives a reload
+    // and `capturing: false` is replayed with it, so the fresh viewer is handed
+    // a hidden page it has never been shown — and the placeholder would take
+    // its keystrokes. The page can have changed while hidden, by timer, by
+    // redirect, or by the last thing typed into it, so the viewer that has gone
+    // having seen it is not this one seeing it.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    // A sees the page, confirms it, takes control and hides it.
+    const first: BrowserFrame[] = [];
+    await c.startWatching('run-A', (f) => first.push(f));
+    cdp.pushFrame(1);
+    c.frameSeen('run-A', first[0]!.generation);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+    expect(await c.setCapture('run-A', false), 'hidden by somebody who saw it').toBe(false);
+    expect((await c.input('run-A', { kind: 'text', text: 'secret' })).ok, 'and typed into').toBe(true);
+
+    // The tab reloads. The screencast survives, the hold survives, and the
+    // hidden state is replayed — but this is a new watcher.
+    const second: BrowserFrame[] = [];
+    await c.startWatching('run-A', (f) => second.push(f));
+
+    const typed = cdp.sent.filter((m) => m === 'Input.insertText').length;
+    const blind = await c.input('run-A', { kind: 'text', text: 'password' });
+    expect(blind.ok, 'a page this view has never seen').toBe(false);
+    expect(blind.detail).toMatch(/show the page/i);
+    const keyed = await c.input('run-A', { kind: 'key', key: 'Enter' });
+    expect(keyed.ok, 'and not a keystroke either').toBe(false);
+    expect(
+      cdp.sent.filter((m) => m === 'Input.insertText'),
+      'nothing of theirs reached the page',
+    ).toHaveLength(typed);
+    expect(cdp.sent, 'nor as a key event').not.toContain('Input.dispatchKeyEvent');
+
+    // Showing the page is the way out, and it is never refused. One frame and
+    // one receipt later, hiding it is a choice this viewer made.
+    expect(await c.setCapture('run-A', true), 'showing is never refused').toBe(true);
+    cdp.pushFrame(2);
+    expect(second, 'the new viewer is looking at it now').toHaveLength(1);
+    c.frameSeen('run-A', second[0]!.generation);
+    expect(await c.setCapture('run-A', false), 'hidden by somebody who saw it').toBe(false);
+    expect((await c.input('run-A', { kind: 'text', text: 'password' })).ok).toBe(true);
+    expect(cdp.sent.filter((m) => m === 'Input.insertText')).toHaveLength(typed + 1);
+  });
+
+  it('tells the viewer its new watch has not seen the page', async () => {
+    // Pushed rather than inferred, for the same reason ownership is: with the
+    // picture off there are no frames for a client to work it out from, and a
+    // client left guessing would guess from the watch it had before the reload.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    const seen: Array<{ capturing: boolean; confirmed: boolean }> = [];
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    c.onControlFor('run-A', (st) => seen.push({ capturing: st.capturing, confirmed: st.confirmed }));
+
+    const frames: BrowserFrame[] = [];
+    await c.startWatching('run-A', (f) => frames.push(f));
+    cdp.pushFrame(1);
+    c.frameSeen('run-A', frames[0]!.generation);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+    await c.setCapture('run-A', false);
+    expect(seen.at(-1), 'hidden, by somebody who had seen it').toEqual({ capturing: false, confirmed: true });
+
+    await c.startWatching('run-A', () => {});
+    expect(seen.at(-1), 'and the reloaded one is told it has not').toEqual({
+      capturing: false, confirmed: false,
+    });
+  });
+
   it('refuses to hide a page whose picture the viewer never received', async () => {
     // The state the dispatch-based gate could not tell from a viewing. In
     // production the consumer ends at `socket.volatile.emit`, which DROPS
@@ -1909,22 +1984,26 @@ describe('handing the browser to the person watching', () => {
     // need a socket message on every click the agent makes.
     const { provider } = fakeProvider();
     const c = new RemoteBrowserController({ provider });
-    const seen: Array<{ human: boolean; capturing: boolean }> = [];
+    const seen: Array<{ human: boolean; capturing: boolean; confirmed: boolean }> = [];
     c.onControlFor('run-A', (state) => seen.push(state));
 
     await watched(c);
     await c.controller({ kind: 'click', selector: '#b' }, ctx('run-A', 'w1'));
     await c.controller({ kind: 'click', selector: '#c' }, ctx('run-A', 'w1'));
     c.actorEnded('w1');
-    expect(seen, 'the agent had it before and has it now').toEqual([
-      { human: false, capturing: true },
+    // The stream starting and the viewer confirming it are two real changes.
+    // The two agent clicks between them are not, and that is the property: a
+    // viewer does not get a socket message per click.
+    expect(seen, 'the stream started, then the viewer confirmed it').toEqual([
+      { human: false, capturing: true, confirmed: false },
+      { human: false, capturing: true, confirmed: true },
     ]);
 
     await c.takeOver('run-A');
     await c.setCapture('run-A', false);
-    expect(seen.slice(1)).toEqual([
-      { human: true, capturing: true },
-      { human: true, capturing: false },
+    expect(seen.slice(2)).toEqual([
+      { human: true, capturing: true, confirmed: true },
+      { human: true, capturing: false, confirmed: true },
     ]);
   });
 
@@ -1963,7 +2042,12 @@ describe('handing the browser to the person watching', () => {
       await c.takeOver('run-A');
       await vi.advanceTimersByTimeAsync(180_000);
 
-      expect(seen.map((s) => s.human)).toEqual([false, true, false]);
+      // Consecutive duplicates collapsed: `human` is one field of a state that
+      // also carries capture and confirmation, and repeating it while one of
+      // THOSE changes is not the noise this guards against. What matters is
+      // that the lapse is announced at all, rather than left to be discovered.
+      const holders = seen.map((s) => s.human).filter((v, i, all) => v !== all[i - 1]);
+      expect(holders).toEqual([false, true, false]);
     } finally {
       vi.useRealTimers();
     }

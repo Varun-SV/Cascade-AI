@@ -57,6 +57,7 @@ interface Props {
   browserHuman?: boolean;
   /** Whether it is still being pictured while they drive it. */
   browserCapturing?: boolean;
+  browserConfirmed?: boolean;
   /** Something the browser refused to do for this conversation. */
   browserNotice?: string | undefined;
   /** Ask for the browser, and give it back. */
@@ -78,7 +79,7 @@ export default function ChatPanel({
   onEditMessage, onDeleteMessage, onSelectSibling,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange, uiMode, approval,
   compactionNotice, providerNotice, knowledgeNotice, activity, browserLiveView, browserActive,
-  browserFrame, browserStreaming, browserHuman, browserCapturing, browserNotice,
+  browserFrame, browserStreaming, browserHuman, browserCapturing, browserConfirmed, browserNotice,
   onStopBrowser, onTakeOverBrowser, onHandBackBrowser, onBrowserInput, onBrowserCapture,
   toolApprovals, onDecideToolApproval,
 }: Props) {
@@ -237,6 +238,7 @@ export default function ChatPanel({
           streaming={browserStreaming}
           human={browserHuman}
           capturing={browserCapturing}
+          confirmed={browserConfirmed}
           notice={browserNotice}
           onStop={() => onStopBrowser?.()}
           onTakeOver={() => onTakeOverBrowser?.()}

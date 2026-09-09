@@ -115,6 +115,15 @@ export interface BrowserControlState {
   human: boolean;
   /** Whether frames are being produced right now. See `setCapture`. */
   capturing: boolean;
+  /**
+   * Whether THIS watch has confirmed receiving a picture. See `seenGen`.
+   *
+   * Pushed rather than inferred, for the same reason ownership is: the client
+   * cannot work it out while the picture is off, because it is the frames that
+   * would tell it. A client left to guess would guess from what it remembers of
+   * a previous watch, which is exactly the state this distinguishes.
+   */
+  confirmed: boolean;
 }
 
 /**
@@ -472,11 +481,13 @@ export class RemoteBrowserController {
   private announceControl(runId: string, force = false): void {
     const listener = this.controlListeners.get(runId);
     if (!listener) return;
+    const held = this.runs.get(runId);
     const state: BrowserControlState = {
       human: this.leases.get(runId)?.heldByHuman === true,
-      capturing: this.runs.get(runId)?.capturing === true,
+      capturing: held?.capturing === true,
+      confirmed: held?.watchGen !== undefined && held.seenGen === held.watchGen,
     };
-    const key = `${state.human}:${state.capturing}`;
+    const key = `${state.human}:${state.capturing}:${state.confirmed}`;
     if (!force && this.controlAnnounced.get(runId) === key) return;
     this.controlAnnounced.set(runId, key);
     listener(state);
@@ -586,7 +597,16 @@ export class RemoteBrowserController {
       // not need to be, because it can no longer match, and a record that goes
       // stale on its own is one fewer reset to run at the right moment.
       held.watchGen = (held.watchGen ?? 0) + 1;
-      if (held.screencast) return true;
+      if (held.screencast) {
+        // A new watch is unconfirmed, and a RECONNECTING one has to be told so:
+        // it may be arriving at a page that is already hidden, where there are
+        // no frames to work it out from, and a client left to infer it would
+        // infer from the last watch it remembers — the very state this
+        // distinguishes. The attach path below announces on its own way out,
+        // so announcing here too would only flap `capturing` off and on.
+        this.announceControl(runId);
+        return true;
+      }
       return (await this.attachScreencast(runId, held, onFrame)) !== null;
     });
   }
@@ -836,7 +856,11 @@ export class RemoteBrowserController {
     if (!held) return;
     if (typeof generation !== 'number' || !Number.isFinite(generation)) return;
     if (held.watchGen === undefined || generation !== held.watchGen) return;
+    if (held.seenGen === generation) return;
     held.seenGen = generation;
+    // The blind keyboard surface turns on here, so the client learns it from
+    // the same push that carries who holds the page.
+    this.announceControl(runId);
   }
 
   handBack(runId: string): boolean {
@@ -868,6 +892,21 @@ export class RemoteBrowserController {
     const lease = this.leaseFor(runId);
     if (!lease.heldByHuman) {
       return { ok: false, detail: 'You do not have control of this browser. Take control first.' };
+    }
+    // Typing with the picture off is only allowed to somebody who turned it off
+    // — which means THIS watch has seen the page. A takeover survives a reload
+    // and the hidden state is replayed with it, so a fresh watcher could be
+    // handed `capturing: false` for a page it has never been shown, and the
+    // placeholder would take its keystrokes. The page can have changed while
+    // hidden, by timer or redirect or the last thing typed into it, so the
+    // previous watcher having seen it is not this one seeing it.
+    //
+    // Only while hidden. With the picture live the person can see what they are
+    // typing into, and requiring a receipt there would refuse input from a
+    // viewer looking at a perfectly good frame whose watch an idle page has not
+    // yet had cause to repaint.
+    if (held.capturing !== true && (held.watchGen === undefined || held.seenGen !== held.watchGen)) {
+      return { ok: false, detail: 'Show the page before typing into it — this view has not seen it yet.' };
     }
 
     // The person's events take the SAME action slot the agent's do, and that is

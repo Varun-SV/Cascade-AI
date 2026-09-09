@@ -228,14 +228,14 @@ describe('BrowserLiveView — taking the page over', () => {
 
   it('can still be typed into with the picture hidden — the real prop state', () => {
     // The state the hook actually produces: hiding the page clears the frame,
-    // so `frame` is undefined. An earlier test rendered `capturing={false}`
+    // so `frame` is undefined. An earlier test rendered `capturing={false} confirmed`
     // WITH a frame, which is a combination that never occurs — and it missed
     // that clearing the frame unmounted the only element carrying onKeyDown,
     // making credential entry, the reason this feature exists, impossible.
     const onInput = vi.fn();
     render(
       <BrowserLiveView
-        active liveViewUrl={undefined} frame={undefined} human capturing={false}
+        active liveViewUrl={undefined} frame={undefined} human capturing={false} confirmed
         onStop={() => {}} onInput={onInput}
       />,
     );
@@ -314,11 +314,46 @@ describe('BrowserLiveView — taking the page over', () => {
     // gate that only asked for a frame would strand them on a dark panel.
     rerender(
       <BrowserLiveView
-        active liveViewUrl={undefined} frame={undefined} human capturing={false} streaming
+        active liveViewUrl={undefined} frame={undefined} human capturing={false} confirmed streaming
         onStop={() => {}} onCapture={onCapture} onInput={onInput}
       />,
     );
     expect(screen.getByRole('button', { name: /show the page/i })).toBeInTheDocument();
+  });
+
+  it('will not be typed into over a page hidden before this view opened', () => {
+    // Reachable with the ordinary client: a takeover survives a reload and the
+    // hidden state is replayed with it, so this view can be handed
+    // `capturing: false` for a page it has never been shown. The page may have
+    // changed while hidden — a timer, a redirect, the last thing typed into it
+    // — so the viewer that has gone having seen it is not this one seeing it.
+    const onInput = vi.fn();
+    const { rerender } = render(
+      <BrowserLiveView
+        active liveViewUrl={undefined} frame={undefined} human capturing={false}
+        confirmed={false} onStop={() => {}} onInput={onInput}
+      />,
+    );
+
+    const inherited = screen.getByLabelText(/picture hidden and not yet seen/i);
+    expect(inherited, 'nothing to focus and nothing to type into').not.toHaveAttribute('tabindex');
+    fireEvent.keyDown(inherited, { key: 'p' });
+    fireEvent.keyDown(inherited, { key: 'Enter' });
+    expect(onInput, 'not one keystroke into a page this view never saw').not.toHaveBeenCalled();
+    // Showing it is the way out, so that control has to still be there.
+    expect(screen.getByRole('button', { name: /show the page/i })).toBeInTheDocument();
+
+    // Once the server says this watch has seen the page, it is a blind period
+    // the person chose and the keyboard comes back.
+    rerender(
+      <BrowserLiveView
+        active liveViewUrl={undefined} frame={undefined} human capturing={false}
+        confirmed onStop={() => {}} onInput={onInput}
+      />,
+    );
+    const chosen = screen.getByRole('group', { name: /picture hidden/i });
+    fireEvent.keyDown(chosen, { key: 'p' });
+    expect(onInput).toHaveBeenCalledWith({ kind: 'text', text: 'p' });
   });
 
   it('offers no pointer surface without a picture to aim at', () => {
@@ -327,7 +362,7 @@ describe('BrowserLiveView — taking the page over', () => {
     const onInput = vi.fn();
     render(
       <BrowserLiveView
-        active liveViewUrl={undefined} frame={undefined} human capturing={false}
+        active liveViewUrl={undefined} frame={undefined} human capturing={false} confirmed
         onStop={() => {}} onInput={onInput}
       />,
     );
@@ -340,7 +375,7 @@ describe('BrowserLiveView — taking the page over', () => {
     // and would put a second, uncoordinated view of the session on screen.
     render(
       <BrowserLiveView
-        active liveViewUrl="https://provider.test/live/abc" frame={undefined} human capturing={false}
+        active liveViewUrl="https://provider.test/live/abc" frame={undefined} human capturing={false} confirmed
         onStop={() => {}}
       />,
     );
@@ -350,7 +385,7 @@ describe('BrowserLiveView — taking the page over', () => {
 
   it('says the picture is paused rather than looking broken', () => {
     render(
-      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human capturing={false} onStop={() => {}} />,
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human capturing={false} confirmed onStop={() => {}} />,
     );
     expect(screen.getByText(/picture is paused/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /show the page/i })).toBeInTheDocument();

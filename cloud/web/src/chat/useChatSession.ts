@@ -403,6 +403,14 @@ export function useChatSession(
       /** Whether frames are being produced. False while the picture is paused. */
       capturing?: boolean;
       /**
+       * Whether THIS watch has confirmed receiving a picture.
+       *
+       * The server's answer, not ours: while the picture is off there are no
+       * frames to work it out from, and what this pane remembers is about the
+       * watch it had BEFORE a reload. It gates the blind keyboard surface.
+       */
+      confirmed?: boolean;
+      /**
        * Something the user asked of the browser that did not happen.
        *
        * Kept with the view rather than in one shared banner, because a refusal
@@ -423,6 +431,8 @@ export function useChatSession(
   const browserHuman = browserView?.human === true;
   /** Whether frames are still being produced while they drive it. */
   const browserCapturing = browserView?.capturing !== false;
+  /** Whether this watch has confirmed a picture. Gates the blind keyboard. */
+  const browserConfirmed = browserView?.confirmed === true;
   /** The last thing the browser refused to do for this pane, if any. */
   const browserNotice = browserView?.notice;
   /** A browser is attached to this run, whether or not it can be streamed. */
@@ -880,7 +890,8 @@ export function useChatSession(
      * would take their panel away over a keystroke.
      */
     const onBrowserControl = (e: {
-      conversationId?: string; taskId?: string; human?: boolean; capturing?: boolean; detail?: string;
+      conversationId?: string; taskId?: string; human?: boolean; capturing?: boolean;
+      confirmed?: boolean; detail?: string;
     }) => {
       adoptConversationId(e?.conversationId);
       const key = typeof e?.conversationId === 'string' ? e.conversationId : (activeConversationId() ?? '');
@@ -894,6 +905,7 @@ export function useChatSession(
             ...view,
             ...(typeof e.human === 'boolean' ? { human: e.human } : {}),
             ...(typeof e.capturing === 'boolean' ? { capturing: e.capturing } : {}),
+            ...(typeof e.confirmed === 'boolean' ? { confirmed: e.confirmed } : {}),
             // A paused picture must not keep showing the last frame. That
             // frame is of a page which may have changed since — and a stale
             // picture of a live browser is worse than none, because it is the
@@ -1550,7 +1562,7 @@ export function useChatSession(
     escalation, escalationQueued: escalations.length, resolveEscalation, clearEscalation,
     contextApproval, resolveContextApproval, compactionNotice, providerNotice, knowledgeNotice, activity,
     browserLiveView, browserActive, browserTaskId, browserFrame, browserStreaming,
-    browserHuman, browserCapturing, browserNotice, stopBrowser,
+    browserHuman, browserCapturing, browserConfirmed, browserNotice, stopBrowser,
     takeOverBrowser, handBackBrowser, sendBrowserInput, setBrowserCapture,
     toolApprovals, resolveToolApproval,
   };

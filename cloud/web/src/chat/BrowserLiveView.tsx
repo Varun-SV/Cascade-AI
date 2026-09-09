@@ -65,6 +65,16 @@ interface Props {
   human?: boolean;
   /** Whether frames are being produced. False while the picture is paused. */
   capturing?: boolean;
+  /**
+   * Whether THIS watch has confirmed receiving a picture, per the server.
+   *
+   * The blind keyboard surface is gated on it. A takeover survives a reload and
+   * the hidden state is replayed with it, so without this a fresh viewer could
+   * be handed `capturing: false` for a page it has never been shown — and the
+   * page can have changed while hidden, by timer, redirect, or the last thing
+   * typed into it.
+   */
+  confirmed?: boolean;
   /** Something the user asked of the browser that did not happen. */
   notice?: string | undefined;
   /** Stop the agent using the browser for this run. */
@@ -80,7 +90,7 @@ interface Props {
 }
 
 export function BrowserLiveView({
-  active, liveViewUrl, frame, streaming, human, capturing, notice,
+  active, liveViewUrl, frame, streaming, human, capturing, confirmed, notice,
   onStop, onTakeOver, onHandBack, onInput, onCapture,
 }: Props) {
   const imgRef = useRef<HTMLImageElement>(null);
@@ -308,7 +318,12 @@ export function BrowserLiveView({
         somewhere the person could not see.
       */}
       {!frame && driving && (
-        capturing === false ? (
+        // AND confirmed: a hidden page this watch has not been shown is not a
+        // blind period the person chose, it is a blind period they inherited
+        // from a viewer that is gone. Showing the page is how they get out of
+        // it — that control stays available, and one frame later this is a
+        // choice again.
+        capturing === false && confirmed ? (
           <div
             ref={(el) => {
               // Focus follows the surface, because the element the person was
@@ -328,16 +343,25 @@ export function BrowserLiveView({
             <span>The picture is hidden. What you type still goes to the page.</span>
           </div>
         ) : (
-          // Inert on purpose: nothing to see yet, so nothing to type into.
+          // Inert on purpose: nothing this watch has seen, so nothing to type
+          // into. Two ways to arrive here and they need different words — one
+          // is waiting for a stream that is running, the other is a page
+          // someone else hid before this view existed.
           <div
-            aria-label="Agent browser, waiting for the first picture"
+            aria-label={capturing === false
+              ? 'Agent browser, picture hidden and not yet seen'
+              : 'Agent browser, waiting for the first picture'}
             style={{
               width: '100%', minHeight: 400, display: 'grid', placeItems: 'center',
               background: '#000', color: 'var(--ink-400, #888)', fontSize: 13,
               textAlign: 'center', padding: 16,
             }}
           >
-            <span>Waiting for the first picture. You can type once you can see the page.</span>
+            <span>
+              {capturing === false
+                ? 'The picture was hidden before this view opened. Show the page to carry on.'
+                : 'Waiting for the first picture. You can type once you can see the page.'}
+            </span>
           </div>
         )
       )}

@@ -307,6 +307,7 @@ export default function App() {
             browserStreaming={chat.browserStreaming}
             browserHuman={chat.browserHuman}
             browserCapturing={chat.browserCapturing}
+            browserConfirmed={chat.browserConfirmed}
             browserNotice={chat.browserNotice}
             onTakeOverBrowser={chat.takeOverBrowser}
             onHandBackBrowser={chat.handBackBrowser}

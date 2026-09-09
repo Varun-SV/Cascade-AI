@@ -215,12 +215,15 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
     // Pushed rather than answered, because the interesting change is the one
     // nobody asked for: an idle takeover lapses on its own, and a client that
     // still believes it has control keeps typing into a lease it lost.
-    controller.onControlFor(id, ({ human, capturing }) => {
+    controller.onControlFor(id, ({ human, capturing, confirmed }) => {
       opts.emit('browser:control', {
         conversationId: opts.conversationId,
         taskId: id,
         human,
         capturing,
+        // Whether THIS watch has confirmed a picture. The blind keyboard
+        // surface turns on with it, so it is pushed rather than inferred.
+        confirmed,
       });
     });
     controller.onLiveViewFor(id, ({ active, liveViewUrl }) => {

@@ -255,7 +255,12 @@ export function rememberForReplay(run: LiveRun, event: string, payload: unknown)
     // `human: false` is the client's own default, so replaying it says nothing;
     // storing it would only risk carrying a stale `capturing: false` into a
     // page whose agent is about to turn the picture back on anyway.
-    if (p['human'] === true) run.control = p;
+    // Stored WITHOUT `confirmed`, whatever it said. That flag is per-watch,
+    // and a replayed takeover is by definition arriving at a new one: the page
+    // being reloaded is the reason there is a replay at all. Carrying the old
+    // watch's answer over would hand the fresh viewer a blind keyboard for a
+    // page it has not been shown, which is the whole point of the flag.
+    if (p['human'] === true) run.control = { ...p, confirmed: false };
     else delete run.control;
     return;
   }

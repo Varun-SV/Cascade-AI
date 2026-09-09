@@ -1283,15 +1283,19 @@ describe('rememberForReplay / replaySupervision — what a reload gets back', ()
     // existing holder as a no-op.
     const run = freshRun();
     rememberForReplay(run, 'browser:live-view', { active: true, taskId: 't1' });
-    rememberForReplay(run, 'browser:control', { taskId: 't1', human: true, capturing: false });
-    expect(run.control).toEqual({ taskId: 't1', human: true, capturing: false });
+    rememberForReplay(run, 'browser:control', { taskId: 't1', human: true, capturing: false, confirmed: true });
+    // `confirmed` is stripped, whatever it said. It is per-WATCH, and a replay
+    // is by definition arriving at a new one — the page reloading is the reason
+    // there is a replay. Carrying the old watch's answer over would hand the
+    // fresh viewer a blind keyboard for a page it has not been shown.
+    expect(run.control).toEqual({ taskId: 't1', human: true, capturing: false, confirmed: false });
 
     // A refusal is not a statement of ownership: it describes a moment that has
     // already passed, and replaying it into a fresh page is noise about
     // something the person did before they reloaded.
     rememberForReplay(run, 'browser:control', { taskId: 't1', detail: 'That key cannot be sent to the page.' });
     expect(run.control, 'still the last thing that said who holds it')
-      .toEqual({ taskId: 't1', human: true, capturing: false });
+      .toEqual({ taskId: 't1', human: true, capturing: false, confirmed: false });
 
     const { emitted, socket } = recorder();
     replaySupervision(run, socket);
@@ -1299,8 +1303,8 @@ describe('rememberForReplay / replaySupervision — what a reload gets back', ()
     // browser entry for the run and drops a control message for a run it has
     // no entry for.
     expect(emitted.map((e) => e.event)).toEqual(['browser:live-view', 'browser:control']);
-    expect(emitted[1]?.payload, 'including that the picture was left paused')
-      .toEqual({ taskId: 't1', human: true, capturing: false });
+    expect(emitted[1]?.payload, 'the picture was left paused, and this view has not seen it')
+      .toEqual({ taskId: 't1', human: true, capturing: false, confirmed: false });
 
     // Handing the browser back stops it being replayed at all.
     rememberForReplay(run, 'browser:control', { taskId: 't1', human: false, capturing: true });
