@@ -17,7 +17,7 @@
 //  there would hand the capability to exactly the runs that cannot supervise it.
 
 import { describe, it, expect, vi } from 'vitest';
-import { addressesRun, applyPermissionDecision, buildApprovalCallback, type PermissionDecision } from './runs.js';
+import { addressesRun, applyPermissionDecision, buildApprovalCallback, lossyEmitter, type PermissionDecision } from './runs.js';
 
 /**
  * The approval shape runs.ts builds.
@@ -265,5 +265,39 @@ describe('which run a browser-control message may reach', () => {
     // addressing it.
     expect(addressesRun(undefined, {}), 'two unknowns are not a match').toBe(false);
     expect(addressesRun(undefined, { taskId: undefined })).toBe(false);
+  });
+});
+
+// The expression this replaces was wrong in a way nothing could see: a run is
+// handed a RebindableTransport, not the raw socket, and that had no `volatile`
+// — so the fallback fired every time and frames went out reliably in
+// production while a test of the callback wiring said otherwise.
+describe('lossyEmitter — which channel a droppable event takes', () => {
+  it('takes the lossy channel when the socket has one', () => {
+    const reliable: string[] = [];
+    const lossy: string[] = [];
+    const socket = {
+      emit: (event: string) => { reliable.push(event); return true; },
+      volatile: { emit: (event: string) => { lossy.push(event); return true; } },
+      on: () => undefined,
+      off: () => undefined,
+    };
+
+    lossyEmitter(socket)('browser:frame', { data: 'x' });
+
+    expect(lossy).toEqual(['browser:frame']);
+    expect(reliable, 'a frame that can be dropped is never sent reliably').toEqual([]);
+  });
+
+  it('still delivers for a caller that has no lossy channel at all', () => {
+    // The SSE and OpenAI-compatible paths have no socket. Falling back is
+    // right for them — it is falling back for a transport that SHOULD have one
+    // that was the bug.
+    const reliable: string[] = [];
+    const socket = { emit: (event: string) => { reliable.push(event); return true; }, on: () => undefined, off: () => undefined };
+
+    lossyEmitter(socket)('browser:frame', { data: 'x' });
+
+    expect(reliable).toEqual(['browser:frame']);
   });
 });

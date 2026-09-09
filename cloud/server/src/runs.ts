@@ -299,6 +299,20 @@ export interface RunSocket {
   off(event: string, listener: (...args: any[]) => void): unknown;
 }
 
+/**
+ * Where a socket's droppable traffic goes.
+ *
+ * Its own function because the expression it replaces was wrong in a way
+ * nothing could see: a run is handed a `RebindableTransport`, not the raw
+ * socket, and that had no `volatile` — so the fallback fired every time and
+ * frames went out reliably in production while a test of the callback wiring
+ * said otherwise. Testing the selection against both shapes is what makes the
+ * difference between the two visible.
+ */
+export function lossyEmitter(socket: RunSocket): (event: string, payload: unknown) => void {
+  return (event, payload) => { (socket.volatile ?? socket).emit(event, payload); };
+}
+
 export interface WebSearchBackend {
   searxngUrl?: string;
   braveApiKey?: string;
@@ -1259,7 +1273,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     // buffer. Volatile drops what the transport cannot write, which is the
     // right trade for a live view: the next picture is always better than a
     // queued old one.
-    emitFrame: (event, payload) => (socket.volatile ?? socket).emit(event, payload),
+    emitFrame: lossyEmitter(socket),
     warn: (message) => console.warn(`[run ${conversation.id}] remote browser: ${message}`),
   });
   // The kill switch, alongside the live view that makes it meaningful. Scoped

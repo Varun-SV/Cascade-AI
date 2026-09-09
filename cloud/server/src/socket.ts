@@ -102,6 +102,28 @@ export class RebindableTransport implements RunSocket {
     return this.current?.emit(event, payload);
   }
 
+  /**
+   * The same transport, on Socket.IO's lossy channel.
+   *
+   * A GETTER rather than a field captured at construction, because `current`
+   * changes: a run outlives the connection that started it, and a volatile
+   * emitter frozen to the original socket would write into a dead one after a
+   * reconnect. Resolving `current` per emit is what makes this follow `rebind`.
+   *
+   * Deliberately NOT observed. `observe` feeds the replay store, and the only
+   * thing sent this way is a frame — which must never be replayed: handing a
+   * reloaded page a picture from before it reloaded is the stale-picture
+   * failure the panel exists to prevent. A dropped volatile emit is also, by
+   * definition, not state anyone is entitled to get back.
+   *
+   * With no socket bound the frame is dropped, which is the correct answer for
+   * a live view during a reconnect gap: by the time anyone could see it, it
+   * would be a picture of a page that has moved on.
+   */
+  get volatile(): { emit(event: string, payload: unknown): unknown } {
+    return { emit: (event, payload) => this.current?.volatile.emit(event, payload) };
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   on(event: string, listener: (...args: any[]) => void): unknown {
     let set = this.listeners.get(event);

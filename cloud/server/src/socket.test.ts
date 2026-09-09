@@ -1079,12 +1079,18 @@ describe('RebindableTransport', () => {
   function fakeSocket() {
     const handlers = new Map<string, Set<(...args: unknown[]) => void>>();
     const emitted: Array<{ event: string; payload: unknown }> = [];
+    const volatileEmitted: Array<{ event: string; payload: unknown }> = [];
     return {
       emitted,
+      /** What went out on the lossy channel, kept apart from the reliable one. */
+      volatileEmitted,
       handlerCount: (event: string) => handlers.get(event)?.size ?? 0,
       fire: (event: string, arg: unknown) => { for (const h of handlers.get(event) ?? []) h(arg); },
       socket: {
         emit: (event: string, payload: unknown) => { emitted.push({ event, payload }); return true; },
+        volatile: {
+          emit: (event: string, payload: unknown) => { volatileEmitted.push({ event, payload }); return true; },
+        },
         on: (event: string, listener: (...args: unknown[]) => void) => {
           let set = handlers.get(event);
           if (!set) { set = new Set(); handlers.set(event, set); }
@@ -1098,6 +1104,41 @@ describe('RebindableTransport', () => {
       },
     };
   }
+
+  it('sends frames on the lossy channel, and keeps doing so after a rebind', () => {
+    // The production path is a RebindableTransport, not a raw Socket, so a
+    // `socket.volatile ?? socket` check in the run fell through to the
+    // reliable channel every time — frames banked in Engine.IO behind a slow
+    // viewer while a test of the callback wiring said the lossy path was
+    // chosen. The transport is where that has to be true.
+    const a = fakeSocket();
+    const b = fakeSocket();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const transport = new RebindableTransport(a.socket as any);
+
+    // Taken ONCE and held, which is the case that matters: a run outlives the
+    // connection that started it, so an emitter frozen to whichever socket was
+    // bound when it was obtained would write into a dead one after a
+    // reconnect. Re-reading `.volatile` before each emit would hide that.
+    const lossy = transport.volatile;
+
+    lossy.emit('browser:frame', { data: 'ONE' });
+    expect(a.volatileEmitted.map((e) => e.event)).toEqual(['browser:frame']);
+    expect(a.emitted, 'and never on the reliable one').toEqual([]);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    transport.rebind(b.socket as any);
+    lossy.emit('browser:frame', { data: 'TWO' });
+    expect(b.volatileEmitted.map((e) => (e.payload as { data: string }).data)).toEqual(['TWO']);
+    expect(a.volatileEmitted, 'nothing more went to the old connection').toHaveLength(1);
+    expect(b.emitted).toEqual([]);
+
+    // And during a reconnect gap a frame is dropped rather than queued: by the
+    // time anyone could see it, it would be a picture of a page that moved on.
+    transport.rebind(null);
+    expect(() => lossy.emit('browser:frame', { data: 'THREE' })).not.toThrow();
+    expect(b.volatileEmitted).toHaveLength(1);
+  });
 
   it('moves emits and listeners to the replacement connection', () => {
     // The interactive gates are the reason listeners have to move, not just
