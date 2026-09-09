@@ -1694,6 +1694,43 @@ describe('handing the browser to the person watching', () => {
     expect(cdp.sent).toContain('Page.stopScreencast');
   });
 
+  it('does not let the departed watcher\'s picture vouch for the one that reconnected', async () => {
+    // A socket drop sends no unwatch, so the screencast deliberately survives
+    // and the reconnected client only replaces the consumer. A record scoped to
+    // the CDP SESSION therefore still said "a frame has been delivered" — from
+    // the viewer that had gone. The page is idle, so nothing arrives to correct
+    // it, and a hand-made client could ask for the blind period on a page this
+    // viewer had never been shown. Which is the reason the gate is enforced
+    // here rather than only by hiding a button.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const first: unknown[] = [];
+    await c.startWatching('run-A', (f) => first.push(f));
+    cdp.pushFrame(1);
+    expect(first, 'the first viewer saw the page').toHaveLength(1);
+
+    const second: unknown[] = [];
+    expect(await c.startWatching('run-A', (f) => second.push(f)), 'still streaming').toBe(true);
+    expect(
+      cdp.sent.filter((m) => m === 'Page.startScreencast'),
+      'the same screencast, which is the whole point of the reconnect branch',
+    ).toHaveLength(1);
+
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    expect(second, 'and the idle page has shown the new one nothing').toHaveLength(0);
+    expect(await c.setCapture('run-A', false), 'so it is not theirs to hide').toBe(true);
+    expect(cdp.sent).not.toContain('Page.stopScreencast');
+
+    cdp.pushFrame(2);
+    expect(second).toHaveLength(1);
+    expect(await c.setCapture('run-A', false), 'once shown, it is').toBe(false);
+    expect(cdp.sent).toContain('Page.stopScreencast');
+  });
+
   it('brings the page back before the agent acts, after an explicit handback', async () => {
     // Hide the page, give it back, and the agent must not carry on against a
     // panel frozen on the last picture.

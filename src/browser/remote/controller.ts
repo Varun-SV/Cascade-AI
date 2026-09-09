@@ -263,16 +263,21 @@ interface RunBrowser {
    */
   metricsStale?: boolean;
   /**
-   * Whether this screencast has ever put a picture in front of the person.
+   * Whether the CURRENT watcher has been shown a picture of this page.
    *
    * The gate on hiding the page. `capturing === false` is supposed to mean a
    * blind period the person CHOSE — they saw the page, put the caret where they
    * wanted it, then asked us to stop showing it — and that claim is only true if
-   * there was ever a picture. `streaming` is announced the moment
+   * a picture reached THEM. `streaming` is announced the moment
    * `Page.startScreencast` returns, so without this a takeover in the window
    * before the first frame could hide a page nobody had seen and then be typed
-   * into. Reset with each attach, because a fresh watcher has seen nothing
-   * whatever the previous one saw.
+   * into.
+   *
+   * Scoped to the watcher rather than the CDP session, which is a distinction
+   * with a real case behind it: a reconnect deliberately keeps the existing
+   * screencast and only swaps the consumer, so a session-scoped record let a
+   * reloaded page inherit the previous viewer's picture. Cleared wherever the
+   * consumer is replaced, and set where a frame is actually handed to one.
    */
   framed?: boolean;
   /**
@@ -545,6 +550,15 @@ export class RemoteBrowserController {
       // the panel could sit forever saying it could not be watched while it
       // was in fact being watched.
       held.onFrame = onFrame;
+      // A NEW watcher has been shown nothing, whatever the last one saw. This
+      // is the only place the seen-a-frame record is cleared, because replacing
+      // the consumer is precisely the event it is about: the branch below
+      // deliberately keeps an existing screencast across a reconnect, so a reset
+      // tied to the CDP session would have let a reloaded page inherit the
+      // previous viewer's picture and hide a page it had never been shown.
+      // Cleared BEFORE any attach, so a frame arriving while
+      // `Page.startScreencast` is still in flight still counts.
+      held.framed = false;
       if (held.screencast) return true;
       return (await this.attachScreencast(runId, held, onFrame)) !== null;
     });
@@ -572,13 +586,6 @@ export class RemoteBrowserController {
   ): Promise<CDPSession | null> {
     const cdp = await held.page.context().newCDPSession(held.page);
 
-    // Cleared before the handler exists, not after the stream starts. A CDP
-    // event does not wait for the command response, and Chrome emits the first
-    // frame as soon as the screencast is running — so clearing this after the
-    // awaited `Page.startScreencast` erased the very picture the person is
-    // looking at, and an idle page sends no second frame to correct it.
-    held.framed = false;
-
     cdp.on('Page.screencastFrame', ((e: {
       data?: string;
       sessionId?: number;
@@ -590,12 +597,17 @@ export class RemoteBrowserController {
         // The page repainted, so whatever was measured before may no longer be
         // true. Broad on purpose: see `metricsStale`.
         held.metricsStale = true;
-        // Set before the hand-off, not after: this records that a picture of
-        // this page exists to have been seen, which is what hiding it claims.
-        held.framed = true;
         // Through the run rather than the captured argument, so a later watcher
         // that joined an already-attached stream is the one that receives.
-        held.onFrame?.({ data: e.data, width, height });
+        const deliver = held.onFrame;
+        if (deliver) {
+          // Recorded on DELIVERY rather than on emission. A frame Chrome
+          // produced with nobody listening — between an unwatch and the next
+          // watch — was never shown to anyone, and hiding the page claims that
+          // somebody saw it.
+          held.framed = true;
+          deliver({ data: e.data, width, height });
+        }
       }
       // Best-effort: the session may have been detached between the frame
       // arriving and this running, and an ack into a dead session is not an
