@@ -1823,6 +1823,65 @@ describe('handing the browser to the person watching', () => {
     }
   });
 
+  it('does not let an idle deadline outrank the event it interrupted', async () => {
+    // The ordering the test above cannot reach, and the reason it could not:
+    // `await c.setCapture(...)` completes within the same tick, so `touch()`
+    // runs BEFORE the old deadline and the transition is never actually held
+    // across it. Both `input` and `setCapture` touch the lease only after their
+    // awaited CDP call, so a real event that takes longer than the second it
+    // has left is still in flight when the deadline fires.
+    //
+    // The lapse used to record itself as a wanted handback, which is a flag
+    // `touch()` deliberately refuses to clear — so the completed interaction
+    // bought nothing and the deferred retry released the hold 25ms later,
+    // moments after the person had just used it. An explicit "Give it back"
+    // must survive activity that was already under way; an idle expiry must
+    // not, because the event it interrupted is proof the person was there.
+    vi.useFakeTimers();
+    try {
+      const { provider } = fakeProvider();
+      const c = new RemoteBrowserController({ provider });
+      await watched(c);
+      c.actorEnded('w1');
+      await c.takeOver('run-A');
+
+      // Hold the person's own event open, inside CDP, across the deadline.
+      const gate = deferred();
+      const realSend = cdp.send;
+      cdp.send = async (method: string, params?: Record<string, unknown>) => {
+        if (method === 'Input.dispatchMouseEvent') await gate.promise;
+        return realSend.call(cdp, method, params);
+      };
+
+      await vi.advanceTimersByTimeAsync(119_000);
+      const clicking = c.input('run-A', { kind: 'click', x: 0.5, y: 0.5 });
+      await vi.advanceTimersByTimeAsync(1);
+
+      // The old deadline comes round while the click is still going in.
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(c.humanHolds('run-A'), 'the deadline landed on their own event').toBe(true);
+
+      gate.resolve();
+      cdp.send = realSend;
+      expect((await clicking).ok).toBe(true);
+
+      // THIS is the assertion the old code failed: the deferred retry found no
+      // action and released, a fifth of a second after a click the person made.
+      await vi.advanceTimersByTimeAsync(100);
+      expect(c.humanHolds('run-A'), 'the finished click is not the moment to let go').toBe(true);
+
+      // And what it bought is a full fresh interval measured from the click,
+      // not the one the interrupted lapse re-armed for itself.
+      await vi.advanceTimersByTimeAsync(119_000);
+      expect(c.humanHolds('run-A'), 'a full interval, from the interaction').toBe(true);
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(c.humanHolds('run-A'), 'and then the silence after it ends the hold').toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('lets go of a browser the person walked away from', async () => {
     // A person has no terminal signal — no worker end, no run completion. A
     // takeover nobody is using still holds a billed session and, at the default

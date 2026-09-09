@@ -110,7 +110,7 @@ export class BrowserLease {
   /** Lapses a human hold nobody is using. See `HUMAN_IDLE_MS`. */
   private humanTimer: ReturnType<typeof setTimeout> | null = null;
   /**
-   * Somebody asked for the hold to end and it could not end yet.
+   * The person ASKED for the hold to end and it could not end yet.
    *
    * Kept as a request rather than only a retry timer, because the retry shares
    * `humanTimer` with the idle deadline: an authorised event settling after the
@@ -118,6 +118,11 @@ export class BrowserLease {
    * interval, and quietly cancel a handback the person had already asked for.
    * "Give it back" is not undone by activity that was already under way when
    * they said it.
+   *
+   * Explicit requests ONLY. An idle expiry must never set this: a deadline that
+   * lands on the person's own in-flight event is evidence they were THERE, and
+   * recording it here made `touch()` bail afterwards, so the hold dropped the
+   * instant a fresh interaction finished. See `lapse()`.
    */
   private handBackWanted = false;
 
@@ -239,12 +244,37 @@ export class BrowserLease {
   touch(): void {
     if (this.actor !== HUMAN_ACTOR) return;
     if (this.handBackWanted) return;
+    this.armIdle();
+  }
+
+  /** (Re)start the idle interval. The only place the deadline is set. */
+  private armIdle(): void {
     this.clearHumanIdle();
-    // Through handBack rather than straight to release, so a lapse obeys the
-    // same "not while their event is still landing" rule an explicit handback
-    // does. One rule, one place, whichever way the hold ends.
-    this.humanTimer = setTimeout(() => { this.handBack(); }, HUMAN_IDLE_MS);
+    this.humanTimer = setTimeout(() => { this.lapse(); }, HUMAN_IDLE_MS);
     this.humanTimer.unref?.();
+  }
+
+  /**
+   * The idle deadline came round.
+   *
+   * Both ways a hold ends obey the same rule — never while one of the person's
+   * own events is still landing — but they resolve that clash in OPPOSITE
+   * directions, and routing the lapse through `handBack()` collapsed them into
+   * one. An event in flight BEGAN before this deadline, which makes it evidence
+   * the person was there; deferring the lapse and then releasing the moment
+   * that event lands ends the hold immediately after a fresh interaction, which
+   * is the precise opposite of what an idle deadline measures. So an
+   * interrupted lapse yields: the interval starts again, and the next silence
+   * decides.
+   *
+   * `handBack()` keeps the deferral instead, because "Give it back" is a
+   * decision and activity already under way when it was made does not withdraw
+   * it. Same rule, different answer, which is why they are different methods.
+   */
+  private lapse(): void {
+    if (this.actor !== HUMAN_ACTOR) return;
+    if (this.action) { this.armIdle(); return; }
+    this.release();
   }
 
   /**
