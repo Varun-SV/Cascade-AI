@@ -791,8 +791,15 @@ export class RemoteBrowserController {
         return;
       }
       case 'key': {
-        const spec = KEYS[event.key];
-        if (!spec) throw new Error(`That key cannot be sent to the page: ${event.key}`);
+        // `Object.hasOwn`, not a bare lookup. `KEYS['__proto__']` is
+        // `Object.prototype` — truthy — so a bare `if (!spec)` let it through
+        // and then read `spec.code` as undefined, dispatching a key event with
+        // no virtual key code. `constructor` and `toString` do the same. An
+        // allowlist that answers for keys nobody put in it is not an allowlist.
+        const spec = typeof event.key === 'string' && Object.hasOwn(KEYS, event.key)
+          ? KEYS[event.key]
+          : undefined;
+        if (!spec) throw new Error(`That key cannot be sent to the page: ${String(event.key)}`);
         const base = {
           key: event.key,
           code: event.key,
@@ -828,7 +835,20 @@ export class RemoteBrowserController {
           return;
         }
 
-        const button = event.button && event.button in BUTTONS ? event.button : 'left';
+        // Absence and invalidity are different answers. `undefined` means "the
+        // ordinary button", but a value that is present and not one of the
+        // three used to fall through to `left` — so a version-skewed client
+        // sending `button: 'primary'` performed a real left click it never
+        // asked for. Repairing malformed input into a mutation the sender did
+        // not specify is the same shape as every other bug on this boundary.
+        // Own properties only, for the same reason as the keys above: `in`
+        // walks the prototype chain, so `button: 'toString'` passed the check
+        // and then `BUTTONS['toString']` handed CDP a FUNCTION as the button
+        // mask. That hole came in with the check itself.
+        if (event.button !== undefined && !Object.hasOwn(BUTTONS, event.button)) {
+          throw new Error(`That is not a mouse button: ${String(event.button)}`);
+        }
+        const button = event.button ?? 'left';
         const buttons = BUTTONS[button];
         // Double-click is two events with clickCount 2, which pages read to
         // mean word-selection. Capped because a click count is a number from a

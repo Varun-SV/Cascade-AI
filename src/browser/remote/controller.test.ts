@@ -1317,6 +1317,16 @@ describe('handing the browser to the person watching', () => {
       { kind: 'text', text: 123 },
       { kind: 'key' },
       { kind: 'click', x: 0.5, y: 0.5, clicks: 'lots' },
+      // Present-but-invalid is not the same as absent: this used to fall
+      // through to a real left click nobody asked for.
+      { kind: 'click', x: 0.5, y: 0.5, button: 'primary' },
+      // Inherited properties are not allowlist entries. `KEYS['__proto__']` is
+      // Object.prototype and truthy; `'toString' in BUTTONS` is true and hands
+      // back a function. An allowlist that answers for keys nobody put in it
+      // is not an allowlist.
+      { kind: 'key', key: '__proto__' },
+      { kind: 'key', key: 'constructor' },
+      { kind: 'click', x: 0.5, y: 0.5, button: 'toString' },
     ]) {
       const refused = await c.input('run-A', bad as never);
       expect(refused.ok, `${JSON.stringify(bad)} must not reach the page`).toBe(false);
