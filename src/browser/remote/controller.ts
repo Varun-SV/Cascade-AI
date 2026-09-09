@@ -827,13 +827,18 @@ export class RemoteBrowserController {
     try {
       const metrics = await cdp.send('Page.getLayoutMetrics') as {
         cssVisualViewport?: { clientWidth?: number; clientHeight?: number };
-        visualViewport?: { clientWidth?: number; clientHeight?: number };
       };
-      // `cssVisualViewport` is the field documented in CSS pixels.
-      // `visualViewport` is the older one, kept only for a Chrome predating it.
-      const v = metrics?.cssVisualViewport ?? metrics?.visualViewport;
-      const width = v?.clientWidth;
-      const height = v?.clientHeight;
+      // `cssVisualViewport` ONLY. There is a legacy `visualViewport` on the same
+      // response and it is tempting as a fallback, but CDP documents it as
+      // deprecated and in DEVICE pixels while this one is in CSS pixels — the
+      // very units `Input.dispatchMouseEvent` wants. Reading the old field as
+      // though it were the new one reintroduces exactly the wrong-coordinate
+      // bug at any device scale but 1, on the old Chrome the fallback was meant
+      // to help. Converting instead would need a scale valid for that version,
+      // which is a guess about someone else's build; refusing is a fact about
+      // ours. Every Chrome new enough to serve a screencast has the CSS field.
+      const width = metrics?.cssVisualViewport?.clientWidth;
+      const height = metrics?.cssVisualViewport?.clientHeight;
       if (typeof width === 'number' && typeof height === 'number' && width > 0 && height > 0) {
         held.viewport = { width, height };
         held.metricsStale = false;

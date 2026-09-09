@@ -30,11 +30,18 @@ function fakeCdp() {
      * on it. A test that wants the two spaces to differ says so.
      */
     layout: { clientWidth: 1280, clientHeight: 800 },
+    /** Answer with the deprecated device-pixel field only. See below. */
+    legacyOnly: false,
     async send(method: string, params?: Record<string, unknown>) {
       session.sent.push(method);
       session.calls.push({ method, ...(params ? { params } : {}) });
       if (method === 'Page.getLayoutMetrics') {
-        return { cssVisualViewport: { ...session.layout } };
+        // `legacyOnly` models an older Chrome: the deprecated `visualViewport`
+        // is present and `cssVisualViewport` is not. Its numbers are DEVICE
+        // pixels, which is the whole point — they must not be read as CSS ones.
+        return session.legacyOnly
+          ? { visualViewport: { ...session.layout } }
+          : { cssVisualViewport: { ...session.layout } };
       }
       if (method === 'Page.screencastFrameAck') session.order.push(`ack:${params?.['sessionId']}`);
       return {};
@@ -1356,6 +1363,29 @@ describe('handing the browser to the person watching', () => {
       'and nothing was clicked on a guess',
     ).toHaveLength(before);
     cdp.send = good;
+  });
+
+  it('refuses rather than read device pixels as CSS pixels', async () => {
+    // CDP's legacy `visualViewport` is documented as deprecated and in DEVICE
+    // pixels; `cssVisualViewport` is the CSS-pixel replacement, and CSS pixels
+    // are what `Input.dispatchMouseEvent` takes. Reading one as the other
+    // reintroduces the wrong-coordinate bug at any device scale but 1 — on
+    // precisely the old Chrome a fallback would be there to help. Converting
+    // would need a scale valid for someone else's build; refusing is a fact
+    // about ours.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    cdp.legacyOnly = true;
+    await c.startWatching('run-A', () => {});
+    cdp.pushFrame(1);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    const out = await c.input('run-A', { kind: 'click', x: 0.5, y: 0.5 });
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/not been measured/i);
+    expect(cdp.sent, 'nothing was clicked in the wrong units').not.toContain('Input.dispatchMouseEvent');
   });
 
   it('keeps a click inside the picture it claims to come from', async () => {
