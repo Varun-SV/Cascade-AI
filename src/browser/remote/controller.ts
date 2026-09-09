@@ -572,6 +572,13 @@ export class RemoteBrowserController {
   ): Promise<CDPSession | null> {
     const cdp = await held.page.context().newCDPSession(held.page);
 
+    // Cleared before the handler exists, not after the stream starts. A CDP
+    // event does not wait for the command response, and Chrome emits the first
+    // frame as soon as the screencast is running — so clearing this after the
+    // awaited `Page.startScreencast` erased the very picture the person is
+    // looking at, and an idle page sends no second frame to correct it.
+    held.framed = false;
+
     cdp.on('Page.screencastFrame', ((e: {
       data?: string;
       sessionId?: number;
@@ -609,7 +616,6 @@ export class RemoteBrowserController {
     held.screencast = cdp;
     held.onFrame = onFrame;
     held.capturing = true;
-    held.framed = false;
     this.announceControl(runId);
     return cdp;
   }

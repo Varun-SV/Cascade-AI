@@ -1661,6 +1661,39 @@ describe('handing the browser to the person watching', () => {
     expect(await c.setCapture('run-A', false), 'once it has, hiding is theirs again').toBe(false);
   });
 
+  it('keeps a frame that arrived while the stream was still starting', async () => {
+    // A CDP event does not wait for the command response. Chrome emits the
+    // first frame as soon as the screencast is running, which can be before
+    // `Page.startScreencast` resolves — so clearing `framed` after that await
+    // erased the one picture the person is actually looking at. On an idle page
+    // no second frame comes to correct it, which made the failure stick: the
+    // client offered Hide because it really had a frame, and the server refused
+    // every request as a page never shown.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const realSend = cdp.send;
+    cdp.send = async (method: string, params?: Record<string, unknown>) => {
+      const out = await realSend.call(cdp, method, params);
+      // Delivered before the caller ever sees the start resolve.
+      if (method === 'Page.startScreencast') cdp.pushFrame(1);
+      return out;
+    };
+
+    const seen: unknown[] = [];
+    await c.startWatching('run-A', (f) => seen.push(f));
+    cdp.send = realSend;
+    expect(seen, 'the person is looking at a picture').toHaveLength(1);
+
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    // And nothing else arrives, because the page is idle.
+    expect(await c.setCapture('run-A', false), 'so it is theirs to hide').toBe(false);
+    expect(cdp.sent).toContain('Page.stopScreencast');
+  });
+
   it('brings the page back before the agent acts, after an explicit handback', async () => {
     // Hide the page, give it back, and the agent must not carry on against a
     // panel frozen on the last picture.
