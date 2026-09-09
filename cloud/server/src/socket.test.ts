@@ -1234,6 +1234,53 @@ describe('rememberForReplay / replaySupervision — what a reload gets back', ()
     expect(run.liveView).toBeUndefined();
   });
 
+  it('brings a takeover back after a reload, and drops it with the browser', () => {
+    // A takeover is edge-triggered like everything else here. Without this, a
+    // reload during one came back with the panel saying the agent had the page
+    // while the server still had the person holding it — and Take control
+    // could not repair it, because the controller treats a takeover by the
+    // existing holder as a no-op.
+    const run = freshRun();
+    rememberForReplay(run, 'browser:live-view', { active: true, taskId: 't1' });
+    rememberForReplay(run, 'browser:control', { taskId: 't1', human: true, capturing: false });
+    expect(run.control).toEqual({ taskId: 't1', human: true, capturing: false });
+
+    // A refusal is not a statement of ownership: it describes a moment that has
+    // already passed, and replaying it into a fresh page is noise about
+    // something the person did before they reloaded.
+    rememberForReplay(run, 'browser:control', { taskId: 't1', detail: 'That key cannot be sent to the page.' });
+    expect(run.control, 'still the last thing that said who holds it')
+      .toEqual({ taskId: 't1', human: true, capturing: false });
+
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+    // AFTER the live view, because the client files control state against the
+    // browser entry for the run and drops a control message for a run it has
+    // no entry for.
+    expect(emitted.map((e) => e.event)).toEqual(['browser:live-view', 'browser:control']);
+    expect(emitted[1]?.payload, 'including that the picture was left paused')
+      .toEqual({ taskId: 't1', human: true, capturing: false });
+
+    // Handing the browser back stops it being replayed at all.
+    rememberForReplay(run, 'browser:control', { taskId: 't1', human: false, capturing: true });
+    expect(run.control).toBeUndefined();
+  });
+
+  it('does not let a takeover outlive the browser it was a takeover of', () => {
+    const run = freshRun();
+    rememberForReplay(run, 'browser:live-view', { active: true, taskId: 't1' });
+    rememberForReplay(run, 'browser:control', { taskId: 't1', human: true, capturing: true });
+
+    // The run gives the browser up while the person still nominally holds it.
+    rememberForReplay(run, 'browser:live-view', { active: false, taskId: 't1' });
+
+    expect(run.liveView).toBeUndefined();
+    expect(run.control, 'a live-looking panel on a dead run is its own kind of lie').toBeUndefined();
+    const { emitted, socket } = recorder();
+    replaySupervision(run, socket);
+    expect(emitted).toEqual([]);
+  });
+
   it('keeps an outstanding approval until permission:resolved names it, keyed by id or requestId', () => {
     const run = freshRun();
     rememberForReplay(run, 'permission:user-required', { id: 'req-1', conversationId: 'c1', tool: 'browser_control' });

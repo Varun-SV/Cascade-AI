@@ -149,6 +149,16 @@ export interface LiveRun {
    */
   conversationId?: string;
   /**
+   * Who holds the browser, when a person does.
+   *
+   * The takeover is edge-triggered like everything else here — announced when
+   * it changes and never again — so a reload during one came back with the
+   * panel saying the agent had the page while the server still had the person
+   * holding it. Pressing Take control did not repair it either: the controller
+   * treats a takeover by the existing holder as a no-op.
+   */
+  control?: Record<string, unknown>;
+  /**
    * The supervision surface a replacement connection has to be given back.
    *
    * These two events are what make the hosted browser safe to run at all: the
@@ -202,8 +212,29 @@ export function rememberForReplay(run: LiveRun, event: string, payload: unknown)
     // `active: false` is the run giving the browser up. Dropping the entry
     // rather than storing it also drops the live-view URL, which is a bearer
     // capability and has no business outliving the session it opens.
-    if (p['active'] === true) run.liveView = p;
-    else delete run.liveView;
+    if (p['active'] === true) {
+      run.liveView = p;
+    } else {
+      delete run.liveView;
+      // And with it, who was holding it. A takeover cannot outlive the browser
+      // it was a takeover OF, and replaying "you have control" for a session
+      // that is gone would put a live-looking panel on a dead run.
+      delete run.control;
+    }
+    return;
+  }
+  if (event === 'browser:control') {
+    // Only a statement of OWNERSHIP is worth keeping. A message carrying just a
+    // detail describes a moment that has already passed — replaying "that key
+    // cannot be sent" into a fresh page is noise about something the person did
+    // before they reloaded.
+    if (typeof p['human'] !== 'boolean') return;
+    // And only while it is still true, the same rule the live view follows.
+    // `human: false` is the client's own default, so replaying it says nothing;
+    // storing it would only risk carrying a stale `capturing: false` into a
+    // page whose agent is about to turn the picture back on anyway.
+    if (p['human'] === true) run.control = p;
+    else delete run.control;
     return;
   }
   if (event === 'permission:user-required') {
@@ -245,6 +276,12 @@ export function resumeAndReplay(
 export function replaySupervision(run: LiveRun, socket: Pick<Socket, 'emit'>): void {
   if (run.done) return;
   if (run.liveView) socket.emit('browser:live-view', run.liveView);
+  // AFTER the live view, and that ordering is load-bearing rather than tidy:
+  // the client files control state against the browser entry for the run, and
+  // drops a control message for a run it has no entry for. Replayed first, it
+  // would be discarded and the reloaded page would come back believing the
+  // agent still had a browser the person was actually holding.
+  if (run.control) socket.emit('browser:control', run.control);
   for (const request of run.approvals?.values() ?? []) {
     socket.emit('permission:user-required', request);
   }

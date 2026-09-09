@@ -228,7 +228,10 @@ export class BrowserLease {
   touch(): void {
     if (this.actor !== HUMAN_ACTOR) return;
     this.clearHumanIdle();
-    this.humanTimer = setTimeout(() => this.release(), HUMAN_IDLE_MS);
+    // Through handBack rather than straight to release, so a lapse obeys the
+    // same "not while their event is still landing" rule an explicit handback
+    // does. One rule, one place, whichever way the hold ends.
+    this.humanTimer = setTimeout(() => { this.handBack(); }, HUMAN_IDLE_MS);
     this.humanTimer.unref?.();
   }
 
@@ -240,6 +243,19 @@ export class BrowserLease {
    */
   handBack(): boolean {
     if (this.actor !== HUMAN_ACTOR) return false;
+    // NEVER while one of their own events is still landing. The person's click
+    // is dispatched over CDP and awaited; releasing while it is in flight lets
+    // the next agent action acquire and start on top of a click that has not
+    // finished — the exact overlap a takeover exists to prevent, reintroduced
+    // at the moment control changes hands. Re-checked shortly rather than
+    // waited on inline, because a caller holding the lease open to wait is the
+    // same deadlock in a different shape.
+    if (this.action) {
+      this.clearHumanIdle();
+      this.humanTimer = setTimeout(() => { this.handBack(); }, ACTION_HANDOFF_POLL_MS);
+      this.humanTimer.unref?.();
+      return false;
+    }
     this.release();
     return true;
   }

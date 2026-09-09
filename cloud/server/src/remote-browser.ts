@@ -45,6 +45,15 @@ interface AttachOptions {
   conversationId: string;
   /** The run owner's socket. The live view goes here and nowhere else. */
   emit: (event: string, payload: unknown) => void;
+  /**
+   * Where frames go, when the caller has a lossy channel to send them on.
+   *
+   * Separate from `emit` because frames are the one thing worth DROPPING. Every
+   * other event on this socket is a fact that must arrive — a live view, a
+   * control change, a refusal — while a frame is only the newest picture, and
+   * one that cannot be written now is worthless by the time it could be.
+   */
+  emitFrame?: (event: string, payload: unknown) => void;
   /** Somewhere to record a misconfiguration without failing the run. */
   warn?: (message: string) => void;
 }
@@ -136,6 +145,17 @@ export async function resetSharedBrowser(): Promise<void> {
   const previous = shared;
   shared = null;
   await previous?.controller.dispose();
+}
+
+/**
+ * Where this run's frames should go.
+ *
+ * Its own function because the fallback is the part that can silently regress:
+ * drop `emitFrame` and frames quietly become reliable again, banking stale
+ * JPEGs behind a slow viewer with nothing failing to say so.
+ */
+export function frameEmitter(opts: Pick<AttachOptions, 'emit' | 'emitFrame'>): (event: string, payload: unknown) => void {
+  return opts.emitFrame ?? opts.emit;
 }
 
 export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null {
@@ -236,12 +256,13 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
     async watch() {
       if (!taskId) return false;
       const id = taskId;
+      const sendFrame = frameEmitter(opts);
       return await controller.startWatching(id, (frame) => {
         // To this socket only. A frame is a picture of whatever the agent is
         // looking at — a half-filled form, a logged-in page — so it is exactly
         // as sensitive as the live-view URL it replaces, and travels the same
         // single path to the run's owner.
-        opts.emit('browser:frame', {
+        sendFrame('browser:frame', {
           conversationId: opts.conversationId,
           // Echoed so a client showing several chats can route the frame, and
           // so a late frame from a finished run is discardable.

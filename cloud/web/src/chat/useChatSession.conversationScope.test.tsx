@@ -776,6 +776,27 @@ describe('useChatSession — frames of the agent\'s browser', () => {
     expect(view.result.current.browserFrame?.data).toBe('MINE');
   });
 
+  it('drops the picture when capture is paused', () => {
+    // Hiding the page has to actually hide it. Keeping the last frame on
+    // screen would show a page that may have changed since — the stale-picture
+    // failure, dressed up as a working panel.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'BEFORE'));
+      fake.fire('browser:control', { conversationId: 'conv-a', taskId: 'task-a', human: true, capturing: true });
+    });
+    expect(view.result.current.browserFrame?.data).toBe('BEFORE');
+
+    act(() => {
+      fake.fire('browser:control', { conversationId: 'conv-a', taskId: 'task-a', human: true, capturing: false });
+    });
+    expect(view.result.current.browserFrame, 'nothing to look at while it is paused').toBeUndefined();
+    expect(view.result.current.browserCapturing).toBe(false);
+  });
+
   it('ignores a browser message that names no run at all', () => {
     // The guard used to reject only when BOTH ids were present and differed,
     // so an untagged message landed in whichever pane was on screen. This

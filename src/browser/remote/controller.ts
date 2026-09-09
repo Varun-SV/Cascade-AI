@@ -206,14 +206,20 @@ interface RunBrowser {
    */
   screencast?: CDPSession;
   /**
-   * The stream being set up, while it is still being set up.
+   * Watch and unwatch, applied in the order they were asked for.
    *
-   * Held so that a second watcher and an early stop can both SEE an attach
-   * that has not finished. Without it the check and the assignment sat either
-   * side of an await, which is the same check-then-act the session pool had to
-   * fix in `open()` — and it went wrong the same two ways.
+   * A queue rather than a "busy" flag, because the flag answered the wrong
+   * question. It could tell a second watcher that an attach was in progress,
+   * so that watcher gave up — and if an unwatch was sitting between the two,
+   * it then tore down the very stream the second watcher wanted, leaving a
+   * mounted panel with nothing streaming and nobody left to ask again. What
+   * matters is the LAST thing asked for, not whether something is in flight,
+   * and running the requests in order is the simplest way to honour that.
+   *
+   * The client produces exactly that sequence on its own: a mount that runs,
+   * cleans up and runs again emits watch, unwatch, watch with nothing between.
    */
-  attaching?: Promise<CDPSession | null>;
+  watchQueue?: Promise<unknown>;
   /**
    * Whether that session is currently producing frames.
    *
@@ -397,7 +403,7 @@ export class RemoteBrowserController {
    * interesting to a viewer — the agent had it before and has it now — and
    * emitting them would put a socket message on every click the agent makes.
    */
-  private announceControl(runId: string): void {
+  private announceControl(runId: string, force = false): void {
     const listener = this.controlListeners.get(runId);
     if (!listener) return;
     const state: BrowserControlState = {
@@ -405,7 +411,7 @@ export class RemoteBrowserController {
       capturing: this.runs.get(runId)?.capturing === true,
     };
     const key = `${state.human}:${state.capturing}`;
-    if (this.controlAnnounced.get(runId) === key) return;
+    if (!force && this.controlAnnounced.get(runId) === key) return;
     this.controlAnnounced.set(runId, key);
     listener(state);
   }
@@ -470,11 +476,16 @@ export class RemoteBrowserController {
    * otherwise pay to encode frames nobody sees, on every run, forever — and on
    * a metered provider it would pay for the bandwidth too.
    *
-   * Frames are ACKED after they are handed on, never before, because the ack
-   * is the flow control: Chrome sends the next frame only once the previous
-   * one is acknowledged, so a slow consumer throttles the stream instead of
-   * queueing memory behind it. Dropping the ack stops the stream dead, which is
-   * why the ack is best-effort but unconditional.
+   * Frames are ACKED after they are handed on, never before. Chrome sends the
+   * next frame only once the previous is acknowledged, so this bounds it to one
+   * outstanding frame against OUR OWN handling. It does not reach further than
+   * that, and an earlier version of this comment claimed it did: `onFrame` ends
+   * at a socket emit, which hands the JPEG to a transport rather than to a
+   * viewer, so the ack says nothing about what the person actually received.
+   * Bounding the rest of the path is the transport's job — see `emitFrame`,
+   * where frames go out lossy so a slow connection drops pictures instead of
+   * banking stale ones. Dropping the ack stops the stream dead, which is why it
+   * is best-effort but unconditional.
    *
    * Returns false when there is nothing to watch — the run has no browser, or
    * it is already being watched. Callers use that to avoid promising a viewer
@@ -482,30 +493,29 @@ export class RemoteBrowserController {
    */
   async startWatching(runId: string, onFrame: (frame: BrowserFrame) => void): Promise<boolean> {
     const held = this.runs.get(runId);
-    if (!held || held.screencast || held.attaching) return false;
+    if (!held) return false;
+    // Queued rather than refused. The check for "already watching" happens
+    // INSIDE the queued turn, once everything asked for earlier has actually
+    // been applied — so a watch that follows an unwatch attaches, instead of
+    // seeing the outgoing stream and giving up on one it was meant to replace.
+    return await this.queueWatch(held, async () => {
+      if (held.screencast) return false;
+      return (await this.attachScreencast(runId, held, onFrame)) !== null;
+    });
+  }
 
-    // Reserved SYNCHRONOUSLY, before the first await, for exactly the reason
-    // `open()` takes its pool slot synchronously. The check and the assignment
-    // used to sit either side of `newCDPSession`, so two watches starting
-    // together both passed: the second overwrote the first, leaving a CDP
-    // session attached, streaming and unreachable — the precise cost this
-    // method exists to avoid. And a `stopWatching` arriving in that window
-    // found nothing to stop, then the attach completed behind it and Chrome
-    // kept encoding for a panel that was already closed. Both are reachable
-    // from the client's own effect: a mount that runs, cleans up and runs
-    // again emits watch, unwatch, watch with nothing in between.
-    //
-    // A promise rather than a boolean flag, because a stop has to be able to
-    // WAIT for the attach rather than merely notice one. The state is settled
-    // inside the promise body, so whoever awaits it finds a stream that is
-    // either fully attached or fully rolled back — never half of either.
-    const attaching = this.attachScreencast(runId, held, onFrame);
-    held.attaching = attaching;
-    try {
-      return (await attaching) !== null;
-    } finally {
-      held.attaching = undefined;
-    }
+  /**
+   * Run one watch or unwatch after every one already asked for.
+   *
+   * The chain is kept non-rejecting on purpose: a failed attach must not poison
+   * every later request for this run, which is what a bare `.then` chain would
+   * do. The caller still sees its own failure, because that is the promise
+   * returned rather than the one stored.
+   */
+  private queueWatch<T>(held: RunBrowser, op: () => Promise<T>): Promise<T> {
+    const mine = (held.watchQueue ?? Promise.resolve()).then(op, op);
+    held.watchQueue = mine.catch(() => {});
+    return mine;
   }
 
   /** Open the CDP session and start the stream, or leave nothing behind. */
@@ -555,21 +565,18 @@ export class RemoteBrowserController {
   async stopWatching(runId: string): Promise<void> {
     const held = this.runs.get(runId);
     if (!held) return;
-    // Waited out rather than raced. A stop landing mid-attach used to find no
-    // session and return, and the attach then finished behind it — a stream
-    // running for a panel that had already closed, which nothing afterwards
-    // would ever stop.
-    if (held.attaching) await held.attaching.catch(() => {});
-    const cdp = held.screencast;
-    if (!cdp) return;
-    held.screencast = undefined;
-    held.capturing = false;
-    this.announceControl(runId);
-    // Both best-effort and in this order: stop the stream first so no further
-    // frames are produced, then let the session go. A run whose page has
-    // already closed throws on both, and neither failure is actionable.
-    await cdp.send('Page.stopScreencast').catch(() => {});
-    await cdp.detach().catch(() => {});
+    await this.queueWatch(held, async () => {
+      const cdp = held.screencast;
+      if (!cdp) return;
+      held.screencast = undefined;
+      held.capturing = false;
+      this.announceControl(runId);
+      // Both best-effort and in this order: stop the stream first so no further
+      // frames are produced, then let the session go. A run whose page has
+      // already closed throws on both, and neither failure is actionable.
+      await cdp.send('Page.stopScreencast').catch(() => {});
+      await cdp.detach().catch(() => {});
+    });
   }
 
   /**
@@ -595,6 +602,15 @@ export class RemoteBrowserController {
     const held = this.runs.get(runId);
     const cdp = held?.screencast;
     if (!held || !cdp) return false;
+    // Only the person holding the page may hide it, and this is the guard that
+    // makes "hidden" a property of the takeover rather than a mode anyone can
+    // set. Without it, a suspended capture outlived the hold that justified it:
+    // hide the page, hand back — or simply let the two-minute hold lapse while
+    // hidden — and the agent could carry on against a panel frozen on the last
+    // picture, which is precisely the invisible agent this panel exists to
+    // prevent. Turning the picture back ON is never refused: restoring
+    // visibility is not a privilege.
+    if (!on && this.leases.get(runId)?.heldByHuman !== true) return held.capturing === true;
     if (held.capturing === on) return on;
     try {
       if (on) await cdp.send('Page.startScreencast', { ...SCREENCAST });
@@ -637,7 +653,16 @@ export class RemoteBrowserController {
       return { ok: false, detail: 'This run has no browser open.' };
     }
     const lease = this.leaseFor(runId);
-    if (lease.heldByHuman) { lease.touch(); return { ok: true }; }
+    if (lease.heldByHuman) {
+      lease.touch();
+      // Said again even though nothing changed, because "nothing changed" is
+      // exactly the situation a reloaded page cannot tell from "you never had
+      // it". Take control is the button someone presses when the panel looks
+      // wrong, so it has to be able to answer rather than dedupe itself into
+      // silence and leave them pressing it.
+      this.announceControl(runId, true);
+      return { ok: true };
+    }
     if (!(await lease.awaitActionSlot(ACTION_TIMEOUT_MS))) {
       return {
         ok: false,
@@ -680,71 +705,120 @@ export class RemoteBrowserController {
       return { ok: false, detail: 'You do not have control of this browser. Take control first.' };
     }
 
+    // The person's events take the SAME action slot the agent's do, and that is
+    // what makes the two mutually exclusive rather than merely nominally so.
+    // Without it, `input` only checked who held the lease and then awaited a
+    // CDP dispatch with nothing recorded: a handback landing in that window let
+    // the agent acquire and act while the click was still going in. It also
+    // serializes the person's own events against each other, so a fast typist
+    // cannot interleave two dispatches on one page.
+    if (!(await lease.awaitActionSlot())) {
+      return { ok: false, detail: 'The last thing you did is still finishing. Try again.' };
+    }
+    const token = lease.beginAction();
+    if (!token) {
+      return { ok: false, detail: 'Another action on this page is already running.' };
+    }
+
     try {
+      // Re-checked after the wait, which is the whole reason the wait is
+      // bounded: a hold can lapse while an earlier event finishes.
+      if (!lease.heldByHuman) {
+        return { ok: false, detail: 'Your control of this browser ended while that was waiting.' };
+      }
       await this.dispatch(cdp, held, event);
     } catch (err) {
       return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+    } finally {
+      lease.endAction(token);
     }
     lease.touch();
     return { ok: true };
   }
 
-  /** Turn one authorised event into CDP calls. Coordinates arrive normalised. */
+  /**
+   * Turn one authorised event into CDP calls. Coordinates arrive normalised.
+   *
+   * A switch with a default that REFUSES, rather than a chain of ifs ending in
+   * the click branch. This is a mutation boundary reached from a socket, so the
+   * question is not what a well-formed event does but what a malformed one
+   * does: the chain answered "clicks", which meant a version-skewed client
+   * sending `{ kind: 'drag', x, y }` pressed the mouse on a real page, and a
+   * kind with no coordinates at all clamped to 0 and clicked the top-left
+   * corner. Unknown input has to fail closed.
+   *
+   * The `never` in the default is the other half: adding a member to
+   * `BrowserInput` without handling it here stops compiling, so the next kind
+   * cannot silently inherit whatever the last branch happened to be.
+   */
   private async dispatch(cdp: CDPSession, held: RunBrowser, event: BrowserInput): Promise<void> {
-    if (event.kind === 'text') {
-      // Bounded because it crosses a socket and lands in a page: a paste is a
-      // reasonable thing to do during a takeover, a novel is not.
-      const text = String(event.text ?? '').slice(0, 4_000);
-      if (!text) return;
-      await cdp.send('Input.insertText', { text });
-      return;
-    }
-    if (event.kind === 'key') {
-      const spec = KEYS[event.key];
-      if (!spec) throw new Error(`That key cannot be sent to the page: ${event.key}`);
-      const base = {
-        key: event.key,
-        code: event.key,
-        windowsVirtualKeyCode: spec.code,
-        nativeVirtualKeyCode: spec.code,
-        ...(spec.text ? { text: spec.text } : {}),
-      };
-      await cdp.send('Input.dispatchKeyEvent', { ...base, type: spec.text ? 'keyDown' : 'rawKeyDown' });
-      await cdp.send('Input.dispatchKeyEvent', { ...base, type: 'keyUp' });
-      return;
-    }
+    switch (event.kind) {
+      case 'text': {
+        // Bounded because it crosses a socket and lands in a page: a paste is a
+        // reasonable thing to do during a takeover, a novel is not.
+        const text = String(event.text ?? '').slice(0, 4_000);
+        if (!text) return;
+        await cdp.send('Input.insertText', { text });
+        return;
+      }
+      case 'key': {
+        const spec = KEYS[event.key];
+        if (!spec) throw new Error(`That key cannot be sent to the page: ${event.key}`);
+        const base = {
+          key: event.key,
+          code: event.key,
+          windowsVirtualKeyCode: spec.code,
+          nativeVirtualKeyCode: spec.code,
+          ...(spec.text ? { text: spec.text } : {}),
+        };
+        await cdp.send('Input.dispatchKeyEvent', { ...base, type: spec.text ? 'keyDown' : 'rawKeyDown' });
+        await cdp.send('Input.dispatchKeyEvent', { ...base, type: 'keyUp' });
+        return;
+      }
+      case 'move':
+      case 'scroll':
+      case 'click': {
+        // The viewport comes from a frame, so an event arriving before the
+        // first one has nowhere to land. Refused rather than guessed at a
+        // default size: a click placed by guesswork lands on whatever happens
+        // to be there.
+        const view = held.viewport;
+        if (!view) throw new Error('The page has not been seen yet, so a click cannot be placed on it.');
+        const x = clamp01(event.x) * view.width;
+        const y = clamp01(event.y) * view.height;
 
-    // The viewport comes from a frame, so an event arriving before the first
-    // one has nowhere to land. Refused rather than guessed at a default size:
-    // a click placed by guesswork lands on whatever happens to be there.
-    const view = held.viewport;
-    if (!view) throw new Error('The page has not been seen yet, so a click cannot be placed on it.');
-    const x = clamp01(event.x) * view.width;
-    const y = clamp01(event.y) * view.height;
+        if (event.kind === 'move') {
+          await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
+          return;
+        }
+        if (event.kind === 'scroll') {
+          await cdp.send('Input.dispatchMouseEvent', {
+            type: 'mouseWheel', x, y, button: 'none', buttons: 0,
+            deltaX: 0, deltaY: clampScroll(event.deltaY),
+          });
+          return;
+        }
 
-    if (event.kind === 'move') {
-      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
-      return;
+        const button = event.button && event.button in BUTTONS ? event.button : 'left';
+        const buttons = BUTTONS[button];
+        // Double-click is two events with clickCount 2, which pages read to
+        // mean word-selection. Capped because a click count is a number from a
+        // client.
+        const clickCount = Math.min(Math.max(Math.trunc(event.clicks ?? 1), 1), 3);
+        // Moved first: hover states, menus and anything listening for mouseover
+        // otherwise never see the pointer arrive, and a press on an element
+        // that was never hovered is not what a real click looks like.
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, buttons, clickCount });
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, buttons: 0, clickCount });
+        return;
+      }
+      default: {
+        const unknown: never = event;
+        throw new Error(`That is not something that can be done to the page: ${
+          (unknown as { kind?: unknown })?.kind ?? 'an event with no kind'}`);
+      }
     }
-    if (event.kind === 'scroll') {
-      await cdp.send('Input.dispatchMouseEvent', {
-        type: 'mouseWheel', x, y, button: 'none', buttons: 0,
-        deltaX: 0, deltaY: clampScroll(event.deltaY),
-      });
-      return;
-    }
-
-    const button = event.button && event.button in BUTTONS ? event.button : 'left';
-    const buttons = BUTTONS[button];
-    // Double-click is two events with clickCount 2, which pages read to mean
-    // word-selection. Capped because a click count is a number from a client.
-    const clickCount = Math.min(Math.max(Math.trunc(event.clicks ?? 1), 1), 3);
-    // Moved first: hover states, menus and anything listening for mouseover
-    // otherwise never see the pointer arrive, and a press on an element that
-    // was never hovered is not what a real click looks like to the page.
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, buttons, clickCount });
-    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, buttons: 0, clickCount });
   }
 
   /** The user stopped this run. Refuses further actions and clears its queue. */
@@ -823,7 +897,9 @@ export class RemoteBrowserController {
     // Before the page and the connection it rides on. A screencast left
     // attached would keep Chrome encoding frames for a run that is over, into
     // a session about to be detached underneath it.
-    if (held.attaching) await held.attaching.catch(() => {});
+    // Everything asked of the stream, applied, before its session is taken
+    // away — otherwise an attach still queued completes into a run that is over.
+    await held.watchQueue?.catch(() => {});
     const watching = held.screencast;
     held.screencast = undefined;
     if (watching) {
@@ -932,6 +1008,25 @@ export class RemoteBrowserController {
       if (context.signal?.aborted || held.abort.signal.aborted) {
         await this.releaseIfIdle(runId);
         return { ok: false, detail: 'The run was cancelled.' };
+      }
+
+      // The page must be VISIBLE before anything changes it.
+      //
+      // The other half of the guard above: a takeover can end — handed back, or
+      // lapsed — while capture is still suspended, and the agent's next action
+      // would then run behind a paused panel. Restoring here rather than at the
+      // moment the hold ends puts the check where it actually matters: between
+      // acquiring the browser and touching the page, nothing has happened yet,
+      // so this is the last point at which "you can see it" is still true to
+      // enforce. If the picture cannot be brought back, the action does not
+      // happen — the same trade the desktop's visibility gate makes.
+      if (held.screencast && held.capturing === false) {
+        if (!(await this.setCapture(runId, true))) {
+          return {
+            ok: false,
+            detail: 'The page could not be shown again, so nothing was done to it.',
+          };
+        }
       }
 
       return await this.perform(held, action, planned);

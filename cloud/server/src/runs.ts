@@ -281,6 +281,13 @@ export function formatZodError(err: ZodError): string {
  */
 export interface RunSocket {
   emit(event: string, payload: unknown): unknown;
+  /**
+   * Socket.IO's lossy channel, where a real `Socket` has one.
+   *
+   * Optional because the non-web callers of this interface do not: an SSE or
+   * OpenAI-compatible caller has no socket at all. Only the screencast uses it.
+   */
+  volatile?: { emit(event: string, payload: unknown): unknown };
   // `any[]` rather than a narrower tuple because socket.io declares `on`/`off`
   // as function-valued PROPERTIES, not methods — so strictFunctionTypes checks
   // them contravariantly and only `any` is assignable in both directions. A
@@ -1244,6 +1251,15 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     // ONE socket, the run's owner. The live-view URL is a bearer capability:
     // anyone holding it can watch the browser and drive it.
     emit: (event, payload) => socket.emit(event, payload),
+    // Frames go out LOSSY, and that is the honest version of the backpressure
+    // story. Chrome's ack bounds it to one outstanding frame against our own
+    // handling — but `emit` only hands the JPEG to the transport, so acking
+    // after it says nothing about whether the viewer consumed anything, and a
+    // slow or half-dead connection would bank stale frames in the Engine.IO
+    // buffer. Volatile drops what the transport cannot write, which is the
+    // right trade for a live view: the next picture is always better than a
+    // queued old one.
+    emitFrame: (event, payload) => (socket.volatile ?? socket).emit(event, payload),
     warn: (message) => console.warn(`[run ${conversation.id}] remote browser: ${message}`),
   });
   // The kill switch, alongside the live view that makes it meaningful. Scoped

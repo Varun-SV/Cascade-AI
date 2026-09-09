@@ -3,7 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { attachRemoteBrowser, asWatchOnlyViewer, resetSharedBrowser, sharedBrowserGeneration } from './remote-browser.js';
+import { attachRemoteBrowser, asWatchOnlyViewer, frameEmitter, resetSharedBrowser, sharedBrowserGeneration } from './remote-browser.js';
 import { Cascade, type CascadeConfig } from '#cascade-ai';
 
 /**
@@ -238,6 +238,23 @@ describe('the session pool is the deployment\'s, not one run\'s', () => {
 // form, a page someone is signed into. They are exactly as sensitive as the
 // live-view URL they replace, so who may ask for them, and where they go,
 // matters as much as who may press Stop.
+describe('where frames are sent', () => {
+  it('prefers the lossy channel, and says so by falling back only when there is none', () => {
+    // The fallback is the part that regresses silently: drop `emitFrame` and
+    // frames quietly become reliable again, banking stale JPEGs behind a slow
+    // viewer with nothing failing to say so.
+    const reliable = vi.fn();
+    const lossy = vi.fn();
+
+    frameEmitter({ emit: reliable, emitFrame: lossy })('browser:frame', { a: 1 });
+    expect(lossy).toHaveBeenCalledOnce();
+    expect(reliable, 'a frame never takes the reliable path when a lossy one exists').not.toHaveBeenCalled();
+
+    frameEmitter({ emit: reliable })('browser:frame', { a: 1 });
+    expect(reliable, 'and a caller with no lossy channel still gets its frames').toHaveBeenCalledOnce();
+  });
+});
+
 describe('asking to watch a run', () => {
   const cdp = { tools: { remoteBrowser: { provider: 'cdp' as const, url: 'ws://browser.test:9222' } } };
 

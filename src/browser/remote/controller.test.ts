@@ -1282,6 +1282,30 @@ describe('handing the browser to the person watching', () => {
       .toEqual([['keyDown', 13], ['keyUp', 13]]);
   });
 
+  it('refuses a kind it does not know instead of clicking', async () => {
+    // A mutation boundary reached from a socket. The old chain of ifs ended in
+    // the click branch, so a version-skewed or malformed event — `drag`, or a
+    // kind with no coordinates at all — pressed the mouse on a real page, at
+    // the top-left corner when the coordinates were missing.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    const out = await c.input('run-A', { kind: 'drag', x: 0.5, y: 0.5 } as never);
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/not something that can be done/i);
+
+    const bare = await c.input('run-A', { kind: 'click' } as never);
+    expect(bare.ok, 'a click with no coordinates is still a click').toBe(true);
+
+    expect(
+      cdp.calls.filter((call) => call.method === 'Input.dispatchMouseEvent' && call.params?.['type'] === 'mousePressed'),
+      'exactly one press, from the well-formed click',
+    ).toHaveLength(1);
+  });
+
   it('refuses input from someone who has not taken control', async () => {
     // Per event, not per session: a socket that was allowed to click once is
     // not thereby allowed to click for the rest of the run.
@@ -1328,6 +1352,44 @@ describe('handing the browser to the person watching', () => {
     expect(out.detail).toMatch(/streaming/i);
   });
 
+  it('does not let the agent start on top of a click still going in', async () => {
+    // Handback is where the two sides are closest to touching. The person's
+    // click is dispatched over CDP and awaited; if the hold can be released
+    // while that is in flight, the agent acquires and acts on top of it —
+    // exactly the concurrent control a takeover exists to prevent.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    // Hold the person's dispatch open inside CDP.
+    const gate = deferred();
+    const realSend = cdp.send;
+    cdp.send = async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'Input.dispatchMouseEvent' && params?.['type'] === 'mousePressed') await gate.promise;
+      return realSend.call(cdp, method, params);
+    };
+
+    const clicking = c.input('run-A', { kind: 'click', x: 0.5, y: 0.5 });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // The person lets go while their click is still landing.
+    expect(c.handBack('run-A'), 'not while their event is in flight').toBe(false);
+
+    let agentActed = false;
+    const agent = c.controller({ kind: 'click', selector: '#agent' }, ctx('run-A', 'w2'))
+      .then((r) => { agentActed = r.ok; return r; });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(agentActed, 'and the agent is not in the page yet').toBe(false);
+    expect(page.calls, 'nothing of the agent\'s has touched it').not.toContain('click:#agent');
+
+    gate.resolve();
+    cdp.send = realSend;
+    expect((await clicking).ok).toBe(true);
+    await agent;
+  });
+
   it('gives the agent the browser back when the person is done', async () => {
     const { provider } = fakeProvider();
     const c = new RemoteBrowserController({ provider });
@@ -1361,6 +1423,65 @@ describe('handing the browser to the person watching', () => {
 
     expect(await c.setCapture('run-A', true)).toBe(true);
     expect(cdp.sent.filter((m) => m === 'Page.startScreencast')).toHaveLength(2);
+  });
+
+  it('will not let anyone but the holder hide the page', async () => {
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+
+    // Nobody has taken over, so nobody may make the agent invisible.
+    expect(await c.setCapture('run-A', false)).toBe(true);
+    expect(cdp.sent).not.toContain('Page.stopScreencast');
+  });
+
+  it('brings the page back before the agent acts, after an explicit handback', async () => {
+    // Hide the page, give it back, and the agent must not carry on against a
+    // panel frozen on the last picture.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+    await c.setCapture('run-A', false);
+    expect(cdp.sent).toContain('Page.stopScreencast');
+    c.handBack('run-A');
+
+    const out = await c.controller({ kind: 'click', selector: '#after' }, ctx('run-A', 'w2'));
+
+    expect(out.ok).toBe(true);
+    expect(page.calls).toContain('click:#after');
+    // Restarted before the click, not after it.
+    const restarted = cdp.sent.lastIndexOf('Page.startScreencast');
+    expect(restarted, 'the picture came back').toBeGreaterThan(cdp.sent.indexOf('Page.stopScreencast'));
+  });
+
+  it('brings the page back before the agent acts, after the hold lapses', async () => {
+    // The same hole by the other route, and the one nobody clicks: the person
+    // hides the page to type a password, then walks away.
+    vi.useFakeTimers();
+    try {
+      const { provider } = fakeProvider();
+      const c = new RemoteBrowserController({ provider });
+      await watched(c);
+      c.actorEnded('w1');
+      await c.takeOver('run-A');
+      await c.setCapture('run-A', false);
+
+      await vi.advanceTimersByTimeAsync(150_000);
+      expect(c.humanHolds('run-A'), 'the hold lapsed').toBe(false);
+
+      const acting = c.controller({ kind: 'click', selector: '#after' }, ctx('run-A', 'w2'));
+      await vi.advanceTimersByTimeAsync(100);
+      expect((await acting).ok).toBe(true);
+
+      expect(cdp.sent.filter((m) => m === 'Page.startScreencast'), 'hidden, then shown again')
+        .toHaveLength(2);
+      expect(page.calls).toContain('click:#after');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('refuses a takeover of a run with no browser, and of a stopped one', async () => {
@@ -1400,6 +1521,25 @@ describe('handing the browser to the person watching', () => {
       { human: true, capturing: true },
       { human: true, capturing: false },
     ]);
+  });
+
+  it('answers Take control again for a page that came back not knowing', async () => {
+    // After a reload the client believes the agent has the browser while the
+    // server still has the person holding it. Take control is the button
+    // somebody presses when the panel looks wrong, so a takeover by the
+    // existing holder has to ANSWER rather than dedupe itself into silence and
+    // leave them pressing it.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    const seen: Array<{ human: boolean }> = [];
+    c.onControlFor('run-A', (state) => seen.push({ human: state.human }));
+
+    expect((await c.takeOver('run-A')).ok, 'still theirs').toBe(true);
+    expect(seen, 'and it said so, unchanged though it is').toEqual([{ human: true }]);
   });
 
   it('tells the viewer when a hold lapses, rather than letting it find out', async () => {
@@ -1491,6 +1631,32 @@ describe('two watches racing each other', () => {
 
     expect(cdp.sent).toContain('Page.stopScreencast');
     expect(cdp.detached, 'and the session goes with it').toBe(true);
+  });
+
+  it('ends up watching after watch, unwatch, watch', async () => {
+    // The sequence a StrictMode mount produces on its own, and the one the
+    // pair-wise tests above cannot see. Treating an in-flight attach as a
+    // failed second watch used to leave the panel mounted with no stream: the
+    // second watch gave up, then the queued unwatch tore down the first.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const gate = deferred();
+    cdpGate = gate.promise;
+    const first = c.startWatching('run-A', () => {});
+    const stopping = c.stopWatching('run-A');
+    const second = c.startWatching('run-A', () => {});
+    gate.resolve();
+
+    expect(await first, 'the first watch attached').toBe(true);
+    await stopping;
+    expect(await second, 'and the last one asked for wins').toBe(true);
+
+    // Attached, torn down, attached again — in the order they were asked for.
+    expect(cdp.sent.filter((m) => m === 'Page.startScreencast')).toHaveLength(2);
+    expect(cdp.sent.filter((m) => m === 'Page.stopScreencast')).toHaveLength(1);
+    expect(cdpCreated, 'a session per attach, not one shared or one leaked').toBe(2);
   });
 
   it('lets the run end while a stream is still attaching', async () => {

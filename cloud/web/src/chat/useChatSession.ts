@@ -873,6 +873,11 @@ export function useChatSession(
             ...view,
             ...(typeof e.human === 'boolean' ? { human: e.human } : {}),
             ...(typeof e.capturing === 'boolean' ? { capturing: e.capturing } : {}),
+            // A paused picture must not keep showing the last frame. That
+            // frame is of a page which may have changed since — and a stale
+            // picture of a live browser is worse than none, because it is the
+            // failure this panel exists to prevent wearing the look of working.
+            ...(e.capturing === false ? { frame: undefined } : {}),
             // Cleared by the next thing the server says about this browser —
             // every ownership announcement carries `human`, and none of them
             // carries a detail, so a refusal lasts until something else
