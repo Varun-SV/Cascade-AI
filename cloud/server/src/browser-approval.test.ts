@@ -17,7 +17,7 @@
 //  there would hand the capability to exactly the runs that cannot supervise it.
 
 import { describe, it, expect, vi } from 'vitest';
-import { addressesRun, applyPermissionDecision, buildApprovalCallback, capturePayload, lossyEmitter, type PermissionDecision } from './runs.js';
+import { addressesRun, applyPermissionDecision, buildApprovalCallback, capturePayload, frameSeenPayload, lossyEmitter, type PermissionDecision } from './runs.js';
 
 /**
  * The approval shape runs.ts builds.
@@ -315,6 +315,25 @@ describe('capturePayload — show, hide, or neither', () => {
     // makes the agent invisible — the failure the panel exists to prevent.
     for (const bad of [{}, { on: 'show' }, { on: 'true' }, { on: 1 }, { on: 0 }, { on: null }, undefined]) {
       expect(capturePayload(bad as { on?: unknown }), JSON.stringify(bad)).toBeNull();
+    }
+  });
+});
+
+// The receipt is what opens Hide, so a malformed one must not become watch
+// zero — the same rule as the capture payload, on the field that now carries
+// the whole "they have actually seen this page" claim.
+describe('frameSeenPayload — which watch the viewer is confirming', () => {
+  it('takes a real, finite generation', () => {
+    expect(frameSeenPayload({ generation: 1 })).toBe(1);
+    expect(frameSeenPayload({ generation: 0 })).toBe(0);
+  });
+
+  it('refuses anything that does not name one', () => {
+    for (const bad of [
+      {}, undefined, { generation: '1' }, { generation: null },
+      { generation: Number.NaN }, { generation: Number.POSITIVE_INFINITY },
+    ]) {
+      expect(frameSeenPayload(bad as { generation?: unknown }), JSON.stringify(bad)).toBeNull();
     }
   });
 });

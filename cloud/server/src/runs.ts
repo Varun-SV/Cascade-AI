@@ -321,6 +321,18 @@ export function capturePayload(d: { on?: unknown } | undefined): boolean | null 
   return typeof d?.on === 'boolean' ? d.on : null;
 }
 
+/**
+ * Whether a `browser:frame-seen` payload named a real watch.
+ *
+ * Its own function for the same reason `capturePayload` is: the handler it
+ * guards lives inside `attachRun` and is not reachable from a test, and the
+ * shape it rejects is exactly what must not be coerced. A receipt is what opens
+ * Hide, so a malformed one must not become watch zero.
+ */
+export function frameSeenPayload(d: { generation?: unknown } | undefined): number | null {
+  return typeof d?.generation === 'number' && Number.isFinite(d.generation) ? d.generation : null;
+}
+
 export function lossyEmitter(socket: RunSocket): (event: string, payload: unknown) => void {
   return (event, payload) => { (socket.volatile ?? socket).emit(event, payload); };
 }
@@ -1404,6 +1416,22 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   };
   socket.on('browser:capture', onBrowserCapture);
 
+  // The viewer telling us it actually has the picture. Reliable rather than
+  // lossy, because a dropped receipt would leave Hide closed for a person who
+  // can see the page perfectly well.
+  //
+  // Silent on a malformed payload, unlike `browser:capture`. That one is a
+  // person pressing a button and deserves an answer when it is refused; this is
+  // the client's own bookkeeping, and a refusal notice for it would be a
+  // message about nothing the person did.
+  const onBrowserFrameSeen = (d: { taskId?: string; generation?: unknown }) => {
+    if (!addressesRun(remoteBrowser?.taskId, d)) return;
+    const generation = frameSeenPayload(d);
+    if (generation === null) return;
+    remoteBrowser?.frameSeen(generation);
+  };
+  socket.on('browser:frame-seen', onBrowserFrameSeen);
+
   // Your thumbs-up/down verdicts, folded into Auto routing as a bounded,
   // sample-size-shrunk adjustment to the public benchmark score. Read once per
   // run and closed over: routing decisions inside a run must not shift halfway
@@ -1668,6 +1696,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
     socket.off('browser:hand-back', onBrowserHandBack);
     socket.off('browser:input', onBrowserInput);
     socket.off('browser:capture', onBrowserCapture);
+    socket.off('browser:frame-seen', onBrowserFrameSeen);
     socket.off('permission:decide', onPermissionDecision);
     // Anything still parked would otherwise hang forever holding a worker.
     for (const resolve of pendingApprovals.values()) resolve({ approved: false, always: false });

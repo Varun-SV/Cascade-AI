@@ -90,6 +90,14 @@ export interface AttachedBrowser {
   input(event: BrowserInput): Promise<{ ok: boolean; detail?: string }>;
   /** Suspend or resume the picture while keeping control. For signing in. */
   setCapture(on: boolean): Promise<boolean>;
+  /**
+   * The viewer confirms it actually received a frame for this watch.
+   *
+   * One per watch rather than per frame, and it gates Hide only — never
+   * Chrome's own frame ack — so the stream stays lossy and nothing about the
+   * frame rate waits on the viewer.
+   */
+  frameSeen(generation: number): void;
 }
 
 /**
@@ -270,6 +278,10 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
           data: frame.data,
           width: frame.width,
           height: frame.height,
+          // Which watch this picture belongs to, so the receipt the client
+          // sends back names what it actually saw rather than whatever is
+          // current by the time it arrives.
+          generation: frame.generation,
         });
       });
     },
@@ -286,6 +298,9 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
     async input(event: BrowserInput) {
       if (!taskId) return { ok: false, detail: 'This run has no browser open.' };
       return await controller.input(taskId, event);
+    },
+    frameSeen(generation: number) {
+      if (taskId) controller.frameSeen(taskId, generation);
     },
     async setCapture(on: boolean) {
       if (!taskId) return false;

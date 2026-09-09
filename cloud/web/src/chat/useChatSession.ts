@@ -383,7 +383,19 @@ export function useChatSession(
        * correct behaviour for a live view and the reason the server acks each
        * frame only once it has been handed on.
        */
-      frame?: { data: string; width: number; height: number };
+      frame?: {
+        data: string; width: number; height: number;
+        /**
+         * Which watch this picture belongs to.
+         *
+         * Sent straight back as a receipt, because the server cannot know a
+         * frame arrived: it goes out on the lossy channel and is DROPPED rather
+         * than queued when the transport is not writable. Hiding the page is
+         * gated on that receipt, so a picture nobody received cannot be the
+         * "you already saw it" that a blind typing surface rests on.
+         */
+        generation: number;
+      };
       /** The server confirmed a stream started, so an empty panel is a bug. */
       streaming?: boolean;
       /** The user holds this page: the agent is being refused until they stop. */
@@ -422,6 +434,8 @@ export function useChatSession(
    * runs, and a conversation-scoped Stop halted all of them.
    */
   const browserTaskId = browserView?.taskId;
+  /** The watch the picture on screen belongs to. See the receipt effect below. */
+  const browserFrameGen = browserView?.frame?.generation;
   // Read by stopBrowser, which is declared before this value and must not close
   // over a stale one when the run changes under it.
   const browserTaskIdRef = useRef<string | undefined>(undefined);
@@ -812,6 +826,7 @@ export function useChatSession(
      */
     const onBrowserFrame = (e: {
       conversationId?: string; taskId?: string; data?: string; width?: number; height?: number;
+      generation?: number;
     }) => {
       if (typeof e?.data !== 'string') return;
       adoptConversationId(e?.conversationId);
@@ -832,7 +847,13 @@ export function useChatSession(
         if (!e.taskId || e.taskId !== view.taskId) return prev;
         return {
           ...prev,
-          [key]: { ...view, frame: { data: e.data!, width: e.width ?? 0, height: e.height ?? 0 } },
+          [key]: {
+            ...view,
+            frame: {
+              data: e.data!, width: e.width ?? 0, height: e.height ?? 0,
+              generation: typeof e.generation === 'number' ? e.generation : 0,
+            },
+          },
         };
       });
     };
@@ -1144,6 +1165,23 @@ export function useChatSession(
       socket.emit('browser:unwatch', { taskId: browserTaskId });
     };
   }, [socket, browserTaskId]);
+
+  // Tell the server this pane actually HAS the picture.
+  //
+  // Frames go out lossy — dropped, not queued, when the transport is not
+  // writable — so handing one to the socket establishes nothing about what
+  // arrived. Hiding the page is gated on this receipt rather than on that
+  // dispatch, because the client the gate protects is an honest stale one whose
+  // Hide is still wired to `streaming`: it never receives the frame, so it never
+  // sends this, and its Hide stays refused.
+  //
+  // Once per watch, not per frame, and from an effect keyed on the generation
+  // so a re-render cannot repeat it. It gates Hide only and never Chrome's own
+  // frame ack, so the stream stays exactly as lossy and as fast as it was.
+  useEffect(() => {
+    if (!socket || !browserTaskId || browserFrameGen === undefined) return;
+    socket.emit('browser:frame-seen', { taskId: browserTaskId, generation: browserFrameGen });
+  }, [socket, browserTaskId, browserFrameGen]);
 
   // Connect only now, and deliberately LAST.
   //

@@ -99,6 +99,14 @@ export interface BrowserFrame {
   /** The remote viewport, so a canvas can size itself without guessing. */
   width: number;
   height: number;
+  /**
+   * Which watch this frame belongs to. See `watchGen`.
+   *
+   * Travels with the picture so the receipt the client sends back names the
+   * watch it actually saw, rather than whichever one is current by the time it
+   * arrives.
+   */
+  generation: number;
 }
 
 /** Who is driving a run's browser, and whether it is being pictured. */
@@ -263,31 +271,39 @@ interface RunBrowser {
    */
   metricsStale?: boolean;
   /**
-   * Whether a frame has been DISPATCHED to the current watcher.
+   * Which watch this is — bumped every time the frame consumer is replaced.
    *
-   * Named for what it proves rather than for what it is used for, because the
-   * two are not the same and an earlier version of this comment claimed they
-   * were. The gate on hiding the page wants "the person saw this page"; what
-   * the server can establish on its own is that it handed a frame to this
-   * watcher's consumer. That consumer ends at `socket.volatile.emit`, which
-   * DROPS rather than queues when the transport is not writable — so a
-   * dispatched frame is not a received one.
-   *
-   * The remaining distance cannot be closed from here. Receipt is a fact only
-   * the client can report, and the client is also who asks to hide the page:
-   * anything willing to lie about the second would lie about the first. So this
-   * is deliberately the server-side half — it rules out the two windows that
-   * ARE server-side facts, a takeover before any frame was sent (`streaming` is
-   * announced the moment `Page.startScreencast` returns) and a reconnect
-   * inheriting the previous viewer's, and it claims nothing more.
-   *
-   * Scoped to the watcher rather than the CDP session, which is a distinction
-   * with a real case behind it: a reconnect deliberately keeps the existing
-   * screencast and only swaps the consumer, so a session-scoped record let a
-   * reloaded page inherit the previous viewer's picture. Cleared wherever the
-   * consumer is replaced, and set where a frame is actually handed to one.
+   * The identity a receipt is checked against, and the reason this is a counter
+   * rather than a flag that gets reset. A reconnect deliberately keeps the
+   * existing screencast and swaps only the consumer, so a record scoped to the
+   * CDP SESSION let a reloaded page inherit the previous viewer's picture.
+   * Making it a generation means a late receipt from the viewer that left
+   * cannot vouch for the one that replaced it — by construction, rather than by
+   * a reset that has to run at the right moment.
    */
-  frameSent?: boolean;
+  watchGen?: number;
+  /**
+   * The watch the client has confirmed RECEIVING a frame for.
+   *
+   * The gate on hiding the page, and deliberately a receipt rather than a
+   * dispatch. `capturing === false` is supposed to mean a blind period the
+   * person CHOSE — they saw the page, put the caret where they wanted it, then
+   * asked us to stop showing it — and handing a frame to `onFrame` does not
+   * establish that: the consumer ends at `socket.volatile.emit`, which DROPS
+   * rather than queues when the transport is not writable.
+   *
+   * That gap is not theoretical for the client this gate exists for. An honest
+   * but stale build, one that offers Hide on `streaming` rather than on having
+   * a frame, does not lie about anything — it simply never receives the picture
+   * and never sends a receipt. Gating on dispatch let its Hide through; gating
+   * on receipt does not, because a dropped frame produces no receipt by
+   * construction.
+   *
+   * One receipt per watch, not per frame. It gates Hide only and never
+   * `Page.screencastFrameAck`, so the stream stays lossy and low-latency and
+   * nothing about the frame rate depends on the viewer answering.
+   */
+  seenGen?: number;
   /**
    * A context this run created and must therefore destroy.
    *
@@ -564,9 +580,12 @@ export class RemoteBrowserController {
       // deliberately keeps an existing screencast across a reconnect, so a reset
       // tied to the CDP session would have let a reloaded page inherit the
       // previous viewer's picture and hide a page it had never been shown.
-      // Cleared BEFORE any attach, so a frame arriving while
-      // `Page.startScreencast` is still in flight still counts.
-      held.frameSent = false;
+      // Bumped BEFORE any attach, so a frame arriving while
+      // `Page.startScreencast` is still in flight carries this watch's number
+      // and its receipt counts. `seenGen` is deliberately NOT cleared: it does
+      // not need to be, because it can no longer match, and a record that goes
+      // stale on its own is one fewer reset to run at the right moment.
+      held.watchGen = (held.watchGen ?? 0) + 1;
       if (held.screencast) return true;
       return (await this.attachScreencast(runId, held, onFrame)) !== null;
     });
@@ -609,13 +628,10 @@ export class RemoteBrowserController {
         // that joined an already-attached stream is the one that receives.
         const deliver = held.onFrame;
         if (deliver) {
-          // Recorded on dispatch to a consumer rather than on emission: a
-          // frame Chrome produced between an unwatch and the next watch went
-          // nowhere at all. What happens after the consumer is the transport's
-          // business, and lossy — see the field's own comment for why that gap
-          // is not closable from this side.
-          held.frameSent = true;
-          deliver({ data: e.data, width, height });
+          // Stamped with the watch it belongs to, so the receipt names what
+          // was actually seen. Nothing is recorded here: what happens past this
+          // consumer is lossy, and the record is the client's to send.
+          deliver({ data: e.data, width, height, generation: held.watchGen ?? 0 });
         }
       }
       // Best-effort: the session may have been detached between the frame
@@ -693,14 +709,17 @@ export class RemoteBrowserController {
     // visibility is not a privilege.
     const lease = this.leaseFor(runId);
     if (!on && !lease.heldByHuman) return held.capturing === true;
-    // And only a page a frame has been sent to this watcher for. Taking control
-    // before the first frame is deliberately allowed — pausing the agent is the
-    // useful half — but the UI offered Hide for any takeover, so the person
-    // could reach the blind typing surface without a picture ever having been
-    // dispatched. Refused here as well as hidden in the client, so an honest
-    // client that has been given no frame cannot be talked into the blind state
-    // by a stale or skewed build.
-    if (!on && held.frameSent !== true) return held.capturing === true;
+    // And only a page this watcher has confirmed RECEIVING a picture of.
+    // Taking control before the first frame is deliberately allowed — pausing
+    // the agent is the useful half — but the UI offered Hide for any takeover,
+    // so the person could reach the blind typing surface with no picture ever
+    // on screen. Refused here as well as hidden in the client, because the
+    // client this protects is the stale one whose button is still wired to
+    // `streaming`; it does not lie, it simply never got the frame, and so it
+    // never sends the receipt.
+    if (!on && (held.watchGen === undefined || held.seenGen !== held.watchGen)) {
+      return held.capturing === true;
+    }
     // Hide and Show are things the holder DID, so they extend the hold like any
     // other authorised event. Without this, clicking Hide at 119.9s took the
     // action slot, the old deadline fired while CDP was still stopping capture,
@@ -804,6 +823,22 @@ export class RemoteBrowserController {
   }
 
   /** The person is done. Answers whether they were holding it at all. */
+  /**
+   * The viewer confirms it received a picture of this run's page.
+   *
+   * Reliable, one per watch, and the only thing that opens Hide. Checked
+   * against the CURRENT watch: a receipt that names an older one is from a
+   * viewer that has since been replaced, and vouching for its successor is the
+   * reconnect hole this counter exists to close.
+   */
+  frameSeen(runId: string, generation: number): void {
+    const held = this.runs.get(runId);
+    if (!held) return;
+    if (typeof generation !== 'number' || !Number.isFinite(generation)) return;
+    if (held.watchGen === undefined || generation !== held.watchGen) return;
+    held.seenGen = generation;
+  }
+
   handBack(runId: string): boolean {
     return this.leases.get(runId)?.handBack() === true;
   }

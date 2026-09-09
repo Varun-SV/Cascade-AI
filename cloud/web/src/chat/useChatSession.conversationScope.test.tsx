@@ -711,9 +711,60 @@ describe('useChatSession — frames of the agent\'s browser', () => {
   function liveView(conversationId: string, taskId: string, url?: string) {
     return { conversationId, taskId, liveViewUrl: url, active: true };
   }
-  function frame(conversationId: string, taskId: string, data: string) {
-    return { conversationId, taskId, data, width: 1280, height: 800 };
+  function frame(conversationId: string, taskId: string, data: string, generation = 1) {
+    return { conversationId, taskId, data, width: 1280, height: 800, generation };
   }
+
+  it('tells the server it actually has the picture, once per watch', () => {
+    // Frames go out lossy — dropped, not queued, when the transport is not
+    // writable — so handing one to the socket establishes nothing about what
+    // arrived. Hiding the page is gated on this receipt instead, which is what
+    // stops an honest stale client, whose Hide is still wired to `streaming`,
+    // asking for a blind typing surface over a page it never received.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'AAAA', 7));
+    });
+
+    const seen = () => fake.sent.filter((m) => m.event === 'browser:frame-seen');
+    expect(seen().map((m) => m.payload)).toEqual([{ taskId: 'task-a', generation: 7 }]);
+
+    // Once per WATCH, not per frame: a live view would otherwise spend a
+    // reliable round trip on every repaint of a busy page.
+    act(() => {
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'BBBB', 7));
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'CCCC', 7));
+    });
+    expect(seen(), 'the same watch is confirmed once').toHaveLength(1);
+
+    // A new watch is a new thing to confirm — the previous receipt names a
+    // generation the server has already superseded.
+    act(() => { fake.fire('browser:frame', frame('conv-a', 'task-a', 'DDDD', 8)); });
+    expect(seen().map((m) => m.payload)).toEqual([
+      { taskId: 'task-a', generation: 7 },
+      { taskId: 'task-a', generation: 8 },
+    ]);
+  });
+
+  it('does not confirm a picture it discarded', () => {
+    // The routing guards run first: a frame this pane refused is not a frame
+    // it received, and confirming it would vouch for a page nobody was shown.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-second'));
+      // A late frame from the run this pane has replaced, and one naming no run.
+      fake.fire('browser:frame', frame('conv-a', 'task-first', 'STALE', 3));
+      fake.fire('browser:frame', { conversationId: 'conv-a', data: 'ORPHAN', width: 1, height: 1, generation: 4 });
+    });
+
+    expect(view.result.current.browserFrame, 'neither was shown').toBeUndefined();
+    expect(fake.sent.filter((m) => m.event === 'browser:frame-seen'), 'so neither was confirmed').toHaveLength(0);
+  });
 
   it('shows each conversation the frames of its own browser', () => {
     const fake = fakeSocket();
@@ -744,7 +795,7 @@ describe('useChatSession — frames of the agent\'s browser', () => {
       fake.fire('browser:frame', frame('conv-a', 'task-a', 'NEW'));
     });
 
-    expect(view.result.current.browserFrame).toEqual({ data: 'NEW', width: 1280, height: 800 });
+    expect(view.result.current.browserFrame).toEqual({ data: 'NEW', width: 1280, height: 800, generation: 1 });
   });
 
   it('ignores a frame for a run this pane has no browser for', () => {

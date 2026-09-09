@@ -4,6 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { RemoteBrowserProvider } from './provider.js';
+import type { BrowserFrame } from './controller.js';
 
 /**
  * A CDP session, modelled well enough to test flow control.
@@ -1207,10 +1208,16 @@ describe('handing the browser to the person watching', () => {
   /** Open a run's browser, start its stream, and report one frame. */
   async function watched(c: InstanceType<typeof RemoteBrowserController>, runId = 'run-A') {
     await c.controller({ kind: 'click', selector: '#a' }, ctx(runId, 'w1'));
-    await c.startWatching(runId, () => {});
+    let gen: number | undefined;
+    await c.startWatching(runId, (f) => { gen = f.generation; });
     // The viewport is only ever learned from a frame, so a takeover test that
     // never delivers one is testing a page nobody has seen.
     cdp.pushFrame(1);
+    // And the viewer confirming it HAS that picture, which is what hiding the
+    // page is gated on. Frames go out lossy, so dispatching one establishes
+    // nothing; a setup that skipped this would be modelling a client whose
+    // frame was dropped, which is a different test and there is one below.
+    if (gen !== undefined) c.frameSeen(runId, gen);
   }
 
   it('refuses the agent outright once a person has taken over', async () => {
@@ -1623,7 +1630,8 @@ describe('handing the browser to the person watching', () => {
     const { provider } = fakeProvider();
     const c = new RemoteBrowserController({ provider });
     await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
-    await c.startWatching('run-A', () => {});
+    const shown: BrowserFrame[] = [];
+    await c.startWatching('run-A', (f) => shown.push(f));
     c.actorEnded('w1');
     await c.takeOver('run-A');
 
@@ -1632,7 +1640,46 @@ describe('handing the browser to the person watching', () => {
 
     // A frame arrives, and only now is there a page they have seen to hide.
     cdp.pushFrame(1);
+    expect(await c.setCapture('run-A', false), 'a dispatch is not a viewing').toBe(true);
+    c.frameSeen('run-A', shown[0]!.generation);
     expect(await c.setCapture('run-A', false), 'now it is theirs to hide').toBe(false);
+    expect(cdp.sent).toContain('Page.stopScreencast');
+  });
+
+  it('refuses to hide a page whose picture the viewer never received', async () => {
+    // The state the dispatch-based gate could not tell from a viewing. In
+    // production the consumer ends at `socket.volatile.emit`, which DROPS
+    // rather than queues when the transport is not writable — so a frame handed
+    // on is not a frame that arrived. The client this protects is an honest
+    // stale one whose Hide is still wired to `streaming`: it does not lie about
+    // anything, it simply never gets the picture, so it never sends the
+    // receipt and its Hide stays refused.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    const sent: BrowserFrame[] = [];
+    await c.startWatching('run-A', (f) => sent.push(f));
+    cdp.pushFrame(1);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    expect(sent, 'the server dispatched a frame').toHaveLength(1);
+    expect(await c.setCapture('run-A', false), 'which is not one arriving').toBe(true);
+    expect(cdp.sent).not.toContain('Page.stopScreencast');
+
+    // A receipt naming some other watch is not a receipt for this one.
+    c.frameSeen('run-A', sent[0]!.generation + 1);
+    expect(await c.setCapture('run-A', false), 'a receipt for another watch').toBe(true);
+    // Nor is one that is not a number at all — the same rule the rest of this
+    // boundary follows, and this field is what opens the blind typing surface.
+    c.frameSeen('run-A', Number.NaN);
+    c.frameSeen('run-A', undefined as never);
+    expect(await c.setCapture('run-A', false), 'nor a malformed one').toBe(true);
+    expect(cdp.sent, 'none of them touched the picture').not.toContain('Page.stopScreencast');
+
+    // The viewer's own, for the watch it actually saw, does.
+    c.frameSeen('run-A', sent[0]!.generation);
+    expect(await c.setCapture('run-A', false), 'confirmed, so it is theirs to hide').toBe(false);
     expect(cdp.sent).toContain('Page.stopScreencast');
   });
 
@@ -1646,7 +1693,8 @@ describe('handing the browser to the person watching', () => {
     const c = new RemoteBrowserController({ provider });
     await watched(c);
     await c.stopWatching('run-A');
-    await c.startWatching('run-A', () => {});
+    const fresh: BrowserFrame[] = [];
+    await c.startWatching('run-A', (f) => fresh.push(f));
     c.actorEnded('w1');
     await c.takeOver('run-A');
 
@@ -1658,6 +1706,7 @@ describe('handing the browser to the person watching', () => {
     ).toHaveLength(stopped);
 
     cdp.pushFrame(1);
+    c.frameSeen('run-A', fresh[0]!.generation);
     expect(await c.setCapture('run-A', false), 'once it has, hiding is theirs again').toBe(false);
   });
 
@@ -1681,10 +1730,14 @@ describe('handing the browser to the person watching', () => {
       return out;
     };
 
-    const seen: unknown[] = [];
+    const seen: BrowserFrame[] = [];
     await c.startWatching('run-A', (f) => seen.push(f));
     cdp.send = realSend;
     expect(seen, 'the person is looking at a picture').toHaveLength(1);
+    // It belongs to THIS watch, which is the property: a generation bumped
+    // after the awaited start would have stamped the frame with the previous
+    // one and the receipt below would name a watch that no longer exists.
+    c.frameSeen('run-A', seen[0]!.generation);
 
     c.actorEnded('w1');
     await c.takeOver('run-A');
@@ -1706,12 +1759,13 @@ describe('handing the browser to the person watching', () => {
     const c = new RemoteBrowserController({ provider });
     await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
 
-    const first: unknown[] = [];
+    const first: BrowserFrame[] = [];
     await c.startWatching('run-A', (f) => first.push(f));
     cdp.pushFrame(1);
     expect(first, 'the first viewer saw the page').toHaveLength(1);
+    c.frameSeen('run-A', first[0]!.generation);
 
-    const second: unknown[] = [];
+    const second: BrowserFrame[] = [];
     expect(await c.startWatching('run-A', (f) => second.push(f)), 'still streaming').toBe(true);
     expect(
       cdp.sent.filter((m) => m === 'Page.startScreencast'),
@@ -1725,9 +1779,15 @@ describe('handing the browser to the person watching', () => {
     expect(await c.setCapture('run-A', false), 'so it is not theirs to hide').toBe(true);
     expect(cdp.sent).not.toContain('Page.stopScreencast');
 
+    // Nor does the departed viewer's own receipt, replayed. It names a watch
+    // that has been superseded, which is what the generation is for.
+    c.frameSeen('run-A', first[0]!.generation);
+    expect(await c.setCapture('run-A', false), 'a stale receipt vouches for nobody').toBe(true);
+
     cdp.pushFrame(2);
     expect(second).toHaveLength(1);
-    expect(await c.setCapture('run-A', false), 'once shown, it is').toBe(false);
+    c.frameSeen('run-A', second[0]!.generation);
+    expect(await c.setCapture('run-A', false), 'once shown AND confirmed, it is').toBe(false);
     expect(cdp.sent).toContain('Page.stopScreencast');
   });
 
