@@ -221,6 +221,15 @@ interface RunBrowser {
    */
   watchQueue?: Promise<unknown>;
   /**
+   * Where this run's frames go, held here rather than captured in the handler.
+   *
+   * So that a watcher arriving to an ALREADY-attached stream still gets the
+   * frames. The CDP handler is registered once, at attach; a second watcher
+   * that only learned "someone is already watching" would otherwise be told a
+   * stream exists while its own callback was never wired to anything.
+   */
+  onFrame?: (frame: BrowserFrame) => void;
+  /**
    * Whether that session is currently producing frames.
    *
    * Separate from having one, because of the credential case: a person typing
@@ -499,7 +508,16 @@ export class RemoteBrowserController {
     // been applied — so a watch that follows an unwatch attaches, instead of
     // seeing the outgoing stream and giving up on one it was meant to replace.
     return await this.queueWatch(held, async () => {
-      if (held.screencast) return false;
+      // Already streaming is STREAMING, not a refusal. The two used to share
+      // `false`, and across a reconnect they are not the same thing at all: a
+      // transient socket drop sends no unwatch, so the screencast survives and
+      // its frames follow the transport to the new connection — but the
+      // reloaded client's `browser:watch` was answered "nothing to stream".
+      // Because CDP frames are adaptive, an idle page then sends nothing, and
+      // the panel could sit forever saying it could not be watched while it
+      // was in fact being watched.
+      held.onFrame = onFrame;
+      if (held.screencast) return true;
       return (await this.attachScreencast(runId, held, onFrame)) !== null;
     });
   }
@@ -537,7 +555,9 @@ export class RemoteBrowserController {
         // Kept for the takeover: this is the only place the remote viewport is
         // ever stated, and a click cannot be placed on the page without it.
         if (width > 0 && height > 0) held.viewport = { width, height };
-        onFrame({ data: e.data, width, height });
+        // Through the run rather than the captured argument, so a later watcher
+        // that joined an already-attached stream is the one that receives.
+        held.onFrame?.({ data: e.data, width, height });
       }
       // Best-effort: the session may have been detached between the frame
       // arriving and this running, and an ack into a dead session is not an
@@ -556,6 +576,7 @@ export class RemoteBrowserController {
     // Recorded BEFORE this promise resolves, so a stop that awaited the attach
     // finds the session rather than racing the assignment.
     held.screencast = cdp;
+    held.onFrame = onFrame;
     held.capturing = true;
     this.announceControl(runId);
     return cdp;
@@ -567,6 +588,7 @@ export class RemoteBrowserController {
     if (!held) return;
     await this.queueWatch(held, async () => {
       const cdp = held.screencast;
+      held.onFrame = undefined;
       if (!cdp) return;
       held.screencast = undefined;
       held.capturing = false;
@@ -784,8 +806,8 @@ export class RemoteBrowserController {
         // to be there.
         const view = held.viewport;
         if (!view) throw new Error('The page has not been seen yet, so a click cannot be placed on it.');
-        const x = clamp01(event.x) * view.width;
-        const y = clamp01(event.y) * view.height;
+        const x = coordinate(event.x, 'horizontal position') * view.width;
+        const y = coordinate(event.y, 'vertical position') * view.height;
 
         if (event.kind === 'move') {
           await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
@@ -794,7 +816,7 @@ export class RemoteBrowserController {
         if (event.kind === 'scroll') {
           await cdp.send('Input.dispatchMouseEvent', {
             type: 'mouseWheel', x, y, button: 'none', buttons: 0,
-            deltaX: 0, deltaY: clampScroll(event.deltaY),
+            deltaX: 0, deltaY: scrollDelta(event.deltaY),
           });
           return;
         }
@@ -1304,14 +1326,29 @@ function refusal(result: 'busy' | 'cancelled' | 'off' | 'human'): string {
   return 'The browser is in use by another part of this run and did not come free in time. Try again, or do something else first.';
 }
 
-/** A client's coordinate, kept inside the picture it claims to be from. */
-function clamp01(n: number): number {
-  return Number.isFinite(n) ? Math.min(Math.max(n, 0), 1) : 0;
+/**
+ * A client's coordinate, kept inside the picture it claims to be from.
+ *
+ * REFUSES anything that is not a finite number rather than coercing it. The
+ * old version returned 0 for a missing or malformed value, which meant a
+ * payload like `{ kind: 'click' }` — no coordinates at all — was not rejected
+ * but pressed the mouse at the top-left corner of a real page. Clamping is for
+ * a position that is out of range; it is not a way to invent one that was
+ * never sent.
+ */
+function coordinate(n: unknown, what: string): number {
+  if (typeof n !== 'number' || !Number.isFinite(n)) {
+    throw new Error(`That ${what} is not a position on the page.`);
+  }
+  return Math.min(Math.max(n, 0), 1);
 }
 
 /** A scroll, bounded so one wheel event cannot ask for an absurd jump. */
-function clampScroll(n: number): number {
-  return Number.isFinite(n) ? Math.min(Math.max(n, -2_000), 2_000) : 0;
+function scrollDelta(n: unknown): number {
+  if (typeof n !== 'number' || !Number.isFinite(n)) {
+    throw new Error('That scroll has no distance to travel.');
+  }
+  return Math.min(Math.max(n, -2_000), 2_000);
 }
 
 /**

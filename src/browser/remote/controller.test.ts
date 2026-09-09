@@ -1144,8 +1144,11 @@ describe('watching a run\'s browser', () => {
     expect(await c.startWatching('never-opened', () => {})).toBe(false);
 
     await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
-    expect(await c.startWatching('run-A', () => {}), 'the first watcher wins').toBe(true);
-    expect(await c.startWatching('run-A', () => {}), 'a second is already served').toBe(false);
+    expect(await c.startWatching('run-A', () => {}), 'the first watcher attaches').toBe(true);
+    // The answer is "is this page streaming", not "did you cause it to". They
+    // used to share `false`, which told a reconnecting client that a stream it
+    // was in fact receiving did not exist.
+    expect(await c.startWatching('run-A', () => {}), 'and so is the second').toBe(true);
   });
 
   it('leaves nothing attached when the stream will not start', async () => {
@@ -1297,12 +1300,32 @@ describe('handing the browser to the person watching', () => {
     expect(out.ok).toBe(false);
     expect(out.detail).toMatch(/not something that can be done/i);
 
-    const bare = await c.input('run-A', { kind: 'click' } as never);
-    expect(bare.ok, 'a click with no coordinates is still a click').toBe(true);
+    // A KNOWN kind with missing or malformed required fields is just as
+    // malformed. An earlier version of this test asserted the opposite — that
+    // a click with no coordinates was "still a click" — which codified the bug
+    // rather than catching it: the coordinates were coerced to 0 and the mouse
+    // was pressed at the top-left corner of a real page.
+    for (const bad of [
+      { kind: 'click' },
+      { kind: 'click', x: 0.5 },
+      { kind: 'move', x: 'left', y: 0.5 },
+      { kind: 'click', x: Number.NaN, y: 0.5 },
+      { kind: 'scroll', x: 0.5, y: 0.5 },
+    ]) {
+      const refused = await c.input('run-A', bad as never);
+      expect(refused.ok, `${JSON.stringify(bad)} must not reach the page`).toBe(false);
+    }
 
     expect(
-      cdp.calls.filter((call) => call.method === 'Input.dispatchMouseEvent' && call.params?.['type'] === 'mousePressed'),
-      'exactly one press, from the well-formed click',
+      cdp.sent.filter((m) => m === 'Input.dispatchMouseEvent'),
+      'not one of them touched the mouse',
+    ).toHaveLength(0);
+
+    // And the well-formed one still works, so this is a gate rather than a wall.
+    expect((await c.input('run-A', { kind: 'click', x: 0.5, y: 0.5 })).ok).toBe(true);
+    expect(
+      cdp.calls.filter((call) => call.params?.['type'] === 'mousePressed'),
+      'exactly one press, from the only valid click',
     ).toHaveLength(1);
   });
 
@@ -1608,8 +1631,8 @@ describe('two watches racing each other', () => {
     const second = c.startWatching('run-A', () => {});
     gate.resolve();
 
-    expect([await first, await second], 'the first asker wins').toEqual([true, false]);
-    expect(cdpCreated, 'and only it opened a session').toBe(1);
+    expect([await first, await second], 'both are streaming').toEqual([true, true]);
+    expect(cdpCreated, 'but only one session was opened').toBe(1);
     expect(cdp.sent.filter((m) => m === 'Page.startScreencast')).toHaveLength(1);
   });
 
@@ -1631,6 +1654,31 @@ describe('two watches racing each other', () => {
 
     expect(cdp.sent).toContain('Page.stopScreencast');
     expect(cdp.detached, 'and the session goes with it').toBe(true);
+  });
+
+  it('tells a reconnecting client the truth about a stream that never stopped', async () => {
+    // A transient socket drop sends no unwatch: the run and its transport
+    // survive, so the screencast stays attached and its frames follow the
+    // rebind. The reloaded client then asks to watch. Answering "nothing to
+    // stream" left the panel saying it could not be watched — and because CDP
+    // frames are adaptive, an idle page sends nothing to correct it, so the
+    // panel could sit wrong indefinitely.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const before: string[] = [];
+    expect(await c.startWatching('run-A', (f) => before.push(f.data))).toBe(true);
+
+    // The page is idle across the reconnect — deliberately no frame here.
+    const after: string[] = [];
+    expect(await c.startWatching('run-A', (f) => after.push(f.data)), 'still streaming').toBe(true);
+    expect(cdp.sent.filter((m) => m === 'Page.startScreencast'), 'and not restarted').toHaveLength(1);
+
+    // And the reconnected client is the one that receives, not the dead one.
+    cdp.pushFrame(1, 'AFTER-RECONNECT');
+    expect(after).toEqual(['AFTER-RECONNECT']);
+    expect(before, 'the connection that went away gets nothing').toEqual([]);
   });
 
   it('ends up watching after watch, unwatch, watch', async () => {

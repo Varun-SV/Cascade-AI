@@ -124,6 +124,29 @@ export function BrowserLiveView({
     return { x, y };
   };
 
+  /**
+   * What the person typed, on its way to the page.
+   *
+   * Shared by the picture and by the privacy placeholder below, because the
+   * whole point of hiding the picture is to keep typing into a page you cannot
+   * see — a handler that lived only on the <img> disappeared with it.
+   */
+  const onKey = (e: React.KeyboardEvent) => {
+    // Modifier chords are not forwarded: they are the viewer's own shortcuts —
+    // copy, reload, close the tab — and stealing them from the person's actual
+    // browser to send to a remote one is worse than not supporting them.
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key.length === 1) {
+      e.preventDefault();
+      onInput?.({ kind: 'text', text: e.key });
+      return;
+    }
+    if (COMMAND_KEYS.has(e.key)) {
+      e.preventDefault();
+      onInput?.({ kind: 'key', key: e.key });
+    }
+  };
+
   const banner = driving
     ? capturing === false
       ? 'You have control. The picture is paused — Cascade cannot see this page either.'
@@ -241,28 +264,52 @@ export function BrowserLiveView({
             const p = at(e.clientX, e.clientY);
             if (p) onInput?.({ kind: 'scroll', ...p, deltaY: e.deltaY });
           } : undefined}
-          onKeyDown={driving ? (e) => {
-            // Modifier chords are not forwarded: they are the viewer's own
-            // shortcuts — copy, reload, close the tab — and stealing them from
-            // the person's actual browser to send to a remote one is worse
-            // than not supporting them.
-            if (e.ctrlKey || e.metaKey || e.altKey) return;
-            if (e.key.length === 1) {
-              e.preventDefault();
-              onInput?.({ kind: 'text', text: e.key });
-              return;
-            }
-            if (COMMAND_KEYS.has(e.key)) {
-              e.preventDefault();
-              onInput?.({ kind: 'key', key: e.key });
-            }
-          } : undefined}
+          onKeyDown={driving ? onKey : undefined}
           style={{
             width: '100%', minHeight: 400, maxHeight: 600, objectFit: 'contain',
             display: 'block', background: '#000',
             ...(driving ? { cursor: 'crosshair' } : { pointerEvents: 'none' }),
           }}
         />
+      )}
+      {/*
+        A place to type when there is no picture to type into.
+
+        Hiding the page is FOR entering a credential, and the input surface
+        lived entirely inside the <img> — so clearing the frame to hide it took
+        the keyboard with it and made the one thing the feature exists for
+        impossible. This keeps a focusable surface for exactly as long as the
+        person holds the page without a picture on it.
+
+        Keys only, deliberately: a pointer coordinate means nothing without a
+        frame to measure it against, and inventing one would put a click
+        somewhere the person could not see.
+      */}
+      {!frame && driving && (
+        <div
+          ref={(el) => {
+            // Focus follows the surface, because the element the person was
+            // typing into just unmounted. Only when the picture was hidden on
+            // purpose — stealing focus while merely waiting for a first frame
+            // would take it out of the composer for no reason.
+            if (el && capturing === false) el.focus();
+          }}
+          role="group"
+          aria-label="Agent browser, picture hidden"
+          tabIndex={0}
+          onKeyDown={onKey}
+          style={{
+            width: '100%', minHeight: 400, display: 'grid', placeItems: 'center',
+            background: '#000', color: 'var(--warn-fg, #f5c96b)', fontSize: 13,
+            textAlign: 'center', padding: 16, cursor: 'text',
+          }}
+        >
+          <span>
+            {capturing === false
+              ? 'The picture is hidden. What you type still goes to the page.'
+              : 'Waiting for the first picture. What you type still goes to the page.'}
+          </span>
+        </div>
       )}
       {/*
         The provider's own viewer, for a deployment not yet streaming frames.
@@ -272,7 +319,7 @@ export function BrowserLiveView({
         same-origin access to its own session and a sandbox permitting both is
         equivalent to none.
       */}
-      {!frame && liveViewUrl && (
+      {!frame && !driving && liveViewUrl && (
         <iframe
           src={liveViewUrl}
           title="Agent browser session (view only)"

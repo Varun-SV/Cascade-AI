@@ -226,6 +226,59 @@ describe('BrowserLiveView — taking the page over', () => {
     expect(onCapture).toHaveBeenCalledWith(false);
   });
 
+  it('can still be typed into with the picture hidden — the real prop state', () => {
+    // The state the hook actually produces: hiding the page clears the frame,
+    // so `frame` is undefined. An earlier test rendered `capturing={false}`
+    // WITH a frame, which is a combination that never occurs — and it missed
+    // that clearing the frame unmounted the only element carrying onKeyDown,
+    // making credential entry, the reason this feature exists, impossible.
+    const onInput = vi.fn();
+    render(
+      <BrowserLiveView
+        active liveViewUrl={undefined} frame={undefined} human capturing={false}
+        onStop={() => {}} onInput={onInput}
+      />,
+    );
+
+    expect(screen.queryByRole('img'), 'no picture, as asked').not.toBeInTheDocument();
+    const surface = screen.getByRole('group', { name: /picture hidden/i });
+    expect(surface, 'and focus followed it').toHaveFocus();
+
+    fireEvent.keyDown(surface, { key: 'h' });
+    fireEvent.keyDown(surface, { key: 'Enter' });
+    expect(onInput.mock.calls.map((c) => c[0])).toEqual([
+      { kind: 'text', text: 'h' },
+      { kind: 'key', key: 'Enter' },
+    ]);
+  });
+
+  it('offers no pointer surface without a picture to aim at', () => {
+    // A coordinate means nothing with no frame to measure against, and
+    // inventing one would put a click somewhere the person cannot see.
+    const onInput = vi.fn();
+    render(
+      <BrowserLiveView
+        active liveViewUrl={undefined} frame={undefined} human capturing={false}
+        onStop={() => {}} onInput={onInput}
+      />,
+    );
+    fireEvent.mouseDown(screen.getByRole('group', { name: /picture hidden/i }), { clientX: 5, clientY: 5 });
+    expect(onInput).not.toHaveBeenCalled();
+  });
+
+  it('does not show the provider iframe underneath a takeover', () => {
+    // The person holds the page; the provider's viewer has no lease behind it
+    // and would put a second, uncoordinated view of the session on screen.
+    render(
+      <BrowserLiveView
+        active liveViewUrl="https://provider.test/live/abc" frame={undefined} human capturing={false}
+        onStop={() => {}}
+      />,
+    );
+    expect(screen.queryByTitle(/view only/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('group', { name: /picture hidden/i })).toBeInTheDocument();
+  });
+
   it('says the picture is paused rather than looking broken', () => {
     render(
       <BrowserLiveView active liveViewUrl={undefined} frame={frame} human capturing={false} onStop={() => {}} />,
