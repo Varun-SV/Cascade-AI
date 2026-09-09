@@ -776,9 +776,16 @@ export class RemoteBrowserController {
   private async dispatch(cdp: CDPSession, held: RunBrowser, event: BrowserInput): Promise<void> {
     switch (event.kind) {
       case 'text': {
+        // A string or nothing — never coerced. `String(123)` would type "123"
+        // into the page, and `String(undefined)` would have typed the word
+        // "undefined" but for an earlier `?? ''`. Same rule as the coordinates
+        // below: a malformed required field is refused, not repaired.
+        if (typeof event.text !== 'string') {
+          throw new Error('That is not text that can be typed into the page.');
+        }
         // Bounded because it crosses a socket and lands in a page: a paste is a
         // reasonable thing to do during a takeover, a novel is not.
-        const text = String(event.text ?? '').slice(0, 4_000);
+        const text = event.text.slice(0, 4_000);
         if (!text) return;
         await cdp.send('Input.insertText', { text });
         return;
@@ -826,6 +833,12 @@ export class RemoteBrowserController {
         // Double-click is two events with clickCount 2, which pages read to
         // mean word-selection. Capped because a click count is a number from a
         // client.
+        // Absent is one click. Present but not a finite number is malformed —
+        // `Math.trunc(NaN)` stays NaN all the way through the clamp and would
+        // have gone to CDP as `clickCount: NaN`.
+        if (event.clicks !== undefined && (typeof event.clicks !== 'number' || !Number.isFinite(event.clicks))) {
+          throw new Error('That is not a number of clicks.');
+        }
         const clickCount = Math.min(Math.max(Math.trunc(event.clicks ?? 1), 1), 3);
         // Moved first: hover states, menus and anything listening for mouseover
         // otherwise never see the pointer arrive, and a press on an element

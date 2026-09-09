@@ -1311,6 +1311,12 @@ describe('handing the browser to the person watching', () => {
       { kind: 'move', x: 'left', y: 0.5 },
       { kind: 'click', x: Number.NaN, y: 0.5 },
       { kind: 'scroll', x: 0.5, y: 0.5 },
+      // The same rule for the fields of the other kinds: a number where text
+      // belongs would have typed "123" into the page, and a non-finite click
+      // count reached CDP as `clickCount: NaN`.
+      { kind: 'text', text: 123 },
+      { kind: 'key' },
+      { kind: 'click', x: 0.5, y: 0.5, clicks: 'lots' },
     ]) {
       const refused = await c.input('run-A', bad as never);
       expect(refused.ok, `${JSON.stringify(bad)} must not reach the page`).toBe(false);
@@ -1320,6 +1326,7 @@ describe('handing the browser to the person watching', () => {
       cdp.sent.filter((m) => m === 'Input.dispatchMouseEvent'),
       'not one of them touched the mouse',
     ).toHaveLength(0);
+    expect(cdp.sent, 'and nothing was typed either').not.toContain('Input.insertText');
 
     // And the well-formed one still works, so this is a gate rather than a wall.
     expect((await c.input('run-A', { kind: 'click', x: 0.5, y: 0.5 })).ok).toBe(true);
