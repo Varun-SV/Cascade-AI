@@ -109,6 +109,17 @@ export class BrowserLease {
   private action: symbol | null = null;
   /** Lapses a human hold nobody is using. See `HUMAN_IDLE_MS`. */
   private humanTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Somebody asked for the hold to end and it could not end yet.
+   *
+   * Kept as a request rather than only a retry timer, because the retry shares
+   * `humanTimer` with the idle deadline: an authorised event settling after the
+   * request would otherwise call `touch()`, re-arm that timer for a full idle
+   * interval, and quietly cancel a handback the person had already asked for.
+   * "Give it back" is not undone by activity that was already under way when
+   * they said it.
+   */
+  private handBackWanted = false;
 
   private isRevoked: (sessionId: string) => boolean;
   private onChange: () => void;
@@ -227,6 +238,7 @@ export class BrowserLease {
    */
   touch(): void {
     if (this.actor !== HUMAN_ACTOR) return;
+    if (this.handBackWanted) return;
     this.clearHumanIdle();
     // Through handBack rather than straight to release, so a lapse obeys the
     // same "not while their event is still landing" rule an explicit handback
@@ -251,6 +263,7 @@ export class BrowserLease {
     // waited on inline, because a caller holding the lease open to wait is the
     // same deadlock in a different shape.
     if (this.action) {
+      this.handBackWanted = true;
       this.clearHumanIdle();
       this.humanTimer = setTimeout(() => { this.handBack(); }, ACTION_HANDOFF_POLL_MS);
       this.humanTimer.unref?.();
@@ -289,6 +302,7 @@ export class BrowserLease {
     // the capability being switched off — and a timer surviving one of those
     // would fire into a lease somebody else has since taken.
     this.clearHumanIdle();
+    this.handBackWanted = false;
     this.actor = null;
     this.session = null;
 

@@ -1270,11 +1270,12 @@ describe('handing the browser to the person watching', () => {
   });
 
   it('maps into the page\'s space, not the picture\'s', async () => {
-    // The identity case above cannot tell these apart. `deviceWidth/Height` are
-    // the DEVICE SCREEN in DIP and `offsetTop` is browser chrome above the
-    // page, while `Input.dispatchMouseEvent` wants the main frame's viewport in
-    // CSS pixels. Here they differ in every dimension: a 1280x900 screen with a
-    // 100px chrome band, showing a 1024x600 page.
+    // The identity case cannot tell these apart: `deviceWidth/Height` are the
+    // DEVICE SCREEN in DIP, while `Input.dispatchMouseEvent` wants the main
+    // frame's viewport in CSS pixels. Here a 1280x900 screen shows a 1024x600
+    // page, and `offsetTop` is non-zero to prove it is NOT subtracted — the
+    // screencast frame is the page render, so a fraction of that image is
+    // already a fraction of the page.
     const { provider } = fakeProvider();
     const c = new RemoteBrowserController({ provider });
     await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
@@ -1284,24 +1285,24 @@ describe('handing the browser to the person watching', () => {
     c.actorEnded('w1');
     await c.takeOver('run-A');
 
-    // The centre of the PAGE AREA of the picture: the band is 100/900 of it,
-    // so the page runs from 0.111 to 1 and its middle is at 0.5556.
-    await c.input('run-A', { kind: 'click', x: 0.5, y: 0.5555555555555556 });
+    // The middle of the picture is the middle of the page.
+    await c.input('run-A', { kind: 'click', x: 0.5, y: 0.5 });
+    const middle = cdp.calls.find((call) => call.params?.['type'] === 'mousePressed');
+    expect([middle?.params?.['x'], middle?.params?.['y']], 'the viewport\'s centre, in its own pixels')
+      .toEqual([512, 300]);
 
-    const pressed = cdp.calls.find((call) => call.params?.['type'] === 'mousePressed');
-    // The centre of the viewport, in its own pixels — not 0.5 x 1280 by 0.5556 x 900.
-    expect([pressed?.params?.['x'], Math.round(Number(pressed?.params?.['y']))]).toEqual([512, 300]);
-
-    // And the chrome above the page is not the page.
-    const onChrome = await c.input('run-A', { kind: 'click', x: 0.5, y: 0.05 });
-    expect(onChrome.ok).toBe(false);
-    expect(onChrome.detail).toMatch(/above the page/i);
+    // And the very top of the picture is the very top of the page, not a
+    // rejected click in a gutter that this frame does not contain.
+    expect((await c.input('run-A', { kind: 'click', x: 0, y: 0 })).ok).toBe(true);
+    const top = cdp.calls.filter((call) => call.params?.['type'] === 'mousePressed').at(-1);
+    expect([top?.params?.['x'], top?.params?.['y']]).toEqual([0, 0]);
   });
 
-  it('re-measures the page when the picture changes shape', async () => {
-    // A resize, a zoom, or device emulation changes the space a click belongs
-    // in. The metadata that says so arrives with every frame anyway, so the
-    // cached measurement is invalidated by it rather than polled for.
+  it('re-measures the page whenever it has been repainted', async () => {
+    // The signal has to be broader than the screencast metadata. Resizing the
+    // window on one monitor changes the CSS viewport while `deviceWidth`,
+    // `deviceHeight` and `offsetTop` all hold still — so a cache keyed on those
+    // looked correct only because the test that exercised it moved both at once.
     const { provider } = fakeProvider();
     const c = new RemoteBrowserController({ provider });
     await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
@@ -1310,22 +1311,51 @@ describe('handing the browser to the person watching', () => {
     c.actorEnded('w1');
     await c.takeOver('run-A');
 
-    await c.input('run-A', { kind: 'click', x: 1, y: 0 });
-    expect(cdp.calls.filter((m) => m.method === 'Page.getLayoutMetrics')).toHaveLength(1);
+    await c.input('run-A', { kind: 'click', x: 1, y: 1 });
+    const first = cdp.calls.filter((call) => call.params?.['type'] === 'mousePressed').at(-1);
+    expect([first?.params?.['x'], first?.params?.['y']]).toEqual([1280, 800]);
 
-    // Same shape again: nothing to re-measure.
+    // The window was resized. The device screen did not move.
+    cdp.layout = { clientWidth: 640, clientHeight: 480 };
+    cdp.pushFrame(2, 'JPEG', { deviceWidth: 1280, deviceHeight: 800, offsetTop: 0 });
+
+    await c.input('run-A', { kind: 'click', x: 1, y: 1 });
+    const second = cdp.calls.filter((call) => call.params?.['type'] === 'mousePressed').at(-1);
+    expect([second?.params?.['x'], second?.params?.['y']], 'the new viewport, not the old one')
+      .toEqual([640, 480]);
+  });
+
+  it('refuses to place a click it could not re-measure for', async () => {
+    // Once the measurement is known stale, falling back to it is how a click
+    // lands on whatever moved into that position after a resize. A refused
+    // click is recoverable; a misplaced one is not.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await c.startWatching('run-A', () => {});
+    cdp.pushFrame(1);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+    await c.input('run-A', { kind: 'click', x: 0.5, y: 0.5 });
+
+    // A fresh frame invalidates the measurement, and the page then refuses to
+    // be measured.
     cdp.pushFrame(2);
-    await c.input('run-A', { kind: 'click', x: 1, y: 0 });
-    expect(cdp.calls.filter((m) => m.method === 'Page.getLayoutMetrics'), 'still cached').toHaveLength(1);
+    const good = cdp.send;
+    cdp.send = async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'Page.getLayoutMetrics') throw new Error('target closed');
+      return good.call(cdp, method, params);
+    };
 
-    // The page resized under them.
-    cdp.layout = { clientWidth: 500, clientHeight: 400 };
-    cdp.pushFrame(3, 'JPEG', { deviceWidth: 500, deviceHeight: 400 });
-    await c.input('run-A', { kind: 'click', x: 1, y: 0 });
-
-    expect(cdp.calls.filter((m) => m.method === 'Page.getLayoutMetrics'), 're-measured').toHaveLength(2);
-    const last = cdp.calls.filter((call) => call.params?.['type'] === 'mousePressed').at(-1);
-    expect(last?.params?.['x'], 'and mapped into the new space').toBe(500);
+    const before = cdp.calls.filter((call) => call.params?.['type'] === 'mousePressed').length;
+    const out = await c.input('run-A', { kind: 'click', x: 0.5, y: 0.5 });
+    expect(out.ok).toBe(false);
+    expect(out.detail).toMatch(/not been measured/i);
+    expect(
+      cdp.calls.filter((call) => call.params?.['type'] === 'mousePressed'),
+      'and nothing was clicked on a guess',
+    ).toHaveLength(before);
+    cdp.send = good;
   });
 
   it('keeps a click inside the picture it claims to come from', async () => {
@@ -1611,6 +1641,9 @@ describe('handing the browser to the person watching', () => {
     gate.resolve();
     cdp.send = realSend;
     expect(await hiding, 'the picture is off').toBe(false);
+    // The handback was ASKED FOR, so the transition settling does not undo it —
+    // even though hiding the page is itself activity that would otherwise
+    // extend the hold.
     await new Promise((r) => setTimeout(r, 60));
     expect(c.humanHolds('run-A'), 'and only now does the hold end').toBe(false);
 
@@ -1724,6 +1757,37 @@ describe('handing the browser to the person watching', () => {
       await vi.advanceTimersByTimeAsync(180_000);
 
       expect(seen.map((s) => s.human)).toEqual([false, true, false]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('counts hiding the page as being there', async () => {
+    // Hide is an authorised action from the holder, so it extends the hold like
+    // any other. Without that, the worst case is exact: hide at 119.9s to type
+    // a password, the old deadline fires while CDP is still stopping capture,
+    // and the hold lapses moments after a fresh interaction — with the picture
+    // off, which is the worst moment for it to go.
+    vi.useFakeTimers();
+    try {
+      const { provider } = fakeProvider();
+      const c = new RemoteBrowserController({ provider });
+      await watched(c);
+      c.actorEnded('w1');
+      await c.takeOver('run-A');
+
+      await vi.advanceTimersByTimeAsync(119_000);
+      expect(c.humanHolds('run-A')).toBe(true);
+
+      await c.setCapture('run-A', false);
+
+      // The old deadline comes and goes.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(c.humanHolds('run-A'), 'hiding the page was them being there').toBe(true);
+
+      // And a fresh full interval from the interaction, not from before it.
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(c.humanHolds('run-A')).toBe(false);
     } finally {
       vi.useRealTimers();
     }
