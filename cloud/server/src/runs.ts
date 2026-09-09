@@ -309,6 +309,18 @@ export interface RunSocket {
  * said otherwise. Testing the selection against both shapes is what makes the
  * difference between the two visible.
  */
+/**
+ * Whether a `browser:capture` payload actually said which way to go.
+ *
+ * Its own function so the distinction can be tested at all: the handler it
+ * guards lives inside `attachRun` and is not reachable from a test, and the
+ * shape it rejects — anything that is not literally a boolean — is exactly what
+ * used to be coerced into "hide the page".
+ */
+export function capturePayload(d: { on?: unknown } | undefined): boolean | null {
+  return typeof d?.on === 'boolean' ? d.on : null;
+}
+
 export function lossyEmitter(socket: RunSocket): (event: string, payload: unknown) => void {
   return (event, payload) => { (socket.volatile ?? socket).emit(event, payload); };
 }
@@ -1375,9 +1387,20 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps): Pro
   };
   socket.on('browser:input', onBrowserInput);
 
-  const onBrowserCapture = (d: { taskId?: string; on?: boolean }) => {
+  const onBrowserCapture = (d: { taskId?: string; on?: unknown }) => {
     if (!addressesRun(remoteBrowser?.taskId, d)) return;
-    void remoteBrowser?.setCapture(d?.on === true).catch(() => {});
+    const mine = remoteBrowser!.taskId!;
+    // `d.on === true` turned EVERY other value into "hide the page" — a missing
+    // field, `'show'`, `1`, a version-skewed payload. Same fail-open shape as
+    // the input boundary: malformed data repaired into a real state change the
+    // sender never asked for, and this one makes the agent invisible. The
+    // TypeScript annotation on a socket handler validates nothing at runtime.
+    const on = capturePayload(d);
+    if (on === null) {
+      refused(mine, 'That was not a request to show or hide the page, so nothing changed.');
+      return;
+    }
+    void remoteBrowser?.setCapture(on).catch(() => {});
   };
   socket.on('browser:capture', onBrowserCapture);
 

@@ -17,7 +17,7 @@
 //  there would hand the capability to exactly the runs that cannot supervise it.
 
 import { describe, it, expect, vi } from 'vitest';
-import { addressesRun, applyPermissionDecision, buildApprovalCallback, lossyEmitter, type PermissionDecision } from './runs.js';
+import { addressesRun, applyPermissionDecision, buildApprovalCallback, capturePayload, lossyEmitter, type PermissionDecision } from './runs.js';
 
 /**
  * The approval shape runs.ts builds.
@@ -299,5 +299,22 @@ describe('lossyEmitter — which channel a droppable event takes', () => {
     lossyEmitter(socket)('browser:frame', { data: 'x' });
 
     expect(reliable).toEqual(['browser:frame']);
+  });
+});
+
+// The same fail-open shape as the input boundary, on the one control that makes
+// the agent invisible: `d.on === true` turned every other value into "hide".
+describe('capturePayload — show, hide, or neither', () => {
+  it('takes only a real boolean', () => {
+    expect(capturePayload({ on: true })).toBe(true);
+    expect(capturePayload({ on: false })).toBe(false);
+  });
+
+  it('refuses anything that did not say which way to go', () => {
+    // Each of these used to mean "hide the page", which is the direction that
+    // makes the agent invisible — the failure the panel exists to prevent.
+    for (const bad of [{}, { on: 'show' }, { on: 'true' }, { on: 1 }, { on: 0 }, { on: null }, undefined]) {
+      expect(capturePayload(bad as { on?: unknown }), JSON.stringify(bad)).toBeNull();
+    }
   });
 });
