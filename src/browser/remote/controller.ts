@@ -672,6 +672,32 @@ export class RemoteBrowserController {
           deliver({ data: e.data, width, height, generation: held.watchGen ?? 0 });
         }
       }
+      // ACKED WHETHER OR NOT THE PICTURE GOT ANYWHERE, and that is the choice,
+      // not an oversight. `emitFrame` is volatile: it drops a frame the
+      // transport cannot write rather than banking it. So a frame can be
+      // delivered to a consumer that discards it, and this still tells Chrome
+      // to send the next one.
+      //
+      // The alternative — ack only what was written — reads better and is
+      // worse. Chrome sends the next frame ONLY once the previous is acked, so
+      // withholding the ack does not slow the stream, it ends it: the one
+      // remaining frame is the one that was dropped, and nothing arrives to
+      // revive it. A page that has gone quiet then stays dark forever, which is
+      // the failure this whole file keeps coming back to.
+      //
+      // The residual, stated plainly so it is not rediscovered as news: a drop
+      // followed by an IDLE page leaves the viewer holding a picture older than
+      // the page, and — because `driving` alone makes the image interactive —
+      // still clickable. The per-watch receipt cannot close that; it answers
+      // "has this view ever seen the page", not "is what it shows current", and
+      // a per-frame receipt was weighed and refused (see the client's
+      // `browser:frame-seen`) because it puts a round trip on every frame.
+      // Closing it properly needs a delivery signal the transport does not
+      // give: Socket.IO drops a volatile packet silently, and inferring it from
+      // the engine's writability would couple the frame path to internals.
+      // Until there is a supported signal, the honest position is that this is
+      // a live view with the staleness every live view has, not a guarantee.
+      //
       // Best-effort: the session may have been detached between the frame
       // arriving and this running, and an ack into a dead session is not an
       // error worth surfacing to a user watching a browser.
@@ -788,8 +814,7 @@ export class RemoteBrowserController {
     // the visibility gate while `capturing` was still its old value — passing
     // the gate, then entering the page as the suspension completed behind it.
     // The same invisible-agent window, one await further along.
-    if (!(await lease.awaitActionSlot())) return held.capturing === true;
-    const token = lease.beginAction();
+    const token = await lease.acquireActionSlot();
     if (!token) return held.capturing === true;
     try {
       // Re-checked after the wait — ALL of it, not just the hold.
@@ -895,13 +920,22 @@ export class RemoteBrowserController {
       this.announceControl(runId, true);
       return { ok: true };
     }
-    if (!(await lease.awaitActionSlot(ACTION_TIMEOUT_MS))) {
+    // Held across the takeover, not merely waited out. The slot is what makes
+    // "the agent is not touching this page" true, and letting it go between the
+    // wait and `takeOver` would leave a gap the agent's next action could start
+    // in — which is the whole thing this wait exists to prevent.
+    const token = await lease.acquireActionSlot(ACTION_TIMEOUT_MS);
+    if (!token) {
       return {
         ok: false,
         detail: 'The agent is still finishing an action on this page. Try again in a moment.',
       };
     }
-    lease.takeOver(runId);
+    try {
+      lease.takeOver(runId);
+    } finally {
+      lease.endAction(token);
+    }
     return { ok: true };
   }
 
@@ -982,12 +1016,9 @@ export class RemoteBrowserController {
     // the agent acquire and act while the click was still going in. It also
     // serializes the person's own events against each other, so a fast typist
     // cannot interleave two dispatches on one page.
-    if (!(await lease.awaitActionSlot())) {
-      return { ok: false, detail: 'The last thing you did is still finishing. Try again.' };
-    }
-    const token = lease.beginAction();
+    const token = await lease.acquireActionSlot();
     if (!token) {
-      return { ok: false, detail: 'Another action on this page is already running.' };
+      return { ok: false, detail: 'The last thing you did is still finishing. Try again.' };
     }
 
     try {
@@ -1358,14 +1389,10 @@ export class RemoteBrowserController {
       lease_.releaseIfHeldBy(actor);
       return { ok: false, detail: 'The run was cancelled.' };
     }
-    if (!(await lease_.awaitActionSlot())) {
+    const token = await lease_.acquireActionSlot();
+    if (!token) {
       lease_.releaseIfHeldBy(actor);
       return { ok: false, detail: 'Another browser action is still finishing. Try again.' };
-    }
-
-    const token = lease_.beginAction();
-    if (!token) {
-      return { ok: false, detail: 'Another browser action is already running. Wait for it to finish.' };
     }
 
     try {
@@ -1499,10 +1526,6 @@ export class RemoteBrowserController {
     const abort = this.aborts.get(runId)?.signal;
     const creationSignal = signal && abort ? AbortSignal.any([signal, abort]) : (signal ?? abort);
     const session = await this.provider.createSession(creationSignal);
-    // Handed to the owner as soon as it exists, so the user can watch from the
-    // first action rather than after it. A CAPABILITY URL — see the provider
-    // seam: never persisted, never logged, never sent to another client.
-    this.announceLiveView(runId, session.liveViewUrl, true);
 
     // Everything past createSession is rolled back on failure. Without this a
     // CDP connection that dies leaves an allocated, billed session with nothing
@@ -1517,6 +1540,9 @@ export class RemoteBrowserController {
     // the operator's browser for runs that never even reached `this.runs`.
     let browser: Browser | undefined;
     let owned: BrowserContext | undefined;
+    // Declared out here so the announcement below can wait for the run to be
+    // REGISTERED. See the comment on that announcement for why the wait matters.
+    let held: RunBrowser;
     try {
       browser = await playwright.chromium.connectOverCDP(session.cdpUrl) as unknown as Browser;
       // Whose context this is decides everything about how the run may use it.
@@ -1549,7 +1575,7 @@ export class RemoteBrowserController {
       // `aborts` and would find nothing. Roll back instead.
       const abort = this.aborts.get(runId);
       if (!abort) throw new Error('The run ended while its browser was still opening.');
-      const held: RunBrowser = { session, browser, page, generation: 0, abort, ...(owned ? { ownedContext: owned } : {}) };
+      held = { session, browser, page, generation: 0, abort, ...(owned ? { ownedContext: owned } : {}) };
       // MAIN frame only. Playwright emits `framenavigated` for every frame,
       // sub-frames included, and this handler used to discard the frame it was
       // given and count them all — while the field it bumps is documented, and
@@ -1567,9 +1593,12 @@ export class RemoteBrowserController {
         held.generation += 1;
       }) as never);
       this.runs.set(runId, held);
-      return held;
     } catch (err) {
-      this.announceLiveView(runId, undefined, false);
+      // Nothing to withdraw. The live view is announced BELOW, after this
+      // block, so a browser that failed to open was never advertised in the
+      // first place — the `announceLiveView(runId, undefined, false)` that used
+      // to stand here withdrew an announcement that no longer exists.
+      //
       // Innermost first, and before endSession: the context is reached through
       // the connection, and for a shared endpoint endSession is a no-op that
       // would leave both behind.
@@ -1578,6 +1607,29 @@ export class RemoteBrowserController {
       await this.provider.endSession(session.id).catch(() => {});
       throw err;
     }
+    // AFTER `this.runs.set`, and that ordering is the whole point.
+    //
+    // The announcement is what makes the client ask to watch: the live-view URL
+    // arrives, the panel mounts, and it sends `browser:watch` immediately. This
+    // used to be announced the moment `createSession` returned — before the CDP
+    // connect, the context, and the page, which together are several awaits and
+    // on a cold provider can be seconds. A watch landing inside that window
+    // looked the run up in `this.runs`, did not find it, and was answered
+    // `streaming: false`. Nothing retried once the run appeared, and because
+    // CDP frames are adaptive an idle page then produced no frame to recover
+    // on, so the panel could sit blank for the life of the run.
+    //
+    // Announcing here needs no retry, no pending-watch queue and no extra
+    // state, because it states the invariant instead: a browser is advertised
+    // only once it can actually be driven. The cost is that the URL appears a
+    // beat later than it used to; the benefit is that it is never a URL for a
+    // run that cannot yet be watched — or, on the failure path above, for one
+    // that never existed at all.
+    //
+    // A CAPABILITY URL — see the provider seam: never persisted, never logged,
+    // never sent to another client.
+    this.announceLiveView(runId, session.liveViewUrl, true);
+    return held;
   }
 
   private async perform(held: RunBrowser, action: BrowserAction, planned: number): Promise<BrowserActionOutcome> {

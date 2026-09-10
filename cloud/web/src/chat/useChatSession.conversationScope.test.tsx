@@ -1100,9 +1100,42 @@ describe('useChatSession — frames of the agent\'s browser', () => {
       .toEqual([{ event: 'browser:watch', payload: { taskId: 'task-a' } }]);
 
     act(() => { view.result.current.setConversationId('conv-b'); });
-    expect(fake.sent.filter((m) => m.event === 'browser:unwatch'))
-      .toEqual([{ event: 'browser:unwatch', payload: { taskId: 'task-a' } }]);
-    expect(fake.sent.filter((m) => m.event === 'browser:watch').at(-1))
-      .toEqual({ event: 'browser:watch', payload: { taskId: 'task-b' } });
+    // B's browser, and A's stream shut off. The unwatch for B is the leading
+    // half of its own viewing boundary, not a second thought about A.
+    expect(fake.sent
+      .filter((m) => m.event === 'browser:unwatch' || m.event === 'browser:watch')
+      .map((m) => [m.event, (m.payload as { taskId: string }).taskId]))
+      .toEqual([
+        ['browser:unwatch', 'task-a'], ['browser:watch', 'task-a'],
+        ['browser:unwatch', 'task-a'], ['browser:unwatch', 'task-b'], ['browser:watch', 'task-b'],
+      ]);
+  });
+
+  it('starts a new viewing boundary on a page that reloaded into a live run', async () => {
+    // A reload gets a brand-new socket; the run's screencast on the server is
+    // not new. Nothing there stops watching when a socket drops, so it outlived
+    // the previous page unwatched and the run is simply re-pointed at this
+    // connection with the stream still attached.
+    //
+    // The connect handler cannot deal with that: a reloaded page learns its
+    // task id from the REPLAYED live view, which lands well after `connect`.
+    // So this falls to the watch effect — and a bare watch there takes the
+    // server's reconnect branch, which keeps the surviving screencast. CDP
+    // frames being adaptive, an idle page then repaints for nobody and the
+    // panel stays blank for the life of the run.
+    const fake = fakeSocket();
+    renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    // Awaited: `connect` also kicks off the conversation reload, and letting it
+    // settle here keeps this test about watching rather than about React.
+    await act(async () => { fake.fire('connect'); });
+    expect(fake.sent.filter((m) => m.event === 'browser:watch'),
+      'nothing is watched on connect — the replay has not arrived yet').toHaveLength(0);
+
+    act(() => { fake.fire('browser:live-view', liveView('conv-a', 'task-a')); });
+    expect(fake.sent
+      .filter((m) => m.event === 'browser:unwatch' || m.event === 'browser:watch')
+      .map((m) => m.event), 'the replayed run is re-watched from scratch, not resumed')
+      .toEqual(['browser:unwatch', 'browser:watch']);
   });
 });

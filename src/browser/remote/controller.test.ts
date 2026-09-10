@@ -477,9 +477,11 @@ describe('a session that half-opened', () => {
     }
   });
 
-  it('withdraws the live view it already announced', async () => {
-    // The URL was emitted the moment the session existed. Leaving it showing
-    // points the user at a browser that will never be driven.
+  it('never advertises a browser that failed to open', async () => {
+    // This used to announce the URL the moment the session existed and then
+    // withdraw it from the rollback. Announcing after the run is registered
+    // means there is nothing to withdraw: the user is never pointed, even for
+    // an instant, at a browser that will never be driven.
     const { provider } = fakeProvider('https://provider.test/live/abc');
     const seen: Array<string | undefined> = [];
     const c = new RemoteBrowserController({ provider });
@@ -490,10 +492,33 @@ describe('a session that half-opened', () => {
 
     try {
       await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
-      expect(seen).toEqual(['https://provider.test/live/abc', undefined]);
+      expect(seen, 'no live view is ever announced for a browser that never opened')
+        .not.toContain('https://provider.test/live/abc');
     } finally {
       (chromium as { connectOverCDP: unknown }).connectOverCDP = original;
     }
+  });
+
+  it('can be watched the instant its live view is announced', async () => {
+    // The announcement IS the client's cue to watch: the URL arrives, the panel
+    // mounts, and it sends `browser:watch` straight away. Announcing before the
+    // run was registered meant that watch looked up a run that did not exist
+    // yet and was answered "nothing to stream", with nothing to retry on — and
+    // because CDP frames are adaptive, an idle page then produced no frame to
+    // recover from, so the panel could stay blank for the life of the run.
+    const { provider } = fakeProvider('https://provider.test/live/abc');
+    const c = new RemoteBrowserController({ provider });
+    let watched: Promise<boolean> | undefined;
+    c.onLiveViewFor('run-A', (info) => {
+      if (!info.liveViewUrl) return;
+      // Exactly what the client does with the announcement, at exactly the
+      // moment it gets it.
+      watched = c.startWatching('run-A', () => {});
+    });
+
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    expect(watched, 'the live view was announced at all').toBeDefined();
+    expect(await watched, 'the run is streamable by the time it is advertised').toBe(true);
   });
 });
 
@@ -1763,6 +1788,53 @@ describe('handing the browser to the person watching', () => {
     expect(out.ok, 'the view it was aimed at has been replaced').toBe(false);
     expect(out.detail).toMatch(/view you were driving is gone/i);
     expect(cdp.sent.filter((m) => m === 'Input.insertText')).toHaveLength(1);
+  });
+
+  it('lands a burst of keystrokes in the order they were typed', async () => {
+    // One event per keypress — `{ kind: 'text', text }` carries a single
+    // character — so the order in which events take the action slot IS the
+    // order the characters appear in the box.
+    //
+    // The slot used to be a 25ms poll, and a poll settles nothing about who
+    // goes first: waiters check on their own phase, and two of them woken by
+    // the same release both saw it free. One called `beginAction` and got it;
+    // the rest were told "another action on this page is already running" and
+    // dropped their character on the floor, for having asked first.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const frames: BrowserFrame[] = [];
+    await c.startWatching('run-A', (f) => frames.push(f));
+    cdp.pushFrame(1);
+    c.frameSeen('run-A', frames[0]!.generation);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    // Only the FIRST is held. That is what makes the rest queue rather than
+    // arrive at an idle slot one at a time, which is the situation the poll
+    // handled perfectly well and this one does not.
+    const typing = deferred();
+    const realSend = cdp.send;
+    const typed: string[] = [];
+    cdp.send = async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'Input.insertText') {
+        if (typed.length === 0) await typing.promise;
+        typed.push(String(params?.['text']));
+      }
+      return realSend.call(cdp, method, params);
+    };
+
+    const burst = [...'pass'].map((ch) => c.input('run-A', { kind: 'text', text: ch }));
+    await new Promise((r) => setTimeout(r, 10));
+    typing.resolve();
+    const outcomes = await Promise.all(burst);
+    cdp.send = realSend;
+
+    expect(outcomes.map((o) => o.ok), 'nobody is refused for having asked first')
+      .toEqual([true, true, true, true]);
+    expect(typed, 'and the page gets them in the order they were typed')
+      .toEqual(['p', 'a', 's', 's']);
   });
 
   it('does not hide a session that stopped being the one on screen', async () => {

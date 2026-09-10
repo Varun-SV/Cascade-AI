@@ -76,7 +76,15 @@ const QUEUE_WAIT_MS = 180_000;
 const MAX_QUEUED = 8;
 /** How long a new holder waits for the previous action to unwind. */
 const ACTION_HANDOFF_MS = 2_000;
-const ACTION_HANDOFF_POLL_MS = 25;
+/**
+ * How soon a handback that could not run yet asks again.
+ *
+ * A retry rather than a wait, because `handBack` is synchronous and a caller
+ * holding the lease open to await an action would deadlock against it. This is
+ * the ONLY polling left around the action slot: waiting FOR the slot is a queue
+ * now — see `acquireActionSlot`.
+ */
+const HANDBACK_RETRY_MS = 25;
 
 export interface BrowserLeaseOptions {
   /**
@@ -107,6 +115,22 @@ export class BrowserLease {
    * took the slot may release it.
    */
   private action: symbol | null = null;
+  /**
+   * Everyone waiting for that slot, IN THE ORDER THEY ASKED.
+   *
+   * A queue rather than a poll, and the ordering is the whole reason for it.
+   * `acquireActionSlot` used to spin on a 25ms timer, which decides nothing
+   * about who goes first: each waiter checks on its own phase, so the one that
+   * asked SECOND can find the slot free a full poll ahead of the one that asked
+   * first. The person types one event per keypress — `{ kind: 'text', text }`
+   * carries a single character — so that reordering is not a theoretical
+   * unfairness, it is "passowrd" appearing in the box.
+   *
+   * The slot is handed straight from `endAction` to the head of this line while
+   * still synchronous, so nothing can slip in between the two, and a waiter
+   * that reaches the front never has to be told the slot is already taken.
+   */
+  private actionQueue: Array<() => void> = [];
   /** Lapses a human hold nobody is using. See `HUMAN_IDLE_MS`. */
   private humanTimer: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -215,7 +239,7 @@ export class BrowserLease {
    * Give the browser to the person watching it.
    *
    * Callers must have waited the in-flight action out first — see
-   * `awaitActionSlot`. This does not interrupt one, because it cannot: a
+   * `acquireActionSlot`. This does not interrupt one, because it cannot: a
    * Playwright call already inside the page finishes whatever it started, and
    * taking the lease off it would only mean the person and a still-running
    * `fill` were both touching the same form. Waiting is what makes "you have
@@ -295,7 +319,7 @@ export class BrowserLease {
     if (this.action) {
       this.handBackWanted = true;
       this.clearHumanIdle();
-      this.humanTimer = setTimeout(() => { this.handBack(); }, ACTION_HANDOFF_POLL_MS);
+      this.humanTimer = setTimeout(() => { this.handBack(); }, HANDBACK_RETRY_MS);
       this.humanTimer.unref?.();
       return false;
     }
@@ -367,35 +391,77 @@ export class BrowserLease {
     if (this.ceilingTimer) { clearTimeout(this.ceilingTimer); this.ceilingTimer = null; }
   }
 
-  /** Take the per-action slot, or null when one is already running. */
-  beginAction(): symbol | null {
+  /**
+   * Take the per-action slot, or null when one is already running.
+   *
+   * PRIVATE, so the queue is the only way in. A caller that could take the slot
+   * without joining the line would be exactly the jump-the-queue the ordering
+   * is there to prevent.
+   */
+  private beginAction(): symbol | null {
     if (this.action) return null;
     const token = Symbol('browser-action');
     this.action = token;
     return token;
   }
 
-  /** Release the slot, but only for the action that took it. */
+  /**
+   * Release the slot, but only for the action that took it.
+   *
+   * Hands it to the head of the line rather than merely clearing it, and does
+   * so SYNCHRONOUSLY: the waiter's `beginAction` runs before this call returns,
+   * so there is no window in which the slot is free and somebody who asked
+   * later can take it.
+   */
   endAction(token: symbol): boolean {
     if (this.action !== token) return false;
     this.action = null;
+    this.actionQueue.shift()?.();
     return true;
   }
 
   /**
-   * Wait, briefly, for an outgoing action to unwind.
+   * Take the per-action slot, waiting in line for it if somebody has it.
    *
    * A release can hand the browser on while the previous holder's abort is
    * still propagating through an awaited navigation. That is a handoff, not a
    * conflict, so it is waited out rather than refused — but bounded, because a
    * wedged action must not pin the queue.
+   *
+   * Waiting and TAKING are one step, which they deliberately were not before:
+   * the wait used to answer "the slot looks free" and leave the caller to call
+   * `beginAction` afterwards. Two callers woken by the same release both saw it
+   * free, and the loser was told "another action is already running" — a
+   * refusal for having asked first. Granting it here means whoever reaches the
+   * front of the line gets it, and everybody else is still waiting rather than
+   * refused.
+   *
+   * `null` means the wait ran out, never that somebody jumped in.
    */
-  async awaitActionSlot(withinMs = ACTION_HANDOFF_MS): Promise<boolean> {
-    for (let waited = 0; waited < withinMs; waited += ACTION_HANDOFF_POLL_MS) {
-      if (!this.action) return true;
-      await new Promise((r) => setTimeout(r, ACTION_HANDOFF_POLL_MS));
-    }
-    return this.action === null;
+  async acquireActionSlot(withinMs = ACTION_HANDOFF_MS): Promise<symbol | null> {
+    // The queue is empty whenever the slot is free — `endAction` fills it again
+    // in the same breath as it clears it — so this is the ordinary path, and it
+    // takes no timer at all. The length check is what keeps a newcomer from
+    // stepping over a line that is already forming.
+    if (!this.action && this.actionQueue.length === 0) return this.beginAction();
+    return await new Promise<symbol | null>((resolve) => {
+      let done = false;
+      const wake = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(this.beginAction());
+      };
+      const timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        const i = this.actionQueue.indexOf(wake);
+        if (i >= 0) this.actionQueue.splice(i, 1);
+        resolve(null);
+      }, withinMs);
+      timer.unref?.();
+      this.actionQueue.push(wake);
+    });
   }
 
   /**

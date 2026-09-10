@@ -546,6 +546,40 @@ export function useChatSession(
     if (!browserTaskIdRef.current || !socket?.connected) return;
     socket.emit('browser:capture', { taskId: browserTaskIdRef.current, on });
   }, [socket]);
+
+  /**
+   * Start a NEW viewing boundary on this run's browser.
+   *
+   * Unwatch and watch, never watch alone, and that pairing is the whole point.
+   * A bare watch takes the server's reconnect branch, which deliberately KEEPS
+   * an existing screencast — and because CDP frames are adaptive, an idle page
+   * then sends nothing, so the panel sits inert with no way back. Tearing the
+   * screencast down and building it again bumps the watch generation AND makes
+   * Chrome produce a first frame immediately. A deliberate Hide still survives
+   * it, because the re-attach honours the holder's pause.
+   *
+   * A screencast can survive into a view that never asked for one because
+   * nothing on the server side stops watching when a socket drops: a reload or
+   * a transient gap sends no unwatch, and the run is later re-pointed at the
+   * new connection with its stream still attached. Both ways in need the same
+   * treatment, which is why they share this rather than each spelling it out:
+   *   • a page that RELOADS learns its task id from the replayed live view,
+   *     which arrives well after `connect` — so the connect handler has no id
+   *     to act on and only the watch effect below can do it;
+   *   • a page that RECONNECTS keeps both its socket object and its task id,
+   *     so the watch effect's dependencies never change and only the connect
+   *     handler can do it.
+   * Neither one covers the other, and each was the sole path in a real blank
+   * panel.
+   *
+   * Emitted whether or not the socket is up: unlike an input event, a watch
+   * that arrives late is still the right request, and Socket.IO's buffer
+   * delivering it on connect is exactly the wanted behaviour.
+   */
+  const beginWatching = useCallback((taskId: string) => {
+    socket?.emit('browser:unwatch', { taskId });
+    socket?.emit('browser:watch', { taskId });
+  }, [socket]);
   const [status, setStatus] = useState<string | null>(null);
   const [lastTokens, setLastTokens] = useState<number>(0);
   const [lastSaved, setLastSaved] = useState<{ usd: number; pct: number } | null>(null);
@@ -1092,20 +1126,14 @@ export function useChatSession(
       // survives a reconnect, so it never re-runs — and the server, having
       // received no unwatch, keeps streaming to the rebound transport as though
       // nothing happened. Nothing would then invalidate the receipt this view
-      // gave before the gap.
+      // gave before the gap. See `beginWatching` for why it is a PAIR.
       //
-      // Unwatch and watch rather than watch alone, deliberately. A bare watch
-      // takes the reconnect branch, which keeps the existing screencast — and
-      // because CDP frames are adaptive, an idle page would send nothing, so
-      // the panel would sit inert with no way back. Tearing it down and
-      // building it again bumps the watch generation AND makes Chrome produce
-      // a first frame at once. A deliberate Hide still survives that, because
-      // the attach honours it.
+      // A page that reloaded rather than reconnected has no task id yet — it
+      // learns it from the replayed live view, which lands after this — so
+      // there is deliberately nothing to do here for that case. The watch
+      // effect picks it up when the id arrives.
       const taskId = browserTaskIdRef.current;
-      if (taskId) {
-        socket.emit('browser:unwatch', { taskId });
-        socket.emit('browser:watch', { taskId });
-      }
+      if (taskId) beginWatching(taskId);
     };
     const onResumed = (e: {
       active?: number;
@@ -1219,7 +1247,7 @@ export function useChatSession(
       socket.off('session:complete', onComplete);
       socket.off('session:error', onError);
     };
-  }, [socket, reloadActivePath, finishWithoutAck]);
+  }, [socket, reloadActivePath, finishWithoutAck, beginWatching]);
 
   // Watch the browser this pane is actually showing, and only that one.
   //
@@ -1232,13 +1260,18 @@ export function useChatSession(
   // renders on, so the two cannot drift.
   useEffect(() => {
     if (!socket || !browserTaskId) return;
-    socket.emit('browser:watch', { taskId: browserTaskId });
+    // A PAIR, not a bare watch — see `beginWatching`. This is the path a
+    // reloaded page takes: its socket is brand new but the run's screencast on
+    // the server is not, having survived the previous page's disconnect
+    // unwatched, so a bare watch here would land on a stream that only repaints
+    // on activity and leave an idle page blank for the life of the run.
+    beginWatching(browserTaskId);
     return () => {
       // The run may already be over, in which case the server ignores this —
       // but an unwatch that arrives late is free and a missing one is not.
       socket.emit('browser:unwatch', { taskId: browserTaskId });
     };
-  }, [socket, browserTaskId]);
+  }, [socket, browserTaskId, beginWatching]);
 
   // Tell the server this pane actually HAS the picture.
   //
