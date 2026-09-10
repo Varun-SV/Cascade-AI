@@ -792,9 +792,35 @@ export class RemoteBrowserController {
     const token = lease.beginAction();
     if (!token) return held.capturing === true;
     try {
-      // Re-checked after the wait: the hold can end while an earlier action
-      // finishes, and hiding the page is only the holder's to ask for.
+      // Re-checked after the wait — ALL of it, not just the hold.
+      //
+      // The watch queue does not take the action slot, so everything this
+      // method validated before parking can move while it is parked: a remount
+      // detaches the session and attaches another, and a reconnect keeps the
+      // session but bumps the watch. Only the hold was re-read, which made the
+      // other two stale by exactly the same mechanism the hold re-check exists
+      // for.
+      //
+      // Refusing rather than retargeting. Hide is a statement about the page
+      // the person was looking at; applying it to a watch that replaced theirs
+      // is not what they asked for, and the safe direction here is the picture
+      // staying ON. Stopping the session captured before the wait would have
+      // been worse than either: it records the page as hidden while the live
+      // session keeps sending frames, so the password goes out over a panel
+      // the person believes is dark.
+      //
+      // The watch re-check covers the swapped session too, and deliberately
+      // does it alone: `attachScreencast` is reachable only through
+      // `startWatching`, which bumps the watch BEFORE it attaches, so a session
+      // that changed is always a watch that changed. A second check on
+      // `held.screencast` was written first and its revert-check went green —
+      // two answers to one question, which is how they come to disagree. If
+      // that ordering in `startWatching` ever changes, this is the comment
+      // that should stop you.
       if (!on && !lease.heldByHuman) return held.capturing === true;
+      if (!on && (held.watchGen === undefined || held.seenGen !== held.watchGen)) {
+        return held.capturing === true;
+      }
       const now = await this.applyCapture(runId, held, cdp, on);
       if (lease.heldByHuman) lease.touch();
       return now;

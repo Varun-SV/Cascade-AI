@@ -79,6 +79,17 @@ let cdpCreated = 0;
  * recording it, and a fake that resolves immediately never opens that window.
  */
 let cdpGate: Promise<void> | null = null;
+/**
+ * Give each attach its OWN session, and keep them.
+ *
+ * Off by default, because almost every test attaches once and reads `cdp`.
+ * But `Page.startScreencast` and `Page.stopScreencast` are PER-SESSION state,
+ * and a fake that hands the same object to every attach cannot tell a stale
+ * session reference from a live one at all — so the whole class was invisible
+ * here. When this is on, `cdp` still points at the newest.
+ */
+let cdpPerAttach = false;
+const cdpSessions: Array<ReturnType<typeof fakeCdp>> = [];
 
 /** A promise a test can settle by hand. */
 function deferred() {
@@ -133,7 +144,12 @@ function fakeContext(pageForThisContext: typeof page) {
     closed: false,
     pages: () => [pageForThisContext],
     newPage: async () => pageForThisContext,
-    newCDPSession: async () => { cdpCreated += 1; if (cdpGate) await cdpGate; return cdp; },
+    newCDPSession: async () => {
+      cdpCreated += 1;
+      if (cdpGate) await cdpGate;
+      if (cdpPerAttach) { cdp = fakeCdp(); cdpSessions.push(cdp); }
+      return cdp;
+    },
     close: async () => { c.closed = true; },
   };
   return c;
@@ -193,6 +209,8 @@ beforeEach(() => {
   createdContexts.length = 0;
   cdp = fakeCdp();
   cdpCreated = 0;
+  cdpPerAttach = false;
+  cdpSessions.length = 0;
   cdpGate = null;
   pageContext = defaultContext;
 });
@@ -1644,6 +1662,109 @@ describe('handing the browser to the person watching', () => {
     c.frameSeen('run-A', shown[0]!.generation);
     expect(await c.setCapture('run-A', false), 'now it is theirs to hide').toBe(false);
     expect(cdp.sent).toContain('Page.stopScreencast');
+  });
+
+  it('does not hide a session that stopped being the one on screen', async () => {
+    // Found by a fresh-context review, and invisible to this suite until the
+    // fake started handing out a session per attach. `setCapture` reads the
+    // session BEFORE it waits for the action slot, and the watch queue does not
+    // take that slot — so a remount can detach that session and attach another
+    // while the wait is in progress.
+    //
+    // Stopping the one it started with would be the worst outcome available:
+    // the controller records the page as hidden and announces it, while the
+    // session that is actually streaming was never told to stop. The person
+    // types a password into a panel they believe is dark.
+    cdpPerAttach = true;
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const first: BrowserFrame[] = [];
+    await c.startWatching('run-A', (f) => first.push(f));
+    const one = cdpSessions[0]!;
+    one.pushFrame(1);
+    c.frameSeen('run-A', first[0]!.generation);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    // One of the person's own events holds the action slot open.
+    const gate = deferred();
+    const realSend = one.send;
+    one.send = async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'Input.dispatchMouseEvent') await gate.promise;
+      return realSend.call(one, method, params);
+    };
+    const clicking = c.input('run-A', { kind: 'click', x: 0.5, y: 0.5 });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // They press Hide while it is still going in. This reads session one, and
+    // then parks on the action slot.
+    const hiding = c.setCapture('run-A', false);
+    await new Promise((r) => setTimeout(r, 10));
+
+    // The panel remounts while it waits: session one goes, session two arrives.
+    await c.stopWatching('run-A');
+    const second: BrowserFrame[] = [];
+    await c.startWatching('run-A', (f) => second.push(f));
+    const two = cdpSessions[1]!;
+    expect(two, 'genuinely a different session').not.toBe(one);
+
+    gate.resolve();
+    one.send = realSend;
+    expect((await clicking).ok).toBe(true);
+    expect(await hiding, 'the page they were looking at is gone, so this is not it').toBe(true);
+
+    expect(
+      two.sent.filter((m) => m === 'Page.stopScreencast'),
+      'the live session was not stopped behind a Hide aimed at another one',
+    ).toHaveLength(0);
+    expect(c.humanHolds('run-A'), 'and they still hold the page').toBe(true);
+
+    // Seeing the new watch is what makes Hide theirs to press again.
+    two.pushFrame(2);
+    expect(second).toHaveLength(1);
+    c.frameSeen('run-A', second[0]!.generation);
+    expect(await c.setCapture('run-A', false), 'now it is').toBe(false);
+    expect(two.sent).toContain('Page.stopScreencast');
+  });
+
+  it('does not hide against a watch that was replaced while it waited', async () => {
+    // The same staleness by the other route. A reconnect KEEPS the session and
+    // bumps the watch, so the session identity is unchanged and only the
+    // receipt has gone stale — the page this view was shown belongs to a watch
+    // that no longer exists.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const first: BrowserFrame[] = [];
+    await c.startWatching('run-A', (f) => first.push(f));
+    cdp.pushFrame(1);
+    c.frameSeen('run-A', first[0]!.generation);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    const gate = deferred();
+    const realSend = cdp.send;
+    cdp.send = async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'Input.dispatchMouseEvent') await gate.promise;
+      return realSend.call(cdp, method, params);
+    };
+    const clicking = c.input('run-A', { kind: 'click', x: 0.5, y: 0.5 });
+    await new Promise((r) => setTimeout(r, 10));
+
+    const hiding = c.setCapture('run-A', false);
+    await new Promise((r) => setTimeout(r, 10));
+
+    // A reconnect: same screencast, new watcher, no receipt.
+    await c.startWatching('run-A', () => {});
+
+    gate.resolve();
+    cdp.send = realSend;
+    expect((await clicking).ok).toBe(true);
+    expect(await hiding, 'the watch it checked has been replaced').toBe(true);
+    expect(cdp.sent, 'so nothing was hidden').not.toContain('Page.stopScreencast');
   });
 
   it('does not let a watcher coming and going turn Hide back into Show', async () => {
