@@ -3,7 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import { BrowserLiveView } from './BrowserLiveView.js';
 
@@ -142,6 +142,8 @@ describe('BrowserLiveView — watching by frames', () => {
 // user can answer, with Stop — throwing the session away — as the only control.
 describe('BrowserLiveView — taking the page over', () => {
   const frame = { data: 'AAAA', width: 1280, height: 800 };
+  /** Mirrors `MOVE_INTERVAL_MS` in the component. */
+  const MOVE_INTERVAL = 60;
 
   it('offers control only where there are frames to drive', () => {
     // The provider's iframe has no lease behind it: input through it would be a
@@ -419,7 +421,8 @@ describe('BrowserLiveView — taking the page over', () => {
       onInput.mockClear();
       now.mockReturnValue(1_010);
       fireEvent.mouseMove(img, { clientX: 300, clientY: 200 });
-      expect(onInput, 'and the ones a flick of the wrist produces are not').not.toHaveBeenCalled();
+      expect(onInput, 'and the ones a flick of the wrist produces do not go immediately')
+        .not.toHaveBeenCalled();
 
       // Far enough apart to be a different intention rather than the same
       // gesture, and in the letterbox, which is not the page.
@@ -434,6 +437,104 @@ describe('BrowserLiveView — taking the page over', () => {
         .toHaveBeenCalledWith({ kind: 'move', x: 0.5, y: 0.9 });
     } finally {
       now.mockRestore();
+    }
+  });
+
+  it('does not fall back to the provider\'s viewer over a hidden page', () => {
+    // `Page.stopScreencast` stops OUR frames. It does nothing to the provider's
+    // own viewer, which is an independent stream of the same session. So hiding
+    // a page to type a password and then handing it back — or simply letting
+    // the hold lapse — cleared the frame, dropped `human`, and mounted the
+    // fallback iframe, putting the credential page back on screen and back on
+    // the wire before the agent restored capture. Hiding one of two windows is
+    // not hiding.
+    const { rerender } = render(
+      <BrowserLiveView
+        active liveViewUrl="https://provider.test/live/abc" frame={undefined}
+        human capturing={false} confirmed onStop={() => {}}
+      />,
+    );
+    // Handed back, or lapsed, while still hidden.
+    rerender(
+      <BrowserLiveView
+        active liveViewUrl="https://provider.test/live/abc" frame={undefined}
+        human={false} capturing={false} onStop={() => {}}
+      />,
+    );
+
+    expect(screen.queryByTitle('Agent browser session (view only)'), 'the page stays hidden').toBeNull();
+    expect(screen.getByText(/picture is paused/i), 'and the panel says why rather than lying about a stream')
+      .toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /stop/i }), 'Stop survives, as it always must')
+      .toBeInTheDocument();
+  });
+
+  it('still falls back to the provider\'s viewer when nothing is paused', () => {
+    // The gate is the PAUSE, not the absence of frames. A deployment with no
+    // screencast at all must still get its viewer.
+    render(
+      <BrowserLiveView active liveViewUrl="https://provider.test/live/abc" frame={undefined} onStop={() => {}} />,
+    );
+    expect(screen.getByTitle('Agent browser session (view only)')).toBeInTheDocument();
+  });
+
+  it('sends the position the pointer came to rest at', async () => {
+    // A leading-edge throttle alone drops the LAST move of a gesture, because
+    // nothing follows it to take its place — and that is the position hover
+    // depends on. The person moves onto a menu, stops, and the page never
+    // learns they arrived, so the dropdown appears for the first time under the
+    // `mouseMoved` that `dispatch` synthesises just before the press, and the
+    // click lands on something the frame they were looking at could not show.
+    vi.useFakeTimers();
+    try {
+      const onInput = vi.fn();
+      render(
+        <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+      );
+      const img = screen.getByRole('img') as HTMLImageElement;
+      Object.defineProperty(img, 'naturalWidth', { value: 1280 });
+      Object.defineProperty(img, 'naturalHeight', { value: 800 });
+      img.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 400 }) as DOMRect;
+
+      // Travelling, then stopping. Only the first goes out at once.
+      fireEvent.mouseMove(img, { clientX: 100, clientY: 200 });
+      fireEvent.mouseMove(img, { clientX: 200, clientY: 200 });
+      fireEvent.mouseMove(img, { clientX: 300, clientY: 200 });
+      expect(onInput).toHaveBeenCalledTimes(1);
+
+      await act(async () => { vi.advanceTimersByTime(MOVE_INTERVAL); });
+      expect(onInput, 'the resting position follows, and only that one').toHaveBeenCalledTimes(2);
+      expect(onInput.mock.calls.at(-1)?.[0], 'the ones it passed through are not resent')
+        .toEqual({ kind: 'move', x: 0.75, y: 0.5 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not send a held-back move after the page is handed back', async () => {
+    // The trailing position is armed while driving and fires later. Landing
+    // after the handback, it would be refused by the server and put a notice on
+    // screen for a mouse that moved before the person let go.
+    vi.useFakeTimers();
+    try {
+      const onInput = vi.fn();
+      const props = { active: true, liveViewUrl: undefined, frame, onStop: () => {}, onInput };
+      const { rerender } = render(<BrowserLiveView {...props} human />);
+      const img = screen.getByRole('img') as HTMLImageElement;
+      Object.defineProperty(img, 'naturalWidth', { value: 1280 });
+      Object.defineProperty(img, 'naturalHeight', { value: 800 });
+      img.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 400 }) as DOMRect;
+
+      fireEvent.mouseMove(img, { clientX: 100, clientY: 200 });
+      fireEvent.mouseMove(img, { clientX: 300, clientY: 200 });
+      onInput.mockClear();
+
+      // Given back before the trailing move was due.
+      rerender(<BrowserLiveView {...props} human={false} />);
+      await act(async () => { vi.advanceTimersByTime(MOVE_INTERVAL * 4); });
+      expect(onInput, 'nothing is sent for a page that is no longer theirs').not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
     }
   });
 

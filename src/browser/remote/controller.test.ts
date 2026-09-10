@@ -2493,6 +2493,109 @@ describe('handing the browser to the person watching', () => {
     expect(dropped, 'handled under the lossy rule, not refused').toEqual({ ok: true });
   });
 
+  it('stops vouching for a view while there is no view', async () => {
+    // A receipt vouches for a VIEW. `stopWatching` clears the session without
+    // bumping the watch — deliberately, since replacing the consumer is what a
+    // new watch is about — so the receipt stayed matched right across the
+    // detach and re-attach that `beginWatching` performs on every reconnect and
+    // every return to a conversation. Announced `confirmed` through that
+    // window, the client mounts and FOCUSES the blind keyboard surface over a
+    // page nothing is serving, and the keystrokes meant for the composer go to
+    // a remote page that can only refuse them.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    const seen: BrowserControlState[] = [];
+    c.onControlFor('run-A', (s) => seen.push(s));
+    await c.setCapture('run-A', false);
+    expect(seen.at(-1), 'hidden, and this view has been shown the page')
+      .toMatchObject({ human: true, capturing: false, confirmed: true });
+
+    await c.stopWatching('run-A');
+    expect(seen.at(-1)?.confirmed, 'nothing is serving the page now').toBe(false);
+  });
+
+  it('shows the page that is on screen now, not the one Show was aimed at', async () => {
+    // Hide refuses when the view moves under it, because hiding whatever
+    // replaced the page somebody was looking at is the wrong page. Show is the
+    // opposite request: it ends a PAUSE, and the pause lives on the run, which
+    // the replacement session inherits and attaches paused. Aimed at the
+    // session captured before the wait, Show hit a detached one — `applyCapture`
+    // swallows that, the socket handler ignores its `false`, and the button
+    // silently did nothing to a page that was still hidden.
+    cdpPerAttach = true;
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+    await c.setCapture('run-A', false);
+
+    // A slow input holds the slot while Show waits behind it.
+    const typing = deferred();
+    const first = cdpSessions.at(-1)!;
+    const realSend = first.send;
+    first.send = async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'Input.insertText') await typing.promise;
+      return realSend.call(first, method, params);
+    };
+    const typed = c.input('run-A', { kind: 'text', text: 'x' });
+    await new Promise((r) => setTimeout(r, 10));
+    const showing = c.setCapture('run-A', true);
+    await new Promise((r) => setTimeout(r, 10));
+
+    // The panel remounts: the old session goes, a replacement attaches paused.
+    await c.stopWatching('run-A');
+    await c.startWatching('run-A', () => {});
+
+    typing.resolve();
+    first.send = realSend;
+    await typed;
+
+    expect(await showing, 'the page the person is looking at is shown').toBe(true);
+    const replacement = cdpSessions.at(-1)!;
+    expect(replacement, 'and it is not the session Show was aimed at').not.toBe(first);
+    expect(replacement.sent, 'the picture came back on the current session')
+      .toContain('Page.startScreencast');
+  });
+
+  it('does not hand over a browser that closed while the person waited for it', async () => {
+    // The wait is up to the full action ceiling, and the agent's action can END
+    // the page — a site closing its own window during a navigation is ordinary.
+    // Granting the hold anyway tells the person they have control of a dead
+    // browser, and every input is then refused one at a time while the panel
+    // goes on saying the page is theirs.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+    c.actorEnded('w1');
+
+    let finishClick = () => {};
+    const realClick = page.click;
+    page.click = async (selector: string) => {
+      page.calls.push(`click:${selector}`);
+      await new Promise<void>((r) => { finishClick = r; });
+    };
+    const acting = c.controller({ kind: 'click', selector: '#closes-it' }, ctx('run-A', 'w2'));
+    await new Promise((r) => setTimeout(r, 10));
+    const taking = c.takeOver('run-A');
+    await new Promise((r) => setTimeout(r, 10));
+
+    // The action takes the page with it.
+    page.closed = true;
+    finishClick();
+    page.click = realClick;
+    await acting;
+
+    const out = await taking;
+    expect(out.ok, 'there is nothing left to take control of').toBe(false);
+    expect(out.detail).toMatch(/closed while you were waiting/i);
+    expect(c.humanHolds('run-A'), 'and the hold was not granted').toBe(false);
+  });
+
   it('does not act on a page whose restore the user stopped', async () => {
     // Bringing the picture back is a CDP round trip, and watching a page come
     // back is exactly when somebody presses Stop. The revoked/abort checks in

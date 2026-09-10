@@ -151,11 +151,36 @@ export function BrowserLiveView({
    * read and written inside the handler that produces the next one.
    */
   const lastMoveRef = useRef(0);
+  /**
+   * The position a throttled-away move was carrying, and the timer that will
+   * send it.
+   *
+   * A leading-edge throttle alone drops the LAST move of a gesture — the one
+   * that says where the pointer came to rest — because nothing follows it to
+   * take its place. That is the position hover actually depends on: the person
+   * moves onto a menu, stops, and the page never learns they arrived, so the
+   * dropdown appears for the first time under the `mouseMoved` that `dispatch`
+   * synthesises just before the press. The click then lands on something the
+   * frame they were looking at could not have shown.
+   */
+  const pendingMoveRef = useRef<{ x: number; y: number } | null>(null);
+  const moveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /**
+   * The person paused the picture, and the pause has to reach EVERY way of
+   * seeing the page.
+   *
+   * `Page.stopScreencast` stops our frames. It does nothing to the provider's
+   * own viewer, which is an independent stream of the same session — so the
+   * fallback iframe below would happily go on showing the credential page that
+   * was just hidden. Hiding one of two windows is not hiding.
+   */
+  const paused = capturing === false;
   // Frames first: they come from the browser itself, so they exist whoever is
   // hosting it. The provider's own viewer is the fallback for a deployment
   // still on the old path, and neither being available is now unusual rather
-  // than expected.
-  const watchable = !!frame || !!liveViewUrl;
+  // than expected. A paused page is watchable through NEITHER, whatever the
+  // provider would otherwise offer.
+  const watchable = !!frame || (!!liveViewUrl && !paused);
   // Taking over means driving the frames, so it is offered only where they are
   // the thing on screen. The provider's iframe has no lease behind it — input
   // through it would be a second, uncoordinated controller racing the agent.
@@ -179,6 +204,22 @@ export function BrowserLiveView({
   useEffect(() => {
     if (blind) blindRef.current?.focus();
   }, [blind]);
+
+  // A held-back move must not outlive the control it was made under. The timer
+  // is armed only while driving, so this cleanup covers both giving the page
+  // back and the panel going away — otherwise a trailing position could arrive
+  // after the handback and be refused, putting a notice on screen for a mouse
+  // that moved before the person let go.
+  useEffect(() => {
+    if (!driving) return;
+    return () => {
+      if (moveTimerRef.current) {
+        clearTimeout(moveTimerRef.current);
+        moveTimerRef.current = null;
+      }
+      pendingMoveRef.current = null;
+    };
+  }, [driving]);
 
   // AFTER every hook, and that is not a style preference.
   //
@@ -268,9 +309,14 @@ export function BrowserLiveView({
   };
 
   const banner = driving
-    ? capturing === false
+    ? paused
       ? 'You have control. The picture is paused — Cascade cannot see this page either.'
       : 'You have control of this browser. Cascade is paused until you give it back.'
+    : paused
+      // Handed back, or lapsed, while still hidden. Saying "it cannot be
+      // streamed" here would be a lie about a stream that is merely off, and
+      // "watch it here" would point at a panel showing nothing.
+      ? 'The picture is paused. Cascade will turn it back on before it does anything to the page.'
     : watchable
       ? 'Cascade is using a browser. Watch it here, and stop it whenever you want.'
       : streaming
@@ -414,15 +460,35 @@ export function BrowserLiveView({
             // in a frame first. `move` was declared on this event type and
             // handled all the way down in `dispatch` from the start; the client
             // simply never produced one, so the whole path was dead.
-            const now = Date.now();
-            if (now - lastMoveRef.current < MOVE_INTERVAL_MS) return;
             const p = at(e.clientX, e.clientY);
-            // Recorded only when one is actually SENT, so a move across the
-            // letterbox does not spend the interval that the next real one over
-            // the page needs.
+            // A move across the letterbox is not a move on the page, and must
+            // not spend the interval the next real one needs.
             if (!p) return;
-            lastMoveRef.current = now;
-            onInput?.({ kind: 'move', ...p });
+            const now = Date.now();
+            const since = now - lastMoveRef.current;
+            if (since >= MOVE_INTERVAL_MS) {
+              // This one goes now, so anything held back is already stale.
+              if (moveTimerRef.current) {
+                clearTimeout(moveTimerRef.current);
+                moveTimerRef.current = null;
+              }
+              pendingMoveRef.current = null;
+              lastMoveRef.current = now;
+              onInput?.({ kind: 'move', ...p });
+              return;
+            }
+            // Held back, not dropped. Only the newest is kept — the ones
+            // between are positions the pointer has already left.
+            pendingMoveRef.current = p;
+            if (moveTimerRef.current) return;
+            moveTimerRef.current = setTimeout(() => {
+              moveTimerRef.current = null;
+              const last = pendingMoveRef.current;
+              pendingMoveRef.current = null;
+              if (!last) return;
+              lastMoveRef.current = Date.now();
+              onInput?.({ kind: 'move', ...last });
+            }, MOVE_INTERVAL_MS - since);
           } : undefined}
           onContextMenu={driving ? (e) => e.preventDefault() : undefined}
           onWheel={driving ? (e) => {
@@ -521,7 +587,7 @@ export function BrowserLiveView({
         same-origin access to its own session and a sandbox permitting both is
         equivalent to none.
       */}
-      {!frame && !driving && liveViewUrl && (
+      {!frame && !driving && !paused && liveViewUrl && (
         <iframe
           src={liveViewUrl}
           title="Agent browser session (view only)"

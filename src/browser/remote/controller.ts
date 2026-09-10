@@ -531,7 +531,17 @@ export class RemoteBrowserController {
     const state: BrowserControlState = {
       human: this.leases.get(runId)?.heldByHuman === true,
       capturing: held?.capturing === true,
-      confirmed: held?.watchGen !== undefined && held.seenGen === held.watchGen,
+      // A receipt vouches for a VIEW, so it stops meaning anything the moment
+      // there is no view. `stopWatching` clears the session without bumping the
+      // watch — deliberately, since replacing the consumer is what a new watch
+      // is about — so the receipt stayed matched across the whole detach and
+      // re-attach, which `beginWatching` performs on every reconnect and every
+      // return to a conversation. Announced `confirmed` through that window,
+      // the client mounted and FOCUSED the blind keyboard surface over a page
+      // no session was serving: keystrokes meant for the composer went to a
+      // remote page that could only refuse them.
+      confirmed: held?.screencast !== undefined
+        && held.watchGen !== undefined && held.seenGen === held.watchGen,
     };
     const key = `${state.human}:${state.capturing}:${state.confirmed}`;
     if (!force && this.controlAnnounced.get(runId) === key) return;
@@ -874,7 +884,20 @@ export class RemoteBrowserController {
       if (!on && (held.watchGen === undefined || held.seenGen !== held.watchGen)) {
         return held.capturing === true;
       }
-      const now = await this.applyCapture(runId, held, cdp, on);
+      // SHOW re-reads the session; HIDE keeps the one it was aimed at.
+      //
+      // Not an inconsistency — the two requests are about different things.
+      // Hiding is aimed at a page somebody is looking at, so hiding whatever
+      // replaced it is the wrong page and is refused above. Showing is asking
+      // for a pause to end, and the pause lives on the RUN (`hiddenByHolder`),
+      // which the replacement session inherits and attaches paused. Aiming
+      // Show at the session captured before the wait meant that after a remount
+      // it targeted a detached one: `applyCapture` swallows the failure, the
+      // socket handler ignores its `false`, and the button silently did nothing
+      // to a page that was still hidden.
+      const target = on ? held.screencast : cdp;
+      if (!target) return held.capturing === true;
+      const now = await this.applyCapture(runId, held, target, on);
       if (lease.heldByHuman) lease.touch();
       return now;
     } finally {
@@ -960,6 +983,20 @@ export class RemoteBrowserController {
       };
     }
     try {
+      // Re-checked AFTER the wait, which is up to the full action ceiling. The
+      // checks above ran before it, and what they checked can be gone: the run
+      // can be stopped, and the agent's action can END the page — a site
+      // closing its own window during a navigation is ordinary. Granting the
+      // hold anyway tells the person they have control of a dead browser, and
+      // every input they then make is refused one at a time while the panel
+      // goes on saying the page is theirs.
+      const held = this.runs.get(runId);
+      if (this.revoked.has(runId)) {
+        return { ok: false, detail: 'Browser control was stopped for this run.' };
+      }
+      if (!held || held.page.isClosed()) {
+        return { ok: false, detail: 'That browser closed while you were waiting for it.' };
+      }
       lease.takeOver(runId);
     } finally {
       lease.endAction(token);
