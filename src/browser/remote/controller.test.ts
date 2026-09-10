@@ -1646,6 +1646,88 @@ describe('handing the browser to the person watching', () => {
     expect(cdp.sent).toContain('Page.stopScreencast');
   });
 
+  it('does not let a watcher coming and going turn Hide back into Show', async () => {
+    // Reachable with the ordinary client. The reconnect path is safe because it
+    // REUSES the surviving session and keeps `capturing: false`, but an
+    // explicit unwatch tears the session down — and the attach on the way back
+    // used to start the stream unconditionally. So switching conversations and
+    // switching back put a page somebody had hidden to type a password into
+    // straight back on the wire, with nobody having pressed Show.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const first: BrowserFrame[] = [];
+    await c.startWatching('run-A', (f) => first.push(f));
+    cdp.pushFrame(1);
+    c.frameSeen('run-A', first[0]!.generation);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+    expect(await c.setCapture('run-A', false), 'hidden on purpose').toBe(false);
+
+    const started = cdp.sent.filter((m) => m === 'Page.startScreencast').length;
+
+    // Switch away, and back.
+    await c.stopWatching('run-A');
+    const second: BrowserFrame[] = [];
+    await c.startWatching('run-A', (f) => second.push(f));
+
+    expect(
+      cdp.sent.filter((m) => m === 'Page.startScreencast'),
+      'the picture did not come back on its own',
+    ).toHaveLength(started);
+    expect(c.humanHolds('run-A'), 'and they still hold it').toBe(true);
+    // The fresh watch has confirmed nothing, so the blind keyboard stays shut.
+    expect((await c.input('run-A', { kind: 'text', text: 'secret' })).ok).toBe(false);
+
+    // Show is theirs to press, and it is what turns the picture back on.
+    expect(await c.setCapture('run-A', true), 'shown again, deliberately').toBe(true);
+    expect(
+      cdp.sent.filter((m) => m === 'Page.startScreencast'),
+      'exactly one more, from the person asking',
+    ).toHaveLength(started + 1);
+
+    cdp.pushFrame(2);
+    expect(second, 'and now they can see it').toHaveLength(1);
+    c.frameSeen('run-A', second[0]!.generation);
+    expect(await c.setCapture('run-A', false), 'so hiding it is a choice again').toBe(false);
+    expect((await c.input('run-A', { kind: 'text', text: 'secret' })).ok).toBe(true);
+  });
+
+  it('does not leave a pause standing that its holder no longer owns', async () => {
+    // The other half of scoping the pause to the holder. If the hold ends while
+    // the page is hidden and no agent action follows to restore it, a later
+    // watcher would inherit a dark panel with nothing able to clear it — the
+    // present-but-inert shape, arrived at from the opposite direction.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const first: BrowserFrame[] = [];
+    await c.startWatching('run-A', (f) => first.push(f));
+    cdp.pushFrame(1);
+    c.frameSeen('run-A', first[0]!.generation);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+    await c.setCapture('run-A', false);
+
+    // They hand it back, and nothing else happens.
+    expect(c.handBack('run-A')).toBe(true);
+    await c.stopWatching('run-A');
+    const started = cdp.sent.filter((m) => m === 'Page.startScreencast').length;
+
+    await c.startWatching('run-A', () => {});
+
+    // Asserted on the CDP call rather than on a delivered frame: the fake hands
+    // a frame to whatever callback is installed whether or not the screencast
+    // was ever started, so `pushFrame` landing proves nothing about this.
+    expect(
+      cdp.sent.filter((m) => m === 'Page.startScreencast'),
+      'a pause nobody holds is not a pause',
+    ).toHaveLength(started + 1);
+    expect(c.humanHolds('run-A'), 'and the hold really had ended').toBe(false);
+  });
+
   it('refuses hidden typing from a watcher that arrived after the page was hidden', async () => {
     // The full lifecycle, and the one path here reachable with the ordinary web
     // client rather than a stale or hand-made one. A takeover survives a reload

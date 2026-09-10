@@ -280,6 +280,24 @@ interface RunBrowser {
    */
   metricsStale?: boolean;
   /**
+   * The HOLDER asked for the picture to stop, as opposed to nobody watching.
+   *
+   * `capturing` answers "are frames flowing", and a watcher arriving or leaving
+   * moves it for reasons that have nothing to do with what the person wants.
+   * Switching conversations tears the screencast down, and the attach on the
+   * way back used to start it again — putting a page somebody had deliberately
+   * hidden, to type a password into, back on the wire without anyone pressing
+   * Show. A watch lifecycle event may stop paying for frames; it may not
+   * overturn the holder's decision.
+   *
+   * Cleared where capture actually turns back ON, which is the one place both
+   * routes out of the pause meet: the person pressing Show, and the agent
+   * restoring the picture before it touches the page once the hold has ended.
+   * Only honoured while they still hold it, so a pause cannot outlive its
+   * holder and leave a later viewer looking at nothing.
+   */
+  hiddenByHolder?: boolean;
+  /**
    * Which watch this is — bumped every time the frame consumer is replaced.
    *
    * The identity a receipt is checked against, and the reason this is a counter
@@ -660,19 +678,29 @@ export class RemoteBrowserController {
       void cdp.send('Page.screencastFrameAck', { sessionId: e?.sessionId }).catch(() => {});
     }) as never);
 
-    try {
-      await cdp.send('Page.startScreencast', { ...SCREENCAST });
-    } catch {
-      // The page went away between opening the session and starting the
-      // stream. Leave nothing half-attached behind.
-      await cdp.detach().catch(() => {});
-      return null;
+    // A watcher coming back does not undo a deliberate Hide. The session is
+    // attached either way — so Show, and the agent's own restore, have
+    // something to turn on — but the stream stays stopped until somebody asks
+    // for it. Only while the person still holds the page: a pause with no
+    // holder left is nobody's decision, and honouring it would leave the panel
+    // dark with nothing to clear it.
+    const paused = held.hiddenByHolder === true && this.humanHolds(runId);
+    if (!paused) {
+      try {
+        await cdp.send('Page.startScreencast', { ...SCREENCAST });
+      } catch {
+        // The page went away between opening the session and starting the
+        // stream. Leave nothing half-attached behind.
+        await cdp.detach().catch(() => {});
+        return null;
+      }
     }
     // Recorded BEFORE this promise resolves, so a stop that awaited the attach
     // finds the session rather than racing the assignment.
     held.screencast = cdp;
     held.onFrame = onFrame;
-    held.capturing = true;
+    held.capturing = !paused;
+    held.hiddenByHolder = paused;
     this.announceControl(runId);
     return cdp;
   }
@@ -686,6 +714,9 @@ export class RemoteBrowserController {
       held.onFrame = undefined;
       if (!cdp) return;
       held.screencast = undefined;
+      // `hiddenByHolder` is deliberately NOT cleared. Nobody is watching, which
+      // is why frames stop; it says nothing about whether the person wanted the
+      // page shown, and the attach on the way back reads it.
       held.capturing = false;
       this.announceControl(runId);
       // Both best-effort and in this order: stop the stream first so no further
@@ -785,6 +816,12 @@ export class RemoteBrowserController {
       if (on) await cdp.send('Page.startScreencast', { ...SCREENCAST });
       else await cdp.send('Page.stopScreencast');
       held.capturing = on;
+      // The decision, recorded separately from whether frames are flowing.
+      // Turning the picture off here is only ever the holder asking for it —
+      // `setCapture` refuses everyone else — and turning it back on is the one
+      // place both ways out of the pause meet, whether the person pressed Show
+      // or the agent restored the picture on its way in.
+      held.hiddenByHolder = !on;
       this.announceControl(runId);
     } catch {
       // The page went away underneath. Report what is actually true rather
