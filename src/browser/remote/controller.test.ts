@@ -1664,6 +1664,107 @@ describe('handing the browser to the person watching', () => {
     expect(cdp.sent).toContain('Page.stopScreencast');
   });
 
+  it('does not let a queued event land after its watcher has gone', async () => {
+    // The sibling of the Hide race, in `input()`. A second event parks on the
+    // action slot while the first is still inside CDP, and the watch queue does
+    // not take that slot — so an unwatch can run underneath it. `stopWatching`
+    // clears `held.screencast` synchronously and only THEN awaits
+    // `Page.stopScreencast` and detach, so there is a window where the session
+    // is no longer the current one and is still perfectly alive.
+    //
+    // Only the hold was re-read, and switching conversations does not hand the
+    // browser back — so the queued key went into a page the viewer had already
+    // navigated away from.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const frames: BrowserFrame[] = [];
+    await c.startWatching('run-A', (f) => frames.push(f));
+    cdp.pushFrame(1);
+    c.frameSeen('run-A', frames[0]!.generation);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    // The first event holds the slot open inside CDP, and the unwatch's own
+    // stop is held open too — that is the window this is about.
+    const typing = deferred();
+    const stopping = deferred();
+    const realSend = cdp.send;
+    cdp.send = async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'Input.insertText') await typing.promise;
+      if (method === 'Page.stopScreencast') await stopping.promise;
+      return realSend.call(cdp, method, params);
+    };
+
+    const first = c.input('run-A', { kind: 'text', text: 'one' });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // A second event arrives and parks on the slot.
+    const second = c.input('run-A', { kind: 'text', text: 'two' });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // The person switches conversation. The session is cleared at once; the
+    // CDP stop is still pending.
+    const unwatching = c.stopWatching('run-A');
+    await new Promise((r) => setTimeout(r, 10));
+
+    typing.resolve();
+    expect((await first).ok, 'the first one was aimed at a view that existed').toBe(true);
+
+    const out = await second;
+    expect(out.ok, 'the second was not').toBe(false);
+    expect(out.detail).toMatch(/view you were driving is gone/i);
+    expect(
+      cdp.sent.filter((m) => m === 'Input.insertText'),
+      'exactly one reached the page, not two',
+    ).toHaveLength(1);
+
+    stopping.resolve();
+    cdp.send = realSend;
+    await unwatching;
+  });
+
+  it('does not let a queued event land in the view that replaced its own', async () => {
+    // The other half. A reconnect KEEPS the session and bumps the watch, so the
+    // session identity is unchanged and only the watch has moved — the mirror
+    // of the unwatch case, and why both halves of the re-check are needed.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+
+    const frames: BrowserFrame[] = [];
+    await c.startWatching('run-A', (f) => frames.push(f));
+    cdp.pushFrame(1);
+    c.frameSeen('run-A', frames[0]!.generation);
+    c.actorEnded('w1');
+    await c.takeOver('run-A');
+
+    const typing = deferred();
+    const realSend = cdp.send;
+    cdp.send = async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'Input.insertText') await typing.promise;
+      return realSend.call(cdp, method, params);
+    };
+
+    const first = c.input('run-A', { kind: 'text', text: 'one' });
+    await new Promise((r) => setTimeout(r, 10));
+    const second = c.input('run-A', { kind: 'text', text: 'two' });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // A reconnect: same screencast, new watcher.
+    await c.startWatching('run-A', () => {});
+
+    typing.resolve();
+    cdp.send = realSend;
+    expect((await first).ok).toBe(true);
+
+    const out = await second;
+    expect(out.ok, 'the view it was aimed at has been replaced').toBe(false);
+    expect(out.detail).toMatch(/view you were driving is gone/i);
+    expect(cdp.sent.filter((m) => m === 'Input.insertText')).toHaveLength(1);
+  });
+
   it('does not hide a session that stopped being the one on screen', async () => {
     // Found by a fresh-context review, and invisible to this suite until the
     // fake started handing out a session per attach. `setCapture` reads the

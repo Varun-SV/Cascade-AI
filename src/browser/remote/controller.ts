@@ -948,6 +948,9 @@ export class RemoteBrowserController {
     // Two answers to "may this land" is how they come to disagree.
     const held = this.runs.get(runId);
     const cdp = held?.screencast;
+    // The view this event is authorised against, kept so it can be compared to
+    // the view that exists when it finally runs. See the re-check below.
+    const watch = held?.watchGen;
     if (!held || held.page.isClosed()) return { ok: false, detail: 'This run has no browser open.' };
     // No CDP session means nobody is watching, and input you cannot see the
     // result of is not a takeover — it is typing into the dark.
@@ -988,11 +991,38 @@ export class RemoteBrowserController {
     }
 
     try {
-      // Re-checked after the wait, which is the whole reason the wait is
-      // bounded: a hold can lapse while an earlier event finishes.
+      // Re-checked after the wait — the VIEW as well as the hold, because the
+      // wait is real: a second event parks here while the first is still inside
+      // CDP, and the watch queue does not take the action slot, so the view can
+      // be torn down and rebuilt underneath it.
+      //
+      // Both halves are needed, and they catch different things. `stopWatching`
+      // clears `held.screencast` WITHOUT bumping the watch, and until its
+      // `Page.stopScreencast` and detach settle that session is still live — so
+      // a queued key could land on a page the viewer has already navigated away
+      // from. A reconnect does the opposite: it keeps the session and bumps the
+      // watch. Checking one would leave the other open.
+      //
+      // (`setCapture` needs only the watch half, because the session there can
+      // change only through `attachScreencast`, which `startWatching` reaches
+      // after bumping. An unwatch is what makes this method different.)
+      //
+      // Refused rather than retargeted, the same as Hide: a click aimed at the
+      // page somebody was looking at is not a click on whatever replaced it.
       if (!lease.heldByHuman) {
         return { ok: false, detail: 'Your control of this browser ended while that was waiting.' };
       }
+      if (held.screencast !== cdp || held.watchGen !== watch) {
+        return { ok: false, detail: 'The view you were driving is gone, so that did not land.' };
+      }
+      // The blind-typing rule is deliberately NOT re-run here, and its
+      // revert-check going green is the reason. Capture can only go off under
+      // this wait through `setCapture`, which takes the same action slot and so
+      // cannot interleave — and when it does run first, it hid a page whose
+      // receipt is still current, which is exactly the case that is allowed.
+      // Reaching it with a stale receipt needs the watch to have moved, and the
+      // check above already refused that. A third answer to the same question
+      // is how they come to disagree.
       await this.dispatch(cdp, held, event);
     } catch (err) {
       return { ok: false, detail: err instanceof Error ? err.message : String(err) };
