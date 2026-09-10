@@ -313,6 +313,7 @@ export default function App() {
             onHandBackBrowser={chat.handBackBrowser}
             onBrowserInput={chat.sendBrowserInput}
             onBrowserCapture={chat.setBrowserCapture}
+            onBrowserFrameShown={chat.markBrowserFrameShown}
             toolApprovals={chat.toolApprovals}
             onDecideToolApproval={chat.resolveToolApproval}
             onStopBrowser={chat.stopBrowser}

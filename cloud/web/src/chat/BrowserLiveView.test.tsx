@@ -191,6 +191,70 @@ describe('BrowserLiveView — taking the page over', () => {
     expect(onInput).not.toHaveBeenCalled();
   });
 
+  it('reports a frame only once the image says it rendered', () => {
+    // The receipt opens Hide and, with it, the blind keyboard surface, so it
+    // has to mean "shown". `load` is the browser saying the JPEG decoded and is
+    // ready to paint — the closest thing to seen that a client can honestly
+    // report. Rendering the frame is not that; a client handed a JPEG it cannot
+    // decode renders nothing and must confirm nothing.
+    const onFrameShown = vi.fn();
+    render(
+      <BrowserLiveView
+        active liveViewUrl={undefined} frame={{ ...frame, generation: 12 }} human
+        onStop={() => {}} onFrameShown={onFrameShown}
+      />,
+    );
+    const img = screen.getByRole('img');
+    expect(onFrameShown, 'on screen in the DOM is not decoded').not.toHaveBeenCalled();
+
+    fireEvent.load(img);
+    expect(onFrameShown).toHaveBeenCalledWith(12);
+  });
+
+  it('pastes into the page instead of nowhere', () => {
+    // Ctrl/Cmd+V is a modifier chord, which the key handler deliberately leaves
+    // to the viewer's own browser — and both surfaces here are non-editable, so
+    // the default paste had nothing to insert and went nowhere at all. Hiding
+    // the picture exists FOR entering a credential, and a credential mostly
+    // comes out of a password manager, so the feature's primary use case was
+    // the one thing that could not be done.
+    const onInput = vi.fn();
+    render(
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+    );
+    fireEvent.paste(screen.getByRole('img'), {
+      clipboardData: { getData: () => 'correct horse battery staple' },
+    });
+    expect(onInput).toHaveBeenCalledWith({ kind: 'text', text: 'correct horse battery staple' });
+  });
+
+  it('pastes into the hidden surface, which is where a password goes', () => {
+    // The picture is off and the person is typing a password they cannot see.
+    // This is the surface the manager actually pastes into.
+    const onInput = vi.fn();
+    render(
+      <BrowserLiveView
+        active liveViewUrl={undefined} frame={undefined} human capturing={false} confirmed
+        onStop={() => {}} onInput={onInput}
+      />,
+    );
+    fireEvent.paste(screen.getByRole('group', { name: /picture hidden/i }), {
+      clipboardData: { getData: () => 'hunter2' },
+    });
+    expect(onInput).toHaveBeenCalledWith({ kind: 'text', text: 'hunter2' });
+  });
+
+  it('does not paste into a page it is only watching', () => {
+    const onInput = vi.fn();
+    render(
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} onStop={() => {}} onInput={onInput} />,
+    );
+    fireEvent.paste(screen.getByRole('img'), {
+      clipboardData: { getData: () => 'not yours to send' },
+    });
+    expect(onInput).not.toHaveBeenCalled();
+  });
+
   it('sends a click as a fraction of the picture, not of the element', () => {
     // `object-fit: contain` centres the picture with bars on two sides whenever
     // the aspect ratios differ, so measuring against the element is wrong by
@@ -213,6 +277,73 @@ describe('BrowserLiveView — taking the page over', () => {
     onInput.mockClear();
     fireEvent.mouseDown(img, { clientX: 200, clientY: 10, button: 0, detail: 1 });
     expect(onInput, 'a click on a black bar is not a click on anything').not.toHaveBeenCalled();
+  });
+
+  it('forwards pointer movement so hover happens before the click', () => {
+    // `dispatch` sends `mouseMoved` immediately before `mousePressed`, so a
+    // click always lands somewhere the pointer has "been" — but only by one
+    // event, at the click's own coordinates. Anything hover reveals therefore
+    // appeared for the first time between the frame the person aimed at and the
+    // press. `move` was declared here and handled in `dispatch` from the start;
+    // the client never produced one, so the path was dead.
+    const onInput = vi.fn();
+    render(
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} onInput={onInput} />,
+    );
+    const img = screen.getByRole('img') as HTMLImageElement;
+    Object.defineProperty(img, 'naturalWidth', { value: 1280 });
+    Object.defineProperty(img, 'naturalHeight', { value: 800 });
+    img.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 400 }) as DOMRect;
+
+    const now = vi.spyOn(Date, 'now');
+    try {
+      now.mockReturnValue(1_000);
+      fireEvent.mouseMove(img, { clientX: 200, clientY: 200 });
+      expect(onInput, 'the pointer arriving is sent as a move')
+        .toHaveBeenCalledWith({ kind: 'move', x: 0.5, y: 0.5 });
+
+      // A mousemove fires per pixel of travel. Every one of them taking the
+      // action slot and a CDP round trip would put a queue of stale positions
+      // in front of the click that follows.
+      onInput.mockClear();
+      now.mockReturnValue(1_010);
+      fireEvent.mouseMove(img, { clientX: 300, clientY: 200 });
+      expect(onInput, 'and the ones a flick of the wrist produces are not').not.toHaveBeenCalled();
+
+      // Far enough apart to be a different intention rather than the same
+      // gesture, and in the letterbox, which is not the page.
+      now.mockReturnValue(1_100);
+      fireEvent.mouseMove(img, { clientX: 200, clientY: 10 });
+      expect(onInput, 'a move across a black bar is not a move on anything').not.toHaveBeenCalled();
+
+      // …and that one must not have spent the interval the next real move needs.
+      now.mockReturnValue(1_120);
+      fireEvent.mouseMove(img, { clientX: 200, clientY: 300 });
+      expect(onInput, 'the next move over the page still goes')
+        .toHaveBeenCalledWith({ kind: 'move', x: 0.5, y: 0.9 });
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('does not forward pointer movement to a page it is only watching', () => {
+    // Watching is not driving. Movement over a picture nobody handed you is
+    // not input, and forwarding it would reach the session outside the lease.
+    const onInput = vi.fn();
+    render(
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} onStop={() => {}} onInput={onInput} />,
+    );
+    const img = screen.getByRole('img') as HTMLImageElement;
+    // The SAME measurable picture the driving test sets up. Without these the
+    // coordinate helper has nothing to measure against and answers "not on the
+    // page" whatever the guard does — so the first draft of this test passed
+    // with the guard deleted, which is the one thing a scope test must not do.
+    Object.defineProperty(img, 'naturalWidth', { value: 1280 });
+    Object.defineProperty(img, 'naturalHeight', { value: 800 });
+    img.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 400 }) as DOMRect;
+
+    fireEvent.mouseMove(img, { clientX: 200, clientY: 200 });
+    expect(onInput).not.toHaveBeenCalled();
   });
 
   it('can pause the picture without giving the page back', () => {

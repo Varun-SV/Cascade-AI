@@ -67,6 +67,7 @@ interface Props {
   onBrowserInput?: (event: BrowserInputEvent) => void;
   /** Pause or resume the picture without giving the page back. */
   onBrowserCapture?: (on: boolean) => void;
+  onBrowserFrameShown?: (generation: number) => void;
   /** Dangerous tool calls waiting on the user. */
   toolApprovals?: ToolApproval[];
   onDecideToolApproval?: (requestId: string, approved: boolean, always?: boolean) => void;
@@ -81,6 +82,7 @@ export default function ChatPanel({
   compactionNotice, providerNotice, knowledgeNotice, activity, browserLiveView, browserActive,
   browserFrame, browserStreaming, browserHuman, browserCapturing, browserConfirmed, browserNotice,
   onStopBrowser, onTakeOverBrowser, onHandBackBrowser, onBrowserInput, onBrowserCapture,
+  onBrowserFrameShown,
   toolApprovals, onDecideToolApproval,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -245,6 +247,7 @@ export default function ChatPanel({
           onHandBack={() => onHandBackBrowser?.()}
           onInput={(e) => onBrowserInput?.(e)}
           onCapture={(on) => onBrowserCapture?.(on)}
+          onFrameShown={(g) => onBrowserFrameShown?.(g)}
         />
       </div>
 

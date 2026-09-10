@@ -1306,6 +1306,52 @@ describe('handing the browser to the person watching', () => {
     expect((await handoff).ok).toBe(true);
   });
 
+  it('does not let a retry granted before the takeover act after it', async () => {
+    // The lease is RE-ENTRANT for its holder — that is what makes a sequence of
+    // actions a sequence — so a retry from the actor that already holds it is
+    // granted instantly, whatever is queued behind it. If a takeover is ahead
+    // of that retry in the slot queue, the takeover changes the holder to the
+    // person and then hands the slot straight on to the retry, which is still
+    // carrying a grant that was true when it was issued and is not any more.
+    //
+    // Before the slot was a queue this was a race the poll usually lost. Now
+    // the handoff is direct, so without a re-check it is not a race at all: the
+    // agent walks into `open()` and changes a page the user has just been told
+    // is theirs.
+    const { provider } = fakeProvider();
+    const c = new RemoteBrowserController({ provider });
+    await watched(c);
+
+    let finishClick = () => {};
+    const realClick = page.click;
+    page.click = async (selector: string) => {
+      page.calls.push(`click:${selector}`);
+      await new Promise<void>((r) => { finishClick = r; });
+    };
+    const acting = c.controller({ kind: 'click', selector: '#slow' }, ctx('run-A', 'w1'));
+    await new Promise((r) => setTimeout(r, 20));
+
+    // ORDER IS THE TEST. The takeover queues for the slot first; the retry —
+    // same actor, so granted the lease on the spot — queues behind it.
+    const handoff = c.takeOver('run-A');
+    await new Promise((r) => setTimeout(r, 20));
+    const retry = c.controller({ kind: 'click', selector: '#retry' }, ctx('run-A', 'w1'));
+    await new Promise((r) => setTimeout(r, 20));
+
+    finishClick();
+    // Restored so that a retry which WRONGLY proceeds runs to completion and
+    // fails the assertion below, rather than parking in the gate and failing as
+    // a timeout — which says only that something hung, not what was wrong.
+    page.click = realClick;
+    expect((await acting).ok, 'the action already in flight still finishes').toBe(true);
+    expect((await handoff).ok, 'and the person is given control').toBe(true);
+
+    const out = await retry;
+    expect(out.ok, 'the agent does not act after control was handed to the person').toBe(false);
+    expect(out.detail).toMatch(/taken control/i);
+    expect(page.calls, 'and it never reached the page').not.toContain('click:#retry');
+  });
+
   it('places a click on the page it was clicked on', async () => {
     // The client sends a fraction of the picture; only this side knows the
     // viewport that picture was scaled down from.

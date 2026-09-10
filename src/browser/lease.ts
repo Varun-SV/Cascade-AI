@@ -161,6 +161,14 @@ export class BrowserLease {
   get holderActor(): string | null { return this.actor; }
   /** Whether a person, rather than the agent, is driving the page right now. */
   get heldByHuman(): boolean { return this.actor === HUMAN_ACTOR; }
+  /**
+   * Whether THIS actor is the one holding the browser right now.
+   *
+   * For asking again after a wait. `acquire` is re-entrant for the holder, so
+   * "I was granted the lease" is a fact about the moment it was granted and
+   * says nothing about the moment the caller finally gets to act.
+   */
+  heldBy(actorId: string): boolean { return this.actor === actorId; }
   get holderSession(): string | null { return this.session; }
   get queueDepth(): number { return this.waiting.length; }
   get actionInFlight(): boolean { return this.action !== null; }

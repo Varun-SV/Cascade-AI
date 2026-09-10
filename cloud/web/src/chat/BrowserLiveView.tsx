@@ -30,6 +30,18 @@ const COMMAND_KEYS = new Set([
   'Home', 'End', 'PageUp', 'PageDown',
 ]);
 
+/**
+ * How often pointer movement is forwarded while the person is driving.
+ *
+ * A rate, not every event: a mousemove fires per pixel of travel, and each one
+ * that went through would take the action slot and a CDP round trip, so a
+ * flick across the panel would put a queue of stale positions in front of the
+ * click that follows it. Roughly the screencast's own cadence — often enough
+ * that hover states appear in a frame before the person clicks, rare enough
+ * that the queue drains faster than they can aim.
+ */
+const MOVE_INTERVAL_MS = 60;
+
 /** One thing the user did to the page. Coordinates are fractions of the frame. */
 export type BrowserInputEvent =
   | { kind: 'move'; x: number; y: number }
@@ -58,7 +70,7 @@ interface Props {
    * including a bare CDP endpoint, which has no viewer API at all and so used
    * to get a Stop button and an apology.
    */
-  frame?: { data: string; width: number; height: number } | undefined;
+  frame?: { data: string; width: number; height: number; generation?: number } | undefined;
   /** The server confirmed a stream is running, so a blank panel is worth explaining. */
   streaming?: boolean;
   /** The user holds the page: the agent is being refused until they hand it back. */
@@ -85,15 +97,33 @@ interface Props {
   onHandBack?: () => void;
   /** One thing the user did to the page, while they hold it. */
   onInput?: (event: BrowserInputEvent) => void;
+  /**
+   * This frame is on screen — not merely in state.
+   *
+   * Called from the image's own `load`, which is the browser saying the JPEG
+   * decoded and is ready to paint. The server treats it as the receipt that
+   * opens Hide and the blind keyboard surface, so it has to mean "shown"; an
+   * effect firing when the bytes arrived would confirm a page a slow or broken
+   * client never rendered.
+   */
+  onFrameShown?: (generation: number) => void;
   /** Pause or resume the picture without giving the page back. */
   onCapture?: (on: boolean) => void;
 }
 
 export function BrowserLiveView({
   active, liveViewUrl, frame, streaming, human, capturing, confirmed, notice,
-  onStop, onTakeOver, onHandBack, onInput, onCapture,
+  onStop, onTakeOver, onHandBack, onInput, onCapture, onFrameShown,
 }: Props) {
   const imgRef = useRef<HTMLImageElement>(null);
+  /**
+   * When a pointer move was last forwarded, so they go out at a rate rather
+   * than one per mousemove event.
+   *
+   * A ref rather than state: throttling must not re-render, and the value is
+   * read and written inside the handler that produces the next one.
+   */
+  const lastMoveRef = useRef(0);
   if (!active) return null;
   // Frames first: they come from the browser itself, so they exist whoever is
   // hosting it. The provider's own viewer is the fallback for a deployment
@@ -141,6 +171,29 @@ export function BrowserLiveView({
    * whole point of hiding the picture is to keep typing into a page you cannot
    * see — a handler that lived only on the <img> disappeared with it.
    */
+  /**
+   * A paste, forwarded as the text it carries.
+   *
+   * Ctrl/Cmd+V is a modifier chord, and `onKey` below deliberately lets those
+   * through to the viewer's own browser rather than stealing them. That is
+   * right for copy and reload — and it left paste going nowhere at all, because
+   * both surfaces here are non-editable, so the default paste has nothing to
+   * insert. The one thing the hidden-capture mode exists for is entering a
+   * credential, and a credential mostly arrives from a password manager, so the
+   * feature's primary use case was the one that could not be done.
+   *
+   * The clipboard is read only in response to the person's own paste gesture —
+   * this handler cannot see it otherwise — and the text goes through `onInput`
+   * like anything else they type, so it takes the lease, the action slot and
+   * the 4,000-character bound with it.
+   */
+  const onPaste = (e: React.ClipboardEvent) => {
+    const text = e.clipboardData?.getData('text') ?? '';
+    if (!text) return;
+    e.preventDefault();
+    onInput?.({ kind: 'text', text });
+  };
+
   const onKey = (e: React.KeyboardEvent) => {
     // Modifier chords are not forwarded: they are the viewer's own shortcuts —
     // copy, reload, close the tab — and stealing them from the person's actual
@@ -281,12 +334,44 @@ export function BrowserLiveView({
             const p = at(e.clientX, e.clientY);
             if (p) onInput?.({ kind: 'click', ...p, button: e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left', clicks: e.detail || 1 });
           } : undefined}
+          onMouseMove={driving ? (e) => {
+            // Hover is part of the page, and the person could not see it.
+            //
+            // `dispatch` already sends `mouseMoved` immediately before
+            // `mousePressed`, so a click always arrives somewhere the pointer
+            // has "been" — but only by one event, at the click's own
+            // coordinates, a moment before the press. Anything hover reveals —
+            // a nav dropdown, a tooltip, a toolbar that appears on the row
+            // under the cursor — therefore appeared for the first time BETWEEN
+            // the frame the person aimed at and the press, so the press landed
+            // on content that was not in the picture they clicked.
+            //
+            // Forwarding movement while they travel is what puts that content
+            // in a frame first. `move` was declared on this event type and
+            // handled all the way down in `dispatch` from the start; the client
+            // simply never produced one, so the whole path was dead.
+            const now = Date.now();
+            if (now - lastMoveRef.current < MOVE_INTERVAL_MS) return;
+            const p = at(e.clientX, e.clientY);
+            // Recorded only when one is actually SENT, so a move across the
+            // letterbox does not spend the interval that the next real one over
+            // the page needs.
+            if (!p) return;
+            lastMoveRef.current = now;
+            onInput?.({ kind: 'move', ...p });
+          } : undefined}
           onContextMenu={driving ? (e) => e.preventDefault() : undefined}
           onWheel={driving ? (e) => {
             const p = at(e.clientX, e.clientY);
             if (p) onInput?.({ kind: 'scroll', ...p, deltaY: e.deltaY });
           } : undefined}
           onKeyDown={driving ? onKey : undefined}
+          onPaste={driving ? onPaste : undefined}
+          onLoad={() => {
+            // Reported from HERE — the browser saying the JPEG decoded — rather
+            // than from the arrival of the bytes. See `onFrameShown`.
+            if (frame.generation !== undefined) onFrameShown?.(frame.generation);
+          }}
           style={{
             width: '100%', minHeight: 400, maxHeight: 600, objectFit: 'contain',
             display: 'block', background: '#000',
@@ -334,6 +419,9 @@ export function BrowserLiveView({
             aria-label="Agent browser, picture hidden"
             tabIndex={0}
             onKeyDown={onKey}
+            // The surface a password is actually entered on, so the surface a
+            // password manager actually pastes into.
+            onPaste={onPaste}
             style={{
               width: '100%', minHeight: 400, display: 'grid', placeItems: 'center',
               background: '#000', color: 'var(--warn-fg, #f5c96b)', fontSize: 13,

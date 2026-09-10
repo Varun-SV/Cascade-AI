@@ -444,8 +444,6 @@ export function useChatSession(
    * runs, and a conversation-scoped Stop halted all of them.
    */
   const browserTaskId = browserView?.taskId;
-  /** The watch the picture on screen belongs to. See the receipt effect below. */
-  const browserFrameGen = browserView?.frame?.generation;
   // Read by stopBrowser, which is declared before this value and must not close
   // over a stale one when the run changes under it.
   const browserTaskIdRef = useRef<string | undefined>(undefined);
@@ -1273,22 +1271,48 @@ export function useChatSession(
     };
   }, [socket, browserTaskId, beginWatching]);
 
-  // Tell the server this pane actually HAS the picture.
-  //
-  // Frames go out lossy — dropped, not queued, when the transport is not
-  // writable — so handing one to the socket establishes nothing about what
-  // arrived. Hiding the page is gated on this receipt rather than on that
-  // dispatch, because the client the gate protects is an honest stale one whose
-  // Hide is still wired to `streaming`: it never receives the frame, so it never
-  // sends this, and its Hide stays refused.
-  //
-  // Once per watch, not per frame, and from an effect keyed on the generation
-  // so a re-render cannot repeat it. It gates Hide only and never Chrome's own
-  // frame ack, so the stream stays exactly as lossy and as fast as it was.
-  useEffect(() => {
-    if (!socket || !browserTaskId || browserFrameGen === undefined) return;
-    socket.emit('browser:frame-seen', { taskId: browserTaskId, generation: browserFrameGen });
-  }, [socket, browserTaskId, browserFrameGen]);
+  /**
+   * The generation this pane has already reported seeing.
+   *
+   * A ref, because it must not re-render and it must not be re-derived: it is a
+   * record of something that happened, read on the way to deciding whether it
+   * has happened again.
+   */
+  const shownGenRef = useRef<number | undefined>(undefined);
+
+  /**
+   * Tell the server this pane actually HAS the picture.
+   *
+   * Frames go out lossy — dropped, not queued, when the transport is not
+   * writable — so handing one to the socket establishes nothing about what
+   * arrived. Hiding the page is gated on this receipt rather than on that
+   * dispatch, because the client the gate protects is an honest stale one whose
+   * Hide is still wired to `streaming`: it never receives the frame, so it never
+   * sends this, and its Hide stays refused.
+   *
+   * CALLED FROM THE IMAGE'S OWN `load`, not from an effect keyed on the frame
+   * arriving. That distinction is round 9's argument one layer further down: an
+   * effect fires when the JPEG enters React state, which proves the socket
+   * delivered bytes and nothing about whether they became a picture. A slow
+   * client, or one handed a frame it cannot decode, would confirm a page it has
+   * never shown anybody — and the confirmation is what opens Hide and, with it,
+   * the blind keyboard surface. `load` is the browser saying the image is ready
+   * to paint, which is the closest thing to "seen" that a client can honestly
+   * report. A frame that fails to decode fires nothing, no receipt is sent, and
+   * the surface stays shut: the right way to fail.
+   *
+   * Still once per watch, not per frame — the generation is the watch's, and
+   * the ref above is what keeps a stream of repaints from becoming a stream of
+   * round trips. It gates Hide only and never Chrome's own frame ack, so the
+   * stream stays exactly as lossy and as fast as it was.
+   */
+  const markBrowserFrameShown = useCallback((generation: number) => {
+    const taskId = browserTaskIdRef.current;
+    if (!socket || !taskId) return;
+    if (shownGenRef.current === generation) return;
+    shownGenRef.current = generation;
+    socket.emit('browser:frame-seen', { taskId, generation });
+  }, [socket]);
 
   // Connect only now, and deliberately LAST.
   //
@@ -1659,6 +1683,7 @@ export function useChatSession(
     browserLiveView, browserActive, browserTaskId, browserFrame, browserStreaming,
     browserHuman, browserCapturing, browserConfirmed, browserNotice, stopBrowser,
     takeOverBrowser, handBackBrowser, sendBrowserInput, setBrowserCapture,
+    markBrowserFrameShown,
     toolApprovals, resolveToolApproval,
   };
 }

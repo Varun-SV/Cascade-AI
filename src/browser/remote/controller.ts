@@ -1394,6 +1394,28 @@ export class RemoteBrowserController {
       lease_.releaseIfHeldBy(actor);
       return { ok: false, detail: 'Another browser action is still finishing. Try again.' };
     }
+    // Re-checked AFTER the slot wait — the same question `input()` and
+    // `setCapture` are each made to ask after theirs, and the one entry point
+    // that was not made to ask it.
+    //
+    // `acquire` above is RE-ENTRANT for the holder, which is what makes a
+    // sequence of actions a sequence. So a retry from the actor that already
+    // holds the lease is granted instantly and then queues here — and a
+    // takeover queued AHEAD of it takes the slot, changes the holder to the
+    // person, and hands the slot straight on to this retry. The grant it is
+    // carrying was true when it was issued and is not true any more.
+    //
+    // Before the slot became a queue this was a race the poll usually lost;
+    // now the handoff is direct, so it is not a race at all. Either way the
+    // outcome was the agent walking into `open()` and changing a page the
+    // user had just been told was theirs — the exact overlap a takeover
+    // exists to prevent, arriving through the one door with no re-check on it.
+    if (!lease_.heldBy(actor)) {
+      lease_.endAction(token);
+      // Named from who holds it now rather than assumed: a takeover is the
+      // reachable case, and a `stopRun` mid-wait is the other one.
+      return { ok: false, detail: refusal(lease_.heldByHuman ? 'human' : 'off') };
+    }
 
     try {
       const held = await this.open(runId, context.signal);

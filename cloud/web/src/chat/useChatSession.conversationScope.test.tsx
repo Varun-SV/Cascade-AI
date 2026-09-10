@@ -807,6 +807,7 @@ describe('useChatSession — frames of the agent\'s browser', () => {
     // Only a picture from the NEW watch, confirmed, brings the surface back.
     act(() => {
       fake.fire('browser:frame', frame('conv-a', 'task-a', 'AFTER', 5));
+      view.result.current.markBrowserFrameShown(5);
       fake.fire('browser:control', {
         conversationId: 'conv-a', taskId: 'task-a', human: true, capturing: true, confirmed: true,
       });
@@ -837,23 +838,59 @@ describe('useChatSession — frames of the agent\'s browser', () => {
     });
 
     const seen = () => fake.sent.filter((m) => m.event === 'browser:frame-seen');
+    // What the rendered <img> reports on `load` — the frame arriving is not
+    // itself the receipt, which is the point of the test below this one.
+    act(() => { view.result.current.markBrowserFrameShown(7); });
     expect(seen().map((m) => m.payload)).toEqual([{ taskId: 'task-a', generation: 7 }]);
 
-    // Once per WATCH, not per frame: a live view would otherwise spend a
-    // reliable round trip on every repaint of a busy page.
+    // Once per WATCH, not per frame: a busy page repaints constantly and every
+    // repaint fires `load` again, so this would otherwise spend a reliable
+    // round trip on each of them.
     act(() => {
       fake.fire('browser:frame', frame('conv-a', 'task-a', 'BBBB', 7));
+      view.result.current.markBrowserFrameShown(7);
       fake.fire('browser:frame', frame('conv-a', 'task-a', 'CCCC', 7));
+      view.result.current.markBrowserFrameShown(7);
     });
     expect(seen(), 'the same watch is confirmed once').toHaveLength(1);
 
     // A new watch is a new thing to confirm — the previous receipt names a
     // generation the server has already superseded.
-    act(() => { fake.fire('browser:frame', frame('conv-a', 'task-a', 'DDDD', 8)); });
+    act(() => {
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'DDDD', 8));
+      view.result.current.markBrowserFrameShown(8);
+    });
     expect(seen().map((m) => m.payload)).toEqual([
       { taskId: 'task-a', generation: 7 },
       { taskId: 'task-a', generation: 8 },
     ]);
+  });
+
+  it('does not confirm a frame that arrived but was never rendered', () => {
+    // Round 9's argument, one layer further down. The receipt used to be sent
+    // from an effect keyed on the frame entering React state, which proves the
+    // socket delivered bytes and nothing about whether they became a picture.
+    // A slow client — or one handed a JPEG it cannot decode — would confirm a
+    // page it has never shown anybody, and the confirmation is precisely what
+    // opens Hide and the blind keyboard surface.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'UNDECODABLE', 9));
+    });
+
+    expect(view.result.current.browserFrame?.data, 'the bytes did arrive').toBe('UNDECODABLE');
+    expect(
+      fake.sent.filter((m) => m.event === 'browser:frame-seen'),
+      'but nothing has said it rendered, so nothing is confirmed',
+    ).toHaveLength(0);
+
+    // The image reporting its own `load` is the only thing that confirms it.
+    act(() => { view.result.current.markBrowserFrameShown(9); });
+    expect(fake.sent.filter((m) => m.event === 'browser:frame-seen').map((m) => m.payload))
+      .toEqual([{ taskId: 'task-a', generation: 9 }]);
   });
 
   it('does not confirm a picture it discarded', () => {
@@ -869,8 +906,13 @@ describe('useChatSession — frames of the agent\'s browser', () => {
       fake.fire('browser:frame', { conversationId: 'conv-a', data: 'ORPHAN', width: 1, height: 1, generation: 4 });
     });
 
+    // The receipt half of this test was DELETED rather than kept. It asserted
+    // that neither frame was confirmed, and once the receipt moved to the
+    // image's own `load` there is no image for a discarded frame, so nothing
+    // in this test could call it and the assertion could no longer fail. The
+    // property it was reaching for — a frame that arrives is not a frame that
+    // was seen — is pinned above, where it can.
     expect(view.result.current.browserFrame, 'neither was shown').toBeUndefined();
-    expect(fake.sent.filter((m) => m.event === 'browser:frame-seen'), 'so neither was confirmed').toHaveLength(0);
   });
 
   it('shows each conversation the frames of its own browser', () => {
