@@ -14,12 +14,49 @@ vi.mock('../lib/api.js', () => ({
 function fakeSocket() {
   const handlers = new Map<string, Set<(...args: unknown[]) => void>>();
   const sent: Array<{ event: string; payload: unknown }> = [];
+  /** Emitted while down. Socket.IO would flush these on reconnect. */
+  const buffered: Array<{ event: string; payload: unknown }> = [];
   const runAcks: Array<(a: unknown) => void> = [];
   /** Registrations and the connect, in the order they happened. */
   const order: string[] = [];
+  const socket = {
+    on(event: string, listener: (...args: unknown[]) => void) {
+      order.push(`on:${event}`);
+      let set = handlers.get(event);
+      if (!set) { set = new Set(); handlers.set(event, set); }
+      set.add(listener);
+      return this;
+    },
+    off(event: string, listener: (...args: unknown[]) => void) {
+      handlers.get(event)?.delete(listener);
+      return this;
+    },
+    connected: false,
+    connect() { socket.connected = true; order.push('connect'); return this; },
+    emit(event: string, payload: unknown, ack?: (a: unknown) => void) {
+      // Socket.IO 4.x BUFFERS anything emitted while disconnected and delivers
+      // it on reconnect. Modelled here because a fake that records every emit
+      // cannot tell "sent" from "queued to be sent later" — and that difference
+      // is the whole of the takeover's see-what-you-drive guarantee across a
+      // transport gap. See socket.io/docs/v4/client-offline-behavior.
+      if (!socket.connected) { buffered.push({ event, payload }); return this; }
+      sent.push({ event, payload });
+      if (event === 'chat:run' && ack) runAcks.push(ack);
+      return this;
+    },
+  };
   return {
     order,
     sent,
+    /** What Socket.IO is holding to deliver later. Should stay empty. */
+    buffered,
+    /** The transport drops, the way a flaky network does. */
+    drop() { socket.connected = false; },
+    /** And comes back, flushing whatever Socket.IO had queued. */
+    restore() {
+      socket.connected = true;
+      sent.push(...buffered.splice(0, buffered.length));
+    },
     /** Settle the in-flight run the way the server's `chat:run` ack does. */
     ackRun(conversationId: string) { runAcks.shift()?.({ conversationId, output: 'done' }); },
     /** The other ordinary ending: the run failed on this same socket. */
@@ -27,26 +64,7 @@ function fakeSocket() {
     fire(event: string, payload?: unknown) {
       for (const h of [...(handlers.get(event) ?? [])]) h(payload);
     },
-    socket: {
-      on(event: string, listener: (...args: unknown[]) => void) {
-        order.push(`on:${event}`);
-        let set = handlers.get(event);
-        if (!set) { set = new Set(); handlers.set(event, set); }
-        set.add(listener);
-        return this;
-      },
-      off(event: string, listener: (...args: unknown[]) => void) {
-        handlers.get(event)?.delete(listener);
-        return this;
-      },
-      connected: false,
-      connect() { (this as { connected: boolean }).connected = true; order.push('connect'); return this; },
-      emit(event: string, payload: unknown, ack?: (a: unknown) => void) {
-        sent.push({ event, payload });
-        if (event === 'chat:run' && ack) runAcks.push(ack);
-        return this;
-      },
-    } as unknown as Socket,
+    socket: socket as unknown as Socket,
   };
 }
 
@@ -714,6 +732,95 @@ describe('useChatSession — frames of the agent\'s browser', () => {
   function frame(conversationId: string, taskId: string, data: string, generation = 1) {
     return { conversationId, taskId, data, width: 1280, height: 800, generation };
   }
+
+  it('stops being driveable the moment the socket goes down', () => {
+    // A takeover survives a transport gap: the server holds the lease across
+    // the reconnect grace and the remote page keeps changing, but no frames can
+    // reach this client. Left alone, the last JPEG stayed an interactive `<img>`
+    // — and Socket.IO buffers what the person does against it and delivers it
+    // on reconnect, so the click lands on whatever the page became.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'BEFORE', 4));
+      fake.fire('browser:control', {
+        conversationId: 'conv-a', taskId: 'task-a', human: true, capturing: true, confirmed: true,
+      });
+    });
+    expect(view.result.current.browserFrame?.data).toBe('BEFORE');
+    expect(view.result.current.browserConfirmed).toBe(true);
+
+    act(() => { fake.drop(); fake.fire('disconnect'); });
+
+    // The evidence of sight is gone, so the panel has nothing to drive.
+    expect(view.result.current.browserFrame, 'no picture of a page nobody can see').toBeUndefined();
+    expect(view.result.current.browserStreaming).toBe(false);
+    expect(view.result.current.browserConfirmed).toBe(false);
+    // But the hold is NOT invented away — it really does survive on the server,
+    // and a client that decided its own ownership would be the failure this
+    // panel exists to prevent, in the other direction.
+    expect(view.result.current.browserHuman, 'the takeover is still theirs').toBe(true);
+
+    // Anything they try now must not even reach the send buffer.
+    act(() => {
+      view.result.current.sendBrowserInput({ kind: 'text', text: 'secret' });
+      view.result.current.setBrowserCapture(false);
+    });
+    expect(fake.sent.filter((m) => m.event === 'browser:input')).toHaveLength(0);
+    expect(fake.sent.filter((m) => m.event === 'browser:capture')).toHaveLength(0);
+    expect(fake.buffered, 'and Socket.IO is holding nothing to deliver later').toHaveLength(0);
+  });
+
+  it('starts a new viewing boundary when the socket comes back', () => {
+    // The watch effect keys on the socket OBJECT, which survives a reconnect,
+    // so it never re-runs — and the server, having received no unwatch, keeps
+    // streaming to the rebound transport as though nothing happened. Something
+    // has to invalidate the receipt this view gave before the gap.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => {
+      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'BEFORE', 4));
+      fake.fire('browser:control', {
+        conversationId: 'conv-a', taskId: 'task-a', human: true, capturing: true, confirmed: true,
+      });
+    });
+
+    act(() => { fake.drop(); fake.fire('disconnect'); });
+    act(() => { fake.restore(); fake.fire('connect'); });
+
+    // Unwatch AND watch, in that order: a bare watch takes the server's
+    // reconnect branch, which keeps the existing screencast, and an idle page
+    // would then never repaint — leaving the panel inert with no way back.
+    const watching = fake.sent
+      .filter((m) => m.event === 'browser:unwatch' || m.event === 'browser:watch')
+      .map((m) => m.event);
+    expect(watching.slice(-2)).toEqual(['browser:unwatch', 'browser:watch']);
+
+    // Still not driveable: the boundary is new and nothing has been seen yet.
+    expect(view.result.current.browserFrame).toBeUndefined();
+    expect(view.result.current.browserConfirmed).toBe(false);
+
+    // Only a picture from the NEW watch, confirmed, brings the surface back.
+    act(() => {
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'AFTER', 5));
+      fake.fire('browser:control', {
+        conversationId: 'conv-a', taskId: 'task-a', human: true, capturing: true, confirmed: true,
+      });
+    });
+    expect(view.result.current.browserFrame?.data).toBe('AFTER');
+    expect(view.result.current.browserConfirmed).toBe(true);
+    expect(
+      fake.sent.filter((m) => m.event === 'browser:frame-seen').map((m) => m.payload),
+      'and the new watch is what got confirmed',
+    ).toContainEqual({ taskId: 'task-a', generation: 5 });
+
+    act(() => { view.result.current.sendBrowserInput({ kind: 'text', text: 'ok' }); });
+    expect(fake.sent.filter((m) => m.event === 'browser:input')).toHaveLength(1);
+  });
 
   it('tells the server it actually has the picture, once per watch', () => {
     // Frames go out lossy — dropped, not queued, when the transport is not

@@ -523,14 +523,28 @@ export function useChatSession(
     socket?.emit('browser:hand-back', { taskId: browserTaskIdRef.current });
   }, [socket]);
 
+  /**
+   * Refused while the socket is down, rather than sent and buffered.
+   *
+   * Socket.IO buffers anything emitted while disconnected and delivers it on
+   * reconnect. For a mutation aimed at a picture, that is the worst possible
+   * delivery: the person acted on the last frame before the gap, the remote
+   * page went on changing without them, and the click lands afterwards on
+   * whatever is there now. Dropping it at the source is what keeps it out of
+   * that buffer — a check on arrival cannot tell a delayed event from a fresh
+   * one, because by then it is fresh.
+   *
+   * Stop is deliberately NOT gated this way. Buffering "stop using the
+   * browser" and delivering it late is the direction that helps.
+   */
   const sendBrowserInput = useCallback((event: BrowserInputEvent) => {
-    if (!browserTaskIdRef.current) return;
-    socket?.emit('browser:input', { taskId: browserTaskIdRef.current, event });
+    if (!browserTaskIdRef.current || !socket?.connected) return;
+    socket.emit('browser:input', { taskId: browserTaskIdRef.current, event });
   }, [socket]);
 
   const setBrowserCapture = useCallback((on: boolean) => {
-    if (!browserTaskIdRef.current) return;
-    socket?.emit('browser:capture', { taskId: browserTaskIdRef.current, on });
+    if (!browserTaskIdRef.current || !socket?.connected) return;
+    socket.emit('browser:capture', { taskId: browserTaskIdRef.current, on });
   }, [socket]);
   const [status, setStatus] = useState<string | null>(null);
   const [lastTokens, setLastTokens] = useState<number>(0);
@@ -794,7 +808,35 @@ export function useChatSession(
     // on, and the run would then sit until its own timeout. The case that
     // clearing protected against is covered by `run:resumed` reporting no
     // active run: that is the signal the run really is over.
-    const onDisconnect = () => {};
+    const onDisconnect = () => {
+      // The last frame stops being a picture of anything.
+      //
+      // A takeover survives a transport gap — the server holds the lease across
+      // the reconnect grace, and the remote page keeps changing — but no frames
+      // can reach this client while it is down. Left as it was, the stale JPEG
+      // stays an interactive `<img>` and invites the person to drive a page
+      // they can no longer see.
+      //
+      // `human` is deliberately NOT cleared. The hold really does survive, and
+      // a client that decided its own ownership would be the one thing this
+      // panel never does — ownership is pushed. What goes is the evidence of
+      // SIGHT: the frame, the stream, and this watch's confirmation. That
+      // leaves the panel in a state it already knows how to render, inert and
+      // saying so, and leaves the blind keyboard shut.
+      setBrowserViews((prev) => {
+        let changed = false;
+        const next: typeof prev = {};
+        for (const [key, view] of Object.entries(prev)) {
+          if (view.frame || view.streaming || view.confirmed) {
+            changed = true;
+            next[key] = { ...view, frame: undefined, streaming: false, confirmed: false };
+          } else {
+            next[key] = view;
+          }
+        }
+        return changed ? next : prev;
+      });
+    };
     // A run produced a file. `pending: true` means generated media the user
     // has not kept — refresh the unsaved list so its expiry badge and Save
     // button appear on the message as soon as the image lands. A saved file
@@ -1044,6 +1086,26 @@ export function useChatSession(
     const onConnect = () => {
       const cid = conversationIdRef.current;
       if (cid) void reloadActivePath(cid);
+      // Start a NEW viewing boundary rather than resuming the old one.
+      //
+      // The watch effect cannot do this: it keys on the socket object, which
+      // survives a reconnect, so it never re-runs — and the server, having
+      // received no unwatch, keeps streaming to the rebound transport as though
+      // nothing happened. Nothing would then invalidate the receipt this view
+      // gave before the gap.
+      //
+      // Unwatch and watch rather than watch alone, deliberately. A bare watch
+      // takes the reconnect branch, which keeps the existing screencast — and
+      // because CDP frames are adaptive, an idle page would send nothing, so
+      // the panel would sit inert with no way back. Tearing it down and
+      // building it again bumps the watch generation AND makes Chrome produce
+      // a first frame at once. A deliberate Hide still survives that, because
+      // the attach honours it.
+      const taskId = browserTaskIdRef.current;
+      if (taskId) {
+        socket.emit('browser:unwatch', { taskId });
+        socket.emit('browser:watch', { taskId });
+      }
     };
     const onResumed = (e: {
       active?: number;
