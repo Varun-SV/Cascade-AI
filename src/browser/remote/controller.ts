@@ -206,6 +206,25 @@ export interface RemoteBrowserControllerOptions {
   maxSessions?: number;
   /** Told when a run's live view becomes available, so the owner can watch. */
   onLiveView?: (runId: string, liveViewUrl: string | undefined) => void;
+  /**
+   * Something that must finish before this controller may open anything.
+   *
+   * For ROTATION. A settings change builds a new controller and disposes the
+   * old one, and disposal is not instant: it detaches CDP sessions and hands
+   * provider sessions back over the network. Installing the replacement
+   * immediately meant the first action after a rotation could call
+   * `createSession` while the previous controller was still releasing — two
+   * controllers holding sessions against one provider's cap, which the pool
+   * here cannot see because it counts only its own. On a provider that
+   * enforces its own limit that action simply fails, and it is the first one
+   * after an operator changed a setting, which is the worst moment for it.
+   *
+   * Awaited once, before the pool slot is reserved, and never awaited again.
+   * A rejection is ignored on purpose: the old controller failing to tidy up
+   * is not a reason to refuse the new one work, and `dispose` already reports
+   * its own trouble.
+   */
+  ready?: Promise<unknown>;
 }
 
 /** One run's browser, and the page it is working on. */
@@ -447,7 +466,16 @@ export class RemoteBrowserController {
     // Kept as its own field rather than folded into the per-run map: it needs
     // the run id, and squeezing it in under a sentinel key lost exactly that.
     this.onLiveViewAll = options.onLiveView;
+    this.ready = options.ready;
   }
+
+  /**
+   * The predecessor's teardown, until it has been waited for once.
+   *
+   * Cleared as soon as it settles so the wait is not re-entered on every open
+   * — and so the promise itself is not retained for the life of the process.
+   */
+  private ready: Promise<unknown> | undefined;
 
   private leaseFor(runId: string): BrowserLease {
     let lease = this.leases.get(runId);
@@ -1508,6 +1536,15 @@ export class RemoteBrowserController {
    * it out changed no test. Two copies of a cap invite them to disagree.
    */
   private async open(runId: string, signal?: AbortSignal): Promise<RunBrowser> {
+    // BEFORE anything is reserved or allocated. See `ready`: the controller this
+    // one replaced may still be handing its sessions back, and the provider's
+    // own cap counts both of us.
+    if (this.ready) {
+      const settling = this.ready;
+      try { await settling; } catch { /* the old one's trouble, not ours */ }
+      // Only if nothing newer arrived while we waited.
+      if (this.ready === settling) this.ready = undefined;
+    }
     const existing = this.runs.get(runId);
     if (existing && !existing.page.isClosed()) return existing;
     if (existing) {

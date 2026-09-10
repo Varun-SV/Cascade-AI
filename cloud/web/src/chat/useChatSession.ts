@@ -575,6 +575,41 @@ export function useChatSession(
    * delivering it on connect is exactly the wanted behaviour.
    */
   const beginWatching = useCallback((taskId: string) => {
+    // The evidence of SIGHT goes first, before the request that replaces it.
+    //
+    // Same rule `onDisconnect` states, reached by the other door. A view is
+    // kept per conversation, deliberately, so switching chats and coming back
+    // does not throw the run's panel away — but what comes back with it is a
+    // JPEG of a page from before the switch, and `driving` alone is what makes
+    // that image interactive. A hold survives a conversation switch, so the
+    // person returns to a picture that is minutes old, still clickable, over a
+    // page that has moved on. That is round 14's stale-and-interactive failure
+    // arriving through the switch rather than through the socket.
+    //
+    // `human` is deliberately not touched here either: ownership is pushed by
+    // the server and a client deciding its own would be the one thing this
+    // panel never does. What goes is the frame, the stream and this watch's
+    // confirmation — which leaves the panel inert and saying so, and the blind
+    // keyboard shut, until the new watch supplies a picture of its own. The
+    // unwatch/watch pair below makes Chrome produce that immediately, so the
+    // gap is a round trip rather than a wait for the page to move.
+    //
+    // Scoped to the task being watched. `onDisconnect` clears every view
+    // because the socket is down for all of them; this one is about a single
+    // boundary being redrawn.
+    setBrowserViews((prev) => {
+      let changed = false;
+      const next: typeof prev = {};
+      for (const [key, view] of Object.entries(prev)) {
+        if (view.taskId === taskId && (view.frame || view.streaming || view.confirmed)) {
+          changed = true;
+          next[key] = { ...view, frame: undefined, streaming: false, confirmed: false };
+        } else {
+          next[key] = view;
+        }
+      }
+      return changed ? next : prev;
+    });
     socket?.emit('browser:unwatch', { taskId });
     socket?.emit('browser:watch', { taskId });
   }, [socket]);

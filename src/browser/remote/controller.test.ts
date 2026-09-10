@@ -522,6 +522,39 @@ describe('a session that half-opened', () => {
   });
 });
 
+describe('replacing the shared controller', () => {
+  it('opens nothing until the controller it replaced has let go', async () => {
+    // A settings change builds a new controller and disposes the old one, and
+    // disposal is not instant: it detaches CDP sessions and hands provider
+    // sessions back over the network. Starting work immediately meant the first
+    // action after the change could allocate while the outgoing controller was
+    // still releasing — two controllers holding sessions against ONE provider's
+    // cap, which neither pool can see, because each counts only its own.
+    const { provider, created } = fakeProvider();
+    const retiring = deferred();
+    const c = new RemoteBrowserController({ provider, ready: retiring.promise });
+
+    const acting = c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(created, 'nothing is allocated while the previous one is still releasing').toEqual([]);
+
+    retiring.resolve();
+    expect((await acting).ok).toBe(true);
+    expect(created, 'and then it opens normally').toEqual(['sess-1']);
+  });
+
+  it('is not held back by a predecessor that failed to tidy up', async () => {
+    // The old controller's trouble is not a reason to refuse the new one work.
+    // `dispose` already reports its own, and a rejection swallowed here would
+    // otherwise become a browser that never opens again.
+    const { provider, created } = fakeProvider();
+    const c = new RemoteBrowserController({ provider, ready: Promise.reject(new Error('endSession failed')) });
+
+    expect((await c.controller({ kind: 'click', selector: '#a' }, ctx('run-A', 'w1'))).ok).toBe(true);
+    expect(created).toEqual(['sess-1']);
+  });
+});
+
 describe('the session pool', () => {
   it('refuses a second run when only one session is allowed', async () => {
     // Every session is billed, so the default is one and raising it is a

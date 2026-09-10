@@ -179,8 +179,23 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
 
   // Reused across runs. A settings change makes a new one and disposes the old
   // rather than leaving its sessions running at the operator's expense.
+  let retiring: Promise<unknown> | undefined;
   if (shared && !sameProviderConfig(shared.settings, settings)) {
-    void shared.controller.dispose();
+    // KEPT, not discarded. Disposal detaches CDP sessions and hands provider
+    // sessions back over the network, so it is not instant — and the
+    // replacement below used to start work immediately, which meant the first
+    // action after a settings change could call `createSession` while the
+    // outgoing controller was still releasing. Two controllers holding
+    // sessions against one provider's cap, which neither pool can see because
+    // each counts only its own. On a provider that enforces its own limit the
+    // action simply fails, and it is the first one after the operator changed
+    // something, which is exactly when it will be blamed on the change.
+    //
+    // Handed to the new controller as its `ready` rather than awaited here:
+    // this function is synchronous by contract — the caller wires listeners on
+    // what it returns — and the wait only has to happen before the new
+    // controller OPENS anything, not before it exists.
+    retiring = shared.controller.dispose();
     shared = null;
   }
   if (!shared) {
@@ -190,6 +205,7 @@ export function attachRemoteBrowser(opts: AttachOptions): AttachedBrowser | null
       controller: new RemoteBrowserController({
         provider,
         ...(settings.maxSessions ? { maxSessions: settings.maxSessions } : {}),
+        ...(retiring ? { ready: retiring } : {}),
       }),
     };
   }

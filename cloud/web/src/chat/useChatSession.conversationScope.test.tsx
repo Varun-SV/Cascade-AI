@@ -742,8 +742,8 @@ describe('useChatSession — frames of the agent\'s browser', () => {
     const fake = fakeSocket();
     const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
 
+    act(() => { fake.fire('browser:live-view', liveView('conv-a', 'task-a')); });
     act(() => {
-      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
       fake.fire('browser:frame', frame('conv-a', 'task-a', 'BEFORE', 4));
       fake.fire('browser:control', {
         conversationId: 'conv-a', taskId: 'task-a', human: true, capturing: true, confirmed: true,
@@ -866,6 +866,41 @@ describe('useChatSession — frames of the agent\'s browser', () => {
     ]);
   });
 
+  it('does not hand back a stale picture when a conversation is returned to', () => {
+    // A view is kept per conversation so switching chats and back does not throw
+    // the run's panel away — but what came back with it was a JPEG of a page
+    // from before the switch, and `driving` alone is what makes that image
+    // interactive. A hold survives a switch, so the person returned to a
+    // minutes-old picture they could still click, over a page that had moved
+    // on. Round 14's stale-and-interactive failure, reached through the switch
+    // instead of through the socket.
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
+
+    act(() => { fake.fire('browser:live-view', liveView('conv-a', 'task-a')); });
+    act(() => {
+      fake.fire('browser:frame', frame('conv-a', 'task-a', 'BEFORE', 3));
+      fake.fire('browser:control', {
+        conversationId: 'conv-a', taskId: 'task-a', human: true, capturing: true, confirmed: true,
+      });
+    });
+    expect(view.result.current.browserFrame?.data).toBe('BEFORE');
+
+    // Away, and back. The page went on changing the whole time.
+    act(() => { view.result.current.setConversationId('conv-b'); });
+    act(() => { view.result.current.setConversationId('conv-a'); });
+
+    expect(view.result.current.browserFrame, 'the picture from before the switch is gone').toBeUndefined();
+    expect(view.result.current.browserConfirmed, 'and this watch has confirmed nothing').toBe(false);
+    // The hold is the SERVER's to end, and it did not end. A client deciding its
+    // own ownership is the one thing this panel never does.
+    expect(view.result.current.browserHuman, 'the hold survives the switch').toBe(true);
+
+    // What the new boundary supplies is what can be driven.
+    act(() => { fake.fire('browser:frame', frame('conv-a', 'task-a', 'AFTER', 4)); });
+    expect(view.result.current.browserFrame?.data).toBe('AFTER');
+  });
+
   it('keeps the newer run\'s panel when the older one gives its browser up', () => {
     // One conversation can have two runs overlapping, and the socket carries
     // both. A later `active: true` replaces the entry with the newer task; the
@@ -936,10 +971,8 @@ describe('useChatSession — frames of the agent\'s browser', () => {
     const fake = fakeSocket();
     const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
 
-    act(() => {
-      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
-      fake.fire('browser:frame', frame('conv-a', 'task-a', 'UNDECODABLE', 9));
-    });
+    act(() => { fake.fire('browser:live-view', liveView('conv-a', 'task-a')); });
+    act(() => { fake.fire('browser:frame', frame('conv-a', 'task-a', 'UNDECODABLE', 9)); });
 
     expect(view.result.current.browserFrame?.data, 'the bytes did arrive').toBe('UNDECODABLE');
     expect(
@@ -979,16 +1012,27 @@ describe('useChatSession — frames of the agent\'s browser', () => {
     const fake = fakeSocket();
     const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
 
+    // Frames in a LATER act than the live view, deliberately. Beginning a watch
+    // drops the evidence of sight for that task, and in production a frame
+    // cannot precede the request to watch — the server streams nothing until
+    // asked. Delivering both in one batch models an order that cannot happen.
     act(() => {
       fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
       fake.fire('browser:live-view', liveView('conv-b', 'task-b'));
+    });
+    act(() => {
       fake.fire('browser:frame', frame('conv-a', 'task-a', 'AAAA'));
       fake.fire('browser:frame', frame('conv-b', 'task-b', 'BBBB'));
     });
 
     expect(view.result.current.browserFrame?.data).toBe('AAAA');
+    // Switching redraws B's viewing boundary, so B's picture from before the
+    // switch goes with it — a JPEG of a page that has since moved on must not
+    // come back as something the person can click.
     act(() => { view.result.current.setConversationId('conv-b'); });
-    expect(view.result.current.browserFrame?.data).toBe('BBBB');
+    expect(view.result.current.browserFrame, 'the stale one does not come back').toBeUndefined();
+    act(() => { fake.fire('browser:frame', frame('conv-b', 'task-b', 'BBBB')); });
+    expect(view.result.current.browserFrame?.data, 'and B still sees only its own').toBe('BBBB');
   });
 
   it('keeps only the newest frame', () => {
@@ -998,8 +1042,8 @@ describe('useChatSession — frames of the agent\'s browser', () => {
     const fake = fakeSocket();
     const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
 
+    act(() => { fake.fire('browser:live-view', liveView('conv-a', 'task-a')); });
     act(() => {
-      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
       fake.fire('browser:frame', frame('conv-a', 'task-a', 'OLD'));
       fake.fire('browser:frame', frame('conv-a', 'task-a', 'NEW'));
     });
@@ -1027,8 +1071,8 @@ describe('useChatSession — frames of the agent\'s browser', () => {
     const fake = fakeSocket();
     const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
 
+    act(() => { fake.fire('browser:live-view', liveView('conv-a', 'task-second')); });
     act(() => {
-      fake.fire('browser:live-view', liveView('conv-a', 'task-second'));
       fake.fire('browser:frame', frame('conv-a', 'task-second', 'MINE'));
       fake.fire('browser:frame', frame('conv-a', 'task-first', 'STALE'));
     });
@@ -1043,8 +1087,8 @@ describe('useChatSession — frames of the agent\'s browser', () => {
     const fake = fakeSocket();
     const view = renderHook(() => useChatSession(fake.socket, [], 'general', undefined, 'conv-a'));
 
+    act(() => { fake.fire('browser:live-view', liveView('conv-a', 'task-a')); });
     act(() => {
-      fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
       fake.fire('browser:frame', frame('conv-a', 'task-a', 'BEFORE'));
       fake.fire('browser:control', { conversationId: 'conv-a', taskId: 'task-a', human: true, capturing: true });
     });
@@ -1088,13 +1132,24 @@ describe('useChatSession — frames of the agent\'s browser', () => {
     act(() => {
       fake.fire('browser:live-view', liveView('conv-a', 'task-a'));
       fake.fire('browser:live-view', liveView('conv-b', 'task-b'));
+    });
+    // The server's answer follows the request, as it does on the wire.
+    act(() => {
       fake.fire('browser:watching', { conversationId: 'conv-b', taskId: 'task-b', streaming: true });
     });
 
     // B's stream is B's. Borrowing it here would promise frames that are being
     // sent to another pane, and this one would wait for them forever.
     expect(view.result.current.browserStreaming, 'not another chat\'s stream').toBe(false);
+
+    // Switching redraws B's boundary — which unwatches and watches again, so the
+    // answer B gave to the PREVIOUS request stops being true and is dropped
+    // with the rest of the evidence of sight. The server answers the new one.
     act(() => { view.result.current.setConversationId('conv-b'); });
+    expect(view.result.current.browserStreaming, 'the previous answer does not carry over').toBe(false);
+    act(() => {
+      fake.fire('browser:watching', { conversationId: 'conv-b', taskId: 'task-b', streaming: true });
+    });
     expect(view.result.current.browserStreaming).toBe(true);
   });
 
