@@ -191,6 +191,35 @@ describe('BrowserLiveView — taking the page over', () => {
     expect(onInput).not.toHaveBeenCalled();
   });
 
+  it('survives a browser becoming active on a panel already mounted', () => {
+    // THE ordinary path, and it was a crash. This component is mounted for the
+    // whole conversation and merely switches `active` when a run opens a
+    // browser — so an early `return null` placed above a hook meant the first
+    // render ran fewer hooks than the activation re-render, and React threw
+    // "Rendered more hooks than during the previous render", taking the chat
+    // down at exactly the moment the panel was supposed to appear.
+    //
+    // Every other test in this file renders with `active` already settled one
+    // way or the other, which is why none of them could see it: the defect is
+    // in the TRANSITION, and nothing crossed it.
+    const { rerender } = render(
+      <BrowserLiveView active={false} liveViewUrl={undefined} onStop={() => {}} />,
+    );
+    expect(screen.queryByRole('img'), 'nothing before a browser exists').toBeNull();
+
+    expect(() => rerender(
+      <BrowserLiveView active liveViewUrl={undefined} frame={frame} human onStop={() => {}} />,
+    )).not.toThrow();
+    expect(screen.getByRole('img'), 'and the page appears').toBeInTheDocument();
+
+    // And back again: the reverse transition renders fewer hooks if the same
+    // mistake is made the other way round.
+    expect(() => rerender(
+      <BrowserLiveView active={false} liveViewUrl={undefined} onStop={() => {}} />,
+    )).not.toThrow();
+    expect(screen.queryByRole('img'), 'and goes away when the run gives it up').toBeNull();
+  });
+
   it('ignores the mouse buttons that mean Back and Forward', () => {
     // They report 3 and 4. Mapping "not middle, not right" onto `left` turned a
     // navigation gesture into a real left click on the remote page — the client

@@ -151,7 +151,6 @@ export function BrowserLiveView({
    * read and written inside the handler that produces the next one.
    */
   const lastMoveRef = useRef(0);
-  if (!active) return null;
   // Frames first: they come from the browser itself, so they exist whoever is
   // hosting it. The provider's own viewer is the fallback for a deployment
   // still on the old path, and neither being available is now unusual rather
@@ -168,7 +167,7 @@ export function BrowserLiveView({
    * Named once because two things need it and they must not drift: the surface
    * that renders, and the effect that focuses it.
    */
-  const blind = !frame && driving && capturing === false && confirmed === true;
+  const blind = active && !frame && driving && capturing === false && confirmed === true;
   const blindRef = useRef<HTMLDivElement>(null);
   // Focus follows the surface, because the element the person was typing into
   // just unmounted. From an EFFECT keyed on entering that state, not from an
@@ -180,6 +179,19 @@ export function BrowserLiveView({
   useEffect(() => {
     if (blind) blindRef.current?.focus();
   }, [blind]);
+
+  // AFTER every hook, and that is not a style preference.
+  //
+  // This used to sit above the two hooks below it, which is a crash rather than
+  // an inefficiency: React counts hooks per render, and this component is
+  // mounted for the whole conversation and merely switches `active` when a run
+  // opens a browser. So the first render ran two hooks and returned; the
+  // activation re-render ran four, and React threw "Rendered more hooks than
+  // during the previous render" — taking the chat down at exactly the moment
+  // the panel was supposed to appear, on the ordinary path rather than an edge
+  // case. Nothing above this line may return early, and nothing below it may
+  // call a hook.
+  if (!active) return null;
 
   /**
    * Where on the PAGE the user clicked, as a fraction of it.
